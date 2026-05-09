@@ -1,0 +1,11 @@
+# Mordred plugin manifest. Hermes core ignores unknown fields; `privacy_lock`
+# is a Mordred-internal hint used by sibling plugins to detect peer disable
+# (TODO §1.1 H3 Path B / SPEC §Plugin-disable protection Tier A).
+name: mordred_wizard
+version: 0.1.0a0
+description: Mordred wizard plugin (Phase 0 stub)
+author: InternetMaximalism
+privacy_lock: true
+config_schema:
+  type: object
+  properties: {}

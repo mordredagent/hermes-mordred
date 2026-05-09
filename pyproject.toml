@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mordred-hermes"
+version = "0.1.0a0"
+description = "Privacy-preserving plugin bundle for the Hermes agent (NousResearch/hermes-agent)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "InternetMaximalism" }]
+license = { text = "MIT" }
+keywords = ["hermes", "agent", "privacy", "tor", "vpn", "keyvault"]
+
+dependencies = [
+  "hermes-agent>=0.11.0",
+  "ruamel.yaml>=0.18",
+]
+
+[project.optional-dependencies]
+macos = [
+  "pyobjc-framework-Security>=10.0",
+  "argon2-cffi>=23",
+  "cryptography>=42",
+  "blake3>=0.4",
+]
+dev = [
+  "pytest>=8",
+  "pytest-cov",
+  "ruff",
+  "mypy>=1.10",
+]
+
+# Entry points point at the MODULE (not module:register). Hermes loader
+# (hermes_cli/plugins.py:_load_entrypoint_module) calls ep.load() and then
+# getattr(module, "register"), so module-only is what works in practice.
+[project.entry-points."hermes_agent.plugins"]
+mordred_network = "mordred_hermes.network"
+mordred_privacy_check = "mordred_hermes.privacy_check"
+mordred_llm_guard = "mordred_hermes.llm_guard"
+mordred_keyvault = "mordred_hermes.keyvault"
+mordred_wizard = "mordred_hermes.wizard"
+
+[project.urls]
+Documentation = "https://github.com/InternetMaximalism/Mordred-Hermes/tree/main/mordred-docs/mordred"
+Source = "https://github.com/InternetMaximalism/Mordred-Hermes"
+
+[tool.mordred]
+min-hermes-version = "0.11.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mordred_hermes"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/README.md", "/pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["src/mordred_hermes"]
