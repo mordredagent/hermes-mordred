@@ -19,13 +19,30 @@ PLUGINS = [
 ]
 
 
+class _FakeContext:
+    """Captures register_hook calls so plugins-with-hooks (Phase 1+) can be tested
+    alongside Phase 0 stubs without spinning up a real Hermes session."""
+
+    def __init__(self) -> None:
+        self.hooks: list[tuple[str, object]] = []
+
+    def register_hook(self, hook_name: str, callback: object) -> None:
+        self.hooks.append((hook_name, callback))
+
+    def register_cli_command(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def register_provider(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
 @pytest.mark.parametrize("module_path", PLUGINS)
 def test_plugin_imports(module_path: str) -> None:
     module = importlib.import_module(module_path)
     register = getattr(module, "register", None)
     assert callable(register), f"{module_path}.register must be callable"
-    # Phase 0 stub returns None for any ctx
-    assert register(object()) is None
+    # Phase 0 stubs ignore ctx; Phase 1+ call ctx.register_hook(...).
+    assert register(_FakeContext()) is None
 
 
 def test_entry_points_resolve() -> None:

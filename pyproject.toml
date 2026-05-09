@@ -81,6 +81,11 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 
 # Phase 0: hermes_cli has no published stubs — ignore its types only.
+# follow_imports = "skip" prevents mypy from descending into the upstream
+# package and tripping on its own (unrelated) typing/syntax issues.
+# hermes_constants is a sibling top-level module from the upstream Hermes
+# package; we use get_hermes_home() for profile-aware path resolution.
 [[tool.mypy.overrides]]
-module = ["hermes_cli", "hermes_cli.*"]
+module = ["hermes_cli", "hermes_cli.*", "hermes_constants"]
 ignore_missing_imports = true
+follow_imports = "skip"
