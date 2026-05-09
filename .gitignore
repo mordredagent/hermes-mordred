@@ -8,3 +8,7 @@ __pycache__/
 build/
 dist/
 *.egg
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

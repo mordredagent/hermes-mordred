@@ -63,11 +63,7 @@ def test_hermes_plugin_manager_discovery() -> None:
 
     mgr = PluginManager()
     mgr.discover_and_load(force=True)
-    mordred = {
-        k: p
-        for k, p in mgr._plugins.items()
-        if p.manifest.source == "entrypoint" and k.startswith("mordred_")
-    }
+    mordred = {k: p for k, p in mgr._plugins.items() if p.manifest.source == "entrypoint" and k.startswith("mordred_")}
     expected = {
         "mordred_network",
         "mordred_privacy_check",
