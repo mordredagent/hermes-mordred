@@ -1,1 +1,264 @@
-"""mordred_wizard.cli — Phase 0 placeholder. Implementation in Phase 1.3."""
+"""argparse subparser tree for ``hermes mordred ...``.
+
+Phase A (1.3) ships the full command surface so that ``hermes mordred --help``
+already lists every subcommand. Each handler delegates to its own module
+(populated phase-by-phase). Subcommands whose modules are not implemented
+yet raise :class:`NotImplementedError` from a stable error message —
+``hermes mordred network status`` returns a clear "deferred to Phase 3"
+message rather than ``argparse: invalid choice``.
+
+Subcommand tree (SPEC.md §Plugin: ``mordred_wizard`` L386-407):
+
+- ``configure``                              — Phase C / TODO §1.3 L172
+- ``upgrade [--reset|--non-interactive|...]``— Phase E / TODO §1.3 L173
+- ``install <skill>``                        — Phase F (delegates to privacy_check)
+- ``network {use,status} [path]``            — Phase 3 stub
+- ``policy {show,explain,dry-run,reload}``   — Phase D / TODO §1.3 L185
+- ``audit {tail,grep,decrypt,purge}``        — Phase F (decrypt/purge: Phase 4)
+- ``keyvault {init,list,verify-digest,recover}`` — Phase 4 stub
+- ``plugins list``                           — Phase F (closes §0.5 L128 UX gap)
+"""
+
+from __future__ import annotations
+
+import argparse
+from typing import Any
+
+
+def _setup_subparser(parser: argparse.ArgumentParser) -> None:
+    """Build the full ``hermes mordred`` subcommand tree.
+
+    Hermes calls this once at CLI initialisation with the top-level
+    ``mordred`` subparser. We add ``mordred_command`` dest and per-command
+    sub-subparsers, each wired via ``set_defaults(func=<handler>)``.
+    """
+    sub = parser.add_subparsers(dest="mordred_command", required=True, metavar="COMMAND")
+
+    _add_configure(sub)
+    _add_upgrade(sub)
+    _add_install(sub)
+    _add_network(sub)
+    _add_policy(sub)
+    _add_audit(sub)
+    _add_keyvault(sub)
+    _add_plugins(sub)
+
+
+# -----------------------------------------------------------------------------
+# Subcommand parsers — each calls set_defaults(func=...) wiring its handler.
+# -----------------------------------------------------------------------------
+
+
+def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "configure",
+        help="Run interactive Mordred setup (writes config.yaml + policy.json)",
+    )
+    p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail fast on any prompt (CI / scripted use)",
+    )
+    p.set_defaults(func=_handle_configure)
+
+
+def _add_upgrade(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "upgrade",
+        help="Idempotent migration (Story 1 / Story 1.5). Detects ~/.openclaw if present.",
+    )
+    p.add_argument("--reset", action="store_true", help="Force overwrite on every conflict")
+    p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail fast when a conflict policy was not pre-specified",
+    )
+    p.add_argument(
+        "--audit-merge",
+        choices=["skip", "append-all", "abort"],
+        help="OpenClaw audit-log merge policy when overlap is detected",
+    )
+    p.add_argument(
+        "--policy-conflict",
+        choices=["keep-existing", "overwrite", "abort"],
+        help="Behaviour when ~/.hermes/config.yaml plugins.mordred_* already differs",
+    )
+    p.set_defaults(func=_handle_upgrade)
+
+
+def _add_install(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "install",
+        help="Install a skill through the Mordred policy gate (delegates to privacy_check)",
+    )
+    p.add_argument("skill", help="Skill name or path to a directory containing SKILL.md")
+    p.set_defaults(func=_handle_install)
+
+
+def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("network", help="Network path control (Phase 3)")
+    nsub = p.add_subparsers(dest="network_command", required=True, metavar="COMMAND")
+
+    p_use = nsub.add_parser("use", help="Switch active network path")
+    p_use.add_argument("path", choices=["tor", "vpn", "clearnet"])
+    p_use.set_defaults(func=_handle_network_use)
+
+    p_status = nsub.add_parser("status", help="Show active path and liveness")
+    p_status.set_defaults(func=_handle_network_status)
+
+
+def _add_policy(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("policy", help="Inspect and explain the active Mordred policy")
+    psub = p.add_subparsers(dest="policy_command", required=True, metavar="COMMAND")
+
+    p_show = psub.add_parser("show", help="Print resolved policy.json")
+    p_show.set_defaults(func=_handle_policy_show)
+
+    p_explain = psub.add_parser("explain", help="Explain the install decision for a known skill id")
+    p_explain.add_argument("skill_id")
+    p_explain.set_defaults(func=_handle_policy_explain)
+
+    p_dry = psub.add_parser("dry-run", help="Evaluate install policy against a SKILL.md path without installing")
+    p_dry.add_argument("skill_path")
+    p_dry.set_defaults(func=_handle_policy_dry_run)
+
+    p_reload = psub.add_parser("reload", help="Re-read policy from config.yaml (in-process state reset)")
+    p_reload.set_defaults(func=_handle_policy_reload)
+
+
+def _add_audit(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("audit", help="Tail / grep / decrypt the Mordred audit log")
+    asub = p.add_subparsers(dest="audit_command", required=True, metavar="COMMAND")
+
+    p_tail = asub.add_parser("tail", help="Tail the most recent audit entries")
+    p_tail.add_argument("-n", "--lines", type=int, default=20)
+    p_tail.set_defaults(func=_handle_audit_tail)
+
+    p_grep = asub.add_parser("grep", help="Grep audit entries (line-wise regex)")
+    p_grep.add_argument("pattern")
+    p_grep.set_defaults(func=_handle_audit_grep)
+
+    p_decrypt = asub.add_parser("decrypt", help="Decrypt encrypted audit entries (Phase 4)")
+    p_decrypt.add_argument("--date", required=True, help="YYYY-MM-DD")
+    p_decrypt.set_defaults(func=_handle_audit_decrypt)
+
+    p_purge = asub.add_parser("purge", help="Manually purge pre-Phase-4 plaintext entries (Phase 4)")
+    p_purge.add_argument("--before", required=True, help="YYYY-MM-DD")
+    p_purge.set_defaults(func=_handle_audit_purge)
+
+
+def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("keyvault", help="Mordred keyvault management (Phase 4)")
+    ksub = p.add_subparsers(dest="keyvault_command", required=True, metavar="COMMAND")
+
+    ksub.add_parser("init", help="Initialise the keyvault").set_defaults(func=_handle_keyvault_init)
+    ksub.add_parser("list", help="List key IDs").set_defaults(func=_handle_keyvault_list)
+    ksub.add_parser("verify-digest", help="Verify the keyvault digest").set_defaults(
+        func=_handle_keyvault_verify_digest
+    )
+    p_recover = ksub.add_parser("recover", help="Restore from a backup blob")
+    p_recover.add_argument("--blob", required=True)
+    p_recover.set_defaults(func=_handle_keyvault_recover)
+
+
+def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "plugins",
+        help="List Mordred plugins (closes the entry-point discovery gap, §0.5 L128)",
+    )
+    psub = p.add_subparsers(dest="plugins_command", required=True, metavar="COMMAND")
+    psub.add_parser("list", help="List discovered Mordred plugins").set_defaults(func=_handle_plugins_list)
+
+
+# -----------------------------------------------------------------------------
+# Handlers — Phase A stubs. Subsequent phases swap each body for the real impl.
+# Each handler accepts ``argparse.Namespace`` and returns an exit code (int).
+# -----------------------------------------------------------------------------
+
+
+def _handle_configure(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred configure: Phase C (TODO.md §1.3 L172) not yet landed")
+
+
+def _handle_upgrade(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred upgrade: Phase E (TODO.md §1.3 L173-183) not yet landed")
+
+
+def _handle_install(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred install: Phase F (delegates to privacy_check) not yet landed")
+
+
+def _handle_network_use(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred network use: Phase 3 (TODO.md §3) not yet landed")
+
+
+def _handle_network_status(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred network status: Phase 3 (TODO.md §3) not yet landed")
+
+
+def _handle_policy_show(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred policy show: Phase D (TODO.md §1.3 L185) not yet landed")
+
+
+def _handle_policy_explain(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred policy explain: Phase D (TODO.md §1.3 L185) not yet landed")
+
+
+def _handle_policy_dry_run(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred policy dry-run: Phase D (TODO.md §1.3 L185) not yet landed")
+
+
+def _handle_policy_reload(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred policy reload: Phase D not yet landed")
+
+
+def _handle_audit_tail(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred audit tail: Phase F not yet landed")
+
+
+def _handle_audit_grep(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred audit grep: Phase F not yet landed")
+
+
+def _handle_audit_decrypt(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred audit decrypt: Phase 4 (TODO.md §4) not yet landed")
+
+
+def _handle_audit_purge(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred audit purge: Phase 4 (TODO.md §4) not yet landed")
+
+
+def _handle_keyvault_init(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred keyvault init: Phase 4 (TODO.md §4) not yet landed")
+
+
+def _handle_keyvault_list(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred keyvault list: Phase 4 (TODO.md §4) not yet landed")
+
+
+def _handle_keyvault_verify_digest(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred keyvault verify-digest: Phase 4 (TODO.md §4) not yet landed")
+
+
+def _handle_keyvault_recover(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred keyvault recover: Phase 4 (TODO.md §4) not yet landed")
+
+
+def _handle_plugins_list(args: argparse.Namespace) -> int:
+    raise NotImplementedError("hermes mordred plugins list: Phase F (closes §0.5 L128) not yet landed")
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    """Top-level dispatch helper.
+
+    Hermes calls the handler set via ``set_defaults(func=...)`` directly,
+    so this helper is mainly for tests that build a Namespace by hand.
+    Returns the handler's exit code (0 = success). Re-raises
+    :class:`NotImplementedError` from stub handlers so tests can assert
+    on the deferred-phase message.
+    """
+    func = getattr(args, "func", None)
+    if func is None:
+        raise SystemExit("usage: hermes mordred <COMMAND> ... (no subcommand provided)")
+    result: Any = func(args)
+    return int(result) if isinstance(result, int) else 0

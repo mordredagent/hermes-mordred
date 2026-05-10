@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
+from .._home import HERMES_BASE, hermes_home
 from .audit import NDJSONWriter, Writer
 from .policy import PolicyMode
 
@@ -36,24 +37,12 @@ SIBLING_PLUGINS: Final = (
     "mordred_wizard",
 )
 
-
-def _hermes_home() -> Path:
-    """Return Hermes's profile-aware home directory.
-
-    Prefers ``hermes_constants.get_hermes_home()`` (honors ``HERMES_HOME``
-    env var + ``active_profile`` file) and falls back to ``~/.hermes`` if
-    that import is unavailable. Resolved at module import time — mid-process
-    ``HERMES_HOME`` flips won't propagate (env vars must be set before
-    plugin discovery, which is the documented Hermes contract).
-    """
-    try:
-        from hermes_constants import get_hermes_home
-    except ImportError:
-        return Path.home() / ".hermes"
-    return cast(Path, get_hermes_home())
-
-
-_HERMES_BASE: Final = _hermes_home()
+# Backwards-compat aliases — pre-Phase-1.3 code (and in-module uses below)
+# read these names directly. The resolver itself was promoted to
+# ``mordred_hermes._home`` so wizard / network / keyvault can share it
+# without copy-paste.
+_hermes_home = hermes_home
+_HERMES_BASE: Final = HERMES_BASE
 DEFAULT_AUDIT_PATH: Final = _HERMES_BASE / "mordred" / "audit.log"
 DEFAULT_HERMES_CONFIG_PATH: Final = _HERMES_BASE / "config.yaml"
 
