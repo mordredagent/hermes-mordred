@@ -1,1 +1,97 @@
-"""mordred_privacy_check.install_wrapper — Phase 0 placeholder. Implementation in Phase 1.1."""
+"""``hermes mordred install <skill>`` policy wrapper.
+
+Reads SKILL.md frontmatter, evaluates policy, writes one ``pre_install``
+audit entry, then either raises :class:`InstallBlocked` or delegates to
+the real Hermes installer (``hermes skills install <skill>``).
+
+Audit always lands BEFORE the side effect — block events are recorded
+even when the call would fail; allow/warn events are recorded before
+the subprocess is invoked so they cannot be lost to a crashed installer.
+
+The ``runner`` parameter is injectable for tests; the default invokes
+``hermes skills install`` via :mod:`subprocess`.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TypeAlias
+
+from .audit import Writer
+from .policy import PolicyMode, PolicyOutcome, evaluate_install
+from .skill_frontmatter import parse
+
+SubprocessRunner: TypeAlias = Callable[[list[str]], "subprocess.CompletedProcess[bytes]"]
+
+
+class InstallBlocked(RuntimeError):
+    """Strict-mode policy refused this install."""
+
+    def __init__(self, reason: str, skill_id: str | None) -> None:
+        super().__init__(f"strict policy refused install of {skill_id!r}: {reason}")
+        self.reason = reason
+        self.skill_id = skill_id
+
+
+@dataclass(frozen=True, slots=True)
+class InstallResult:
+    """Outcome of :func:`run`. Only populated on non-block decisions."""
+
+    outcome: PolicyOutcome
+    skill_id: str | None
+    install_returncode: int
+
+
+def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(cmd, check=False)
+
+
+def _resolve_skill_md(skill_path: Path, skill_md_name: str) -> Path:
+    """Accept either a skill directory or an explicit SKILL.md path."""
+    if skill_path.is_dir():
+        return skill_path / skill_md_name
+    return skill_path
+
+
+def run(
+    *,
+    skill_path: Path,
+    policy_mode: PolicyMode,
+    audit: Writer,
+    skill_md_name: str = "SKILL.md",
+    runner: SubprocessRunner = _default_runner,
+) -> InstallResult:
+    """Run the install wrapper for one skill.
+
+    Raises :class:`InstallBlocked` on strict-mode block (audit entry is
+    written first). On allow / warn, invokes ``runner(["hermes", "skills",
+    "install", <skill_path>])`` and returns its returncode.
+    """
+    md = _resolve_skill_md(skill_path, skill_md_name)
+    metadata = parse(md)
+    outcome = evaluate_install(
+        policy_mode=policy_mode,
+        network_requirements=metadata.network_requirements,
+    )
+
+    audit.append(
+        {
+            "event": "pre_install",
+            "decision": outcome.decision,
+            "reason": outcome.reason,
+            "skill_id": metadata.name,
+        }
+    )
+
+    if outcome.decision == "block":
+        raise InstallBlocked(outcome.reason or "unknown", metadata.name)
+
+    completed = runner(["hermes", "skills", "install", str(skill_path)])
+    return InstallResult(
+        outcome=outcome,
+        skill_id=metadata.name,
+        install_returncode=completed.returncode,
+    )
