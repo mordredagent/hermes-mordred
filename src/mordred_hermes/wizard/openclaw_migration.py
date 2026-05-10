@@ -25,6 +25,7 @@ Atomicity: every destination write goes through ``<dest>.tmp`` +
 
 from __future__ import annotations
 
+import filecmp
 import json
 import logging
 import shutil
@@ -168,18 +169,43 @@ def _write_marker(marker: Path) -> None:
 # -----------------------------------------------------------------------------
 
 
-def _migrate_directory(src: Path, dest: Path, kind: str) -> bool:
-    """``shutil.copytree(src, dest, dirs_exist_ok=False)`` with friendly errors.
+def _dirs_identical(src: Path, dest: Path) -> bool:
+    """True iff ``src`` and ``dest`` contain the same file tree byte-for-byte.
 
-    Returns True if migrated, False if source absent. Raises ``SystemExit``
-    if dest exists -- ``never overwrite`` per PATHS.md §OpenClaw migration H5.
+    Uses :class:`filecmp.dircmp` recursively. Tolerates symlinks the same
+    way ``filecmp`` does (compares targets, not symlink-vs-file shape).
+    Returns ``False`` on any structural difference (extra/missing files,
+    differing content, common funny files).
+    """
+    cmp = filecmp.dircmp(src, dest)
+    if cmp.left_only or cmp.right_only or cmp.diff_files or cmp.funny_files:
+        return False
+    return all(_dirs_identical(src / sub, dest / sub) for sub in cmp.common_dirs)
+
+
+def _migrate_directory(src: Path, dest: Path, kind: str) -> bool:
+    """Idempotently copy ``src`` -> ``dest`` (PATHS.md §OpenClaw migration H5).
+
+    Returns True if a copy happened, False if no-op (source absent OR
+    dest already contains the same tree byte-for-byte). Raises
+    ``SystemExit`` only on a real data conflict (dest exists with
+    different content -- "never overwrite" data-loss protection).
+
+    Idempotency rule: if ``dest`` exists AND its contents match ``src``
+    exactly, treat as already-migrated (skip silently). Required so that
+    a second ``upgrade`` run, or a retry after audit-overlap abort, does
+    not crash on the now-existing dest from the first attempt.
     """
     if not src.is_dir():
         return False
     if dest.exists():
+        if _dirs_identical(src, dest):
+            _LOG.info("%s already migrated (dest matches src byte-for-byte); skipping", kind)
+            return False
         raise SystemExit(
             f"hermes mordred upgrade: refusing to overwrite existing {kind} "
-            f"at {dest}. Move or remove it manually before re-running upgrade."
+            f"at {dest} -- contents differ from {src}. "
+            f"Move or remove the destination manually before re-running upgrade."
         )
     dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     shutil.copytree(src, dest, dirs_exist_ok=False)
@@ -191,11 +217,25 @@ def _migrate_directory(src: Path, dest: Path, kind: str) -> bool:
 # -----------------------------------------------------------------------------
 
 
-def _migrate_policy(openclaw_base: Path, policy_writer: PolicyWriter) -> bool:
+def _migrate_policy(
+    openclaw_base: Path,
+    policy_writer: PolicyWriter,
+    options: UpgradeOptions,
+) -> bool:
     """Transform ``openclaw.json plugins.entries.mordred-privacy-check.config``
-    into a :class:`PolicySnapshot` and upsert via ``PolicyWriter``.
+    into a :class:`PolicySnapshot` and write via ``PolicyWriter``.
 
     Returns True if policy was migrated, False if no recognisable section.
+
+    Codex review fixes:
+    - Honors ``options.policy_conflict`` against the OpenClaw-derived
+      snapshot (P1-A: previously the conflict was only checked against
+      the default snapshot in ``upgrade._resolve_story1``, leaving the
+      OpenClaw upsert path unguarded).
+    - Calls ``policy_writer.write()`` instead of ``upsert_mordred_sections``
+      so the ``policy.json`` mirror is also emitted (P2: explainer reads
+      via ``get_active_policy_mode`` from config.yaml, but other plugins
+      and ``policy show`` still rely on the mirror existing).
     """
     src = openclaw_base.parent / "openclaw.json"
     if not src.is_file():
@@ -217,8 +257,66 @@ def _migrate_policy(openclaw_base: Path, policy_writer: PolicyWriter) -> bool:
         return False
 
     snapshot = _coerce_snapshot(config)
-    policy_writer.upsert_mordred_sections({"mordred_privacy_check": snapshot.to_config_yaml_section()})
+
+    # Apply --policy-conflict against the OpenClaw snapshot (P1-A).
+    existing = _read_existing_section(policy_writer.config_path)
+    want = snapshot.to_config_yaml_section()
+    if existing is not None and not _section_matches_dict(existing, want):
+        if options.reset:
+            pass  # fall through to write
+        elif options.policy_conflict == "keep-existing":
+            return False
+        elif options.policy_conflict == "abort":
+            raise SystemExit(
+                "hermes mordred upgrade: --policy-conflict=abort and OpenClaw "
+                "policy differs from existing config.yaml -- aborting."
+            )
+        elif options.policy_conflict is None:
+            if options.non_interactive:
+                raise SystemExit(
+                    "hermes mordred upgrade: --non-interactive set but --policy-conflict "
+                    "not specified; refusing to overwrite existing mordred section "
+                    "with OpenClaw migration."
+                )
+            raise SystemExit(
+                "hermes mordred upgrade: OpenClaw policy differs from existing "
+                "config.yaml plugins.mordred_privacy_check. Re-run with one of "
+                "--policy-conflict=keep-existing|overwrite|abort or --reset."
+            )
+        # options.policy_conflict == "overwrite" or reset -> fall through to write.
+
+    # Write BOTH config.yaml and policy.json mirror (P2).
+    policy_writer.write(snapshot)
     return True
+
+
+def _read_existing_section(config_path: Path) -> dict[str, Any] | None:
+    """Local helper -- avoids cyclic import with upgrade._read_existing_section."""
+    if not config_path.exists():
+        return None
+    from ruamel.yaml import YAML
+
+    yaml = YAML(typ="rt")
+    try:
+        with config_path.open(encoding="utf-8") as f:
+            root = yaml.load(f)
+    except Exception as e:
+        _LOG.warning("could not parse %s: %s", config_path, e)
+        return None
+    if not isinstance(root, dict):
+        return None
+    plugins = root.get("plugins")
+    if not isinstance(plugins, dict):
+        return None
+    section = plugins.get("mordred_privacy_check")
+    if not isinstance(section, dict):
+        return None
+    return dict(section)
+
+
+def _section_matches_dict(existing: dict[str, Any], want: dict[str, Any]) -> bool:
+    """True iff ``existing`` super-set-equals ``want`` field-by-field."""
+    return all(existing.get(k) == v for k, v in want.items()) and set(existing.keys()) >= set(want.keys())
 
 
 def _coerce_snapshot(config: dict[str, Any]) -> PolicySnapshot:
@@ -280,9 +378,10 @@ def migrate(
     if state.has_credentials:
         _migrate_directory(openclaw_base / "credentials", dest_credentials, kind="credentials")
 
-    # 2. Policy transform (idempotent via PolicyWriter compare-and-skip)
+    # 2. Policy transform (idempotent via PolicyWriter compare-and-skip;
+    # honors options.policy_conflict against the OpenClaw snapshot per Codex P1-A)
     if state.has_openclaw_json:
-        _migrate_policy(openclaw_base, policy_writer)
+        _migrate_policy(openclaw_base, policy_writer, options)
 
     # 3. Audit log -- last, with marker
     audit_migrated = _migrate_audit(openclaw_base, dest_audit, marker, options)

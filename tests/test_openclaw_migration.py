@@ -266,6 +266,171 @@ class TestKeyvaultCredentialsNeverOverwrite:
         with pytest.raises(SystemExit, match=r"credentials"):
             openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
 
+    def test_keyvault_idempotent_when_already_migrated(self, tmp_path: Path) -> None:
+        """Codex P1-B: second `upgrade` after a successful first run must not abort.
+
+        First run copies keyvault. Second run sees dest exists with identical
+        content -- treat as already migrated and skip (NOT abort).
+        """
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(base, keyvault=True)
+        w = _writer(tmp_path)
+        openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+        # Second run -- must not crash even though dest now exists
+        openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+        # Existing dest content unchanged
+        dest_keyvault = tmp_path / "hermes" / "mordred" / "keyvault"
+        assert (dest_keyvault / "key1.bin").read_bytes() == b"opaque-keyvault-bytes"
+
+    def test_keyvault_content_collision_still_aborts(self, tmp_path: Path) -> None:
+        """Idempotency must NOT swallow real data conflicts -- different content
+        at dest still aborts (data-loss protection per PATHS.md H5)."""
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(base, keyvault=True)
+        # Pre-existing Hermes keyvault with DIFFERENT content
+        hermes_kv = tmp_path / "hermes" / "mordred" / "keyvault"
+        hermes_kv.mkdir(parents=True)
+        (hermes_kv / "key1.bin").write_bytes(b"different-content")
+        w = _writer(tmp_path)
+        with pytest.raises(SystemExit, match=r"keyvault"):
+            openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+        # Existing data must remain untouched
+        assert (hermes_kv / "key1.bin").read_bytes() == b"different-content"
+
+    def test_partial_failure_retry_after_audit_overlap(self, tmp_path: Path) -> None:
+        """Codex P1-B (sub-case): keyvault copies, then audit step aborts on
+        overlap -- a retry with --audit-merge=skip must succeed, not crash on
+        the now-existing keyvault dest."""
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            keyvault=True,
+            audit_lines=['{"ts":"2026-05-05T00:00:00.000Z","event":"pre_install","decision":"allow"}'],
+        )
+        # Pre-seed Hermes audit with overlapping ts (forces overlap abort)
+        hermes_audit = tmp_path / "hermes" / "mordred" / "audit.log"
+        hermes_audit.parent.mkdir(parents=True, exist_ok=True)
+        hermes_audit.write_text(
+            '{"ts":"2026-05-04T00:00:00.000Z","event":"pre_install","decision":"allow"}\n',
+            encoding="utf-8",
+        )
+        w = _writer(tmp_path)
+
+        # First run: keyvault copies, audit aborts (overlap, no merge flag)
+        with pytest.raises(SystemExit, match=r"audit-merge"):
+            openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+
+        # Retry with --audit-merge=skip: must NOT crash on already-copied keyvault
+        result = openclaw_migration.migrate(
+            openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions(audit_merge="skip")
+        )
+        assert result == "migrated"
+
+
+# -----------------------------------------------------------------------------
+# Codex P1-A + P2 -- conflict resolver applies to OpenClaw snapshot too;
+# policy.json mirror must be emitted when policy is migrated.
+# -----------------------------------------------------------------------------
+
+
+class TestCodexFindings:
+    def test_openclaw_policy_respects_policy_conflict_keep_existing(self, tmp_path: Path) -> None:
+        """Codex P1-A: --policy-conflict=keep-existing must protect the
+        existing Hermes section even from OpenClaw migration overwrites."""
+        # Pre-seed Hermes config with strict
+        config = tmp_path / "hermes" / "config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "plugins:\n  mordred_privacy_check:\n    policy: strict\n"
+            "    allow_cloud_llm: false\n    cloud_provider_allowlist: []\n",
+            encoding="utf-8",
+        )
+        # OpenClaw wants to migrate "off"
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            openclaw_json={
+                "plugins": {
+                    "entries": {
+                        "mordred-privacy-check": {
+                            "id": "mordred-privacy-check",
+                            "config": {"policy": "off", "allow_cloud_llm": False, "cloud_provider_allowlist": []},
+                        }
+                    }
+                }
+            },
+        )
+        w = _writer(tmp_path)
+        openclaw_migration.migrate(
+            openclaw_base=base,
+            policy_writer=w,
+            options=upgrade.UpgradeOptions(policy_conflict="keep-existing"),
+        )
+        # Existing strict policy preserved
+        assert "policy: strict" in config.read_text(encoding="utf-8")
+
+    def test_openclaw_policy_respects_policy_conflict_abort(self, tmp_path: Path) -> None:
+        """Codex P1-A: --policy-conflict=abort must SystemExit on OpenClaw policy mismatch."""
+        config = tmp_path / "hermes" / "config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            "plugins:\n  mordred_privacy_check:\n    policy: strict\n"
+            "    allow_cloud_llm: false\n    cloud_provider_allowlist: []\n",
+            encoding="utf-8",
+        )
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            openclaw_json={
+                "plugins": {
+                    "entries": {
+                        "mordred-privacy-check": {
+                            "id": "mordred-privacy-check",
+                            "config": {"policy": "off"},
+                        }
+                    }
+                }
+            },
+        )
+        w = _writer(tmp_path)
+        with pytest.raises(SystemExit, match=r"policy-conflict"):
+            openclaw_migration.migrate(
+                openclaw_base=base,
+                policy_writer=w,
+                options=upgrade.UpgradeOptions(policy_conflict="abort"),
+            )
+
+    def test_openclaw_policy_emits_policy_json_mirror(self, tmp_path: Path) -> None:
+        """Codex P2: policy.json mirror must be written when OpenClaw policy migrates."""
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            openclaw_json={
+                "plugins": {
+                    "entries": {
+                        "mordred-privacy-check": {
+                            "id": "mordred-privacy-check",
+                            "config": {
+                                "policy": "strict",
+                                "allow_cloud_llm": True,
+                                "cloud_provider_allowlist": ["anthropic"],
+                            },
+                        }
+                    }
+                }
+            },
+        )
+        w = _writer(tmp_path)
+        openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+        policy_json = tmp_path / "hermes" / "mordred" / "policy.json"
+        assert policy_json.exists(), "policy.json mirror must be emitted by OpenClaw migration"
+        import json as _json
+
+        body = _json.loads(policy_json.read_text(encoding="utf-8"))
+        assert body["policy"] == "strict"
+        assert body["allow_cloud_llm"] is True
+        assert body["cloud_provider_allowlist"] == ["anthropic"]
+
 
 # -----------------------------------------------------------------------------
 # openclaw.json policy block -- transform + upsert via PolicyWriter
