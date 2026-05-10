@@ -94,12 +94,18 @@ class TestExplain:
             "",
             "foo/bar",
             r"foo\bar",
+            "\x00",
+            "/etc/passwd",
+            # Unicode look-alike separators that bypass naive `"/" in s` checks.
+            "foo／bar",  # noqa: RUF001 -- U+FF0F FULLWIDTH SOLIDUS, intentionally ambiguous
+            "foo∕bar",  # noqa: RUF001 -- U+2215 DIVISION SLASH, intentionally ambiguous
+            "café",  # any non-ASCII
         ],
     )
     def test_traversal_attempts_rejected(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], evil_id: str
     ) -> None:
-        """``skill_id`` must be a single path segment; traversal sequences fail closed."""
+        """``skill_id`` must match the ASCII allowlist; traversal sequences fail closed."""
         rc = policy_explainer.explain(
             evil_id,
             policy_json_path=_write_policy(tmp_path, "lenient"),

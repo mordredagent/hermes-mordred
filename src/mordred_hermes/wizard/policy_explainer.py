@@ -14,10 +14,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Final, cast
 
 from .._home import HERMES_BASE
 from ..privacy_check._runtime import is_poisoned, reload_state
@@ -31,6 +32,14 @@ DEFAULT_SKILLS_DIRS: tuple[Path, ...] = (
     HERMES_BASE / "skills",
     Path.cwd() / ".hermes" / "skills",
 )
+
+# Skill IDs are restricted to ASCII alphanumerics + dot/underscore/hyphen.
+# Layer 0 of the path-traversal defence -- rejects unicode look-alikes
+# (U+FF0F FULLWIDTH SOLIDUS, U+2215 DIVISION SLASH, etc.) that would
+# pass the ``"/" in skill_id`` substring check on POSIX but could be
+# normalised on Windows or future runtimes. Layer 1 (substring guard)
+# and Layer 2 (resolve + is_relative_to) remain as defence in depth.
+_SKILL_ID_RE: Final = re.compile(r"[A-Za-z0-9._-]+")
 
 
 # -----------------------------------------------------------------------------
@@ -86,7 +95,7 @@ def _find_skill_md(skill_id: str, search_paths: Iterable[Path]) -> Path | None:
     must remain under their search dir; symlinks pointing elsewhere are
     treated as misses.
     """
-    if not skill_id or "/" in skill_id or "\\" in skill_id or skill_id in (".", ".."):
+    if not _SKILL_ID_RE.fullmatch(skill_id) or skill_id in (".", ".."):
         return None
     for d in search_paths:
         candidate = d / skill_id / "SKILL.md"
