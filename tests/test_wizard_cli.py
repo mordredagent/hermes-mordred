@@ -110,15 +110,13 @@ class TestStubHandlersDeferProperly:
     @pytest.mark.parametrize(
         "argv,expected_marker",
         [
-            (["mordred", "configure"], "Phase C"),
+            # configure: wired in Phase C -- real-handler test lives in test_configure.py
             (["mordred", "upgrade"], "Phase E"),
             (["mordred", "install", "x"], "Phase F"),
             (["mordred", "network", "use", "tor"], "Phase 3"),
             (["mordred", "network", "status"], "Phase 3"),
-            (["mordred", "policy", "show"], "Phase D"),
-            (["mordred", "policy", "explain", "x"], "Phase D"),
-            (["mordred", "policy", "dry-run", "x"], "Phase D"),
-            (["mordred", "policy", "reload"], "Phase D"),
+            # policy {show, explain, dry-run, reload}: wired in Phase D --
+            # real-handler tests live in test_policy_explainer.py
             (["mordred", "audit", "tail"], "Phase F"),
             (["mordred", "audit", "grep", "x"], "Phase F"),
             (["mordred", "audit", "decrypt", "--date", "2026-05-10"], "Phase 4"),

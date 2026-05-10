@@ -92,6 +92,20 @@ def reset_state_for_tests() -> None:
         _degraded_no_origin_skill_emitted = False
 
 
+def reload_state() -> None:
+    """Public reload entry point — clears the cached PluginState so the
+    next hook invocation re-reads ``~/.hermes/config.yaml``.
+
+    Called from ``hermes mordred policy reload``. Does NOT clear the
+    poison flag or one-shot ``no_origin_skill`` marker — those are
+    process-lifetime invariants and re-asserting them after reload
+    requires restarting the session.
+    """
+    global _state
+    with _state_lock:
+        _state = None
+
+
 def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginState:
     cfg = _load_yaml(config_path)
     plugins_cfg = cfg.get("plugins")

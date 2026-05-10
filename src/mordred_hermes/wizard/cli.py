@@ -177,7 +177,9 @@ def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
 
 def _handle_configure(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred configure: Phase C (TODO.md §1.3 L172) not yet landed")
+    from . import configure
+
+    return configure.cli_handler(args)
 
 
 def _handle_upgrade(args: argparse.Namespace) -> int:
@@ -197,19 +199,27 @@ def _handle_network_status(args: argparse.Namespace) -> int:
 
 
 def _handle_policy_show(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred policy show: Phase D (TODO.md §1.3 L185) not yet landed")
+    from . import policy_explainer
+
+    return policy_explainer.cli_show(args)
 
 
 def _handle_policy_explain(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred policy explain: Phase D (TODO.md §1.3 L185) not yet landed")
+    from . import policy_explainer
+
+    return policy_explainer.cli_explain(args)
 
 
 def _handle_policy_dry_run(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred policy dry-run: Phase D (TODO.md §1.3 L185) not yet landed")
+    from . import policy_explainer
+
+    return policy_explainer.cli_dry_run(args)
 
 
 def _handle_policy_reload(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred policy reload: Phase D not yet landed")
+    from . import policy_explainer
+
+    return policy_explainer.cli_reload(args)
 
 
 def _handle_audit_tail(args: argparse.Namespace) -> int:
