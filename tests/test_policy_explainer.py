@@ -24,6 +24,7 @@ MISSING = FIXTURES / "missing_metadata_skill"
 
 
 def _write_policy(tmp_path: Path, policy: str) -> Path:
+    """Write policy.json -- for `show()` tests (the only consumer that reads it)."""
     p = tmp_path / "mordred" / "policy.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
@@ -36,6 +37,19 @@ def _write_policy(tmp_path: Path, policy: str) -> Path:
             }
         )
         + "\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _write_config(tmp_path: Path, policy: str) -> Path:
+    """Write config.yaml -- the source explain/dry-run actually read.
+
+    Same shape privacy_check._runtime._load_state reads (plugins.mordred_privacy_check).
+    """
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        f"plugins:\n  mordred_privacy_check:\n    policy: {policy}\n",
         encoding="utf-8",
     )
     return p
@@ -79,7 +93,7 @@ class TestExplain:
     def test_returns_1_when_skill_not_found(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = policy_explainer.explain(
             "nonexistent",
-            policy_json_path=tmp_path / "policy.json",
+            config_path=tmp_path / "config.yaml",
             skills_dirs=[tmp_path / "skills"],
         )
         assert rc == 1
@@ -108,7 +122,7 @@ class TestExplain:
         """``skill_id`` must match the ASCII allowlist; traversal sequences fail closed."""
         rc = policy_explainer.explain(
             evil_id,
-            policy_json_path=_write_policy(tmp_path, "lenient"),
+            config_path=_write_config(tmp_path, "lenient"),
             skills_dirs=[tmp_path / "skills"],
         )
         assert rc == 1
@@ -122,12 +136,11 @@ class TestExplain:
 
         skills = tmp_path / "skills"
         skills.mkdir()
-        # Make `skills/escape` a symlink to outside/
         (skills / "escape").symlink_to(outside, target_is_directory=True)
 
         rc = policy_explainer.explain(
             "escape",
-            policy_json_path=_write_policy(tmp_path, "lenient"),
+            config_path=_write_config(tmp_path, "lenient"),
             skills_dirs=[skills],
         )
         assert rc == 1, "symlink escape must be rejected"
@@ -139,11 +152,11 @@ class TestExplain:
             (CLEARNET / "SKILL.md").read_text(encoding="utf-8"),
             encoding="utf-8",
         )
-        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "strict")
         out = io.StringIO()
         rc = policy_explainer.explain(
             "my-skill",
-            policy_json_path=policy,
+            config_path=config,
             skills_dirs=[skills],
             out=out,
         )
@@ -160,11 +173,11 @@ class TestExplain:
             (TOR / "SKILL.md").read_text(encoding="utf-8"),
             encoding="utf-8",
         )
-        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "strict")
         out = io.StringIO()
         rc = policy_explainer.explain(
             "tor-skill",
-            policy_json_path=policy,
+            config_path=config,
             skills_dirs=[skills],
             out=out,
         )
@@ -185,34 +198,34 @@ class TestDryRun:
         assert "SKILL.md not found" in capsys.readouterr().err
 
     def test_strict_clearnet_blocks(self, tmp_path: Path) -> None:
-        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "strict")
         out = io.StringIO()
-        rc = policy_explainer.dry_run(CLEARNET, policy_json_path=policy, out=out)
+        rc = policy_explainer.dry_run(CLEARNET, config_path=config, out=out)
         text = out.getvalue()
         assert rc == 2
         assert "dry-run: block" in text
         assert "policy.strict.clearnet" in text
 
     def test_lenient_missing_metadata_warns(self, tmp_path: Path) -> None:
-        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, "lenient")
         out = io.StringIO()
-        rc = policy_explainer.dry_run(MISSING, policy_json_path=policy, out=out)
+        rc = policy_explainer.dry_run(MISSING, config_path=config, out=out)
         text = out.getvalue()
         assert rc == 0
         assert "dry-run: warn" in text
         assert "policy.lenient.unknown_metadata_warning" in text
 
     def test_off_mode_always_allows(self, tmp_path: Path) -> None:
-        policy = _write_policy(tmp_path, "off")
+        config = _write_config(tmp_path, "off")
         out = io.StringIO()
-        rc = policy_explainer.dry_run(CLEARNET, policy_json_path=policy, out=out)
+        rc = policy_explainer.dry_run(CLEARNET, config_path=config, out=out)
         assert rc == 0
         assert "dry-run: allow" in out.getvalue()
 
     def test_explicit_skill_md_path(self, tmp_path: Path) -> None:
-        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "strict")
         out = io.StringIO()
-        rc = policy_explainer.dry_run(TOR / "SKILL.md", policy_json_path=policy, out=out)
+        rc = policy_explainer.dry_run(TOR / "SKILL.md", config_path=config, out=out)
         assert rc == 0
         assert "dry-run: allow" in out.getvalue()
 
@@ -272,14 +285,14 @@ class TestCliAdapters:
         assert rc == 0
 
     def test_cli_explain_unknown_skill(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(policy_explainer, "DEFAULT_POLICY_JSON_PATH", tmp_path / "policy.json")
+        monkeypatch.setattr(policy_explainer, "DEFAULT_HERMES_CONFIG_PATH", tmp_path / "config.yaml")
         monkeypatch.setattr(policy_explainer, "DEFAULT_SKILLS_DIRS", (tmp_path / "skills",))
         rc = policy_explainer.cli_explain(argparse.Namespace(skill_id="nope"))
         assert rc == 1
 
     def test_cli_dry_run_passes_through(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        p = _write_policy(tmp_path, "off")
-        monkeypatch.setattr(policy_explainer, "DEFAULT_POLICY_JSON_PATH", p)
+        config = _write_config(tmp_path, "off")
+        monkeypatch.setattr(policy_explainer, "DEFAULT_HERMES_CONFIG_PATH", config)
         rc = policy_explainer.cli_dry_run(argparse.Namespace(skill_path=str(TOR)))
         assert rc == 0
 
@@ -295,20 +308,43 @@ class TestCliAdapters:
 
 
 class TestResolvePolicyMode:
-    def test_defaults_to_lenient_when_missing(self, tmp_path: Path) -> None:
-        assert policy_explainer._resolve_policy_mode(tmp_path / "missing.json") == "lenient"
+    """Mode resolution reads ~/.hermes/config.yaml -- the same source as the install hook."""
 
-    def test_defaults_to_lenient_on_invalid_json(self, tmp_path: Path) -> None:
-        p = tmp_path / "policy.json"
-        p.write_text("not json", encoding="utf-8")
+    def test_defaults_to_lenient_when_config_missing(self, tmp_path: Path) -> None:
+        assert policy_explainer._resolve_policy_mode(tmp_path / "missing.yaml") == "lenient"
+
+    def test_defaults_to_lenient_on_invalid_yaml(self, tmp_path: Path) -> None:
+        p = tmp_path / "config.yaml"
+        # ruamel safe loader treats malformed YAML as empty -> defaults to lenient
+        p.write_text("plugins:\n  mordred_privacy_check:\n    policy: : :", encoding="utf-8")
         assert policy_explainer._resolve_policy_mode(p) == "lenient"
 
-    def test_defaults_to_lenient_on_unknown_policy_value(self, tmp_path: Path) -> None:
-        p = tmp_path / "policy.json"
-        p.write_text(json.dumps({"policy": "wat"}), encoding="utf-8")
-        assert policy_explainer._resolve_policy_mode(p) == "lenient"
+    def test_defaults_to_lenient_on_unknown_policy_value(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        p = tmp_path / "config.yaml"
+        p.write_text("plugins:\n  mordred_privacy_check:\n    policy: wat\n", encoding="utf-8")
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="mordred.privacy_check"):
+            assert policy_explainer._resolve_policy_mode(p) == "lenient"
+        assert any("invalid policy" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("mode", ["strict", "lenient", "off"])
     def test_passes_through_valid_modes(self, tmp_path: Path, mode: str) -> None:
-        p = _write_policy(tmp_path, mode)
+        p = _write_config(tmp_path, mode)
         assert policy_explainer._resolve_policy_mode(p) == mode
+
+    def test_drift_free_with_config_yaml_edit(self, tmp_path: Path) -> None:
+        """Editing config.yaml directly is reflected without going through PolicyWriter.
+
+        This is the regression test for Codex P2 -- previously _resolve_policy_mode
+        read policy.json (a wizard-written mirror) and could drift.
+        """
+        config = tmp_path / "config.yaml"
+        config.write_text("plugins:\n  mordred_privacy_check:\n    policy: lenient\n", encoding="utf-8")
+        assert policy_explainer._resolve_policy_mode(config) == "lenient"
+
+        # User edits config.yaml directly -- explainer must reflect it
+        config.write_text("plugins:\n  mordred_privacy_check:\n    policy: strict\n", encoding="utf-8")
+        assert policy_explainer._resolve_policy_mode(config) == "strict"

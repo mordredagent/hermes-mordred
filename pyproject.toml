@@ -41,6 +41,18 @@ mordred_llm_guard = "mordred_hermes.llm_guard"
 mordred_keyvault = "mordred_hermes.keyvault"
 mordred_wizard = "mordred_hermes.wizard"
 
+# Standalone console script -- `hermes-mordred ...` works today.
+# Hermes 0.11.0 does NOT iterate PluginManager._cli_commands when building
+# its argparse subparsers (only `plugins.memory.discover_plugin_cli_commands`
+# is consulted from hermes_cli/main.py:9728-9740), so the wizard's
+# ctx.register_cli_command("mordred", ...) call is silently dropped at
+# parser-construction time. This console_script is the v1 workaround;
+# when Hermes 0.12+ wires entry-point CLI commands to argparse the
+# `hermes mordred ...` form will start working too without code changes
+# (both entry points coexist).
+[project.scripts]
+hermes-mordred = "mordred_hermes.wizard.cli:main"
+
 [project.urls]
 Documentation = "https://github.com/InternetMaximalism/Mordred-Hermes/tree/main/mordred-docs/mordred"
 Source = "https://github.com/InternetMaximalism/Mordred-Hermes"

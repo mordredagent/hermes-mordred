@@ -272,3 +272,30 @@ def dispatch(args: argparse.Namespace) -> int:
         raise SystemExit("usage: hermes mordred <COMMAND> ... (no subcommand provided)")
     result: Any = func(args)
     return int(result) if isinstance(result, int) else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Standalone ``hermes-mordred`` console-script entry.
+
+    This is the v1 user-facing CLI. It exists because Hermes 0.11.0 does
+    not iterate ``PluginManager._cli_commands`` when building its top-level
+    argparse subparsers (see ``hermes_cli/main.py:9728-9740`` -- only
+    ``plugins.memory.discover_plugin_cli_commands`` is consulted), so the
+    wizard's ``ctx.register_cli_command("mordred", ...)`` call alone is
+    silently dropped from argparse. Users invoke ``hermes-mordred ...``
+    today; once Hermes 0.12+ ships entry-point CLI wiring,
+    ``hermes mordred ...`` will also work via the same handlers.
+
+    Wired in ``pyproject.toml`` ``[project.scripts]`` as
+    ``hermes-mordred = "mordred_hermes.wizard.cli:main"``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="hermes-mordred",
+        description=(
+            "Mordred privacy layer (standalone CLI). "
+            "Same subcommand tree as `hermes mordred ...` once Hermes 0.12+ wires it."
+        ),
+    )
+    _setup_subparser(parser)
+    ns = parser.parse_args(argv)
+    return dispatch(ns)

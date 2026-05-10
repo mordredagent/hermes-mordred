@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.wizard import register
-from mordred_hermes.wizard.cli import _setup_subparser, dispatch
+from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 
 
 class _CapturingContext:
@@ -163,3 +163,36 @@ class TestDispatchWithoutFunc:
     def test_missing_func_raises_systemexit(self) -> None:
         with pytest.raises(SystemExit):
             dispatch(argparse.Namespace())
+
+
+class TestMainStandaloneEntry:
+    """`hermes-mordred` console-script entry (Codex P1 workaround for Hermes 0.11)."""
+
+    def test_help_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(["--help"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert "configure" in out
+        assert "upgrade" in out
+        assert "policy" in out
+
+    def test_no_args_shows_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main([])
+        # argparse exits with code 2 on missing required subcommand
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "COMMAND" in err or "required" in err.lower()
+
+    def test_dispatches_to_stub_handler(self) -> None:
+        """`hermes-mordred upgrade` reaches the upgrade stub (Phase E placeholder)."""
+        with pytest.raises(NotImplementedError, match="Phase E"):
+            main(["upgrade"])
+
+    def test_unknown_subcommand_argparse_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(["bogus-subcommand"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "invalid choice" in err

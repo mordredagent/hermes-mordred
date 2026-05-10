@@ -18,10 +18,15 @@ import re
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 from .._home import HERMES_BASE
-from ..privacy_check._runtime import is_poisoned, reload_state
+from ..privacy_check._runtime import (
+    DEFAULT_HERMES_CONFIG_PATH,
+    get_active_policy_mode,
+    is_poisoned,
+    reload_state,
+)
 from ..privacy_check.policy import PolicyMode, evaluate_install
 from ..privacy_check.skill_frontmatter import SkillMetadataError, parse
 from ._runtime import DEFAULT_POLICY_JSON_PATH
@@ -73,18 +78,17 @@ def show(
 # -----------------------------------------------------------------------------
 
 
-def _resolve_policy_mode(policy_json_path: Path) -> PolicyMode:
-    """Read policy.json -> ``policy`` field. Default 'lenient' if absent."""
-    if not policy_json_path.exists():
-        return "lenient"
-    try:
-        body = json.loads(policy_json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return "lenient"
-    raw = body.get("policy") if isinstance(body, dict) else None
-    if raw in ("strict", "lenient", "off"):
-        return cast(PolicyMode, raw)
-    return "lenient"
+def _resolve_policy_mode(config_path: Path = DEFAULT_HERMES_CONFIG_PATH) -> PolicyMode:
+    """Resolve the active policy mode using the same source as the install hook.
+
+    Reads ``~/.hermes/config.yaml plugins.mordred_privacy_check.policy``
+    via :func:`privacy_check._runtime.get_active_policy_mode` so that
+    ``policy explain`` / ``dry-run`` cannot drift from the actual
+    install-time decision when users edit ``config.yaml`` directly.
+    Defaults to ``"lenient"`` when the section is missing -- matching
+    the privacy_check hook's defaulting behaviour.
+    """
+    return get_active_policy_mode(config_path=config_path)
 
 
 def _find_skill_md(skill_id: str, search_paths: Iterable[Path]) -> Path | None:
@@ -114,7 +118,7 @@ def _find_skill_md(skill_id: str, search_paths: Iterable[Path]) -> Path | None:
 def explain(
     skill_id: str,
     *,
-    policy_json_path: Path = DEFAULT_POLICY_JSON_PATH,
+    config_path: Path = DEFAULT_HERMES_CONFIG_PATH,
     skills_dirs: Iterable[Path] = DEFAULT_SKILLS_DIRS,
     out: Any = sys.stdout,
 ) -> int:
@@ -122,8 +126,12 @@ def explain(
 
     Searches ``~/.hermes/skills/<skill_id>/SKILL.md`` first, then a
     project-local ``.hermes/skills/<skill_id>/SKILL.md`` fallback.
+
+    Policy mode is read from ``~/.hermes/config.yaml`` (the same source
+    the install hook uses) -- not from the ``policy.json`` mirror -- so
+    explainer output cannot drift when users edit config.yaml directly.
     """
-    policy_mode = _resolve_policy_mode(policy_json_path)
+    policy_mode = _resolve_policy_mode(config_path)
     skill_md = _find_skill_md(skill_id, skills_dirs)
     if skill_md is None:
         print(
@@ -137,19 +145,20 @@ def explain(
 def dry_run(
     skill_path: Path,
     *,
-    policy_json_path: Path = DEFAULT_POLICY_JSON_PATH,
+    config_path: Path = DEFAULT_HERMES_CONFIG_PATH,
     out: Any = sys.stdout,
 ) -> int:
     """Evaluate the install decision for a SKILL.md (or skill dir) path.
 
     No install side effect is taken. Useful before committing a new skill
-    to verify Mordred will not block it under the active policy.
+    to verify Mordred will not block it under the active policy. Same
+    drift-free policy resolution as :func:`explain`.
     """
     skill_md = skill_path if skill_path.is_file() else skill_path / "SKILL.md"
     if not skill_md.exists():
         print(f"SKILL.md not found at {skill_md}", file=sys.stderr)
         return 1
-    policy_mode = _resolve_policy_mode(policy_json_path)
+    policy_mode = _resolve_policy_mode(config_path)
     return _print_decision(skill_md, policy_mode, out=out, dry_run_label=True)
 
 
@@ -219,13 +228,13 @@ def cli_show(args: argparse.Namespace) -> int:
 def cli_explain(args: argparse.Namespace) -> int:
     return explain(
         args.skill_id,
-        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        config_path=DEFAULT_HERMES_CONFIG_PATH,
         skills_dirs=DEFAULT_SKILLS_DIRS,
     )
 
 
 def cli_dry_run(args: argparse.Namespace) -> int:
-    return dry_run(Path(args.skill_path), policy_json_path=DEFAULT_POLICY_JSON_PATH)
+    return dry_run(Path(args.skill_path), config_path=DEFAULT_HERMES_CONFIG_PATH)
 
 
 def cli_reload(args: argparse.Namespace) -> int:

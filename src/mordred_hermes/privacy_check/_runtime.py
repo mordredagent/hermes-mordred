@@ -106,6 +106,30 @@ def reload_state() -> None:
         _state = None
 
 
+def get_active_policy_mode(*, config_path: Path | None = None) -> PolicyMode:
+    """Read the active policy mode from ``~/.hermes/config.yaml``.
+
+    Public read-only helper for tools (e.g. wizard's ``policy explain``)
+    that must evaluate decisions identically to the install hook without
+    touching the cached :class:`PluginState`. Reads the same field the
+    hook reads (``plugins.mordred_privacy_check.policy``), so explainer
+    output cannot drift from install-time enforcement when users edit
+    ``config.yaml`` directly.
+    """
+    cfg = _load_yaml(config_path or DEFAULT_HERMES_CONFIG_PATH)
+    plugins_cfg = cfg.get("plugins")
+    if not isinstance(plugins_cfg, dict):
+        return "lenient"
+    section = plugins_cfg.get("mordred_privacy_check")
+    if not isinstance(section, dict):
+        return "lenient"
+    raw = section.get("policy", "lenient")
+    if raw in ("strict", "lenient", "off"):
+        return cast(PolicyMode, raw)
+    _LOG.warning("invalid policy %r in %s; defaulting to lenient", raw, config_path or DEFAULT_HERMES_CONFIG_PATH)
+    return "lenient"
+
+
 def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginState:
     cfg = _load_yaml(config_path)
     plugins_cfg = cfg.get("plugins")
