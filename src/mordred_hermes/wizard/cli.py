@@ -183,7 +183,17 @@ def _handle_configure(args: argparse.Namespace) -> int:
 
 
 def _handle_upgrade(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred upgrade: Phase E (TODO.md §1.3 L173-183) not yet landed")
+    from . import upgrade
+    from .policy_writer import PolicyWriter
+
+    options = upgrade.UpgradeOptions(
+        reset=bool(getattr(args, "reset", False)),
+        non_interactive=bool(getattr(args, "non_interactive", False)),
+        audit_merge=getattr(args, "audit_merge", None),
+        policy_conflict=getattr(args, "policy_conflict", None),
+    )
+    upgrade.run(options=options, policy_writer=PolicyWriter())
+    return 0
 
 
 def _handle_install(args: argparse.Namespace) -> int:

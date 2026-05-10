@@ -111,7 +111,7 @@ class TestStubHandlersDeferProperly:
         "argv,expected_marker",
         [
             # configure: wired in Phase C -- real-handler test lives in test_configure.py
-            (["mordred", "upgrade"], "Phase E"),
+            # upgrade: wired in Phase E -- real-handler tests live in test_upgrade.py
             (["mordred", "install", "x"], "Phase F"),
             (["mordred", "network", "use", "tor"], "Phase 3"),
             (["mordred", "network", "status"], "Phase 3"),
@@ -186,9 +186,13 @@ class TestMainStandaloneEntry:
         assert "COMMAND" in err or "required" in err.lower()
 
     def test_dispatches_to_stub_handler(self) -> None:
-        """`hermes-mordred upgrade` reaches the upgrade stub (Phase E placeholder)."""
-        with pytest.raises(NotImplementedError, match="Phase E"):
-            main(["upgrade"])
+        """`hermes-mordred install` reaches the install stub (Phase F placeholder).
+
+        Targets a still-stubbed handler (Phases C/D/E now wire real handlers
+        for configure / policy / upgrade); install lands in PR2 Phase F.
+        """
+        with pytest.raises(NotImplementedError, match="Phase F"):
+            main(["install", "any-skill"])
 
     def test_unknown_subcommand_argparse_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
