@@ -66,13 +66,24 @@ class PromptIO(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SubprocessSetupRunner:
-    """Default :class:`SetupRunner` -- shells out to ``hermes setup``."""
+    """Default :class:`SetupRunner` -- shells out to ``hermes setup``.
+
+    Returns the child process exit code on success. Returns ``1`` (with
+    a logged warning) if the ``hermes`` binary is missing from PATH so
+    that callers do not crash with an unhandled :class:`FileNotFoundError`
+    -- the Mordred prompt sequence still runs and the user gets a clean
+    exit code rather than a stack trace.
+    """
 
     def run(self, *, non_interactive: bool) -> int:
         cmd = ["hermes", "setup"]
         if non_interactive:
             cmd.append("--non-interactive")
-        completed = subprocess.run(cmd, check=False)
+        try:
+            completed = subprocess.run(cmd, check=False)
+        except FileNotFoundError:
+            _LOG.warning("`hermes` executable not found on PATH; skipping `hermes setup` step")
+            return 1
         return completed.returncode
 
 

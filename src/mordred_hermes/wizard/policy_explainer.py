@@ -16,12 +16,11 @@ import json
 import logging
 import sys
 from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .._home import HERMES_BASE
-from ..privacy_check._runtime import reload_state
+from ..privacy_check._runtime import is_poisoned, reload_state
 from ..privacy_check.policy import PolicyMode, evaluate_install
 from ..privacy_check.skill_frontmatter import SkillMetadataError, parse
 from ._runtime import DEFAULT_POLICY_JSON_PATH
@@ -65,15 +64,6 @@ def show(
 # -----------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class _Decision:
-    decision: str
-    reason: str | None
-    skill_id: str | None
-    network_requirements: str | None
-    policy_mode: str
-
-
 def _resolve_policy_mode(policy_json_path: Path) -> PolicyMode:
     """Read policy.json -> ``policy`` field. Default 'lenient' if absent."""
     if not policy_json_path.exists():
@@ -84,15 +74,30 @@ def _resolve_policy_mode(policy_json_path: Path) -> PolicyMode:
         return "lenient"
     raw = body.get("policy") if isinstance(body, dict) else None
     if raw in ("strict", "lenient", "off"):
-        return raw  # type: ignore[no-any-return]
+        return cast(PolicyMode, raw)
     return "lenient"
 
 
 def _find_skill_md(skill_id: str, search_paths: Iterable[Path]) -> Path | None:
-    """Return the first ``<dir>/<skill_id>/SKILL.md`` that exists, or None."""
+    """Return the first ``<dir>/<skill_id>/SKILL.md`` that exists, or None.
+
+    ``skill_id`` is treated as a single path segment -- traversal sequences
+    (``/``, ``\\``, ``.``, ``..``) are rejected outright. Resolved candidates
+    must remain under their search dir; symlinks pointing elsewhere are
+    treated as misses.
+    """
+    if not skill_id or "/" in skill_id or "\\" in skill_id or skill_id in (".", ".."):
+        return None
     for d in search_paths:
         candidate = d / skill_id / "SKILL.md"
-        if candidate.is_file():
+        if not candidate.is_file():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            base = d.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved.is_relative_to(base):
             return candidate
     return None
 
@@ -175,9 +180,20 @@ def reload(*, out: Any = sys.stdout) -> int:
 
     Note: live sessions in OTHER processes are unaffected; users must
     restart those. This is documented in the wizard README.
+
+    The poison flag is intentionally NOT cleared by reload (it is a
+    process-lifetime invariant). If the calling process is poisoned the
+    user is warned that reload alone will not unblock them.
     """
+    poisoned = is_poisoned()
     reload_state()
     print("Mordred privacy_check policy state reloaded.", file=out)
+    if poisoned:
+        print(
+            "Warning: this process is poisoned (sibling-disable detected at startup); "
+            "reload does not clear the poison flag. Restart your Hermes session.",
+            file=sys.stderr,
+        )
     return 0
 
 

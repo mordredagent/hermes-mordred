@@ -85,6 +85,47 @@ class TestExplain:
         assert rc == 1
         assert "not found" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "evil_id",
+        [
+            "../etc/passwd",
+            "..",
+            ".",
+            "",
+            "foo/bar",
+            r"foo\bar",
+        ],
+    )
+    def test_traversal_attempts_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], evil_id: str
+    ) -> None:
+        """``skill_id`` must be a single path segment; traversal sequences fail closed."""
+        rc = policy_explainer.explain(
+            evil_id,
+            policy_json_path=_write_policy(tmp_path, "lenient"),
+            skills_dirs=[tmp_path / "skills"],
+        )
+        assert rc == 1
+        assert "not found" in capsys.readouterr().err
+
+    def test_symlink_pointing_outside_search_dir_is_ignored(self, tmp_path: Path) -> None:
+        """A skill dir that's actually a symlink to outside the search root must miss."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("---\nname: x\n---\n", encoding="utf-8")
+
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        # Make `skills/escape` a symlink to outside/
+        (skills / "escape").symlink_to(outside, target_is_directory=True)
+
+        rc = policy_explainer.explain(
+            "escape",
+            policy_json_path=_write_policy(tmp_path, "lenient"),
+            skills_dirs=[skills],
+        )
+        assert rc == 1, "symlink escape must be rejected"
+
     def test_strict_clearnet_skill_blocks(self, tmp_path: Path) -> None:
         skills = tmp_path / "skills"
         (skills / "my-skill").mkdir(parents=True)
@@ -197,6 +238,19 @@ class TestReload:
         rc1 = policy_explainer.reload(out=io.StringIO())
         rc2 = policy_explainer.reload(out=io.StringIO())
         assert rc1 == 0 and rc2 == 0
+
+    def test_warns_when_process_is_poisoned(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """reload() does not clear the poison flag and must surface that to the user."""
+        privacy_runtime.reset_state_for_tests()
+        privacy_runtime.poison("synthetic poison for test")
+        try:
+            rc = policy_explainer.reload(out=io.StringIO())
+            assert rc == 0
+            err = capsys.readouterr().err
+            assert "poisoned" in err.lower()
+            assert "restart" in err.lower()
+        finally:
+            privacy_runtime.reset_state_for_tests()
 
 
 # -----------------------------------------------------------------------------

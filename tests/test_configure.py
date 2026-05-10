@@ -176,7 +176,7 @@ class TestRun:
         with caplog.at_level(logging.WARNING, logger="mordred.wizard.configure"):
             result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
         assert result.snapshot.policy == "lenient"
-        assert any("hermes setup" in r.message and "42" in r.message for r in caplog.records)
+        assert any("hermes setup" in r.getMessage() and "42" in r.getMessage() for r in caplog.records)
 
     def test_non_interactive_forwarded_to_runner(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block"])
@@ -296,6 +296,23 @@ class TestSubprocessSetupRunner:
         rc = configure.SubprocessSetupRunner().run(non_interactive=False)
         assert rc == 7
         assert called == [["hermes", "setup"]]
+
+    def test_missing_hermes_binary_returns_1_and_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``hermes`` not on PATH must not propagate FileNotFoundError."""
+
+        def _raise(cmd: list[str], check: bool = False) -> object:
+            raise FileNotFoundError(2, "No such file or directory: 'hermes'")
+
+        import logging
+        import subprocess
+
+        monkeypatch.setattr(subprocess, "run", _raise)
+        with caplog.at_level(logging.WARNING, logger="mordred.wizard.configure"):
+            rc = configure.SubprocessSetupRunner().run(non_interactive=False)
+        assert rc == 1
+        assert any("not found on PATH" in r.getMessage() for r in caplog.records)
 
 
 # -----------------------------------------------------------------------------
