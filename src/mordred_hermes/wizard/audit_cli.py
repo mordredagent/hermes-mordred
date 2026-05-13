@@ -56,12 +56,22 @@ def tail(*, n: int, log_path: Path = DEFAULT_AUDIT_LOG_PATH) -> int:
     """Print the last ``n`` NDJSON entries from the audit log to stdout.
 
     Returns 0 on success, 1 when the log is absent or encrypted.
+
+    ``n <= 0`` is treated as "print nothing" -- the obvious user intent.
+    Without the early return, ``lines[-max(n, 0):]`` evaluates to
+    ``lines[0:]`` and dumps the whole log (Python negative-zero slice).
     """
+    if n <= 0:
+        # Still surface "missing log" / "encrypted" errors even when n=0
+        # so users can probe the log's readability with -n 0.
+        if _iter_lines(log_path) is None:
+            return 1
+        return 0
     lines_iter = _iter_lines(log_path)
     if lines_iter is None:
         return 1
     lines = list(lines_iter)
-    for line in lines[-max(n, 0) :]:
+    for line in lines[-n:]:
         print(line)
     return 0
 

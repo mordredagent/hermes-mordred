@@ -61,6 +61,44 @@ class TestTail:
         out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert len(out_lines) == 1
 
+    def test_tail_zero_returns_no_output(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``-n 0`` must print nothing, not dump the entire log.
+
+        Regression guard for the ``lines[-max(n, 0):]`` slice that evaluates
+        to ``lines[0:]`` (the whole list) when ``n == 0``.
+        """
+        log = tmp_path / "audit.log"
+        _seed_audit_log(
+            log,
+            [{"ts": f"2026-05-10T00:00:0{i}.000Z", "event": "x", "n": i} for i in range(3)],
+        )
+
+        rc = audit_cli.tail(n=0, log_path=log)
+
+        assert rc == 0
+        assert capsys.readouterr().out == ""
+
+    def test_tail_negative_returns_no_output(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Negative ``-n`` is treated as 0 — no surprising last-N-minus-K output."""
+        log = tmp_path / "audit.log"
+        _seed_audit_log(
+            log,
+            [{"ts": f"2026-05-10T00:00:0{i}.000Z", "event": "x", "n": i} for i in range(3)],
+        )
+
+        rc = audit_cli.tail(n=-5, log_path=log)
+
+        assert rc == 0
+        assert capsys.readouterr().out == ""
+
     def test_tail_missing_log_returns_1_with_stderr_message(
         self,
         tmp_path: Path,
