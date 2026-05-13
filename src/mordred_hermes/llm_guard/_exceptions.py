@@ -31,8 +31,14 @@ class MordredLocalUnreachable(Exception):
 
     Recoverable in lenient/off mode (the session falls back to whatever
     provider is configured). In strict mode the session is aborted via
-    :class:`MordredSessionRefused` at a higher layer; raising this class
-    alone does not constitute a refusal.
+    :class:`MordredSessionRefused`; the translation happens in
+    :func:`enforce._probe_local` (Codex review P2 round 2) so the
+    underlying :class:`MordredLocalUnreachable` is preserved as
+    ``__cause__`` while a ``BaseException``-derived refusal escapes
+    Hermes' ``except Exception`` hook dispatch
+    (``hermes_cli/plugins.py::invoke_hook`` line 1112). Raising this
+    class alone — outside ``enforce._probe_local`` — does not constitute
+    a refusal.
     """
 
 

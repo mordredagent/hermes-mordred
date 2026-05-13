@@ -215,6 +215,17 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
     )
     cloud_attempt_action = _coerce_cloud_attempt_action(cloud_attempt_action_raw)
 
+    # Phase 2 PR2: declared harness primary controls strict-mode abort
+    # behaviour in ``mordred_llm_guard.harness_detect``. ``"none"`` is the
+    # safe default — it doesn't match any harness pattern so existing
+    # users don't lose the session. The known choices mirror SPEC.md L143
+    # / the regex allowlist in ``harness_detect._HARNESS_PATTERNS``.
+    harness_primary = prompt_io.ask_choice(
+        label="Agent harness primary (Phase 2; strict mode refuses if a known harness)",
+        choices=("none", "codex", "claude-cli", "cursor", "acp-claude", "acp-cline"),
+        default="none",
+    )
+
     snapshot = PolicySnapshot(
         policy=policy,
         allow_cloud_llm=allow_cloud_llm,
@@ -222,6 +233,7 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         local_llm_endpoint=local_llm_endpoint,
         local_llm_model_id=local_llm_model_id,
         cloud_attempt_action=cloud_attempt_action,
+        harness_primary=harness_primary,
     )
     return ConfigureResult(snapshot=snapshot)
 

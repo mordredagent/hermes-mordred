@@ -162,6 +162,9 @@ class PolicySnapshot:
     local_llm_endpoint: str = "http://localhost:1234/v1"
     local_llm_model_id: str = ""
     cloud_attempt_action: Literal["always-block", "prompt-once"] = "always-block"
+    # Phase 2 PR2: config.yaml-only (consumed by harness_detect). Default
+    # ``"none"`` is a sentinel that doesn't match any harness regex pattern.
+    harness_primary: str = "none"
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +176,16 @@ class PolicySnapshot:
             "local_llm_model_id": self.local_llm_model_id,
             "cloud_attempt_action": self.cloud_attempt_action,
         }
+
+    def to_llm_guard_section(self) -> dict[str, Any]:
+        """The body under ``plugins.mordred_llm_guard`` in config.yaml.
+
+        Phase 2 PR2: only ``harness_primary`` for now — wizard is the sole
+        writer and ``harness_detect`` is the sole reader. Other Phase 2
+        fields stay in policy.json so plugins read through one mirror
+        rather than two.
+        """
+        return {"harness_primary": self.harness_primary}
 
     def to_config_yaml_section(self) -> dict[str, Any]:
         """The body that lives under ``plugins.mordred_privacy_check`` in config.yaml.
@@ -242,12 +255,17 @@ class PolicyWriter:
         _atomic_write_text(self.policy_json_path, text, mode=0o600)
 
     def write(self, snapshot: PolicySnapshot) -> None:
-        """Compose: write both ``policy.json`` AND the matching config.yaml section.
+        """Compose: write both ``policy.json`` AND the matching config.yaml sections.
 
-        Convenience for ``hermes mordred configure``. Note that only the
-        ``mordred_privacy_check`` section is updated here -- wizard / network /
-        llm_guard / keyvault sections are written by their own configure
-        flows in later phases.
+        Convenience for ``hermes mordred configure``. Phase 2 PR2 added
+        ``mordred_llm_guard`` to the upserted set so ``harness_primary``
+        lands in config.yaml. Network / keyvault sections still belong to
+        their own configure flows in later phases.
         """
         self.emit_policy_json(snapshot)
-        self.upsert_mordred_sections({"mordred_privacy_check": snapshot.to_config_yaml_section()})
+        self.upsert_mordred_sections(
+            {
+                "mordred_privacy_check": snapshot.to_config_yaml_section(),
+                "mordred_llm_guard": snapshot.to_llm_guard_section(),
+            }
+        )

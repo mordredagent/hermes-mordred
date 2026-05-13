@@ -2,28 +2,23 @@
 
 Strict-mode local LLM enforcement. Registers a `mordred-local` synthetic
 provider that points at a user-configurable OpenAI-compatible endpoint
-(LM Studio / Ollama / vLLM), and refuses session start under strict policy
+(LM Studio / Ollama / vLLM), refuses session start under strict policy
 when the configured primary is an agent harness (Codex / Claude CLI /
-Cursor / ACP client) whose daemon traffic bypasses Hermes hooks.
+Cursor / ACP client) whose daemon traffic bypasses Hermes hooks, and
+applies a refuse-only decision matrix at session start to keep
+non-allowlisted cloud providers out under strict policy.
 
-## Phase 2 PR1 scope (current)
+## Phase 2 scope (PR1 + PR2)
 
 | Module | Status | Notes |
 | --- | --- | --- |
-| `_exceptions.py` | ✓ landed | `MordredLocalUnreachable(Exception)`, `MordredHarnessRefused(BaseException)`, `MordredSessionRefused(BaseException)`. Two propagation regimes — see module docstring. |
-| `_typing.py` | ✓ landed | Narrow `PluginContext` Protocol mirroring `privacy_check/_typing.py`. |
-| `local_adapter.py` | ✓ landed | `build_mordred_local_profile()` / `register_mordred_local()`. **Explicit** registration (Codex B1 — no module-import side effect). |
-| `health.py` | ✓ landed | `probe(endpoint, transport, timeout)`. 2-second default; raises `MordredLocalUnreachable` on any failure. |
-| `harness_detect.py` | ✓ landed | `check_harness_primary(policy_mode, config_path, audit)`. Regex prefix match against `codex` / `claude-cli` / `cursor` / `acp-` (semver suffix allowed). |
-| `__init__.py` | ✓ landed | `register(ctx)` wires provider registration + `on_session_start`. |
-
-## Phase 2 PR2 scope (planned)
-
-- `enforce.py` — session-scoped enforcement. **v1 = refuse-only** (Codex
-  B2: Hermes resolves the active provider before `on_session_start` fires,
-  so `auto-swap` via config patch cannot take effect mid-session).
-- Wizard prompt to declare `harness_primary` explicitly.
-- Live LLM integration test (`MORDRED_LIVE_LLM_TEST=1` gated).
+| `_exceptions.py` | ✓ landed (PR1) | `MordredLocalUnreachable(Exception)`, `MordredHarnessRefused(BaseException)`, `MordredSessionRefused(BaseException)`. Two propagation regimes — see module docstring. |
+| `_typing.py` | ✓ landed (PR1) | Narrow `PluginContext` Protocol mirroring `privacy_check/_typing.py`. |
+| `local_adapter.py` | ✓ landed (PR1) | `build_mordred_local_profile()` / `register_mordred_local()`. **Explicit** registration (Codex B1 — no module-import side effect). PR2 re-invokes from `_on_session_start_enforce` to pick up `local_llm_endpoint` changes after `configure` reruns (Codex M1). |
+| `health.py` | ✓ landed (PR1) | `probe(endpoint, transport, timeout)`. 2-second default; raises `MordredLocalUnreachable` on any failure. |
+| `harness_detect.py` | ✓ landed (PR1) | `check_harness_primary(policy_mode, config_path, audit)`. Regex prefix match against `codex` / `claude-cli` / `cursor` / `acp-` (semver suffix allowed). |
+| `enforce.py` | ✓ landed (PR2) | `check_session_provider(policy_mode, policy_json_path, active_provider, audit, health_probe)`. v1 refuse-only — see module docstring for the full decision matrix. |
+| `__init__.py` | ✓ landed (PR1+PR2) | `register(ctx)` wires provider registration + 2 `on_session_start` callbacks (harness_detect FIRST, then enforce — registration order matters per HOOK_PAYLOADS.md §1). Audit writer cached via `functools.lru_cache` (Codex M2). |
 
 ## Deferred to v2
 

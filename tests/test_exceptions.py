@@ -90,6 +90,42 @@ def test_session_refused_propagates_past_exception_wrapper() -> None:
         hermes_invoke_hook(session_handler)
 
 
+def test_session_refused_escapes_double_nested_exception_wrappers() -> None:
+    """``pre_api_request`` is called with TWO nested ``except Exception``
+    filters: ``hermes_cli/plugins.py::invoke_hook`` (line 1112) AND the
+    call-site wrapper at ``run_agent.py:11319-11338``. Both catch only
+    :class:`Exception`, not :class:`BaseException`, so
+    :class:`MordredSessionRefused` (BaseException-derived) escapes both —
+    this is what makes pre_api_request enforcement actually abort the
+    API call despite the hook being documented as "observer-only" for
+    return-value purposes.
+
+    Pins the propagation contract Codex review P1 round 3 questioned.
+    """
+    from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
+
+    def hermes_invoke_hook(callback: object) -> None:
+        # plugins.py:1108-1118 — per-callback wrapper.
+        try:
+            assert callable(callback)
+            callback()
+        except Exception:
+            pytest.fail("MordredSessionRefused incorrectly swallowed by invoke_hook")
+
+    def run_agent_call_site(callback: object) -> None:
+        # run_agent.py:11319-11338 — outer try/except wrapping the hook call.
+        try:
+            hermes_invoke_hook(callback)
+        except Exception:
+            pytest.fail("MordredSessionRefused incorrectly swallowed by run_agent wrapper")
+
+    def enforce_handler() -> None:
+        raise MordredSessionRefused("runtime provider not allowlisted")
+
+    with pytest.raises(MordredSessionRefused):
+        run_agent_call_site(enforce_handler)
+
+
 def test_refusal_classes_distinguishable_from_systemexit() -> None:
     """Codex H2: refusal must be distinguishable from a process-level exit.
 
