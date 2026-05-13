@@ -113,8 +113,8 @@ class TestStubHandlersDeferProperly:
             # configure: wired in Phase C -- real-handler test lives in test_configure.py
             # upgrade: wired in Phase E -- real-handler tests live in test_upgrade.py
             # install: wired in Phase F-1 -- real-handler tests in test_install_dispatch.py
-            (["mordred", "network", "use", "tor"], "Phase 3"),
-            (["mordred", "network", "status"], "Phase 3"),
+            # network {use, status}: wired in Phase 3 PR2-C --
+            # real-handler tests live in test_wizard_network_cli.py
             # policy {show, explain, dry-run, reload}: wired in Phase D --
             # real-handler tests live in test_policy_explainer.py
             # audit tail/grep: wired in Phase F-2 -- real-handler tests in test_audit_cli.py

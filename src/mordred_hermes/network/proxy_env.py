@@ -26,8 +26,15 @@ from ._exceptions import UnknownPath
 ActivePath = Literal["tor", "vpn", "clearnet"]
 
 _LOCALHOST_DEFAULTS: Final[tuple[str, ...]] = ("localhost", "127.0.0.1", "::1")
-_PROXY_KEYS: Final[tuple[str, ...]] = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
-_MANAGED_KEYS: Final[frozenset[str]] = frozenset((*_PROXY_KEYS, "NO_PROXY"))
+# Codex round 5 P1 (2026-05-14): include lowercase variants. POSIX tools
+# (curl, wget, python ``requests`` httplib) honour the lowercase forms;
+# if we only manage the uppercase keys, pre-existing ``https_proxy=...``
+# in the parent env would survive a Tor switch and leak child traffic
+# through the old clearnet proxy.
+_UPPER_PROXY_KEYS: Final[tuple[str, ...]] = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+_LOWER_PROXY_KEYS: Final[tuple[str, ...]] = ("https_proxy", "http_proxy", "all_proxy")
+_PROXY_KEYS: Final[tuple[str, ...]] = (*_UPPER_PROXY_KEYS, *_LOWER_PROXY_KEYS)
+_MANAGED_KEYS: Final[frozenset[str]] = frozenset((*_PROXY_KEYS, "NO_PROXY", "no_proxy"))
 
 DEFAULT_TOR_SOCKS_PORT: Final[int] = 9050
 
@@ -68,7 +75,12 @@ def desired_env(
         for key in _PROXY_KEYS:
             env[key] = proxy_url
 
-    env["NO_PROXY"] = _build_no_proxy(no_proxy_extra)
+    # Codex round 5 P1 (2026-05-14): emit both casings so POSIX tools
+    # using ``no_proxy`` (e.g. curl, requests' httplib) honour the same
+    # bypass list as tools reading ``NO_PROXY``.
+    no_proxy_value = _build_no_proxy(no_proxy_extra)
+    env["NO_PROXY"] = no_proxy_value
+    env["no_proxy"] = no_proxy_value
     return env
 
 

@@ -203,11 +203,15 @@ def _handle_install(args: argparse.Namespace) -> int:
 
 
 def _handle_network_use(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred network use: Phase 3 (TODO.md §3) not yet landed")
+    from . import network_cli
+
+    return network_cli.handle_use(args)
 
 
 def _handle_network_status(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred network status: Phase 3 (TODO.md §3) not yet landed")
+    from . import network_cli
+
+    return network_cli.handle_status(args)
 
 
 def _handle_policy_show(args: argparse.Namespace) -> int:

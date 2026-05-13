@@ -24,7 +24,7 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from ._exceptions import BlackoutNotAsserted, MordredNetworkError, UnknownPath
 
@@ -51,7 +51,12 @@ class Runtime(Protocol):
     """The concrete singleton implemented in PR2 ``runtime.py``.
 
     Kept narrow so PR1 tests can satisfy it with a tiny fake and PR2
-    can replace the global without surface changes.
+    can replace the global without surface changes. PR2 added
+    :meth:`stop` and :meth:`is_dropped` so the hooks layer can route
+    ``on_session_end`` tear-down and ``pre_tool_call`` strict-mode
+    refusals through ``api`` instead of importing the concrete class.
+    The M9 liveness worker sets ``is_dropped`` after two consecutive
+    health failures; ``hooks.pre_tool_call`` reads it.
     """
 
     def use(self, path: str) -> None: ...
@@ -59,6 +64,15 @@ class Runtime(Protocol):
     def status(self) -> NetworkStatus: ...
 
     def health(self) -> bool: ...
+
+    def stop(self) -> None: ...
+
+    def is_dropped(self) -> bool: ...
+
+    # ``PolicyMode`` Literal lives in :mod:`.runtime` to avoid an
+    # import cycle; ``str`` here keeps the Protocol decoupled. The
+    # concrete runtime narrows at the call site.
+    def update_policy_mode(self, policy_mode: Any) -> None: ...
 
 
 _RUNTIME: Runtime | None = None
@@ -129,6 +143,46 @@ def _default_probe() -> bool:
     except OSError:
         return False
     return True
+
+
+def stop(*, runtime: Runtime | None = None) -> None:
+    """Tear down the active path and stop the liveness worker.
+
+    Safe to call when no runtime is registered (no-op) - the hooks
+    layer invokes this from ``on_session_end`` and the session may
+    have ended without ``register()`` ever running (defensive idempotence).
+    """
+    rt = runtime if runtime is not None else _RUNTIME
+    if rt is None:
+        return
+    rt.stop()
+
+
+def update_policy_mode(policy_mode: str, *, runtime: Runtime | None = None) -> None:
+    """Refresh the runtime's policy mode (Codex r9-P1-B, 2026-05-14).
+
+    Called by ``hooks.on_session_start`` so disk-state policy changes
+    made after ``register()`` reach the runtime before the next
+    ``api.use()``. No-op when no runtime is registered.
+    """
+    rt = runtime if runtime is not None else _RUNTIME
+    if rt is None:
+        return
+    rt.update_policy_mode(policy_mode)
+
+
+def is_dropped(*, runtime: Runtime | None = None) -> bool:
+    """Return ``True`` if the M9 liveness worker flagged a path drop.
+
+    Returns ``False`` when no runtime is registered - the hooks layer
+    treats "no runtime" as "no drop to react to", deferring the decision
+    to whichever sibling plugin (e.g. ``privacy_check``) is actually
+    enforcing strict policy.
+    """
+    rt = runtime if runtime is not None else _RUNTIME
+    if rt is None:
+        return False
+    return rt.is_dropped()
 
 
 def blackout_assert(*, probe: Callable[[], bool] | None = None) -> None:

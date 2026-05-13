@@ -8,38 +8,43 @@ Tor / VPN / Clearnet path management.
 - `~/.hermes/mordred/tor-data/` — torrc, control_auth_cookie, DataDirectory
 - `~/.hermes/mordred/policy.json` — reader (`default_path`, `disable_ipv6`, `provider_overrides`)
 
-## Phase 3 PR1 status (2026-05-13)
+## Phase 3 PR2 status (2026-05-14)
 
-Primitives landed. `register(ctx)` is still a no-op; PR2 will wire hooks + runtime + wizard CLI.
+Runtime + hooks + wizard CLI landed. `register(ctx)` wires the runtime singleton + 3 hook callbacks. PR3 covers real-traffic verification (provider proxy + SOCKS5h + integration tests).
 
 | Module | Surface | Tested via |
 | --- | --- | --- |
 | `_exceptions` | `MordredNetworkError` hierarchy + `BringupFailed` / `AlreadySwitching` / `UnknownPath` / `BlackoutNotAsserted` (Exception-derived); `MordredPathBringupFailed` / `MordredPathDropped` (BaseException-derived for strict-mode hook escape) | `tests/test_network_exceptions.py` |
 | `paths/clearnet` | `start()` / `stop()` / `health()` no-op | `tests/test_paths_clearnet.py` |
-| `paths/tor` | `render_torrc` / `pick_free_port` (9050→9150 shift) / `wait_for_bootstrap` (30s default) / `start_process` / `stop` (terminate + 5s grace + kill) / `health` (process alive — control-port probe lands in PR2) | `tests/test_paths_tor.py` |
+| `paths/tor` | `render_torrc` / `pick_free_port` (9050→9150 shift) / `wait_for_bootstrap` (30s default) / `start_process` / `stop` (terminate + 5s grace + kill) / `health` (process alive — control-port probe lands in PR3) | `tests/test_paths_tor.py` |
 | `paths/vpn` | `detect_cli` (PATH + macOS app bundle fallback) / `bring_up` (lockdown / always-require-vpn / relay / connect) / `wait_connected` (10s polling) / `disconnect(preserve_lockdown=True)` / `health` (wg show handshake age) | `tests/test_paths_vpn.py` |
-| `proxy_env` | `desired_env(path, tor_socks_port, no_proxy_extra) -> dict[str, str]` — pure. `NO_PROXY` always includes `localhost,127.0.0.1,::1`. Tor uses `socks5h://`. `managed_var_names()` enumerates the keys PR2 runtime clears on path switch. | `tests/test_proxy_env.py` |
+| `proxy_env` | `desired_env(path, tor_socks_port, no_proxy_extra) -> dict[str, str]` — pure. `NO_PROXY` always includes `localhost,127.0.0.1,::1`. Tor uses `socks5h://`. `managed_var_names()` enumerates the keys runtime clears on path switch. | `tests/test_proxy_env.py` |
 | `provider_transport_flagger` | `KNOWN_PROVIDERS` v1 baseline (6 entries, all `unverified_baseline=True` until PR3). `evaluate(active_path, providers, policy_mode, overrides)` returns `Flag(provider, severity, reason)`. Baseline immutable; overrides may add new providers only. | `tests/test_provider_transport_flagger.py` |
-| `api` | Public surface: `use` / `status` / `health` / `blackout_assert`. `Runtime` Protocol; PR2 registers concrete runtime via `set_runtime`. Default blackout probe = UDP connect to 1.1.1.1:53 (connectionless). | `tests/test_network_api.py` |
+| `api` | Public surface: `use` / `status` / `health` / `stop` / `is_dropped` / `blackout_assert`. `Runtime` Protocol; PR2 register populates the singleton via `set_runtime`. Default blackout probe = UDP connect to 1.1.1.1:53 (connectionless). | `tests/test_network_api.py` |
+| `runtime` | Concrete `Runtime` class — state machine (`IDLE` / `BRINGING_UP` / `READY` / `TEARING_DOWN` / `DEGRADED`), Tor + Mullvad + clearnet subprocess handles via PR1 path modules, `os.environ` snapshot/restore via `proxy_env`, M9 liveness worker (30s default, 2× failure threshold), `is_dropped()` flag for strict-mode pre_tool_call refusal, M3 `live_subprocess_count` audit field (best-effort `pgrep -P` based). All external touchpoints injectable for hermetic unit tests. | `tests/test_network_runtime.py` |
+| `hooks` | `on_session_start` (reads policy.json + config.yaml, brings up `default_path`; strict bring-up failure raises `MordredPathBringupFailed`) / `on_session_end` (`api.stop`) / `pre_tool_call` (strict + dropped raises `MordredPathDropped`; lenient/off return None). `wait_until_ready(timeout=5s)` polling helper for bootstrap-order races with sibling plugins. | `tests/test_network_hooks.py` |
+| `__init__.register(ctx)` | Builds `Runtime` with `RuntimeConfig` defaults, `api.set_runtime(runtime)`, registers 3 hook callbacks wired with audit writer + default config paths. | `tests/test_network_hooks.py::TestRegister` |
+| wizard `network_cli` | `hermes mordred network use <path>` writes `plugins.mordred_network.default_path` to `config.yaml` (round-trip YAML, preserves other plugin sections) AND drives in-process `api.use()` when a runtime is registered. `hermes mordred network status` prints live runtime state or the disk-configured fallback. | `tests/test_wizard_network_cli.py` |
 
-## Audit reason codes added in PR1
+## Audit reason codes (16-code freeze)
 
 Phase 3 step-0 freeze appended to `mordred_hermes.privacy_check._audit_reasons.ReasonCode` (Literal). Total freeze: **16 codes** (12 Phase 1 + 4 Phase 3):
 
-- `network.use` — successful path switch (decision `override`)
+- `network.use` — successful path switch (decision `override`, fields `prev_path` / `new_path` / `live_subprocess_count`)
 - `network.use_failed` — `api.use(path)` raised `MordredNetworkError` (decision `raise`)
-- `network.bringup_failed` — lenient-mode bring-up + clearnet fallback (strict pairs with `MordredPathBringupFailed`)
-- `network.path_dropped` — M9 liveness 2× consecutive failure
+- `network.bringup_failed` — lenient: runtime fallback to clearnet (decision `fallback`); strict: hooks layer emits this + raises `MordredPathBringupFailed`
+- `network.path_dropped` — M9 liveness 2× consecutive failure (decision `block` in strict, `warn` in lenient)
 
 Naming normalized to dotted form (`network.use` rather than the `network_use` form in TODO L331) for consistency with `policy.*` / `mordred.*`. See `mordred-docs/mordred/POLICY.md`.
 
-## Deferred to PR2
+## M3 transitive proxy-env failure mode
 
-- `runtime.py` — `Runtime` concrete implementation (Popen lifecycle, M9 liveness worker thread, state machine)
-- `hooks.py` — `on_session_start` (bring-up + bootstrap order polling fallback) / `on_session_end` (tear-down + worker stop) / `pre_tool_call` (tool-name allowlist)
-- Wizard: `hermes mordred configure` Phase 3 prompts; `hermes mordred network use` / `network status` CLI
-- `register(ctx)` wires hooks + `api.set_runtime(...)`
-- Tor control-port circuit-status liveness probe (`stem` dependency)
+`Runtime.use(path)` mutates `os.environ` via `proxy_env.desired_env()` + `proxy_env.managed_var_names()`. Per Phase 0.8 §8.1:
+
+- **Regime A** (`tools/terminal_tool.py` / `tools/environments/*` / `tools/browser_tool.py`): proxy env passed through; new spawns after `use(path)` honour the switch.
+- **Regime B** (`tools/code_execution_tool.py`'s `_SAFE_ENV_PREFIXES` filter): silently drops proxy variables. **Until upstream `tools.env_passthrough` registry registration lands, `execute_code` child traffic can leak the previous path.**
+
+Either way, **already-running subprocesses are not affected** — Hermes spawns with `env=dict(os.environ | env)` snapshot. The `live_subprocess_count` audit field is an informational signal of this risk per path switch.
 
 ## Deferred to PR3
 

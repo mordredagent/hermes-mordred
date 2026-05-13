@@ -140,6 +140,10 @@ def test_no_proxy_preserves_order() -> None:
 
 
 def test_managed_var_names_complete() -> None:
+    """Codex round 5 P1 (2026-05-14): both upper- and lower-case variants
+    must be managed. POSIX tools (curl, wget, python ``requests``) honor
+    the lowercase forms, so leaving them untouched after a path switch
+    would route child traffic through the user's old proxy."""
     from mordred_hermes.network import proxy_env
 
     assert proxy_env.managed_var_names() == {
@@ -147,7 +151,22 @@ def test_managed_var_names_complete() -> None:
         "HTTP_PROXY",
         "ALL_PROXY",
         "NO_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "no_proxy",
     }
+
+
+def test_tor_sets_lowercase_proxy_vars() -> None:
+    """Codex round 5 P1: lowercase keys must also be set, not just uppercase."""
+    from mordred_hermes.network import proxy_env
+
+    env = proxy_env.desired_env(path="tor", tor_socks_port=9050)
+    assert env["https_proxy"] == "socks5h://127.0.0.1:9050"
+    assert env["http_proxy"] == "socks5h://127.0.0.1:9050"
+    assert env["all_proxy"] == "socks5h://127.0.0.1:9050"
+    assert env["no_proxy"] == env["NO_PROXY"]
 
 
 def test_unknown_path_raises() -> None:
