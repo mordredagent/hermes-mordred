@@ -1,0 +1,313 @@
+"""Tests for ``hermes mordred audit {tail,grep}``.
+
+The wizard audit CLI is read-only over ``~/.hermes/mordred/audit.log``
+(privacy_check is the sole writer per PATHS.md). Tests seed an audit
+log under ``tmp_path`` and assert tail / grep output shape.
+
+Phase 4 encryption is out of scope for PR2 -- the v1 read path detects
+binary log headers (anything not starting with ``{``) and surfaces a
+"use audit decrypt (Phase 4)" message rather than dumping garbage.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import pytest
+
+from mordred_hermes.wizard import audit_cli
+
+
+def _seed_audit_log(path: Path, entries: list[dict[str, object]]) -> None:
+    """Write NDJSON in the same compact form privacy_check.audit emits."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, separators=(",", ":"), sort_keys=True) + "\n")
+
+
+class TestTail:
+    def test_tail_returns_last_n_entries(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        entries = [{"ts": f"2026-05-10T00:00:0{i}.000Z", "event": "pre_install", "n": i} for i in range(5)]
+        _seed_audit_log(log, entries)
+
+        rc = audit_cli.tail(n=3, log_path=log)
+
+        assert rc == 0
+        out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert len(out_lines) == 3
+        # Last three entries are n=2, 3, 4 (oldest-to-newest order preserved).
+        assert '"n":2' in out_lines[0]
+        assert '"n":4' in out_lines[-1]
+
+    def test_tail_handles_n_larger_than_file(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        _seed_audit_log(log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "x"}])
+
+        rc = audit_cli.tail(n=100, log_path=log)
+
+        assert rc == 0
+        out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert len(out_lines) == 1
+
+    def test_tail_zero_returns_no_output(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``-n 0`` must print nothing, not dump the entire log.
+
+        Regression guard for the ``lines[-max(n, 0):]`` slice that evaluates
+        to ``lines[0:]`` (the whole list) when ``n == 0``.
+        """
+        log = tmp_path / "audit.log"
+        _seed_audit_log(
+            log,
+            [{"ts": f"2026-05-10T00:00:0{i}.000Z", "event": "x", "n": i} for i in range(3)],
+        )
+
+        rc = audit_cli.tail(n=0, log_path=log)
+
+        assert rc == 0
+        assert capsys.readouterr().out == ""
+
+    def test_tail_negative_returns_no_output(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Negative ``-n`` is treated as 0 — no surprising last-N-minus-K output."""
+        log = tmp_path / "audit.log"
+        _seed_audit_log(
+            log,
+            [{"ts": f"2026-05-10T00:00:0{i}.000Z", "event": "x", "n": i} for i in range(3)],
+        )
+
+        rc = audit_cli.tail(n=-5, log_path=log)
+
+        assert rc == 0
+        assert capsys.readouterr().out == ""
+
+    def test_tail_missing_log_returns_1_with_stderr_message(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "absent" / "audit.log"
+
+        rc = audit_cli.tail(n=10, log_path=log)
+
+        assert rc == 1
+        assert "no audit log" in capsys.readouterr().err.lower()
+
+    def test_tail_encrypted_log_returns_1_with_phase4_hint(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        log.write_bytes(b"\x00\x01encrypted-blob")
+
+        rc = audit_cli.tail(n=10, log_path=log)
+
+        assert rc == 1
+        err = capsys.readouterr().err.lower()
+        assert "encrypted" in err
+        assert "phase 4" in err or "audit decrypt" in err
+
+
+class TestGrep:
+    def test_grep_returns_matching_lines(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        entries: list[dict[str, object]] = [
+            {"ts": "2026-05-10T00:00:00.000Z", "event": "pre_install", "decision": "block"},
+            {"ts": "2026-05-10T00:00:01.000Z", "event": "pre_install", "decision": "allow"},
+            {"ts": "2026-05-10T00:00:02.000Z", "event": "policy_reload"},
+        ]
+        _seed_audit_log(log, entries)
+
+        rc = audit_cli.grep(pattern="block", log_path=log)
+
+        assert rc == 0
+        out_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert len(out_lines) == 1
+        assert '"decision":"block"' in out_lines[0]
+
+    def test_grep_no_matches_returns_1(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        _seed_audit_log(log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "x"}])
+
+        rc = audit_cli.grep(pattern="zzzz_no_match", log_path=log)
+
+        assert rc == 1
+        assert capsys.readouterr().out == ""
+
+    def test_grep_invalid_regex_returns_2(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        _seed_audit_log(log, [{"event": "x"}])
+
+        rc = audit_cli.grep(pattern="[unterminated", log_path=log)
+
+        assert rc == 2
+        assert "invalid" in capsys.readouterr().err.lower()
+
+
+class TestCLIHandlers:
+    def test_cli_tail_reads_n_from_args(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        log = tmp_path / "audit.log"
+        _seed_audit_log(log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "x"}])
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: log)
+
+        ns = argparse.Namespace(lines=1)
+        rc = audit_cli.cli_tail(ns)
+
+        assert rc == 0
+
+    def test_cli_grep_reads_pattern_from_args(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        log = tmp_path / "audit.log"
+        _seed_audit_log(log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "pre_install"}])
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: log)
+
+        ns = argparse.Namespace(pattern="pre_install")
+        rc = audit_cli.cli_grep(ns)
+
+        assert rc == 0
+
+
+class TestActivePathResolution:
+    """Codex P2: audit tail/grep must read the SAME path the writer uses.
+
+    privacy_check honours ``plugins.mordred_privacy_check.audit_log_path``
+    when constructing its NDJSONWriter; if that key points elsewhere under
+    ``~/.hermes``, the wizard CLI must follow.
+    """
+
+    def test_get_active_audit_path_honours_config_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """privacy_check.get_active_audit_path picks up custom audit_log_path."""
+        from mordred_hermes.privacy_check import _runtime as pc_runtime
+
+        # Sandbox _HERMES_BASE so the custom path passes the under-base guard.
+        fake_hermes = tmp_path / ".hermes"
+        fake_hermes.mkdir()
+        monkeypatch.setattr(pc_runtime, "_HERMES_BASE", fake_hermes)
+        monkeypatch.setattr(pc_runtime, "DEFAULT_AUDIT_PATH", fake_hermes / "mordred" / "audit.log")
+
+        config = fake_hermes / "config.yaml"
+        custom_log = fake_hermes / "alt" / "custom-audit.log"
+        config.write_text(
+            f"plugins:\n  mordred_privacy_check:\n    audit_log_path: {custom_log}\n",
+            encoding="utf-8",
+        )
+
+        resolved = pc_runtime.get_active_audit_path(config_path=config)
+        assert resolved == custom_log
+
+    def test_get_active_audit_path_defaults_when_section_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.privacy_check import _runtime as pc_runtime
+
+        fake_default = tmp_path / "default-audit.log"
+        monkeypatch.setattr(pc_runtime, "DEFAULT_AUDIT_PATH", fake_default)
+
+        config = tmp_path / "empty-config.yaml"
+        config.write_text("plugins: {}\n", encoding="utf-8")
+
+        resolved = pc_runtime.get_active_audit_path(config_path=config)
+        assert resolved == fake_default
+
+    def test_cli_tail_follows_active_audit_path(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: writer's custom path = reader's resolved path."""
+        custom_log = tmp_path / "custom-audit.log"
+        _seed_audit_log(custom_log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "from-custom"}])
+        # Default path is intentionally absent -- cli_tail must NOT read it.
+        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", tmp_path / "default-must-not-be-read.log")
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_log)
+
+        ns = argparse.Namespace(lines=5)
+        rc = audit_cli.cli_tail(ns)
+
+        assert rc == 0
+        assert "from-custom" in capsys.readouterr().out
+
+    def test_tail_direct_api_default_follows_active_path(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex P3-b: direct ``tail()`` call without log_path follows the active path.
+
+        ``tail()`` and ``grep()`` are exported in ``__all__``; callers in
+        wizard-internal code that pass no ``log_path`` must not hardcode
+        ``DEFAULT_AUDIT_LOG_PATH`` -- they must resolve the writer's
+        configured path the same way ``cli_tail`` / ``cli_grep`` do.
+        """
+        custom_log = tmp_path / "writer-configured.log"
+        _seed_audit_log(custom_log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "from-writer"}])
+        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", tmp_path / "must-not-be-read.log")
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_log)
+
+        rc = audit_cli.tail(n=5)
+
+        assert rc == 0
+        assert "from-writer" in capsys.readouterr().out
+
+    def test_grep_direct_api_default_follows_active_path(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex P3-b mirror: ``grep()`` default also follows active path."""
+        custom_log = tmp_path / "writer-configured.log"
+        _seed_audit_log(custom_log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "match-me"}])
+        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", tmp_path / "must-not-be-read.log")
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_log)
+
+        rc = audit_cli.grep(pattern="match-me")
+
+        assert rc == 0
+        assert "match-me" in capsys.readouterr().out
