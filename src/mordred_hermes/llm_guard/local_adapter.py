@@ -36,6 +36,11 @@ _LOG = logging.getLogger("mordred.llm_guard.local_adapter")
 
 DEFAULT_POLICY_JSON_PATH: Final[Path] = HERMES_BASE / "mordred" / "policy.json"
 DEFAULT_LOCAL_ENDPOINT: Final[str] = "http://localhost:1234/v1"
+# Single source of truth for the synthetic provider's registry name.
+# ``enforce._LOCAL_PROVIDER_NAME`` re-exports this so the strict-mode
+# decision matrix can route on the same identifier without a duplicated
+# string literal (review LOW finding #2).
+LOCAL_PROVIDER_NAME: Final[str] = "mordred-local"
 
 
 # mypy --strict ``disallow_subclassing_any`` cannot tell that the upstream
@@ -60,7 +65,7 @@ def build_mordred_local_profile(
     """
     endpoint = _read_endpoint(policy_json_path)
     return MordredLocalProfile(
-        name="mordred-local",
+        name=LOCAL_PROVIDER_NAME,
         api_mode="chat_completions",
         display_name="Mordred Local",
         description="Local OpenAI-compatible endpoint enforced by mordred_llm_guard",

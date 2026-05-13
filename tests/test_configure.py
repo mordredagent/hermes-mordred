@@ -90,6 +90,7 @@ class TestCollectAnswers:
                 "http://example/v1",  # local_llm_endpoint (Phase 2)
                 "llama-3",  # local_llm_model_id (Phase 2)
                 "prompt-once",  # cloud_attempt_action (Phase 2)
+                "codex",  # harness_primary (Phase 2 PR2)
             ]
         )
         result = collect_answers(prompts)
@@ -104,23 +105,27 @@ class TestCollectAnswers:
             local_llm_endpoint="http://example/v1",
             local_llm_model_id="llama-3",
             cloud_attempt_action="prompt-once",
+            harness_primary="codex",
         )
 
     def test_lenient_with_empty_allowlist(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "http://localhost:1234/v1", "", "always-block"])
+        prompts = _ScriptedPromptIO(
+            answers=["lenient", False, "", "http://localhost:1234/v1", "", "always-block", "none"]
+        )
         result = collect_answers(prompts)
         assert result.snapshot.policy == "lenient"
         assert result.snapshot.allow_cloud_llm is False
         assert result.snapshot.cloud_provider_allowlist == ()
+        assert result.snapshot.harness_primary == "none"
 
     def test_csv_whitespace_stripped(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["off", False, "  anthropic ,  openai  ,", "x", "", "always-block"])
+        prompts = _ScriptedPromptIO(answers=["off", False, "  anthropic ,  openai  ,", "x", "", "always-block", "none"])
         result = collect_answers(prompts)
         assert result.snapshot.cloud_provider_allowlist == ("anthropic", "openai")
 
     def test_prompt_order_is_stable(self) -> None:
         """Order matters for snapshot tests; lock it explicitly."""
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "y", "always-block"])
+        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "y", "always-block", "none"])
         collect_answers(prompts)
         labels = [label for _, label, _ in prompts.seen]
         assert labels == [
@@ -130,6 +135,7 @@ class TestCollectAnswers:
             "Local LLM endpoint URL (Phase 2)",
             "Local LLM model id (Phase 2)",
             "On cloud LLM attempt under strict mode (Phase 2)",
+            "Agent harness primary (Phase 2; strict mode refuses if a known harness)",
         ]
 
 
@@ -140,7 +146,9 @@ class TestCollectAnswers:
 
 class TestRun:
     def test_persists_snapshot_to_disk(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=["strict", False, "anthropic", "http://x/v1", "qwen", "prompt-once"])
+        prompts = _ScriptedPromptIO(
+            answers=["strict", False, "anthropic", "http://x/v1", "qwen", "prompt-once", "codex"]
+        )
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -165,11 +173,15 @@ class TestRun:
         # (plugin-boundary discipline — they belong to mordred_llm_guard).
         assert "local_llm_endpoint" not in ytext
         assert "cloud_attempt_action" not in ytext
+        # Phase 2 PR2: mordred_llm_guard section gains harness_primary.
+        assert "mordred_llm_guard" in ytext
+        assert "harness_primary: codex" in ytext
         assert result.snapshot.policy == "strict"
         assert result.snapshot.local_llm_endpoint == "http://x/v1"
+        assert result.snapshot.harness_primary == "codex"
 
     def test_skip_hermes_setup_does_not_call_runner(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block"])
+        prompts = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block", "none"])
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -177,7 +189,7 @@ class TestRun:
         assert runner.calls == [], "skip_hermes_setup must not invoke the runner"
 
     def test_setup_failure_warns_but_continues(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block"])
+        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block", "none"])
         runner = _SetupRunnerSpy(returncode=42)
         w = _writer(tmp_path)
 
@@ -189,7 +201,7 @@ class TestRun:
         assert any("hermes setup" in r.getMessage() and "42" in r.getMessage() for r in caplog.records)
 
     def test_non_interactive_forwarded_to_runner(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block"])
+        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block", "none"])
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -258,7 +270,7 @@ class TestCliHandler:
         assert "non-interactive" in captured.err.lower()
 
     def test_interactive_path_runs_end_to_end(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        scripted = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block"])
+        scripted = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block", "none"])
         _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
         ns = argparse.Namespace(non_interactive=False)
         rc = cli_handler(ns)
