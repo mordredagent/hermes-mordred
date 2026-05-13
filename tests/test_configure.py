@@ -94,16 +94,17 @@ class TestCollectAnswers:
         )
         result = collect_answers(prompts)
         assert isinstance(result, ConfigureResult)
+        # Codex M3 (PR1): Phase 2 fields now live INSIDE the snapshot so
+        # llm_guard can read them through policy.json without a separate
+        # ConfigureResult.phase2_fields side channel.
         assert result.snapshot == PolicySnapshot(
             policy="strict",
             allow_cloud_llm=True,
             cloud_provider_allowlist=("anthropic", "openai"),
+            local_llm_endpoint="http://example/v1",
+            local_llm_model_id="llama-3",
+            cloud_attempt_action="prompt-once",
         )
-        assert result.phase2_fields == {
-            "local_llm_endpoint": "http://example/v1",
-            "local_llm_model_id": "llama-3",
-            "cloud_attempt_action": "prompt-once",
-        }
 
     def test_lenient_with_empty_allowlist(self) -> None:
         prompts = _ScriptedPromptIO(answers=["lenient", False, "", "http://localhost:1234/v1", "", "always-block"])
@@ -139,7 +140,7 @@ class TestCollectAnswers:
 
 class TestRun:
     def test_persists_snapshot_to_disk(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=["strict", False, "anthropic", "x", "", "always-block"])
+        prompts = _ScriptedPromptIO(answers=["strict", False, "anthropic", "http://x/v1", "qwen", "prompt-once"])
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -152,11 +153,20 @@ class TestRun:
             "allow_cloud_llm": False,
             "cloud_provider_allowlist": ["anthropic"],
             "audit_log_path": None,
+            # Phase 2 fields persisted (Codex M3 — PR1 scope).
+            "local_llm_endpoint": "http://x/v1",
+            "local_llm_model_id": "qwen",
+            "cloud_attempt_action": "prompt-once",
         }
         ytext = (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert "policy: strict" in ytext
         assert "mordred_privacy_check" in ytext
+        # config.yaml privacy_check section must NOT carry Phase 2 fields
+        # (plugin-boundary discipline — they belong to mordred_llm_guard).
+        assert "local_llm_endpoint" not in ytext
+        assert "cloud_attempt_action" not in ytext
         assert result.snapshot.policy == "strict"
+        assert result.snapshot.local_llm_endpoint == "http://x/v1"
 
     def test_skip_hermes_setup_does_not_call_runner(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block"])

@@ -30,7 +30,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from ruamel.yaml import YAML
 
@@ -143,15 +143,25 @@ def _upsert_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]
 class PolicySnapshot:
     """Resolved policy values destined for ``policy.json``.
 
-    Phase 1 fields only (Phase 2 / 3 will extend via additional
-    keyword-only fields with defaults). Order of fields matches the
-    JSON serialisation order -- keep stable for diffability.
+    Phase 1 + Phase 2 fields. Order of fields matches the JSON serialisation
+    order — keep stable for diffability.
+
+    Phase 2 fields (``local_llm_endpoint`` / ``local_llm_model_id`` /
+    ``cloud_attempt_action``) are read by ``mordred_llm_guard`` and persisted
+    here so future wizard reruns are not required after upgrading from
+    Phase 1. They deliberately do NOT appear in
+    :meth:`to_config_yaml_section`; ``plugins.mordred_privacy_check`` is
+    privacy-check's namespace and Phase 2 fields belong to llm_guard.
     """
 
     policy: str  # "strict" | "lenient" | "off"
     allow_cloud_llm: bool = False
     cloud_provider_allowlist: tuple[str, ...] = ()
     audit_log_path: str | None = None
+    # Phase 2 (Codex M3 — moved from PR2 so Phase 2 has a stable policy input surface).
+    local_llm_endpoint: str = "http://localhost:1234/v1"
+    local_llm_model_id: str = ""
+    cloud_attempt_action: Literal["always-block", "prompt-once"] = "always-block"
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -159,6 +169,9 @@ class PolicySnapshot:
             "allow_cloud_llm": self.allow_cloud_llm,
             "cloud_provider_allowlist": list(self.cloud_provider_allowlist),
             "audit_log_path": self.audit_log_path,
+            "local_llm_endpoint": self.local_llm_endpoint,
+            "local_llm_model_id": self.local_llm_model_id,
+            "cloud_attempt_action": self.cloud_attempt_action,
         }
 
     def to_config_yaml_section(self) -> dict[str, Any]:
@@ -166,7 +179,9 @@ class PolicySnapshot:
 
         The same shape is read by ``privacy_check._runtime._load_state``
         (see ``privacy_check/_runtime.py:106``); changing field names here
-        requires a coordinated change there.
+        requires a coordinated change there. Phase 2 fields are intentionally
+        excluded — they belong to ``plugins.mordred_llm_guard`` (PR2) and the
+        ``policy.json`` cross-plugin mirror.
         """
         body: dict[str, Any] = {
             "policy": self.policy,

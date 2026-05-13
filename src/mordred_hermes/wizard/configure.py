@@ -27,8 +27,8 @@ import logging
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
 from .policy_writer import PolicySnapshot, PolicyWriter
 
@@ -167,13 +167,13 @@ class _RefusingPromptIO:
 class ConfigureResult:
     """Resolved answers from the prompt sequence.
 
-    The ``snapshot`` is what gets persisted in Phase 1. ``phase2_fields``
-    is collected now but not yet wired -- Phase 2 will read from a
-    similarly shaped dict (or extend :class:`PolicySnapshot`).
+    Phase 2 fields (Codex M3 — moved into PR1) now live INSIDE ``snapshot``
+    via the extended :class:`PolicySnapshot`. The historical
+    ``phase2_fields`` side channel is retired; consumers should read
+    ``snapshot.local_llm_endpoint`` etc. directly.
     """
 
     snapshot: PolicySnapshot
-    phase2_fields: dict[str, Any] = field(default_factory=dict)
 
 
 def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
@@ -196,7 +196,10 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
     )
     cloud_provider_allowlist = tuple(p.strip() for p in cloud_csv.split(",") if p.strip())
 
-    # Phase 2 fields -- collected for forward compatibility, not persisted now.
+    # Phase 2 fields are persisted into policy.json via PolicySnapshot
+    # (Codex M3, PR1). They are NOT pushed into the config.yaml
+    # ``plugins.mordred_privacy_check`` section -- llm_guard reads them
+    # from the policy.json mirror.
     local_llm_endpoint = prompt_io.ask_text(
         label="Local LLM endpoint URL (Phase 2)",
         default="http://localhost:1234/v1",
@@ -205,23 +208,38 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         label="Local LLM model id (Phase 2)",
         default="",
     )
-    cloud_attempt_action = prompt_io.ask_choice(
+    cloud_attempt_action_raw = prompt_io.ask_choice(
         label="On cloud LLM attempt under strict mode (Phase 2)",
         choices=("always-block", "prompt-once"),
         default="always-block",
     )
+    cloud_attempt_action = _coerce_cloud_attempt_action(cloud_attempt_action_raw)
 
     snapshot = PolicySnapshot(
         policy=policy,
         allow_cloud_llm=allow_cloud_llm,
         cloud_provider_allowlist=cloud_provider_allowlist,
+        local_llm_endpoint=local_llm_endpoint,
+        local_llm_model_id=local_llm_model_id,
+        cloud_attempt_action=cloud_attempt_action,
     )
-    phase2_fields = {
-        "local_llm_endpoint": local_llm_endpoint,
-        "local_llm_model_id": local_llm_model_id,
-        "cloud_attempt_action": cloud_attempt_action,
-    }
-    return ConfigureResult(snapshot=snapshot, phase2_fields=phase2_fields)
+    return ConfigureResult(snapshot=snapshot)
+
+
+def _coerce_cloud_attempt_action(raw: str) -> Literal["always-block", "prompt-once"]:
+    """Narrow ``ask_choice``'s ``str`` return to the snapshot Literal.
+
+    The prompt only offers two choices so this never raises in production;
+    the explicit check protects against test doubles that script invalid
+    answers and satisfies mypy --strict at the construction site.
+    """
+    # Explicit per-branch return so mypy narrows ``raw`` to each Literal
+    # member (a single ``if raw in {...}`` keeps the type as ``str``).
+    if raw == "always-block":
+        return "always-block"
+    if raw == "prompt-once":
+        return "prompt-once"
+    raise ValueError(f"invalid cloud_attempt_action: {raw!r}")
 
 
 def run(

@@ -37,11 +37,17 @@ class TestEmitPolicyJson:
         path = tmp_path / "mordred" / "policy.json"
         assert path.exists()
         body = json.loads(path.read_text(encoding="utf-8"))
+        # Phase 2 fields (local_llm_endpoint / local_llm_model_id /
+        # cloud_attempt_action) land here with defaults so llm_guard can
+        # read them without needing wizard rerun. See POLICY.md §Phase 2.
         assert body == {
             "policy": "lenient",
             "allow_cloud_llm": False,
             "cloud_provider_allowlist": [],
             "audit_log_path": None,
+            "local_llm_endpoint": "http://localhost:1234/v1",
+            "local_llm_model_id": "",
+            "cloud_attempt_action": "always-block",
         }
         st_mode = stat.S_IMODE(os.stat(path).st_mode)
         assert st_mode == 0o600, f"expected 0o600, got 0o{st_mode:o}"
@@ -60,6 +66,9 @@ class TestEmitPolicyJson:
             < text.index('"allow_cloud_llm"')
             < text.index('"cloud_provider_allowlist"')
             < text.index('"audit_log_path"')
+            < text.index('"local_llm_endpoint"')
+            < text.index('"local_llm_model_id"')
+            < text.index('"cloud_attempt_action"')
         )
 
     def test_idempotent(self, tmp_path: Path) -> None:
@@ -70,6 +79,85 @@ class TestEmitPolicyJson:
         first_mtime = path.stat().st_mtime_ns
         w.emit_policy_json(snap)
         assert path.stat().st_mtime_ns == first_mtime, "no-op write must not touch mtime"
+
+
+class TestPolicySnapshotPhase2Fields:
+    """Phase 2 fields persisted into policy.json (Codex M3, moved from PR2).
+
+    The fields are kw-only with defaults so existing positional callers
+    (``PolicySnapshot(policy="strict")``) keep working. They are read by
+    ``mordred_llm_guard`` (Phase 2 PR2 enforce + local_adapter) — wizard
+    is the sole writer.
+    """
+
+    def test_custom_values_round_trip(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        snap = PolicySnapshot(
+            policy="strict",
+            local_llm_endpoint="http://127.0.0.1:11434/v1",
+            local_llm_model_id="llama3.1:70b",
+            cloud_attempt_action="prompt-once",
+        )
+        w.emit_policy_json(snap)
+        body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
+        assert body["local_llm_endpoint"] == "http://127.0.0.1:11434/v1"
+        assert body["local_llm_model_id"] == "llama3.1:70b"
+        assert body["cloud_attempt_action"] == "prompt-once"
+
+    def test_snapshot_is_frozen(self) -> None:
+        """Defensive copy guarantee — llm_guard reads, never mutates."""
+        snap = PolicySnapshot(policy="strict")
+        with pytest.raises((AttributeError, TypeError)):
+            snap.local_llm_endpoint = "http://evil.example.com"  # type: ignore[misc]
+
+    def test_config_yaml_section_omits_phase2_fields(self) -> None:
+        """``plugins.mordred_privacy_check`` config body must NOT carry llm_guard fields.
+
+        privacy_check reads its own section from config.yaml (see
+        ``privacy_check/_runtime.py:_load_state``). Polluting that section
+        with Phase 2 fields would cross plugin boundaries — they belong in
+        ``plugins.mordred_llm_guard`` (added in PR2) instead, or in
+        ``policy.json`` (the cross-plugin mirror) here.
+        """
+        snap = PolicySnapshot(
+            policy="strict",
+            local_llm_endpoint="http://localhost:1234/v1",
+            local_llm_model_id="qwen2.5",
+            cloud_attempt_action="always-block",
+        )
+        section = snap.to_config_yaml_section()
+        assert "local_llm_endpoint" not in section
+        assert "local_llm_model_id" not in section
+        assert "cloud_attempt_action" not in section
+
+    def test_back_compat_positional_construction(self) -> None:
+        """Existing call-sites (``PolicySnapshot("strict")``) keep working.
+
+        Phase 1 tests construct snapshots with positional + a small kw-only
+        set; the Phase 2 extension must not reorder existing parameters.
+        """
+        snap = PolicySnapshot(policy="strict")
+        # Defaults pinned so a wizard-less consumer can rely on them.
+        assert snap.local_llm_endpoint == "http://localhost:1234/v1"
+        assert snap.local_llm_model_id == ""
+        assert snap.cloud_attempt_action == "always-block"
+
+    def test_cloud_attempt_action_only_accepts_known_values(self) -> None:
+        """No validation at the dataclass level — schema is documented but
+        not enforced (matches Phase 1 pattern). This test just guards the
+        Literal type hint so mypy --strict catches typos at compile time.
+
+        The runtime test below ensures we did not silently widen the type.
+        """
+        from typing import get_type_hints
+
+        from mordred_hermes.wizard.policy_writer import PolicySnapshot as Snap
+
+        hints = get_type_hints(Snap)
+        # ``Literal['always-block', 'prompt-once']`` -> __args__ exposes the values
+        action_hint = hints["cloud_attempt_action"]
+        args = getattr(action_hint, "__args__", ())
+        assert set(args) == {"always-block", "prompt-once"}, args
 
 
 class TestUpsertMordredSections:

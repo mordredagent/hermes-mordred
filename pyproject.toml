@@ -97,7 +97,10 @@ warn_redundant_casts = true
 # package and tripping on its own (unrelated) typing/syntax issues.
 # hermes_constants is a sibling top-level module from the upstream Hermes
 # package; we use get_hermes_home() for profile-aware path resolution.
+# providers / providers.base are also upstream Hermes — Phase 2 PR1
+# llm_guard.local_adapter subclasses ``providers.base.ProviderProfile`` to
+# register the ``mordred-local`` synthetic provider.
 [[tool.mypy.overrides]]
-module = ["hermes_cli", "hermes_cli.*", "hermes_constants"]
+module = ["hermes_cli", "hermes_cli.*", "hermes_constants", "providers", "providers.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
