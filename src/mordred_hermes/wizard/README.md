@@ -126,9 +126,9 @@ after `*,`); `detect()` is the only positional entry.
 | `upgrade` | `UpgradeOptions`; `UpgradeReport`; `run(*, options, policy_writer, target_snapshot=None, openclaw_base=DEFAULT_OPENCLAW_BASE) -> UpgradeReport`; `cli_handler(ns)` |
 | `openclaw_migration` | `OpenClawState`; `detect(openclaw_base: Path) -> OpenClawState`; `migrate(*, openclaw_base, policy_writer, options) -> Story1_5Action` |
 | `install_dispatch` | `run(*, skill_arg, state, runner=_default_runner) -> int`; `cli_handler(ns)` |
-| `policy_writer` | `PolicySnapshot`; `PolicyWriter.write(snapshot)`; `PolicyWriter.upsert_mordred_sections(snapshot)` |
+| `policy_writer` | `PolicySnapshot`; `PolicyWriter.write(snapshot)`; `PolicyWriter.upsert_mordred_sections(sections: Mapping[str, Mapping[str, Any]])` |
 | `policy_explainer` | `show()`, `explain(skill_id)`, `dry_run(skill_path)`, `reload()` + `cli_*(ns)` adapters |
-| `audit_cli` | `tail(*, n, log_path=...)`, `grep(*, pattern, log_path=...)`, `cli_tail(ns)`, `cli_grep(ns)`. Active path resolved via `privacy_check._runtime.get_active_audit_path()` so reads follow the writer's configured `audit_log_path` |
+| `audit_cli` | `tail(*, n, log_path=None)`, `grep(*, pattern, log_path=None)`, `cli_tail(ns)`, `cli_grep(ns)`. `log_path=None` resolves the active writer path via `privacy_check._runtime.get_active_audit_path()` so reads follow the writer's configured `audit_log_path`; pass an explicit `log_path` to override (e.g. tests) |
 | `plugins_list` | `run(*, config_path=DEFAULT_CONFIG_PATH) -> int`; `cli_handler(ns)` |
 
 ## Fixture catalog

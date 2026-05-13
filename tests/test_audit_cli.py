@@ -271,3 +271,43 @@ class TestActivePathResolution:
 
         assert rc == 0
         assert "from-custom" in capsys.readouterr().out
+
+    def test_tail_direct_api_default_follows_active_path(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex P3-b: direct ``tail()`` call without log_path follows the active path.
+
+        ``tail()`` and ``grep()`` are exported in ``__all__``; callers in
+        wizard-internal code that pass no ``log_path`` must not hardcode
+        ``DEFAULT_AUDIT_LOG_PATH`` -- they must resolve the writer's
+        configured path the same way ``cli_tail`` / ``cli_grep`` do.
+        """
+        custom_log = tmp_path / "writer-configured.log"
+        _seed_audit_log(custom_log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "from-writer"}])
+        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", tmp_path / "must-not-be-read.log")
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_log)
+
+        rc = audit_cli.tail(n=5)
+
+        assert rc == 0
+        assert "from-writer" in capsys.readouterr().out
+
+    def test_grep_direct_api_default_follows_active_path(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex P3-b mirror: ``grep()`` default also follows active path."""
+        custom_log = tmp_path / "writer-configured.log"
+        _seed_audit_log(custom_log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "match-me"}])
+        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", tmp_path / "must-not-be-read.log")
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_log)
+
+        rc = audit_cli.grep(pattern="match-me")
+
+        assert rc == 0
+        assert "match-me" in capsys.readouterr().out

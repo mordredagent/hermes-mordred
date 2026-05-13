@@ -64,22 +64,28 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
     return (ln for ln in text.splitlines() if ln.strip())
 
 
-def tail(*, n: int, log_path: Path = DEFAULT_AUDIT_LOG_PATH) -> int:
+def tail(*, n: int, log_path: Path | None = None) -> int:
     """Print the last ``n`` NDJSON entries from the audit log to stdout.
 
     Returns 0 on success, 1 when the log is absent or encrypted.
+
+    ``log_path=None`` (the default) resolves the active writer path via
+    :func:`_resolve_active_audit_path` so direct callers cannot drift from
+    ``hermes-mordred audit tail`` when a custom ``audit_log_path`` is
+    configured. Explicit paths are honoured as-is (tests / one-off probes).
 
     ``n <= 0`` is treated as "print nothing" -- the obvious user intent.
     Without the early return, ``lines[-max(n, 0):]`` evaluates to
     ``lines[0:]`` and dumps the whole log (Python negative-zero slice).
     """
+    resolved = log_path if log_path is not None else _resolve_active_audit_path()
     if n <= 0:
         # Still surface "missing log" / "encrypted" errors even when n=0
         # so users can probe the log's readability with -n 0.
-        if _iter_lines(log_path) is None:
+        if _iter_lines(resolved) is None:
             return 1
         return 0
-    lines_iter = _iter_lines(log_path)
+    lines_iter = _iter_lines(resolved)
     if lines_iter is None:
         return 1
     lines = list(lines_iter)
@@ -88,18 +94,22 @@ def tail(*, n: int, log_path: Path = DEFAULT_AUDIT_LOG_PATH) -> int:
     return 0
 
 
-def grep(*, pattern: str, log_path: Path = DEFAULT_AUDIT_LOG_PATH) -> int:
+def grep(*, pattern: str, log_path: Path | None = None) -> int:
     """Print audit entries whose raw NDJSON matches ``pattern`` (Python regex).
 
     Returns 0 when at least one line matches, 1 on no matches / missing log,
     2 when the pattern is not a valid regex.
+
+    ``log_path=None`` (the default) resolves the active writer path -- same
+    rationale as :func:`tail`.
     """
     try:
         regex = re.compile(pattern)
     except re.error as e:
         print(f"invalid regex {pattern!r}: {e}", file=sys.stderr)
         return 2
-    lines_iter = _iter_lines(log_path)
+    resolved = log_path if log_path is not None else _resolve_active_audit_path()
+    lines_iter = _iter_lines(resolved)
     if lines_iter is None:
         return 1
     hits = 0
@@ -116,8 +126,8 @@ def grep(*, pattern: str, log_path: Path = DEFAULT_AUDIT_LOG_PATH) -> int:
 
 
 def cli_tail(args: argparse.Namespace) -> int:
-    return tail(n=int(args.lines), log_path=_resolve_active_audit_path())
+    return tail(n=int(args.lines))
 
 
 def cli_grep(args: argparse.Namespace) -> int:
-    return grep(pattern=str(args.pattern), log_path=_resolve_active_audit_path())
+    return grep(pattern=str(args.pattern))
