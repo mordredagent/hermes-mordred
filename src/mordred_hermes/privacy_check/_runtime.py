@@ -130,6 +130,29 @@ def get_active_policy_mode(*, config_path: Path | None = None) -> PolicyMode:
     return "lenient"
 
 
+def get_active_audit_path(*, config_path: Path | None = None) -> Path:
+    """Read the active audit log path from ``~/.hermes/config.yaml``.
+
+    Public read-only helper mirroring :func:`get_active_policy_mode`.
+    Returns the same path the install hook's NDJSONWriter is constructed
+    with -- :func:`_resolve_audit_path` applies the under-``_HERMES_BASE``
+    sandbox so a malicious config edit cannot redirect the wizard CLI
+    elsewhere.
+
+    Required so ``hermes mordred audit tail`` / ``grep`` follow the writer
+    when users configure a custom ``plugins.mordred_privacy_check.audit_log_path``;
+    otherwise the CLI would silently read the default path and miss entries.
+    """
+    cfg = _load_yaml(config_path or DEFAULT_HERMES_CONFIG_PATH)
+    plugins_cfg = cfg.get("plugins")
+    if not isinstance(plugins_cfg, dict):
+        return DEFAULT_AUDIT_PATH
+    section = plugins_cfg.get("mordred_privacy_check")
+    if not isinstance(section, dict):
+        return DEFAULT_AUDIT_PATH
+    return _resolve_audit_path(section.get("audit_log_path"))
+
+
 def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginState:
     cfg = _load_yaml(config_path)
     plugins_cfg = cfg.get("plugins")

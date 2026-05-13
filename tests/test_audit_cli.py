@@ -183,7 +183,7 @@ class TestCLIHandlers:
     ) -> None:
         log = tmp_path / "audit.log"
         _seed_audit_log(log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "x"}])
-        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", log)
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: log)
 
         ns = argparse.Namespace(lines=1)
         rc = audit_cli.cli_tail(ns)
@@ -197,9 +197,77 @@ class TestCLIHandlers:
     ) -> None:
         log = tmp_path / "audit.log"
         _seed_audit_log(log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "pre_install"}])
-        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", log)
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: log)
 
         ns = argparse.Namespace(pattern="pre_install")
         rc = audit_cli.cli_grep(ns)
 
         assert rc == 0
+
+
+class TestActivePathResolution:
+    """Codex P2: audit tail/grep must read the SAME path the writer uses.
+
+    privacy_check honours ``plugins.mordred_privacy_check.audit_log_path``
+    when constructing its NDJSONWriter; if that key points elsewhere under
+    ``~/.hermes``, the wizard CLI must follow.
+    """
+
+    def test_get_active_audit_path_honours_config_yaml(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """privacy_check.get_active_audit_path picks up custom audit_log_path."""
+        from mordred_hermes.privacy_check import _runtime as pc_runtime
+
+        # Sandbox _HERMES_BASE so the custom path passes the under-base guard.
+        fake_hermes = tmp_path / ".hermes"
+        fake_hermes.mkdir()
+        monkeypatch.setattr(pc_runtime, "_HERMES_BASE", fake_hermes)
+        monkeypatch.setattr(pc_runtime, "DEFAULT_AUDIT_PATH", fake_hermes / "mordred" / "audit.log")
+
+        config = fake_hermes / "config.yaml"
+        custom_log = fake_hermes / "alt" / "custom-audit.log"
+        config.write_text(
+            f"plugins:\n  mordred_privacy_check:\n    audit_log_path: {custom_log}\n",
+            encoding="utf-8",
+        )
+
+        resolved = pc_runtime.get_active_audit_path(config_path=config)
+        assert resolved == custom_log
+
+    def test_get_active_audit_path_defaults_when_section_absent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.privacy_check import _runtime as pc_runtime
+
+        fake_default = tmp_path / "default-audit.log"
+        monkeypatch.setattr(pc_runtime, "DEFAULT_AUDIT_PATH", fake_default)
+
+        config = tmp_path / "empty-config.yaml"
+        config.write_text("plugins: {}\n", encoding="utf-8")
+
+        resolved = pc_runtime.get_active_audit_path(config_path=config)
+        assert resolved == fake_default
+
+    def test_cli_tail_follows_active_audit_path(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end: writer's custom path = reader's resolved path."""
+        custom_log = tmp_path / "custom-audit.log"
+        _seed_audit_log(custom_log, [{"ts": "2026-05-10T00:00:00.000Z", "event": "from-custom"}])
+        # Default path is intentionally absent -- cli_tail must NOT read it.
+        monkeypatch.setattr(audit_cli, "DEFAULT_AUDIT_LOG_PATH", tmp_path / "default-must-not-be-read.log")
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_log)
+
+        ns = argparse.Namespace(lines=5)
+        rc = audit_cli.cli_tail(ns)
+
+        assert rc == 0
+        assert "from-custom" in capsys.readouterr().out

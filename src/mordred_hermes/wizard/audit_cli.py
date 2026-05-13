@@ -18,6 +18,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+from ..privacy_check._runtime import get_active_audit_path
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
 __all__ = [
@@ -27,6 +28,17 @@ __all__ = [
     "grep",
     "tail",
 ]
+
+
+def _resolve_active_audit_path() -> Path:
+    """Indirection seam over :func:`get_active_audit_path`.
+
+    Production: returns the same path the install hook's writer uses
+    (Codex P2 fix -- tail/grep must not drift from the writer when a
+    custom ``audit_log_path`` is configured). Tests can monkeypatch this
+    attribute to point at a tmp_path log.
+    """
+    return get_active_audit_path()
 
 
 def _iter_lines(log_path: Path) -> Iterator[str] | None:
@@ -104,8 +116,8 @@ def grep(*, pattern: str, log_path: Path = DEFAULT_AUDIT_LOG_PATH) -> int:
 
 
 def cli_tail(args: argparse.Namespace) -> int:
-    return tail(n=int(args.lines), log_path=DEFAULT_AUDIT_LOG_PATH)
+    return tail(n=int(args.lines), log_path=_resolve_active_audit_path())
 
 
 def cli_grep(args: argparse.Namespace) -> int:
-    return grep(pattern=str(args.pattern), log_path=DEFAULT_AUDIT_LOG_PATH)
+    return grep(pattern=str(args.pattern), log_path=_resolve_active_audit_path())

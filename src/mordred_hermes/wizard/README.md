@@ -117,16 +117,19 @@ OpenClaw legacy paths (Story 1.5 migration source; read-only):
 
 ## Internal API
 
+All `run()` / `migrate()` entries take keyword-only arguments (declared
+after `*,`); `detect()` is the only positional entry.
+
 | Module | Surface |
 |---|---|
-| `configure` | `configure.run(setup_runner, prompt_io, policy_writer, non_interactive)`, `cli_handler(ns)` |
-| `upgrade` | `UpgradeOptions`, `run(options, policy_writer)`, `cli_handler(ns)` |
-| `openclaw_migration` | `OpenClawState`, `detect()`, `migrate(state, options)` |
-| `install_dispatch` | `run(skill_arg, state, runner)`, `cli_handler(ns)` |
-| `policy_writer` | `PolicySnapshot`, `PolicyWriter.write(snapshot)`, `.upsert_mordred_sections(snapshot)` |
-| `policy_explainer` | `show()`, `explain(skill_id)`, `dry_run(skill_path)`, `reload()` + `cli_*` adapters |
-| `audit_cli` | `tail(n, log_path)`, `grep(pattern, log_path)`, `cli_tail(ns)`, `cli_grep(ns)` |
-| `plugins_list` | `run(config_path)`, `cli_handler(ns)` |
+| `configure` | `run(*, setup_runner, prompt_io, policy_writer, non_interactive=False, skip_hermes_setup=False) -> ConfigureResult`; `cli_handler(ns)` |
+| `upgrade` | `UpgradeOptions`; `UpgradeReport`; `run(*, options, policy_writer, target_snapshot=None, openclaw_base=DEFAULT_OPENCLAW_BASE) -> UpgradeReport`; `cli_handler(ns)` |
+| `openclaw_migration` | `OpenClawState`; `detect(openclaw_base: Path) -> OpenClawState`; `migrate(*, openclaw_base, policy_writer, options) -> Story1_5Action` |
+| `install_dispatch` | `run(*, skill_arg, state, runner=_default_runner) -> int`; `cli_handler(ns)` |
+| `policy_writer` | `PolicySnapshot`; `PolicyWriter.write(snapshot)`; `PolicyWriter.upsert_mordred_sections(snapshot)` |
+| `policy_explainer` | `show()`, `explain(skill_id)`, `dry_run(skill_path)`, `reload()` + `cli_*(ns)` adapters |
+| `audit_cli` | `tail(*, n, log_path=...)`, `grep(*, pattern, log_path=...)`, `cli_tail(ns)`, `cli_grep(ns)`. Active path resolved via `privacy_check._runtime.get_active_audit_path()` so reads follow the writer's configured `audit_log_path` |
+| `plugins_list` | `run(*, config_path=DEFAULT_CONFIG_PATH) -> int`; `cli_handler(ns)` |
 
 ## Fixture catalog
 
