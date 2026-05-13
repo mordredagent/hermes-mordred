@@ -197,7 +197,9 @@ def _handle_upgrade(args: argparse.Namespace) -> int:
 
 
 def _handle_install(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred install: Phase F (delegates to privacy_check) not yet landed")
+    from . import install_dispatch
+
+    return install_dispatch.cli_handler(args)
 
 
 def _handle_network_use(args: argparse.Namespace) -> int:
@@ -233,11 +235,15 @@ def _handle_policy_reload(args: argparse.Namespace) -> int:
 
 
 def _handle_audit_tail(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred audit tail: Phase F not yet landed")
+    from . import audit_cli
+
+    return audit_cli.cli_tail(args)
 
 
 def _handle_audit_grep(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred audit grep: Phase F not yet landed")
+    from . import audit_cli
+
+    return audit_cli.cli_grep(args)
 
 
 def _handle_audit_decrypt(args: argparse.Namespace) -> int:
@@ -265,7 +271,9 @@ def _handle_keyvault_recover(args: argparse.Namespace) -> int:
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred plugins list: Phase F (closes §0.5 L128) not yet landed")
+    from . import plugins_list
+
+    return plugins_list.cli_handler(args)
 
 
 def dispatch(args: argparse.Namespace) -> int:

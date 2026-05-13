@@ -112,20 +112,19 @@ class TestStubHandlersDeferProperly:
         [
             # configure: wired in Phase C -- real-handler test lives in test_configure.py
             # upgrade: wired in Phase E -- real-handler tests live in test_upgrade.py
-            (["mordred", "install", "x"], "Phase F"),
+            # install: wired in Phase F-1 -- real-handler tests in test_install_dispatch.py
             (["mordred", "network", "use", "tor"], "Phase 3"),
             (["mordred", "network", "status"], "Phase 3"),
             # policy {show, explain, dry-run, reload}: wired in Phase D --
             # real-handler tests live in test_policy_explainer.py
-            (["mordred", "audit", "tail"], "Phase F"),
-            (["mordred", "audit", "grep", "x"], "Phase F"),
+            # audit tail/grep: wired in Phase F-2 -- real-handler tests in test_audit_cli.py
             (["mordred", "audit", "decrypt", "--date", "2026-05-10"], "Phase 4"),
             (["mordred", "audit", "purge", "--before", "2026-01-01"], "Phase 4"),
             (["mordred", "keyvault", "init"], "Phase 4"),
             (["mordred", "keyvault", "list"], "Phase 4"),
             (["mordred", "keyvault", "verify-digest"], "Phase 4"),
             (["mordred", "keyvault", "recover", "--blob", "x"], "Phase 4"),
-            (["mordred", "plugins", "list"], "Phase F"),
+            # plugins list: wired in Phase F-3 -- real-handler tests in test_plugins_list.py
         ],
     )
     def test_stub_raises_with_phase_marker(self, argv: list[str], expected_marker: str) -> None:
@@ -186,13 +185,13 @@ class TestMainStandaloneEntry:
         assert "COMMAND" in err or "required" in err.lower()
 
     def test_dispatches_to_stub_handler(self) -> None:
-        """`hermes-mordred install` reaches the install stub (Phase F placeholder).
+        """`hermes-mordred keyvault init` reaches a still-stubbed handler.
 
-        Targets a still-stubbed handler (Phases C/D/E now wire real handlers
-        for configure / policy / upgrade); install lands in PR2 Phase F.
+        Targets a Phase 4 stub since Phases C/D/E/F now wire real handlers
+        for configure / policy / upgrade / install / audit / plugins.
         """
-        with pytest.raises(NotImplementedError, match="Phase F"):
-            main(["install", "any-skill"])
+        with pytest.raises(NotImplementedError, match="Phase 4"):
+            main(["keyvault", "init"])
 
     def test_unknown_subcommand_argparse_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
