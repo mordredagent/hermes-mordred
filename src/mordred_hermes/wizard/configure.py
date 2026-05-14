@@ -27,7 +27,7 @@ import logging
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
@@ -250,7 +250,13 @@ class ConfigureResult:
 
     snapshot: PolicySnapshot
     network_answers: NetworkAnswers
-    _mullvad_account_secret: str = ""
+    # C1 (security review 2026-05-14): ``repr=False`` so the dataclass-
+    # generated ``__repr__`` never emits the plaintext secret. Tracebacks,
+    # logging, ``pytest --showlocals`` and debugger dumps all call ``repr``
+    # implicitly. Without this guard the secret can reach the operator
+    # via a stack trace from any code path that touches the in-flight
+    # ConfigureResult before ``run()`` returns the cleared copy.
+    _mullvad_account_secret: str = field(default="", repr=False)
 
 
 def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
