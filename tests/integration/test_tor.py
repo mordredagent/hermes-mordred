@@ -43,10 +43,17 @@ _SOCKS_PORT = 9050
 _LOOPBACK = "127.0.0.1"
 
 
-pytestmark = pytest.mark.skipif(
-    _docker.skip_reason_if_unavailable() is not None,
-    reason=_docker.skip_reason_if_unavailable() or "docker available",
-)
+# Codex P2-1 (2026-05-14): tag the suite ``integration`` so the default
+# ``-m "not integration"`` filter in mordred-hermes/pyproject.toml
+# excludes it. The dedicated ``integration-tor`` CI job opts back in
+# with ``-m integration`` (see .github/workflows/ci.yml).
+# Codex P2-1 also: cache the skip-reason so the docker probe doesn't
+# fire twice during module collection.
+_SKIP_REASON = _docker.skip_reason_if_unavailable()
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or ""),
+]
 
 
 @pytest.fixture(scope="module")

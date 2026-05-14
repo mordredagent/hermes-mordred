@@ -39,6 +39,11 @@ import pytest
 
 from mordred_hermes.network.paths import vpn
 
+# Codex P2-1 (2026-05-14): tag the suite ``integration`` so the default
+# unit-test run skips it. ``MORDRED_LIVE_VPN_TEST`` is the runtime opt-
+# in; the marker is the static (config-level) opt-in. Both must agree.
+pytestmark = pytest.mark.integration
+
 _LIVE_GATE_ENV = "MORDRED_LIVE_VPN_TEST"
 _ACCOUNT_ENV = "MORDRED_MULLVAD_ACCOUNT"
 

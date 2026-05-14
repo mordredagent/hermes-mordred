@@ -15,9 +15,8 @@ pytest configuration matches the contract we rely on.
 from __future__ import annotations
 
 import shlex
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 _PYPROJECT = Path(__file__).parent.parent / "pyproject.toml"
 
