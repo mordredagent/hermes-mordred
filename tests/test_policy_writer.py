@@ -270,6 +270,185 @@ plugins:
             assert name in result
 
 
+class TestMergeMordredSections:
+    """Partial-update merge API (Phase 3 PR3a, review-L4 fix from PR #18).
+
+    ``upsert_mordred_sections`` does whole-section replacement -- correct for
+    ``hermes mordred configure`` writing a full ``PolicySnapshot``, but
+    destructive for partial writers like ``hermes mordred network use`` that
+    only know about ``default_path``. The merge variant preserves on-disk
+    sub-fields (Tor binary path, Mullvad account ref, etc.) that other code
+    paths or hand-edits established.
+    """
+
+    def test_merge_preserves_existing_sub_fields(self, tmp_path: Path) -> None:
+        seed = """\
+plugins:
+  enabled:
+    - mordred_network
+  mordred_network:
+    default_path: tor
+    tor_binary_path: /usr/bin/tor
+    tor_socks_port: 9050
+    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section["default_path"] == "clearnet"
+        assert section["tor_binary_path"] == "/usr/bin/tor"
+        assert section["tor_socks_port"] == 9050
+        assert section["mullvad_account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
+
+    def test_merge_idempotent(self, tmp_path: Path) -> None:
+        seed = """\
+plugins:
+  mordred_network:
+    default_path: tor
+    tor_binary_path: /usr/bin/tor
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
+        first_mtime = config_path.stat().st_mtime_ns
+        w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
+        assert config_path.stat().st_mtime_ns == first_mtime, "no-op merge must not touch mtime"
+
+    def test_merge_preserves_comments_and_anchors(self, tmp_path: Path) -> None:
+        seed = """\
+# user-owned config (preserve this comment)
+profile: default  # inline
+
+defaults: &defs
+  retries: 3
+
+plugins:
+  enabled:
+    - my_other_plugin
+  mordred_network:
+    default_path: tor  # set by `hermes mordred network use tor`
+    tor_binary_path: /usr/bin/tor
+
+  my_other_plugin:
+    <<: *defs
+    custom: value
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
+
+        result = config_path.read_text(encoding="utf-8")
+        assert "# user-owned config (preserve this comment)" in result
+        assert "# inline" in result
+        assert "&defs" in result
+        assert "<<: *defs" in result
+        assert "custom: value" in result
+        assert "tor_binary_path: /usr/bin/tor" in result
+        assert "default_path: clearnet" in result
+
+    def test_merge_refuses_non_mordred_plugin(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        with pytest.raises(ValueError, match="refusing to touch 'random_plugin'"):
+            w.merge_mordred_sections({"random_plugin": {"key": "value"}})
+
+    def test_merge_creates_section_when_absent(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
+        text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        assert "default_path: tor" in text
+        for name in MORDRED_PLUGIN_NAMES:
+            assert name in text, f"plugins.enabled must list {name}"
+
+    def test_merge_creates_section_with_existing_unrelated_plugins(self, tmp_path: Path) -> None:
+        """Fresh ``plugins.mordred_network`` section under an existing ``plugins`` block."""
+        seed = """\
+plugins:
+  enabled:
+    - my_other_plugin
+  my_other_plugin:
+    custom: value
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "vpn"}})
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert data["plugins"]["mordred_network"]["default_path"] == "vpn"
+        assert data["plugins"]["my_other_plugin"]["custom"] == "value"
+
+    def test_merge_overwrites_non_mapping_section(self, tmp_path: Path) -> None:
+        """If ``plugins.mordred_network`` is pathologically a scalar / list, we
+        replace it entirely with the merge body (no in-place merge possible)
+        instead of crashing."""
+        seed = """\
+plugins:
+  mordred_network: "string-instead-of-mapping"
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert data["plugins"]["mordred_network"] == {"default_path": "tor"}
+
+
+class TestUpsertMordredSectionsStillReplaces:
+    """Regression guard: ``upsert_mordred_sections`` (whole-replace) must keep
+    its full-snapshot semantics so ``configure`` rewrites stay clean.
+
+    The merge variant is the new partial-update API. The whole-replace one is
+    NOT deprecated — it is the right behaviour when the caller has computed
+    every field of the section from scratch.
+    """
+
+    def test_upsert_clobbers_unspecified_sub_fields(self, tmp_path: Path) -> None:
+        seed = """\
+plugins:
+  mordred_network:
+    default_path: tor
+    tor_binary_path: /usr/bin/tor
+    tor_socks_port: 9050
+"""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.upsert_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section == {"default_path": "clearnet"}, "whole-replace must drop unspecified sub-fields"
+
+
 class TestWriteCompose:
     def test_writes_both_files(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)
