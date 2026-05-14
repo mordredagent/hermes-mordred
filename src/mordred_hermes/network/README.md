@@ -8,9 +8,29 @@ Tor / VPN / Clearnet path management.
 - `~/.hermes/mordred/tor-data/` — torrc, control_auth_cookie, DataDirectory
 - `~/.hermes/mordred/policy.json` — reader (`default_path`, `disable_ipv6`, `provider_overrides`)
 
-## Phase 3 PR2 status (2026-05-14)
+## Phase 3 PR3a status (2026-05-14)
 
-Runtime + hooks + wizard CLI landed. `register(ctx)` wires the runtime singleton + 3 hook callbacks. PR3 covers real-traffic verification (provider proxy + SOCKS5h + integration tests).
+Hermetic code-complete: M8 transport coverage + Tor ControlPort liveness + wizard Mullvad/Tor prompts. PR3b ships docker-compose integration tests, PR3c the operator playbook for the `unverified_baseline=True → False` flips.
+
+### PR3a additions
+
+- `paths/tor.py::circuit_status_health(handle, *, controller_factory=None)` — Tor ControlPort cookie auth + `GETINFO circuit-status` deep liveness probe. BUILT-circuit-present → True. Optional via the `[tor-control]` extra (`pip install mordred-hermes[tor-control]` pulls in `stem>=1.8.0,<2`). Missing extra / missing cookie file / unreachable port → shallow `process.poll()` fallback. Used by strict-mode operators through the runtime's `tor_health` injection point.
+- `proxy_env.SOCKS5H_LIBRARY_REQUIREMENTS` + `evaluate_library_compatibility(active_path, declared_libs)` — static allowlist of HTTP client libraries with the minimum version that grew `socks5h://` URL-scheme support. Surfaces one human-readable warning per declared library not on the allowlist. Tor-only; clearnet / vpn skip.
+- `provider_transport_flagger.ProviderEntry.transport_class: Literal["http","tcp","udp","quic","grpc","websocket"]` + `respects_ipv6_proxy: bool` — two new fields driving the new `_flag_for_ipv6` (Tor-only, suppressed when `disable_ipv6=True`) and `_flag_for_non_http` (Tor → abort, clearnet → warning) branches. `evaluate(...)` gains a `disable_ipv6: bool = False` kw-only param.
+- Network-related fields in `~/.hermes/mordred/policy.json` — `disable_ipv6` bool (strict default `true`, lenient/off default `false`). Reader `mordred_hermes.network._resolve_disable_ipv6` collapses to mode default on absent / non-bool values.
+
+### Phase 3.2 wizard surface (PR3a Task #6)
+
+- `hermes mordred configure` now collects six additional answers (after the Phase 1 / Phase 2 prompts):
+  - default network path (`tor` / `vpn` / `clearnet`, default `clearnet`)
+  - Tor binary path (default `tor`)
+  - Tor SOCKS port (default 9050; non-numeric → fallback 9050 + WARN)
+  - Mullvad account number (collected via `prompt_toolkit` `is_password=True`; the secret never appears in `ConfigureResult`)
+  - Mullvad relay country (`auto` or 2-letter code, default `auto`)
+  - Mullvad killswitch (lockdown-mode; strict default `on`)
+- `wizard/env_file_writer.py::DotEnvFileWriter` — upserts `MORDRED_MULLVAD_ACCOUNT=<value>` into `~/.hermes/.env` (mode 0600, parent 0700). Empty value removes the line. Refuses non-POSIX keys / newline values.
+- `wizard/credentials_writer.py::JSONCredentialsWriter` — writes `~/.hermes/mordred/credentials/network.json` (env-var REFERENCES only; never the secret value; refuses secret-shape values).
+- `wizard/policy_writer.py::PolicyWriter.write` gains optional `network_answers` kw-arg routed through `merge_mordred_sections` (Task #1) so subsequent `hermes mordred network use <path>` invocations don't clobber the wizard's choices.
 
 | Module | Surface | Tested via |
 | --- | --- | --- |
