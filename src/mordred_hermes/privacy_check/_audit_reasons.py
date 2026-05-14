@@ -40,7 +40,24 @@ OR already referenced by frozen SPEC text are included now:
   security L352 already references this; PR2 freezes it so the PR4
   ``seed_display.py`` emit site has a stable target.
 
-PR3 codes (``keyvault.unwrap_authorized`` / ``keyvault.unwrap_denied``) and
+Phase 4 PR3 step-0 freeze (2026-05-14) adds 2 ``keyvault.*`` codes for
+Secure-Enclave-authorized DEK unwrap. The codex review on the PR3 plan
+(BLOCKER-1 / HIGH-3) corrected the authorization boundary: wrap uses
+the Enclave **public** key + a software ephemeral private and never
+prompts the user, so only unwrap can emit authorization-decision
+audit entries:
+
+- ``keyvault.unwrap_authorized`` — emitted by ``wrap.unwrap_dek`` after
+  ``SecKeyCopyKeyExchangeResult`` succeeds (biometric / passcode access
+  control satisfied). Decision ``allow``. Fields:
+  ``event="keyvault.unwrap_dek"``, ``key_id_hash`` (hex prefix; never
+  the full ``key_id``).
+- ``keyvault.unwrap_denied`` — emitted when the Enclave returns
+  ``errSecUserCancelled`` / ``errSecAuthFailed`` / equivalent NSError,
+  paired with :class:`mordred_hermes.keyvault.wrap.WrapAuthCancelled`
+  raise. Decision ``block``. Fields: ``event="keyvault.unwrap_dek"``,
+  ``native_error_code`` (translated; never the raw OSStatus).
+
 PR4 codes (``keyvault.init_started`` / ``keyvault.init_completed`` /
 ``keyvault.backup_exported``) are deliberately NOT frozen here — they
 land in their respective step-0 freezes once the emit site exists, to
@@ -69,4 +86,6 @@ ReasonCode = Literal[
     "network.path_dropped",
     "keyvault.recovery_digest_mismatch",
     "keyvault.seed_display_aborted_screenshot",
+    "keyvault.unwrap_authorized",
+    "keyvault.unwrap_denied",
 ]
