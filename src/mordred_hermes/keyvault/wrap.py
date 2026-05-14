@@ -43,7 +43,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -92,17 +92,60 @@ _OFFSET_WRAPPED_DEK = 87
 # ---------------------------------------------------------------------------
 
 
+NativeErrorCode = Literal[
+    "user_cancelled",
+    "auth_failed",
+    "biometry_lockout",
+    "passcode_not_set",
+    "key_not_found",
+]
+"""Closed set of translated native-error codes.
+
+Matches POLICY.md code #20 ``native_error_code``. ``key_not_found`` is in
+the set because :func:`unwrap_dek` branches on it (raising
+:class:`WrapKeyNotFound` with no audit emit per review-fix-1 HIGH-1) —
+the check happens BEFORE the audit-emit decision, so the code is still
+the right way for a backend to signal "missing Keychain item."
+"""
+
+_NATIVE_ERROR_CODES: frozenset[str] = frozenset(
+    ("user_cancelled", "auth_failed", "biometry_lockout", "passcode_not_set", "key_not_found")
+)
+"""Runtime lookup mirror of :data:`NativeErrorCode`.
+
+Mypy-strict catches in-tree typos at the type level via the ``Literal``;
+this frozenset catches them at runtime in case a third-party
+``NativeBackend`` implementation (e.g. PR4's production ``_SecKeyBackend``)
+ever calls ``NativeBackendError("-25293")`` after stringifying a raw
+``OSStatus`` — that would leak biometric-attempt state into the audit
+log via ``_emit_unwrap_denied`` (codex review-fix-2 MEDIUM-1).
+"""
+
+
 class NativeBackendError(Exception):
     """Raised by :class:`NativeBackend` to signal an authorization failure.
 
     ``code`` is one of the translated strings documented in POLICY.md
-    code #20 (``user_cancelled``, ``auth_failed``, ``biometry_lockout``,
-    ``passcode_not_set``, ``key_not_found``). The raw ``OSStatus`` from
+    code #20 (:data:`NativeErrorCode`). The raw ``OSStatus`` from
     pyobjc is **not** stored — it carries biometric-attempt-count state
     that should not cross the audit-log boundary.
+
+    Construction validates ``code`` against :data:`_NATIVE_ERROR_CODES`
+    and raises :class:`ValueError` on any value outside the frozen set.
+    A backend MUST translate raw ``OSStatus`` ints to one of the closed
+    strings before raising — fail-fast at the backend boundary instead
+    of leaking through the audit boundary (codex review-fix-2 MEDIUM-1).
     """
 
     def __init__(self, code: str) -> None:
+        if code not in _NATIVE_ERROR_CODES:
+            raise ValueError(
+                f"NativeBackendError code must be one of "
+                f"{sorted(_NATIVE_ERROR_CODES)!r}; got {code!r}. "
+                "Production backends MUST translate raw OSStatus values to "
+                "one of these strings before raising — the audit log "
+                "(POLICY.md #20) must never see raw OS error ints."
+            )
         super().__init__(code)
         self.code: str = code
 

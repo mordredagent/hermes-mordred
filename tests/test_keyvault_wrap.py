@@ -37,7 +37,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-from mordred_hermes.keyvault.wrap import NativeBackendError
+from mordred_hermes.keyvault.wrap import NativeBackendError, NativeErrorCode
 
 AuditSink = Callable[[dict[str, Any]], None]
 
@@ -60,7 +60,10 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self._keys: dict[str, ec.EllipticCurvePrivateKey] = {}
-        self.denied_reason: str | None = None
+        # Narrowed to ``NativeErrorCode | None`` (review-fix-2 MEDIUM-1)
+        # — only the 5 frozen translated codes can be assigned, so a
+        # typo in a test value surfaces at mypy time.
+        self.denied_reason: NativeErrorCode | None = None
         self.calls: list[tuple[str, str]] = []  # (op, key_id)
 
     def generate_enclave_key(self, key_id: str) -> bytes:
