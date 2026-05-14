@@ -36,7 +36,7 @@ import pytest
 
 from mordred_hermes.network import proxy_env
 
-from . import _docker  # noqa: F401 — RED until PR3b GREEN lands the helper
+from . import _docker
 
 _COMPOSE_DIR = Path(__file__).parent / "docker" / "tor"
 _SOCKS_PORT = 9050
@@ -102,7 +102,7 @@ class TestSocks5hDnsRemoteResolution:
                 timeout=30.0,
             ) as client:
                 response = client.get("https://check.torproject.org/api/ip")
-        except Exception as e:  # noqa: BLE001 — external service flake
+        except Exception as e:
             pytest.skip(f"check.torproject.org unreachable: {e!r}")
 
         if response.status_code != 200:
@@ -133,9 +133,7 @@ class TestProxyEnvRoundTrip:
         try:
             with httpx.Client(timeout=15.0) as client:
                 response = client.get("https://check.torproject.org/")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             pytest.skip(f"upstream probe flaked: {e!r}")
 
-        assert response.status_code < 400, (
-            f"httpx via HTTPS_PROXY did not reach Tor exit: {response.status_code}"
-        )
+        assert response.status_code < 400, f"httpx via HTTPS_PROXY did not reach Tor exit: {response.status_code}"
