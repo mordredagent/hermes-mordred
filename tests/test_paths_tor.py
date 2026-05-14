@@ -465,6 +465,66 @@ class TestCircuitStatusHealth:
         result = tor.circuit_status_health(handle)
         assert isinstance(result, bool)
 
+    def test_authenticate_called_without_kwargs_matches_real_stem_api(self, tmp_path: Path) -> None:
+        """Codex review (2026-05-14, P1): stem's real
+        ``Controller.authenticate(password=None, chroot_path=None,
+        protocolinfo_response=None)`` does NOT accept a ``cookie`` kwarg.
+        The previous implementation called
+        ``controller.authenticate(cookie=cookie_bytes)`` -> TypeError ->
+        caught silently -> circuit_status_health always returned False.
+        Strict-mode deep liveness would mark an otherwise healthy Tor
+        process as dropped on every probe.
+
+        Fix: call ``authenticate()`` with no args; stem auto-discovers
+        the cookie path via PROTOCOLINFO and reads it itself. This test
+        uses a fake mirroring stem's real signature so the production
+        code path is exercised against the actual API.
+        """
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        class _StemRealisticController:
+            """Fake matching stem.control.Controller.authenticate's real signature.
+
+            stem.connection.authenticate (which Controller.authenticate
+            delegates to) accepts password/chroot_path/protocolinfo_response
+            -- NO cookie kwarg. Calling with cookie=... raises TypeError.
+            """
+
+            def __init__(self) -> None:
+                self.authenticated = False
+                self.closed = False
+
+            def authenticate(
+                self,
+                password: object = None,
+                chroot_path: object = None,
+                protocolinfo_response: object = None,
+            ) -> None:
+                # Reject unexpected kwargs the way real stem would.
+                self.authenticated = True
+
+            def get_info(self, key: str) -> str:
+                assert self.authenticated, "controller used before authenticate()"
+                return "42 BUILT $abc"
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake = _StemRealisticController()
+
+        def factory(*, host: str, port: int) -> _StemRealisticController:
+            return fake
+
+        result = tor.circuit_status_health(handle, controller_factory=factory)
+        assert result is True, (
+            "P1: circuit_status_health must call authenticate() in a way "
+            "stem accepts; today it passes cookie=... -> TypeError -> False "
+            "-> Tor falsely marked dropped on every probe"
+        )
+        assert fake.authenticated, "authenticate() was not called"
+
     def test_no_stem_logs_warning_once(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         """H5 (review 2026-05-14): the silent shallow fallback when stem
         is absent hides a real downgrade from the strict-mode operator.
