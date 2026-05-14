@@ -102,7 +102,12 @@ def _ensure_plugins_enabled(root: Any) -> None:
     non-Mordred entries are preserved.
     """
     plugins = root.get("plugins") if isinstance(root, Mapping) else None
-    if plugins is None:
+    if not isinstance(plugins, MutableMapping):
+        if plugins is not None:
+            _LOG.warning(
+                "plugins is %s, not a mapping; replacing with fresh enabled list",
+                type(plugins).__name__,
+            )
         # Use a plain dict -- ruamel will still emit it as a mapping; round-trip
         # treatment of NEW keys is best-effort (we own this section).
         root["plugins"] = {"enabled": list(MORDRED_PLUGIN_NAMES)}
@@ -131,9 +136,20 @@ def _upsert_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]
     Whole-section replacement is intentional -- partial merges across
     invocations would leave dangling keys from prior policy modes.
     Non-Mordred plugin sections are preserved.
+
+    Pathological cases (``plugins`` itself is a scalar / list from a hand-edit
+    or interrupted write) fall back to whole-replacement of the ``plugins``
+    key with a fresh dict — crashing on ``int[str] = ...`` would leave the
+    user with an unrecoverable config. Logged at WARNING so the operator
+    sees the corruption.
     """
     plugins = root.get("plugins")
-    if plugins is None:
+    if not isinstance(plugins, MutableMapping):
+        if plugins is not None:
+            _LOG.warning(
+                "plugins is %s, not a mapping; replacing with upsert body",
+                type(plugins).__name__,
+            )
         root["plugins"] = {plugin_name: dict(body)}
         return
     plugins[plugin_name] = dict(body)
@@ -157,7 +173,12 @@ def _merge_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any])
     Mullvad sub-fields the wizard configure step wrote earlier.
     """
     plugins = root.get("plugins")
-    if plugins is None:
+    if not isinstance(plugins, MutableMapping):
+        if plugins is not None:
+            _LOG.warning(
+                "plugins is %s, not a mapping; replacing with merge body",
+                type(plugins).__name__,
+            )
         root["plugins"] = {plugin_name: dict(body)}
         return
     existing = plugins.get(plugin_name)
