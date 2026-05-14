@@ -417,6 +417,139 @@ plugins:
         assert data["plugins"]["mordred_network"] == {"default_path": "tor"}
 
 
+class TestPolicySnapshotDisableIPv6Field:
+    """Phase 3 PR3a Task #7: PolicySnapshot gains ``disable_ipv6`` so the
+    wizard can persist it to ``policy.json``. The network reader (Task #2)
+    consumes it through ``_resolve_disable_ipv6``; PolicyWriter is the
+    sole writer side.
+    """
+
+    def test_default_is_true(self) -> None:
+        """Safe-by-default mirrors RuntimeConfig.disable_ipv6 default."""
+        snap = PolicySnapshot(policy="lenient")
+        assert snap.disable_ipv6 is True
+
+    def test_field_round_trips_through_policy_json(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        snap = PolicySnapshot(policy="strict", disable_ipv6=False)
+        w.emit_policy_json(snap)
+        body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
+        assert body["disable_ipv6"] is False
+
+    def test_field_omitted_from_privacy_check_section(self) -> None:
+        """``disable_ipv6`` lives in policy.json + plugins.mordred_network, NOT
+        in plugins.mordred_privacy_check (cross-plugin discipline)."""
+        snap = PolicySnapshot(policy="strict", disable_ipv6=True)
+        section = snap.to_config_yaml_section()
+        assert "disable_ipv6" not in section
+
+
+class TestNetworkAnswersToConfigYamlSection:
+    """``NetworkAnswers.to_config_yaml_section()`` returns the body upserted
+    into ``plugins.mordred_network`` so PolicyWriter.write can persist it
+    alongside snapshot fields."""
+
+    def test_to_config_yaml_section_shape(self) -> None:
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        na = NetworkAnswers(
+            default_network_path="vpn",
+            tor_binary_path="/opt/tor/bin/tor",
+            tor_socks_port=19050,
+            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+            mullvad_relay_country="jp",
+            mullvad_killswitch=True,
+        )
+        section = na.to_config_yaml_section()
+        assert section == {
+            "default_path": "vpn",
+            "tor_binary_path": "/opt/tor/bin/tor",
+            "tor_socks_port": 19050,
+            "mullvad_account_id_env": "MORDRED_MULLVAD_ACCOUNT",
+            "mullvad_relay_country": "jp",
+            "mullvad_killswitch": True,
+        }
+
+
+class TestPolicyWriterWritesNetworkSection:
+    """Task #7: ``PolicyWriter.write`` accepts an optional
+    ``network_answers`` and upserts ``plugins.mordred_network`` in
+    config.yaml via :meth:`merge_mordred_sections`. The merge variant is
+    used (not whole-replace) so future writers like ``hermes mordred
+    network use`` don't clobber the wizard's choices when only the path
+    changes (Task #1 contract)."""
+
+    def test_write_upserts_network_section_when_answers_provided(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        w = _writer(tmp_path)
+        snap = PolicySnapshot(policy="strict")
+        na = NetworkAnswers(
+            default_network_path="tor",
+            tor_binary_path="/usr/bin/tor",
+            tor_socks_port=9050,
+            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+            mullvad_relay_country="auto",
+            mullvad_killswitch=True,
+        )
+        w.write(snap, network_answers=na)
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with (tmp_path / "config.yaml").open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section["default_path"] == "tor"
+        assert section["mullvad_killswitch"] is True
+        assert section["tor_socks_port"] == 9050
+
+    def test_write_without_network_answers_omits_section(self, tmp_path: Path) -> None:
+        """Backward compat: existing call sites passing only ``snapshot``
+        must not write a (probably-wrong-default-valued) mordred_network."""
+        w = _writer(tmp_path)
+        w.write(PolicySnapshot(policy="lenient"))
+        text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        # mordred_network may appear in plugins.enabled, but its section
+        # body should be absent (no default_path / tor_binary_path / ...).
+        assert "default_path" not in text
+        assert "tor_binary_path" not in text
+
+    def test_write_uses_merge_not_whole_replace(self, tmp_path: Path) -> None:
+        """When a prior network section exists (e.g., from a previous
+        configure run that the user partially edited), the wizard must
+        merge -- not clobber -- per the Task #1 contract."""
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        config_path = tmp_path / "config.yaml"
+        seed = """\
+plugins:
+  mordred_network:
+    default_path: tor
+    custom_user_field: keep-me
+"""
+        config_path.write_text(seed, encoding="utf-8")
+
+        w = _writer(tmp_path)
+        na = NetworkAnswers(
+            default_network_path="vpn",
+            tor_binary_path="/usr/bin/tor",
+            tor_socks_port=9050,
+            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+            mullvad_relay_country="auto",
+            mullvad_killswitch=False,
+        )
+        w.write(PolicySnapshot(policy="strict"), network_answers=na)
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section["default_path"] == "vpn"
+        assert section["custom_user_field"] == "keep-me", "merge must preserve unknown user fields"
+
+
 class TestUpsertMordredSectionsStillReplaces:
     """Regression guard: ``upsert_mordred_sections`` (whole-replace) must keep
     its full-snapshot semantics so ``configure`` rewrites stay clean.
