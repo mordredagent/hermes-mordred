@@ -137,6 +137,34 @@ class TestVerifyBeforeDecrypt:
         with pytest.raises(recovery.RecoveryDigestMismatch):
             recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=WRONG_DIGEST)
 
+    def test_import_backup_uses_constant_time_compare(
+        self,
+        valid_blob: bytes,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """Code-reviewer HIGH-2: digest.py's verify_digest is verified to
+        use hmac.compare_digest via spy, but recovery.py's equality
+        check had no equivalent regression guard. A future PR that
+        replaces ``_compare_digest(a, b)`` with ``a == b`` would be a
+        timing-leakable digest comparison and must trip a test.
+        """
+        from mordred_hermes.keyvault import recovery
+
+        real = recovery._compare_digest
+        calls: list[tuple[bytes, bytes]] = []
+
+        def spy(a: object, b: object) -> bool:
+            calls.append((bytes(a), bytes(b)))  # type: ignore[arg-type]
+            return real(a, b)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(recovery, "_compare_digest", spy, raising=True)
+        # Match path: ensures the spy fires on a successful digest check.
+        recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=DIGEST_FIXTURE)
+
+        assert calls, (
+            "recovery.import_backup must route digest comparison through a timing-safe primitive (hmac.compare_digest)"
+        )
+
 
 class TestAuditSink:
     """Codex review #9: audit_sink receives a single ``dict`` shaped like
@@ -211,12 +239,21 @@ class TestAuditSink:
         with pytest.raises(recovery.RecoveryDigestMismatch):
             recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=WRONG_DIGEST)
 
-    def test_audit_sink_exception_does_not_swallow_raise(self, valid_blob: bytes) -> None:
-        """If audit_sink itself raises (e.g. disk full when writing the
-        audit log), the underlying RecoveryDigestMismatch must still
-        be visible to the caller. Whichever exception ends up at the
-        top of the chain, the caller sees one of the two — never silent
-        success."""
+    def test_audit_sink_exception_does_not_mask_recovery_digest_mismatch(self, valid_blob: bytes) -> None:
+        """Code-reviewer HIGH-1: if audit_sink raises (e.g. disk-full
+        when writing the audit log), the caller's primary exception
+        must be :class:`RecoveryDigestMismatch` — the safety-critical
+        signal — with the sink exception chained as ``__context__`` so
+        operators can still diagnose the audit-log failure.
+
+        Why this matters: a caller writing
+        ``except RecoveryDigestMismatch:`` to display a "wrong
+        passphrase / transcription" error to the user would otherwise
+        leak the AuditDiskFull through to a higher unhandled-exception
+        layer, breaking the UX contract for the digest mismatch path.
+        Safety-critical exceptions always win at the top; operational
+        ones live in __context__.
+        """
         from mordred_hermes.keyvault import recovery
 
         class AuditDiskFull(RuntimeError):
@@ -225,13 +262,21 @@ class TestAuditSink:
         def angry_sink(_entry: dict[str, object]) -> None:
             raise AuditDiskFull("simulated audit log write failure")
 
-        with pytest.raises((recovery.RecoveryDigestMismatch, AuditDiskFull)):
+        with pytest.raises(recovery.RecoveryDigestMismatch) as excinfo:
             recovery.import_backup(
                 valid_blob,
                 PASSPHRASE,
                 recomputed_digest=WRONG_DIGEST,
                 audit_sink=angry_sink,
             )
+
+        # The sink exception must be reachable for diagnostics, but it
+        # must NOT be the surface exception.
+        assert isinstance(excinfo.value.__context__, AuditDiskFull), (
+            "audit_sink exception must be chained as __context__ so "
+            "operators can diagnose audit-log failures without losing "
+            "the primary RecoveryDigestMismatch signal"
+        )
 
 
 class TestInvalidTagPropagation:

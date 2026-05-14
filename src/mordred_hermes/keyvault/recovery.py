@@ -58,22 +58,43 @@ class RecoveryDigestMismatch(VerificationDigestMismatch):
     """
 
 
-def _emit_mismatch(audit_sink: AuditSink | None, *, blob_version: int) -> None:
+def _emit_mismatch(audit_sink: AuditSink | None, *, blob_version: int) -> BaseException | None:
     """Best-effort emit of the ``keyvault.recovery_digest_mismatch``
-    audit entry. The sink is allowed to raise (e.g. disk-full when
-    writing the audit log); we don't swallow that — the caller will
-    see whichever exception ends up at the top of the chain.
+    audit entry. Returns the sink's exception (if any) so the caller
+    can chain it as ``__context__`` on the primary
+    :class:`RecoveryDigestMismatch`.
+
+    Why catch here rather than at the call site (code-reviewer HIGH-1):
+    the safety-critical invariant is "caller's surface exception is
+    RecoveryDigestMismatch on digest mismatch, always". If the sink
+    raises (e.g. disk-full audit log), letting that exception escape
+    masks the digest-mismatch signal — a caller's
+    ``except RecoveryDigestMismatch: show_user("wrong passphrase")``
+    handler silently leaks the AuditDiskFull through.
+
+    Returning the captured exception (rather than re-raising or
+    swallowing) lets ``import_backup`` chain it as ``__context__`` so
+    operators can still diagnose the audit-log failure via the
+    standard ``__context__`` traceback walk.
     """
     if audit_sink is None:
-        return
-    audit_sink(
-        {
-            "event": "keyvault.import_backup",
-            "decision": "block",
-            "reason": "keyvault.recovery_digest_mismatch",
-            "blob_version": blob_version,
-        }
-    )
+        return None
+    try:
+        audit_sink(
+            {
+                "event": "keyvault.import_backup",
+                "decision": "block",
+                "reason": "keyvault.recovery_digest_mismatch",
+                "blob_version": blob_version,
+            }
+        )
+    except BaseException as exc:
+        # Intentional broad catch: any sink failure (RuntimeError,
+        # OSError, KeyboardInterrupt, etc.) must be chained to the
+        # primary RecoveryDigestMismatch, never swallowed and never
+        # allowed to mask it. The chaining happens at the call site.
+        return exc
+    return None
 
 
 def import_backup(
@@ -87,8 +108,12 @@ def import_backup(
     embedded verification digest.
 
     Raises :class:`RecoveryDigestMismatch` on mismatch (before any
-    KDF / AES work). Raises
-    :class:`mordred_hermes.keyvault.backup.BackupCorrupt` for
+    KDF / AES work). If ``audit_sink`` itself raises while emitting
+    the mismatch entry, the sink exception is chained as
+    ``__context__`` so it remains diagnosable without masking the
+    primary RecoveryDigestMismatch (code-reviewer HIGH-1).
+
+    Raises :class:`mordred_hermes.keyvault.backup.BackupCorrupt` for
     structurally invalid blobs. Raises
     :class:`cryptography.exceptions.InvalidTag` on wrong passphrase or
     AAD tamper. Returns the original secret bytes on success.
@@ -96,22 +121,27 @@ def import_backup(
     # 1. Length-confusion guard (Codex review #6).
     if len(recomputed_digest) != _DIGEST_LEN:
         # We do NOT know the blob version yet (parse_header has not
-        # run), so emit with version=0 sentinel — POLICY.md frozen
-        # extras allow integer ``blob_version`` and 0 is unambiguous
-        # ("unknown / pre-parse rejection").
-        _emit_mismatch(audit_sink, blob_version=0)
-        raise RecoveryDigestMismatch(f"recomputed_digest must be {_DIGEST_LEN} bytes, got {len(recomputed_digest)}")
+        # run), so emit with version=0 sentinel — POLICY.md entry #17
+        # Fields documents this as "pre-parse rejection".
+        sink_exc = _emit_mismatch(audit_sink, blob_version=0)
+        primary = RecoveryDigestMismatch(f"recomputed_digest must be {_DIGEST_LEN} bytes, got {len(recomputed_digest)}")
+        if sink_exc is not None:
+            primary.__context__ = sink_exc
+        raise primary
 
     # 2. Structural validation (no KDF, no AES).
     parsed = backup.parse_header(blob)
 
     # 3. Verify-before-decrypt (Codex review #4). Constant-time compare.
     if not _compare_digest(parsed.verification_digest, recomputed_digest):
-        _emit_mismatch(audit_sink, blob_version=parsed.version)
-        raise RecoveryDigestMismatch(
+        sink_exc = _emit_mismatch(audit_sink, blob_version=parsed.version)
+        primary = RecoveryDigestMismatch(
             "verification digest mismatch — backup blob does not match "
             "the (seed, passphrase, PoW) transcription provided"
         )
+        if sink_exc is not None:
+            primary.__context__ = sink_exc
+        raise primary
 
     # 4. Only on match: run the KDF + AES-GCM decryption. InvalidTag
     # propagates to the caller.
