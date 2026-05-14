@@ -148,6 +148,32 @@ def _derive_kek(passphrase: str, *, salt: bytes, m_cost: int, t_cost: int, p_cos
     )
 
 
+def _assert_canonical_kdf_profile_v1(*, m_cost: int, t_cost: int, p_cost: int) -> None:
+    """Canonical-profile invariant check for v1 blobs (codex third-pass
+    HIGH-1, 2026-05-14).
+
+    Phase 4 PR2 ships a single KDF profile under ``version=1``:
+    ``m_cost = 46 MiB`` (47104 KiB), ``t_cost = 1``, ``p_cost = 1``.
+    ``export()`` always writes these values, so any deviation in a v1
+    blob's parsed cost params is either header tamper or a malformed
+    external blob masquerading as v1.
+
+    Called from :func:`parse_header` AND :func:`decrypt_body` (defence
+    in depth — a hand-crafted :class:`ParsedHeader` that bypasses
+    parse_header still trips this guard before the KDF runs).
+
+    When ``version=2`` lands with a stronger profile, dispatch on
+    ``version`` here. The wide DOS caps in :func:`parse_header` will
+    continue to bound the worst case.
+    """
+    if m_cost != _ARGON2_M_COST_KIB or t_cost != _ARGON2_T_COST or p_cost != _ARGON2_P_COST:
+        raise BackupCorrupt(
+            f"non-canonical v1 KDF profile (m_cost={m_cost}, t_cost={t_cost}, "
+            f"p_cost={p_cost}); v1 requires the canonical profile "
+            f"(m={_ARGON2_M_COST_KIB}, t={_ARGON2_T_COST}, p={_ARGON2_P_COST})"
+        )
+
+
 def export(secret: bytes, passphrase: str, *, verification_digest: bytes) -> bytes:
     """Wrap ``secret`` with a passphrase-derived KEK and serialize the
     self-describing blob.
@@ -223,6 +249,17 @@ def parse_header(blob: bytes) -> ParsedHeader:
         raise BackupCorrupt(
             f"p_cost {p_cost} out of bounds [1, {_MAX_P_COST}] (header tampered or unsupported KDF profile)"
         )
+    # Canonical v1 profile enforcement (codex third-pass HIGH-1,
+    # 2026-05-14). The wide DOS caps above allow m_cost up to 1 GiB so
+    # they can serve as a future-profile bound, but a v1 blob whose
+    # KDF params deviate from the canonical (46 MiB, 1, 1) is by
+    # definition tampered or malformed — v1 export() always produces
+    # the canonical profile. Rejecting at parse keeps the recovery
+    # path from running an expensive Argon2 against an attacker-chosen
+    # cost profile even when the attacker happens to know the
+    # verification digest.
+    if version == VERSION:
+        _assert_canonical_kdf_profile_v1(m_cost=m_cost, t_cost=t_cost, p_cost=p_cost)
     salt = blob[18:34]
     verification_digest = blob[34:66]
     aes_blob_len = int.from_bytes(blob[66:70], "big")
@@ -258,7 +295,19 @@ def decrypt_body(parsed: ParsedHeader, passphrase: str) -> bytes:
     AES-GCM-decrypt ``parsed.aes_blob`` with ``parsed.aad`` bound.
     Raises :class:`cryptography.exceptions.InvalidTag` on wrong
     passphrase or tampered header/ciphertext.
+
+    Defence-in-depth (codex third-pass MEDIUM-2, 2026-05-14): re-runs
+    the canonical-profile check on the supplied :class:`ParsedHeader`.
+    The check is redundant with the one in :func:`parse_header` for
+    callers that go through the normal flow, but it closes the
+    bypass that exists if a caller constructs a ``ParsedHeader`` by
+    hand (e.g. for testing, or future API misuse). ``ParsedHeader``
+    is a public dataclass and Python provides no real way to make
+    its constructor private; this re-check is the practical
+    enforcement boundary.
     """
+    if parsed.version == VERSION:
+        _assert_canonical_kdf_profile_v1(m_cost=parsed.m_cost, t_cost=parsed.t_cost, p_cost=parsed.p_cost)
     kek = _derive_kek(
         passphrase,
         salt=parsed.salt,

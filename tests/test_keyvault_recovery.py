@@ -123,17 +123,24 @@ class TestVerifyBeforeDecrypt:
     ) -> None:
         """The KDF (Argon2id) is the most expensive step. Skipping it
         on mismatch is both a safety property (no key material derived)
-        AND a performance one (instant rejection feedback)."""
-        import argon2.low_level
+        AND a performance one (instant rejection feedback).
 
-        from mordred_hermes.keyvault import recovery
+        Patch target: ``backup.hash_secret_raw``, NOT
+        ``argon2.low_level.hash_secret_raw``. The backup module
+        imports the name via ``from argon2.low_level import
+        hash_secret_raw``, so the impl's call resolves through the
+        module-local global. Patching the original module misses the
+        call entirely and produces a silently-passing dead test —
+        verified during third-pass review (codex MEDIUM-3, 2026-05-14).
+        """
+        from mordred_hermes.keyvault import backup, recovery
 
         def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError(
                 "recovery.import_backup MUST NOT invoke Argon2 KDF on digest mismatch — verify-before-decrypt"
             )
 
-        monkeypatch.setattr(argon2.low_level, "hash_secret_raw", boom)
+        monkeypatch.setattr(backup, "hash_secret_raw", boom)
         with pytest.raises(recovery.RecoveryDigestMismatch):
             recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=WRONG_DIGEST)
 

@@ -313,6 +313,107 @@ class TestStructuralValidation:
         with pytest.raises(backup.BackupCorrupt, match="m_cost"):
             backup.parse_header(bytes(blob))
 
+
+class TestCanonicalKdfProfileV1:
+    """Codex third-pass HIGH-1 (2026-05-14): v1 blobs MUST use the
+    canonical KDF profile (m=46 MiB, t=1, p=1) exactly. The DOS cap
+    (m ≤ 1 GiB, t ≤ 64, p ≤ 16) is too permissive — even within those
+    bounds, an attacker who substitutes m_cost=512 MiB into a blob
+    whose verification_digest they happen to know can DOS the recovery
+    path before AAD fails. v1 export() always produces the canonical
+    profile, so any deviation in a v1 import is by definition tamper
+    (or a malformed external blob).
+
+    The cap remains as belt-and-suspenders / future-profile bound.
+    When ``version=2`` ships with a stronger profile, the canonical
+    check dispatches on version.
+    """
+
+    def test_within_cap_but_non_canonical_m_cost_raises(self) -> None:
+        """``m_cost=512 MiB`` is well within the 1 GiB DOS cap and a
+        plausible "stronger profile" attacker substitution, but it's
+        not the v1 canonical value. Must reject at parse_header."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        # 512 MiB in KiB = 524288, within cap (1 GiB = 1048576 KiB).
+        blob[6:10] = (512 * 1024).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match=r"canonical|m_cost"):
+            backup.parse_header(bytes(blob))
+
+    def test_within_cap_but_non_canonical_t_cost_raises(self) -> None:
+        """t_cost=4 is within the cap of 64 but != canonical 1."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob[10:14] = (4).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match=r"canonical|t_cost"):
+            backup.parse_header(bytes(blob))
+
+    def test_within_cap_but_non_canonical_p_cost_raises(self) -> None:
+        """p_cost=2 is within the cap of 16 but != canonical 1."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob[14:18] = (2).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match=r"canonical|p_cost"):
+            backup.parse_header(bytes(blob))
+
+    def test_canonical_profile_roundtrips_unchanged(self) -> None:
+        """Sanity: the canonical profile (m=46*1024, t=1, p=1) is what
+        export produces by default and must parse cleanly. Regression
+        guard for the canonical-check itself."""
+        from mordred_hermes.keyvault import backup
+
+        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        parsed = backup.parse_header(blob)
+        assert parsed.m_cost == 46 * 1024
+        assert parsed.t_cost == 1
+        assert parsed.p_cost == 1
+        # And the full roundtrip still works.
+        assert backup.decrypt_body(parsed, PASSPHRASE) == SECRET
+
+    def test_decrypt_body_rejects_hand_crafted_non_canonical_parsed_header(
+        self,
+        monkeypatch,  # type: ignore[no-untyped-def]
+    ) -> None:
+        """Codex third-pass MEDIUM-2 (2026-05-14): a caller that
+        constructs :class:`ParsedHeader` by hand (bypassing
+        parse_header) must NOT be able to slip a non-canonical KDF
+        profile past decrypt_body. The canonical-profile re-check
+        inside decrypt_body raises before Argon2 runs.
+
+        Verified via explosive spy on ``backup.hash_secret_raw`` — if
+        Argon2 is reached at all, the spy raises AssertionError.
+        """
+        from mordred_hermes.keyvault import backup
+
+        # Build a real blob so we get a valid AAD/aes_blob/salt/digest.
+        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        legit = backup.parse_header(blob)
+
+        # Now hand-craft a ParsedHeader that swaps in a wider m_cost
+        # (still within the DOS cap, but non-canonical for v1).
+        tampered = backup.ParsedHeader(
+            magic=legit.magic,
+            version=legit.version,
+            kdf_id=legit.kdf_id,
+            m_cost=512 * 1024,  # 512 MiB — within cap, not canonical
+            t_cost=legit.t_cost,
+            p_cost=legit.p_cost,
+            salt=legit.salt,
+            verification_digest=legit.verification_digest,
+            aes_blob=legit.aes_blob,
+            aad=legit.aad,
+        )
+
+        def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("decrypt_body MUST canonical-check before invoking Argon2 — codex third-pass MEDIUM-2")
+
+        monkeypatch.setattr(backup, "hash_secret_raw", boom)
+        with pytest.raises(backup.BackupCorrupt, match="non-canonical"):
+            backup.decrypt_body(tampered, PASSPHRASE)
+
     def test_truncated_header_raises_backup_corrupt(self) -> None:
         from mordred_hermes.keyvault import backup
 
@@ -376,9 +477,15 @@ class TestParseHeaderDoesNotDecrypt:
     def test_parse_header_does_not_call_argon2(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """If parse_header invokes Argon2id at all, the spy below will
         raise. parse_header is allowed to read the cost params from the
-        header but MUST NOT feed them to ``hash_secret_raw``."""
-        import argon2.low_level
+        header but MUST NOT feed them to ``hash_secret_raw``.
 
+        Patch target: ``backup.hash_secret_raw`` (the module-local
+        alias from ``from argon2.low_level import hash_secret_raw``),
+        NOT ``argon2.low_level.hash_secret_raw``. Patching the source
+        module misses the impl's call entirely — verified during
+        third-pass review (codex MEDIUM-3, 2026-05-14): the bogus
+        patch was a silently-passing dead test.
+        """
         from mordred_hermes.keyvault import backup
 
         # First, do a real export — this DOES call argon2 once.
@@ -389,7 +496,7 @@ class TestParseHeaderDoesNotDecrypt:
         def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("parse_header MUST NOT invoke argon2 KDF — Codex review #4 verify-before-decrypt")
 
-        monkeypatch.setattr(argon2.low_level, "hash_secret_raw", boom)
+        monkeypatch.setattr(backup, "hash_secret_raw", boom)
         backup.parse_header(blob)  # must not raise
 
     def test_parse_header_does_not_call_aes_decrypt(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]

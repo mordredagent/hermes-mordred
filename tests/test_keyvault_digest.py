@@ -124,18 +124,73 @@ class TestComputeDigestSensitivity:
 class TestXorWidth:
     """Codex review #1 BLOCKER: SPEC formula ``hash(Passphrase) ⊕ top4(PoW)``
     was ambiguous (XOR top 4 bytes only, or extend to 32). Canonical
-    answer: XOR affects ONLY the first 4 bytes of pass_hash."""
+    answer: XOR affects ONLY the first 4 bytes of pass_hash.
+
+    Third-pass note (codex LOW-4, 2026-05-14): the first two tests
+    compare SPEC fixture constants against each other — they prove
+    the SPEC vector is internally consistent but do NOT exercise the
+    implementation. The two new tests below derive ``pass_hash`` from
+    :mod:`blake3` directly and probe :func:`compute_digest` to ensure
+    the impl honors the canonical XOR width.
+    """
 
     def test_pass_hash_tail_passes_through_unchanged(self) -> None:
         """``masked_pass[4:]`` must equal ``pass_hash[4:]`` — no XOR is
-        applied beyond index 3. We verify this against the SPEC fixed
-        vector's intermediate values."""
+        applied beyond index 3. Self-consistency of the SPEC fixture
+        vector."""
         assert SPEC_MASKED_PASS[4:] == SPEC_PASS_HASH[4:]
 
     def test_pass_hash_head_xored_with_top4(self) -> None:
-        """``masked_pass[:4] == pass_hash[:4] XOR top4(pow)``."""
+        """``masked_pass[:4] == pass_hash[:4] XOR top4(pow)`` —
+        self-consistency of the SPEC fixture vector."""
         expected_head = bytes(p ^ t for p, t in zip(SPEC_PASS_HASH[:4], SPEC_POW[:4], strict=True))
         assert SPEC_MASKED_PASS[:4] == expected_head
+
+    def test_compute_digest_xor_width_via_implementation(self) -> None:
+        """End-to-end: compute pass_hash from :mod:`blake3` directly,
+        construct what masked_pass MUST be under the canonical
+        algorithm (first 4 bytes XOR'd, rest unchanged), then feed
+        ``H(seed_hash || masked_pass)`` through BLAKE3 and compare to
+        ``compute_digest`` output.
+
+        Codex LOW-4 (2026-05-14): the previous two tests proved the
+        SPEC fixture was internally consistent but did not exercise
+        the impl. If a regression made ``compute_digest`` XOR the
+        full 32 bytes (with zero-pad) or skip the XOR entirely, those
+        tests still passed. This test exercises the impl end-to-end
+        against a model built from primitives, so any drift trips.
+        """
+        from blake3 import blake3
+
+        from mordred_hermes.keyvault import digest
+
+        seed = "round-trip seed"
+        passphrase = "round-trip pass"
+        pow_bytes = bytes.fromhex("12345678" + "ab" * 28)
+
+        # Build the expected digest by hand from BLAKE3 primitives.
+        seed_hash = blake3(seed.encode("utf-8")).digest()
+        pass_hash = blake3(passphrase.encode("utf-8")).digest()
+        expected_masked = bytes(p ^ t for p, t in zip(pass_hash[:4], pow_bytes[:4], strict=True)) + pass_hash[4:]
+        expected_digest = blake3(seed_hash + expected_masked).digest()
+
+        # Impl output must match the hand-built value.
+        actual = digest.compute_digest(seed, passphrase, pow_bytes)
+        assert actual == expected_digest
+
+    def test_compute_digest_tail_of_pow_does_not_leak_into_pass_hash_tail(self) -> None:
+        """A regression that XORs ``pow_bytes`` against ``pass_hash``
+        as 32-byte zero-padded values would let bytes [4:] of pow_bytes
+        affect ``masked_pass[4:]``. Canonical uses only ``pow_bytes[:4]``,
+        so two PoWs with same top4 but different tail must produce the
+        same digest."""
+        from mordred_hermes.keyvault import digest
+
+        pow_a = b"\xde\xad\xbe\xef" + b"\x00" * 28
+        pow_b = b"\xde\xad\xbe\xef" + b"\xa5" * 28
+        a = digest.compute_digest("s", "p", pow_a)
+        b = digest.compute_digest("s", "p", pow_b)
+        assert a == b
 
 
 class TestVerifyDigest:
