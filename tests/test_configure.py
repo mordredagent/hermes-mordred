@@ -430,6 +430,78 @@ class TestCliHandler:
         assert body["policy"] == "off"
 
 
+class TestCliHandlerWiresWriters:
+    """H4 (review 2026-05-14): ``cli_handler`` accepts a Mullvad secret
+    via ``ask_password`` but does NOT pass an ``env_writer`` or
+    ``credentials_writer`` to :func:`run`. The secret is captured into
+    ``ConfigureResult._mullvad_account_secret`` then dropped on the floor
+    -- the .env and credentials JSON the operator expects never appear.
+
+    Fix: instantiate :class:`DotEnvFileWriter` and
+    :class:`JSONCredentialsWriter` in ``cli_handler`` and forward them to
+    ``run()`` so the end-to-end interactive path actually persists what
+    the wizard collected.
+    """
+
+    _ANSWERS_WITH_MULLVAD_SECRET: ClassVar[list[object]] = [
+        "off",  # policy
+        False,  # allow_cloud_llm
+        "",  # cloud_provider_allowlist
+        "x",  # local_llm_endpoint
+        "",  # local_llm_model_id
+        "always-block",  # cloud_attempt_action
+        "none",  # harness_primary
+        "clearnet",  # default_network_path
+        "/usr/bin/tor",  # tor_binary_path
+        "9050",  # tor_socks_port
+        "MULL-12345678",  # mullvad_account_secret -- password prompt
+        "auto",  # mullvad_relay_country
+        True,  # mullvad_killswitch
+    ]
+
+    def test_dotenv_file_written_with_secret(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from mordred_hermes import _home as home_mod
+
+        monkeypatch.setattr(home_mod, "HERMES_BASE", tmp_path)
+        scripted = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD_SECRET))
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+
+        ns = argparse.Namespace(non_interactive=False)
+        rc = cli_handler(ns)
+        assert rc == 0
+
+        env_path = tmp_path / ".env"
+        assert env_path.exists(), (
+            f"H4: cli_handler must wire DotEnvFileWriter; no {env_path} written. "
+            "Mullvad account number was silently discarded."
+        )
+        text = env_path.read_text(encoding="utf-8")
+        assert "MORDRED_MULLVAD_ACCOUNT=MULL-12345678" in text, text
+
+    def test_credentials_json_written(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from mordred_hermes import _home as home_mod
+
+        monkeypatch.setattr(home_mod, "HERMES_BASE", tmp_path)
+        scripted = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD_SECRET))
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+
+        ns = argparse.Namespace(non_interactive=False)
+        rc = cli_handler(ns)
+        assert rc == 0
+
+        creds_path = tmp_path / "mordred" / "credentials" / "network.json"
+        assert creds_path.exists(), (
+            f"H4: cli_handler must wire JSONCredentialsWriter; no {creds_path} written. "
+            "Mullvad relay/killswitch indirection JSON was silently discarded."
+        )
+        body = json.loads(creds_path.read_text(encoding="utf-8"))
+        assert body["mullvad"]["account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
+        assert body["mullvad"]["relay_country"] == "auto"
+        assert body["mullvad"]["killswitch"] is True
+
+
 # -----------------------------------------------------------------------------
 # Default subprocess runner -- assert command shape without spawning.
 # -----------------------------------------------------------------------------
