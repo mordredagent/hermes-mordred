@@ -104,9 +104,17 @@ class _FakeCtx:
 # --------------------------------------------------------------------------- #
 
 
-def _write_policy(tmp_path: Path, policy_mode: str = "off") -> Path:
+def _write_policy(
+    tmp_path: Path,
+    policy_mode: str = "off",
+    *,
+    disable_ipv6: bool | None = None,
+) -> Path:
     p = tmp_path / "policy.json"
-    p.write_text(json.dumps({"policy": policy_mode}))
+    payload: dict[str, Any] = {"policy": policy_mode}
+    if disable_ipv6 is not None:
+        payload["disable_ipv6"] = disable_ipv6
+    p.write_text(json.dumps(payload))
     return p
 
 
@@ -539,6 +547,113 @@ class TestRegisterLoadsPolicyFromDisk:
         runtime = api._RUNTIME
         assert runtime is not None
         assert runtime._config.policy_mode == "off"  # type: ignore[attr-defined]
+
+
+class TestRegisterLoadsDisableIPv6FromDisk:
+    """Phase 3 PR3a Task #2: ``disable_ipv6`` schema in ``policy.json``.
+
+    ``RuntimeConfig.disable_ipv6`` is the v1 flag for IPv6-leak defence in
+    advisory form (flagger warning + IPv4-only resolver hint; full kernel
+    enforcement is v2-N2). When ``policy.json`` doesn't pin the value, the
+    reader infers it from ``policy_mode`` so a strict-by-disk policy gets
+    safe-by-default IPv6 disabling without an explicit toggle. When the
+    user pins it, their choice wins.
+    """
+
+    def _register_with_policy(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        policy_path: Path,
+        config_path: Path,
+    ) -> Any:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+        return api._RUNTIME
+
+    def test_strict_policy_no_explicit_field_defaults_to_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "strict")  # no disable_ipv6 in JSON
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is True, (  # type: ignore[attr-defined]
+            "strict without explicit pin must default to True (safe)"
+        )
+
+    def test_lenient_policy_no_explicit_field_defaults_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False, (  # type: ignore[attr-defined]
+            "lenient without explicit pin must default to False (user-friendly)"
+        )
+
+    def test_off_policy_no_explicit_field_defaults_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "off")
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
+
+    def test_strict_policy_user_pin_false_is_honoured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User explicitly opting out of IPv6-disable in strict is allowed.
+        Documented caveat in POLICY.md - lets IPv6-only providers work but
+        the flagger emits a strict-mode warning."""
+        policy = _write_policy(tmp_path, "strict", disable_ipv6=False)
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
+
+    def test_lenient_policy_user_pin_true_is_honoured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "lenient", disable_ipv6=True)
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is True  # type: ignore[attr-defined]
+
+    def test_non_bool_value_falls_back_to_mode_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A corrupted ``disable_ipv6`` (string, list, dict) falls back to the
+        policy-mode default. Mirrors :class:`_read_policy_mode`'s unhashable
+        fallback (Codex round 3 P2)."""
+        p = tmp_path / "policy.json"
+        p.write_text(json.dumps({"policy": "strict", "disable_ipv6": "yes-please"}))
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, p, config)
+        assert runtime is not None
+        # strict default = True
+        assert runtime._config.disable_ipv6 is True  # type: ignore[attr-defined]
+
+    def test_missing_policy_json_disable_ipv6_defaults_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No policy.json → off mode → disable_ipv6 stays False."""
+        runtime = self._register_with_policy(
+            tmp_path, monkeypatch, tmp_path / "absent.json", tmp_path / "absent.yaml"
+        )
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
 
 
 class TestSessionStartRefreshesRuntimePolicy:
