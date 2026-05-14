@@ -28,7 +28,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from .policy_writer import PolicySnapshot, PolicyWriter
 
@@ -52,11 +52,16 @@ class PromptIO(Protocol):
     Production impl wraps ``prompt_toolkit``. Tests inject a scripted FIFO
     that pops pre-recorded answers per call -- nothing in this module
     touches a real TTY.
+
+    Phase 3 PR3a Task #6 added :meth:`ask_password` so secret prompts
+    (the Mullvad account number) bypass shell history and don't appear in
+    test diagnostics that log every user-typed value.
     """
 
     def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str: ...
     def ask_text(self, label: str, default: str = "") -> str: ...
     def ask_bool(self, label: str, default: bool) -> bool: ...
+    def ask_password(self, label: str, default: str = "") -> str: ...
 
 
 # -----------------------------------------------------------------------------
@@ -127,6 +132,20 @@ class PromptToolkitIO:
             return default
         return answer in ("y", "yes")
 
+    def ask_password(self, label: str, default: str = "") -> str:
+        """Read a secret with shell-history-safe echoing.
+
+        ``is_password=True`` masks the input. Empty input → ``default`` so
+        a user who already has the env var set elsewhere can decline to
+        re-enter the secret. Documented in PR3c playbook.
+        """
+        try:
+            from prompt_toolkit import prompt
+        except ImportError as e:
+            raise RuntimeError("prompt_toolkit is required for interactive `hermes mordred configure`") from e
+        answer = prompt(f"{label}: ", is_password=True)
+        return answer.strip() or default
+
 
 # -----------------------------------------------------------------------------
 # NonInteractive guard -- rejects prompts in CI / scripted use.
@@ -157,23 +176,52 @@ class _RefusingPromptIO:
     def ask_bool(self, label: str, default: bool) -> bool:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
+    def ask_password(self, label: str, default: str = "") -> str:
+        raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
+
 
 # -----------------------------------------------------------------------------
 # Mordred-specific prompt sequence + run().
 # -----------------------------------------------------------------------------
 
 
+DEFAULT_TOR_SOCKS_PORT: Final[int] = 9050
+MULLVAD_ACCOUNT_ENV_VAR_NAME: Final[str] = "MORDRED_MULLVAD_ACCOUNT"
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkAnswers:
+    """The 6 wizard outputs that drive Phase 3 path management.
+
+    Task #6 keeps them on a sibling field of :class:`ConfigureResult`;
+    Task #7 will fold them into :class:`PolicySnapshot` proper so the
+    PolicyWriter persists them under ``plugins.mordred_network`` in
+    config.yaml. The Mullvad account *value* never appears here -- only
+    the env-var REFERENCE. The actual secret flows through the
+    :class:`EnvFileWriter` (Task #6b) which writes it to
+    ``~/.hermes/.env`` at mode 0600.
+    """
+
+    default_network_path: str  # "tor" | "vpn" | "clearnet"
+    tor_binary_path: str  # filesystem path or shell-resolvable name
+    tor_socks_port: int
+    mullvad_account_id_env: str  # always ``MORDRED_MULLVAD_ACCOUNT``
+    mullvad_relay_country: str  # "auto" | 2-letter code
+    mullvad_killswitch: bool
+
+
 @dataclass(frozen=True, slots=True)
 class ConfigureResult:
     """Resolved answers from the prompt sequence.
 
-    Phase 2 fields (Codex M3 — moved into PR1) now live INSIDE ``snapshot``
-    via the extended :class:`PolicySnapshot`. The historical
-    ``phase2_fields`` side channel is retired; consumers should read
-    ``snapshot.local_llm_endpoint`` etc. directly.
+    Phase 2 fields (Codex M3 — moved into PR1) live INSIDE ``snapshot``
+    via the extended :class:`PolicySnapshot`. Phase 3 PR3a Task #6 adds
+    a sibling :class:`NetworkAnswers` payload; Task #7 will fold these
+    into :class:`PolicySnapshot` proper.
     """
 
     snapshot: PolicySnapshot
+    network_answers: NetworkAnswers
 
 
 def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
@@ -226,6 +274,46 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         default="none",
     )
 
+    # Phase 3 PR3a Task #6: Mordred network path + Tor / Mullvad
+    # configuration. Captured here on the ``NetworkAnswers`` sibling
+    # payload; Task #7 will fold the fields into ``PolicySnapshot`` so
+    # the PolicyWriter persists them to ``plugins.mordred_network`` in
+    # config.yaml. The Mullvad secret is collected via ``ask_password``
+    # and routed to the EnvFileWriter (Task #6b) rather than appearing
+    # in any snapshot.
+    default_network_path = prompt_io.ask_choice(
+        label="Default network path",
+        choices=("tor", "vpn", "clearnet"),
+        default="clearnet",
+    )
+    tor_binary_path = prompt_io.ask_text(
+        label="Tor binary path",
+        default="tor",
+    )
+    tor_socks_port_raw = prompt_io.ask_text(
+        label="Tor SOCKS port",
+        default=str(DEFAULT_TOR_SOCKS_PORT),
+    )
+    tor_socks_port = _coerce_tor_socks_port(tor_socks_port_raw)
+    # The secret never reaches NetworkAnswers — only the env-var REFERENCE.
+    _mullvad_secret = prompt_io.ask_password(
+        label="Mullvad account number (stored in ~/.hermes/.env)",
+        default="",
+    )
+    # Tag the secret so the upcoming EnvFileWriter consumer can find it;
+    # Task #6c wires the run() pipeline. Keep the local for now — the
+    # collect_answers contract is "return the user's choices"; side effects
+    # belong to the writer step.
+    del _mullvad_secret
+    mullvad_relay_country = prompt_io.ask_text(
+        label="Mullvad relay country (`auto` or 2-letter code)",
+        default="auto",
+    )
+    mullvad_killswitch = prompt_io.ask_bool(
+        label="Mullvad killswitch (lockdown-mode)",
+        default=policy == "strict",
+    )
+
     snapshot = PolicySnapshot(
         policy=policy,
         allow_cloud_llm=allow_cloud_llm,
@@ -235,7 +323,34 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         cloud_attempt_action=cloud_attempt_action,
         harness_primary=harness_primary,
     )
-    return ConfigureResult(snapshot=snapshot)
+    network_answers = NetworkAnswers(
+        default_network_path=default_network_path,
+        tor_binary_path=tor_binary_path,
+        tor_socks_port=tor_socks_port,
+        mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
+        mullvad_relay_country=mullvad_relay_country,
+        mullvad_killswitch=mullvad_killswitch,
+    )
+    return ConfigureResult(snapshot=snapshot, network_answers=network_answers)
+
+
+def _coerce_tor_socks_port(raw: str) -> int:
+    """Parse a port string; fall back to the default 9050 on garbage input.
+
+    Hard-aborting on bad input would force the user to abandon a whole
+    configure session for a typo. A WARN log + safe-default lets them fix
+    it later via ``hermes mordred network use`` or by re-editing the
+    policy.json directly.
+    """
+    try:
+        port = int(raw)
+    except ValueError:
+        _LOG.warning("Invalid Tor SOCKS port %r; falling back to default %d", raw, DEFAULT_TOR_SOCKS_PORT)
+        return DEFAULT_TOR_SOCKS_PORT
+    if port <= 0 or port > 65535:
+        _LOG.warning("Tor SOCKS port %d out of range; falling back to default %d", port, DEFAULT_TOR_SOCKS_PORT)
+        return DEFAULT_TOR_SOCKS_PORT
+    return port
 
 
 def _coerce_cloud_attempt_action(raw: str) -> Literal["always-block", "prompt-once"]:

@@ -12,6 +12,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -56,6 +57,12 @@ class _ScriptedPromptIO:
     def ask_bool(self, label: str, default: bool) -> bool:
         return bool(self._pop("bool", label, default))
 
+    def ask_password(self, label: str, default: str = "") -> str:
+        """Same FIFO contract as ask_text but kind tag distinguishes for
+        diagnostics so a future test can confirm the wizard used password
+        prompting for secrets, not plain text."""
+        return str(self._pop("password", label, default))
+
 
 @dataclass
 class _SetupRunnerSpy:
@@ -91,6 +98,13 @@ class TestCollectAnswers:
                 "llama-3",  # local_llm_model_id (Phase 2)
                 "prompt-once",  # cloud_attempt_action (Phase 2)
                 "codex",  # harness_primary (Phase 2 PR2)
+                # Phase 3 PR3a Task #6 — network prompt sextet:
+                "clearnet",  # default_network_path
+                "/usr/bin/tor",  # tor_binary_path
+                "9050",  # tor_socks_port (ask_text)
+                "",  # mullvad account (password; empty = no .env line)
+                "auto",  # mullvad_relay_country
+                False,  # mullvad_killswitch
             ]
         )
         result = collect_answers(prompts)
@@ -110,7 +124,21 @@ class TestCollectAnswers:
 
     def test_lenient_with_empty_allowlist(self) -> None:
         prompts = _ScriptedPromptIO(
-            answers=["lenient", False, "", "http://localhost:1234/v1", "", "always-block", "none"]
+            answers=[
+                "lenient",
+                False,
+                "",
+                "http://localhost:1234/v1",
+                "",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
         )
         result = collect_answers(prompts)
         assert result.snapshot.policy == "lenient"
@@ -119,13 +147,49 @@ class TestCollectAnswers:
         assert result.snapshot.harness_primary == "none"
 
     def test_csv_whitespace_stripped(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["off", False, "  anthropic ,  openai  ,", "x", "", "always-block", "none"])
+        prompts = _ScriptedPromptIO(
+            answers=[
+                "off",
+                False,
+                "  anthropic ,  openai  ,",
+                "x",
+                "",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
+        )
         result = collect_answers(prompts)
         assert result.snapshot.cloud_provider_allowlist == ("anthropic", "openai")
 
     def test_prompt_order_is_stable(self) -> None:
-        """Order matters for snapshot tests; lock it explicitly."""
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "y", "always-block", "none"])
+        """Order matters for snapshot tests; lock it explicitly.
+
+        Task #6 added 6 network prompts at the end. The leading 7 stay
+        stable so Phase 1 / Phase 2 snapshot tests aren't disturbed.
+        """
+        prompts = _ScriptedPromptIO(
+            answers=[
+                "lenient",
+                False,
+                "",
+                "x",
+                "y",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
+        )
         collect_answers(prompts)
         labels = [label for _, label, _ in prompts.seen]
         assert labels == [
@@ -136,6 +200,12 @@ class TestCollectAnswers:
             "Local LLM model id (Phase 2)",
             "On cloud LLM attempt under strict mode (Phase 2)",
             "Agent harness primary (Phase 2; strict mode refuses if a known harness)",
+            "Default network path",
+            "Tor binary path",
+            "Tor SOCKS port",
+            "Mullvad account number (stored in ~/.hermes/.env)",
+            "Mullvad relay country (`auto` or 2-letter code)",
+            "Mullvad killswitch (lockdown-mode)",
         ]
 
 
@@ -147,7 +217,21 @@ class TestCollectAnswers:
 class TestRun:
     def test_persists_snapshot_to_disk(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(
-            answers=["strict", False, "anthropic", "http://x/v1", "qwen", "prompt-once", "codex"]
+            answers=[
+                "strict",
+                False,
+                "anthropic",
+                "http://x/v1",
+                "qwen",
+                "prompt-once",
+                "codex",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                True,
+            ]
         )
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
@@ -181,7 +265,23 @@ class TestRun:
         assert result.snapshot.harness_primary == "codex"
 
     def test_skip_hermes_setup_does_not_call_runner(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block", "none"])
+        prompts = _ScriptedPromptIO(
+            answers=[
+                "off",
+                False,
+                "",
+                "x",
+                "",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
+        )
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -189,7 +289,23 @@ class TestRun:
         assert runner.calls == [], "skip_hermes_setup must not invoke the runner"
 
     def test_setup_failure_warns_but_continues(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block", "none"])
+        prompts = _ScriptedPromptIO(
+            answers=[
+                "lenient",
+                False,
+                "",
+                "x",
+                "",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
+        )
         runner = _SetupRunnerSpy(returncode=42)
         w = _writer(tmp_path)
 
@@ -201,7 +317,23 @@ class TestRun:
         assert any("hermes setup" in r.getMessage() and "42" in r.getMessage() for r in caplog.records)
 
     def test_non_interactive_forwarded_to_runner(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=["lenient", False, "", "x", "", "always-block", "none"])
+        prompts = _ScriptedPromptIO(
+            answers=[
+                "lenient",
+                False,
+                "",
+                "x",
+                "",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
+        )
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -270,7 +402,23 @@ class TestCliHandler:
         assert "non-interactive" in captured.err.lower()
 
     def test_interactive_path_runs_end_to_end(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        scripted = _ScriptedPromptIO(answers=["off", False, "", "x", "", "always-block", "none"])
+        scripted = _ScriptedPromptIO(
+            answers=[
+                "off",
+                False,
+                "",
+                "x",
+                "",
+                "always-block",
+                "none",
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",
+                "auto",
+                False,
+            ]
+        )
         _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
         ns = argparse.Namespace(non_interactive=False)
         rc = cli_handler(ns)
@@ -438,7 +586,7 @@ class TestNetworkPrompts:
     expectations (no Mullvad account, no killswitch); strict-mode
     operators set them via the prompts."""
 
-    _BASE_ANSWERS = [
+    _BASE_ANSWERS: ClassVar[list[object]] = [
         "lenient",  # policy
         False,  # allow_cloud_llm
         "",  # cloud_provider_allowlist
@@ -447,7 +595,7 @@ class TestNetworkPrompts:
         "always-block",  # cloud_attempt_action
         "none",  # harness_primary
     ]
-    _NETWORK_ANSWERS = [
+    _NETWORK_ANSWERS: ClassVar[list[object]] = [
         "tor",  # default_network_path
         "/opt/tor/bin/tor",  # tor_binary_path
         "9150",  # tor_socks_port (ask_text -> coerce to int)
@@ -523,9 +671,7 @@ class TestNetworkPrompts:
 
     def test_tor_socks_port_coerced_to_int(self) -> None:
         """The text prompt returns a string; collect_answers must coerce."""
-        prompts = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "tor", "/usr/bin/tor", "9150", "", "auto", False]
-        )
+        prompts = _ScriptedPromptIO(answers=[*self._BASE_ANSWERS, "tor", "/usr/bin/tor", "9150", "", "auto", False])
         result = collect_answers(prompts)
         assert result.network_answers.tor_socks_port == 9150  # type: ignore[attr-defined]
         assert isinstance(result.network_answers.tor_socks_port, int)  # type: ignore[attr-defined]
