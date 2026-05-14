@@ -355,3 +355,186 @@ def test_refusing_prompt_io_matches_protocol() -> None:
 def test_setup_runner_spy_matches_protocol() -> None:
     r: SetupRunner = _SetupRunnerSpy()
     assert r is not None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 PR3a Task #6: Mullvad / Tor wizard prompts + NetworkAnswers         #
+# --------------------------------------------------------------------------- #
+
+
+class TestPromptIOAskPassword:
+    """``PromptIO`` grows an ``ask_password`` method so secrets (Mullvad
+    account number) don't appear in shell history or _ScriptedPromptIO.seen
+    string-coerced records.
+    """
+
+    def test_protocol_has_ask_password(self) -> None:
+        """Static check: PromptIO.ask_password exists with the documented shape."""
+        import inspect
+
+        sig = inspect.signature(PromptIO.ask_password)  # type: ignore[attr-defined]
+        params = list(sig.parameters)
+        # self + label + default
+        assert "label" in params
+        assert "default" in params
+
+    def test_scripted_prompt_io_supports_ask_password(self) -> None:
+        scripted = _ScriptedPromptIO(answers=["secret-123"])
+        result = scripted.ask_password("Mullvad account id", default="")  # type: ignore[attr-defined]
+        assert result == "secret-123"
+
+    def test_refusing_prompt_io_ask_password_raises(self) -> None:
+        rp = _RefusingPromptIO()
+        with pytest.raises(NonInteractiveAbort):
+            rp.ask_password("secret", default="")  # type: ignore[attr-defined]
+
+
+class TestNetworkAnswersDataclass:
+    """A new ``NetworkAnswers`` dataclass carries the 5 (well, 6 with bool)
+    new wizard outputs alongside ``ConfigureResult.snapshot``. Task #7 will
+    fold these into ``PolicySnapshot`` proper; PR3a Task #6 keeps them on
+    a sibling field so the prompt + writer slice ships first."""
+
+    def test_network_answers_importable(self) -> None:
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        assert NetworkAnswers is not None
+
+    def test_network_answers_fields_present(self) -> None:
+        import dataclasses
+
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        names = {f.name for f in dataclasses.fields(NetworkAnswers)}
+        assert names == {
+            "default_network_path",
+            "tor_binary_path",
+            "tor_socks_port",
+            "mullvad_account_id_env",
+            "mullvad_relay_country",
+            "mullvad_killswitch",
+        }
+
+    def test_network_answers_is_frozen(self) -> None:
+        import dataclasses
+
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        na = NetworkAnswers(
+            default_network_path="clearnet",
+            tor_binary_path="/usr/bin/tor",
+            tor_socks_port=9050,
+            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+            mullvad_relay_country="auto",
+            mullvad_killswitch=False,
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            na.default_network_path = "tor"  # type: ignore[misc]
+
+
+class TestNetworkPrompts:
+    """``collect_answers`` runs 6 new network prompts after the existing
+    Phase 1 / Phase 2 fields. Default values mirror lenient-mode
+    expectations (no Mullvad account, no killswitch); strict-mode
+    operators set them via the prompts."""
+
+    _BASE_ANSWERS = [
+        "lenient",  # policy
+        False,  # allow_cloud_llm
+        "",  # cloud_provider_allowlist
+        "http://x/v1",  # local_llm_endpoint
+        "qwen",  # local_llm_model_id
+        "always-block",  # cloud_attempt_action
+        "none",  # harness_primary
+    ]
+    _NETWORK_ANSWERS = [
+        "tor",  # default_network_path
+        "/opt/tor/bin/tor",  # tor_binary_path
+        "9150",  # tor_socks_port (ask_text -> coerce to int)
+        "my-secret-account",  # mullvad_account_id (ask_password -> .env value, ConfigureResult holds env-var REF only)
+        "jp",  # mullvad_relay_country
+        True,  # mullvad_killswitch
+    ]
+
+    def test_collects_six_network_prompts(self) -> None:
+        prompts = _ScriptedPromptIO(answers=[*self._BASE_ANSWERS, *self._NETWORK_ANSWERS])
+        result = collect_answers(prompts)
+        from mordred_hermes.wizard.configure import NetworkAnswers
+
+        assert isinstance(result.network_answers, NetworkAnswers)  # type: ignore[attr-defined]
+        na = result.network_answers  # type: ignore[attr-defined]
+        assert na.default_network_path == "tor"
+        assert na.tor_binary_path == "/opt/tor/bin/tor"
+        assert na.tor_socks_port == 9150
+        assert na.mullvad_account_id_env == "MORDRED_MULLVAD_ACCOUNT"
+        assert na.mullvad_relay_country == "jp"
+        assert na.mullvad_killswitch is True
+
+    def test_empty_mullvad_account_yields_blank_env_ref(self) -> None:
+        """User leaves Mullvad password blank → ``mullvad_account_id_env`` is
+        still the canonical env-var name; the writer will see an empty value
+        and decide whether to write the .env line."""
+        prompts = _ScriptedPromptIO(
+            answers=[
+                *self._BASE_ANSWERS,
+                "clearnet",
+                "/usr/bin/tor",
+                "9050",
+                "",  # empty password
+                "auto",
+                False,
+            ]
+        )
+        result = collect_answers(prompts)
+        na = result.network_answers  # type: ignore[attr-defined]
+        assert na.mullvad_account_id_env == "MORDRED_MULLVAD_ACCOUNT"
+        # The actual secret is captured separately for the EnvFileWriter
+        # (the prompts.seen record carries it). ConfigureResult only carries
+        # the env-var reference.
+
+    def test_prompt_order_now_includes_six_network_labels(self) -> None:
+        """Label-order regression: the 6 new network labels come AFTER the
+        existing 7 Phase 1/Phase 2 prompts so snapshot tests that depend on
+        the leading prompts continue to pass."""
+        prompts = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "auto", False]
+        )
+        collect_answers(prompts)
+        labels = [label for _, label, _ in prompts.seen]
+        # First 7 are unchanged (Phase 1 / Phase 2).
+        assert labels[:7] == [
+            "Mordred policy mode",
+            "Allow cloud LLM providers (passes through provider override)?",
+            "Cloud provider allowlist (comma-separated; empty = none)",
+            "Local LLM endpoint URL (Phase 2)",
+            "Local LLM model id (Phase 2)",
+            "On cloud LLM attempt under strict mode (Phase 2)",
+            "Agent harness primary (Phase 2; strict mode refuses if a known harness)",
+        ]
+        # Next 6 are the new network prompts.
+        assert labels[7:] == [
+            "Default network path",
+            "Tor binary path",
+            "Tor SOCKS port",
+            "Mullvad account number (stored in ~/.hermes/.env)",
+            "Mullvad relay country (`auto` or 2-letter code)",
+            "Mullvad killswitch (lockdown-mode)",
+        ]
+
+    def test_tor_socks_port_coerced_to_int(self) -> None:
+        """The text prompt returns a string; collect_answers must coerce."""
+        prompts = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "tor", "/usr/bin/tor", "9150", "", "auto", False]
+        )
+        result = collect_answers(prompts)
+        assert result.network_answers.tor_socks_port == 9150  # type: ignore[attr-defined]
+        assert isinstance(result.network_answers.tor_socks_port, int)  # type: ignore[attr-defined]
+
+    def test_invalid_tor_socks_port_falls_back_to_default(self) -> None:
+        """A non-numeric port answer falls back to 9050 with a warning rather
+        than aborting the whole configure flow."""
+        prompts = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "tor", "/usr/bin/tor", "not-a-port", "", "auto", False]
+        )
+        result = collect_answers(prompts)
+        assert result.network_answers.tor_socks_port == 9050  # type: ignore[attr-defined]
