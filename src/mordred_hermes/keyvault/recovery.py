@@ -58,11 +58,11 @@ class RecoveryDigestMismatch(VerificationDigestMismatch):
     """
 
 
-def _emit_mismatch(audit_sink: AuditSink | None, *, blob_version: int) -> BaseException | None:
+def _emit_mismatch(audit_sink: AuditSink | None, *, blob_version: int) -> Exception | None:
     """Best-effort emit of the ``keyvault.recovery_digest_mismatch``
-    audit entry. Returns the sink's exception (if any) so the caller
-    can chain it as ``__context__`` on the primary
-    :class:`RecoveryDigestMismatch`.
+    audit entry. Returns the sink's exception (if any, as an
+    :class:`Exception` instance) so the caller can chain it as
+    ``__context__`` on the primary :class:`RecoveryDigestMismatch`.
 
     Why catch here rather than at the call site (code-reviewer HIGH-1):
     the safety-critical invariant is "caller's surface exception is
@@ -72,10 +72,15 @@ def _emit_mismatch(audit_sink: AuditSink | None, *, blob_version: int) -> BaseEx
     ``except RecoveryDigestMismatch: show_user("wrong passphrase")``
     handler silently leaks the AuditDiskFull through.
 
-    Returning the captured exception (rather than re-raising or
-    swallowing) lets ``import_backup`` chain it as ``__context__`` so
-    operators can still diagnose the audit-log failure via the
-    standard ``__context__`` traceback walk.
+    Why ``except Exception`` (second-pass code-reviewer HIGH, 2026-05-14):
+    we deliberately do NOT catch :class:`BaseException`. That
+    superclass also contains :class:`KeyboardInterrupt`,
+    :class:`SystemExit`, and :class:`GeneratorExit`, which encode
+    "the user / runtime wants the program to stop NOW". Masking those
+    into ``RecoveryDigestMismatch.__context__`` would break Ctrl-C
+    handling for any CLI built on top of this module, and would let
+    a sink that calls ``sys.exit(1)`` be silently overridden. Those
+    must propagate cleanly.
     """
     if audit_sink is None:
         return None
@@ -88,11 +93,13 @@ def _emit_mismatch(audit_sink: AuditSink | None, *, blob_version: int) -> BaseEx
                 "blob_version": blob_version,
             }
         )
-    except BaseException as exc:
-        # Intentional broad catch: any sink failure (RuntimeError,
-        # OSError, KeyboardInterrupt, etc.) must be chained to the
-        # primary RecoveryDigestMismatch, never swallowed and never
-        # allowed to mask it. The chaining happens at the call site.
+    except Exception as exc:
+        # Broad catch (intentional): any *operational* failure of the
+        # sink (RuntimeError, OSError, IOError, ValueError, etc.) is
+        # chained to RecoveryDigestMismatch. Control-flow exceptions
+        # (KeyboardInterrupt / SystemExit / GeneratorExit, all
+        # BaseException-but-not-Exception) propagate untouched — see
+        # the ``Why except Exception`` paragraph in the docstring.
         return exc
     return None
 

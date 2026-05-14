@@ -164,6 +164,22 @@ class TestVerifyBeforeDecrypt:
         assert calls, (
             "recovery.import_backup must route digest comparison through a timing-safe primitive (hmac.compare_digest)"
         )
+        # Second-pass code-reviewer MEDIUM: ``assert calls`` alone is
+        # too weak — a future refactor that calls _compare_digest with
+        # a 1-byte decoy and then does an ``==`` comparison on the
+        # full 32-byte digest would still pass. Verify each spy call
+        # received two 32-byte operands (full-width digest compare).
+        for actual, expected in calls:
+            assert len(actual) == 32, (
+                f"_compare_digest received a non-32-byte operand "
+                f"(len={len(actual)}); a partial compare would bypass "
+                f"the timing-safety guarantee"
+            )
+            assert len(expected) == 32, (
+                f"_compare_digest received a non-32-byte operand "
+                f"(len={len(expected)}); a partial compare would bypass "
+                f"the timing-safety guarantee"
+            )
 
 
 class TestAuditSink:
@@ -277,6 +293,52 @@ class TestAuditSink:
             "operators can diagnose audit-log failures without losing "
             "the primary RecoveryDigestMismatch signal"
         )
+
+    def test_audit_sink_keyboard_interrupt_propagates_unmasked(self, valid_blob: bytes) -> None:
+        """Second-pass code-reviewer HIGH: the exception-chaining fix
+        (HIGH-1) must NOT swallow ``KeyboardInterrupt`` or
+        ``SystemExit``. If the user hits Ctrl-C while the audit sink
+        is writing, the program must terminate — masking the
+        KeyboardInterrupt by chaining it as
+        ``RecoveryDigestMismatch.__context__`` would break the CLI's
+        ability to be interrupted.
+
+        Test asserts the surface exception is ``KeyboardInterrupt``,
+        not ``RecoveryDigestMismatch``. Same property applies to
+        ``SystemExit`` (covered by the next test).
+        """
+        from mordred_hermes.keyvault import recovery
+
+        def ctrl_c_during_audit(_entry: dict[str, object]) -> None:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            recovery.import_backup(
+                valid_blob,
+                PASSPHRASE,
+                recomputed_digest=WRONG_DIGEST,
+                audit_sink=ctrl_c_during_audit,
+            )
+
+    def test_audit_sink_system_exit_propagates_unmasked(self, valid_blob: bytes) -> None:
+        """Companion to KeyboardInterrupt: SystemExit raised by the
+        audit sink (e.g. a sink that decides to abort the process)
+        must propagate without being chained into
+        RecoveryDigestMismatch."""
+        from mordred_hermes.keyvault import recovery
+
+        def aborting_sink(_entry: dict[str, object]) -> None:
+            raise SystemExit(1)
+
+        with pytest.raises(SystemExit) as excinfo:
+            recovery.import_backup(
+                valid_blob,
+                PASSPHRASE,
+                recomputed_digest=WRONG_DIGEST,
+                audit_sink=aborting_sink,
+            )
+
+        assert excinfo.value.code == 1
 
 
 class TestInvalidTagPropagation:
