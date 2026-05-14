@@ -16,6 +16,7 @@ caller is expected to surface a startup warning on censored networks.
 from __future__ import annotations
 
 import contextlib
+import logging
 import selectors
 import socket
 import subprocess
@@ -27,11 +28,18 @@ from typing import Any, Final, Protocol, cast
 
 from .._exceptions import BringupFailed
 
+_LOG = logging.getLogger("mordred.network.paths.tor")
+
 PATH_NAME: Final[str] = "tor"
 DEFAULT_PORT_CANDIDATES: Final[tuple[int, ...]] = (9050, 9150)
 DEFAULT_BOOTSTRAP_TIMEOUT: Final[float] = 30.0
 DEFAULT_GRACE_SECONDS: Final[float] = 5.0
 BOOTSTRAP_DONE_TOKEN: Final[str] = "Bootstrapped 100%"
+
+# Module-level latch: emit the [tor-control]-missing WARNING exactly once
+# per process (the 30s liveness worker would spam logs every interval
+# otherwise). Reset only from tests; production keeps it sticky.
+_STEM_FALLBACK_WARNED: bool = False
 
 
 class _ProcessLike(Protocol):
@@ -330,7 +338,19 @@ def circuit_status_health(
     try:
         controller = factory(host=host, port=handle.control_port)
     except ImportError:
-        # Optional [tor-control] extra not installed; fall back gracefully.
+        # Optional [tor-control] extra not installed; fall back gracefully
+        # to the shallow process.poll() check. Strict-mode operators need
+        # visibility into this downgrade (review H5) so we WARN on the
+        # first occurrence; the module-level latch keeps the 30s liveness
+        # worker from spamming logs.
+        global _STEM_FALLBACK_WARNED
+        if not _STEM_FALLBACK_WARNED:
+            _LOG.warning(
+                "stem not installed; circuit_status_health degraded to shallow process.poll() "
+                "fallback. Install the optional dependency to recover deep liveness: "
+                "pip install 'mordred-hermes[tor-control]'."
+            )
+            _STEM_FALLBACK_WARNED = True
         return health(handle)
     except Exception:
         # Anything else at construction time (port unreachable, refused, ...)
