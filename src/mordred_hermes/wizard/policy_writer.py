@@ -23,10 +23,12 @@ the previous file intact.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
 import os
+import tempfile
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,7 +88,22 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
 
     Idempotent: if ``path`` already contains ``text`` byte-for-byte, no
     write happens (avoids touching mtime and triggering downstream watchers).
-    Sets the optional file mode AFTER replace so it lands atomically.
+
+    The tmpfile is created via :func:`tempfile.mkstemp` (atomic
+    ``O_CREAT|O_EXCL`` at mode 0o600 with a random suffix). This closes:
+
+    - H3 (review 2026-05-14): for ``mode=0o600`` calls (policy.json,
+      .env, credentials JSON) the secret content never lands on disk at
+      umask-default — the file is 0o600 from the moment of creation.
+    - M5: predictable ``<name>.tmp`` paths could collide under
+      concurrent writers; the random suffix removes that.
+    - M6: stale ``<name>.tmp`` from a prior crash no longer collides
+      with subsequent writes.
+
+    The final file mode after ``os.replace`` is the explicit ``mode``
+    argument when provided; otherwise the tmpfile's 0o600 (tightest safe
+    default — the parent directory is 0o700 so this doesn't restrict
+    legitimate access).
     """
     if path.exists():
         try:
@@ -97,12 +114,27 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
         if existing == text:
             return  # no-op -- content unchanged
 
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    if mode is not None:
-        os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    # mkstemp returns (fd, name). fd is opened O_RDWR|O_CREAT|O_EXCL at
+    # mode 0o600 atomically -- no umask-default window. prefix/suffix
+    # combine to keep the path adjacent to its target so os.replace stays
+    # within the same filesystem (otherwise replace is non-atomic).
+    fd, tmp_name = tempfile.mkstemp(dir=parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        if mode is not None and mode != 0o600:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        # Best-effort cleanup -- if replace already happened the unlink is
+        # a no-op (the path no longer points at our tmpfile).
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        raise
 
 
 def _ensure_plugins_enabled(root: Any) -> None:
