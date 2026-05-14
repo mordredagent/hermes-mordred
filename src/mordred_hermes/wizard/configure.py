@@ -196,13 +196,13 @@ MULLVAD_ACCOUNT_ENV_VAR_NAME: Final[str] = "MORDRED_MULLVAD_ACCOUNT"
 class NetworkAnswers:
     """The 6 wizard outputs that drive Phase 3 path management.
 
-    Task #6 keeps them on a sibling field of :class:`ConfigureResult`;
-    Task #7 will fold them into :class:`PolicySnapshot` proper so the
-    PolicyWriter persists them under ``plugins.mordred_network`` in
-    config.yaml. The Mullvad account *value* never appears here -- only
-    the env-var REFERENCE. The actual secret flows through the
-    :class:`EnvFileWriter` (Task #6b) which writes it to
-    ``~/.hermes/.env`` at mode 0600.
+    Lives on :class:`ConfigureResult` as a sibling of :class:`PolicySnapshot`.
+    The Mullvad account *value* never appears here -- only the env-var
+    REFERENCE. The actual secret flows through the :class:`EnvFileWriter`
+    (Task #6b) which writes it to ``~/.hermes/.env`` at mode 0600.
+
+    :meth:`to_config_yaml_section` (Task #7) returns the body
+    PolicyWriter upserts into ``plugins.mordred_network``.
     """
 
     default_network_path: str  # "tor" | "vpn" | "clearnet"
@@ -211,6 +211,23 @@ class NetworkAnswers:
     mullvad_account_id_env: str  # always ``MORDRED_MULLVAD_ACCOUNT``
     mullvad_relay_country: str  # "auto" | 2-letter code
     mullvad_killswitch: bool
+
+    def to_config_yaml_section(self) -> dict[str, object]:
+        """The body upserted into ``plugins.mordred_network`` in config.yaml.
+
+        Key remap: the wizard's ``default_network_path`` becomes
+        ``default_path`` on disk so the existing reader helper in
+        ``mordred_hermes.network.__init__._read_default_path`` keeps
+        working without a schema-version bump.
+        """
+        return {
+            "default_path": self.default_network_path,
+            "tor_binary_path": self.tor_binary_path,
+            "tor_socks_port": self.tor_socks_port,
+            "mullvad_account_id_env": self.mullvad_account_id_env,
+            "mullvad_relay_country": self.mullvad_relay_country,
+            "mullvad_killswitch": self.mullvad_killswitch,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +351,12 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         local_llm_model_id=local_llm_model_id,
         cloud_attempt_action=cloud_attempt_action,
         harness_primary=harness_primary,
+        # Phase 3 PR3a Task #7: persist the policy-mode-dependent default
+        # to policy.json explicitly so the network reader doesn't have to
+        # apply the same heuristic. Mirrors
+        # mordred_hermes.network._resolve_disable_ipv6: strict → True,
+        # lenient/off → False.
+        disable_ipv6=(policy == "strict"),
     )
     network_answers = NetworkAnswers(
         default_network_path=default_network_path,
@@ -431,7 +454,7 @@ def run(
             _LOG.warning("`hermes setup` exited with code %d; continuing with Mordred prompts anyway", rc)
 
     result = collect_answers(prompt_io)
-    policy_writer.write(result.snapshot)
+    policy_writer.write(result.snapshot, network_answers=result.network_answers)
 
     if env_writer is not None and result._mullvad_account_secret:
         from .._home import HERMES_BASE

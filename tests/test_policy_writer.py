@@ -39,7 +39,9 @@ class TestEmitPolicyJson:
         body = json.loads(path.read_text(encoding="utf-8"))
         # Phase 2 fields (local_llm_endpoint / local_llm_model_id /
         # cloud_attempt_action) land here with defaults so llm_guard can
-        # read them without needing wizard rerun. See POLICY.md §Phase 2.
+        # read them without needing wizard rerun. Phase 3 PR3a Task #7
+        # added ``disable_ipv6`` so the network reader doesn't have to
+        # rerun the mode-default heuristic. See POLICY.md §Phase 2 / §Phase 3.
         assert body == {
             "policy": "lenient",
             "allow_cloud_llm": False,
@@ -48,6 +50,7 @@ class TestEmitPolicyJson:
             "local_llm_endpoint": "http://localhost:1234/v1",
             "local_llm_model_id": "",
             "cloud_attempt_action": "always-block",
+            "disable_ipv6": True,
         }
         st_mode = stat.S_IMODE(os.stat(path).st_mode)
         assert st_mode == 0o600, f"expected 0o600, got 0o{st_mode:o}"

@@ -203,6 +203,10 @@ class PolicySnapshot:
     # Phase 2 PR2: config.yaml-only (consumed by harness_detect). Default
     # ``"none"`` is a sentinel that doesn't match any harness regex pattern.
     harness_primary: str = "none"
+    # Phase 3 PR3a Task #7: persisted to policy.json so the network reader
+    # (mordred_hermes.network._resolve_disable_ipv6) can consume it.
+    # Default ``True`` matches the safe-by-default in RuntimeConfig.
+    disable_ipv6: bool = True
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -213,6 +217,7 @@ class PolicySnapshot:
             "local_llm_endpoint": self.local_llm_endpoint,
             "local_llm_model_id": self.local_llm_model_id,
             "cloud_attempt_action": self.cloud_attempt_action,
+            "disable_ipv6": self.disable_ipv6,
         }
 
     def to_llm_guard_section(self) -> dict[str, Any]:
@@ -323,13 +328,19 @@ class PolicyWriter:
         text = json.dumps(snapshot.to_json_dict(), indent=2, sort_keys=False) + "\n"
         _atomic_write_text(self.policy_json_path, text, mode=0o600)
 
-    def write(self, snapshot: PolicySnapshot) -> None:
-        """Compose: write both ``policy.json`` AND the matching config.yaml sections.
+    def write(self, snapshot: PolicySnapshot, *, network_answers: object | None = None) -> None:
+        """Compose: write ``policy.json`` AND the matching config.yaml sections.
 
         Convenience for ``hermes mordred configure``. Phase 2 PR2 added
         ``mordred_llm_guard`` to the upserted set so ``harness_primary``
-        lands in config.yaml. Network / keyvault sections still belong to
-        their own configure flows in later phases.
+        lands in config.yaml. Phase 3 PR3a Task #7 adds an optional
+        ``network_answers`` (typed ``NetworkAnswers`` at the call site;
+        kept ``object`` here to avoid the configure → policy_writer →
+        configure import cycle) which lands in
+        ``plugins.mordred_network`` via the Task #1
+        :meth:`merge_mordred_sections` so subsequent ``hermes mordred
+        network use <path>`` invocations don't clobber the wizard's
+        choices.
         """
         self.emit_policy_json(snapshot)
         self.upsert_mordred_sections(
@@ -338,3 +349,7 @@ class PolicyWriter:
                 "mordred_llm_guard": snapshot.to_llm_guard_section(),
             }
         )
+        if network_answers is not None:
+            # Duck-typed call: NetworkAnswers has to_config_yaml_section.
+            section = network_answers.to_config_yaml_section()  # type: ignore[attr-defined]
+            self.merge_mordred_sections({"mordred_network": section})

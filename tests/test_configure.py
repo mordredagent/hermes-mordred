@@ -249,6 +249,9 @@ class TestRun:
             "local_llm_endpoint": "http://x/v1",
             "local_llm_model_id": "qwen",
             "cloud_attempt_action": "prompt-once",
+            # Phase 3 PR3a Task #7: strict policy → disable_ipv6=True
+            # is computed by collect_answers and persisted explicitly.
+            "disable_ipv6": True,
         }
         ytext = (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert "policy: strict" in ytext
