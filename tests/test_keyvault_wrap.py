@@ -61,9 +61,7 @@ class FakeBackend:
             raise WrapKeyNotFound(f"key {key_id!r} already exists")
         priv = ec.generate_private_key(ec.SECP256R1())
         self._keys[key_id] = priv
-        return priv.public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint
-        )
+        return priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
 
     def get_enclave_public_key(self, key_id: str) -> bytes:
         self.calls.append(("get_pub", key_id))
@@ -71,9 +69,7 @@ class FakeBackend:
             from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
 
             raise WrapKeyNotFound(f"no key for {key_id!r}")
-        return self._keys[key_id].public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint
-        )
+        return self._keys[key_id].public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
 
     def delete_enclave_key(self, key_id: str) -> None:
         self.calls.append(("delete", key_id))
@@ -601,9 +597,7 @@ class TestInputValidation:
 
 
 class TestAuditSinkExceptions:
-    def test_audit_sink_raise_on_denied_chains_via_context(
-        self, backend: FakeBackend
-    ) -> None:
+    def test_audit_sink_raise_on_denied_chains_via_context(self, backend: FakeBackend) -> None:
         """If the audit sink itself raises while recording a denial, the
         sink exception is chained as ``__context__`` on the surface
         :class:`WrapAuthCancelled` so callers' denial-handlers stay
