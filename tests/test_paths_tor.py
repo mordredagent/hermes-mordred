@@ -310,19 +310,23 @@ class _FakeController:
 
     Implements the methods ``circuit_status_health`` actually calls so
     tests don't depend on a real Tor daemon or the ``stem`` library.
+
+    The ``authenticate`` signature mirrors stem's real API
+    (Codex P1, 2026-05-14): ``Controller.authenticate`` accepts no
+    cookie kwarg -- it does PROTOCOLINFO discovery and cookie reading
+    itself. Earlier versions of this fake accepted ``cookie=...`` which
+    masked the production API mismatch.
     """
 
     def __init__(self, *, get_info_response: str = "", auth_raises: BaseException | None = None) -> None:
-        self.cookie_bytes_used: bytes | None = None
         self.authenticated: bool = False
         self.closed: bool = False
         self._get_info_response = get_info_response
         self._auth_raises = auth_raises
 
-    def authenticate(self, *, cookie: bytes) -> None:
+    def authenticate(self) -> None:
         if self._auth_raises is not None:
             raise self._auth_raises
-        self.cookie_bytes_used = cookie
         self.authenticated = True
 
     def get_info(self, key: str) -> str:
@@ -364,7 +368,10 @@ class TestCircuitStatusHealth:
 
         assert tor.circuit_status_health(handle, controller_factory=factory) is True
         assert fake.authenticated is True
-        assert fake.cookie_bytes_used == handle.data_dir.joinpath("control_auth_cookie").read_bytes()
+        # Codex P1 (2026-05-14): stem does cookie reading via PROTOCOLINFO,
+        # the production code no longer reads cookie_bytes itself, so the
+        # fake no longer tracks them. The cookie *file* existence is still
+        # a precondition asserted by _make_handle's setUp.
 
     def test_only_launched_circuits_returns_false(self, tmp_path: Path) -> None:
         from mordred_hermes.network.paths import tor

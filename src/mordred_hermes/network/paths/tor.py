@@ -261,9 +261,16 @@ class _ControllerLike(Protocol):
     The default factory returns a real stem ``Controller``; tests inject
     a ``_FakeController``-style stand-in. Both must support the context-
     manager protocol so the socket closes deterministically.
+
+    Codex review (2026-05-14, P1): the ``authenticate`` signature mirrors
+    stem's real ``Controller.authenticate(password=None, chroot_path=None,
+    protocolinfo_response=None)`` rather than a custom ``cookie=`` kwarg.
+    Stem does PROTOCOLINFO discovery + cookie read internally, so we
+    invoke it with no positional args. Fakes that previously accepted
+    ``cookie=...`` would have masked the API mismatch.
     """
 
-    def authenticate(self, *, cookie: bytes) -> None: ...
+    def authenticate(self) -> None: ...
 
     def get_info(self, key: str) -> str: ...
 
@@ -327,11 +334,11 @@ def circuit_status_health(
     """
     cookie_path = handle.data_dir / "control_auth_cookie"
     if not cookie_path.exists():
-        return health(handle)
-
-    try:
-        cookie_bytes = cookie_path.read_bytes()
-    except OSError:
+        # No cookie => Tor still bootstrapping or the data dir was wiped;
+        # the deep probe has nothing to authenticate with. Stem would
+        # auto-discover this path via PROTOCOLINFO and produce the same
+        # outcome, but we short-circuit here to keep the shallow fallback
+        # path fast (avoids opening a control-port socket just to fail).
         return health(handle)
 
     factory = controller_factory or _default_controller_factory
@@ -359,7 +366,11 @@ def circuit_status_health(
 
     try:
         try:
-            controller.authenticate(cookie=cookie_bytes)
+            # Codex P1 (2026-05-14): stem's real
+            # ``Controller.authenticate`` does PROTOCOLINFO discovery and
+            # reads the cookie file itself. The previous ``cookie=`` kwarg
+            # raised TypeError on every probe.
+            controller.authenticate()
         except Exception:
             return False
         try:
