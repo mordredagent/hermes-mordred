@@ -132,15 +132,26 @@ class TestProxyEnvRoundTrip:
         tor_container: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Codex P2-2 (2026-05-14): the prior assertion ``status_code <
+        400`` passed even when ``HTTPS_PROXY`` was ignored — direct
+        clearnet still returns 200. Hit ``/api/ip`` and assert
+        ``IsTor=True`` so the test fails closed if the env-var contract
+        regresses.
+        """
         httpx = pytest.importorskip("httpx", reason="httpx[socks] required")
         env = proxy_env.desired_env(path="tor", tor_socks_port=_SOCKS_PORT)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
 
         try:
-            with httpx.Client(timeout=15.0) as client:
-                response = client.get("https://check.torproject.org/")
+            with httpx.Client(timeout=30.0) as client:
+                response = client.get("https://check.torproject.org/api/ip")
         except Exception as e:
             pytest.skip(f"upstream probe flaked: {e!r}")
 
-        assert response.status_code < 400, f"httpx via HTTPS_PROXY did not reach Tor exit: {response.status_code}"
+        if response.status_code != 200:
+            pytest.skip(f"check.torproject.org returned {response.status_code}; treating as flake")
+        body: dict[str, Any] = response.json()
+        assert body.get("IsTor") is True, (
+            f"httpx via HTTPS_PROXY did not exit via Tor (proxy ignored or env regressed?): {body!r}"
+        )
