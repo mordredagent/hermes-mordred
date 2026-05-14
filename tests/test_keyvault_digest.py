@@ -26,25 +26,16 @@ from __future__ import annotations
 
 import pytest
 
-
 # SPEC fixed vector (canonical regression anchor for the digest algorithm).
 # Any future change that perturbs these values requires a SPEC update + PR
 # description note.
 SPEC_SEED = "test seed"
 SPEC_PASS = "test pass"
 SPEC_POW = bytes.fromhex("deadbeef" + "00" * 28)
-SPEC_SEED_HASH = bytes.fromhex(
-    "c18818fa275b46e46836d45540512fb2561a66924b2962d6675ef71c7cdcecf0"
-)
-SPEC_PASS_HASH = bytes.fromhex(
-    "734cedd9a49ec88207d0c58f757899bd2dc21cf65b6fa0958ff40c81e4ee08eb"
-)
-SPEC_MASKED_PASS = bytes.fromhex(
-    "ade15336a49ec88207d0c58f757899bd2dc21cf65b6fa0958ff40c81e4ee08eb"
-)
-SPEC_DIGEST = bytes.fromhex(
-    "25c17b1e1b249dd278f6de52e6e0dddf855fe9943177c99c5428fc1c321b5c93"
-)
+SPEC_SEED_HASH = bytes.fromhex("c18818fa275b46e46836d45540512fb2561a66924b2962d6675ef71c7cdcecf0")
+SPEC_PASS_HASH = bytes.fromhex("734cedd9a49ec88207d0c58f757899bd2dc21cf65b6fa0958ff40c81e4ee08eb")
+SPEC_MASKED_PASS = bytes.fromhex("ade15336a49ec88207d0c58f757899bd2dc21cf65b6fa0958ff40c81e4ee08eb")
+SPEC_DIGEST = bytes.fromhex("25c17b1e1b249dd278f6de52e6e0dddf855fe9943177c99c5428fc1c321b5c93")
 
 
 class TestSpecFixedVector:
@@ -64,10 +55,7 @@ class TestTop4:
     def test_top4_returns_first_four_bytes(self) -> None:
         from mordred_hermes.keyvault import digest
 
-        assert (
-            digest.top4(bytes.fromhex("deadbeefcafebabe" + "00" * 24))
-            == bytes.fromhex("deadbeef")
-        )
+        assert digest.top4(bytes.fromhex("deadbeefcafebabe" + "00" * 24)) == bytes.fromhex("deadbeef")
 
     def test_top4_accepts_exactly_four_bytes(self) -> None:
         from mordred_hermes.keyvault import digest
@@ -146,7 +134,7 @@ class TestXorWidth:
 
     def test_pass_hash_head_xored_with_top4(self) -> None:
         """``masked_pass[:4] == pass_hash[:4] XOR top4(pow)``."""
-        expected_head = bytes(p ^ t for p, t in zip(SPEC_PASS_HASH[:4], SPEC_POW[:4]))
+        expected_head = bytes(p ^ t for p, t in zip(SPEC_PASS_HASH[:4], SPEC_POW[:4], strict=True))
         assert SPEC_MASKED_PASS[:4] == expected_head
 
 
@@ -172,9 +160,7 @@ class TestVerifyDigest:
         from mordred_hermes.keyvault import digest
 
         with pytest.raises(digest.VerificationDigestMismatch):
-            digest.verify_digest(
-                SPEC_SEED, SPEC_PASS, SPEC_POW, expected=b"\x00" * 31
-            )
+            digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=b"\x00" * 31)
 
     def test_verify_digest_rejects_long_expected(self) -> None:
         """Companion to short_expected: 33-byte ``expected`` is also a
@@ -182,9 +168,7 @@ class TestVerifyDigest:
         from mordred_hermes.keyvault import digest
 
         with pytest.raises(digest.VerificationDigestMismatch):
-            digest.verify_digest(
-                SPEC_SEED, SPEC_PASS, SPEC_POW, expected=b"\x00" * 33
-            )
+            digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=b"\x00" * 33)
 
     def test_verify_digest_uses_constant_time_compare(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         """The implementation MUST use ``hmac.compare_digest`` (or
@@ -207,14 +191,9 @@ class TestVerifyDigest:
 
         # Patch the symbol that digest.py imported, not the global one.
         monkeypatch.setattr(digest, "_compare_digest", spy, raising=True)
-        digest.verify_digest(
-            SPEC_SEED, SPEC_PASS, SPEC_POW, expected=SPEC_DIGEST
-        )
+        digest.verify_digest(SPEC_SEED, SPEC_PASS, SPEC_POW, expected=SPEC_DIGEST)
 
-        assert calls, (
-            "verify_digest must route equality through a timing-safe "
-            "primitive (e.g. hmac.compare_digest)"
-        )
+        assert calls, "verify_digest must route equality through a timing-safe primitive (e.g. hmac.compare_digest)"
 
 
 class TestVerificationDigestMismatchException:
