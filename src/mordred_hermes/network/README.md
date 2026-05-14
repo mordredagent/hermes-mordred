@@ -12,6 +12,17 @@ Tor / VPN / Clearnet path management.
 
 Hermetic code-complete: M8 transport coverage + Tor ControlPort liveness + wizard Mullvad/Tor prompts. PR3b ships docker-compose integration tests, PR3c the operator playbook for the `unverified_baseline=True → False` flips.
 
+## Phase 3 PR3b status (2026-05-14)
+
+Integration test harness landed. `tests/integration/test_tor.py` runs against a hermetic alpine + Tor container (loopback-only port binding, SocksPolicy restricted to RFC1918) — proves SOCKS5 handshake, SOCKS5h DNS routing, and `proxy_env.desired_env` HTTPS_PROXY round-trip end-to-end. `tests/integration/test_vpn.py` is `MORDRED_LIVE_VPN_TEST=1` + `MORDRED_MULLVAD_ACCOUNT` gated — exercises the live Mullvad daemon roundtrip (bring-up / wait_connected / disconnect, lockdown rollback when `lockdown_applied_by_us`, handshake freshness under 180s).
+
+CI surface:
+
+- `.github/workflows/ci.yml` `integration-tor` job — ubuntu-24.04 only, `needs: test`, builds the local Dockerfile and runs `pytest tests/integration/test_tor.py`. No production code paths changed.
+- `.github/workflows/integration-vpn.yml` — `workflow_dispatch` only, never auto-runs (paid account + machine state mutation). Consumes `secrets.MORDRED_MULLVAD_ACCOUNT`.
+
+Docker harness: `tests/integration/_docker.py` (compose v2 lifecycle helper with three-tier skip-guard: `MORDRED_SKIP_DOCKER_TESTS=1`, OS, binary + daemon `docker info` probe), `tests/integration/docker/tor/{Dockerfile,torrc,docker-compose.yml}`.
+
 ### PR3a additions
 
 - `paths/tor.py::circuit_status_health(handle, *, controller_factory=None)` — Tor ControlPort cookie auth + `GETINFO circuit-status` deep liveness probe. BUILT-circuit-present → True. Optional via the `[tor-control]` extra (`pip install mordred-hermes[tor-control]` pulls in `stem>=1.8.0,<2`). Missing extra / missing cookie file / unreachable port → shallow `process.poll()` fallback. Used by strict-mode operators through the runtime's `tor_health` injection point.
@@ -66,11 +77,11 @@ Naming normalized to dotted form (`network.use` rather than the `network_use` fo
 
 Either way, **already-running subprocesses are not affected** — Hermes spawns with `env=dict(os.environ | env)` snapshot. The `live_subprocess_count` audit field is an informational signal of this risk per path switch.
 
-## Deferred to PR3
+## Deferred to PR3c
 
 - Real-traffic verification of `KNOWN_PROVIDERS` (TODO §0.8 L110-117): anthropic / openai / gemini / mordred-local / bedrock / vertex through HTTPS_PROXY (Wireshark + Tor circuit log).
 - SOCKS5h library compatibility verification (TODO §0.8 L118-122).
 - Once verified, per-entry `unverified_baseline` flips to `False`.
-- `tests/integration/test_tor.py` (docker-compose with Tor container) and `tests/integration/test_vpn.py` (`MORDRED_LIVE_TOR_TEST=1` gated).
+- Stem-against-real-Tor deep liveness probe (requires bind-mounted `data_dir` so the host can read `control_auth_cookie`). PR3b kept the harness ephemeral; PR3c extends it to a `tor-with-controlport` variant.
 
 See `mordred-docs/mordred/SPEC.md` §Plugin: `mordred_network` and `mordred-docs/mordred/TODO.md` §3.

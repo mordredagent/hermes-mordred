@@ -77,7 +77,14 @@ include = ["/src", "/tests", "/README.md", "/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# Codex review (2026-05-14, P2-1): default unit-test runs must skip
+# integration tests so `pytest` on a Linux dev box with Docker doesn't
+# spin up the Tor container. The dedicated `integration-tor` /
+# `integration-vpn` CI jobs opt back in via `-m integration`.
+addopts = "-q --strict-markers -m 'not integration'"
+markers = [
+    "integration: requires external services (Docker, real Mullvad daemon, live network); excluded from default runs",
+]
 xfail_strict = true
 
 [tool.ruff]
