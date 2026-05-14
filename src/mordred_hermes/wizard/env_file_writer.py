@@ -80,16 +80,22 @@ def _replace_or_strip_key(lines: list[str], key: str, value: str) -> tuple[list[
     Used by :meth:`DotEnvFileWriter.upsert`. Match is exact: ``key=...`` only
     matches lines starting with ``<key>=``. Comments and lines that happen to
     contain ``key=`` as a substring elsewhere are preserved.
+
+    Deduplication (review M2): if the on-disk file already had multiple
+    matching lines (from a hand-edit or a half-finished write), only the
+    first match keeps the new value -- subsequent matches are stripped --
+    so the result is a single line. Empty-value removal strips all
+    matches.
     """
     out: list[str] = []
     found = False
     prefix = f"{key}="
     for line in lines:
         if line.startswith(prefix):
-            found = True
-            if value:
+            if value and not found:
                 out.append(f"{key}={value}")
-            # else: drop the line (remove existing)
+            # subsequent matches dropped (or all matches dropped when value is empty)
+            found = True
             continue
         out.append(line)
     return out, found
