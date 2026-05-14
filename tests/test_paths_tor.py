@@ -17,6 +17,7 @@ The richer control-port circuit-status probe lands in PR2 alongside the
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import subprocess
 from pathlib import Path
@@ -463,3 +464,45 @@ class TestCircuitStatusHealth:
         # whether stem is installed.
         result = tor.circuit_status_health(handle)
         assert isinstance(result, bool)
+
+    def test_no_stem_logs_warning_once(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """H5 (review 2026-05-14): the silent shallow fallback when stem
+        is absent hides a real downgrade from the strict-mode operator.
+        At least one WARNING must be emitted naming the optional extra so
+        the operator can install ``mordred-hermes[tor-control]`` to
+        recover the deep probe. The warning must NOT be emitted every
+        call (the 30s liveness worker would spam logs); once per process
+        is enough.
+        """
+        import logging
+
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            raise ImportError("stem not installed (optional [tor-control] extra)")
+
+        # Reset the module-level "warned once" flag if it exists so this
+        # test starts from a clean slate. After GREEN it'll be a real
+        # module attribute; before GREEN the setattr is harmless.
+        with contextlib.suppress(AttributeError):
+            tor._STEM_FALLBACK_WARNED = False  # type: ignore[attr-defined]
+
+        with caplog.at_level(logging.WARNING, logger="mordred.network.paths.tor"):
+            tor.circuit_status_health(handle, controller_factory=factory)
+            tor.circuit_status_health(handle, controller_factory=factory)
+            tor.circuit_status_health(handle, controller_factory=factory)
+
+        relevant = [
+            r for r in caplog.records if r.levelno == logging.WARNING and "tor-control" in r.getMessage()
+        ]
+        assert relevant, (
+            "H5: circuit_status_health must emit a WARNING when stem is "
+            "absent so the operator knows the deep probe was skipped. "
+            f"Got log records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        assert len(relevant) == 1, (
+            f"H5: warning must fire exactly once per process; got {len(relevant)} "
+            "(30s liveness worker would spam logs)"
+        )
