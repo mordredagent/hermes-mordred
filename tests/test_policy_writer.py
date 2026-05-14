@@ -660,3 +660,44 @@ class TestWriteCompose:
         w.write(PolicySnapshot(policy="lenient"))
         leftovers = sorted(p.name for p in tmp_path.rglob("*.tmp"))
         assert leftovers == [], f"unexpected .tmp leftovers: {leftovers}"
+
+
+class TestHasConfigYamlSectionProtocol:
+    """H2 (review 2026-05-14): ``PolicyWriter.write`` accepted
+    ``network_answers: object | None`` and called ``.to_config_yaml_section()``
+    behind a ``# type: ignore[attr-defined]``. The structural shape is now
+    described by a ``runtime_checkable`` Protocol exposed from the module so
+    callers and tests can verify conformance and mypy --strict can drop the
+    type ignore.
+    """
+
+    def test_protocol_is_runtime_checkable_and_importable(self) -> None:
+        from mordred_hermes.wizard.policy_writer import _HasConfigYamlSection
+
+        class _Stub:
+            def to_config_yaml_section(self) -> dict[str, object]:
+                return {"default_path": "tor"}
+
+        class _NotStub:
+            pass
+
+        assert isinstance(_Stub(), _HasConfigYamlSection)
+        assert not isinstance(_NotStub(), _HasConfigYamlSection)
+
+    def test_write_accepts_protocol_shape_without_type_ignore(self, tmp_path: Path) -> None:
+        """Duck-type compliance: any object implementing the Protocol works."""
+
+        class _MinimalNetworkAnswers:
+            def to_config_yaml_section(self) -> dict[str, object]:
+                return {"default_path": "tor", "tor_socks_port": 9050}
+
+        w = _writer(tmp_path)
+        w.write(PolicySnapshot(policy="strict"), network_answers=_MinimalNetworkAnswers())
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with (tmp_path / "config.yaml").open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
+        assert data["plugins"]["mordred_network"]["tor_socks_port"] == 9050
