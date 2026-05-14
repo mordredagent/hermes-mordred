@@ -82,11 +82,15 @@ def test_phase1_freeze_preserved() -> None:
     assert not missing, f"Phase 1 codes accidentally removed: {sorted(missing)}"
 
 
-def test_total_freeze_size_16() -> None:
-    """After PR1: 12 Phase 1 codes + 4 Phase 3 codes = 16."""
+def test_total_freeze_size_after_phase4_pr2() -> None:
+    """After Phase 4 PR2: 12 Phase 1 + 4 Phase 3 + 2 Phase 4 = 18.
+
+    If a future PR bumps this, update POLICY.md's "Total freeze becomes N"
+    statement in the same commit so the doc and the type stay in lockstep.
+    """
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    assert len(get_args(ReasonCode)) == 16
+    assert len(get_args(ReasonCode)) == 18
 
 
 def test_no_underscore_typo_legacy_name() -> None:

@@ -27,8 +27,25 @@ Naming normalized to dotted form (``network.use`` rather than ``network_use``
 as in TODO.md L331) to match the existing ``policy.*`` / ``mordred.*``
 convention. Documented in POLICY.md.
 
-Phase 4 codes (``keyvault.*``) are intentionally NOT included — Phase 4's
-step-0 freeze adds its own codes alongside the SPEC.md update.
+Phase 4 PR2 step-0 freeze (2026-05-14) adds 2 ``keyvault.*`` codes,
+scoped narrowly per Codex review #8 — only codes with a PR2 emit site
+OR already referenced by frozen SPEC text are included now:
+
+- ``keyvault.recovery_digest_mismatch`` — emitted by ``recovery.import_backup``
+  before AES-GCM decryption runs, paired with
+  :class:`mordred_hermes.keyvault.recovery.RecoveryDigestMismatch` raise.
+  Codex review #4: verify-before-decrypt prevents secret materialization
+  on mismatch.
+- ``keyvault.seed_display_aborted_screenshot`` — SPEC §Seed phrase display
+  security L352 already references this; PR2 freezes it so the PR4
+  ``seed_display.py`` emit site has a stable target.
+
+PR3 codes (``keyvault.unwrap_authorized`` / ``keyvault.unwrap_denied``) and
+PR4 codes (``keyvault.init_started`` / ``keyvault.init_completed`` /
+``keyvault.backup_exported``) are deliberately NOT frozen here — they
+land in their respective step-0 freezes once the emit site exists, to
+avoid the "frozen but unused" footgun that Phase 2 hit with
+``policy.strict.local_stream_interrupted`` (POLICY.md entry #12 caveat).
 """
 
 from typing import Literal
@@ -50,4 +67,6 @@ ReasonCode = Literal[
     "network.use_failed",
     "network.bringup_failed",
     "network.path_dropped",
+    "keyvault.recovery_digest_mismatch",
+    "keyvault.seed_display_aborted_screenshot",
 ]
