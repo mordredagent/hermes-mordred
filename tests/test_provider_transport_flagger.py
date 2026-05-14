@@ -78,19 +78,24 @@ class TestStrictTor:
         assert flags == []
 
     def test_bedrock_aborts(self) -> None:
+        """bedrock fires both ``socks5h=False`` and ``respects_ipv6_proxy=False``
+        flags after Task #3 - assert at least one abort is present and that
+        the socks5h reason is mentioned. The aggregated message to the user
+        is composed downstream by the CLI / hooks layer."""
         from mordred_hermes.network import provider_transport_flagger as ptf
 
         flags = ptf.evaluate(active_path="tor", providers=("bedrock",), policy_mode="strict")
-        assert len(flags) == 1
-        assert flags[0].provider == "bedrock"
-        assert flags[0].severity == "abort"
+        assert flags, "bedrock must produce at least one flag"
+        assert all(f.provider == "bedrock" for f in flags)
+        assert any(f.severity == "abort" for f in flags)
+        assert any("socks5h" in f.reason.lower() for f in flags)
 
     def test_vertex_aborts(self) -> None:
         from mordred_hermes.network import provider_transport_flagger as ptf
 
         flags = ptf.evaluate(active_path="tor", providers=("vertex",), policy_mode="strict")
-        assert len(flags) == 1
-        assert flags[0].severity == "abort"
+        assert flags
+        assert any(f.severity == "abort" for f in flags)
 
     def test_localhost_only_provider_exempt(self) -> None:
         from mordred_hermes.network import provider_transport_flagger as ptf
@@ -146,6 +151,9 @@ class TestOverrides:
             transport="httpx",
             respects_proxy=True,
             respects_socks5h=True,
+            # Task #3: opt in to IPv6 proxy honouring so the new IPv6 branch
+            # doesn't flag this otherwise-clean provider.
+            respects_ipv6_proxy=True,
             unverified_baseline=False,
         )
         flags = ptf.evaluate(
