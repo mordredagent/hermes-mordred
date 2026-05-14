@@ -334,3 +334,81 @@ class TestNetworkStatusStandalone:
         assert rc == 0
         out = capsys.readouterr().out
         assert "clearnet" in out.lower()
+
+
+# --------------------------------------------------------------------------- #
+# network use - merge preservation (Phase 3 PR3a, review-L4 fix)              #
+# --------------------------------------------------------------------------- #
+
+
+class TestNetworkUseMergePreservation:
+    """``network use <path>`` must NOT clobber Tor/Mullvad sub-fields.
+
+    PR2 routed through ``upsert_mordred_sections`` which whole-replaces the
+    section -- documented at ``network_cli.py:135-141`` as a known caveat to
+    be fixed when Phase 3.2 wizard prompts land. PR3a routes through the new
+    ``merge_mordred_sections`` so partial writes preserve everything else.
+    """
+
+    def test_use_clearnet_preserves_tor_subfields(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import cli
+
+        seed = """\
+plugins:
+  mordred_network:
+    default_path: tor
+    tor_binary_path: /usr/bin/tor
+    tor_socks_port: 9050
+    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
+    mullvad_relay_country: jp
+"""
+        config = tmp_path / "config.yaml"
+        config.write_text(seed, encoding="utf-8")
+
+        args = _make_args(path="clearnet", config_path=config)
+        rc = cli._handle_network_use(args)
+        assert rc == 0
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section["default_path"] == "clearnet"
+        # All four sub-fields must survive the partial write.
+        assert section["tor_binary_path"] == "/usr/bin/tor"
+        assert section["tor_socks_port"] == 9050
+        assert section["mullvad_account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
+        assert section["mullvad_relay_country"] == "jp"
+
+    def test_use_tor_then_use_clearnet_preserves_tor_subfields_across_runs(self, tmp_path: Path) -> None:
+        """Two-step regression: configure persists Tor sub-fields, then a
+        subsequent ``network use clearnet`` must not drop them."""
+        from mordred_hermes.wizard import cli
+
+        seed = """\
+plugins:
+  mordred_network:
+    tor_binary_path: /opt/tor/bin/tor
+    tor_socks_port: 19050
+"""
+        config = tmp_path / "config.yaml"
+        config.write_text(seed, encoding="utf-8")
+
+        # First switch to tor.
+        rc1 = cli._handle_network_use(_make_args(path="tor", config_path=config))
+        assert rc1 == 0
+        # Then back to clearnet.
+        rc2 = cli._handle_network_use(_make_args(path="clearnet", config_path=config))
+        assert rc2 == 0
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section["default_path"] == "clearnet"
+        assert section["tor_binary_path"] == "/opt/tor/bin/tor"
+        assert section["tor_socks_port"] == 19050

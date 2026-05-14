@@ -23,14 +23,16 @@ the previous file intact.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
 import os
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from ruamel.yaml import YAML
 
@@ -49,6 +51,21 @@ MORDRED_PLUGIN_NAMES: Final = (
     "mordred_network",
     "mordred_keyvault",
 )
+
+
+@runtime_checkable
+class _HasConfigYamlSection(Protocol):
+    """Structural shape required by :meth:`PolicyWriter.write` for the
+    optional ``network_answers`` argument.
+
+    Implemented by :class:`mordred_hermes.wizard.configure.NetworkAnswers`.
+    Kept as a Protocol (not a concrete import) to avoid the
+    ``configure -> policy_writer -> configure`` import cycle while still
+    enforcing the contract under ``mypy --strict``. ``runtime_checkable`` so
+    callers and tests can ``isinstance``-check at the boundary.
+    """
+
+    def to_config_yaml_section(self) -> Mapping[str, Any]: ...
 
 
 def _round_trip_yaml() -> YAML:
@@ -71,7 +88,22 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
 
     Idempotent: if ``path`` already contains ``text`` byte-for-byte, no
     write happens (avoids touching mtime and triggering downstream watchers).
-    Sets the optional file mode AFTER replace so it lands atomically.
+
+    The tmpfile is created via :func:`tempfile.mkstemp` (atomic
+    ``O_CREAT|O_EXCL`` at mode 0o600 with a random suffix). This closes:
+
+    - H3 (review 2026-05-14): for ``mode=0o600`` calls (policy.json,
+      .env, credentials JSON) the secret content never lands on disk at
+      umask-default — the file is 0o600 from the moment of creation.
+    - M5: predictable ``<name>.tmp`` paths could collide under
+      concurrent writers; the random suffix removes that.
+    - M6: stale ``<name>.tmp`` from a prior crash no longer collides
+      with subsequent writes.
+
+    The final file mode after ``os.replace`` is the explicit ``mode``
+    argument when provided; otherwise the tmpfile's 0o600 (tightest safe
+    default — the parent directory is 0o700 so this doesn't restrict
+    legitimate access).
     """
     if path.exists():
         try:
@@ -82,12 +114,27 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
         if existing == text:
             return  # no-op -- content unchanged
 
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    if mode is not None:
-        os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    # mkstemp returns (fd, name). fd is opened O_RDWR|O_CREAT|O_EXCL at
+    # mode 0o600 atomically -- no umask-default window. prefix/suffix
+    # combine to keep the path adjacent to its target so os.replace stays
+    # within the same filesystem (otherwise replace is non-atomic).
+    fd, tmp_name = tempfile.mkstemp(dir=parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        if mode is not None and mode != 0o600:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        # Best-effort cleanup -- if replace already happened the unlink is
+        # a no-op (the path no longer points at our tmpfile).
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        raise
 
 
 def _ensure_plugins_enabled(root: Any) -> None:
@@ -102,7 +149,12 @@ def _ensure_plugins_enabled(root: Any) -> None:
     non-Mordred entries are preserved.
     """
     plugins = root.get("plugins") if isinstance(root, Mapping) else None
-    if plugins is None:
+    if not isinstance(plugins, MutableMapping):
+        if plugins is not None:
+            _LOG.warning(
+                "plugins is %s, not a mapping; replacing with fresh enabled list",
+                type(plugins).__name__,
+            )
         # Use a plain dict -- ruamel will still emit it as a mapping; round-trip
         # treatment of NEW keys is best-effort (we own this section).
         root["plugins"] = {"enabled": list(MORDRED_PLUGIN_NAMES)}
@@ -131,12 +183,66 @@ def _upsert_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]
     Whole-section replacement is intentional -- partial merges across
     invocations would leave dangling keys from prior policy modes.
     Non-Mordred plugin sections are preserved.
+
+    Pathological cases (``plugins`` itself is a scalar / list from a hand-edit
+    or interrupted write) fall back to whole-replacement of the ``plugins``
+    key with a fresh dict — crashing on ``int[str] = ...`` would leave the
+    user with an unrecoverable config. Logged at WARNING so the operator
+    sees the corruption.
     """
     plugins = root.get("plugins")
-    if plugins is None:
+    if not isinstance(plugins, MutableMapping):
+        if plugins is not None:
+            _LOG.warning(
+                "plugins is %s, not a mapping; replacing with upsert body",
+                type(plugins).__name__,
+            )
         root["plugins"] = {plugin_name: dict(body)}
         return
     plugins[plugin_name] = dict(body)
+
+
+def _merge_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]) -> None:
+    """In-place merge ``body`` into ``plugins.<plugin_name>``, preserving siblings.
+
+    Unlike :func:`_upsert_mordred_section`, the existing section's sub-fields
+    survive: only keys in ``body`` are touched. ruamel.yaml's CommentedMap
+    in-place update preserves comments and key order for retained keys; new
+    keys are appended at the end of the section.
+
+    Pathological cases (the section is currently a scalar / list / null) fall
+    back to whole-replacement -- the on-disk shape is no longer mergeable and
+    crashing with ``AttributeError: 'str' has no 'get'`` would leave the user
+    with an unrecoverable config. Logged at WARNING so the operator sees it.
+
+    Used by :meth:`PolicyWriter.merge_mordred_sections` (Phase 3 PR3a) to
+    drive ``hermes mordred network use <path>`` without dropping Tor /
+    Mullvad sub-fields the wizard configure step wrote earlier.
+    """
+    plugins = root.get("plugins")
+    if not isinstance(plugins, MutableMapping):
+        if plugins is not None:
+            _LOG.warning(
+                "plugins is %s, not a mapping; replacing with merge body",
+                type(plugins).__name__,
+            )
+        root["plugins"] = {plugin_name: dict(body)}
+        return
+    existing = plugins.get(plugin_name)
+    # ``MutableMapping`` (not ``Mapping``) so the index-assignment loop below
+    # narrows under mypy --strict. ruamel.yaml ``CommentedMap`` is a
+    # ``MutableMapping`` so this is exactly the shape we need.
+    if not isinstance(existing, MutableMapping):
+        if existing is not None:
+            _LOG.warning(
+                "plugins.%s is %s, not a mapping; replacing with merge body",
+                plugin_name,
+                type(existing).__name__,
+            )
+        plugins[plugin_name] = dict(body)
+        return
+    for key, value in body.items():
+        existing[key] = value
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +271,10 @@ class PolicySnapshot:
     # Phase 2 PR2: config.yaml-only (consumed by harness_detect). Default
     # ``"none"`` is a sentinel that doesn't match any harness regex pattern.
     harness_primary: str = "none"
+    # Phase 3 PR3a Task #7: persisted to policy.json so the network reader
+    # (mordred_hermes.network._resolve_disable_ipv6) can consume it.
+    # Default ``True`` matches the safe-by-default in RuntimeConfig.
+    disable_ipv6: bool = True
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +285,7 @@ class PolicySnapshot:
             "local_llm_endpoint": self.local_llm_endpoint,
             "local_llm_model_id": self.local_llm_model_id,
             "cloud_attempt_action": self.cloud_attempt_action,
+            "disable_ipv6": self.disable_ipv6,
         }
 
     def to_llm_guard_section(self) -> dict[str, Any]:
@@ -221,8 +332,39 @@ class PolicyWriter:
         the new section body. Non-listed Mordred plugins and non-Mordred
         plugins in ``config.yaml`` are left untouched.
 
+        Whole-section replacement: any sub-field not in ``body`` is dropped.
+        Use :meth:`merge_mordred_sections` for partial writes (e.g.
+        ``hermes mordred network use``) that must preserve sub-fields written
+        by other code paths or by hand.
+
         Also ensures all 5 Mordred plugin names appear in ``plugins.enabled``
         (Hermes entry-point loader requires this -- HOOK_PAYLOADS §1).
+        """
+        self._edit_config(sections, _upsert_mordred_section)
+
+    def merge_mordred_sections(self, sections: Mapping[str, Mapping[str, Any]]) -> None:
+        """In-place merge sub-fields into ``plugins.<plugin_name>`` sections.
+
+        Unlike :meth:`upsert_mordred_sections`, sub-fields not present in
+        ``body`` survive on-disk. Use for partial writers like
+        ``hermes mordred network use <path>`` that only know one field and
+        must not drop Tor / Mullvad fields set by the wizard configure step.
+
+        Pathological cases (the on-disk value is a scalar / list) fall back
+        to whole-replacement -- a corrupted section is no longer mergeable.
+        """
+        self._edit_config(sections, _merge_mordred_section)
+
+    def _edit_config(
+        self,
+        sections: Mapping[str, Mapping[str, Any]],
+        section_mutator: Callable[[Any, str, Mapping[str, Any]], None],
+    ) -> None:
+        """Shared round-trip pipeline for upsert / merge.
+
+        Loads ``config.yaml`` (or starts empty), applies ``section_mutator`` to
+        each requested section, runs :func:`_ensure_plugins_enabled`, and
+        writes back atomically via :func:`_atomic_write_text`.
         """
         yaml = _round_trip_yaml()
         if self.config_path.exists():
@@ -236,7 +378,7 @@ class PolicyWriter:
         for plugin_name, body in sections.items():
             if plugin_name not in MORDRED_PLUGIN_NAMES:
                 raise ValueError(f"PolicyWriter only edits Mordred plugin sections; refusing to touch {plugin_name!r}")
-            _upsert_mordred_section(root, plugin_name, body)
+            section_mutator(root, plugin_name, body)
 
         _ensure_plugins_enabled(root)
 
@@ -254,13 +396,25 @@ class PolicyWriter:
         text = json.dumps(snapshot.to_json_dict(), indent=2, sort_keys=False) + "\n"
         _atomic_write_text(self.policy_json_path, text, mode=0o600)
 
-    def write(self, snapshot: PolicySnapshot) -> None:
-        """Compose: write both ``policy.json`` AND the matching config.yaml sections.
+    def write(
+        self,
+        snapshot: PolicySnapshot,
+        *,
+        network_answers: _HasConfigYamlSection | None = None,
+    ) -> None:
+        """Compose: write ``policy.json`` AND the matching config.yaml sections.
 
         Convenience for ``hermes mordred configure``. Phase 2 PR2 added
         ``mordred_llm_guard`` to the upserted set so ``harness_primary``
-        lands in config.yaml. Network / keyvault sections still belong to
-        their own configure flows in later phases.
+        lands in config.yaml. Phase 3 PR3a Task #7 adds an optional
+        ``network_answers`` (concretely
+        ``mordred_hermes.wizard.configure.NetworkAnswers`` but typed here
+        via the :class:`_HasConfigYamlSection` Protocol to avoid the
+        ``configure -> policy_writer -> configure`` import cycle) which
+        lands in ``plugins.mordred_network`` via the Task #1
+        :meth:`merge_mordred_sections` so subsequent ``hermes mordred
+        network use <path>`` invocations don't clobber the wizard's
+        choices.
         """
         self.emit_policy_json(snapshot)
         self.upsert_mordred_sections(
@@ -269,3 +423,5 @@ class PolicyWriter:
                 "mordred_llm_guard": snapshot.to_llm_guard_section(),
             }
         )
+        if network_answers is not None:
+            self.merge_mordred_sections({"mordred_network": network_answers.to_config_yaml_section()})

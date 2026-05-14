@@ -17,6 +17,7 @@ The richer control-port circuit-status probe lands in PR2 alongside the
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import subprocess
 from pathlib import Path
@@ -297,3 +298,275 @@ def test_default_socket_constants() -> None:
     """Sanity: pick_free_port's defaults should be the standard TCP probe."""
     assert socket.AF_INET == 2
     assert socket.SOCK_STREAM == 1
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 PR3a Task #5: ControlPort cookie auth + GETINFO circuit-status      #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeController:
+    """Minimal stand-in for stem's ``Controller``.
+
+    Implements the methods ``circuit_status_health`` actually calls so
+    tests don't depend on a real Tor daemon or the ``stem`` library.
+
+    The ``authenticate`` signature mirrors stem's real API
+    (Codex P1, 2026-05-14): ``Controller.authenticate`` accepts no
+    cookie kwarg -- it does PROTOCOLINFO discovery and cookie reading
+    itself. Earlier versions of this fake accepted ``cookie=...`` which
+    masked the production API mismatch.
+    """
+
+    def __init__(self, *, get_info_response: str = "", auth_raises: BaseException | None = None) -> None:
+        self.authenticated: bool = False
+        self.closed: bool = False
+        self._get_info_response = get_info_response
+        self._auth_raises = auth_raises
+
+    def authenticate(self) -> None:
+        if self._auth_raises is not None:
+            raise self._auth_raises
+        self.authenticated = True
+
+    def get_info(self, key: str) -> str:
+        assert self.authenticated, "controller used before authenticate()"
+        if key != "circuit-status":
+            raise KeyError(key)
+        return self._get_info_response
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> _FakeController:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class TestCircuitStatusHealth:
+    """``circuit_status_health(handle, *, controller_factory=...)`` does
+    the deep liveness check via control-port cookie auth + GETINFO."""
+
+    def _make_handle(self, tmp_path: Path) -> Any:
+        from mordred_hermes.network.paths import tor
+
+        proc = _FakePopen(["Bootstrapped 100%"])
+        cookie_path = tmp_path / "control_auth_cookie"
+        cookie_path.write_bytes(b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbe")
+        return tor.TorHandle(process=proc, socks_port=9050, control_port=9051, data_dir=tmp_path)
+
+    def test_built_circuit_returns_true(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response="circuit-status=\n42 BUILT $abc,$def,$ghi BUILD_FLAGS=NEED_CAPACITY")
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+        assert fake.authenticated is True
+        # Codex P1 (2026-05-14): stem does cookie reading via PROTOCOLINFO,
+        # the production code no longer reads cookie_bytes itself, so the
+        # fake no longer tracks them. The cookie *file* existence is still
+        # a precondition asserted by _make_handle's setUp.
+
+    def test_only_launched_circuits_returns_false(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response="42 LAUNCHED $abc\n43 LAUNCHED $def")
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+
+    def test_no_circuits_returns_false(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response="")
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+
+    def test_missing_cookie_file_falls_back_to_shallow(self, tmp_path: Path) -> None:
+        """An absent cookie file means stem can't auth; we shouldn't crash --
+        fall back to the shallow ``health()`` so the strict-mode session
+        gets a clear error from a separate probe, not a noisy traceback."""
+        from mordred_hermes.network.paths import tor
+
+        # Don't create the cookie file.
+        proc = _FakePopen(["Bootstrapped 100%"])
+        handle = tor.TorHandle(process=proc, socks_port=9050, control_port=9051, data_dir=tmp_path)
+
+        called = False
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            nonlocal called
+            called = True
+            return _FakeController()
+
+        result = tor.circuit_status_health(handle, controller_factory=factory)
+        assert called is False, "factory must not run when cookie missing"
+        # Shallow fallback: process is alive → True
+        assert result is True
+
+    def test_authentication_failure_returns_false(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return _FakeController(auth_raises=RuntimeError("cookie mismatch"))
+
+        # Authentication failure does NOT raise to the caller; it returns
+        # False so the runtime treats it as "Tor unhealthy" and surfaces a
+        # clean MordredPathDropped at the next pre_tool_call.
+        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+
+    def test_no_stem_installed_falls_back_to_shallow(self, tmp_path: Path) -> None:
+        """When stem is absent, the default factory raises ImportError on
+        first construction; ``circuit_status_health`` collapses to shallow."""
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            raise ImportError("stem not installed (optional [tor-control] extra)")
+
+        # Should not raise; falls back to process.poll()
+        result = tor.circuit_status_health(handle, controller_factory=factory)
+        assert result is True  # _FakePopen has returncode None → alive
+
+    def test_controller_close_invoked(self, tmp_path: Path) -> None:
+        """The controller must be closed even on the success path so we don't
+        leak control-port sockets across health probes (the worker runs every
+        30s by default)."""
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response="42 BUILT $abc")
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        tor.circuit_status_health(handle, controller_factory=factory)
+        assert fake.closed is True
+
+    def test_default_factory_attempts_stem_lazy_import(self, tmp_path: Path) -> None:
+        """When ``controller_factory`` is omitted, the function attempts to
+        import stem on demand. With stem not installed in the test env, the
+        helper should fall back gracefully (return shallow). We don't assert
+        anything about the lazy-import internals -- only the contract."""
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        # Call without controller_factory; should not crash regardless of
+        # whether stem is installed.
+        result = tor.circuit_status_health(handle)
+        assert isinstance(result, bool)
+
+    def test_authenticate_called_without_kwargs_matches_real_stem_api(self, tmp_path: Path) -> None:
+        """Codex review (2026-05-14, P1): stem's real
+        ``Controller.authenticate(password=None, chroot_path=None,
+        protocolinfo_response=None)`` does NOT accept a ``cookie`` kwarg.
+        The previous implementation called
+        ``controller.authenticate(cookie=cookie_bytes)`` -> TypeError ->
+        caught silently -> circuit_status_health always returned False.
+        Strict-mode deep liveness would mark an otherwise healthy Tor
+        process as dropped on every probe.
+
+        Fix: call ``authenticate()`` with no args; stem auto-discovers
+        the cookie path via PROTOCOLINFO and reads it itself. This test
+        uses a fake mirroring stem's real signature so the production
+        code path is exercised against the actual API.
+        """
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        class _StemRealisticController:
+            """Fake matching stem.control.Controller.authenticate's real signature.
+
+            stem.connection.authenticate (which Controller.authenticate
+            delegates to) accepts password/chroot_path/protocolinfo_response
+            -- NO cookie kwarg. Calling with cookie=... raises TypeError.
+            """
+
+            def __init__(self) -> None:
+                self.authenticated = False
+                self.closed = False
+
+            def authenticate(
+                self,
+                password: object = None,
+                chroot_path: object = None,
+                protocolinfo_response: object = None,
+            ) -> None:
+                # Reject unexpected kwargs the way real stem would.
+                self.authenticated = True
+
+            def get_info(self, key: str) -> str:
+                assert self.authenticated, "controller used before authenticate()"
+                return "42 BUILT $abc"
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake = _StemRealisticController()
+
+        def factory(*, host: str, port: int) -> _StemRealisticController:
+            return fake
+
+        result = tor.circuit_status_health(handle, controller_factory=factory)
+        assert result is True, (
+            "P1: circuit_status_health must call authenticate() in a way "
+            "stem accepts; today it passes cookie=... -> TypeError -> False "
+            "-> Tor falsely marked dropped on every probe"
+        )
+        assert fake.authenticated, "authenticate() was not called"
+
+    def test_no_stem_logs_warning_once(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """H5 (review 2026-05-14): the silent shallow fallback when stem
+        is absent hides a real downgrade from the strict-mode operator.
+        At least one WARNING must be emitted naming the optional extra so
+        the operator can install ``mordred-hermes[tor-control]`` to
+        recover the deep probe. The warning must NOT be emitted every
+        call (the 30s liveness worker would spam logs); once per process
+        is enough.
+        """
+        import logging
+
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            raise ImportError("stem not installed (optional [tor-control] extra)")
+
+        # Reset the module-level "warned once" flag if it exists so this
+        # test starts from a clean slate. After GREEN it'll be a real
+        # module attribute; before GREEN the setattr is harmless.
+        with contextlib.suppress(AttributeError):
+            tor._STEM_FALLBACK_WARNED = False  # type: ignore[attr-defined]
+
+        with caplog.at_level(logging.WARNING, logger="mordred.network.paths.tor"):
+            tor.circuit_status_health(handle, controller_factory=factory)
+            tor.circuit_status_health(handle, controller_factory=factory)
+            tor.circuit_status_health(handle, controller_factory=factory)
+
+        relevant = [r for r in caplog.records if r.levelno == logging.WARNING and "tor-control" in r.getMessage()]
+        assert relevant, (
+            "H5: circuit_status_health must emit a WARNING when stem is "
+            "absent so the operator knows the deep probe was skipped. "
+            f"Got log records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        assert len(relevant) == 1, (
+            f"H5: warning must fire exactly once per process; got {len(relevant)} (30s liveness worker would spam logs)"
+        )

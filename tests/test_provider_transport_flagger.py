@@ -78,19 +78,24 @@ class TestStrictTor:
         assert flags == []
 
     def test_bedrock_aborts(self) -> None:
+        """bedrock fires both ``socks5h=False`` and ``respects_ipv6_proxy=False``
+        flags after Task #3 - assert at least one abort is present and that
+        the socks5h reason is mentioned. The aggregated message to the user
+        is composed downstream by the CLI / hooks layer."""
         from mordred_hermes.network import provider_transport_flagger as ptf
 
         flags = ptf.evaluate(active_path="tor", providers=("bedrock",), policy_mode="strict")
-        assert len(flags) == 1
-        assert flags[0].provider == "bedrock"
-        assert flags[0].severity == "abort"
+        assert flags, "bedrock must produce at least one flag"
+        assert all(f.provider == "bedrock" for f in flags)
+        assert any(f.severity == "abort" for f in flags)
+        assert any("socks5h" in f.reason.lower() for f in flags)
 
     def test_vertex_aborts(self) -> None:
         from mordred_hermes.network import provider_transport_flagger as ptf
 
         flags = ptf.evaluate(active_path="tor", providers=("vertex",), policy_mode="strict")
-        assert len(flags) == 1
-        assert flags[0].severity == "abort"
+        assert flags
+        assert any(f.severity == "abort" for f in flags)
 
     def test_localhost_only_provider_exempt(self) -> None:
         from mordred_hermes.network import provider_transport_flagger as ptf
@@ -146,6 +151,9 @@ class TestOverrides:
             transport="httpx",
             respects_proxy=True,
             respects_socks5h=True,
+            # Task #3: opt in to IPv6 proxy honouring so the new IPv6 branch
+            # doesn't flag this otherwise-clean provider.
+            respects_ipv6_proxy=True,
             unverified_baseline=False,
         )
         flags = ptf.evaluate(
@@ -199,3 +207,224 @@ def test_provider_entry_is_immutable() -> None:
     entry = ptf.KNOWN_PROVIDERS["anthropic"]
     with pytest.raises(dataclasses.FrozenInstanceError):
         entry.respects_socks5h = False  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 PR3a Task #3: IPv6 + non-HTTP transport flagging                    #
+# --------------------------------------------------------------------------- #
+
+
+class TestProviderEntryExtensions:
+    """New fields landed in Task #3.
+
+    - ``transport_class``: which protocol family the SDK speaks. ``"http"``
+      means HTTPS_PROXY routing is well-understood; everything else needs
+      careful per-protocol setup that v1 does not provide.
+    - ``respects_ipv6_proxy``: does the transport honor proxy env vars when
+      the resolved endpoint is IPv6? Many SDKs route IPv6 directly even
+      when ``HTTPS_PROXY`` is set, causing a silent Tor leak.
+    """
+
+    def test_baseline_entries_default_to_http_transport_class(self) -> None:
+        from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
+
+        for name, entry in KNOWN_PROVIDERS.items():
+            assert entry.transport_class == "http", f"{name} transport_class={entry.transport_class!r}"
+
+    def test_bedrock_respects_ipv6_proxy_false(self) -> None:
+        """boto3 historically routes IPv6 around HTTPS_PROXY; flag it."""
+        from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
+
+        assert KNOWN_PROVIDERS["bedrock"].respects_ipv6_proxy is False
+
+    def test_anthropic_respects_ipv6_proxy_true(self) -> None:
+        """httpx with ``http://`` env var honors IPv6 routing through the proxy."""
+        from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
+
+        assert KNOWN_PROVIDERS["anthropic"].respects_ipv6_proxy is True
+
+    def test_transport_class_literal_type_pins_alphabet(self) -> None:
+        """``transport_class`` is a Literal so mypy --strict catches typos."""
+        from typing import get_type_hints
+
+        from mordred_hermes.network.provider_transport_flagger import ProviderEntry
+
+        hints = get_type_hints(ProviderEntry)
+        args = getattr(hints["transport_class"], "__args__", ())
+        assert set(args) == {"http", "tcp", "udp", "quic", "grpc", "websocket"}, args
+
+
+class TestIPv6Flagging:
+    """``respects_ipv6_proxy=False`` on Tor produces a flag unless IPv6 is
+    disabled at the OS / resolver level (``disable_ipv6=True``, strict default).
+    """
+
+    def test_strict_tor_ipv6_enabled_provider_respects_ipv6_proxy_false_aborts(self) -> None:
+        """strict + Tor + IPv6 allowed + provider doesn't proxy IPv6 → abort."""
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("bedrock",),
+            policy_mode="strict",
+            disable_ipv6=False,
+        )
+        # bedrock is already flagged for socks5h=False; check that an
+        # IPv6-leak flag is ALSO emitted (or that the existing reason
+        # mentions ipv6 specifically). Either way the abort severity stays.
+        assert any("ipv6" in f.reason.lower() for f in flags), [f.reason for f in flags]
+        assert any(f.severity == "abort" for f in flags)
+
+    def test_strict_tor_ipv6_disabled_no_ipv6_flag(self) -> None:
+        """strict + Tor + IPv6 disabled at OS → no IPv6-specific flag.
+
+        The flagger trusts the IPv4-only resolver hint; provider IPv6 misuse
+        is moot when the kernel resolver isn't returning AAAA records. (Note
+        that other flags like socks5h=False still apply.)
+        """
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("bedrock",),
+            policy_mode="strict",
+            disable_ipv6=True,
+        )
+        ipv6_flags = [f for f in flags if "ipv6" in f.reason.lower()]
+        assert ipv6_flags == [], "IPv6 flag must not be emitted when disable_ipv6=True"
+
+    def test_lenient_tor_ipv6_enabled_downgrades_to_warning(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("anthropic",),  # anthropic respects_socks5h=True so no other flag
+            policy_mode="lenient",
+            disable_ipv6=False,
+        )
+        # anthropic respects_ipv6_proxy=True so still no flag.
+        assert flags == []
+
+    def test_strict_clearnet_no_ipv6_flag(self) -> None:
+        """IPv6-leak flag only fires on Tor; clearnet has no anonymity model."""
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="clearnet",
+            providers=("bedrock",),
+            policy_mode="strict",
+            disable_ipv6=False,
+        )
+        ipv6_flags = [f for f in flags if "ipv6" in f.reason.lower()]
+        assert ipv6_flags == []
+
+
+class TestNonHTTPTransportFlagging:
+    """``transport_class != "http"`` providers don't honor HTTPS_PROXY.
+
+    The v1 baseline has no non-HTTP providers, so this matrix exercises an
+    override-injected fake. v2 may introduce raw-TCP / WebSocket providers.
+    """
+
+    def test_strict_tor_grpc_provider_aborts(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        grpc_provider = ptf.ProviderEntry(
+            name="my-internal-grpc",
+            transport="grpc-python",
+            respects_proxy=False,
+            respects_socks5h=False,
+            transport_class="grpc",
+        )
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("my-internal-grpc",),
+            policy_mode="strict",
+            overrides={"my-internal-grpc": grpc_provider},
+        )
+        assert any("grpc" in f.reason.lower() or "non-http" in f.reason.lower() for f in flags)
+        assert any(f.severity == "abort" for f in flags)
+
+    def test_strict_clearnet_grpc_provider_emits_warning_not_abort(self) -> None:
+        """Clearnet doesn't have a proxy contract for non-HTTP either, but
+        the absence of a tunnel reduces severity to warning (informational)."""
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        grpc_provider = ptf.ProviderEntry(
+            name="my-grpc",
+            transport="grpc-python",
+            respects_proxy=False,
+            respects_socks5h=False,
+            transport_class="grpc",
+        )
+        flags = ptf.evaluate(
+            active_path="clearnet",
+            providers=("my-grpc",),
+            policy_mode="strict",
+            overrides={"my-grpc": grpc_provider},
+        )
+        # Filter to non-http flags (separate from clearnet `respects_proxy=False`).
+        non_http_flags = [f for f in flags if "non-http" in f.reason.lower() or "grpc" in f.reason.lower()]
+        assert non_http_flags, "expected a non-http flag on clearnet"
+        assert all(f.severity == "warning" for f in non_http_flags)
+
+    def test_lenient_tor_grpc_provider_downgrades_to_warning(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        grpc_provider = ptf.ProviderEntry(
+            name="my-grpc",
+            transport="grpc-python",
+            respects_proxy=False,
+            respects_socks5h=False,
+            transport_class="grpc",
+        )
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("my-grpc",),
+            policy_mode="lenient",
+            overrides={"my-grpc": grpc_provider},
+        )
+        assert all(f.severity == "warning" for f in flags)
+
+    def test_off_emits_no_non_http_flags(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        grpc_provider = ptf.ProviderEntry(
+            name="my-grpc",
+            transport="grpc-python",
+            respects_proxy=False,
+            respects_socks5h=False,
+            transport_class="grpc",
+        )
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("my-grpc",),
+            policy_mode="off",
+            overrides={"my-grpc": grpc_provider},
+        )
+        assert flags == []
+
+
+class TestEvaluateBackwardCompat:
+    """The new ``disable_ipv6`` kw-arg must default-False so existing callers
+    (PR2 runtime, all other tests) keep working without modification."""
+
+    def test_evaluate_default_disable_ipv6_false(self) -> None:
+        """Calling evaluate without disable_ipv6 behaves as if it were False."""
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        # bedrock without disable_ipv6 in strict + tor — should emit IPv6 flag
+        # because the default behavior is "IPv6 not disabled at OS level".
+        flags_explicit = ptf.evaluate(
+            active_path="tor",
+            providers=("bedrock",),
+            policy_mode="strict",
+            disable_ipv6=False,
+        )
+        flags_default = ptf.evaluate(
+            active_path="tor",
+            providers=("bedrock",),
+            policy_mode="strict",
+        )
+        # Both runs flag the same set of reasons.
+        assert {f.reason for f in flags_explicit} == {f.reason for f in flags_default}

@@ -104,9 +104,17 @@ class _FakeCtx:
 # --------------------------------------------------------------------------- #
 
 
-def _write_policy(tmp_path: Path, policy_mode: str = "off") -> Path:
+def _write_policy(
+    tmp_path: Path,
+    policy_mode: str = "off",
+    *,
+    disable_ipv6: bool | None = None,
+) -> Path:
     p = tmp_path / "policy.json"
-    p.write_text(json.dumps({"policy": policy_mode}))
+    payload: dict[str, Any] = {"policy": policy_mode}
+    if disable_ipv6 is not None:
+        payload["disable_ipv6"] = disable_ipv6
+    p.write_text(json.dumps(payload))
     return p
 
 
@@ -539,6 +547,219 @@ class TestRegisterLoadsPolicyFromDisk:
         runtime = api._RUNTIME
         assert runtime is not None
         assert runtime._config.policy_mode == "off"  # type: ignore[attr-defined]
+
+
+class TestRegisterLoadsWizardNetworkSettings:
+    """Codex review (2026-05-14, P2): the wizard persists
+    ``tor_binary_path`` / ``tor_socks_port`` / ``mullvad_relay_country``
+    under ``plugins.mordred_network`` in ``config.yaml`` but
+    ``_load_runtime_config`` only reads ``default_path``. The other
+    three are silently discarded so the operator's choices never reach
+    Tor or Mullvad at runtime.
+    """
+
+    def _seed(self, tmp_path: Path) -> tuple[Path, Path]:
+        policy = _write_policy(tmp_path, "strict")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "plugins:\n"
+            "  mordred_network:\n"
+            "    default_path: tor\n"
+            "    tor_binary_path: /opt/tor/bin/tor\n"
+            "    tor_socks_port: 9150\n"
+            "    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT\n"
+            "    mullvad_relay_country: jp\n"
+            "    mullvad_killswitch: true\n",
+            encoding="utf-8",
+        )
+        return policy, config_path
+
+    def test_register_reads_tor_binary_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy, config = self._seed(tmp_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        assert runtime._config.tor_binary == "/opt/tor/bin/tor", (  # type: ignore[attr-defined]
+            "P2: tor_binary_path from config.yaml must reach RuntimeConfig.tor_binary"
+        )
+
+    def test_register_reads_tor_socks_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy, config = self._seed(tmp_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        assert runtime._config.tor_socks_port == 9150, (  # type: ignore[attr-defined]
+            "P2: tor_socks_port from config.yaml must reach RuntimeConfig"
+        )
+
+    def test_register_reads_mullvad_relay_country(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy, config = self._seed(tmp_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        assert runtime._config.mullvad_region == "jp", (  # type: ignore[attr-defined]
+            "P2: mullvad_relay_country from config.yaml must reach RuntimeConfig.mullvad_region"
+        )
+
+    def test_register_missing_network_keys_falls_back_to_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When config.yaml only has default_path (older wizards / hand-
+        written configs), the new readers must NOT crash. They should
+        fall back to RuntimeConfig's built-in defaults.
+        """
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy = _write_policy(tmp_path, "lenient")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "plugins:\n  mordred_network:\n    default_path: clearnet\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        # defaults from RuntimeConfig
+        assert runtime._config.tor_binary == "tor"  # type: ignore[attr-defined]
+        assert runtime._config.tor_socks_port == 0  # 0 = let runtime pick  # type: ignore[attr-defined]
+        assert runtime._config.mullvad_region == "auto"  # type: ignore[attr-defined]
+
+
+class TestRegisterLoadsDisableIPv6FromDisk:
+    """Phase 3 PR3a Task #2: ``disable_ipv6`` schema in ``policy.json``.
+
+    ``RuntimeConfig.disable_ipv6`` is the v1 flag for IPv6-leak defence in
+    advisory form (flagger warning + IPv4-only resolver hint; full kernel
+    enforcement is v2-N2). When ``policy.json`` doesn't pin the value, the
+    reader infers it from ``policy_mode`` so a strict-by-disk policy gets
+    safe-by-default IPv6 disabling without an explicit toggle. When the
+    user pins it, their choice wins.
+    """
+
+    def _register_with_policy(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        policy_path: Path,
+        config_path: Path,
+    ) -> Any:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+        return api._RUNTIME
+
+    def test_strict_policy_no_explicit_field_defaults_to_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "strict")  # no disable_ipv6 in JSON
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is True, (  # type: ignore[attr-defined]
+            "strict without explicit pin must default to True (safe)"
+        )
+
+    def test_lenient_policy_no_explicit_field_defaults_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False, (  # type: ignore[attr-defined]
+            "lenient without explicit pin must default to False (user-friendly)"
+        )
+
+    def test_off_policy_no_explicit_field_defaults_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        policy = _write_policy(tmp_path, "off")
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
+
+    def test_strict_policy_user_pin_false_is_honoured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """User explicitly opting out of IPv6-disable in strict is allowed.
+        Documented caveat in POLICY.md - lets IPv6-only providers work but
+        the flagger emits a strict-mode warning."""
+        policy = _write_policy(tmp_path, "strict", disable_ipv6=False)
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
+
+    def test_lenient_policy_user_pin_true_is_honoured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        policy = _write_policy(tmp_path, "lenient", disable_ipv6=True)
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is True  # type: ignore[attr-defined]
+
+    def test_non_bool_value_falls_back_to_mode_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A corrupted ``disable_ipv6`` (string, list, dict) falls back to the
+        policy-mode default. Mirrors :class:`_read_policy_mode`'s unhashable
+        fallback (Codex round 3 P2)."""
+        p = tmp_path / "policy.json"
+        p.write_text(json.dumps({"policy": "strict", "disable_ipv6": "yes-please"}))
+        config = _write_config(tmp_path, "clearnet")
+        runtime = self._register_with_policy(tmp_path, monkeypatch, p, config)
+        assert runtime is not None
+        # strict default = True
+        assert runtime._config.disable_ipv6 is True  # type: ignore[attr-defined]
+
+    def test_missing_policy_json_disable_ipv6_defaults_to_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No policy.json → off mode → disable_ipv6 stays False."""
+        runtime = self._register_with_policy(tmp_path, monkeypatch, tmp_path / "absent.json", tmp_path / "absent.yaml")
+        assert runtime is not None
+        assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
 
 
 class TestSessionStartRefreshesRuntimePolicy:
