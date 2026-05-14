@@ -340,9 +340,11 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
     # before the result is returned to the caller. Belt-and-suspenders
     # against accidental serialisation (see test_secret_does_not_appear_in_returned_result).
     captured_mullvad_secret = _mullvad_secret
-    mullvad_relay_country = prompt_io.ask_text(
-        label="Mullvad relay country (`auto` or 2-letter code)",
-        default="auto",
+    mullvad_relay_country = _coerce_mullvad_relay_country(
+        prompt_io.ask_text(
+            label="Mullvad relay country (`auto` or 2-letter code)",
+            default="auto",
+        )
     )
     mullvad_killswitch = prompt_io.ask_bool(
         label="Mullvad killswitch (lockdown-mode)",
@@ -396,6 +398,30 @@ def _coerce_tor_socks_port(raw: str) -> int:
         _LOG.warning("Tor SOCKS port %d out of range; falling back to default %d", port, DEFAULT_TOR_SOCKS_PORT)
         return DEFAULT_TOR_SOCKS_PORT
     return port
+
+
+def _coerce_mullvad_relay_country(raw: str) -> str:
+    """Normalize the Mullvad relay-country answer to ``"auto"`` or a 2-letter
+    lowercase ISO code (review M7).
+
+    The Mullvad CLI accepts ``relay set location <code>`` only for 2-letter
+    codes (or the sentinel ``"any"`` / ``"auto"``). Free-text typos like
+    ``"unitedstates"`` would silently flow into network.json and only
+    surface at bring-up time, far from the wizard. Like
+    :func:`_coerce_tor_socks_port`, garbage falls back to the safe default
+    (``"auto"``) with a WARN rather than aborting the whole configure
+    session.
+    """
+    stripped = raw.strip()
+    if not stripped or stripped.lower() == "auto":
+        return "auto"
+    if len(stripped) == 2 and stripped.isalpha():
+        return stripped.lower()
+    _LOG.warning(
+        "Invalid Mullvad relay country %r; expected 'auto' or 2-letter ISO code; falling back to 'auto'",
+        raw,
+    )
+    return "auto"
 
 
 def _coerce_cloud_attempt_action(raw: str) -> Literal["always-block", "prompt-once"]:
