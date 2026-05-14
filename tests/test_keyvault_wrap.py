@@ -763,6 +763,75 @@ class TestNativeBackendProtocolRuntimeCheckable:
         assert not isinstance(NotABackend(), NativeBackend)
 
 
+class TestNativeBackendErrorClosedSet:
+    """Review-fix-2 MEDIUM-1 (codex second pass on the implementation):
+    ``NativeBackendError`` was accepting arbitrary ``str`` codes, leaving
+    POLICY.md's "never raw OSStatus into the audit log" guarantee as
+    convention-only. A PR4 production backend bug that calls
+    ``NativeBackendError(str(some_osstatus_int))`` would leak biometric-
+    attempt state via the audit emit at ``wrap._emit_unwrap_denied``.
+
+    Fix: closed ``NativeErrorCode`` ``Literal`` enforced at runtime by
+    a frozenset lookup in ``NativeBackendError.__init__``. Unknown codes
+    raise :class:`ValueError` at construction time — fail-fast at the
+    backend boundary instead of leaking through the audit boundary.
+
+    The 5 frozen codes match POLICY.md code #20 ``native_error_code``:
+    ``user_cancelled`` / ``auth_failed`` / ``biometry_lockout`` /
+    ``passcode_not_set`` / ``key_not_found``. ``key_not_found`` stays in
+    the closed set because :func:`unwrap_dek` branches on it (raising
+    :class:`WrapKeyNotFound` before any audit emit, per the HIGH-1 fix);
+    the closed-set check happens at NativeBackendError construction,
+    which is upstream of the audit-emit decision.
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        ["user_cancelled", "auth_failed", "biometry_lockout", "passcode_not_set", "key_not_found"],
+    )
+    def test_construct_succeeds_for_each_frozen_code(self, code: str) -> None:
+        from mordred_hermes.keyvault.wrap import NativeBackendError
+
+        exc = NativeBackendError(code)
+        assert exc.code == code
+        assert str(exc) == code
+
+    def test_construct_rejects_unknown_string(self) -> None:
+        from mordred_hermes.keyvault.wrap import NativeBackendError
+
+        with pytest.raises(ValueError, match="must be one of"):
+            NativeBackendError("not_a_real_code")
+
+    def test_construct_rejects_raw_osstatus_int_as_string(self) -> None:
+        """Specifically the failure mode codex MEDIUM-1 warned about:
+        a buggy backend stringifies an ``OSStatus`` value
+        (e.g. ``str(-25293)`` for ``errSecAuthFailed``) and passes it
+        unchanged. The closed-set check must reject any non-translated
+        form so the raw int never reaches the audit log."""
+        from mordred_hermes.keyvault.wrap import NativeBackendError
+
+        with pytest.raises(ValueError):
+            NativeBackendError("-25293")  # errSecAuthFailed
+        with pytest.raises(ValueError):
+            NativeBackendError("-128")  # errSecUserCancelled
+
+    def test_construct_rejects_empty_string(self) -> None:
+        from mordred_hermes.keyvault.wrap import NativeBackendError
+
+        with pytest.raises(ValueError):
+            NativeBackendError("")
+
+    def test_construct_rejects_close_but_invalid_codes(self) -> None:
+        """Catch typos that look plausible — ``user_canceled`` (US
+        spelling), ``auth_fail`` (truncated), ``BIOMETRY_LOCKOUT``
+        (wrong case). The frozen set is canonical and case-sensitive."""
+        from mordred_hermes.keyvault.wrap import NativeBackendError
+
+        for bogus in ("user_canceled", "auth_fail", "BIOMETRY_LOCKOUT", "userCancelled"):
+            with pytest.raises(ValueError):
+                NativeBackendError(bogus)
+
+
 class TestAuthorizedAuditSinkResilience:
     """Review MEDIUM-1: the success path calls ``audit_sink(...)`` bare. If the
     sink raises (disk full, fd exhausted, log-rotation race), the exception
