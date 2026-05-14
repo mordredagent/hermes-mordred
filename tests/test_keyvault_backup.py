@@ -270,6 +270,49 @@ class TestStructuralValidation:
         with pytest.raises(backup.BackupCorrupt, match="kdf"):
             backup.parse_header(bytes(blob))
 
+    def test_excessive_m_cost_raises_backup_corrupt(self) -> None:
+        """DOS guard: a tampered ``m_cost`` MSB → 16+ GiB Argon2
+        allocation request would hang/OOM the host. parse_header must
+        reject before the KDF runs."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        # Rewrite m_cost field (offset 6, 4 bytes BE) to 2 GiB worth of
+        # KiB — well above the 1 GiB cap.
+        blob[6:10] = (2 * 1024 * 1024).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match="m_cost"):
+            backup.parse_header(bytes(blob))
+
+    def test_excessive_t_cost_raises_backup_corrupt(self) -> None:
+        """DOS guard: tampered ``t_cost`` MSB → 16M iterations would
+        run for years. parse_header rejects."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob[10:14] = (1_000_000).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match="t_cost"):
+            backup.parse_header(bytes(blob))
+
+    def test_excessive_p_cost_raises_backup_corrupt(self) -> None:
+        """DOS guard: tampered ``p_cost`` MSB → millions of threads
+        would exhaust the system."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob[14:18] = (100).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match="p_cost"):
+            backup.parse_header(bytes(blob))
+
+    def test_zero_m_cost_raises_backup_corrupt(self) -> None:
+        """``m_cost=0`` would let an attacker bypass the KDF entirely
+        (free brute-force on the passphrase). Reject."""
+        from mordred_hermes.keyvault import backup
+
+        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
+        blob[6:10] = (0).to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match="m_cost"):
+            backup.parse_header(bytes(blob))
+
     def test_truncated_header_raises_backup_corrupt(self) -> None:
         from mordred_hermes.keyvault import backup
 
