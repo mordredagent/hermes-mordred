@@ -30,7 +30,7 @@ import os
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from ruamel.yaml import YAML
 
@@ -49,6 +49,21 @@ MORDRED_PLUGIN_NAMES: Final = (
     "mordred_network",
     "mordred_keyvault",
 )
+
+
+@runtime_checkable
+class _HasConfigYamlSection(Protocol):
+    """Structural shape required by :meth:`PolicyWriter.write` for the
+    optional ``network_answers`` argument.
+
+    Implemented by :class:`mordred_hermes.wizard.configure.NetworkAnswers`.
+    Kept as a Protocol (not a concrete import) to avoid the
+    ``configure -> policy_writer -> configure`` import cycle while still
+    enforcing the contract under ``mypy --strict``. ``runtime_checkable`` so
+    callers and tests can ``isinstance``-check at the boundary.
+    """
+
+    def to_config_yaml_section(self) -> Mapping[str, Any]: ...
 
 
 def _round_trip_yaml() -> YAML:
@@ -349,16 +364,22 @@ class PolicyWriter:
         text = json.dumps(snapshot.to_json_dict(), indent=2, sort_keys=False) + "\n"
         _atomic_write_text(self.policy_json_path, text, mode=0o600)
 
-    def write(self, snapshot: PolicySnapshot, *, network_answers: object | None = None) -> None:
+    def write(
+        self,
+        snapshot: PolicySnapshot,
+        *,
+        network_answers: _HasConfigYamlSection | None = None,
+    ) -> None:
         """Compose: write ``policy.json`` AND the matching config.yaml sections.
 
         Convenience for ``hermes mordred configure``. Phase 2 PR2 added
         ``mordred_llm_guard`` to the upserted set so ``harness_primary``
         lands in config.yaml. Phase 3 PR3a Task #7 adds an optional
-        ``network_answers`` (typed ``NetworkAnswers`` at the call site;
-        kept ``object`` here to avoid the configure → policy_writer →
-        configure import cycle) which lands in
-        ``plugins.mordred_network`` via the Task #1
+        ``network_answers`` (concretely
+        ``mordred_hermes.wizard.configure.NetworkAnswers`` but typed here
+        via the :class:`_HasConfigYamlSection` Protocol to avoid the
+        ``configure -> policy_writer -> configure`` import cycle) which
+        lands in ``plugins.mordred_network`` via the Task #1
         :meth:`merge_mordred_sections` so subsequent ``hermes mordred
         network use <path>`` invocations don't clobber the wizard's
         choices.
@@ -371,6 +392,4 @@ class PolicyWriter:
             }
         )
         if network_answers is not None:
-            # Duck-typed call: NetworkAnswers has to_config_yaml_section.
-            section = network_answers.to_config_yaml_section()  # type: ignore[attr-defined]
-            self.merge_mordred_sections({"mordred_network": section})
+            self.merge_mordred_sections({"mordred_network": network_answers.to_config_yaml_section()})
