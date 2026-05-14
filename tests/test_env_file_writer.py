@@ -141,6 +141,54 @@ class TestDotEnvFileWriter:
         with pytest.raises(ValueError):
             DotEnvFileWriter().upsert(env_path, key="FOO", value="bar\nINJECTED=evil")
 
+    def test_dedupes_when_existing_file_has_multiple_matching_lines(self, tmp_path: Path) -> None:
+        """M2 (review 2026-05-14): if the .env was hand-edited and ended up
+        with two lines for the same key, the upsert must collapse them to
+        a single line with the new value -- not preserve the duplicate.
+
+        Before the fix, _replace_or_strip_key rewrote every matching line
+        in place, leaving the duplicate intact (``KEY=new\\nKEY=new``).
+        After the fix, only the first match is kept; subsequent matches
+        are stripped.
+        """
+        from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
+
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old1\nMORDRED_MULLVAD_ACCOUNT=old2\n",
+            encoding="utf-8",
+        )
+
+        DotEnvFileWriter().upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="new")
+
+        text = env_path.read_text(encoding="utf-8")
+        occurrences = [line for line in text.splitlines() if line.startswith("MORDRED_MULLVAD_ACCOUNT=")]
+        assert occurrences == ["MORDRED_MULLVAD_ACCOUNT=new"], (
+            f"M2: expected exactly one MORDRED_MULLVAD_ACCOUNT line after dedupe, got {occurrences}; "
+            "duplicates from hand-edit must collapse"
+        )
+        # Unrelated line must survive.
+        assert "OTHER=keep" in text
+
+    def test_dedupes_on_empty_value_removal(self, tmp_path: Path) -> None:
+        """M2 corollary: removal (empty value) of a key that appears twice
+        must strip both lines, not just the first."""
+        from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
+
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "OTHER=keep\nMORDRED_MULLVAD_ACCOUNT=old1\nMORDRED_MULLVAD_ACCOUNT=old2\n",
+            encoding="utf-8",
+        )
+
+        DotEnvFileWriter().upsert(env_path, key="MORDRED_MULLVAD_ACCOUNT", value="")
+
+        text = env_path.read_text(encoding="utf-8")
+        assert "MORDRED_MULLVAD_ACCOUNT" not in text, (
+            f"M2: empty-value removal must strip ALL duplicate lines for the key, got:\n{text}"
+        )
+        assert "OTHER=keep" in text
+
 
 class TestEnvFileWriterProtocol:
     def test_dotenvfilewriter_satisfies_protocol(self) -> None:
