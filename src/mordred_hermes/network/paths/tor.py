@@ -15,6 +15,7 @@ caller is expected to surface a startup warning on censored networks.
 
 from __future__ import annotations
 
+import contextlib
 import selectors
 import socket
 import subprocess
@@ -233,11 +234,145 @@ def stop(handle: TorHandle, *, grace_seconds: float = DEFAULT_GRACE_SECONDS) -> 
 def health(handle: TorHandle) -> bool:
     """Shallow liveness: subprocess is still running.
 
-    PR2 will replace this with a control-port circuit-status probe once
-    the ``stem`` dependency lands. Until then, the network layer trusts
-    that a running ``tor`` process is healthy enough for sessions.
+    The deeper ``circuit_status_health`` probe (Phase 3 PR3a Task #5) is
+    an opt-in via the optional ``[tor-control]`` extra. Lenient / off
+    operators keep this shallow check; strict operators wire the deeper
+    probe through the runtime's ``tor_health`` injection point.
     """
     return handle.process.poll() is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 PR3a Task #5: ControlPort cookie auth + GETINFO circuit-status      #
+# --------------------------------------------------------------------------- #
+
+
+class _ControllerLike(Protocol):
+    """Subset of ``stem.control.Controller`` we depend on.
+
+    The default factory returns a real stem ``Controller``; tests inject
+    a ``_FakeController``-style stand-in. Both must support the context-
+    manager protocol so the socket closes deterministically.
+    """
+
+    def authenticate(self, *, cookie: bytes) -> None: ...
+
+    def get_info(self, key: str) -> str: ...
+
+    def close(self) -> None: ...
+
+    def __enter__(self) -> _ControllerLike: ...
+
+    def __exit__(self, *args: object) -> None: ...
+
+
+ControllerFactory = Callable[..., _ControllerLike]
+
+
+def _default_controller_factory(*, host: str, port: int) -> _ControllerLike:
+    """Lazy import of ``stem.control.Controller``.
+
+    Kept local so module import doesn't pay the stem dep cost (and so
+    operators without the ``[tor-control]`` extra never see an
+    ``ImportError`` at plugin discovery time). The :class:`ImportError`
+    raised here is caught by :func:`circuit_status_health` and surfaces
+    as a graceful shallow fallback.
+    """
+    from stem.control import Controller  # type: ignore[import-not-found]
+
+    controller = Controller.from_port(address=host, port=port)
+    return cast(_ControllerLike, controller)
+
+
+def circuit_status_health(
+    handle: TorHandle,
+    *,
+    controller_factory: ControllerFactory | None = None,
+    host: str = "127.0.0.1",
+) -> bool:
+    """Deep liveness via Tor ControlPort ``GETINFO circuit-status``.
+
+    Returns ``True`` if at least one circuit is in the ``BUILT`` state
+    (= the daemon can route a request right now), ``False`` if every
+    circuit is ``LAUNCHED`` / ``FAILED`` / ``CLOSED`` or the response
+    is empty.
+
+    Graceful degradation contract: any failure short of "the probe
+    successfully said 'no BUILT circuits'" collapses to the shallow
+    :func:`health` check rather than crashing.
+
+    - Missing ``control_auth_cookie`` (Tor still bootstrapping or data
+      dir wiped) → shallow fallback.
+    - ImportError from the default factory (the user did not install
+      ``mordred-hermes[tor-control]``) → shallow fallback.
+    - Authentication failure (cookie mismatch, daemon rejected) →
+      ``False`` (runtime treats as drop). This is different from the
+      ImportError case because a present-but-rejected cookie is a real
+      Tor problem the operator should see.
+    - Any other Exception (network glitch, GETINFO syntax change) →
+      ``False``. Logging is deferred to the runtime so this stays a
+      pure boolean signal.
+
+    The 30s liveness worker calls this every interval; the controller
+    is closed on every call so the control-port socket pool doesn't
+    grow.
+    """
+    cookie_path = handle.data_dir / "control_auth_cookie"
+    if not cookie_path.exists():
+        return health(handle)
+
+    try:
+        cookie_bytes = cookie_path.read_bytes()
+    except OSError:
+        return health(handle)
+
+    factory = controller_factory or _default_controller_factory
+    try:
+        controller = factory(host=host, port=handle.control_port)
+    except ImportError:
+        # Optional [tor-control] extra not installed; fall back gracefully.
+        return health(handle)
+    except Exception:
+        # Anything else at construction time (port unreachable, refused, ...)
+        # is treated as drop rather than crash.
+        return False
+
+    try:
+        try:
+            controller.authenticate(cookie=cookie_bytes)
+        except Exception:
+            return False
+        try:
+            response = controller.get_info("circuit-status")
+        except Exception:
+            return False
+        return _has_built_circuit(response)
+    finally:
+        with contextlib.suppress(Exception):
+            controller.close()
+
+
+def _has_built_circuit(response: str) -> bool:
+    """Return True if the GETINFO response lists at least one BUILT circuit.
+
+    Format per torspec ``control-spec.txt §4.1.1``:
+
+    ``<CircuitID> <Status> [<Path>] [BUILD_FLAGS=...] ...``
+
+    Lines starting with ``250-`` / ``250+`` (response framing) are
+    stripped by stem before the string reaches us, so the parse is just
+    "look for ``BUILT`` as the second whitespace-separated token". The
+    function tolerates a leading ``circuit-status=`` echo from older
+    Tor versions.
+    """
+    for raw_line in response.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("circuit-status="):
+            continue
+        tokens = line.split()
+        if len(tokens) >= 2 and tokens[1] == "BUILT":
+            return True
+    return False
 
 
 def start_process(

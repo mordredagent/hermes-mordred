@@ -24,6 +24,15 @@ macos = [
   "cryptography>=42",
   "blake3>=0.4",
 ]
+# Phase 3 PR3a Task #5: Tor ControlPort cookie auth + `GETINFO circuit-status`
+# liveness probe. Optional because (a) stem's last release was 2021-12 so we
+# don't want to make every Mordred user inherit that supply-chain risk, and
+# (b) the shallow `process.poll()` fallback covers lenient/off operators who
+# don't need the deeper M9 liveness signal. Strict-mode operators install
+# with `pip install mordred-hermes[tor-control]`.
+tor-control = [
+  "stem>=1.8.0,<2",
+]
 dev = [
   "pytest>=8",
   "pytest-cov",
