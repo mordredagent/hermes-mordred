@@ -28,8 +28,11 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, Literal, Protocol
 
+from .credentials_writer import CredentialsWriter
+from .env_file_writer import EnvFileWriter
 from .policy_writer import PolicySnapshot, PolicyWriter
 
 _LOG = logging.getLogger("mordred.wizard.configure")
@@ -218,10 +221,19 @@ class ConfigureResult:
     via the extended :class:`PolicySnapshot`. Phase 3 PR3a Task #6 adds
     a sibling :class:`NetworkAnswers` payload; Task #7 will fold these
     into :class:`PolicySnapshot` proper.
+
+    ``_mullvad_account_secret`` is a TRANSIENT private field carrying
+    the secret from :func:`collect_answers` to :func:`run`. ``run()``
+    routes it to the EnvFileWriter and then returns a NEW
+    ConfigureResult with the field cleared so callers never see the
+    raw value. Test contract:
+    :func:`tests.test_configure.TestRunWiresNetworkWriters.test_secret_does_not_appear_in_returned_result`
+    walks the returned dataclass tree to assert the secret is absent.
     """
 
     snapshot: PolicySnapshot
     network_answers: NetworkAnswers
+    _mullvad_account_secret: str = ""
 
 
 def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
@@ -300,11 +312,11 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         label="Mullvad account number (stored in ~/.hermes/.env)",
         default="",
     )
-    # Tag the secret so the upcoming EnvFileWriter consumer can find it;
-    # Task #6c wires the run() pipeline. Keep the local for now — the
-    # collect_answers contract is "return the user's choices"; side effects
-    # belong to the writer step.
-    del _mullvad_secret
+    # The secret travels through ConfigureResult on a transient
+    # ``mullvad_account_secret`` field consumed by run() and then cleared
+    # before the result is returned to the caller. Belt-and-suspenders
+    # against accidental serialisation (see test_secret_does_not_appear_in_returned_result).
+    captured_mullvad_secret = _mullvad_secret
     mullvad_relay_country = prompt_io.ask_text(
         label="Mullvad relay country (`auto` or 2-letter code)",
         default="auto",
@@ -331,7 +343,11 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         mullvad_relay_country=mullvad_relay_country,
         mullvad_killswitch=mullvad_killswitch,
     )
-    return ConfigureResult(snapshot=snapshot, network_answers=network_answers)
+    return ConfigureResult(
+        snapshot=snapshot,
+        network_answers=network_answers,
+        _mullvad_account_secret=captured_mullvad_secret,
+    )
 
 
 def _coerce_tor_socks_port(raw: str) -> int:
@@ -374,6 +390,10 @@ def run(
     setup_runner: SetupRunner,
     prompt_io: PromptIO,
     policy_writer: PolicyWriter,
+    env_writer: EnvFileWriter | None = None,
+    credentials_writer: CredentialsWriter | None = None,
+    env_path: Path | None = None,
+    credentials_path: Path | None = None,
     non_interactive: bool = False,
     skip_hermes_setup: bool = False,
 ) -> ConfigureResult:
@@ -383,11 +403,27 @@ def run(
         setup_runner: Spawns ``hermes setup``. Production = :class:`SubprocessSetupRunner`.
         prompt_io: Collects Mordred answers. Tests inject a scripted double.
         policy_writer: Persists the resolved snapshot.
+        env_writer: Optional Phase 3 PR3a Task #6c -- writes the Mullvad
+            account number to ``~/.hermes/.env``. When ``None`` the secret
+            is captured but not persisted (lets Phase 1 / Phase 2 tests
+            use ``run()`` without the network slice).
+        credentials_writer: Optional Phase 3 PR3a Task #6c -- writes
+            ``~/.hermes/mordred/credentials/network.json`` with env-var
+            REFERENCES.
+        env_path: Override for the ``.env`` location. Defaults are derived
+            from :data:`mordred_hermes._home.HERMES_BASE` at call time so
+            test profile dirs work.
+        credentials_path: Override for the credentials JSON location.
         non_interactive: Forwarded to :class:`SetupRunner`. Mordred prompts
             still run -- pass a :class:`_RefusingPromptIO` to abort on any
             prompt requirement.
         skip_hermes_setup: Tests use this to avoid spawning ``hermes setup``
             entirely. Production should leave it ``False``.
+
+    Returns:
+        :class:`ConfigureResult` with the Mullvad secret CLEARED so callers
+        never see it in serialised form. The actual secret (if non-empty)
+        is routed to ``env_writer.upsert`` BEFORE the return.
     """
     if not skip_hermes_setup:
         rc = setup_runner.run(non_interactive=non_interactive)
@@ -396,7 +432,49 @@ def run(
 
     result = collect_answers(prompt_io)
     policy_writer.write(result.snapshot)
-    return result
+
+    if env_writer is not None and result._mullvad_account_secret:
+        from .._home import HERMES_BASE
+
+        resolved_env_path = env_path if env_path is not None else (HERMES_BASE / ".env")
+        env_writer.upsert(
+            resolved_env_path,
+            key=result.network_answers.mullvad_account_id_env,
+            value=result._mullvad_account_secret,
+        )
+    elif env_writer is not None:
+        # User cleared the prompt; remove any stale line if present.
+        from .._home import HERMES_BASE
+
+        resolved_env_path = env_path if env_path is not None else (HERMES_BASE / ".env")
+        env_writer.upsert(
+            resolved_env_path,
+            key=result.network_answers.mullvad_account_id_env,
+            value="",
+        )
+
+    if credentials_writer is not None:
+        from .._home import HERMES_BASE
+
+        resolved_credentials_path = (
+            credentials_path
+            if credentials_path is not None
+            else (HERMES_BASE / "mordred" / "credentials" / "network.json")
+        )
+        credentials_writer.write_network(
+            resolved_credentials_path,
+            mullvad_account_id_env=result.network_answers.mullvad_account_id_env,
+            mullvad_relay_country=result.network_answers.mullvad_relay_country,
+            mullvad_killswitch=result.network_answers.mullvad_killswitch,
+        )
+
+    # Belt-and-suspenders: clear the transient secret before returning so
+    # the caller can serialise / log the result without leaking it.
+    return ConfigureResult(
+        snapshot=result.snapshot,
+        network_answers=result.network_answers,
+        _mullvad_account_secret="",
+    )
 
 
 def cli_handler(args: argparse.Namespace) -> int:

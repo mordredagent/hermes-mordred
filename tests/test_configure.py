@@ -539,7 +539,7 @@ class TestRunWiresNetworkWriters:
     existing call sites (Phase 1 tests + cli_handler) keep working without
     modification."""
 
-    _ANSWERS_WITH_MULLVAD = [
+    _ANSWERS_WITH_MULLVAD: ClassVar[list[object]] = [
         "lenient",
         False,
         "",
@@ -629,9 +629,7 @@ class TestRunWiresNetworkWriters:
 
         def _values_of(obj: object) -> list[object]:
             if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-                return [
-                    v for f in dataclasses.fields(obj) for v in _values_of(getattr(obj, f.name))
-                ]
+                return [v for f in dataclasses.fields(obj) for v in _values_of(getattr(obj, f.name))]
             return [obj]
 
         leaked = [v for v in _values_of(result) if v == secret]
