@@ -494,15 +494,12 @@ class TestCircuitStatusHealth:
             tor.circuit_status_health(handle, controller_factory=factory)
             tor.circuit_status_health(handle, controller_factory=factory)
 
-        relevant = [
-            r for r in caplog.records if r.levelno == logging.WARNING and "tor-control" in r.getMessage()
-        ]
+        relevant = [r for r in caplog.records if r.levelno == logging.WARNING and "tor-control" in r.getMessage()]
         assert relevant, (
             "H5: circuit_status_health must emit a WARNING when stem is "
             "absent so the operator knows the deep probe was skipped. "
             f"Got log records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
         )
         assert len(relevant) == 1, (
-            f"H5: warning must fire exactly once per process; got {len(relevant)} "
-            "(30s liveness worker would spam logs)"
+            f"H5: warning must fire exactly once per process; got {len(relevant)} (30s liveness worker would spam logs)"
         )

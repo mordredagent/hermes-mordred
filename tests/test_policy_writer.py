@@ -721,9 +721,7 @@ class TestAtomicWriteHardening:
     name), M6 (stale-collision).
     """
 
-    def test_tmpfile_at_replace_time_matches_target_mode(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_tmpfile_at_replace_time_matches_target_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """The tmpfile written by ``_atomic_write_text(..., mode=0o600)``
         must already be 0o600 (or tighter) at every observable point during
         its on-disk lifetime — not just after a post-write ``os.chmod``.
@@ -757,9 +755,7 @@ class TestAtomicWriteHardening:
             "umask-default window leaks secret content to co-tenants (H3)"
         )
 
-    def test_tmpfile_name_is_randomized_per_invocation(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_tmpfile_name_is_randomized_per_invocation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Consecutive writes to the same target must use distinct tmpfile
         names — predictable ``<name>.tmp`` paths collide under concurrent
         writers (M5) and leave stale-collision footguns after a crash (M6).

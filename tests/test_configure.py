@@ -459,9 +459,7 @@ class TestCliHandlerWiresWriters:
         True,  # mullvad_killswitch
     ]
 
-    def test_dotenv_file_written_with_secret(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    def test_dotenv_file_written_with_secret(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         from mordred_hermes import _home as home_mod
 
         monkeypatch.setattr(home_mod, "HERMES_BASE", tmp_path)
@@ -948,8 +946,7 @@ class TestNetworkPrompts:
         )
         result = collect_answers(prompts)
         assert result.network_answers.mullvad_relay_country == "auto", (  # type: ignore[attr-defined]
-            "M7: free-text typos must collapse to 'auto' (with WARN), not be "
-            "passed through to the Mullvad CLI"
+            "M7: free-text typos must collapse to 'auto' (with WARN), not be passed through to the Mullvad CLI"
         )
 
     def test_valid_2letter_relay_country_passes_through_lowercased(self) -> None:
