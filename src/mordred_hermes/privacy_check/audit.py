@@ -44,7 +44,37 @@ DEFAULT_RETENTION_DAYS: Final = 30
 
 
 class Writer(Protocol):
-    """Frozen audit-log writer surface (Phase 1 contract for Phase 4 swap)."""
+    """Frozen audit-log writer surface (Phase 1 contract for Phase 4 swap).
+
+    Implementors MUST honor the following invariants so consumers of the
+    audit log (and callers like :mod:`mordred_hermes.keyvault.recovery`)
+    can rely on a uniform entry shape regardless of which writer is
+    installed (plaintext NDJSON in Phase 1-3, AES-GCM-encrypted in Phase 4):
+
+    1. **``ts`` injection**: if the caller-supplied ``entry`` does not
+       carry a ``ts`` field, the writer MUST add one set to the current
+       UTC time in ISO-8601 with **3-digit millisecond** precision —
+       literally ``"%Y-%m-%dT%H:%M:%S." + "{ms:03d}" + "Z"``. Python's
+       ``%f`` directive yields 6-digit microseconds, so the
+       :func:`_utcnow_iso` helper builds the string manually rather
+       than relying on a single ``strftime`` format string. Callers
+       further up the stack — including the keyvault ``audit_sink``
+       contract documented in :mod:`mordred_hermes.keyvault.recovery`
+       — assume this and do not inject ``ts`` themselves.
+       Code-reviewer MEDIUM-3 (2026-05-14) + second-pass NIT
+       (2026-05-14): this contract was previously only enforced by
+       :class:`NDJSONWriter` and documented with a misleading ``fff``
+       glyph that Python developers might read as ``%f%f%f`` (18-digit
+       microseconds). Documenting the exact assembly here prevents
+       a future Phase 4 ``EncryptedWriter`` from silently shipping
+       ``ts``-less entries or, worse, microsecond-precision ones.
+    2. **Whole-entry atomicity**: a single :meth:`append` call either
+       writes the entire serialized entry (one NDJSON line) or none of
+       it. No partial-write states should be observable on disk.
+    3. **0600 file mode**: any underlying file MUST be opened with
+       mode ``0600`` so audit history is not readable by other local
+       users.
+    """
 
     def append(self, entry: Mapping[str, Any]) -> None: ...
     def close(self) -> None: ...
