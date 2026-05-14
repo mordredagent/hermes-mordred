@@ -1,6 +1,6 @@
 """RED tests for Phase 4 PR3 step-A: lazy ``Security.framework`` wrapper.
 
-Per SPEC.md §Wrap wire format & algorithm (Phase 4 PR3 freeze, L437):
+Per SPEC.md §Wrap wire format & algorithm (Phase 4 PR3 freeze, 2026-05-14):
 
 - ``import mordred_hermes.keyvault.native`` MUST succeed on any platform
   (Linux / Windows / macOS). The pyobjc import is deferred until a
@@ -27,8 +27,9 @@ import pytest
 
 
 def test_module_import_does_not_raise_on_any_platform() -> None:
-    """SPEC L407 + L521: ``native.py`` must import cleanly on Linux/Windows
-    so ``mordred_hermes.keyvault`` is usable for non-keyvault primitives
+    """SPEC.md §Plugin: ``mordred_keyvault`` (Implementation interface +
+    Files): ``native.py`` must import cleanly on Linux/Windows so
+    ``mordred_hermes.keyvault`` is usable for non-keyvault primitives
     (digest, backup, recovery already landed in PR2). pyobjc must be
     deferred to call time.
     """
@@ -36,8 +37,9 @@ def test_module_import_does_not_raise_on_any_platform() -> None:
 
 
 def test_wrap_error_taxonomy_exported() -> None:
-    """SPEC L451-456 freezes a 6-class taxonomy. All must be importable
-    from ``keyvault._exceptions`` and form a subclass tree rooted at
+    """SPEC.md §Wrap wire format & algorithm "Internal Python surface"
+    freezes a 6-class taxonomy. All must be importable from
+    ``keyvault._exceptions`` and form a subclass tree rooted at
     :class:`WrapError`."""
     from mordred_hermes.keyvault._exceptions import (
         WrapAuthCancelled,

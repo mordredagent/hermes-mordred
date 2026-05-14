@@ -66,7 +66,7 @@ AuditSink = Callable[[dict[str, Any]], None]
 
 
 # ---------------------------------------------------------------------------
-# Wire-format constants (SPEC.md §Wrap wire format & algorithm L437)
+# Wire-format constants (SPEC.md §Wrap wire format & algorithm)
 # ---------------------------------------------------------------------------
 
 MAGIC: bytes = b"MRKW"
@@ -221,23 +221,21 @@ def _decode_sec1_uncompressed_p256(point_bytes: bytes) -> ec.EllipticCurvePublic
 class _ParsedHeader:
     """Holds the parsed-and-validated view of a 127-byte wrap blob.
 
-    Attributes are positional bytes plus the decoded EC point object.
-    Constructed only by :func:`_parse_header` — all validation happens
-    there so callers can rely on every field being well-formed.
+    Attributes are positional bytes only. Constructed by
+    :func:`_parse_header`, which validates every field — callers can
+    rely on each attribute being well-formed.
     """
 
-    __slots__ = ("ephemeral_pub", "ephemeral_pub_obj", "key_id_hash", "wrapped_dek")
+    __slots__ = ("ephemeral_pub", "key_id_hash", "wrapped_dek")
 
     def __init__(
         self,
         key_id_hash: bytes,
         ephemeral_pub: bytes,
-        ephemeral_pub_obj: ec.EllipticCurvePublicKey,
         wrapped_dek: bytes,
     ) -> None:
         self.key_id_hash = key_id_hash
         self.ephemeral_pub = ephemeral_pub
-        self.ephemeral_pub_obj = ephemeral_pub_obj
         self.wrapped_dek = wrapped_dek
 
 
@@ -277,14 +275,19 @@ def _parse_header(blob: bytes, key_id: str) -> _ParsedHeader:
         raise WrapParseError("key_id_hash mismatch — blob was wrapped for a different key_id")
 
     ephemeral_pub = blob[_OFFSET_EPHEMERAL_PUB:_OFFSET_WRAPPED_DEK]
-    ephemeral_pub_obj = _decode_sec1_uncompressed_p256(ephemeral_pub)
+    # Validate the EC point — raises ``WrapParseError`` on a malformed
+    # or off-curve point. The decoded ``EllipticCurvePublicKey`` is not
+    # retained because :func:`unwrap_dek` passes the raw bytes to
+    # ``backend.enclave_ecdh``; storing the decoded form was dead state
+    # (security-reviewer NIT-4 / python-reviewer LOW-2).
+    _decode_sec1_uncompressed_p256(ephemeral_pub)
 
     wrapped_dek = blob[_OFFSET_WRAPPED_DEK:]
     if len(wrapped_dek) != WRAPPED_DEK_LEN:
         # Unreachable given the HEADER_LEN check, but defensive.
         raise WrapParseError(f"wrapped_dek must be {WRAPPED_DEK_LEN} bytes; got {len(wrapped_dek)}")
 
-    return _ParsedHeader(blob_kid_hash, ephemeral_pub, ephemeral_pub_obj, wrapped_dek)
+    return _ParsedHeader(blob_kid_hash, ephemeral_pub, wrapped_dek)
 
 
 def _emit_unwrap_denied(

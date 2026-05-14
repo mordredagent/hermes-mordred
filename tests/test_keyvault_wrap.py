@@ -112,8 +112,9 @@ def captured_audit() -> tuple[list[dict[str, Any]], AuditSink]:
 
 
 class TestWireFormat:
-    """SPEC L437 byte layout: ``MRKW|version(1)|alg_suite(1)|key_id_hash(16)|
-    ephemeral_pub(65)|wrapped_dek(40)`` = 127 bytes."""
+    """SPEC.md §Wrap wire format & algorithm byte layout:
+    ``MRKW|version(1)|alg_suite(1)|key_id_hash(16)|ephemeral_pub(65)|
+    wrapped_dek(40)`` = 127 bytes."""
 
     def test_blob_is_127_bytes_for_version_1(self, backend: FakeBackend) -> None:
         from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
@@ -685,7 +686,8 @@ class TestKeyNotFoundIsPreAuthorization:
         backend: FakeBackend,
         captured_audit: tuple[list[dict[str, Any]], AuditSink],
     ) -> None:
-        """SPEC L470: pre-authorization failures do not emit audit. The
+        """SPEC.md §Wrap wire format & algorithm "Algorithm — unwrap_dek"
+        step 2: pre-authorization failures do not emit audit. The
         ``keyvault.unwrap_denied`` reason code is for prompt-denied flows
         (user_cancelled / auth_failed / biometry_lockout / passcode_not_set),
         not for missing-key flows."""

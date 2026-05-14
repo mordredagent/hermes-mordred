@@ -67,8 +67,9 @@ class WrapIntegrityError(WrapError):
     """AES-KW AIV check failed during unwrap.
 
     The integrity of the blob is end-to-end protected by binding all
-    non-secret fields into the HKDF ``info`` parameter (SPEC L437 wrap
-    step 4). A tampered ``ephemeral_pub`` produces a different KEK and
+    non-secret fields into the HKDF ``info`` parameter (SPEC.md
+    §Wrap wire format & algorithm, ``wrap_dek`` step 4). A tampered
+    ``ephemeral_pub`` produces a different KEK and
     AES-KW fails the AIV check. A tampered ``wrapped_dek`` fails the
     AIV check directly. Both surface as this single class so callers
     cannot distinguish them — leaking which byte ranges are integrity-
