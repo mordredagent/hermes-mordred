@@ -95,15 +95,18 @@ class WrapAuthCancelled(WrapError):
 
     Paired with a ``keyvault.unwrap_denied`` audit log entry (POLICY.md
     code #20). The underlying ``NSError`` is chained via ``__cause__``;
-    the translated ``native_error_code`` is one of ``user_cancelled``,
-    ``auth_failed``, ``biometry_lockout``, ``passcode_not_set``,
-    ``key_not_found``.
+    the translated ``native_error_code`` is one of the four prompt-
+    denied codes — ``user_cancelled``, ``auth_failed``,
+    ``biometry_lockout``, ``passcode_not_set``.
 
-    Note: ``key_not_found`` is also a possible audit code here even
-    though :class:`WrapKeyNotFound` exists — when the Enclave returns
-    ``errSecItemNotFound`` mid-unwrap, the audit log records the gating
-    decision (denied) and the raised exception is the more specific
-    :class:`WrapKeyNotFound`.
+    Note: ``key_not_found`` is the fifth member of the
+    :data:`mordred_hermes.keyvault.wrap.NativeErrorCode` closed set,
+    but it never surfaces as :class:`WrapAuthCancelled`. The Enclave
+    returning ``errSecItemNotFound`` mid-unwrap is a pre-authorization
+    failure: :func:`mordred_hermes.keyvault.wrap.unwrap_dek` branches
+    on ``denied.code == "key_not_found"`` and raises the more specific
+    :class:`WrapKeyNotFound` with **no audit emit** (review-fix-1
+    HIGH-1, codex review-fix-2 LOW-1).
     """
 
 
