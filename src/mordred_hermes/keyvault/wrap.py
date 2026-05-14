@@ -40,9 +40,10 @@ Exception taxonomy is in :mod:`mordred_hermes.keyvault._exceptions`.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -57,6 +58,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from ._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
+    WrapKeyNotFound,
     WrapParseError,
 )
 
@@ -105,6 +107,7 @@ class NativeBackendError(Exception):
         self.code: str = code
 
 
+@runtime_checkable
 class NativeBackend(Protocol):
     """Narrow Secure-Enclave boundary (codex review MEDIUM-4).
 
@@ -112,6 +115,11 @@ class NativeBackend(Protocol):
     AES-KW + wire-format parsing live in :mod:`wrap` and are exercised
     with real crypto in the unit tests; only Enclave authorization is
     mocked.
+
+    ``@runtime_checkable`` mirrors the repo convention for structural
+    Protocols used as dependency-injection seams (e.g.
+    ``wizard/policy_writer.PolicyWriter``, ``credentials_writer.CredentialsWriter``,
+    ``env_file_writer.EnvFileWriter``) — review-fix-1 HIGH-3.
     """
 
     def generate_enclave_key(self, key_id: str) -> bytes:
@@ -405,7 +413,14 @@ def unwrap_dek(
         WrapParseError: blob is structurally invalid. Parse rejections
             happen BEFORE any Enclave call — UX + privacy (no biometric
             prompt for malformed blobs).
-        WrapKeyNotFound: Keychain has no item for ``key_id``.
+        WrapKeyNotFound: Keychain has no item for ``key_id``. Surfaces
+            from two paths: (a) a parse-time lookup miss when the
+            backend exposes one, and (b) a mid-unwrap
+            ``NativeBackendError("key_not_found")`` translated to
+            :class:`WrapKeyNotFound` because missing-key is pre-
+            authorization per SPEC.md §Wrap wire format & algorithm
+            "Algorithm — unwrap_dek" step 2 — NO audit entry is emitted
+            in either case (review-fix-1 HIGH-1).
         WrapAuthCancelled: user denied the access-control prompt. The
             underlying :class:`NativeBackendError` is chained via
             ``__cause__``; if ``audit_sink`` itself raised while
@@ -415,13 +430,28 @@ def unwrap_dek(
         WrapIntegrityError: AES-KW AIV check failed — blob's
             ``ephemeral_pub`` or ``wrapped_dek`` was tampered with.
 
-    The ``audit_sink`` is called at most once per invocation (success
-    OR denial, never both). Integrity / parse / key-not-found failures
-    do NOT emit any audit entry because they happen before the
-    authorization decision is reached.
+    The ``audit_sink`` is called at most once per invocation, and only
+    for prompt-denied / authorized decisions. Integrity / parse / key-
+    not-found failures do NOT emit any audit entry because they happen
+    before the authorization decision is reached. If the sink itself
+    raises during the success-path emit, the exception is swallowed
+    and the DEK is returned anyway (review-fix-1 MEDIUM-1) — the
+    asymmetry with the denial path is deliberate: the denial path has
+    a primary exception to chain against, but the success path has
+    only a return value and must deliver the DEK intact (a lost DEK is
+    operationally worse than a missing audit entry, which is
+    recoverable).
     """
     parsed = _parse_header(blob, key_id)
 
+    # ``enclave_ecdh`` is the only path that can prompt the user. We
+    # capture any ``NativeBackendError`` into ``denied`` and raise the
+    # translated exception OUTSIDE the ``except`` handler so Python's
+    # implicit ``__context__`` machinery does not overwrite our explicit
+    # ``__context__ = sink_exc`` assignment (CPython unconditionally sets
+    # ``__context__`` on ``raise`` inside an active exception handler;
+    # see ``Python/ceval.c:do_raise`` → ``PyException_SetContext``).
+    # PR2 ``recovery._emit_mismatch`` uses the same pattern (HIGH-1, 2026-05-14).
     denied: NativeBackendError | None = None
     shared_secret: bytes | None = None
     try:
@@ -430,11 +460,20 @@ def unwrap_dek(
         denied = exc
 
     if denied is not None:
-        # Emit + raise outside the ``except`` handler so that Python's
-        # implicit ``__context__`` assignment (which would point at
-        # ``denied`` itself) does not overwrite our explicit chain.
-        # Pattern mirrors PR2 ``recovery.import_backup`` (code-reviewer
-        # HIGH-1, 2026-05-14).
+        # HIGH-1: ``errSecItemNotFound`` mid-unwrap surfaces as
+        # :class:`WrapKeyNotFound` (more specific than ``WrapAuthCancelled``)
+        # with no audit emit. The docstring in ``_exceptions.py`` already
+        # promises this contract; the fix completes the implementation.
+        if denied.code == "key_not_found":
+            raise WrapKeyNotFound(denied.code) from denied
+
+        # All other native error codes are prompt-denied flows. Emit
+        # ``keyvault.unwrap_denied`` and raise ``WrapAuthCancelled``,
+        # chaining the native error via ``__cause__`` and any sink
+        # failure via ``__context__``. Both attributes are assigned
+        # explicitly before ``raise`` so neither is touched by the raise
+        # machinery (we are outside the ``except`` handler here, so
+        # there is no active exception to auto-fill ``__context__`` with).
         sink_exc = _emit_unwrap_denied(audit_sink, key_id=key_id, native_error_code=denied.code)
         primary = WrapAuthCancelled(denied.code)
         primary.__cause__ = denied
@@ -442,7 +481,17 @@ def unwrap_dek(
             primary.__context__ = sink_exc
         raise primary
 
-    assert shared_secret is not None  # narrow for mypy; denied is None implies success above
+    # HIGH-2: ``denied is None`` here means the ``try`` block completed,
+    # so ``shared_secret`` is bound. The ``assert`` form would be
+    # stripped by ``python -O``; instead we raise a real
+    # :class:`RuntimeError` whose message documents the invariant. The
+    # guard is unreachable in practice and exists only to narrow
+    # ``shared_secret`` from ``bytes | None`` to ``bytes`` for mypy.
+    if shared_secret is None:
+        raise RuntimeError(
+            "unreachable: enclave_ecdh returned without raising NativeBackendError but produced no shared secret"
+        )
+
     info = _build_hkdf_info(parsed.key_id_hash, parsed.ephemeral_pub)
     kek = _derive_kek(shared_secret, info)
 
@@ -451,13 +500,20 @@ def unwrap_dek(
     except InvalidUnwrap as exc:
         raise WrapIntegrityError("AES-KW AIV check failed — wrapped_dek or ephemeral_pub was tampered with") from exc
 
-    audit_sink(
-        {
-            "event": "keyvault.unwrap_dek",
-            "decision": "allow",
-            "reason": "keyvault.unwrap_authorized",
-            "key_id_hash": _audit_key_id_hex(key_id),
-        }
-    )
+    # MEDIUM-1: best-effort audit emit on success. The DEK has been
+    # computed; if the sink raises, the caller MUST still receive it.
+    # Asymmetric with the denial path by design (see docstring).
+    # ``contextlib.suppress(Exception)`` (not ``BaseException``) mirrors
+    # ``_emit_unwrap_denied``'s policy — Ctrl-C / SystemExit /
+    # GeneratorExit propagate untouched so CLI shutdown stays clean.
+    with contextlib.suppress(Exception):
+        audit_sink(
+            {
+                "event": "keyvault.unwrap_dek",
+                "decision": "allow",
+                "reason": "keyvault.unwrap_authorized",
+                "key_id_hash": _audit_key_id_hex(key_id),
+            }
+        )
 
     return dek

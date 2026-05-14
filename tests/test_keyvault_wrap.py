@@ -36,6 +36,9 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
+from mordred_hermes.keyvault.wrap import NativeBackendError
+
 AuditSink = Callable[[dict[str, Any]], None]
 
 
@@ -46,6 +49,13 @@ class FakeBackend:
     private key. ``enclave_ecdh`` performs real ECDH against a supplied
     peer public key. Authorization failure paths are simulated by
     setting ``denied_reason`` before the call.
+
+    review-fix-1 MEDIUM-2: ``WrapKeyNotFound`` and ``NativeBackendError``
+    are imported at module level (not deferred inside each method).
+    No real circularity exists — ``_exceptions`` and ``wrap`` have no
+    test-file dependencies — so the deferred form only served to hide
+    typos from mypy. Module-level imports let mypy catch a rename or
+    move at collect time instead of test runtime.
     """
 
     def __init__(self) -> None:
@@ -56,8 +66,6 @@ class FakeBackend:
     def generate_enclave_key(self, key_id: str) -> bytes:
         self.calls.append(("generate", key_id))
         if key_id in self._keys:
-            from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-
             raise WrapKeyNotFound(f"key {key_id!r} already exists")
         priv = ec.generate_private_key(ec.SECP256R1())
         self._keys[key_id] = priv
@@ -66,8 +74,6 @@ class FakeBackend:
     def get_enclave_public_key(self, key_id: str) -> bytes:
         self.calls.append(("get_pub", key_id))
         if key_id not in self._keys:
-            from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-
             raise WrapKeyNotFound(f"no key for {key_id!r}")
         return self._keys[key_id].public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
 
@@ -78,12 +84,8 @@ class FakeBackend:
     def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
         self.calls.append(("ecdh", key_id))
         if self.denied_reason is not None:
-            from mordred_hermes.keyvault.wrap import NativeBackendError
-
             raise NativeBackendError(self.denied_reason)
         if key_id not in self._keys:
-            from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
-
             raise WrapKeyNotFound(f"no key for {key_id!r}")
         peer = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_pub)
         return self._keys[key_id].exchange(ec.ECDH(), peer)
