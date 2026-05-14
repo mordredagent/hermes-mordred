@@ -549,6 +549,120 @@ class TestRegisterLoadsPolicyFromDisk:
         assert runtime._config.policy_mode == "off"  # type: ignore[attr-defined]
 
 
+class TestRegisterLoadsWizardNetworkSettings:
+    """Codex review (2026-05-14, P2): the wizard persists
+    ``tor_binary_path`` / ``tor_socks_port`` / ``mullvad_relay_country``
+    under ``plugins.mordred_network`` in ``config.yaml`` but
+    ``_load_runtime_config`` only reads ``default_path``. The other
+    three are silently discarded so the operator's choices never reach
+    Tor or Mullvad at runtime.
+    """
+
+    def _seed(self, tmp_path: Path) -> tuple[Path, Path]:
+        policy = _write_policy(tmp_path, "strict")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "plugins:\n"
+            "  mordred_network:\n"
+            "    default_path: tor\n"
+            "    tor_binary_path: /opt/tor/bin/tor\n"
+            "    tor_socks_port: 9150\n"
+            "    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT\n"
+            "    mullvad_relay_country: jp\n"
+            "    mullvad_killswitch: true\n",
+            encoding="utf-8",
+        )
+        return policy, config_path
+
+    def test_register_reads_tor_binary_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy, config = self._seed(tmp_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        assert runtime._config.tor_binary == "/opt/tor/bin/tor", (  # type: ignore[attr-defined]
+            "P2: tor_binary_path from config.yaml must reach RuntimeConfig.tor_binary"
+        )
+
+    def test_register_reads_tor_socks_port(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy, config = self._seed(tmp_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        assert runtime._config.tor_socks_port == 9150, (  # type: ignore[attr-defined]
+            "P2: tor_socks_port from config.yaml must reach RuntimeConfig"
+        )
+
+    def test_register_reads_mullvad_relay_country(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy, config = self._seed(tmp_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        assert runtime._config.mullvad_region == "jp", (  # type: ignore[attr-defined]
+            "P2: mullvad_relay_country from config.yaml must reach RuntimeConfig.mullvad_region"
+        )
+
+    def test_register_missing_network_keys_falls_back_to_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When config.yaml only has default_path (older wizards / hand-
+        written configs), the new readers must NOT crash. They should
+        fall back to RuntimeConfig's built-in defaults.
+        """
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy = _write_policy(tmp_path, "lenient")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "plugins:\n  mordred_network:\n    default_path: clearnet\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+
+        ctx = _FakeCtx()
+        net_pkg.register(ctx)
+
+        runtime = api._RUNTIME
+        assert runtime is not None
+        # defaults from RuntimeConfig
+        assert runtime._config.tor_binary == "tor"  # type: ignore[attr-defined]
+        assert runtime._config.tor_socks_port == 0  # 0 = let runtime pick  # type: ignore[attr-defined]
+        assert runtime._config.mullvad_region == "auto"  # type: ignore[attr-defined]
+
+
 class TestRegisterLoadsDisableIPv6FromDisk:
     """Phase 3 PR3a Task #2: ``disable_ipv6`` schema in ``policy.json``.
 
