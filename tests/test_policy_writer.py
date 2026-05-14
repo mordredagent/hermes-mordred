@@ -8,6 +8,7 @@ substring checks -- a real diff is easier to debug than a pickle blob.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
@@ -701,3 +702,86 @@ class TestHasConfigYamlSectionProtocol:
             data = yaml.load(f)
         assert data["plugins"]["mordred_network"]["default_path"] == "tor"
         assert data["plugins"]["mordred_network"]["tor_socks_port"] == 9050
+
+
+class TestAtomicWriteHardening:
+    """H3+M5+M6 (review 2026-05-14): the canonical ``_atomic_write_text``
+    writes the tmpfile via ``Path.write_text``, which creates the file at
+    the process umask (typically 0o644). For writes that specify
+    ``mode=0o600`` (policy.json, .env, credentials JSON) the secret content
+    lands on disk in the umask-default mode and a co-tenant on the same
+    host can read it during the gap between ``write_text`` and ``os.chmod``.
+
+    The tmpfile name is also predictable (``<path>.tmp``), so concurrent
+    writers collide on the same path and a stale ``.tmp`` from a prior
+    crash can break subsequent writes.
+
+    Hardening: switch to ``tempfile.mkstemp`` (atomic ``O_CREAT|O_EXCL`` at
+    0o600 with a random suffix). Closes H3 (umask window), M5 (predictable
+    name), M6 (stale-collision).
+    """
+
+    def test_tmpfile_at_replace_time_matches_target_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The tmpfile written by ``_atomic_write_text(..., mode=0o600)``
+        must already be 0o600 (or tighter) at every observable point during
+        its on-disk lifetime — not just after a post-write ``os.chmod``.
+
+        We monitor every observable transition: the file's mode at the
+        moment of the first stat after creation, at the moment of
+        ``os.replace``, and at the moment of every ``os.chmod`` call. None
+        of them may exceed the target mode. The current ``Path.write_text``
+        approach leaves the file at umask-default (0o644) between
+        ``write_text`` and ``os.chmod``; with ``tempfile.mkstemp`` the file
+        is at 0o600 from the moment of creation.
+        """
+        from mordred_hermes.wizard import policy_writer as pw
+
+        target = tmp_path / "policy.json"
+        captured_pre_chmod: list[int] = []
+        real_chmod = os.chmod
+
+        def capturing_chmod(path: object, mode: int, *args: object, **kwargs: object) -> None:
+            with contextlib.suppress(FileNotFoundError):
+                if str(path).startswith(str(tmp_path)) and str(path) != str(target):
+                    captured_pre_chmod.append(stat.S_IMODE(os.stat(str(path)).st_mode))
+            real_chmod(path, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "chmod", capturing_chmod)
+        pw._atomic_write_text(target, "secret-payload\n", mode=0o600)
+
+        too_broad = [oct(m) for m in captured_pre_chmod if m > 0o600]
+        assert not too_broad, (
+            f"tmpfile observed at mode wider than 0o600 before chmod: {too_broad}; "
+            "umask-default window leaks secret content to co-tenants (H3)"
+        )
+
+    def test_tmpfile_name_is_randomized_per_invocation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Consecutive writes to the same target must use distinct tmpfile
+        names — predictable ``<name>.tmp`` paths collide under concurrent
+        writers (M5) and leave stale-collision footguns after a crash (M6).
+        """
+        from mordred_hermes.wizard import policy_writer as pw
+
+        target = tmp_path / "policy.json"
+        tmpfiles_seen: list[str] = []
+        real_replace = os.replace
+
+        def capturing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            tmpfiles_seen.append(os.path.basename(str(src)))
+            real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "replace", capturing_replace)
+        pw._atomic_write_text(target, "first-payload\n", mode=0o600)
+        # second write must produce a different content so idempotent-skip
+        # doesn't short-circuit (and thus skip the tmpfile rotation).
+        pw._atomic_write_text(target, "second-payload\n", mode=0o600)
+
+        assert len(tmpfiles_seen) == 2, f"expected 2 replace calls, got {tmpfiles_seen}"
+        assert tmpfiles_seen[0] != tmpfiles_seen[1], (
+            f"tmpfile names must be randomized to avoid predictable collisions; "
+            f"got the same name {tmpfiles_seen[0]!r} twice"
+        )
