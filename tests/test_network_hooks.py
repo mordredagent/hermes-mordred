@@ -610,9 +610,7 @@ class TestRegisterLoadsDisableIPv6FromDisk:
         assert runtime is not None
         assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
 
-    def test_strict_policy_user_pin_false_is_honoured(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_strict_policy_user_pin_false_is_honoured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """User explicitly opting out of IPv6-disable in strict is allowed.
         Documented caveat in POLICY.md - lets IPv6-only providers work but
         the flagger emits a strict-mode warning."""
@@ -622,18 +620,14 @@ class TestRegisterLoadsDisableIPv6FromDisk:
         assert runtime is not None
         assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
 
-    def test_lenient_policy_user_pin_true_is_honoured(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_lenient_policy_user_pin_true_is_honoured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         policy = _write_policy(tmp_path, "lenient", disable_ipv6=True)
         config = _write_config(tmp_path, "clearnet")
         runtime = self._register_with_policy(tmp_path, monkeypatch, policy, config)
         assert runtime is not None
         assert runtime._config.disable_ipv6 is True  # type: ignore[attr-defined]
 
-    def test_non_bool_value_falls_back_to_mode_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_bool_value_falls_back_to_mode_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A corrupted ``disable_ipv6`` (string, list, dict) falls back to the
         policy-mode default. Mirrors :class:`_read_policy_mode`'s unhashable
         fallback (Codex round 3 P2)."""
@@ -649,9 +643,7 @@ class TestRegisterLoadsDisableIPv6FromDisk:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """No policy.json → off mode → disable_ipv6 stays False."""
-        runtime = self._register_with_policy(
-            tmp_path, monkeypatch, tmp_path / "absent.json", tmp_path / "absent.yaml"
-        )
+        runtime = self._register_with_policy(tmp_path, monkeypatch, tmp_path / "absent.json", tmp_path / "absent.yaml")
         assert runtime is not None
         assert runtime._config.disable_ipv6 is False  # type: ignore[attr-defined]
 

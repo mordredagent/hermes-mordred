@@ -92,6 +92,9 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
 
     Reads:
     - ``policy.json`` for ``policy_mode`` (strict / lenient / off)
+    - ``policy.json`` for ``disable_ipv6`` (advisory IPv6-leak defence;
+      strict-mode default ``True``, lenient/off default ``False``, Phase 3
+      PR3a Task #2). User pin always wins.
     - ``config.yaml plugins.mordred_network.default_path`` for
       ``default_path``
 
@@ -105,26 +108,42 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     config files are absent or malformed - matches the hooks-layer
     fallback so the two readers stay in agreement.
     """
-    policy_mode = _read_policy_mode(policy_json_path)
+    policy_data = _load_policy_json(policy_json_path)
+    policy_mode = _resolve_policy_mode(policy_data)
+    disable_ipv6 = _resolve_disable_ipv6(policy_data, policy_mode)
     default_path = _read_default_path(config_path)
     return RuntimeConfig(
         policy_mode=cast(PolicyMode, policy_mode),
         default_path=cast(ActivePath, default_path),
         tor_data_dir=HERMES_BASE / "mordred" / "tor-data",
+        disable_ipv6=disable_ipv6,
     )
 
 
-def _read_policy_mode(policy_json_path: Path) -> str:
+def _load_policy_json(policy_json_path: Path) -> dict[str, Any]:
+    """Open ``policy.json`` once and return its dict (or ``{}`` on miss).
+
+    Phase 3 PR3a Task #2: ``_load_runtime_config`` derives multiple
+    fields from the same JSON so a single read amortises the IO. All
+    failure modes (absent, unreadable, malformed, non-dict root) collapse
+    to ``{}`` so downstream resolvers can apply their own defaults
+    without crashing plugin registration.
+    """
     if not policy_json_path.exists():
-        return "off"
+        return {}
     try:
         with policy_json_path.open(encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        _LOG.warning("could not read %s: %s; defaulting to 'off'", policy_json_path, e)
-        return "off"
+        _LOG.warning("could not read %s: %s; defaulting to empty", policy_json_path, e)
+        return {}
     if not isinstance(data, dict):
-        return "off"
+        return {}
+    return cast(dict[str, Any], data)
+
+
+def _resolve_policy_mode(data: dict[str, Any]) -> str:
+    """Derive ``policy_mode`` from a pre-loaded ``policy.json`` dict."""
     mode = data.get("policy", "off")
     # Codex round 3 P2 (2026-05-14): isinstance check first; ``in`` on a
     # frozenset raises TypeError for unhashable values like ``[]`` or
@@ -133,6 +152,32 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     if isinstance(mode, str) and mode in _VALID_POLICY_MODES:
         return mode
     return "off"
+
+
+def _resolve_disable_ipv6(data: dict[str, Any], policy_mode: str) -> bool:
+    """Derive ``disable_ipv6`` from a pre-loaded ``policy.json`` dict.
+
+    Phase 3 PR3a Task #2. If the user pinned a bool, honour it. Otherwise
+    default by policy mode: ``strict`` → ``True`` (safe-by-default IPv6
+    leak defence), ``lenient`` / ``off`` → ``False`` (user-friendly).
+
+    Non-bool values (``"yes"``, ``1``, ``[]``) collapse to the mode default
+    -- the contract is documented in POLICY.md §disable_ipv6 schema.
+    """
+    raw = data.get("disable_ipv6")
+    if isinstance(raw, bool):
+        return raw
+    return policy_mode == "strict"
+
+
+def _read_policy_mode(policy_json_path: Path) -> str:
+    """Backward-compatible wrapper for the single-field reader.
+
+    Kept so the hooks layer can call the single-field reader without
+    learning the new ``_load_policy_json`` interface. New code should
+    prefer the bulk reader.
+    """
+    return _resolve_policy_mode(_load_policy_json(policy_json_path))
 
 
 def _read_default_path(config_path: Path) -> str:
