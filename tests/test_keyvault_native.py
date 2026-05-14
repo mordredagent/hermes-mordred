@@ -56,9 +56,7 @@ def test_wrap_error_taxonomy_exported() -> None:
         WrapKeyNotFound,
     ):
         assert issubclass(cls, WrapError), f"{cls.__name__} must inherit from WrapError"
-        assert issubclass(cls, Exception), (
-            f"{cls.__name__} must inherit from Exception (not BaseException)"
-        )
+        assert issubclass(cls, Exception), f"{cls.__name__} must inherit from Exception (not BaseException)"
 
 
 def test_wrap_error_subclasses_are_distinct() -> None:
@@ -139,8 +137,7 @@ def test_lazy_import_security_raises_wrap_native_unavailable_on_non_darwin(
 
     assert "macOS" in str(excinfo.value) or "darwin" in str(excinfo.value).lower()
     assert excinfo.value.__cause__ is None, (
-        "non-darwin path should short-circuit before any ImportError; "
-        "no exception chain expected"
+        "non-darwin path should short-circuit before any ImportError; no exception chain expected"
     )
 
 
