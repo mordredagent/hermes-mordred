@@ -95,8 +95,11 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     - ``policy.json`` for ``disable_ipv6`` (advisory IPv6-leak defence;
       strict-mode default ``True``, lenient/off default ``False``, Phase 3
       PR3a Task #2). User pin always wins.
-    - ``config.yaml plugins.mordred_network.default_path`` for
-      ``default_path``
+    - ``config.yaml plugins.mordred_network`` for ``default_path``,
+      ``tor_binary_path`` -> ``tor_binary``, ``tor_socks_port``, and
+      ``mullvad_relay_country`` -> ``mullvad_region`` (codex P2,
+      2026-05-14). Without those four the wizard's choices are
+      persisted to disk but never reach the runtime.
 
     Also pins ``tor_data_dir`` to the active Hermes profile via
     :data:`HERMES_BASE` (Codex P2 round 2, 2026-05-14). Falling back to
@@ -104,18 +107,28 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     ``~/.hermes`` and leak Tor cookies across profiles when the user
     has ``HERMES_HOME`` set or an ``active_profile`` configured.
 
-    Falls back to safe defaults (off / clearnet) when the policy /
-    config files are absent or malformed - matches the hooks-layer
-    fallback so the two readers stay in agreement.
+    Falls back to safe defaults (off / clearnet / built-in
+    RuntimeConfig defaults) when the policy / config files are absent
+    or malformed -- matches the hooks-layer fallback so the two readers
+    stay in agreement.
+
+    ``mullvad_killswitch`` is intentionally NOT wired here yet
+    (RuntimeConfig has no field for it; the VPN path derives lockdown
+    from ``policy_mode``). Threading an explicit user override is a
+    follow-up.
     """
     policy_data = _load_policy_json(policy_json_path)
     policy_mode = _resolve_policy_mode(policy_data)
     disable_ipv6 = _resolve_disable_ipv6(policy_data, policy_mode)
-    default_path = _read_default_path(config_path)
+    network = _load_network_section(config_path)
+    default_path = _resolve_default_path(network)
     return RuntimeConfig(
         policy_mode=cast(PolicyMode, policy_mode),
         default_path=cast(ActivePath, default_path),
+        tor_binary=_resolve_tor_binary(network),
+        tor_socks_port=_resolve_tor_socks_port(network),
         tor_data_dir=HERMES_BASE / "mordred" / "tor-data",
+        mullvad_region=_resolve_mullvad_region(network),
         disable_ipv6=disable_ipv6,
     )
 
@@ -180,9 +193,17 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     return _resolve_policy_mode(_load_policy_json(policy_json_path))
 
 
-def _read_default_path(config_path: Path) -> str:
+def _load_network_section(config_path: Path) -> dict[str, Any]:
+    """Open ``config.yaml`` and return ``plugins.mordred_network`` as a dict.
+
+    Codex P2 (2026-05-14): a single read amortises IO for the four
+    network fields the runtime consumes (``default_path``,
+    ``tor_binary_path``, ``tor_socks_port``, ``mullvad_relay_country``).
+    All failure modes collapse to ``{}`` so downstream resolvers apply
+    their own defaults without crashing plugin registration.
+    """
     if not config_path.exists():
-        return "clearnet"
+        return {}
     from ruamel.yaml import YAML
     from ruamel.yaml.error import YAMLError
 
@@ -192,19 +213,79 @@ def _read_default_path(config_path: Path) -> str:
             data = yaml.load(f)
     except (OSError, YAMLError) as e:
         _LOG.warning("could not read %s: %s", config_path, e)
-        return "clearnet"
+        return {}
     if not isinstance(data, dict):
-        return "clearnet"
+        return {}
     plugins = data.get("plugins")
     if not isinstance(plugins, dict):
-        return "clearnet"
+        return {}
     network = plugins.get("mordred_network")
     if not isinstance(network, dict):
-        return "clearnet"
+        return {}
+    return cast(dict[str, Any], network)
+
+
+def _resolve_default_path(network: dict[str, Any]) -> str:
     value = network.get("default_path", "clearnet")
     if isinstance(value, str) and value in _VALID_PATHS:
         return value
     return "clearnet"
+
+
+def _resolve_tor_binary(network: dict[str, Any]) -> str:
+    """Derive ``RuntimeConfig.tor_binary`` from ``tor_binary_path``.
+
+    The wizard's ``tor_binary_path`` key maps to ``tor_binary`` because
+    ``RuntimeConfig.tor_binary`` accepts either an absolute path or a
+    shell-resolvable name (e.g., bare ``"tor"``). Any non-string value
+    falls back to the safe default ``"tor"`` so the runtime can still
+    spawn via PATH lookup.
+    """
+    value = network.get("tor_binary_path")
+    if isinstance(value, str) and value:
+        return value
+    return "tor"
+
+
+def _resolve_tor_socks_port(network: dict[str, Any]) -> int:
+    """Derive ``RuntimeConfig.tor_socks_port`` from on-disk config.
+
+    Returns ``0`` (= "let the runtime pick from the candidate list") when
+    the field is absent or malformed. Out-of-range or non-int values
+    collapse to ``0`` so a typo doesn't surface as a port-binding
+    failure.
+    """
+    value = network.get("tor_socks_port")
+    if isinstance(value, bool):
+        # bool is a subclass of int in Python; reject it explicitly so
+        # ``mullvad_killswitch: true`` placed under the wrong key can't
+        # silently become port 1.
+        return 0
+    if isinstance(value, int) and 0 < value <= 65535:
+        return value
+    return 0
+
+
+def _resolve_mullvad_region(network: dict[str, Any]) -> str:
+    """Derive ``RuntimeConfig.mullvad_region`` from ``mullvad_relay_country``.
+
+    The wizard validates the input shape (``"auto"`` or 2-letter lowercase
+    code) so this reader trusts a well-formed string and falls back to
+    ``"auto"`` only when the field is absent or non-string.
+    """
+    value = network.get("mullvad_relay_country")
+    if isinstance(value, str) and value:
+        return value
+    return "auto"
+
+
+def _read_default_path(config_path: Path) -> str:
+    """Backward-compatible wrapper for the single-field reader.
+
+    Kept so callers that only need ``default_path`` don't have to learn
+    the new ``_load_network_section`` interface.
+    """
+    return _resolve_default_path(_load_network_section(config_path))
 
 
 @functools.lru_cache(maxsize=1)
