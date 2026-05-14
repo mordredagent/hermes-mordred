@@ -510,6 +510,134 @@ def test_setup_runner_spy_matches_protocol() -> None:
 # --------------------------------------------------------------------------- #
 
 
+class _SpyEnvFileWriter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, str, str]] = []
+
+    def upsert(self, path: Path, *, key: str, value: str) -> None:
+        self.calls.append((path, key, value))
+
+
+class _SpyCredentialsWriter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, str, str, bool]] = []
+
+    def write_network(
+        self,
+        path: Path,
+        *,
+        mullvad_account_id_env: str,
+        mullvad_relay_country: str,
+        mullvad_killswitch: bool,
+    ) -> None:
+        self.calls.append((path, mullvad_account_id_env, mullvad_relay_country, mullvad_killswitch))
+
+
+class TestRunWiresNetworkWriters:
+    """``run()`` accepts ``env_writer`` + ``credentials_writer`` Protocol-typed
+    dependencies and routes Mullvad inputs to them. Each is optional so
+    existing call sites (Phase 1 tests + cli_handler) keep working without
+    modification."""
+
+    _ANSWERS_WITH_MULLVAD = [
+        "lenient",
+        False,
+        "",
+        "http://x/v1",
+        "qwen",
+        "always-block",
+        "none",
+        "vpn",  # default_network_path
+        "/usr/bin/tor",
+        "9050",
+        "secret-account-123",  # password (will go to env writer)
+        "jp",
+        True,
+    ]
+
+    def test_env_writer_receives_mullvad_secret(self, tmp_path: Path) -> None:
+        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+        env_w = _SpyEnvFileWriter()
+        cred_w = _SpyCredentialsWriter()
+        env_path = tmp_path / ".env"
+        credentials_path = tmp_path / "credentials" / "network.json"
+
+        run(
+            setup_runner=runner,
+            prompt_io=prompts,
+            policy_writer=w,
+            env_writer=env_w,
+            credentials_writer=cred_w,
+            env_path=env_path,
+            credentials_path=credentials_path,
+        )
+
+        assert env_w.calls == [(env_path, "MORDRED_MULLVAD_ACCOUNT", "secret-account-123")]
+
+    def test_credentials_writer_receives_network_answers(self, tmp_path: Path) -> None:
+        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+        env_w = _SpyEnvFileWriter()
+        cred_w = _SpyCredentialsWriter()
+
+        run(
+            setup_runner=runner,
+            prompt_io=prompts,
+            policy_writer=w,
+            env_writer=env_w,
+            credentials_writer=cred_w,
+            env_path=tmp_path / ".env",
+            credentials_path=tmp_path / "credentials" / "network.json",
+        )
+
+        assert cred_w.calls == [(tmp_path / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "jp", True)]
+
+    def test_optional_writers_default_to_no_op(self, tmp_path: Path) -> None:
+        """Backward compat: existing call sites pass only policy_writer."""
+        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+        # No env_writer / credentials_writer -- must not crash.
+        result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
+        assert result.network_answers.mullvad_relay_country == "jp"  # type: ignore[attr-defined]
+
+    def test_secret_does_not_appear_in_returned_result(self, tmp_path: Path) -> None:
+        """The Mullvad secret flows to EnvFileWriter only -- it must NOT leak
+        into the ConfigureResult that the caller might serialise."""
+        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+        env_w = _SpyEnvFileWriter()
+
+        result = run(
+            setup_runner=runner,
+            prompt_io=prompts,
+            policy_writer=w,
+            env_writer=env_w,
+            env_path=tmp_path / ".env",
+        )
+
+        import dataclasses
+
+        # Walk every dataclass field on the result + its nested
+        # network_answers; none of the *stringy* values should equal the
+        # secret. The env writer's call list is the only place it lives.
+        secret = "secret-account-123"
+
+        def _values_of(obj: object) -> list[object]:
+            if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+                return [
+                    v for f in dataclasses.fields(obj) for v in _values_of(getattr(obj, f.name))
+                ]
+            return [obj]
+
+        leaked = [v for v in _values_of(result) if v == secret]
+        assert leaked == [], f"secret leaked into ConfigureResult: {leaked!r}"
+
+
 class TestPromptIOAskPassword:
     """``PromptIO`` grows an ``ask_password`` method so secrets (Mullvad
     account number) don't appear in shell history or _ScriptedPromptIO.seen
