@@ -27,7 +27,7 @@ import io
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -139,6 +139,44 @@ def _upsert_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]
     plugins[plugin_name] = dict(body)
 
 
+def _merge_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]) -> None:
+    """In-place merge ``body`` into ``plugins.<plugin_name>``, preserving siblings.
+
+    Unlike :func:`_upsert_mordred_section`, the existing section's sub-fields
+    survive: only keys in ``body`` are touched. ruamel.yaml's CommentedMap
+    in-place update preserves comments and key order for retained keys; new
+    keys are appended at the end of the section.
+
+    Pathological cases (the section is currently a scalar / list / null) fall
+    back to whole-replacement -- the on-disk shape is no longer mergeable and
+    crashing with ``AttributeError: 'str' has no 'get'`` would leave the user
+    with an unrecoverable config. Logged at WARNING so the operator sees it.
+
+    Used by :meth:`PolicyWriter.merge_mordred_sections` (Phase 3 PR3a) to
+    drive ``hermes mordred network use <path>`` without dropping Tor /
+    Mullvad sub-fields the wizard configure step wrote earlier.
+    """
+    plugins = root.get("plugins")
+    if plugins is None:
+        root["plugins"] = {plugin_name: dict(body)}
+        return
+    existing = plugins.get(plugin_name)
+    # ``MutableMapping`` (not ``Mapping``) so the index-assignment loop below
+    # narrows under mypy --strict. ruamel.yaml ``CommentedMap`` is a
+    # ``MutableMapping`` so this is exactly the shape we need.
+    if not isinstance(existing, MutableMapping):
+        if existing is not None:
+            _LOG.warning(
+                "plugins.%s is %s, not a mapping; replacing with merge body",
+                plugin_name,
+                type(existing).__name__,
+            )
+        plugins[plugin_name] = dict(body)
+        return
+    for key, value in body.items():
+        existing[key] = value
+
+
 @dataclass(frozen=True, slots=True)
 class PolicySnapshot:
     """Resolved policy values destined for ``policy.json``.
@@ -221,8 +259,39 @@ class PolicyWriter:
         the new section body. Non-listed Mordred plugins and non-Mordred
         plugins in ``config.yaml`` are left untouched.
 
+        Whole-section replacement: any sub-field not in ``body`` is dropped.
+        Use :meth:`merge_mordred_sections` for partial writes (e.g.
+        ``hermes mordred network use``) that must preserve sub-fields written
+        by other code paths or by hand.
+
         Also ensures all 5 Mordred plugin names appear in ``plugins.enabled``
         (Hermes entry-point loader requires this -- HOOK_PAYLOADS §1).
+        """
+        self._edit_config(sections, _upsert_mordred_section)
+
+    def merge_mordred_sections(self, sections: Mapping[str, Mapping[str, Any]]) -> None:
+        """In-place merge sub-fields into ``plugins.<plugin_name>`` sections.
+
+        Unlike :meth:`upsert_mordred_sections`, sub-fields not present in
+        ``body`` survive on-disk. Use for partial writers like
+        ``hermes mordred network use <path>`` that only know one field and
+        must not drop Tor / Mullvad fields set by the wizard configure step.
+
+        Pathological cases (the on-disk value is a scalar / list) fall back
+        to whole-replacement -- a corrupted section is no longer mergeable.
+        """
+        self._edit_config(sections, _merge_mordred_section)
+
+    def _edit_config(
+        self,
+        sections: Mapping[str, Mapping[str, Any]],
+        section_mutator: Callable[[Any, str, Mapping[str, Any]], None],
+    ) -> None:
+        """Shared round-trip pipeline for upsert / merge.
+
+        Loads ``config.yaml`` (or starts empty), applies ``section_mutator`` to
+        each requested section, runs :func:`_ensure_plugins_enabled`, and
+        writes back atomically via :func:`_atomic_write_text`.
         """
         yaml = _round_trip_yaml()
         if self.config_path.exists():
@@ -236,7 +305,7 @@ class PolicyWriter:
         for plugin_name, body in sections.items():
             if plugin_name not in MORDRED_PLUGIN_NAMES:
                 raise ValueError(f"PolicyWriter only edits Mordred plugin sections; refusing to touch {plugin_name!r}")
-            _upsert_mordred_section(root, plugin_name, body)
+            section_mutator(root, plugin_name, body)
 
         _ensure_plugins_enabled(root)
 

@@ -123,25 +123,22 @@ def _runtime_registered() -> bool:
 
 
 def _write_default_path_to_config(config_path: Path, default_path: str) -> None:
-    """Upsert ``plugins.mordred_network.default_path`` via PolicyWriter.
+    """Merge ``default_path`` into ``plugins.mordred_network`` via PolicyWriter.
 
-    Routes through :meth:`PolicyWriter.upsert_mordred_sections` so the
-    write inherits the canonical ``_atomic_write_text`` (tempfile +
-    ``os.replace``) guarantee. A crash or concurrent ``hermes mordred
-    configure`` invocation thus cannot truncate the file — readers
-    always see either the pre-write or post-write content, never a
-    partial blob.
+    Routes through :meth:`PolicyWriter.merge_mordred_sections` (Phase 3 PR3a,
+    landed alongside the wizard configure prompts that introduced Tor /
+    Mullvad sub-fields) so a ``network use clearnet`` invocation does NOT
+    clobber ``tor_binary_path`` / ``tor_socks_port`` / ``mullvad_*`` written
+    earlier by ``hermes mordred configure`` or by hand.
 
-    Whole-section replacement caveat (review L4, 2026-05-14):
-    PolicyWriter replaces the entire ``plugins.mordred_network`` body.
-    PR2 ships with ``default_path`` as the only field in that section,
-    so this is fine. When PR2-D / Phase 3.2 adds Tor / Mullvad
-    sub-fields, this helper will need to *merge* with the existing
-    section instead of overwriting it.
+    The merge path inherits the canonical ``_atomic_write_text`` (tempfile +
+    ``os.replace``) guarantee from the writer pipeline, so a crash or
+    concurrent ``hermes mordred configure`` invocation cannot truncate the
+    file -- readers always see either the pre-write or post-write content.
     """
     from .policy_writer import PolicyWriter
 
-    PolicyWriter(config_path=config_path).upsert_mordred_sections({"mordred_network": {"default_path": default_path}})
+    PolicyWriter(config_path=config_path).merge_mordred_sections({"mordred_network": {"default_path": default_path}})
 
 
 def _read_default_path_from_config(config_path: Path) -> str:
