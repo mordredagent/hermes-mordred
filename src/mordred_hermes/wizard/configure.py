@@ -31,8 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
-from .credentials_writer import CredentialsWriter
-from .env_file_writer import EnvFileWriter
+from .credentials_writer import CredentialsWriter, JSONCredentialsWriter
+from .env_file_writer import DotEnvFileWriter, EnvFileWriter
 from .policy_writer import PolicySnapshot, PolicyWriter
 
 _LOG = logging.getLogger("mordred.wizard.configure")
@@ -514,6 +514,14 @@ def cli_handler(args: argparse.Namespace) -> int:
       will abort because Phase 1 does not yet accept ``--policy=...`` flags
       to pre-specify answers.
     - Otherwise: real :class:`SubprocessSetupRunner` + :class:`PromptToolkitIO`.
+
+    Phase 3 PR3a Task #6c wires :class:`DotEnvFileWriter` and
+    :class:`JSONCredentialsWriter` so the Mullvad account number the
+    wizard collects via :meth:`PromptIO.ask_password` actually lands in
+    ``~/.hermes/.env`` and the relay/killswitch indirection lands in
+    ``~/.hermes/mordred/credentials/network.json``. Without these the
+    secret would be captured into :class:`ConfigureResult` and silently
+    discarded on return (review H4).
     """
     non_interactive = bool(getattr(args, "non_interactive", False))
     prompt_io: PromptIO = _RefusingPromptIO() if non_interactive else PromptToolkitIO()
@@ -522,6 +530,8 @@ def cli_handler(args: argparse.Namespace) -> int:
             setup_runner=SubprocessSetupRunner(),
             prompt_io=prompt_io,
             policy_writer=PolicyWriter(),
+            env_writer=DotEnvFileWriter(),
+            credentials_writer=JSONCredentialsWriter(),
             non_interactive=non_interactive,
         )
     except NonInteractiveAbort as e:
