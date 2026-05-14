@@ -50,6 +50,18 @@ class TestAesGcmRoundtrip:
 
         assert crypto.decrypt(key, blob) == plaintext
 
+    def test_roundtrip_with_aes192_key(self) -> None:
+        """AES-192 (24-byte key) — closes the gap between the AES-128
+        and AES-256 coverage so the docstring claim of "128 / 192 / 256
+        bit" is exercised end-to-end."""
+        from mordred_hermes.keyvault import crypto
+
+        key = b"\xcc" * 24
+        plaintext = b"phase4 review L1"
+        blob = crypto.encrypt(key, plaintext)
+
+        assert crypto.decrypt(key, blob) == plaintext
+
     def test_encrypt_produces_unique_nonce_per_call(self) -> None:
         """Same key + plaintext + AAD must produce different blobs across calls.
 
