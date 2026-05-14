@@ -934,3 +934,48 @@ class TestNetworkPrompts:
         )
         result = collect_answers(prompts)
         assert result.network_answers.tor_socks_port == 9050  # type: ignore[attr-defined]
+
+    def test_invalid_relay_country_falls_back_to_auto(self) -> None:
+        """M7 (review 2026-05-14): the relay country prompt accepts free
+        text today, so a typo like ``"unitedstates"`` or ``"u.s."`` lands
+        directly in network.json and the Mullvad CLI rejects it later.
+        Validate the prompt: accept ``"auto"`` or any 2-letter alphabetic
+        code (normalized to lowercase). Garbage falls back to ``"auto"``
+        with a WARN so the wizard never aborts on a typo.
+        """
+        prompts = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "unitedstates", False]
+        )
+        result = collect_answers(prompts)
+        assert result.network_answers.mullvad_relay_country == "auto", (  # type: ignore[attr-defined]
+            "M7: free-text typos must collapse to 'auto' (with WARN), not be "
+            "passed through to the Mullvad CLI"
+        )
+
+    def test_valid_2letter_relay_country_passes_through_lowercased(self) -> None:
+        """``"JP"`` or ``"jp"`` is the Mullvad-CLI-acceptable shape; both
+        must be normalized to lowercase ``"jp"`` for consistency on disk.
+        """
+        prompts_lower = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "jp", False]
+        )
+        result_lower = collect_answers(prompts_lower)
+        assert result_lower.network_answers.mullvad_relay_country == "jp"  # type: ignore[attr-defined]
+
+        prompts_upper = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "JP", False]
+        )
+        result_upper = collect_answers(prompts_upper)
+        assert result_upper.network_answers.mullvad_relay_country == "jp", (  # type: ignore[attr-defined]
+            "M7: uppercase 2-letter code must normalize to lowercase for consistency"
+        )
+
+    def test_auto_relay_country_preserved(self) -> None:
+        """The default sentinel must survive validation unchanged so the
+        Mullvad runtime keeps its automatic-selection behavior.
+        """
+        prompts = _ScriptedPromptIO(
+            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "auto", False]
+        )
+        result = collect_answers(prompts)
+        assert result.network_answers.mullvad_relay_country == "auto"  # type: ignore[attr-defined]
