@@ -1,10 +1,10 @@
-"""Phase 4 PR2 step-0 freeze of ``keyvault.*`` audit reason codes.
+"""Phase 4 PR2 + PR3 step-0 freeze of ``keyvault.*`` audit reason codes.
 
 Per ``mordred-docs/mordred/POLICY.md`` §Phase 4 step-0 freeze (added
-2026-05-14, PR2): only codes with a PR2 emit site OR already referenced
-by frozen SPEC text are included now.
+2026-05-14, PR2 + PR3): only codes with an emit site OR already
+referenced by frozen SPEC text are included.
 
-PR2 adds 2 codes:
+PR2 adds 2 codes (already landed):
 
 - ``keyvault.recovery_digest_mismatch`` — emitted by
   ``recovery.import_backup`` BEFORE AES-GCM decryption runs, paired with
@@ -17,11 +17,27 @@ PR2 adds 2 codes:
   PR4 ``seed_display.py`` emit site has a stable target. Decision
   ``block``. Fields: ``event="keyvault.seed_display"``, ``detector``.
 
-PR3 (``keyvault.unwrap_*``) and PR4 (``keyvault.init_*`` /
-``keyvault.backup_exported``) reason codes are deliberately NOT in the
-freeze yet — they land in their respective step-0 freezes once the emit
-site exists, to avoid the "frozen but unused" footgun that Phase 2 hit
-with ``policy.strict.local_stream_interrupted`` (POLICY.md entry #12).
+PR3 adds 2 codes (this PR) for Secure-Enclave-authorized DEK unwrap.
+Authorization happens on **unwrap** only — wrap uses the Enclave public
+key + a software ephemeral private key and never prompts the user
+(codex review BLOCKER-1 / HIGH-3):
+
+- ``keyvault.unwrap_authorized`` — emitted by ``wrap.unwrap_dek`` after
+  ``SecKeyCopyKeyExchangeResult`` succeeds (biometric / passcode access
+  control satisfied). Decision ``allow``. Fields:
+  ``event="keyvault.unwrap_dek"``, ``key_id_hash`` (hex prefix; never
+  the full ``key_id``).
+- ``keyvault.unwrap_denied`` — emitted when the Enclave returns
+  ``errSecUserCancelled`` / ``errSecAuthFailed`` / equivalent NSError,
+  paired with :class:`mordred_hermes.keyvault.wrap.WrapAuthCancelled`
+  raise. Decision ``block``. Fields: ``event="keyvault.unwrap_dek"``,
+  ``native_error_code`` (translated; never the raw OSStatus).
+
+PR4 (``keyvault.init_*`` / ``keyvault.backup_exported``) reason codes
+are deliberately NOT in the freeze yet — they land in PR4 step-0 once
+the emit site exists, to avoid the "frozen but unused" footgun that
+Phase 2 hit with ``policy.strict.local_stream_interrupted`` (POLICY.md
+entry #12).
 """
 
 from __future__ import annotations
@@ -41,15 +57,22 @@ def test_keyvault_seed_display_aborted_screenshot_in_freeze() -> None:
     assert "keyvault.seed_display_aborted_screenshot" in get_args(ReasonCode)
 
 
-def test_phase4_unwrap_codes_deliberately_not_frozen_yet() -> None:
-    """Codex review #8: PR3 codes have no emit site in PR2, so freezing
-    them now would create the same "frozen but unused" footgun as Phase 2
-    ``policy.strict.local_stream_interrupted``. Re-add when PR3 lands."""
+def test_keyvault_unwrap_authorized_in_freeze() -> None:
+    """PR3 step-0 freeze: emit site is ``wrap.unwrap_dek`` after a
+    successful ``SecKeyCopyKeyExchangeResult`` call. Codex review
+    BLOCKER-1: authorization happens on unwrap, not wrap."""
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    members = set(get_args(ReasonCode))
-    assert "keyvault.unwrap_authorized" not in members
-    assert "keyvault.unwrap_denied" not in members
+    assert "keyvault.unwrap_authorized" in get_args(ReasonCode)
+
+
+def test_keyvault_unwrap_denied_in_freeze() -> None:
+    """PR3 step-0 freeze: paired with
+    :class:`mordred_hermes.keyvault.wrap.WrapAuthCancelled` raise when the
+    Enclave returns ``errSecUserCancelled`` / ``errSecAuthFailed``."""
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "keyvault.unwrap_denied" in get_args(ReasonCode)
 
 
 def test_phase4_init_codes_deliberately_not_frozen_yet() -> None:
