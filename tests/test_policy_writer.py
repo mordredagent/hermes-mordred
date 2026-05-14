@@ -553,6 +553,61 @@ plugins:
         assert section["custom_user_field"] == "keep-me", "merge must preserve unknown user fields"
 
 
+class TestCorruptedPluginsScalarRecovery:
+    """H1 (review 2026-05-14): when ``config.yaml`` has a corrupted
+    ``plugins: <scalar>`` (e.g. a string, list, or None from a hand-edit
+    or a half-finished crash recovery), both merge and upsert helpers
+    must not crash with AttributeError / TypeError. They should treat
+    the corrupted section as ``{}`` and rebuild it.
+    """
+
+    def test_merge_recovers_from_plugins_scalar(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("plugins: a-string\n", encoding="utf-8")
+
+        w = _writer(tmp_path)
+        # Must not crash with AttributeError.
+        w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
+
+    def test_upsert_recovers_from_plugins_scalar(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("plugins: 42\n", encoding="utf-8")
+
+        w = _writer(tmp_path)
+        # Must not crash with TypeError on int subscript.
+        w.upsert_mordred_sections(
+            {"mordred_privacy_check": {"policy": "lenient", "allow_cloud_llm": False, "cloud_provider_allowlist": []}}
+        )
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert data["plugins"]["mordred_privacy_check"]["policy"] == "lenient"
+
+    def test_merge_recovers_from_plugins_list(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("plugins:\n  - item1\n  - item2\n", encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.merge_mordred_sections({"mordred_network": {"default_path": "vpn"}})
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert data["plugins"]["mordred_network"]["default_path"] == "vpn"
+
+
 class TestUpsertMordredSectionsStillReplaces:
     """Regression guard: ``upsert_mordred_sections`` (whole-replace) must keep
     its full-snapshot semantics so ``configure`` rewrites stay clean.
