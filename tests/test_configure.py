@@ -536,6 +536,55 @@ class _SpyCredentialsWriter:
         self.calls.append((path, mullvad_account_id_env, mullvad_relay_country, mullvad_killswitch))
 
 
+class TestConfigureResultRedactsSecret:
+    """C1 (security review 2026-05-14): the dataclass auto-repr emits
+    ``_mullvad_account_secret=<plaintext>`` for any in-flight result before
+    ``run()`` constructs the cleared copy. ``repr()`` is implicitly called
+    by tracebacks, logging, ``pytest --showlocals``, and debugger sessions.
+    """
+
+    def test_repr_does_not_contain_secret(self) -> None:
+        from mordred_hermes.wizard.configure import (
+            ConfigureResult,
+            NetworkAnswers,
+        )
+
+        result = ConfigureResult(
+            snapshot=PolicySnapshot(policy="strict"),
+            network_answers=NetworkAnswers(
+                default_network_path="vpn",
+                tor_binary_path="/usr/bin/tor",
+                tor_socks_port=9050,
+                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=True,
+            ),
+            _mullvad_account_secret="DO-NOT-LEAK-1234567890",
+        )
+        # The secret value must not appear in repr.
+        assert "DO-NOT-LEAK-1234567890" not in repr(result), repr(result)
+
+    def test_str_does_not_contain_secret(self) -> None:
+        from mordred_hermes.wizard.configure import (
+            ConfigureResult,
+            NetworkAnswers,
+        )
+
+        result = ConfigureResult(
+            snapshot=PolicySnapshot(policy="strict"),
+            network_answers=NetworkAnswers(
+                default_network_path="vpn",
+                tor_binary_path="/usr/bin/tor",
+                tor_socks_port=9050,
+                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=True,
+            ),
+            _mullvad_account_secret="DO-NOT-LEAK-1234567890",
+        )
+        assert "DO-NOT-LEAK-1234567890" not in str(result)
+
+
 class TestRunWiresNetworkWriters:
     """``run()`` accepts ``env_writer`` + ``credentials_writer`` Protocol-typed
     dependencies and routes Mullvad inputs to them. Each is optional so
