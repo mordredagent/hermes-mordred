@@ -25,6 +25,7 @@ import hmac
 import os
 import re
 import secrets
+import time
 import unicodedata
 from pathlib import Path
 
@@ -37,11 +38,112 @@ from .digest import verify_digest as _digest_verify
 from .wrap import AuditSink, NativeBackend
 
 __all__ = [
+    "SeedDisplayExpired",
+    "SeedDisplayHandle",
     "VerificationDigestMismatch",
     "decrypt",
     "encrypt",
     "verify_digest",
 ]
+
+
+# ----------------------------- SeedDisplayHandle (PR4 step-D) -----------------------------
+# Opaque-class contract frozen in SPEC.md §"PR4 API contract / SeedDisplayHandle
+# (opaque, codex BLOCKER #3)". PR5 will relocate this class to ``seed_display.py``
+# and layer screen-blackout / 60s timer / screenshot detection on top; the
+# external contract (slots, redacted repr, raising __eq__, __hash__ = None,
+# one-shot consume() with in-place wipe + deadline guard) MUST hold verbatim
+# after the relocation.
+
+
+class SeedDisplayExpired(Exception):
+    """``SeedDisplayHandle.consume()`` was called after the deadline elapsed.
+
+    Raised by :meth:`SeedDisplayHandle.consume` when ``time.monotonic()``
+    has passed the handle's ``deadline_monotonic``. The handle's internal
+    bytearray is wiped before the exception propagates so the seed does
+    not survive an expired display window in process memory.
+    """
+
+
+class SeedDisplayHandle:
+    """Opaque container for a normalized seed phrase during the display flow.
+
+    The naive shape — a frozen dataclass with ``seed_phrase: str`` — would
+    leak the seed via four channels:
+
+    1. ``repr`` / ``str`` (auto-generated to echo all fields).
+    2. ``__eq__`` against attacker-supplied strings (comparison oracle).
+    3. Hash-based memoization (long-lived retention in dict / set).
+    4. Stray ``handle.seed_phrase = ...`` assignment landing in ``__dict__``.
+
+    Each is blocked here: a fixed redacted repr, an ``__eq__`` that raises
+    ``TypeError``, ``__hash__ = None``, and ``__slots__`` pinning the
+    attribute set. ``consume()`` is the only egress; it is one-shot and
+    zero-fills the payload bytearray in-place so any other reference into
+    the same buffer also observes zero bytes after release.
+    """
+
+    # __slots__ order matches SPEC.md §"SeedDisplayHandle (opaque)" verbatim;
+    # natural sort suppressed because the spec freezes the tuple value and
+    # the test pins it exactly (see test_slots_value_is_exact_three_tuple).
+    __slots__ = ("_payload", "_consumed", "_deadline")  # noqa: RUF023
+
+    def __init__(self, normalized_seed: str, deadline_monotonic: float) -> None:
+        # Store the seed as a wipeable bytearray (str is immutable, so
+        # bytearray is the only way to actually zero the bytes in place).
+        self._payload = bytearray(normalized_seed.encode("utf-8"))
+        self._consumed = False
+        # Absolute monotonic timestamp — caller computes
+        # ``time.monotonic() + ttl`` (default ttl = 60.0s per SPEC).
+        self._deadline = deadline_monotonic
+
+    def __repr__(self) -> str:
+        return "<SeedDisplayHandle redacted>"
+
+    def __eq__(self, other: object) -> bool:
+        # Raising rather than returning False eliminates the comparison
+        # oracle entirely. Identity (``is``) is not routed through __eq__
+        # and continues to work for the legitimate same-object check.
+        raise TypeError("SeedDisplayHandle does not support equality (would leak via comparison oracle)")
+
+    # Setting __hash__ to None at the class level makes instances unhashable —
+    # hash() / set / dict-key use all raise TypeError. This prevents the
+    # handle from accidentally landing in a memoization cache that would
+    # extend the seed's residency past the intended display window.
+    __hash__ = None  # type: ignore[assignment]
+
+    def consume(self) -> str:
+        """Return the normalized seed exactly once, wiping the payload.
+
+        Subsequent calls raise :class:`RuntimeError`. If
+        ``time.monotonic()`` has passed the deadline, the payload is
+        wiped and :class:`SeedDisplayExpired` is raised instead of
+        returning the seed.
+        """
+        if self._consumed:
+            raise RuntimeError("handle already consumed")
+
+        if time.monotonic() > self._deadline:
+            # Wipe BEFORE raising so the seed bytes do not survive in
+            # process memory just because the display window timed out.
+            self._wipe()
+            self._consumed = True
+            raise SeedDisplayExpired("SeedDisplayHandle expired before consume()")
+
+        # Decode-then-wipe: hold the str on the local stack frame, then
+        # zero the underlying bytearray. The returned str is a fresh
+        # object; mutating the bytearray does not affect it.
+        seed = self._payload.decode("utf-8")
+        self._wipe()
+        self._consumed = True
+        return seed
+
+    def _wipe(self) -> None:
+        # In-place zero-fill. Replacing with a new bytearray would leave
+        # the original buffer (and any aliased references) untouched.
+        for i in range(len(self._payload)):
+            self._payload[i] = 0
 
 
 # ----------------------------- MREN envelope constants -----------------------------
