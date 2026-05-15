@@ -338,8 +338,11 @@ class TestApiDecrypt:
         self, registered_key: str, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
         _, sink = captured_audit
+        # 22-char URL-safe-base64 ID that satisfies _validate_envelope_id but
+        # has no envelope on disk.
+        unused_eid = "A" * 22
         with pytest.raises(FileNotFoundError):
-            api.decrypt(registered_key, "nonexistent", "purpose", backend=backend, audit_sink=sink, home=home)
+            api.decrypt(registered_key, unused_eid, "purpose", backend=backend, audit_sink=sink, home=home)
 
     def test_wrong_key_id_raises_wrap_parse_error(
         self,

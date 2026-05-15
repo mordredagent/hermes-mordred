@@ -69,7 +69,19 @@ def resolve_keyvault_dir(home: Path | None = None) -> Path:
 
 
 def _check_dir_mode(path: Path) -> None:
-    actual = stat.S_IMODE(path.stat().st_mode)
+    """Validate that ``path`` is a real directory with mode ``0o700``.
+
+    Uses ``lstat`` (not ``stat``) so a symlinked directory is refused
+    even when the target has correct mode (codex pre-merge P2-2:
+    symlinked keyvault directories would otherwise pass the mode check
+    and redirect writes outside the keyvault tree).
+    """
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link to keyvault directory", str(path))
+    if not stat.S_ISDIR(st.st_mode):
+        raise KeyvaultPermissionError(errno.ENOTDIR, "keyvault path exists but is not a directory", str(path))
+    actual = stat.S_IMODE(st.st_mode)
     if actual != _DIR_MODE:
         raise KeyvaultPermissionError(
             errno.EPERM,
@@ -79,7 +91,15 @@ def _check_dir_mode(path: Path) -> None:
 
 
 def _check_file_mode(path: Path) -> None:
-    actual = stat.S_IMODE(path.stat().st_mode)
+    """Validate that ``path`` is a real file with mode ``0o600``.
+
+    Uses ``lstat`` so a symlinked file is refused regardless of the
+    target's mode (file-safety contract — codex pre-merge P2-2).
+    """
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link to keyvault file", str(path))
+    actual = stat.S_IMODE(st.st_mode)
     if actual != _FILE_MODE:
         raise KeyvaultPermissionError(
             errno.EPERM,
@@ -163,7 +183,17 @@ def atomic_write(path: Path, data: bytes) -> None:
     )
     try:
         try:
-            os.write(fd, data)
+            # ``os.write`` is not guaranteed to flush the entire buffer
+            # in a single call; loop until every byte is written so a
+            # short write does not commit a truncated file via the
+            # subsequent ``os.replace`` (codex pre-merge P2-3).
+            view = memoryview(data)
+            offset = 0
+            while offset < len(view):
+                written = os.write(fd, view[offset:])
+                if written <= 0:
+                    raise OSError("os.write returned 0 bytes — disk full or fd closed")
+                offset += written
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -283,6 +313,14 @@ def load_meta(root: Path) -> dict[str, Any]:
         raise KeyvaultCorruptError("meta.json is missing the required 'version' field")
     if parsed["version"] != _META_VERSION:
         raise KeyvaultCorruptError(f"meta.json version must be {_META_VERSION}; got an unsupported version")
+    # codex pre-merge P2-4: the downstream read-modify-write code assumes
+    # ``parsed["keys"]`` is a dict. An absent / non-object keys field
+    # would surface as KeyError / TypeError far from the parse site;
+    # reject here so the caller sees a clean KeyvaultCorruptError.
+    if "keys" not in parsed:
+        raise KeyvaultCorruptError("meta.json is missing the required 'keys' field")
+    if not isinstance(parsed["keys"], dict):
+        raise KeyvaultCorruptError("meta.json 'keys' field must be a JSON object")
     return parsed
 
 

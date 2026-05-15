@@ -23,6 +23,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import unicodedata
 from pathlib import Path
@@ -154,6 +155,25 @@ def _new_envelope_id() -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+# Exactly 22 URL-safe-base64 chars (alphabet ``[A-Za-z0-9_-]``, no padding).
+# Matches the output of :func:`_new_envelope_id` and rejects any caller-supplied
+# value containing path separators, traversal sequences, or wrong length.
+_ENVELOPE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
+
+
+def _validate_envelope_id(envelope_id: str) -> None:
+    """Reject ``envelope_id`` values that could escape the managed storage path.
+
+    Codex pre-merge P1: ``envelope_id`` was appended verbatim into the
+    filesystem path. A caller supplying ``"../something"`` or ``"a/b"``
+    would make :func:`decrypt` open a ``.gcm`` file outside the keyvault
+    tree. Rejecting anything that does not match the exact format
+    produced by :func:`_new_envelope_id` is the simplest correct fix.
+    """
+    if not _ENVELOPE_ID_RE.match(envelope_id):
+        raise ValueError("invalid envelope_id: must be 22 URL-safe-base64 characters (no padding)")
+
+
 def _envelope_path_for(root: Path, key_id: str, purpose: str, envelope_id: str) -> Path:
     """Construct the on-disk path for an MREN envelope."""
     return root / "ciphertexts" / _hash_id(key_id).hex() / _hash_id(purpose).hex() / f"{envelope_id}.gcm"
@@ -279,10 +299,18 @@ def encrypt(
     envelope_path = purpose_dir / f"{envelope_id}.gcm"
 
     with _storage.keyvault_lock(root):
-        if not key_dir.exists():
+        # codex pre-merge P2-1: validate any pre-existing directory before
+        # writing inside it. Without this an attacker who pre-creates the
+        # key_dir as a symlink (or with wrong mode) could redirect the
+        # envelope into attacker-controlled territory.
+        if key_dir.exists() or key_dir.is_symlink():
+            _storage._check_dir_mode(key_dir)
+        else:
             key_dir.mkdir(mode=0o700)
             os.chmod(key_dir, 0o700)
-        if not purpose_dir.exists():
+        if purpose_dir.exists() or purpose_dir.is_symlink():
+            _storage._check_dir_mode(purpose_dir)
+        else:
             purpose_dir.mkdir(mode=0o700)
             os.chmod(purpose_dir, 0o700)
         _storage.atomic_write(envelope_path, envelope)
@@ -314,6 +342,7 @@ def decrypt(
     double-emit at the api layer (codex OD-3).
     """
     _validate_purpose(purpose)
+    _validate_envelope_id(envelope_id)
     root = _storage.resolve_keyvault_dir(home)
     envelope_path = _envelope_path_for(root, key_id, purpose, envelope_id)
 
