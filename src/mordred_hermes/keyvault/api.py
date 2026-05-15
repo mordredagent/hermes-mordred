@@ -180,6 +180,21 @@ class SeedDisplayHandle:
     def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
         raise TypeError("SeedDisplayHandle is opaque and not picklable")
 
+    # On Python 3.11+ slotted objects inherit ``object.__getstate__``, which
+    # returns ``(None, {"_payload": bytearray(...), ...})`` — a direct
+    # seed-leak channel that bypasses ``consume()`` and is NOT routed
+    # through the ``__reduce*__`` guards above. A generic state dumper (or
+    # any caller invoking ``handle.__getstate__()`` directly) would read the
+    # seed bytes from an unconsumed handle. Block it, and block
+    # ``__setstate__`` for symmetry so a handle can never be repopulated
+    # from an external state dict (codex pre-merge P2, 2026-05-15).
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("SeedDisplayHandle is opaque and does not expose its state")
+
+    def __setstate__(self, state: object) -> NoReturn:
+        raise TypeError("SeedDisplayHandle is opaque and does not expose its state")
+
     def consume(self) -> str:
         """Return the normalized seed exactly once, wiping the payload.
 

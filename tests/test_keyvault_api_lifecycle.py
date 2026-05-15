@@ -363,6 +363,38 @@ class TestCopyPickleBlocked:
         # Whatever pickle wrote before raising must not contain the seed.
         assert b"verysecretseedphrase" not in buffer.getvalue()
 
+    def test_getstate_raises_typeerror(self) -> None:
+        """On Python 3.11+ slotted objects inherit ``object.__getstate__``,
+        which returns ``(None, {'_payload': bytearray(...), ...})`` — a
+        direct seed-leak channel that bypasses ``consume()`` entirely (the
+        copy/pickle guards only cover ``__reduce*__``). Block it
+        (codex pre-merge P2, 2026-05-15).
+        """
+        handle = _make_handle("supersecret")
+        with pytest.raises(TypeError) as excinfo:
+            handle.__getstate__()
+        assert "opaque" in str(excinfo.value).lower()
+
+    def test_getstate_does_not_leak_seed(self) -> None:
+        """Belt-and-suspenders: even if a future refactor changed the
+        exception type, the call must not return the seed payload.
+        """
+        handle = _make_handle("verysecretseedphrase")
+        try:
+            state = handle.__getstate__()
+        except TypeError:
+            return  # blocked as intended
+        pytest.fail(f"__getstate__ must raise, not return state: {state!r}")
+
+    def test_setstate_raises_typeerror(self) -> None:
+        """``__setstate__`` is blocked for symmetry — a reconstructed handle
+        must never be populated from an external state dict.
+        """
+        handle = _make_handle("supersecret")
+        with pytest.raises(TypeError) as excinfo:
+            handle.__setstate__({})
+        assert "opaque" in str(excinfo.value).lower()
+
 
 # ============================ consume() — one-shot + zero-fill ============================
 
