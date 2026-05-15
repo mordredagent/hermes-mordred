@@ -464,6 +464,48 @@ class TestLoadMetaKeysFieldValidation:
             _storage.load_meta(root)
 
 
+# ---------------- second codex pass — P2-C non-regular file refusal ----------------
+
+
+class TestNonRegularFileRefusal:
+    """Codex second-pass P2-C: ``_check_file_mode`` only checked permission
+    bits, so a FIFO / device / directory at mode 0o600 would have passed.
+    ``ensure_layout`` could then ``bless`` a non-file as meta.json or
+    .lock, and ``safe_read`` / ``keyvault_lock`` would block or operate
+    on the wrong kind of inode."""
+
+    def test_fifo_at_meta_json_path_refused_by_ensure_layout(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        root.mkdir(mode=0o700)
+        (root / "digests").mkdir(mode=0o700)
+        (root / "ciphertexts").mkdir(mode=0o700)
+        # Create the .lock as a regular file so ensure_layout reaches meta.json.
+        lock_fd = os.open(root / ".lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(lock_fd)
+        # Replace meta.json with a FIFO at the expected mode.
+        os.mkfifo(root / "meta.json", mode=0o600)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            _storage.ensure_layout(root)
+
+    def test_fifo_at_lock_path_refused_by_ensure_layout(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        root.mkdir(mode=0o700)
+        (root / "digests").mkdir(mode=0o700)
+        (root / "ciphertexts").mkdir(mode=0o700)
+        os.mkfifo(root / ".lock", mode=0o600)
+        # Touch a regular meta.json so the lock is the failing path.
+        meta_fd = os.open(root / "meta.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(meta_fd)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            _storage.ensure_layout(root)
+
+    def test_safe_read_refuses_fifo(self, tmp_path: Path) -> None:
+        fifo = tmp_path / "fifo"
+        os.mkfifo(fifo, mode=0o600)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            _storage.safe_read(fifo)
+
+
 # ---------------------------- exception types ----------------------------
 
 

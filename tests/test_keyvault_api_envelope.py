@@ -384,7 +384,12 @@ class TestApiDecrypt:
         purpose_hex = _purpose_hash("purpose").hex()
         old_path = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex_old / purpose_hex / f"{eid}.gcm"
         new_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex_new / purpose_hex
-        new_dir.mkdir(parents=True)
+        new_dir.mkdir(parents=True, mode=0o700)
+        # mkdir mode is umask-adjusted; chmod explicitly so the dir-mode check
+        # in decrypt accepts these intermediate dirs and we reach the parse
+        # validation (which is the contract this test pins).
+        os.chmod(new_dir, 0o700)
+        os.chmod(new_dir.parent, 0o700)
         new_path = new_dir / f"{eid}.gcm"
         os.rename(old_path, new_path)
 
@@ -658,6 +663,115 @@ class TestEncryptValidatesExistingDirs:
         kid_dir.mkdir(mode=0o755)  # too permissive
         with pytest.raises(_storage.KeyvaultPermissionError):
             api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+
+
+# ----- second codex pre-merge pass — P2-A / P2-B file-safety + parse strictness -----
+
+
+class TestParseEnvelopeUndersizedAesBlob:
+    """Codex second-pass P2-A: ``_parse_envelope`` only verified
+    ``declared_len`` matched the actual blob tail length. An attacker who
+    places a same-purpose envelope with ``aes_blob_len < 12 + 16``
+    (nonce + tag minimum) would pass parse, then ``decrypt`` invokes
+    ``wrap.unwrap_dek`` — spending a biometric prompt and emitting
+    ``keyvault.unwrap_authorized`` — before AES-GCM rejects the
+    structurally-invalid envelope. Parse must reject this BEFORE any
+    wrap-layer call."""
+
+    @pytest.mark.parametrize("declared_len", [0, 1, 11, 12, 27])  # < nonce(12) + tag(16) = 28
+    def test_decrypt_rejects_undersized_aes_blob_len(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+        declared_len: int,
+    ) -> None:
+        log, sink = captured_audit
+        # Build an envelope with valid header but a too-small aes_blob_len field.
+        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+        path = _envelope_path(home, registered_key, "purpose", eid)
+        blob = bytearray(_storage.safe_read(path))
+        # Overwrite the 4-byte BE aes_blob_len field (offsets 164-168).
+        blob[164:168] = declared_len.to_bytes(4, "big")
+        # Truncate or pad the body so that len(blob) - 168 == declared_len.
+        truncated = bytes(blob[:168]) + bytes(declared_len)
+        _storage.atomic_write(path, truncated)
+
+        before_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        with pytest.raises(WrapParseError):
+            api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
+        after_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        # No ecdh call - no biometric prompt would have fired.
+        assert after_ecdh == before_ecdh
+        # No audit emit - parse failures are pre-authorization.
+        assert log == []
+
+
+class TestDecryptValidatesIntermediateDirs:
+    """Codex second-pass P2-B: ``decrypt`` opened the final ``.gcm`` file
+    via ``safe_read`` which only refuses symlinks at the final path
+    component (``O_NOFOLLOW``). An intermediate symlinked directory
+    (``ciphertexts/<kid_hash>`` or ``ciphertexts/<kid_hash>/<purpose_hash>``)
+    would still be traversed, allowing a local attacker who can write
+    inside the keyvault tree to redirect ``decrypt`` to attacker-placed
+    bytes."""
+
+    def test_refuses_symlinked_key_directory_on_decrypt(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+        tmp_path: Path,
+    ) -> None:
+        log, sink = captured_audit
+        # Set up a normal envelope first.
+        eid = api.encrypt(registered_key, b"secret", "purpose", backend=backend, audit_sink=sink, home=home)
+        # Swap the key directory for a symlink pointing at attacker territory.
+        attacker = tmp_path / "attacker"
+        attacker.mkdir(mode=0o700)
+        kid_hex = _key_id_hash(registered_key).hex()
+        kid_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex
+        # rmtree the real dir, replace with symlink.
+        import shutil
+
+        shutil.rmtree(kid_dir)
+        kid_dir.symlink_to(attacker)
+        before_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
+        after_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        # No ecdh: refused before any wrap-layer call.
+        assert after_ecdh == before_ecdh
+        # No audit emit at the api layer.
+        assert log == []
+
+    def test_refuses_symlinked_purpose_directory_on_decrypt(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+        tmp_path: Path,
+    ) -> None:
+        log, sink = captured_audit
+        eid = api.encrypt(registered_key, b"secret", "purpose", backend=backend, audit_sink=sink, home=home)
+        attacker = tmp_path / "attacker"
+        attacker.mkdir(mode=0o700)
+        kid_hex = _key_id_hash(registered_key).hex()
+        purpose_hex = _purpose_hash("purpose").hex()
+        purpose_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex / purpose_hex
+        import shutil
+
+        shutil.rmtree(purpose_dir)
+        purpose_dir.symlink_to(attacker)
+        before_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home)
+        after_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        assert after_ecdh == before_ecdh
+        assert log == []
 
 
 # ----------------------------- helpers -----------------------------

@@ -251,6 +251,15 @@ def _parse_envelope(
         raise WrapParseError(
             f"envelope aes_blob_len mismatch: header says {declared_len}, actual {len(blob) - _ENVELOPE_HEADER_LEN}"
         )
+    # codex second-pass P2-A: aes_blob must hold at least one AES-GCM nonce
+    # plus the 16-byte tag. Anything shorter is structurally invalid; reject
+    # BEFORE unwrap_dek so a truncated envelope cannot spend a biometric
+    # prompt and emit keyvault.unwrap_authorized only to fail at AES-GCM.
+    if declared_len < _AES_NONCE_LEN + _AES_TAG_LEN:
+        raise WrapParseError(
+            f"envelope aes_blob too short: {declared_len} bytes, "
+            f"need at least {_AES_NONCE_LEN + _AES_TAG_LEN} (nonce + tag)"
+        )
     # ``safe_read`` returns ``bytes``; slicing ``bytes`` returns ``bytes`` —
     # the explicit wrap is redundant (in-tree code-reviewer NIT-1).
     aad = blob[:_ENVELOPE_AAD_LEN]
@@ -359,6 +368,18 @@ def decrypt(
     _validate_envelope_id(envelope_id)
     root = _storage.resolve_keyvault_dir(home)
     envelope_path = _envelope_path_for(root, key_id, purpose, envelope_id)
+
+    # codex second-pass P2-B: O_NOFOLLOW in safe_read only protects the
+    # final .gcm component. Refuse symlinked intermediate dirs (key_dir /
+    # purpose_dir) explicitly so an attacker who has swapped one of them
+    # for a symlink cannot redirect the read into attacker territory.
+    # Each existing dir must also be mode 0o700.
+    key_dir = envelope_path.parent.parent
+    purpose_dir = envelope_path.parent
+    if key_dir.exists() or key_dir.is_symlink():
+        _storage._check_dir_mode(key_dir)
+    if purpose_dir.exists() or purpose_dir.is_symlink():
+        _storage._check_dir_mode(purpose_dir)
 
     blob = _storage.safe_read(envelope_path)
     aad, wrapped_dek_blob, aes_blob = _parse_envelope(blob, key_id, purpose)

@@ -106,10 +106,21 @@ def _check_file_mode(path: Path) -> None:
 
     Uses ``lstat`` so a symlinked file is refused regardless of the
     target's mode (file-safety contract — codex pre-merge P2-2).
+    Rejects non-regular files (FIFO / device / directory) via
+    ``stat.S_ISREG`` — a 0o600 FIFO would otherwise pass the mode bit
+    check and cause ``safe_read`` / ``keyvault_lock`` to block or
+    operate on the wrong kind of inode (codex second-pass P2-C,
+    2026-05-15).
     """
     st = path.lstat()
     if stat.S_ISLNK(st.st_mode):
         raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link to keyvault file", str(path))
+    if not stat.S_ISREG(st.st_mode):
+        raise KeyvaultPermissionError(
+            errno.EINVAL,
+            "keyvault file must be a regular file (not FIFO, device, directory)",
+            str(path),
+        )
     actual = stat.S_IMODE(st.st_mode)
     if actual != _FILE_MODE:
         raise KeyvaultPermissionError(
@@ -232,12 +243,28 @@ def safe_read(path: Path) -> bytes:
 
     Raises:
 
-    - :exc:`KeyvaultPermissionError` if ``path`` is a symlink or its
-      mode is not ``0o600``.
+    - :exc:`KeyvaultPermissionError` if ``path`` is a symlink, a
+      non-regular file (FIFO / device / directory), or its mode is not
+      ``0o600``.
     - :exc:`FileNotFoundError` if ``path`` does not exist (the standard
       :class:`OSError` subclass — callers handle it the same way they
       would for any missing file).
     """
+    # Pre-check via lstat so we never call ``os.open`` on a FIFO (which
+    # would block until a writer connects) or a symlink (which would
+    # surface as ELOOP but only after the syscall — cheaper to refuse
+    # here). The O_NOFOLLOW open below still defends against a
+    # symlink-swap race after this check (codex second-pass P2-C).
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link", str(path))
+    if not stat.S_ISREG(st.st_mode):
+        raise KeyvaultPermissionError(
+            errno.EINVAL,
+            "keyvault file must be a regular file (not FIFO, device, directory)",
+            str(path),
+        )
+
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
@@ -247,6 +274,14 @@ def safe_read(path: Path) -> bytes:
 
     try:
         st = os.fstat(fd)
+        # Re-check S_ISREG and mode under the open fd to close the TOCTOU
+        # window between lstat above and this open (codex second-pass P2-C).
+        if not stat.S_ISREG(st.st_mode):
+            raise KeyvaultPermissionError(
+                errno.EINVAL,
+                "keyvault file must be a regular file (not FIFO, device, directory)",
+                str(path),
+            )
         mode = stat.S_IMODE(st.st_mode)
         if mode != _FILE_MODE:
             raise KeyvaultPermissionError(
