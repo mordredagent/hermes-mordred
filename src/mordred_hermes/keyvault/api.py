@@ -137,9 +137,11 @@ class SeedDisplayHandle:
         self._deadline = deadline_monotonic
         # 32-byte expected digest baked in at prepare time; confirm_generate
         # compares the user-typed digest against this via hmac.compare_digest.
-        # Stored as immutable ``bytes`` (not a mutable ``bytearray``) so the
-        # digest contents cannot be edited in place after construction.
-        self._expected_digest = expected_digest
+        # Coerced through ``bytes(...)`` so that even if the caller passed a
+        # mutable bytearray / memoryview, the handle stores an independent
+        # immutable copy — a caller-retained alias cannot mutate the compare
+        # target post-construction (codex pre-merge P2, 2026-05-15).
+        self._expected_digest = bytes(expected_digest)
 
     def __repr__(self) -> str:
         return "<SeedDisplayHandle redacted>"

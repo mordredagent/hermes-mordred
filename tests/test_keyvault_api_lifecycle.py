@@ -146,6 +146,28 @@ class TestExpectedDigestValidation:
         handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"\x00" * 32)
         assert handle._expected_digest == b"\x00" * 32  # type: ignore[attr-defined]
 
+    def test_bytearray_digest_stored_as_immutable_bytes(self) -> None:
+        """A 32-byte bytearray passes the length check; the handle must
+        coerce it to immutable ``bytes`` rather than store the mutable
+        object.
+        """
+        handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, bytearray(32))
+        assert type(handle._expected_digest) is bytes  # type: ignore[attr-defined]
+
+    def test_mutating_caller_bytearray_does_not_affect_stored_digest(self) -> None:
+        """confirm_generate (PR4c-2) compares the user-typed digest against
+        ``_expected_digest``. If a caller passed a bytearray and retained a
+        live alias, mutating that alias post-construction would change the
+        compare target without touching the handle — a confirm-time TOCTOU.
+        The constructor must copy the digest so the stored value is frozen
+        for the handle's lifetime (codex pre-merge P2, 2026-05-15).
+        """
+        mutable = bytearray(b"\xaa" * 32)
+        handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, mutable)
+        mutable[0] = 0x00  # mutate the caller's original buffer
+        assert handle._expected_digest[0] == 0xAA  # type: ignore[attr-defined]
+        assert handle._expected_digest == b"\xaa" * 32  # type: ignore[attr-defined]
+
 
 # ============================ repr / str (no leakage) ============================
 
