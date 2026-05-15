@@ -29,9 +29,12 @@ import hmac
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import unicodedata
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn, SupportsIndex
 
@@ -44,9 +47,11 @@ from .digest import verify_digest as _digest_verify
 from .wrap import AuditSink, NativeBackend
 
 __all__ = [
+    "GenerateResult",
     "SeedDisplayExpired",
     "SeedDisplayHandle",
     "VerificationDigestMismatch",
+    "confirm_generate",
     "decrypt",
     "encrypt",
     "prepare_generate",
@@ -64,6 +69,12 @@ _SEED_DISPLAY_DEFAULT_TTL_SECONDS = 60.0
 # its ``expected_digest`` against this so a wrong-length value cannot reach
 # confirm_generate's hmac.compare_digest as a silent always-mismatch.
 _VERIFICATION_DIGEST_LEN = 32
+
+# Resolved key_id when the caller passes ``key_id=None`` to confirm_generate
+# / generate. v1 keyvault is single-key per user (SPEC Story 5 — one
+# keyvault initialization); a deterministic literal keeps the wizard flow
+# and re-init detection simple.
+_DEFAULT_KEY_ID = "default"
 
 
 # ----------------------------- SeedDisplayHandle (PR4 step-D) -----------------------------
@@ -358,6 +369,203 @@ def prepare_generate(
         expected_digest,
     )
     return handle, expected_digest
+
+
+@dataclass(frozen=True, slots=True)
+class GenerateResult:
+    """Outcome of a successful :func:`confirm_generate` / :func:`generate`.
+
+    - ``key_id``: the resolved key identifier. The caller may have passed
+      ``key_id=None``; this field reports what was actually used (the
+      ``"default"`` literal in that case).
+    - ``key_id_hash``: the 32-hex-char on-disk hash
+      (``SHA-256(key_id)[:16].hex()``) — the ``meta.json`` row key and the
+      ``digests/<key_id_hash>.commit`` filename stem.
+    - ``created_at``: ISO 8601 UTC timestamp (``...Z``, second precision)
+      recorded in the ``meta.json`` row.
+    """
+
+    key_id: str
+    key_id_hash: str
+    created_at: str
+
+
+def _utc_now_iso() -> str:
+    """Current UTC time as an ISO 8601 string with a ``Z`` suffix.
+
+    Second precision — the timestamp is operator-facing provenance, not a
+    high-resolution event clock.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _emit_init_denied(audit_sink: AuditSink, *, key_id: str) -> Exception | None:
+    """Best-effort emit of the ``keyvault.init_denied`` audit entry.
+
+    Returns the sink's exception (only :class:`Exception` subclasses) so
+    :func:`confirm_generate` can chain it as ``__context__`` on the
+    :class:`VerificationDigestMismatch` it is about to raise — mirrors the
+    PR2 recovery ``_emit_mismatch`` / PR3 ``_emit_unwrap_denied`` policy.
+
+    The ``except Exception`` is intentional: KeyboardInterrupt / SystemExit
+    / GeneratorExit are control-flow exceptions that must propagate
+    untouched so CLI shutdown stays clean.
+    """
+    try:
+        audit_sink(
+            {
+                "event": "keyvault.init",
+                "decision": "block",
+                "reason": "keyvault.init_denied",
+                "key_id_hash": wrap._audit_key_id_hex(key_id),
+            }
+        )
+    except Exception as exc:
+        return exc
+    return None
+
+
+def confirm_generate(
+    handle: SeedDisplayHandle,
+    user_confirmed_digest: bytes,
+    *,
+    key_id: str | None = None,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> GenerateResult:
+    """Finalize key generation once the verification digest is confirmed.
+
+    The durable half of two-phase generate (SPEC.md §"Two-phase generate",
+    codex BLOCKER #2). :func:`prepare_generate` computed the digest in
+    memory; the user transcribed the seed and confirmed the digest via the
+    offline channel; this function commits the durable state — but only if
+    ``user_confirmed_digest`` matches.
+
+    Flow:
+
+    1. ``handle.consume()`` — enforces the one-shot contract (a second
+       ``confirm_generate`` on the same handle raises :class:`RuntimeError`),
+       the display deadline (an expired handle raises
+       :class:`SeedDisplayExpired`), and wipes the seed bytes.
+    2. ``hmac.compare_digest`` against the digest baked into the handle.
+       On mismatch: emit ``keyvault.init_denied`` and raise
+       :class:`VerificationDigestMismatch` — NO Keychain / filesystem
+       mutation (POLICY.md #23). A sink failure during the denied emit is
+       chained as ``__context__`` on the raised exception.
+    3. On match — the durable phase:
+
+       a. Emit ``keyvault.init_started``. This is the durability barrier:
+          if the audit sink raises here the whole init aborts (fail-closed,
+          POLICY.md #21) — no key, no ``meta.json`` row.
+       b. ``wrap.generate_wrapping_key`` — create the Enclave keypair.
+          A duplicate ``key_id`` raises here (the backend's duplicate
+          guard); this is OUTSIDE the rollback scope so a pre-existing
+          legitimate key is never deleted.
+       c. Under ``keyvault_lock``: write the ``meta.json`` row and
+          ``digests/<key_id_hash>.commit`` atomically. Any failure here
+          rolls back — deletes the Enclave key created in (b) — then
+          re-raises.
+       d. Emit ``keyvault.init_completed``. The init is already durable,
+          so a sink failure is suppressed (POLICY.md #22); a line is
+          written to stderr for the operator.
+
+    ``backend`` is keyword-only and required (no default), matching the
+    merged ``encrypt`` / ``decrypt`` surface. SPEC.md sketches it as
+    ``NativeBackend | None = None``; api.py standardizes on a required
+    backend — the production ``_SecKeyBackend`` is a later step and does
+    not exist yet, so there is no sensible ``None`` fallback.
+    """
+    resolved_key_id = key_id if key_id is not None else _DEFAULT_KEY_ID
+
+    # 1. Consume the handle. This enforces one-shot use (RuntimeError on a
+    #    second confirm), the display deadline (SeedDisplayExpired), and
+    #    wipes the seed bytes prepare_generate stashed for PR5's display
+    #    flow. confirm_generate does not need the seed itself — the
+    #    verification digest is the gate — so the returned value is dropped.
+    handle.consume()
+
+    # 2. Defense-in-depth digest check (hmac.compare_digest — constant time).
+    #    Same-module access to the handle's private digest slot.
+    verification_digest = handle._expected_digest
+    if not hmac.compare_digest(user_confirmed_digest, verification_digest):
+        sink_exc = _emit_init_denied(audit_sink, key_id=resolved_key_id)
+        mismatch = VerificationDigestMismatch("user-confirmed digest does not match the prepared verification digest")
+        # Chain the sink failure (if any) as __context__ — not __cause__ —
+        # so it stays diagnosable without displacing the primary mismatch
+        # signal. Matches the PR2 recovery._emit_mismatch pattern (an
+        # explicit assignment because ``raise X from Y`` sets __cause__).
+        if sink_exc is not None:
+            mismatch.__context__ = sink_exc
+        raise mismatch
+
+    # 3a. init_started — durability barrier. NO try/except: a sink exception
+    #     propagates and aborts the init before any Keychain / filesystem
+    #     mutation (fail-closed — POLICY.md #21).
+    audit_sink(
+        {
+            "event": "keyvault.init",
+            "decision": "allow",
+            "reason": "keyvault.init_started",
+            "key_id_hash": wrap._audit_key_id_hex(resolved_key_id),
+        }
+    )
+
+    # 3b. Create the Enclave wrapping key. OUTSIDE the rollback scope: if
+    #     this raises (e.g. duplicate key_id) the key either was not created
+    #     or belongs to a prior init — it must NOT be deleted.
+    wrap.generate_wrapping_key(resolved_key_id, backend=backend)
+
+    # 3c. Persist meta.json + digests/<key_id_hash>.commit atomically under
+    #     the keyvault lock. Any failure after the key exists rolls it back.
+    created_at = _utc_now_iso()
+    key_id_hash_hex = _hash_id(resolved_key_id).hex()
+    try:
+        root = _storage.resolve_keyvault_dir(home)
+        _storage.ensure_layout(root)
+        with _storage.keyvault_lock(root):
+            meta = _storage.load_meta(root)
+            meta["keys"][key_id_hash_hex] = {
+                "key_id": resolved_key_id,
+                "created_at": created_at,
+            }
+            _storage.save_meta(root, meta)
+            _storage.atomic_write(
+                root / "digests" / f"{key_id_hash_hex}.commit",
+                verification_digest,
+            )
+    except BaseException:
+        # Rollback: delete the orphaned Enclave key so a retry can re-init
+        # cleanly. ``BaseException`` (not ``Exception``) so a KeyboardInterrupt
+        # mid-write still triggers cleanup before propagating. If the delete
+        # itself fails, that exception propagates with the original chained.
+        wrap.delete_wrapping_key(resolved_key_id, backend=backend)
+        raise
+
+    # 3d. init_completed — success-path emit. The init is already durable,
+    #     so a sink exception is suppressed (POLICY.md #22); a single line
+    #     on stderr lets the operator investigate without losing the key.
+    try:
+        audit_sink(
+            {
+                "event": "keyvault.init",
+                "decision": "allow",
+                "reason": "keyvault.init_completed",
+                "key_id_hash": wrap._audit_key_id_hex(resolved_key_id),
+                "verification_digest_hex_prefix": verification_digest[:8].hex(),
+            }
+        )
+    except Exception as exc:  # success-path suppress (POLICY.md #22)
+        print(
+            f"keyvault.init_completed audit emit failed (init already durable, key_id_hash={key_id_hash_hex}): {exc!r}",
+            file=sys.stderr,
+        )
+
+    return GenerateResult(
+        key_id=resolved_key_id,
+        key_id_hash=key_id_hash_hex,
+        created_at=created_at,
+    )
 
 
 # ----------------------------- MREN envelope helpers (step-C) -----------------------------
