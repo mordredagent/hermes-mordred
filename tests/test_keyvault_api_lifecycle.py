@@ -215,6 +215,62 @@ class TestExpectedDigestValidation:
             api.SeedDisplayHandle(_SEED, _FAR_FUTURE, view_64_bytes)
 
 
+# ============================ expected_digest() — confirm-side egress ============================
+
+
+class TestExpectedDigestMethod:
+    """``expected_digest()`` is confirm_generate's read-only egress from the
+    handle: it returns the prepared verification digest WITHOUT consuming
+    the handle (consume() is the display flow's egress), but wipes the seed
+    payload if the handle has expired so a never-displayed seed does not
+    outlive its deadline (codex pre-merge P2).
+    """
+
+    def test_returns_the_expected_digest(self) -> None:
+        digest = b"\x5a" * 32
+        handle = _make_handle(expected_digest=digest)
+        assert handle.expected_digest() == digest
+
+    def test_does_not_consume_the_handle(self) -> None:
+        """Unlike consume(), expected_digest() leaves the handle usable —
+        the display flow can still consume() the seed afterwards.
+        """
+        handle = _make_handle()
+        handle.expected_digest()
+        assert handle.consume() == _SEED
+
+    def test_callable_repeatedly(self) -> None:
+        """A pure read on the non-expired path — no one-shot guard."""
+        handle = _make_handle(expected_digest=b"\x5a" * 32)
+        assert handle.expected_digest() == b"\x5a" * 32
+        assert handle.expected_digest() == b"\x5a" * 32
+
+    def test_expired_raises_seed_display_expired(self) -> None:
+        handle = _make_handle(deadline=_FAR_PAST)
+        with pytest.raises(api.SeedDisplayExpired):
+            handle.expected_digest()
+
+    def test_expired_wipes_the_payload(self) -> None:
+        """An expired, never-displayed handle must not keep the seed in
+        memory past its deadline — expected_digest() wipes on expiry.
+        """
+        handle = _make_handle(deadline=_FAR_PAST)
+        original_payload = handle._payload  # type: ignore[attr-defined]
+        with pytest.raises(api.SeedDisplayExpired):
+            handle.expected_digest()
+        assert all(b == 0 for b in original_payload)
+
+    def test_works_on_an_already_display_consumed_handle(self) -> None:
+        """The real flow is prepare → display consume() → confirm. After the
+        display flow consumed the seed, expected_digest() still returns the
+        digest (consume wipes _payload, not _expected_digest).
+        """
+        digest = b"\x5a" * 32
+        handle = _make_handle(expected_digest=digest)
+        handle.consume()  # display flow renders + wipes the seed
+        assert handle.expected_digest() == digest
+
+
 # ============================ repr / str (no leakage) ============================
 
 
@@ -1282,6 +1338,38 @@ class TestConfirmGenerateRollback:
         with pytest.raises(OSError, match="disk full"):
             api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
 
+    def test_save_meta_partial_commit_is_repaired(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """codex pre-merge P2: save_meta's atomic rename can commit the new
+        meta.json before a later fsync raises. The rollback must re-open
+        meta.json and drop the row so it does not advertise a key whose
+        Keychain item was rolled back. Simulated by a save_meta that really
+        writes, then raises.
+        """
+        handle, digest = _prepared()
+        key_id_hash = _storage_key_id_hash("default")
+        real_save_meta = _storage.save_meta
+
+        def commit_then_boom(root: Path, meta: dict[str, Any]) -> None:
+            real_save_meta(root, meta)  # the atomic rename commits meta.json
+            raise OSError("parent-dir fsync failed after meta.json was committed")
+
+        monkeypatch.setattr(_storage, "save_meta", commit_then_boom)
+        with pytest.raises(OSError, match="fsync failed"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        # The row that briefly landed on disk has been repaired away.
+        meta = _storage.load_meta(kv_root)
+        assert key_id_hash not in meta["keys"]
+        # And the Enclave key was rolled back too.
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound
+            wrap.get_wrapping_key_public("default", backend=backend)
+
 
 class TestConfirmGenerateHandleExpiry:
     """An expired handle is rejected before any digest check or audit emit."""
@@ -1307,29 +1395,61 @@ class TestConfirmGenerateHandleExpiry:
             api.confirm_generate(handle, _PLACEHOLDER_DIGEST, backend=backend, audit_sink=audit, home=home)
         assert not kv_root.exists()
 
+    def test_expired_handle_payload_is_wiped(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        """codex pre-merge P2: when confirm_generate is the first code path
+        to observe an expired handle (the display flow never consumed it),
+        the seed bytes must be wiped — they must not outlive the deadline.
+        """
+        handle = _make_handle(deadline=_FAR_PAST)
+        original_payload = handle._payload  # type: ignore[attr-defined]
+        assert any(b != 0 for b in original_payload)  # sanity: starts non-zero
+        with pytest.raises(api.SeedDisplayExpired):
+            api.confirm_generate(handle, _PLACEHOLDER_DIGEST, backend=backend, audit_sink=audit, home=home)
+        assert all(b == 0 for b in original_payload), "expired handle's seed payload must be wiped"
 
-class TestConfirmGenerateDuplicate:
-    """Re-initializing the same key_id is rejected by the backend's
-    duplicate guard — and the existing key is NOT disturbed.
+
+class TestConfirmGenerateReInit:
+    """v1 keyvault is single-key (SPEC Story 5). Once any key is
+    initialized, a second confirm_generate is rejected by the re-init
+    guard — checked under the keyvault lock against meta["keys"] (codex
+    pre-merge P2) — and the existing key is NOT disturbed.
     """
 
-    def test_duplicate_key_id_raises(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+    def test_reinit_same_key_id_rejected(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         h1, d1 = _prepared()
         api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
         h2, d2 = _prepared()
-        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound (duplicate)
+        with pytest.raises(RuntimeError, match="already initialized"):
             api.confirm_generate(h2, d2, backend=backend, audit_sink=audit, home=home)
 
-    def test_duplicate_attempt_preserves_existing_key(
+    def test_reinit_with_different_key_id_rejected(
         self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
     ) -> None:
-        """A failed re-init must NOT delete the legitimate existing key —
-        the rollback path is only for keys THIS call created.
+        """codex P2: a second confirm with a DIFFERENT explicit key_id must
+        not slip past — the re-init guard keys off "any key exists", not a
+        per-key_id duplicate check, so it cannot append a second meta row.
+        """
+        h1, d1 = _prepared()
+        api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
+        h2, d2 = _prepared()
+        with pytest.raises(RuntimeError, match="already initialized"):
+            api.confirm_generate(h2, d2, key_id="second-key", backend=backend, audit_sink=audit, home=home)
+        # meta.json still has exactly the one original key.
+        meta = _storage.load_meta(kv_root)
+        assert len(meta["keys"]) == 1
+        assert _storage_key_id_hash("second-key") not in meta["keys"]
+
+    def test_reinit_attempt_preserves_existing_key(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        """A rejected re-init must NOT delete or disturb the legitimate
+        existing key — the rollback path only cleans up keys THIS call
+        created, and the re-init guard rejects before any key is generated.
         """
         h1, d1 = _prepared()
         first = api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
         h2, d2 = _prepared()
-        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound
+        with pytest.raises(RuntimeError, match="already initialized"):
             api.confirm_generate(h2, d2, backend=backend, audit_sink=audit, home=home)
         pub = wrap.get_wrapping_key_public("default", backend=backend)
         assert len(pub) == 65
