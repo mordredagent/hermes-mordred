@@ -21,11 +21,22 @@ combining marks.
 from __future__ import annotations
 
 import inspect
+import typing
 
 import pytest
 
 from mordred_hermes.keyvault import api
 from mordred_hermes.keyvault.digest import VerificationDigestMismatch
+
+# Precomposed/decomposed Japanese katakana pairs for NFKD equivalence tests.
+# Precomposed `パ` (U+30D1) NFKD-decomposes to `ハ` (U+30CF) + handakuten
+# (U+309A); precomposed `ド` (U+30C9) decomposes to `ト` (U+30C8) + dakuten
+# (U+3099). Using \u escapes here so the source file's UTF-8 bytes are not
+# already normalized by an editor (which would silently make the two literals
+# identical and defeat the test).
+_JP_PASSWORD_PRECOMPOSED = "パスワード"  # パスワード, fully precomposed
+_JP_PASSWORD_DECOMPOSED = "パスワード"  # パスワート゛, fully decomposed
+_JP_CAFE_PRECOMPOSED = "カフェ"  # カフェ (no combining marks; here only for completeness)
 
 # SPEC.md §Key generation and verification digest L355-362 (Phase 4 PR2
 # canonical regression anchor; ASCII inputs unaffected by split normalization).
@@ -59,7 +70,7 @@ class TestNormalizeSeedPhrase:
 
     def test_whitespace_collapse_nbsp(self) -> None:
         # U+00A0 NBSP decomposes to ASCII space under NFKD, then collapse runs.
-        assert api._normalize_seed_phrase("test seed") == "test seed"
+        assert api._normalize_seed_phrase("test\u00a0seed") == "test seed"
 
     def test_whitespace_collapse_ideographic_space(self) -> None:
         # U+3000 IDEOGRAPHIC SPACE decomposes to ASCII space under NFKD.
@@ -75,7 +86,7 @@ class TestNormalizeSeedPhrase:
         # both to the same combining-mark sequence; casefold is a no-op on kana;
         # whitespace collapse is a no-op (no whitespace).
         precomposed = "パスワード"  # パスワード
-        decomposed = "バスワード"  # ハ+ダ etc decomposed
+        decomposed = "パスワード"  # NFKD of パスワード (handakuten on ha, dakuten on to)
         assert api._normalize_seed_phrase(precomposed) == api._normalize_seed_phrase(decomposed)
 
     def test_runs_of_whitespace_only_normalize_to_empty(self) -> None:
@@ -95,13 +106,15 @@ class TestNormalizeSeedPhrase:
             assert once == twice, f"normalization not idempotent for {raw!r}"
 
     def test_signature_matches_spec(self) -> None:
+        # `from __future__ import annotations` (PEP 563) makes annotations strings,
+        # so resolve via typing.get_type_hints to get the actual types.
         sig = inspect.signature(api._normalize_seed_phrase)
+        hints = typing.get_type_hints(api._normalize_seed_phrase)
         params = list(sig.parameters.items())
         assert len(params) == 1, "expected single positional parameter"
-        name, param = params[0]
+        name, _param = params[0]
         assert name == "s"
-        assert param.annotation is str
-        assert sig.return_annotation is str
+        assert hints == {"s": str, "return": str}
 
 
 # ---------------------------- _normalize_passphrase ----------------------------
@@ -141,12 +154,12 @@ class TestNormalizePassphrase:
     def test_nfkd_decomposes_nbsp_to_space_but_does_not_collapse(self) -> None:
         # NFKD compatibility-decomposes NBSP (U+00A0) to ASCII space (U+0020),
         # but unlike the seed normalizer we do NOT collapse runs.
-        out = api._normalize_passphrase("a  b")
+        out = api._normalize_passphrase("a\u00a0 b")
         assert out == "a  b", f"expected 'a  b' (two spaces, preserved), got {out!r}"
 
     def test_japanese_passphrase_precomposed_and_decomposed_equivalent(self) -> None:
         precomposed = "パスワード"  # パスワード
-        decomposed = "バスワード"
+        decomposed = "パスワード"
         assert api._normalize_passphrase(precomposed) == api._normalize_passphrase(decomposed)
 
     def test_does_not_casefold_kana_or_other_scripts(self) -> None:
@@ -165,7 +178,7 @@ class TestNormalizePassphrase:
             "パスワード",
             "",
             "with  multiple  spaces",
-            " a b ",
+            " a\u00a0b ",
         ]:
             once = api._normalize_passphrase(raw)
             twice = api._normalize_passphrase(once)
@@ -173,12 +186,12 @@ class TestNormalizePassphrase:
 
     def test_signature_matches_spec(self) -> None:
         sig = inspect.signature(api._normalize_passphrase)
+        hints = typing.get_type_hints(api._normalize_passphrase)
         params = list(sig.parameters.items())
         assert len(params) == 1
-        name, param = params[0]
+        name, _param = params[0]
         assert name == "s"
-        assert param.annotation is str
-        assert sig.return_annotation is str
+        assert hints == {"s": str, "return": str}
 
 
 # ------------------- seed-vs-passphrase divergence (the point) -------------------
@@ -207,14 +220,17 @@ class TestSplitNormalizationDiverges:
 class TestApiVerifyDigest:
     def test_signature_matches_spec(self) -> None:
         sig = inspect.signature(api.verify_digest)
+        hints = typing.get_type_hints(api.verify_digest)
         params = sig.parameters
         assert list(params.keys()) == ["seed_phrase", "passphrase", "pow_bytes", "expected"]
-        assert params["seed_phrase"].annotation is str
-        assert params["passphrase"].annotation is str
-        assert params["pow_bytes"].annotation is bytes
-        assert params["expected"].annotation is bytes
+        assert hints == {
+            "seed_phrase": str,
+            "passphrase": str,
+            "pow_bytes": bytes,
+            "expected": bytes,
+            "return": type(None),
+        }
         assert params["expected"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert sig.return_annotation is None
 
     def test_re_exports_verification_digest_mismatch(self) -> None:
         # Callers can import the exception class from api without reaching into
@@ -265,14 +281,14 @@ class TestApiVerifyDigest:
         # the same digest. The expected digest is computed from the normalized
         # form so both inputs round-trip the same way.
         precomposed_seed = "パスワード"
-        decomposed_seed = "バスワード"
+        decomposed_seed = "パスワード"
         expected = _digest_after_normalize(precomposed_seed, _SPEC_PASS, _SPEC_POW)
         api.verify_digest(precomposed_seed, _SPEC_PASS, _SPEC_POW, expected=expected)
         api.verify_digest(decomposed_seed, _SPEC_PASS, _SPEC_POW, expected=expected)
 
     def test_normalization_applied_consistently_japanese_passphrase(self) -> None:
         precomposed_pass = "パスワード"
-        decomposed_pass = "バスワード"
+        decomposed_pass = "パスワード"
         expected = _digest_after_normalize(_SPEC_SEED, precomposed_pass, _SPEC_POW)
         api.verify_digest(_SPEC_SEED, precomposed_pass, _SPEC_POW, expected=expected)
         api.verify_digest(_SPEC_SEED, decomposed_pass, _SPEC_POW, expected=expected)
