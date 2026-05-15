@@ -7,8 +7,12 @@ Steps landed so far:
 - step-C: MREN envelope wire format + ``encrypt`` / ``decrypt`` (managed
   storage; per-ciphertext DEK wrapped under the Enclave wrapping key).
 
-Step-D will add ``prepare_generate`` / ``confirm_generate`` / ``generate``
-/ ``export_backup`` / ``import_backup`` / ``SeedDisplayHandle``.
+Step-D lifecycle surface (lands across PR4c-1 / PR4c-2):
+
+- PR4c-1 (landed): ``SeedDisplayHandle`` + ``SeedDisplayExpired`` +
+  ``prepare_generate`` — the in-memory phase, pure with respect to disk.
+- PR4c-2 (pending): ``confirm_generate`` / ``generate`` /
+  ``export_backup`` / ``import_backup`` — the durable phases.
 
 Authoritative contract lives in ``mordred-docs/mordred/SPEC.md``
 §"PR4 API contract & MREN envelope wire format". Codex pre-implementation
@@ -28,7 +32,7 @@ import secrets
 import time
 import unicodedata
 from pathlib import Path
-from typing import SupportsIndex
+from typing import NoReturn, SupportsIndex
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -104,9 +108,9 @@ class SeedDisplayHandle:
     # can verify the user-typed digest via hmac.compare_digest without
     # re-running the algorithm. The first three slots are SPEC-ordered;
     # ruff's natural-sort lint is suppressed because the test pins the
-    # exact tuple value (see test_slots_value_is_exact_four_tuple). The
-    # SPEC.md slot listing will be updated in a docs-drift commit
-    # alongside step-D's overall SPEC reconciliation.
+    # exact tuple value (see test_slots_value_is_exact_four_tuple). SPEC.md
+    # §"SeedDisplayHandle (opaque)" carries a matching "Step-D extension"
+    # callout pinning the same 4-tuple.
     __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest")  # noqa: RUF023
 
     def __init__(
@@ -163,16 +167,16 @@ class SeedDisplayHandle:
     # before any output is produced, so partial pickle buffers cannot
     # leak the seed either.
 
-    def __copy__(self) -> SeedDisplayHandle:
+    def __copy__(self) -> NoReturn:
         raise TypeError("SeedDisplayHandle is opaque and not copyable")
 
-    def __deepcopy__(self, memo: dict[int, object]) -> SeedDisplayHandle:
+    def __deepcopy__(self, memo: dict[int, object]) -> NoReturn:
         raise TypeError("SeedDisplayHandle is opaque and not copyable")
 
-    def __reduce__(self) -> tuple[object, ...]:
+    def __reduce__(self) -> NoReturn:
         raise TypeError("SeedDisplayHandle is opaque and not picklable")
 
-    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[object, ...]:
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
         raise TypeError("SeedDisplayHandle is opaque and not picklable")
 
     def consume(self) -> str:
@@ -202,10 +206,10 @@ class SeedDisplayHandle:
         return seed
 
     def _wipe(self) -> None:
-        # In-place zero-fill. Replacing with a new bytearray would leave
-        # the original buffer (and any aliased references) untouched.
-        for i in range(len(self._payload)):
-            self._payload[i] = 0
+        # In-place zero-fill via slice assignment — overwrites the existing
+        # buffer rather than rebinding ``_payload`` to a new bytearray, so
+        # any aliased reference into the same buffer also observes zeros.
+        self._payload[:] = bytes(len(self._payload))
 
 
 # ----------------------------- MREN envelope constants -----------------------------

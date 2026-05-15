@@ -32,6 +32,10 @@ verbatim after the relocation.
 
 from __future__ import annotations
 
+import copy
+import inspect
+import io
+import pickle
 import time
 from typing import Any
 
@@ -266,8 +270,6 @@ class TestCopyPickleBlocked:
     """
 
     def test_copy_copy_raises_typeerror(self) -> None:
-        import copy
-
         handle = _make_handle("supersecret")
         with pytest.raises(TypeError) as excinfo:
             copy.copy(handle)
@@ -275,19 +277,25 @@ class TestCopyPickleBlocked:
         assert "opaque" in str(excinfo.value).lower()
 
     def test_copy_deepcopy_raises_typeerror(self) -> None:
-        import copy
-
         handle = _make_handle("supersecret")
         with pytest.raises(TypeError) as excinfo:
             copy.deepcopy(handle)
         assert "opaque" in str(excinfo.value).lower()
 
     def test_pickle_dumps_raises_typeerror(self) -> None:
-        import pickle
-
         handle = _make_handle("supersecret")
         with pytest.raises(TypeError) as excinfo:
             pickle.dumps(handle)
+        assert "opaque" in str(excinfo.value).lower()
+
+    def test_reduce_directly_raises_typeerror(self) -> None:
+        """``__reduce__`` is defined alongside ``__reduce_ex__``; exercise it
+        directly so the dunder's behavior is pinned even though pickle
+        reaches the class via ``__reduce_ex__`` in practice.
+        """
+        handle = _make_handle("supersecret")
+        with pytest.raises(TypeError) as excinfo:
+            handle.__reduce__()
         assert "opaque" in str(excinfo.value).lower()
 
     def test_pickle_dumps_does_not_leak_seed_in_partial_buffer(self) -> None:
@@ -295,9 +303,6 @@ class TestCopyPickleBlocked:
         landed in any partial buffer that's accessible to the caller.
         The TypeError must fire before any seed bytes are emitted.
         """
-        import io
-        import pickle
-
         handle = _make_handle("verysecretseedphrase")
         buffer = io.BytesIO()
         pickler = pickle.Pickler(buffer)
@@ -331,6 +336,10 @@ class TestConsumeOneShot:
         assert any(b != 0 for b in original_payload)  # sanity: starts non-zero
         handle.consume()
         assert all(b == 0 for b in original_payload), "payload must be wiped in-place after consume()"
+        # Pin that the slot still holds the SAME bytearray object — a refactor
+        # of _wipe to ``self._payload = bytearray(...)`` would leave the old
+        # (aliased) buffer un-zeroed and silently pass the content check above.
+        assert handle._payload is original_payload  # type: ignore[attr-defined]
 
     def test_consume_preserves_payload_length(self) -> None:
         """Wipe is zero-fill, not truncate — length stays equal to the
@@ -652,7 +661,11 @@ class TestPrepareGenerateNoPersistence:
     durable happened".
     """
 
-    def test_no_files_created_under_home(self, tmp_path: Any) -> None:
+    def test_no_files_created_anywhere(self, tmp_path: Any) -> None:
+        """``prepare_generate`` has no ``home`` parameter — it cannot create
+        keyvault files by construction. This snapshots a scratch directory
+        before/after the call to assert no incidental disk writes occur.
+        """
         # Snapshot the directory state, call prepare_generate, re-snapshot.
         before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
         api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
@@ -664,8 +677,6 @@ class TestPrepareGenerateNoPersistence:
         pow_bytes). No keyword-only ``audit_sink`` / ``backend`` / ``home``
         — those are confirm_generate's surface.
         """
-        import inspect
-
         sig = inspect.signature(api.prepare_generate)
         param_names = list(sig.parameters)
         assert param_names == ["seed_phrase", "passphrase", "pow_bytes"]
