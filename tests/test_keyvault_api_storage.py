@@ -33,7 +33,6 @@ import pytest
 
 from mordred_hermes.keyvault import _storage
 
-
 # ---------------------------- resolve_keyvault_dir ----------------------------
 
 
@@ -248,9 +247,8 @@ class TestKeyvaultLock:
     def test_releases_on_exception(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
-        with pytest.raises(RuntimeError):
-            with _storage.keyvault_lock(root):
-                raise RuntimeError("simulated")
+        with pytest.raises(RuntimeError), _storage.keyvault_lock(root):
+            raise RuntimeError("simulated")
         # Lock must still be released after the exception propagated.
         fd = os.open(root / ".lock", os.O_RDWR)
         try:
