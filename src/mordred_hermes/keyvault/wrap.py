@@ -372,8 +372,12 @@ def _emit_unwrap_denied(
 # ---------------------------------------------------------------------------
 
 
-def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> None:
+def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> bytes:
     """Create + persist a Secure-Enclave-backed P-256 keypair for ``key_id``.
+
+    Returns the SEC1 uncompressed public key (65 bytes) so callers — e.g.
+    PR4's ``api.generate`` — can use it directly without a second
+    :func:`get_wrapping_key_public` round-trip (review LOW-3).
 
     The public key remains exportable; the private key never leaves the
     Enclave. Raises :class:`WrapKeyNotFound` if a key with this id
@@ -381,7 +385,7 @@ def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> None:
     ``errSecDuplicateItem`` to this exception so callers do not need to
     know the OSStatus).
     """
-    backend.generate_enclave_key(key_id)
+    return backend.generate_enclave_key(key_id)
 
 
 def get_wrapping_key_public(key_id: str, *, backend: NativeBackend) -> bytes:
