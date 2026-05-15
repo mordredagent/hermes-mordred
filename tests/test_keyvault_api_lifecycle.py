@@ -38,15 +38,24 @@ verbatim after the relocation.
 from __future__ import annotations
 
 import copy
+import dataclasses
+import datetime
+import hashlib
 import inspect
 import io
 import pickle
+import re
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import api
+from mordred_hermes.keyvault import _storage, api, wrap
+
+# FakeBackend stands in for the real Secure Enclave — software P-256 keypair.
+# Step-G will relocate it to a shared tests._keyvault_fakes module.
+from tests.test_keyvault_wrap import FakeBackend
 
 # ----------------------------- helpers / fixtures -----------------------------
 
@@ -839,3 +848,420 @@ class TestPrepareGenerateNoPersistence:
         sig = inspect.signature(api.prepare_generate)
         param_names = list(sig.parameters)
         assert param_names == ["seed_phrase", "passphrase", "pow_bytes"]
+
+
+# ============================ confirm_generate (durable phase) ============================
+#
+# Contract frozen in SPEC.md §"PR4 API contract / Two-phase generate" +
+# POLICY.md §"Phase 4 PR4 step-0 freeze" (audit codes #21-23):
+#
+#     def confirm_generate(handle, user_confirmed_digest, *, key_id=None,
+#                          backend, audit_sink, home=None) -> GenerateResult:
+#         # Verifies user_confirmed_digest matches handle._expected_digest
+#         #   via hmac.compare_digest.
+#         # Mismatch: emit keyvault.init_denied, raise VerificationDigestMismatch,
+#         #   NO Keychain / filesystem mutation.
+#         # Match:
+#         #   1. Emit keyvault.init_started (durability barrier — sink failure aborts).
+#         #   2. wrap.generate_wrapping_key(key_id, backend=...).
+#         #   3. Write meta.json + digests/<key_id_hash_hex>.commit atomically
+#         #      under keyvault_lock. Rollback (delete Enclave key) on any failure.
+#         #   4. Emit keyvault.init_completed (sink failure suppressed).
+#
+# NOTE: ``backend`` is keyword-only and REQUIRED here (no default), matching
+# the merged ``encrypt`` / ``decrypt`` surface. SPEC.md sketches it as
+# ``NativeBackend | None = None``; api.py standardizes on a required backend
+# (the production _SecKeyBackend is step-E and does not exist yet).
+
+
+_ISO8601_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def _prepared(
+    seed: str = _SPEC_SEED,
+    passphrase: str = _SPEC_PASSPHRASE,
+    pow_bytes: bytes = _SPEC_POW,
+) -> tuple[Any, bytes]:
+    """A fresh ``(handle, expected_digest)`` pair from prepare_generate.
+
+    Each confirm_generate call consumes its handle one-shot, so every test
+    that confirms must mint its own pair.
+    """
+    return api.prepare_generate(seed, passphrase, pow_bytes)
+
+
+def _storage_key_id_hash(key_id: str) -> str:
+    """The 32-hex-char on-disk hash (meta.json key + digests/<...>.commit)."""
+    return hashlib.sha256(key_id.encode("utf-8")).digest()[:16].hex()
+
+
+class _AuditCapture:
+    """A callable audit sink that records every entry it receives.
+
+    Used directly as the ``audit_sink`` argument; ``.log`` exposes the
+    captured entries for assertions.
+    """
+
+    def __init__(self) -> None:
+        self.log: list[dict[str, Any]] = []
+
+    def __call__(self, entry: dict[str, Any]) -> None:
+        self.log.append(entry)
+
+
+class _FailingAuditCapture(_AuditCapture):
+    """An ``_AuditCapture`` that raises ``self.boom`` when it sees an entry
+    whose ``reason`` matches ``fail_on_reason`` — for exercising the three
+    distinct sink-failure policies of confirm_generate's audit emits.
+    """
+
+    def __init__(self, fail_on_reason: str) -> None:
+        super().__init__()
+        self.fail_on_reason = fail_on_reason
+        self.boom = RuntimeError(f"audit sink failed on {fail_on_reason}")
+
+    def __call__(self, entry: dict[str, Any]) -> None:
+        self.log.append(entry)
+        if entry.get("reason") == self.fail_on_reason:
+            raise self.boom
+
+
+@pytest.fixture
+def backend() -> FakeBackend:
+    return FakeBackend()
+
+
+@pytest.fixture
+def audit() -> _AuditCapture:
+    return _AuditCapture()
+
+
+@pytest.fixture
+def home(tmp_path: Path) -> Path:
+    """Hermes home root; the keyvault lives at ``home/mordred/keyvault``.
+    confirm_generate creates the layout itself (no pre-created fixture).
+    """
+    return tmp_path
+
+
+@pytest.fixture
+def kv_root(home: Path) -> Path:
+    return home / "mordred" / "keyvault"
+
+
+class TestGenerateResult:
+    """``GenerateResult`` is the frozen return type of confirm_generate /
+    generate — carries the resolved key_id (the caller may have passed
+    None), its on-disk hash, and the creation timestamp.
+    """
+
+    def test_is_frozen_dataclass(self) -> None:
+        assert dataclasses.is_dataclass(api.GenerateResult)
+        result = api.GenerateResult(
+            key_id="default",
+            key_id_hash="00" * 16,
+            created_at="2026-05-15T07:30:00Z",
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.key_id = "other"  # type: ignore[misc]
+
+    def test_carries_the_three_fields(self) -> None:
+        result = api.GenerateResult(
+            key_id="default",
+            key_id_hash="ab" * 16,
+            created_at="2026-05-15T07:30:00Z",
+        )
+        assert result.key_id == "default"
+        assert result.key_id_hash == "ab" * 16
+        assert result.created_at == "2026-05-15T07:30:00Z"
+
+
+class TestConfirmGenerateHappyPath:
+    """Digest matches → Enclave key created, meta.json + digests commit
+    persisted, init_started/init_completed emitted in order.
+    """
+
+    def test_returns_generate_result(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert isinstance(result, api.GenerateResult)
+
+    def test_default_key_id_resolves_to_default(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert result.key_id == "default"
+
+    def test_explicit_key_id_used_verbatim(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(
+            handle, digest, key_id="signing-key", backend=backend, audit_sink=audit, home=home
+        )
+        assert result.key_id == "signing-key"
+
+    def test_key_id_hash_is_sha256_prefix_hex(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert result.key_id_hash == _storage_key_id_hash("default")
+        assert len(result.key_id_hash) == 32  # 16 bytes hex-encoded
+
+    def test_created_at_is_iso8601_utc(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert _ISO8601_UTC_RE.match(result.created_at), result.created_at
+        datetime.datetime.strptime(result.created_at, "%Y-%m-%dT%H:%M:%SZ")
+
+    def test_enclave_key_is_generated(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        pub = wrap.get_wrapping_key_public("default", backend=backend)
+        assert len(pub) == 65  # SEC1 uncompressed P-256
+
+    def test_meta_json_row_written(self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        meta = _storage.load_meta(kv_root)
+        entry = meta["keys"][result.key_id_hash]
+        assert entry["key_id"] == "default"
+        assert entry["created_at"] == result.created_at
+
+    def test_digest_commit_file_written(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        commit_path = kv_root / "digests" / f"{result.key_id_hash}.commit"
+        assert commit_path.exists()
+        assert _storage.safe_read(commit_path) == digest
+
+    def test_audit_emits_started_then_completed(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert [e["reason"] for e in audit.log] == [
+            "keyvault.init_started",
+            "keyvault.init_completed",
+        ]
+
+    def test_init_started_fields(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        started = audit.log[0]
+        assert started["event"] == "keyvault.init"
+        assert started["decision"] == "allow"
+        assert started["reason"] == "keyvault.init_started"
+        assert started["key_id_hash"] == wrap._audit_key_id_hex("default")
+
+    def test_init_completed_fields(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, digest = _prepared()
+        api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        completed = audit.log[1]
+        assert completed["event"] == "keyvault.init"
+        assert completed["decision"] == "allow"
+        assert completed["reason"] == "keyvault.init_completed"
+        assert completed["key_id_hash"] == wrap._audit_key_id_hex("default")
+        assert completed["verification_digest_hex_prefix"] == digest[:8].hex()
+
+    def test_second_confirm_with_same_handle_raises_runtimeerror(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        """The handle is one-shot — confirm_generate consumes it. A second
+        confirm_generate on the same handle hits the consumed guard.
+        """
+        handle, digest = _prepared()
+        api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        with pytest.raises(RuntimeError, match="already consumed"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+
+class TestConfirmGenerateMismatch:
+    """User-confirmed digest does NOT match → init_denied + raise, no mutation."""
+
+    def test_wrong_digest_raises_verification_mismatch(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        handle, _digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+
+    def test_mismatch_emits_only_init_denied(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, _digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+        assert [e["reason"] for e in audit.log] == ["keyvault.init_denied"]
+
+    def test_init_denied_fields(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, _digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+        denied = audit.log[0]
+        assert denied["event"] == "keyvault.init"
+        assert denied["decision"] == "block"
+        assert denied["reason"] == "keyvault.init_denied"
+        assert denied["key_id_hash"] == wrap._audit_key_id_hex("default")
+
+    def test_mismatch_generates_no_enclave_key(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle, _digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key never created
+            wrap.get_wrapping_key_public("default", backend=backend)
+
+    def test_mismatch_touches_no_filesystem_state(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        """POLICY.md #23: init_denied is emitted before any filesystem
+        state is touched — the keyvault layout is never even created.
+        """
+        handle, _digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+        assert not kv_root.exists()
+
+    def test_mismatch_consumes_the_handle(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        """A mismatch still consumes the handle — a retry with the correct
+        digest is not possible; the caller restarts from prepare_generate.
+        """
+        handle, digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
+        with pytest.raises(RuntimeError, match="already consumed"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+
+class TestConfirmGenerateAuditFailure:
+    """The 3 audit emits have 3 distinct sink-failure policies."""
+
+    def test_init_started_sink_failure_aborts_the_init(self, backend: FakeBackend, home: Path) -> None:
+        """init_started is the durability barrier: if the sink raises, the
+        whole init aborts — no Enclave key, no meta.json.
+        """
+        sink = _FailingAuditCapture("keyvault.init_started")
+        handle, digest = _prepared()
+        with pytest.raises(RuntimeError) as excinfo:
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=sink, home=home)
+        assert excinfo.value is sink.boom
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound
+            wrap.get_wrapping_key_public("default", backend=backend)
+
+    def test_init_started_sink_failure_writes_no_meta(self, backend: FakeBackend, home: Path, kv_root: Path) -> None:
+        sink = _FailingAuditCapture("keyvault.init_started")
+        handle, digest = _prepared()
+        with pytest.raises(RuntimeError):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=sink, home=home)
+        assert not kv_root.exists()
+
+    def test_init_completed_sink_failure_is_suppressed(self, backend: FakeBackend, home: Path, kv_root: Path) -> None:
+        """init_completed fires after the init is already durable — a sink
+        exception is suppressed, confirm_generate still returns normally.
+        """
+        sink = _FailingAuditCapture("keyvault.init_completed")
+        handle, digest = _prepared()
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=sink, home=home)
+        assert isinstance(result, api.GenerateResult)
+        meta = _storage.load_meta(kv_root)
+        assert result.key_id_hash in meta["keys"]
+        pub = wrap.get_wrapping_key_public("default", backend=backend)
+        assert len(pub) == 65
+
+    def test_init_denied_sink_failure_chains_as_context(self, backend: FakeBackend, home: Path) -> None:
+        """If the sink raises while emitting init_denied, that exception is
+        chained as ``__context__`` on the VerificationDigestMismatch.
+        """
+        sink = _FailingAuditCapture("keyvault.init_denied")
+        handle, _digest = _prepared()
+        with pytest.raises(api.VerificationDigestMismatch) as excinfo:
+            api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=sink, home=home)
+        assert excinfo.value.__context__ is sink.boom
+
+
+class TestConfirmGenerateRollback:
+    """A failure in the durable phase (after the Enclave key exists) rolls
+    back the Keychain item before re-raising.
+    """
+
+    def test_meta_write_failure_rolls_back_enclave_key(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handle, digest = _prepared()
+
+        def boom_save_meta(root: Path, meta: dict[str, Any]) -> None:
+            raise OSError("disk full while writing meta.json")
+
+        monkeypatch.setattr(_storage, "save_meta", boom_save_meta)
+        with pytest.raises(OSError, match="disk full"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key rolled back
+            wrap.get_wrapping_key_public("default", backend=backend)
+
+    def test_meta_write_failure_reraises_original_error(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handle, digest = _prepared()
+
+        def boom_save_meta(root: Path, meta: dict[str, Any]) -> None:
+            raise OSError("disk full while writing meta.json")
+
+        monkeypatch.setattr(_storage, "save_meta", boom_save_meta)
+        with pytest.raises(OSError, match="disk full"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+
+class TestConfirmGenerateHandleExpiry:
+    """An expired handle is rejected before any digest check or audit emit."""
+
+    def test_expired_handle_raises_seed_display_expired(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        handle = _make_handle(deadline=_FAR_PAST)
+        with pytest.raises(api.SeedDisplayExpired):
+            api.confirm_generate(handle, _PLACEHOLDER_DIGEST, backend=backend, audit_sink=audit, home=home)
+
+    def test_expired_handle_emits_no_audit(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        handle = _make_handle(deadline=_FAR_PAST)
+        with pytest.raises(api.SeedDisplayExpired):
+            api.confirm_generate(handle, _PLACEHOLDER_DIGEST, backend=backend, audit_sink=audit, home=home)
+        assert audit.log == []
+
+    def test_expired_handle_touches_no_filesystem(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        handle = _make_handle(deadline=_FAR_PAST)
+        with pytest.raises(api.SeedDisplayExpired):
+            api.confirm_generate(handle, _PLACEHOLDER_DIGEST, backend=backend, audit_sink=audit, home=home)
+        assert not kv_root.exists()
+
+
+class TestConfirmGenerateDuplicate:
+    """Re-initializing the same key_id is rejected by the backend's
+    duplicate guard — and the existing key is NOT disturbed.
+    """
+
+    def test_duplicate_key_id_raises(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        h1, d1 = _prepared()
+        api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
+        h2, d2 = _prepared()
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound (duplicate)
+            api.confirm_generate(h2, d2, backend=backend, audit_sink=audit, home=home)
+
+    def test_duplicate_attempt_preserves_existing_key(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        """A failed re-init must NOT delete the legitimate existing key —
+        the rollback path is only for keys THIS call created.
+        """
+        h1, d1 = _prepared()
+        first = api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
+        h2, d2 = _prepared()
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound
+            api.confirm_generate(h2, d2, backend=backend, audit_sink=audit, home=home)
+        pub = wrap.get_wrapping_key_public("default", backend=backend)
+        assert len(pub) == 65
+        meta = _storage.load_meta(kv_root)
+        assert first.key_id_hash in meta["keys"]
