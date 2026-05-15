@@ -528,6 +528,22 @@ class TestKeychainManagement:
         assert len(pub) == 65
         assert pub[0] == 0x04
 
+    def test_generate_returns_sec1_public_key(self, backend: FakeBackend) -> None:
+        """review LOW-3: ``generate_wrapping_key`` returns the SEC1
+        uncompressed public key so PR4's ``api.generate`` need not issue a
+        second ``get_wrapping_key_public`` round-trip just to display it."""
+        from mordred_hermes.keyvault.wrap import (
+            generate_wrapping_key,
+            get_wrapping_key_public,
+        )
+
+        pub = generate_wrapping_key("k1", backend=backend)
+
+        assert isinstance(pub, bytes)
+        assert len(pub) == 65
+        assert pub[0] == 0x04
+        assert pub == get_wrapping_key_public("k1", backend=backend)
+
     def test_delete_then_lookup_raises_key_not_found(self, backend: FakeBackend) -> None:
         from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
         from mordred_hermes.keyvault.wrap import (
