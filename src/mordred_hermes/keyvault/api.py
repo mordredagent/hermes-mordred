@@ -54,6 +54,12 @@ __all__ = [
 # reachable from realistic call sites.
 _SEED_DISPLAY_DEFAULT_TTL_SECONDS = 60.0
 
+# The verification digest is always a 32-byte BLAKE3 output (SPEC.md
+# §"Key generation and verification digest"). SeedDisplayHandle validates
+# its ``expected_digest`` against this so a wrong-length value cannot reach
+# confirm_generate's hmac.compare_digest as a silent always-mismatch.
+_VERIFICATION_DIGEST_LEN = 32
+
 
 # ----------------------------- SeedDisplayHandle (PR4 step-D) -----------------------------
 # Opaque-class contract frozen in SPEC.md §"PR4 API contract / SeedDisplayHandle
@@ -109,6 +115,15 @@ class SeedDisplayHandle:
         deadline_monotonic: float,
         expected_digest: bytes,
     ) -> None:
+        # Validate the digest length before materializing the seed buffer:
+        # hmac.compare_digest accepts unequal-length operands and returns
+        # False, so a wrong-length digest would otherwise become a silent
+        # always-mismatch at confirm_generate time. Fail loudly here, at the
+        # construction-site of the bug.
+        if len(expected_digest) != _VERIFICATION_DIGEST_LEN:
+            raise ValueError(
+                f"expected_digest must be exactly {_VERIFICATION_DIGEST_LEN} bytes, got {len(expected_digest)}"
+            )
         # Store the seed as a wipeable bytearray (str is immutable, so
         # bytearray is the only way to actually zero the bytes in place).
         self._payload = bytearray(normalized_seed.encode("utf-8"))
@@ -118,8 +133,8 @@ class SeedDisplayHandle:
         self._deadline = deadline_monotonic
         # 32-byte expected digest baked in at prepare time; confirm_generate
         # compares the user-typed digest against this via hmac.compare_digest.
-        # Pinned to immutable bytes (not bytearray) so it cannot be mutated
-        # post-construction to forge a match.
+        # Stored as immutable ``bytes`` (not a mutable ``bytearray``) so the
+        # digest contents cannot be edited in place after construction.
         self._expected_digest = expected_digest
 
     def __repr__(self) -> str:
