@@ -54,6 +54,7 @@ __all__ = [
     "confirm_generate",
     "decrypt",
     "encrypt",
+    "generate",
     "prepare_generate",
     "verify_digest",
 ]
@@ -565,6 +566,43 @@ def confirm_generate(
         key_id=resolved_key_id,
         key_id_hash=key_id_hash_hex,
         created_at=created_at,
+    )
+
+
+def generate(
+    seed_phrase: str,
+    passphrase: str,
+    pow_bytes: bytes,
+    expected_digest: bytes,
+    *,
+    key_id: str | None = None,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> GenerateResult:
+    """Non-interactive convenience wrapper: prepare → confirm in one call.
+
+    Tests and future automation use this. The wizard CLI MUST use the
+    two-phase form (:func:`prepare_generate` then :func:`confirm_generate`)
+    so the user transcribes the seed and confirms the verification digest
+    via the offline channel before anything durable is created.
+
+    ``generate`` delegates fully to :func:`confirm_generate` — it does not
+    pre-check the digest itself. confirm_generate consumes the handle,
+    compares ``expected_digest`` against the handle's prepared digest, and
+    emits ``keyvault.init_denied`` on a mismatch. (SPEC.md sketched an
+    early in-``generate`` check that raised without an audit emit;
+    delegating is simpler and gives a non-interactive mismatch the same
+    audit trail as the interactive path.)
+    """
+    handle, _expected = prepare_generate(seed_phrase, passphrase, pow_bytes)
+    return confirm_generate(
+        handle,
+        expected_digest,
+        key_id=key_id,
+        backend=backend,
+        audit_sink=audit_sink,
+        home=home,
     )
 
 
