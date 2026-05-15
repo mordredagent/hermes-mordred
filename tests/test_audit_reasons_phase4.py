@@ -75,15 +75,43 @@ def test_keyvault_unwrap_denied_in_freeze() -> None:
     assert "keyvault.unwrap_denied" in get_args(ReasonCode)
 
 
-def test_phase4_init_codes_deliberately_not_frozen_yet() -> None:
-    """Codex review #8: PR4 ``api.generate`` / ``audit purge`` codes are
-    not in freeze yet — they land alongside ``api.py`` (Phase 4 PR4)."""
+def test_keyvault_init_started_in_freeze() -> None:
+    """PR4 step-D (PR4c-2): emit site is ``api.confirm_generate`` — the
+    durability barrier, emitted before any Keychain / meta.json mutation.
+    Sink failure aborts the whole init (fail-closed). POLICY.md #21."""
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    members = set(get_args(ReasonCode))
-    assert "keyvault.init_started" not in members
-    assert "keyvault.init_completed" not in members
-    assert "keyvault.backup_exported" not in members
+    assert "keyvault.init_started" in get_args(ReasonCode)
+
+
+def test_keyvault_init_completed_in_freeze() -> None:
+    """PR4 step-D (PR4c-2): emit site is ``api.confirm_generate`` success
+    path — Enclave key created, meta.json row + digests/<kid>.commit
+    persisted. Sink failure suppressed (init already durable). POLICY.md #22."""
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "keyvault.init_completed" in get_args(ReasonCode)
+
+
+def test_keyvault_init_denied_in_freeze() -> None:
+    """PR4 step-D (PR4c-2): emit site is ``api.confirm_generate`` on a
+    digest mismatch — paired with a ``VerificationDigestMismatch`` raise,
+    emitted before any mutation. Sink failure chains as ``__context__``
+    on the raised exception. POLICY.md #23."""
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "keyvault.init_denied" in get_args(ReasonCode)
+
+
+def test_backup_exported_deliberately_not_frozen_yet() -> None:
+    """``keyvault.backup_exported`` (#24) is NOT frozen yet — it lands with
+    the ``api.export_backup`` emit site (a later step-D slice). Freezing it
+    before the emit site exists would reintroduce the "frozen but unused"
+    footgun that Phase 2 hit with ``policy.strict.local_stream_interrupted``.
+    """
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "keyvault.backup_exported" not in get_args(ReasonCode)
 
 
 def test_keyvault_codes_use_dotted_form() -> None:

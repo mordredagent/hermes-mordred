@@ -58,10 +58,29 @@ audit entries:
   raise. Decision ``block``. Fields: ``event="keyvault.unwrap_dek"``,
   ``native_error_code`` (translated; never the raw OSStatus).
 
-PR4 codes (``keyvault.init_started`` / ``keyvault.init_completed`` /
-``keyvault.backup_exported``) are deliberately NOT frozen here — they
-land in their respective step-0 freezes once the emit site exists, to
-avoid the "frozen but unused" footgun that Phase 2 hit with
+Phase 4 PR4 step-D (PR4c-2, 2026-05-15) adds 3 ``keyvault.init_*`` codes
+for the two-phase key-generation lifecycle. Each has a same-PR emit site
+in ``api.confirm_generate`` (POLICY.md #21-23):
+
+- ``keyvault.init_started`` — durability barrier, emitted before any
+  Keychain / meta.json mutation. Decision ``allow``. Fields:
+  ``event="keyvault.init"``, ``key_id_hash``. If the audit sink raises
+  during this emit the whole init aborts (fail-closed) — failing open
+  would diverge audit from observable state.
+- ``keyvault.init_completed`` — success path: Enclave key created,
+  meta.json row + ``digests/<kid>.commit`` persisted. Decision ``allow``.
+  Fields: ``event="keyvault.init"``, ``key_id_hash``,
+  ``verification_digest_hex_prefix``. Sink failure suppressed (init is
+  already durable).
+- ``keyvault.init_denied`` — digest mismatch, paired with a
+  :class:`VerificationDigestMismatch` raise, emitted before any mutation.
+  Decision ``block``. Fields: ``event="keyvault.init"``, ``key_id_hash``.
+  Sink failure is chained as ``__context__`` on the raised exception.
+
+``keyvault.backup_exported`` (#24) is still deliberately NOT frozen — it
+lands with the ``api.export_backup`` emit site (a later step-D slice),
+preserving the "freeze only with an emit site" discipline that avoids
+the "frozen but unused" footgun Phase 2 hit with
 ``policy.strict.local_stream_interrupted`` (POLICY.md entry #12 caveat).
 """
 
@@ -88,4 +107,7 @@ ReasonCode = Literal[
     "keyvault.seed_display_aborted_screenshot",
     "keyvault.unwrap_authorized",
     "keyvault.unwrap_denied",
+    "keyvault.init_started",
+    "keyvault.init_completed",
+    "keyvault.init_denied",
 ]
