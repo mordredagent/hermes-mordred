@@ -110,6 +110,39 @@ class TestSlotsLayout:
         assert handle._expected_digest == digest  # type: ignore[attr-defined]
 
 
+# ============================ expected_digest length validation ============================
+
+
+class TestExpectedDigestValidation:
+    """``__init__`` rejects any ``expected_digest`` that is not 32 bytes.
+
+    The verification digest is always a 32-byte BLAKE3 output. ``confirm_generate``
+    (PR4c-2) compares the user-typed digest against ``_expected_digest`` via
+    ``hmac.compare_digest``, which accepts unequal-length operands and just
+    returns False — so a wrong-length value would silently produce a mismatch
+    far from the construction-site bug. Validating at the constructor boundary
+    surfaces a caller bug (e.g. a future ``import_backup`` reconstructing
+    handles) immediately and loudly.
+    """
+
+    def test_too_short_digest_raises_valueerror(self) -> None:
+        with pytest.raises(ValueError, match="32 bytes"):
+            api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"\x00" * 31)
+
+    def test_too_long_digest_raises_valueerror(self) -> None:
+        with pytest.raises(ValueError, match="32 bytes"):
+            api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"\x00" * 33)
+
+    def test_empty_digest_raises_valueerror(self) -> None:
+        with pytest.raises(ValueError, match="32 bytes"):
+            api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"")
+
+    def test_exactly_32_bytes_accepted(self) -> None:
+        """The boundary value — exactly 32 bytes — must NOT raise."""
+        handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, b"\x00" * 32)
+        assert handle._expected_digest == b"\x00" * 32  # type: ignore[attr-defined]
+
+
 # ============================ repr / str (no leakage) ============================
 
 
