@@ -72,9 +72,7 @@ def _key_id_hash_hex(key_id: str) -> str:
 
 
 class TestExportBlob:
-    def test_export_returns_parseable_mrkv_blob(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
+    def test_export_returns_parseable_mrkv_blob(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
         _log, sink = audit
         backend = FakeBackend()
         home = tmp_path / "deviceA"
@@ -116,9 +114,7 @@ class TestExportBlob:
         exported = [e for e in log if e.get("reason") == "keyvault.backup_exported"]
         assert len(exported) == 1
 
-    def test_export_audit_fields_match_policy(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
+    def test_export_audit_fields_match_policy(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
         """POLICY.md #24: event=keyvault.backup_export, decision=allow,
         key_id_hash, blob_version=1, kdf_id=1, envelope_count."""
         log, sink = audit
@@ -317,9 +313,7 @@ class TestImportRejection:
                 home=home_b,
             )
 
-    def test_corrupt_blob_raises_backup_corrupt(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
+    def test_corrupt_blob_raises_backup_corrupt(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
         _log, sink = audit
         backend_b = FakeBackend()
         home_b = tmp_path / "deviceB"

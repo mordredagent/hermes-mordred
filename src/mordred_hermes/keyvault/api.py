@@ -817,9 +817,7 @@ def _encode_envelope(
     Thin wrapper over :func:`_encode_envelope_from_hashes` that hashes the
     cleartext ``key_id`` / ``purpose`` first.
     """
-    return _encode_envelope_from_hashes(
-        dek, plaintext, _hash_id(key_id), _hash_id(purpose), wrapped_dek_blob
-    )
+    return _encode_envelope_from_hashes(dek, plaintext, _hash_id(key_id), _hash_id(purpose), wrapped_dek_blob)
 
 
 def _split_envelope(blob: bytes, expected_key_id_hash: bytes) -> tuple[bytes, bytes, bytes, bytes]:
