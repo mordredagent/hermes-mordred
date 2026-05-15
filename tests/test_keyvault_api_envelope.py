@@ -51,7 +51,6 @@ from mordred_hermes.keyvault._exceptions import (
 # than duplicating the fake.
 from tests.test_keyvault_wrap import FakeBackend
 
-
 # ----------------------------- fixtures -----------------------------
 
 
@@ -284,7 +283,7 @@ class TestApiDecrypt:
         eid = api.encrypt(registered_key, plaintext, "purpose", backend=backend, audit_sink=sink, home=home)
         assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == plaintext
 
-    def test_cross_purpose_replay_raises_wrap_parse_error(
+    def test_cross_purpose_replay_no_biometric_prompt(
         self,
         registered_key: str,
         backend: FakeBackend,
@@ -292,17 +291,47 @@ class TestApiDecrypt:
         captured_audit: tuple[list[dict[str, Any]], Any],
     ) -> None:
         # Encrypt under purpose="A"; attempt to decrypt with purpose="B".
-        # Must raise WrapParseError BEFORE invoking unwrap_dek so no
-        # biometric prompt is spent on the attack.
+        # The security contract (codex HIGH #2): no biometric prompt fires,
+        # no audit entry is emitted. With managed storage the path already
+        # encodes the purpose_hash so a wrong purpose hits FileNotFoundError;
+        # if the attacker repositions the envelope into the wrong-purpose
+        # directory, the MREN parser rejects with WrapParseError. Both
+        # are pre-authorization rejections.
         log, sink = captured_audit
         eid = api.encrypt(registered_key, b"secret", "purpose-A", backend=backend, audit_sink=sink, home=home)
         before_ecdh_count = sum(1 for op, _ in backend.calls if op == "ecdh")
-        with pytest.raises(WrapParseError):
+        with pytest.raises((WrapParseError, FileNotFoundError)):
             api.decrypt(registered_key, eid, "purpose-B", backend=backend, audit_sink=sink, home=home)
         after_ecdh_count = sum(1 for op, _ in backend.calls if op == "ecdh")
         # No ecdh call was made (= no biometric prompt would have fired).
         assert after_ecdh_count == before_ecdh_count
         # No audit emit either - parse failures are pre-authorization (PR3 HIGH-1).
+        assert log == []
+
+    def test_cross_purpose_repositioned_envelope_raises_wrap_parse_error(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+    ) -> None:
+        # Attacker has the envelope bytes and places them at the wrong-purpose
+        # path on disk. The MREN parser must still reject before unwrap_dek.
+        log, sink = captured_audit
+        eid = api.encrypt(registered_key, b"secret", "purpose-A", backend=backend, audit_sink=sink, home=home)
+        # Copy envelope into the purpose-B directory.
+        path_a = _envelope_path(home, registered_key, "purpose-A", eid)
+        purpose_b_hex = _purpose_hash("purpose-B").hex()
+        kid_hex = _key_id_hash(registered_key).hex()
+        dir_b = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex / purpose_b_hex
+        dir_b.mkdir(mode=0o700, parents=True)
+        path_b = dir_b / f"{eid}.gcm"
+        _storage.atomic_write(path_b, _storage.safe_read(path_a))
+        before_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        with pytest.raises(WrapParseError):
+            api.decrypt(registered_key, eid, "purpose-B", backend=backend, audit_sink=sink, home=home)
+        after_ecdh = sum(1 for op, _ in backend.calls if op == "ecdh")
+        assert after_ecdh == before_ecdh
         assert log == []
 
     def test_wrong_envelope_id_raises_file_not_found(

@@ -1,12 +1,14 @@
 """mordred_hermes.keyvault.api — public Python API surface.
 
-Phase 4 PR4 step-A landed the split-normalization helpers and the
-``verify_digest`` wrapper. Subsequent steps build on this:
+Steps landed so far:
 
-- step-B (storage helpers + file-safety)
-- step-C (MREN envelope + encrypt / decrypt with purpose binding)
-- step-D (prepare_generate / confirm_generate / generate / export_backup /
-  import_backup + SeedDisplayHandle)
+- step-A: split-normalization helpers + ``verify_digest`` wrapper.
+- step-B: ``_storage`` module (file-safety helpers; consumed by api.py).
+- step-C: MREN envelope wire format + ``encrypt`` / ``decrypt`` (managed
+  storage; per-ciphertext DEK wrapped under the Enclave wrapping key).
+
+Step-D will add ``prepare_generate`` / ``confirm_generate`` / ``generate``
+/ ``export_backup`` / ``import_backup`` / ``SeedDisplayHandle``.
 
 Authoritative contract lives in ``mordred-docs/mordred/SPEC.md``
 §"PR4 API contract & MREN envelope wire format". Codex pre-implementation
@@ -17,15 +19,46 @@ passphrase weakens entropy, so the two normalizers diverge intentionally.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import os
+import secrets
 import unicodedata
+from pathlib import Path
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from . import _storage, wrap
+from ._exceptions import WrapParseError
 from .digest import VerificationDigestMismatch
 from .digest import verify_digest as _digest_verify
+from .wrap import AuditSink, NativeBackend
 
 __all__ = [
     "VerificationDigestMismatch",
+    "decrypt",
+    "encrypt",
     "verify_digest",
 ]
+
+
+# ----------------------------- MREN envelope constants -----------------------------
+# Wire format frozen in SPEC.md §"PR4 API contract / MREN envelope".
+
+_ENVELOPE_MAGIC = b"MREN"
+_ENVELOPE_VERSION = 1
+_KEY_ID_HASH_LEN = 16
+_PURPOSE_HASH_LEN = 16
+_WRAPPED_DEK_LEN = 127  # PR3 MRKW blob, SPEC §"Wrap wire format & algorithm"
+_AES_BLOB_LEN_FIELD_LEN = 4
+_ENVELOPE_AAD_LEN = 4 + 1 + _KEY_ID_HASH_LEN + _PURPOSE_HASH_LEN + _WRAPPED_DEK_LEN  # 164
+_ENVELOPE_HEADER_LEN = _ENVELOPE_AAD_LEN + _AES_BLOB_LEN_FIELD_LEN  # 168
+
+_DEK_LEN = 32
+_AES_NONCE_LEN = 12
+_AES_TAG_LEN = 16
+_ENVELOPE_ID_RAND_BYTES = 16
 
 
 def _normalize_seed_phrase(s: str) -> str:
@@ -82,3 +115,214 @@ def verify_digest(
         pow_bytes,
         expected=expected,
     )
+
+
+# ----------------------------- MREN envelope helpers (step-C) -----------------------------
+
+
+def _validate_purpose(purpose: str) -> None:
+    """Reject any purpose string that could escape the storage layout or
+    appear inside an audit log as a control sequence.
+
+    Allowed: alphanumeric, dash, underscore, dot (but not the bare
+    relative-path components ``"."`` / ``".."``). Rejected: empty string,
+    path separators (``/`` / ``\\``), control characters (``\\x00``-``\\x1f``
+    / ``\\x7f``), and the relative-path components ``"."`` / ``".."``.
+    """
+    if not purpose:
+        raise ValueError("purpose must not be empty")
+    if purpose in {".", ".."}:
+        raise ValueError("purpose must not be a relative-path component")
+    if "/" in purpose or "\\" in purpose:
+        raise ValueError("purpose must not contain path separators")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in purpose):
+        raise ValueError("purpose must not contain control characters")
+
+
+def _hash_id(value: str) -> bytes:
+    """Return the first 16 bytes of ``sha256(value.encode("utf-8"))``.
+
+    Used for both ``key_id_hash`` and ``purpose_hash`` (same algorithm
+    and width).
+    """
+    return hashlib.sha256(value.encode("utf-8")).digest()[:_KEY_ID_HASH_LEN]
+
+
+def _new_envelope_id() -> str:
+    """Return a URL-safe base64 string of 16 random bytes (22 chars, no padding)."""
+    raw = secrets.token_bytes(_ENVELOPE_ID_RAND_BYTES)
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _envelope_path_for(root: Path, key_id: str, purpose: str, envelope_id: str) -> Path:
+    """Construct the on-disk path for an MREN envelope."""
+    return root / "ciphertexts" / _hash_id(key_id).hex() / _hash_id(purpose).hex() / f"{envelope_id}.gcm"
+
+
+def _encode_envelope(
+    dek: bytes,
+    plaintext: bytes,
+    key_id: str,
+    purpose: str,
+    wrapped_dek_blob: bytes,
+) -> bytes:
+    """Build an MREN envelope (AAD-bound AES-GCM) from a pre-wrapped DEK.
+
+    Layout (SPEC.md §"PR4 API contract / MREN envelope"):
+
+        magic(4) || version(1) || key_id_hash(16) || purpose_hash(16) ||
+        wrapped_dek(127) || aes_blob_len(4 BE) ||
+        aes_blob = nonce(12) || ciphertext(N) || tag(16)
+
+    AAD = the first 164 bytes; AES-GCM tag therefore covers every field
+    except ``aes_blob`` itself.
+    """
+    if len(wrapped_dek_blob) != _WRAPPED_DEK_LEN:
+        raise ValueError(f"wrapped_dek must be exactly {_WRAPPED_DEK_LEN} bytes")
+    aad = _ENVELOPE_MAGIC + bytes([_ENVELOPE_VERSION]) + _hash_id(key_id) + _hash_id(purpose) + wrapped_dek_blob
+    assert len(aad) == _ENVELOPE_AAD_LEN
+    nonce = secrets.token_bytes(_AES_NONCE_LEN)
+    ct_tag = AESGCM(dek).encrypt(nonce, plaintext, aad)
+    aes_blob = nonce + ct_tag
+    return aad + len(aes_blob).to_bytes(_AES_BLOB_LEN_FIELD_LEN, "big") + aes_blob
+
+
+def _parse_envelope(
+    blob: bytes,
+    expected_key_id: str,
+    expected_purpose: str,
+) -> tuple[bytes, bytes, bytes]:
+    """Validate the MREN header and return ``(aad, wrapped_dek_blob, aes_blob)``.
+
+    Raises :exc:`mordred_hermes.keyvault._exceptions.WrapParseError` on any
+    structural mismatch, magic/version disagreement, key_id_hash mismatch,
+    or purpose_hash mismatch. The purpose_hash compare uses
+    :func:`hmac.compare_digest` so cross-purpose attempts cannot be
+    distinguished by timing (the wrap layer is then never reached, so the
+    user is not prompted — codex HIGH #2).
+    """
+    if len(blob) < _ENVELOPE_HEADER_LEN:
+        raise WrapParseError(f"envelope too short: {len(blob)} bytes, expected at least {_ENVELOPE_HEADER_LEN}")
+    if blob[0:4] != _ENVELOPE_MAGIC:
+        raise WrapParseError(f"envelope magic mismatch: {blob[0:4]!r}")
+    if blob[4] != _ENVELOPE_VERSION:
+        raise WrapParseError(f"envelope version mismatch: {blob[4]}")
+
+    expected_kid_hash = _hash_id(expected_key_id)
+    if not hmac.compare_digest(blob[5 : 5 + _KEY_ID_HASH_LEN], expected_kid_hash):
+        raise WrapParseError("envelope key_id_hash does not match expected key_id")
+
+    expected_purpose_hash = _hash_id(expected_purpose)
+    purpose_offset = 5 + _KEY_ID_HASH_LEN
+    if not hmac.compare_digest(
+        blob[purpose_offset : purpose_offset + _PURPOSE_HASH_LEN],
+        expected_purpose_hash,
+    ):
+        raise WrapParseError("envelope purpose_hash does not match expected purpose")
+
+    wrapped_dek_start = purpose_offset + _PURPOSE_HASH_LEN
+    wrapped_dek_blob = blob[wrapped_dek_start : wrapped_dek_start + _WRAPPED_DEK_LEN]
+    aes_blob_len_offset = wrapped_dek_start + _WRAPPED_DEK_LEN  # = 164
+    declared_len = int.from_bytes(blob[aes_blob_len_offset : aes_blob_len_offset + _AES_BLOB_LEN_FIELD_LEN], "big")
+    if len(blob) != _ENVELOPE_HEADER_LEN + declared_len:
+        raise WrapParseError(
+            f"envelope aes_blob_len mismatch: header says {declared_len}, actual {len(blob) - _ENVELOPE_HEADER_LEN}"
+        )
+    aad = bytes(blob[:_ENVELOPE_AAD_LEN])
+    aes_blob = bytes(blob[_ENVELOPE_HEADER_LEN:])
+    return aad, wrapped_dek_blob, aes_blob
+
+
+def encrypt(
+    key_id: str,
+    plaintext: bytes,
+    purpose: str,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> str:
+    """Encrypt ``plaintext`` under a fresh per-call DEK; return ``envelope_id``.
+
+    The DEK is wrapped offline via :func:`mordred_hermes.keyvault.wrap.wrap_dek`
+    (no biometric prompt, no audit emit). The resulting envelope is persisted
+    to ``<keyvault>/ciphertexts/<key_id_hash_hex>/<purpose_hash_hex>/<envelope_id>.gcm``
+    via the step-B atomic-write helpers under ``keyvault_lock``.
+    Returns the URL-safe-base64 ``envelope_id`` (22 chars, no padding).
+
+    ``audit_sink`` is accepted so this surface matches the rest of the
+    api.py contract; codex OD-3 specifies that ``encrypt`` does NOT emit
+    audit entries at this layer (no authorization gate, and the wrap
+    layer never emits on the wrap path).
+    """
+    del audit_sink  # documented no-op for encrypt; reserved for symmetry with decrypt
+    _validate_purpose(purpose)
+    root = _storage.resolve_keyvault_dir(home)
+    _storage.ensure_layout(root)
+
+    dek = secrets.token_bytes(_DEK_LEN)
+    try:
+        wrapped_dek_blob = wrap.wrap_dek(dek, key_id, backend=backend)
+        envelope = _encode_envelope(dek, plaintext, key_id, purpose, wrapped_dek_blob)
+    finally:
+        # Best-effort wipe — Python bytes are immutable so we cannot zero
+        # them in place; leaving the reference unbound lets the GC reclaim
+        # sooner than a function-level local would.
+        del dek
+
+    envelope_id = _new_envelope_id()
+
+    key_id_hash_hex = _hash_id(key_id).hex()
+    purpose_hash_hex = _hash_id(purpose).hex()
+    key_dir = root / "ciphertexts" / key_id_hash_hex
+    purpose_dir = key_dir / purpose_hash_hex
+    envelope_path = purpose_dir / f"{envelope_id}.gcm"
+
+    with _storage.keyvault_lock(root):
+        if not key_dir.exists():
+            key_dir.mkdir(mode=0o700)
+            os.chmod(key_dir, 0o700)
+        if not purpose_dir.exists():
+            purpose_dir.mkdir(mode=0o700)
+            os.chmod(purpose_dir, 0o700)
+        _storage.atomic_write(envelope_path, envelope)
+
+    return envelope_id
+
+
+def decrypt(
+    key_id: str,
+    envelope_id: str,
+    purpose: str,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> bytes:
+    """Decrypt an MREN envelope and return the plaintext.
+
+    Reads ``ciphertexts/<key_id_hash_hex>/<purpose_hash_hex>/<envelope_id>.gcm``;
+    rejects mismatched ``key_id_hash`` or ``purpose_hash`` with
+    :exc:`WrapParseError` *before* calling
+    :func:`mordred_hermes.keyvault.wrap.unwrap_dek` so a cross-purpose
+    replay attempt does not spend a biometric prompt (codex HIGH #2).
+
+    On purpose match the wrap layer is invoked, which may prompt the user
+    for biometric authorization and emits exactly one
+    ``keyvault.unwrap_authorized`` or ``keyvault.unwrap_denied`` audit
+    entry via the supplied ``audit_sink``. ``decrypt`` does NOT
+    double-emit at the api layer (codex OD-3).
+    """
+    _validate_purpose(purpose)
+    root = _storage.resolve_keyvault_dir(home)
+    envelope_path = _envelope_path_for(root, key_id, purpose, envelope_id)
+
+    blob = _storage.safe_read(envelope_path)
+    aad, wrapped_dek_blob, aes_blob = _parse_envelope(blob, key_id, purpose)
+    dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
+    try:
+        nonce = aes_blob[:_AES_NONCE_LEN]
+        ct_tag = aes_blob[_AES_NONCE_LEN:]
+        return AESGCM(dek).decrypt(nonce, ct_tag, aad)
+    finally:
+        del dek
