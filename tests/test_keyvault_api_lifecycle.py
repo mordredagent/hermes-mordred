@@ -8,16 +8,21 @@ pins only ``SeedDisplayHandle``; the rest of step-D (``prepare_generate``
 ``import_backup``) lands in subsequent RED→GREEN commits.
 
 The ``SeedDisplayHandle`` contract is frozen in SPEC.md §"PR4 API
-contract / SeedDisplayHandle (opaque, codex BLOCKER #3)":
+contract / SeedDisplayHandle (opaque, codex BLOCKER #3)", with one
+step-D extension (the 4th slot ``_expected_digest`` — a docs-drift
+fix to be reconciled in SPEC.md alongside step-D landing):
 
     class SeedDisplayHandle:
-        __slots__ = ("_payload", "_consumed", "_deadline")
+        __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest")
         # __repr__ → "<SeedDisplayHandle redacted>"
         # __eq__   → raise TypeError(... comparison oracle ...)
         # __hash__ = None
         # consume(): one-shot, zero-fills _payload, second call raises
         #            RuntimeError; past deadline raises SeedDisplayExpired
         #            after wiping.
+        # _expected_digest: 32-byte digest baked in by prepare_generate,
+        #            read by confirm_generate for hmac.compare_digest
+        #            against the user-typed digest.
 
 The class lives in ``api.py`` for PR4. PR5 will relocate it to
 ``seed_display.py`` and layer screen-blackout / 60s timer / screenshot
@@ -42,13 +47,17 @@ _SEED = "abandon abandon abandon abandon abandon abandon"
 _FAR_FUTURE = 1.0e12
 # Far enough in the past that any consume() trips the deadline guard.
 _FAR_PAST = -1.0e12
+# 32-byte placeholder digest for handle construction in tests that don't
+# care about digest contents (only structural / consume / repr behavior).
+_PLACEHOLDER_DIGEST = b"\x00" * 32
 
 
 def _make_handle(
     seed: str = _SEED,
     deadline: float = _FAR_FUTURE,
+    expected_digest: bytes = _PLACEHOLDER_DIGEST,
 ) -> Any:
-    return api.SeedDisplayHandle(seed, deadline)
+    return api.SeedDisplayHandle(seed, deadline, expected_digest)
 
 
 # ============================ structural contract ============================
@@ -63,8 +72,18 @@ class TestSlotsLayout:
     on any other name.
     """
 
-    def test_slots_value_is_exact_three_tuple(self) -> None:
-        assert api.SeedDisplayHandle.__slots__ == ("_payload", "_consumed", "_deadline")
+    def test_slots_value_is_exact_four_tuple(self) -> None:
+        """The handle carries (seed bytes, consumed flag, deadline, expected
+        digest). The 4th slot is what makes confirm_generate's defense-in-
+        depth verification (hmac.compare_digest against user-typed digest)
+        possible without re-running compute_digest at the api.py boundary.
+        """
+        assert api.SeedDisplayHandle.__slots__ == (
+            "_payload",
+            "_consumed",
+            "_deadline",
+            "_expected_digest",
+        )
 
     def test_instance_has_no_dict(self) -> None:
         handle = _make_handle()
@@ -81,6 +100,14 @@ class TestSlotsLayout:
         """
         handle = _make_handle()
         assert bytes(handle._payload) == _SEED.encode("utf-8")  # type: ignore[attr-defined]
+
+    def test_expected_digest_stored_verbatim(self) -> None:
+        """The third constructor argument is held on the instance for
+        confirm_generate to compare against the user-typed digest.
+        """
+        digest = b"\xab" * 32
+        handle = _make_handle(expected_digest=digest)
+        assert handle._expected_digest == digest  # type: ignore[attr-defined]
 
 
 # ============================ repr / str (no leakage) ============================
@@ -513,6 +540,16 @@ class TestPrepareGenerateHandleBehavior:
         # the only ambiguity is the time spent inside the call.
         deadline = handle._deadline  # type: ignore[attr-defined]
         assert before + 60.0 <= deadline <= after + 60.0
+
+    def test_handle_carries_expected_digest_equal_to_returned_digest(self) -> None:
+        """The (handle, expected_digest) pair is internally consistent —
+        confirm_generate compares the user-typed digest against
+        handle._expected_digest, so the value baked into the handle must
+        equal the digest returned to the caller (i.e. the one shown to
+        the user for offline transcription).
+        """
+        handle, returned_digest = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
+        assert handle._expected_digest == returned_digest  # type: ignore[attr-defined]
 
 
 class TestPrepareGenerateNoPersistence:

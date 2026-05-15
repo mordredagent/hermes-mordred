@@ -91,12 +91,23 @@ class SeedDisplayHandle:
     the same buffer also observes zero bytes after release.
     """
 
-    # __slots__ order matches SPEC.md §"SeedDisplayHandle (opaque)" verbatim;
-    # natural sort suppressed because the spec freezes the tuple value and
-    # the test pins it exactly (see test_slots_value_is_exact_three_tuple).
-    __slots__ = ("_payload", "_consumed", "_deadline")  # noqa: RUF023
+    # __slots__ order matches SPEC.md §"SeedDisplayHandle (opaque)" with one
+    # PR4-step-D extension: ``_expected_digest`` (4th slot) carries the
+    # BLAKE3 digest computed at prepare_generate time so confirm_generate
+    # can verify the user-typed digest via hmac.compare_digest without
+    # re-running the algorithm. The first three slots are SPEC-ordered;
+    # ruff's natural-sort lint is suppressed because the test pins the
+    # exact tuple value (see test_slots_value_is_exact_four_tuple). The
+    # SPEC.md slot listing will be updated in a docs-drift commit
+    # alongside step-D's overall SPEC reconciliation.
+    __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest")  # noqa: RUF023
 
-    def __init__(self, normalized_seed: str, deadline_monotonic: float) -> None:
+    def __init__(
+        self,
+        normalized_seed: str,
+        deadline_monotonic: float,
+        expected_digest: bytes,
+    ) -> None:
         # Store the seed as a wipeable bytearray (str is immutable, so
         # bytearray is the only way to actually zero the bytes in place).
         self._payload = bytearray(normalized_seed.encode("utf-8"))
@@ -104,6 +115,11 @@ class SeedDisplayHandle:
         # Absolute monotonic timestamp — caller computes
         # ``time.monotonic() + ttl`` (default ttl = 60.0s per SPEC).
         self._deadline = deadline_monotonic
+        # 32-byte expected digest baked in at prepare time; confirm_generate
+        # compares the user-typed digest against this via hmac.compare_digest.
+        # Pinned to immutable bytes (not bytearray) so it cannot be mutated
+        # post-construction to forge a match.
+        self._expected_digest = expected_digest
 
     def __repr__(self) -> str:
         return "<SeedDisplayHandle redacted>"
@@ -265,6 +281,7 @@ def prepare_generate(
     handle = SeedDisplayHandle(
         normalized_seed,
         time.monotonic() + _SEED_DISPLAY_DEFAULT_TTL_SECONDS,
+        expected_digest,
     )
     return handle, expected_digest
 
