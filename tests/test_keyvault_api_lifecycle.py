@@ -884,8 +884,9 @@ def _prepared(
 ) -> tuple[Any, bytes]:
     """A fresh ``(handle, expected_digest)`` pair from prepare_generate.
 
-    Each confirm_generate call consumes its handle one-shot, so every test
-    that confirms must mint its own pair.
+    confirm_generate is a pure reader of the handle (it does not consume),
+    so a handle could be reused — but each test mints its own pair anyway
+    to keep tests independent.
     """
     return api.prepare_generate(seed, passphrase, pow_bytes)
 
@@ -1060,16 +1061,21 @@ class TestConfirmGenerateHappyPath:
         assert completed["key_id_hash"] == wrap._audit_key_id_hex("default")
         assert completed["verification_digest_hex_prefix"] == digest[:8].hex()
 
-    def test_second_confirm_with_same_handle_raises_runtimeerror(
+    def test_confirm_does_not_consume_the_handle(
         self, backend: FakeBackend, audit: _AuditCapture, home: Path
     ) -> None:
-        """The handle is one-shot — confirm_generate consumes it. A second
-        confirm_generate on the same handle hits the consumed guard.
+        """confirm_generate is a pure reader of the handle (codex pre-merge
+        P1): it reads ``_expected_digest`` + ``_deadline`` but never calls
+        ``consume()``. ``consume()`` is the *display flow's* egress for the
+        seed; if confirm_generate also consumed, a real
+        prepare → display-seed (consume) → confirm flow could not complete.
+        The handle's seed payload is therefore still intact after a confirm.
         """
         handle, digest = _prepared()
         api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
-        with pytest.raises(RuntimeError, match="already consumed"):
-            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        # The handle was NOT consumed — consume() still works (and returns
+        # the normalized seed), proving confirm_generate left it untouched.
+        assert handle.consume() == _SPEC_SEED
 
 
 class TestConfirmGenerateMismatch:
@@ -1116,15 +1122,20 @@ class TestConfirmGenerateMismatch:
             api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
         assert not kv_root.exists()
 
-    def test_mismatch_consumes_the_handle(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        """A mismatch still consumes the handle — a retry with the correct
-        digest is not possible; the caller restarts from prepare_generate.
+    def test_mismatch_leaves_handle_reusable(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        """confirm_generate does not consume the handle (codex P1), so a
+        mismatch does not burn it — the caller can retry confirm_generate
+        with the corrected digest and succeed (e.g. the user fixed a
+        transcription typo). No fresh prepare_generate is required.
         """
         handle, digest = _prepared()
         with pytest.raises(api.VerificationDigestMismatch):
             api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
-        with pytest.raises(RuntimeError, match="already consumed"):
-            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        # Retry with the correct digest on the SAME handle — succeeds.
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert isinstance(result, api.GenerateResult)
 
 
 class TestConfirmGenerateAuditFailure:
@@ -1175,7 +1186,14 @@ class TestConfirmGenerateAuditFailure:
 
 class TestConfirmGenerateRollback:
     """A failure in the durable phase (after the Enclave key exists) rolls
-    back the Keychain item before re-raising.
+    back cleanly — Enclave key deleted, no stale filesystem state.
+
+    Transaction order (codex pre-merge P2): the digest commit file is
+    written FIRST, then ``meta.json`` LAST. ``meta.json`` is the commit
+    point — ``atomic_write`` replaces it atomically (tmp+rename), so a
+    failure leaves the prior ``meta.json`` intact. Rollback therefore only
+    has to delete the Enclave key and the orphaned commit file; it never
+    has to repair a half-written ``meta.json``.
     """
 
     def test_meta_write_failure_rolls_back_enclave_key(
@@ -1195,6 +1213,62 @@ class TestConfirmGenerateRollback:
             api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
         with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key rolled back
             wrap.get_wrapping_key_public("default", backend=backend)
+
+    def test_meta_write_failure_leaves_no_stale_filesystem_state(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """codex P2: a meta-write failure must not leave a digests/<kid>.commit
+        file (written first, in the same transaction) advertising a key whose
+        Keychain item was just rolled back. meta.json itself stays clean
+        because save_meta replaces it atomically.
+        """
+        handle, digest = _prepared()
+        key_id_hash = _storage_key_id_hash("default")
+
+        def boom_save_meta(root: Path, meta: dict[str, Any]) -> None:
+            raise OSError("disk full while writing meta.json")
+
+        monkeypatch.setattr(_storage, "save_meta", boom_save_meta)
+        with pytest.raises(OSError, match="disk full"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        # The commit file written earlier in the transaction is removed.
+        assert not (kv_root / "digests" / f"{key_id_hash}.commit").exists()
+        # meta.json carries no row for the rolled-back key.
+        meta = _storage.load_meta(kv_root)
+        assert key_id_hash not in meta["keys"]
+
+    def test_commit_file_write_failure_rolls_back(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the digest commit file (written FIRST) fails, the Enclave key
+        is rolled back and meta.json never gained a row.
+        """
+        handle, digest = _prepared()
+        key_id_hash = _storage_key_id_hash("default")
+        real_atomic_write = _storage.atomic_write
+
+        def selective_boom(path: Path, data: bytes) -> None:
+            if str(path).endswith(".commit"):
+                raise OSError("disk full while writing commit file")
+            real_atomic_write(path, data)
+
+        monkeypatch.setattr(_storage, "atomic_write", selective_boom)
+        with pytest.raises(OSError, match="commit file"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key rolled back
+            wrap.get_wrapping_key_public("default", backend=backend)
+        meta = _storage.load_meta(kv_root)
+        assert key_id_hash not in meta["keys"]
 
     def test_meta_write_failure_reraises_original_error(
         self,
@@ -1278,8 +1352,8 @@ class TestConfirmGenerateDuplicate:
 #         # two-phase form so the user confirms the digest offline.
 #
 # Implementation note: generate delegates fully to confirm_generate (it does
-# NOT pre-check the digest itself). confirm_generate consumes the handle,
-# compares expected_digest against the handle's prepared digest, and emits
+# NOT pre-check the digest itself). confirm_generate reads the handle's
+# prepared digest, compares expected_digest against it, and emits
 # keyvault.init_denied on a mismatch. The SPEC sketch showed an early
 # in-generate check that raised WITHOUT an audit emit; delegating is simpler
 # and gives a non-interactive mismatch the same audit trail as the
