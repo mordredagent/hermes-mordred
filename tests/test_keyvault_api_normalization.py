@@ -214,6 +214,85 @@ class TestSplitNormalizationDiverges:
         assert api._normalize_passphrase(" a ") == " a "
 
 
+# ------------ Unicode format (Cf) character handling (review-fix-1 MEDIUM-1) ------------
+
+
+class TestSeedPhraseStripsFormatChars:
+    """Code-reviewer MEDIUM-1: Unicode Cf-category chars (ZWSP, ZWJ, ZWNJ,
+    BOM, RTL mark, MVS, soft hyphen) are NFKD-stable and ``str.split()`` does
+    NOT treat them as whitespace. Without an explicit strip step they survive
+    seed-phrase normalization and silently produce a different digest. The
+    seed normalizer therefore drops all Cf-category chars; the passphrase
+    normalizer preserves them (see TestPassphrasePreservesFormatChars)."""
+
+    def test_zwsp_is_stripped(self) -> None:
+        # ZWSP between letters is removed (treated as invisible noise, not a separator).
+        assert api._normalize_seed_phrase("a​b") == "ab"
+
+    def test_zwj_is_stripped(self) -> None:
+        assert api._normalize_seed_phrase("a‍b") == "ab"
+
+    def test_zwnj_is_stripped(self) -> None:
+        assert api._normalize_seed_phrase("a‌b") == "ab"
+
+    def test_bom_is_stripped(self) -> None:
+        # U+FEFF as BOM at the start of pasted content.
+        assert api._normalize_seed_phrase("﻿abandon") == "abandon"
+
+    def test_ltr_rtl_marks_are_stripped(self) -> None:
+        # U+200E LRM and U+200F RLM both Cf.
+        assert api._normalize_seed_phrase("abc‏") == "abc"
+        assert api._normalize_seed_phrase("‎abc") == "abc"
+
+    def test_mongolian_vowel_separator_is_stripped(self) -> None:
+        # U+180E is Cf (Mongolian Vowel Separator — a former whitespace re-categorized).
+        assert api._normalize_seed_phrase("a᠎b") == "ab"
+
+    def test_soft_hyphen_is_stripped(self) -> None:
+        # U+00AD soft hyphen is Cf-category (visually invisible in most fonts).
+        assert api._normalize_seed_phrase("a­b") == "ab"
+
+    def test_zwsp_next_to_real_space_preserves_real_space(self) -> None:
+        # "abandon<SPACE><ZWSP>abandon" → ZWSP removed, real space preserved.
+        assert api._normalize_seed_phrase("abandon ​abandon") == "abandon abandon"
+
+    def test_spec_vector_unaffected_by_injected_zwsp_in_seed(self) -> None:
+        # SPEC L355-362 fixed vector: seed "test seed" + ZWSP between letters
+        # → after Cf strip, identical to canonical → digest matches.
+        api.verify_digest("test​ seed", _SPEC_PASS, _SPEC_POW, expected=_SPEC_DIGEST)
+
+    def test_multiple_format_chars_all_stripped(self) -> None:
+        # A copy-paste from a webpage might inject several Cf chars at once.
+        polluted = "﻿test​‍ seed‎"
+        assert api._normalize_seed_phrase(polluted) == "test seed"
+
+
+class TestPassphrasePreservesFormatChars:
+    """The passphrase normalizer is BIP39-reference (NFKD-only) and explicitly
+    preserves Cf-category chars. Rationale: passphrase entropy must not be
+    trimmed. A user who chose an embedded ZWSP did so intentionally; the
+    SPEC mandates that distinct inputs produce distinct keys."""
+
+    def test_zwsp_preserved(self) -> None:
+        assert api._normalize_passphrase("a​b") == "a​b"
+
+    def test_zwj_preserved(self) -> None:
+        assert api._normalize_passphrase("a‍b") == "a‍b"
+
+    def test_bom_preserved(self) -> None:
+        assert api._normalize_passphrase("﻿abc") == "﻿abc"
+
+    def test_soft_hyphen_preserved(self) -> None:
+        assert api._normalize_passphrase("a­b") == "a­b"
+
+    def test_injected_zwsp_in_passphrase_changes_digest(self) -> None:
+        # User who pastes a passphrase containing an invisible ZWSP gets a
+        # DIFFERENT digest than canonical — the system does not silently
+        # fold the invisible char away. The mismatch surfaces at verify time.
+        with pytest.raises(VerificationDigestMismatch):
+            api.verify_digest(_SPEC_SEED, "test​ pass", _SPEC_POW, expected=_SPEC_DIGEST)
+
+
 # ------------------------------ api.verify_digest ------------------------------
 
 
