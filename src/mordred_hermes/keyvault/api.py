@@ -471,27 +471,34 @@ def confirm_generate(
 
     Flow:
 
-    1. ``handle.consume()`` — enforces the one-shot contract (a second
-       ``confirm_generate`` on the same handle raises :class:`RuntimeError`),
-       the display deadline (an expired handle raises
-       :class:`SeedDisplayExpired`), and wipes the seed bytes.
-    2. ``hmac.compare_digest`` against the digest baked into the handle.
-       On mismatch: emit ``keyvault.init_denied`` and raise
-       :class:`VerificationDigestMismatch` — NO Keychain / filesystem
-       mutation (POLICY.md #23). A sink failure during the denied emit is
-       chained as ``__context__`` on the raised exception.
-    3. On match — the durable phase:
+    1. Read the prepared digest via ``handle.expected_digest()`` — the
+       confirm-side egress. It does NOT consume the handle (``consume()``
+       is the display flow's egress, so a real prepare → display-seed →
+       confirm flow works); but on an expired deadline it wipes the seed
+       payload before raising :class:`SeedDisplayExpired`.
+    2. ``hmac.compare_digest`` against that digest. On mismatch: emit
+       ``keyvault.init_denied`` and raise :class:`VerificationDigestMismatch`
+       — NO Keychain / filesystem mutation (POLICY.md #23). A sink failure
+       during the denied emit is chained as ``__context__`` on the raised
+       exception.
+    3. Re-init guard — v1 keyvault is single-key (SPEC Story 5). Reject
+       with :class:`RuntimeError` if any key already exists. Checked once
+       unlocked (before ``init_started``, so a rejected re-init leaves no
+       dangling audit event) and re-checked authoritatively under the lock.
+    4. On match — the durable phase:
 
-       a. Emit ``keyvault.init_started``. This is the durability barrier:
-          if the audit sink raises here the whole init aborts (fail-closed,
-          POLICY.md #21) — no key, no ``meta.json`` row.
-       b. ``wrap.generate_wrapping_key`` — create the Enclave keypair.
-          A duplicate ``key_id`` raises here (the backend's duplicate
-          guard); this is OUTSIDE the rollback scope so a pre-existing
-          legitimate key is never deleted.
-       c. Under ``keyvault_lock``: write the ``meta.json`` row and
-          ``digests/<key_id_hash>.commit`` atomically. Any failure here
-          rolls back — deletes the Enclave key created in (b) — then
+       a. Emit ``keyvault.init_started``. Durability barrier: if the audit
+          sink raises here the whole init aborts (fail-closed, POLICY.md
+          #21) — no key, no ``meta.json`` row.
+       b. Under ``keyvault_lock`` (a single hold): re-check the re-init
+          guard (TOCTOU-safe), then ``wrap.generate_wrapping_key`` to
+          create the Enclave keypair. Key generation is OUTSIDE the inner
+          rollback scope so a duplicate-key raise never deletes a
+          pre-existing key.
+       c. Still under the lock: write ``digests/<key_id_hash>.commit``
+          FIRST, then the ``meta.json`` row LAST (the transaction commit
+          point). Any failure rolls back — delete the Enclave key, remove
+          the commit file, best-effort repair the ``meta.json`` row — then
           re-raises.
        d. Emit ``keyvault.init_completed``. The init is already durable,
           so a sink failure is suppressed (POLICY.md #22); a line is
@@ -600,7 +607,7 @@ def confirm_generate(
                     _storage.save_meta(root, repaired)
             raise
 
-    # 3d. init_completed — success-path emit. The init is already durable,
+    # 4c. init_completed — success-path emit. The init is already durable,
     #     so a sink exception is suppressed (POLICY.md #22); a single line
     #     on stderr lets the operator investigate without losing the key.
     try:
@@ -645,12 +652,13 @@ def generate(
     via the offline channel before anything durable is created.
 
     ``generate`` delegates fully to :func:`confirm_generate` — it does not
-    pre-check the digest itself. confirm_generate consumes the handle,
-    compares ``expected_digest`` against the handle's prepared digest, and
-    emits ``keyvault.init_denied`` on a mismatch. (SPEC.md sketched an
-    early in-``generate`` check that raised without an audit emit;
-    delegating is simpler and gives a non-interactive mismatch the same
-    audit trail as the interactive path.)
+    pre-check the digest itself. confirm_generate reads the handle's
+    prepared digest (via ``expected_digest()`` — it does not consume the
+    handle), compares ``expected_digest`` against it, and emits
+    ``keyvault.init_denied`` on a mismatch. (SPEC.md sketched an early
+    in-``generate`` check that raised without an audit emit; delegating is
+    simpler and gives a non-interactive mismatch the same audit trail as
+    the interactive path.)
     """
     handle, _expected = prepare_generate(seed_phrase, passphrase, pow_bytes)
     return confirm_generate(
