@@ -1061,9 +1061,7 @@ class TestConfirmGenerateHappyPath:
         assert completed["key_id_hash"] == wrap._audit_key_id_hex("default")
         assert completed["verification_digest_hex_prefix"] == digest[:8].hex()
 
-    def test_confirm_does_not_consume_the_handle(
-        self, backend: FakeBackend, audit: _AuditCapture, home: Path
-    ) -> None:
+    def test_confirm_does_not_consume_the_handle(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         """confirm_generate is a pure reader of the handle (codex pre-merge
         P1): it reads ``_expected_digest`` + ``_deadline`` but never calls
         ``consume()``. ``consume()`` is the *display flow's* egress for the
@@ -1122,9 +1120,7 @@ class TestConfirmGenerateMismatch:
             api.confirm_generate(handle, b"\x11" * 32, backend=backend, audit_sink=audit, home=home)
         assert not kv_root.exists()
 
-    def test_mismatch_leaves_handle_reusable(
-        self, backend: FakeBackend, audit: _AuditCapture, home: Path
-    ) -> None:
+    def test_mismatch_leaves_handle_reusable(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         """confirm_generate does not consume the handle (codex P1), so a
         mismatch does not burn it — the caller can retry confirm_generate
         with the corrected digest and succeed (e.g. the user fixed a

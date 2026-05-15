@@ -24,6 +24,7 @@ passphrase weakens entropy, so the two normalizers diverge intentionally.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import os
@@ -479,15 +480,18 @@ def confirm_generate(
     """
     resolved_key_id = key_id if key_id is not None else _DEFAULT_KEY_ID
 
-    # 1. Consume the handle. This enforces one-shot use (RuntimeError on a
-    #    second confirm), the display deadline (SeedDisplayExpired), and
-    #    wipes the seed bytes prepare_generate stashed for PR5's display
-    #    flow. confirm_generate does not need the seed itself — the
-    #    verification digest is the gate — so the returned value is dropped.
-    handle.consume()
+    # 1. confirm_generate is a PURE READER of the handle (codex pre-merge
+    #    P1): it reads ``_deadline`` and ``_expected_digest`` but never
+    #    calls ``consume()``. ``consume()`` is the display flow's egress
+    #    for the seed — if confirm_generate also consumed, a real
+    #    prepare → display-seed (consume) → confirm flow could not
+    #    complete (the handle would already be consumed by confirm time).
+    #    The deadline is still enforced here so a stale handle cannot
+    #    finalize an init. Same-module access to the private slots.
+    if time.monotonic() > handle._deadline:
+        raise SeedDisplayExpired("SeedDisplayHandle expired before confirm_generate")
 
     # 2. Defense-in-depth digest check (hmac.compare_digest — constant time).
-    #    Same-module access to the handle's private digest slot.
     verification_digest = handle._expected_digest
     if not hmac.compare_digest(user_confirmed_digest, verification_digest):
         sink_exc = _emit_init_denied(audit_sink, key_id=resolved_key_id)
@@ -517,30 +521,40 @@ def confirm_generate(
     #     or belongs to a prior init — it must NOT be deleted.
     wrap.generate_wrapping_key(resolved_key_id, backend=backend)
 
-    # 3c. Persist meta.json + digests/<key_id_hash>.commit atomically under
-    #     the keyvault lock. Any failure after the key exists rolls it back.
+    # 3c. Persist digests/<key_id_hash>.commit then meta.json atomically
+    #     under the keyvault lock. The commit file is written FIRST and
+    #     meta.json LAST: meta.json is the transaction commit point
+    #     (codex pre-merge P2). ``save_meta`` replaces meta.json via
+    #     atomic_write (tmp+rename), so a failure leaves the prior
+    #     meta.json fully intact — this init simply "did not happen".
+    #     Rollback therefore only deletes the Enclave key and the orphaned
+    #     commit file; it never has to repair a half-written meta.json.
     created_at = _utc_now_iso()
     key_id_hash_hex = _hash_id(resolved_key_id).hex()
+    commit_path: Path | None = None
     try:
         root = _storage.resolve_keyvault_dir(home)
         _storage.ensure_layout(root)
         with _storage.keyvault_lock(root):
+            commit_path = root / "digests" / f"{key_id_hash_hex}.commit"
+            _storage.atomic_write(commit_path, verification_digest)
             meta = _storage.load_meta(root)
             meta["keys"][key_id_hash_hex] = {
                 "key_id": resolved_key_id,
                 "created_at": created_at,
             }
             _storage.save_meta(root, meta)
-            _storage.atomic_write(
-                root / "digests" / f"{key_id_hash_hex}.commit",
-                verification_digest,
-            )
     except BaseException:
-        # Rollback: delete the orphaned Enclave key so a retry can re-init
-        # cleanly. ``BaseException`` (not ``Exception``) so a KeyboardInterrupt
-        # mid-write still triggers cleanup before propagating. If the delete
-        # itself fails, that exception propagates with the original chained.
-        wrap.delete_wrapping_key(resolved_key_id, backend=backend)
+        # Rollback — best-effort, so the ORIGINAL failure always propagates
+        # via the bare ``raise``: delete the orphaned Enclave key and the
+        # commit file if it was written. ``BaseException`` (not
+        # ``Exception``) so a KeyboardInterrupt mid-write still triggers
+        # cleanup. meta.json needs no repair (written last + atomically).
+        with contextlib.suppress(Exception):
+            wrap.delete_wrapping_key(resolved_key_id, backend=backend)
+        if commit_path is not None:
+            with contextlib.suppress(OSError):
+                commit_path.unlink(missing_ok=True)
         raise
 
     # 3d. init_completed — success-path emit. The init is already durable,
