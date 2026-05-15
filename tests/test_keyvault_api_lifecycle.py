@@ -1,16 +1,16 @@
 """Tests for ``mordred_hermes.keyvault.api`` lifecycle surface.
 
-Phase 4 PR4 step-D RED (2026-05-15) — implementation lands in step-D GREEN.
-
-Scope: the two-phase generate flow + backup roundtrip. This first slice
-pins only ``SeedDisplayHandle``; the rest of step-D (``prepare_generate``
-→ ``confirm_generate`` → ``generate`` → ``export_backup`` →
-``import_backup``) lands in subsequent RED→GREEN commits.
+Phase 4 PR4 step-D, slice PR4c-1 (2026-05-15) — covers the first two
+lifecycle entry points: ``SeedDisplayHandle`` opaque-class contract and
+``prepare_generate`` (in-memory phase). The rest of step-D
+(``confirm_generate`` → ``generate`` → ``export_backup`` →
+``import_backup``) lands in PR4c-2 and later.
 
 The ``SeedDisplayHandle`` contract is frozen in SPEC.md §"PR4 API
 contract / SeedDisplayHandle (opaque, codex BLOCKER #3)", with one
-step-D extension (the 4th slot ``_expected_digest`` — a docs-drift
-fix to be reconciled in SPEC.md alongside step-D landing):
+step-D extension landed in PR4c-1: the 4th slot ``_expected_digest``,
+documented in SPEC.md under the "Step-D extension" callout in the
+same section.
 
     class SeedDisplayHandle:
         __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest")
