@@ -249,6 +249,31 @@ class SeedDisplayHandle:
             self._consumed = True
             return seed
 
+    def expected_digest(self) -> bytes:
+        """Return the prepared verification digest — confirm_generate's
+        read-only egress from the handle.
+
+        Distinct from :meth:`consume` (the display flow's egress for the
+        seed):
+
+        - It does NOT consume the handle or wipe the seed on the success
+          path, so a real ``prepare → display-seed (consume) → confirm``
+          flow works and confirm_generate can read the digest whether or
+          not the display flow already ran.
+        - If the handle has expired, the seed payload IS wiped before
+          :class:`SeedDisplayExpired` is raised, so a seed that was never
+          displayed does not outlive its deadline.
+
+        Runs under the same per-handle lock as :meth:`consume`.
+        """
+        with self._lock:
+            if time.monotonic() > self._deadline:
+                # Wipe so an expired, never-displayed seed does not survive
+                # in process memory past the deadline.
+                self._wipe()
+                raise SeedDisplayExpired("SeedDisplayHandle expired before confirm")
+            return self._expected_digest
+
     def _wipe(self) -> None:
         # In-place zero-fill via slice assignment — overwrites the existing
         # buffer rather than rebinding ``_payload`` to a new bytearray, so
@@ -480,19 +505,15 @@ def confirm_generate(
     """
     resolved_key_id = key_id if key_id is not None else _DEFAULT_KEY_ID
 
-    # 1. confirm_generate is a PURE READER of the handle (codex pre-merge
-    #    P1): it reads ``_deadline`` and ``_expected_digest`` but never
-    #    calls ``consume()``. ``consume()`` is the display flow's egress
-    #    for the seed — if confirm_generate also consumed, a real
-    #    prepare → display-seed (consume) → confirm flow could not
-    #    complete (the handle would already be consumed by confirm time).
-    #    The deadline is still enforced here so a stale handle cannot
-    #    finalize an init. Same-module access to the private slots.
-    if time.monotonic() > handle._deadline:
-        raise SeedDisplayExpired("SeedDisplayHandle expired before confirm_generate")
+    # 1. Read the prepared digest via the handle's confirm-side egress.
+    #    ``expected_digest()`` checks the display deadline and, on expiry,
+    #    wipes the seed payload before raising SeedDisplayExpired. It does
+    #    NOT consume the handle — ``consume()`` is the display flow's
+    #    egress, so a real prepare → display-seed → confirm flow works
+    #    whether or not the display flow already consumed (codex P1).
+    verification_digest = handle.expected_digest()
 
     # 2. Defense-in-depth digest check (hmac.compare_digest — constant time).
-    verification_digest = handle._expected_digest
     if not hmac.compare_digest(user_confirmed_digest, verification_digest):
         sink_exc = _emit_init_denied(audit_sink, key_id=resolved_key_id)
         mismatch = VerificationDigestMismatch("user-confirmed digest does not match the prepared verification digest")
@@ -504,7 +525,17 @@ def confirm_generate(
             mismatch.__context__ = sink_exc
         raise mismatch
 
-    # 3a. init_started — durability barrier. NO try/except: a sink exception
+    # 3. Re-init guard (advisory pre-check). v1 keyvault is single-key
+    #    (SPEC Story 5): reject if any key already exists, BEFORE emitting
+    #    init_started, so a rejected re-init leaves no dangling init_started
+    #    in the audit log. Re-checked authoritatively under the lock below.
+    #    ``load_meta`` on a missing meta.json returns an empty keyvault and
+    #    does not mutate the filesystem.
+    root = _storage.resolve_keyvault_dir(home)
+    if _storage.load_meta(root)["keys"]:
+        raise RuntimeError("keyvault already initialized — v1 supports a single key")
+
+    # 4a. init_started — durability barrier. NO try/except: a sink exception
     #     propagates and aborts the init before any Keychain / filesystem
     #     mutation (fail-closed — POLICY.md #21).
     audit_sink(
@@ -516,46 +547,58 @@ def confirm_generate(
         }
     )
 
-    # 3b. Create the Enclave wrapping key. OUTSIDE the rollback scope: if
-    #     this raises (e.g. duplicate key_id) the key either was not created
-    #     or belongs to a prior init — it must NOT be deleted.
-    wrap.generate_wrapping_key(resolved_key_id, backend=backend)
-
-    # 3c. Persist digests/<key_id_hash>.commit then meta.json atomically
-    #     under the keyvault lock. The commit file is written FIRST and
-    #     meta.json LAST: meta.json is the transaction commit point
-    #     (codex pre-merge P2). ``save_meta`` replaces meta.json via
-    #     atomic_write (tmp+rename), so a failure leaves the prior
-    #     meta.json fully intact — this init simply "did not happen".
-    #     Rollback therefore only deletes the Enclave key and the orphaned
-    #     commit file; it never has to repair a half-written meta.json.
+    # 4b. Durable phase — the re-init re-check, key generation, and the
+    #     commit/meta writes all run under a SINGLE keyvault-lock hold so
+    #     the re-init guard is TOCTOU-safe against a concurrent init.
+    #     The commit file is written FIRST and meta.json LAST: meta.json is
+    #     the transaction commit point (codex P2). ``save_meta`` replaces
+    #     meta.json via atomic_write (tmp+rename); a clean failure leaves
+    #     the prior meta.json intact, and the rollback additionally repairs
+    #     the row in the rare case the atomic rename committed before a
+    #     later fsync raised.
+    _storage.ensure_layout(root)
     created_at = _utc_now_iso()
     key_id_hash_hex = _hash_id(resolved_key_id).hex()
     commit_path: Path | None = None
-    try:
-        root = _storage.resolve_keyvault_dir(home)
-        _storage.ensure_layout(root)
-        with _storage.keyvault_lock(root):
+    with _storage.keyvault_lock(root):
+        # Authoritative re-init guard — TOCTOU-safe under the lock.
+        meta = _storage.load_meta(root)
+        if meta["keys"]:
+            raise RuntimeError("keyvault already initialized — v1 supports a single key")
+
+        # Create the Enclave wrapping key. OUTSIDE the inner rollback try:
+        # if this raises (e.g. a meta/Keychain inconsistency surfacing as a
+        # duplicate) the key belongs elsewhere and must NOT be deleted.
+        wrap.generate_wrapping_key(resolved_key_id, backend=backend)
+
+        try:
             commit_path = root / "digests" / f"{key_id_hash_hex}.commit"
             _storage.atomic_write(commit_path, verification_digest)
-            meta = _storage.load_meta(root)
             meta["keys"][key_id_hash_hex] = {
                 "key_id": resolved_key_id,
                 "created_at": created_at,
             }
             _storage.save_meta(root, meta)
-    except BaseException:
-        # Rollback — best-effort, so the ORIGINAL failure always propagates
-        # via the bare ``raise``: delete the orphaned Enclave key and the
-        # commit file if it was written. ``BaseException`` (not
-        # ``Exception``) so a KeyboardInterrupt mid-write still triggers
-        # cleanup. meta.json needs no repair (written last + atomically).
-        with contextlib.suppress(Exception):
-            wrap.delete_wrapping_key(resolved_key_id, backend=backend)
-        if commit_path is not None:
-            with contextlib.suppress(OSError):
-                commit_path.unlink(missing_ok=True)
-        raise
+        except BaseException:
+            # Rollback — best-effort, so the ORIGINAL failure always
+            # propagates via the bare ``raise``. ``BaseException`` (not
+            # ``Exception``) so a KeyboardInterrupt mid-write still triggers
+            # cleanup. Three steps, each independently suppressed:
+            #  - delete the orphaned Enclave key;
+            #  - remove the digest commit file if it was written;
+            #  - repair meta.json: save_meta's atomic rename may have
+            #    committed the new meta.json before a later fsync raised,
+            #    so re-read and drop the row if it landed (codex P2).
+            with contextlib.suppress(Exception):
+                wrap.delete_wrapping_key(resolved_key_id, backend=backend)
+            if commit_path is not None:
+                with contextlib.suppress(OSError):
+                    commit_path.unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                repaired = _storage.load_meta(root)
+                if repaired["keys"].pop(key_id_hash_hex, None) is not None:
+                    _storage.save_meta(root, repaired)
+            raise
 
     # 3d. init_completed — success-path emit. The init is already durable,
     #     so a sink exception is suppressed (POLICY.md #22); a single line
