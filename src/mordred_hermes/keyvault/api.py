@@ -29,23 +29,34 @@ __all__ = [
 
 
 def _normalize_seed_phrase(s: str) -> str:
-    """Normalize a seed phrase: NFKD + casefold + collapse runs of whitespace.
+    """Normalize a seed phrase: NFKD + strip Cf chars + casefold + collapse whitespace.
 
     BIP39 word-list tolerance — the canonical word list is lowercase ASCII
     and word-separated by a single ASCII space; mixed case and runs of
     whitespace (incl. compatibility-decomposed NBSP / ideographic space)
     are operator-typo noise and are folded away.
+
+    Unicode Cf-category chars (Format) are also stripped: ZWSP / ZWJ /
+    ZWNJ / BOM / LRM / RLM / Mongolian Vowel Separator / soft hyphen are
+    invisible to the user and are NFKD-stable, so without an explicit
+    drop step a clipboard-injected ZWSP would silently produce a different
+    digest from typed-by-hand input (code-reviewer MEDIUM-1, 2026-05-15).
     """
-    return " ".join(unicodedata.normalize("NFKD", s).casefold().split())
+    decomposed = unicodedata.normalize("NFKD", s)
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Cf")
+    return " ".join(stripped.casefold().split())
 
 
 def _normalize_passphrase(s: str) -> str:
     """Normalize a passphrase: NFKD only.
 
-    BIP39 reference behavior (no casefold, no whitespace collapse). Case is
-    significant; whitespace is preserved. Casefold would conflate distinct
-    Unicode strings into the same entropy; whitespace collapse would drop
-    information. See codex review HIGH #1.
+    BIP39 reference behavior (no casefold, no whitespace collapse, no Cf
+    strip). Case is significant; whitespace is preserved; Cf-category chars
+    (ZWSP / ZWJ / BOM / soft hyphen / …) are preserved. Trimming any of
+    these would conflate distinct entropy choices. A user who chose to
+    embed an invisible char did so intentionally and must reproduce the
+    exact bytes on recovery. See codex review HIGH #1 and code-reviewer
+    MEDIUM-1.
     """
     return unicodedata.normalize("NFKD", s)
 
