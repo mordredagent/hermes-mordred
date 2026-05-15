@@ -75,6 +75,17 @@ def _check_dir_mode(path: Path) -> None:
     even when the target has correct mode (codex pre-merge P2-2:
     symlinked keyvault directories would otherwise pass the mode check
     and redirect writes outside the keyvault tree).
+
+    Accepted TOCTOU caveat (in-tree code-reviewer LOW-1, 2026-05-15): the
+    lstat result is not atomically tied to the subsequent open / mkdir
+    that callers perform after the check. A same-host, same-UID attacker
+    who can race the gap between ``_check_dir_mode`` and ``atomic_write``
+    could in principle swap the directory for a symlink. Closing that
+    window cleanly would require ``O_DIRECTORY | O_NOFOLLOW`` open +
+    ``fdopen``-backed reads on every helper, which is not portable
+    across Python versions on macOS. The SPEC threat model excludes
+    same-UID attackers (mode ``0o700`` already gates non-owner access),
+    so the project accepts this gap.
     """
     st = path.lstat()
     if stat.S_ISLNK(st.st_mode):

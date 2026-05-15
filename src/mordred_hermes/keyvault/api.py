@@ -200,7 +200,10 @@ def _encode_envelope(
     if len(wrapped_dek_blob) != _WRAPPED_DEK_LEN:
         raise ValueError(f"wrapped_dek must be exactly {_WRAPPED_DEK_LEN} bytes")
     aad = _ENVELOPE_MAGIC + bytes([_ENVELOPE_VERSION]) + _hash_id(key_id) + _hash_id(purpose) + wrapped_dek_blob
-    assert len(aad) == _ENVELOPE_AAD_LEN
+    # Use ``if/raise`` rather than ``assert`` so the check is not stripped
+    # under ``python -O`` / ``PYTHONOPTIMIZE=1`` (in-tree code-reviewer MEDIUM).
+    if len(aad) != _ENVELOPE_AAD_LEN:
+        raise AssertionError(f"internal error: assembled AAD is {len(aad)} bytes, expected {_ENVELOPE_AAD_LEN}")
     nonce = secrets.token_bytes(_AES_NONCE_LEN)
     ct_tag = AESGCM(dek).encrypt(nonce, plaintext, aad)
     aes_blob = nonce + ct_tag
@@ -248,8 +251,10 @@ def _parse_envelope(
         raise WrapParseError(
             f"envelope aes_blob_len mismatch: header says {declared_len}, actual {len(blob) - _ENVELOPE_HEADER_LEN}"
         )
-    aad = bytes(blob[:_ENVELOPE_AAD_LEN])
-    aes_blob = bytes(blob[_ENVELOPE_HEADER_LEN:])
+    # ``safe_read`` returns ``bytes``; slicing ``bytes`` returns ``bytes`` —
+    # the explicit wrap is redundant (in-tree code-reviewer NIT-1).
+    aad = blob[:_ENVELOPE_AAD_LEN]
+    aes_blob = blob[_ENVELOPE_HEADER_LEN:]
     return aad, wrapped_dek_blob, aes_blob
 
 
@@ -303,6 +308,15 @@ def encrypt(
         # writing inside it. Without this an attacker who pre-creates the
         # key_dir as a symlink (or with wrong mode) could redirect the
         # envelope into attacker-controlled territory.
+        #
+        # Cross-module private access (in-tree code-reviewer LOW-3,
+        # 2026-05-15): ``_storage._check_dir_mode`` is intentionally
+        # consumed across the api.py / _storage.py boundary inside the
+        # same ``mordred_hermes.keyvault`` package. The underscore prefix
+        # signals "package-internal", not "module-internal" — the same
+        # pattern PR3 uses for ``_exceptions.py`` shared between
+        # ``native.py`` and ``wrap.py``. Step-G may promote the helper to
+        # ``_storage.validate_existing_dir`` if a third call site appears.
         if key_dir.exists() or key_dir.is_symlink():
             _storage._check_dir_mode(key_dir)
         else:

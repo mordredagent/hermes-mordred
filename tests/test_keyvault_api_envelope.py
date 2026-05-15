@@ -43,6 +43,7 @@ from mordred_hermes.keyvault import _storage, api, wrap
 from mordred_hermes.keyvault._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
+    WrapKeyNotFound,
     WrapParseError,
 )
 
@@ -237,6 +238,25 @@ class TestApiEncrypt:
         log, sink = captured_audit
         api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
         assert log == []
+
+    def test_unregistered_key_raises_wrap_key_not_found(
+        self, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
+    ) -> None:
+        # In-tree code-reviewer LOW-2 regression anchor: ``encrypt`` calls
+        # ``wrap.wrap_dek`` which needs the Enclave public key. When no
+        # ``generate_wrapping_key`` has been called for the key_id the
+        # FakeBackend raises :class:`WrapKeyNotFound`; this test pins that
+        # the exception propagates cleanly through ``api.encrypt`` (no
+        # swallowing, no spurious audit emit, no partial filesystem state).
+        log, sink = captured_audit
+        with pytest.raises(WrapKeyNotFound):
+            api.encrypt("never-registered-key", b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+        # No audit entry — encrypt has no authorization gate (codex OD-3).
+        assert log == []
+        # No envelope persisted under the missing key_id_hash subdir.
+        kid_hex = _key_id_hash("never-registered-key").hex()
+        kid_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex
+        assert not kid_dir.exists()
 
 
 # ----------------------------- api.decrypt -----------------------------
