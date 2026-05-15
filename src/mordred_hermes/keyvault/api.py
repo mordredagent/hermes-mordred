@@ -260,16 +260,21 @@ class SeedDisplayHandle:
           path, so a real ``prepare → display-seed (consume) → confirm``
           flow works and confirm_generate can read the digest whether or
           not the display flow already ran.
-        - If the handle has expired, the seed payload IS wiped before
-          :class:`SeedDisplayExpired` is raised, so a seed that was never
-          displayed does not outlive its deadline.
+        - The deadline guard fires only while the seed is still live
+          (``not self._consumed``). The deadline bounds how long the SEED
+          stays in memory; once :meth:`consume` has wiped it the deadline
+          is moot — the digest itself is not sensitive — so a slow user
+          who confirms after the display window still succeeds. An
+          expired handle whose seed was NEVER consumed is wiped here
+          before :class:`SeedDisplayExpired` is raised, so a never-shown
+          seed does not outlive its deadline.
 
         Runs under the same per-handle lock as :meth:`consume`.
         """
         with self._lock:
-            if time.monotonic() > self._deadline:
-                # Wipe so an expired, never-displayed seed does not survive
-                # in process memory past the deadline.
+            if not self._consumed and time.monotonic() > self._deadline:
+                # Expired and the seed was never consumed/displayed — wipe
+                # it so it does not survive past the deadline, then reject.
                 self._wipe()
                 raise SeedDisplayExpired("SeedDisplayHandle expired before confirm")
             return self._expected_digest
@@ -661,14 +666,24 @@ def generate(
     the interactive path.)
     """
     handle, _expected = prepare_generate(seed_phrase, passphrase, pow_bytes)
-    return confirm_generate(
-        handle,
-        expected_digest,
-        key_id=key_id,
-        backend=backend,
-        audit_sink=audit_sink,
-        home=home,
-    )
+    try:
+        return confirm_generate(
+            handle,
+            expected_digest,
+            key_id=key_id,
+            backend=backend,
+            audit_sink=audit_sink,
+            home=home,
+        )
+    finally:
+        # generate() is non-interactive — there is no display flow to call
+        # consume(), and confirm_generate only reads the handle. Wipe the
+        # seed payload here so it does not linger in memory until GC, on
+        # both the success and the raise paths. consume() performs the
+        # wipe; SeedDisplayExpired (an already-expired handle) is suppressed
+        # since the wipe is the only thing this finally needs.
+        with contextlib.suppress(SeedDisplayExpired):
+            handle.consume()
 
 
 # ----------------------------- MREN envelope helpers (step-C) -----------------------------
