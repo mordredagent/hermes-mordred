@@ -370,6 +370,100 @@ class TestSaveMeta:
         assert stat.S_IMODE((root / "meta.json").stat().st_mode) == 0o600
 
 
+# ---------------------- codex pre-merge review-fix tests ----------------------
+
+
+class TestEnsureLayoutRefusesSymlinks:
+    """Codex P2-2: ``_check_dir_mode`` used ``path.stat()`` which follows
+    symlinks. A symlinked root/digests/ciphertexts directory passed the
+    mode check whenever the *target* had mode 0o700, redirecting later
+    keyvault reads/writes outside the keyvault tree. The fix uses
+    ``lstat`` (or equivalent ``O_NOFOLLOW`` open) so the symlink itself
+    is rejected."""
+
+    def test_symlinked_root_refused(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            _storage.ensure_layout(link)
+
+    def test_symlinked_digests_subdir_refused(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        root.mkdir(mode=0o700)
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        (root / "digests").symlink_to(target)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            _storage.ensure_layout(root)
+
+    def test_symlinked_ciphertexts_subdir_refused(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        root.mkdir(mode=0o700)
+        target = tmp_path / "elsewhere"
+        target.mkdir(mode=0o700)
+        (root / "ciphertexts").symlink_to(target)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            _storage.ensure_layout(root)
+
+
+class TestAtomicWriteShortWrites:
+    """Codex P2-3: ``os.write`` is not guaranteed to flush the full buffer;
+    short writes truncated the file as if the transaction succeeded."""
+
+    def test_partial_writes_are_resumed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        target = tmp_path / "file.bin"
+        payload = bytes(range(256)) * 64  # 16 KiB
+        original_write = os.write
+        offsets: list[int] = []
+
+        def chunked_write(fd: int, data: bytes) -> int:
+            # Return at most 64 bytes per call to force the resume loop.
+            offsets.append(len(data))
+            return original_write(fd, data[:64])
+
+        monkeypatch.setattr("os.write", chunked_write)
+        _storage.atomic_write(target, payload)
+        assert target.read_bytes() == payload
+        # The implementation looped at least len(payload)/64 times.
+        assert len(offsets) >= len(payload) // 64
+
+
+class TestLoadMetaKeysFieldValidation:
+    """Codex P2-4: ``load_meta`` accepted ``{"version": 1}`` (no keys) or
+    ``{"version": 1, "keys": [...]}`` (wrong type). Both shapes break the
+    read-modify-write pattern downstream. Fix: reject in load_meta."""
+
+    def test_missing_keys_field_raises_corrupt(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text('{"version": 1}')
+        with pytest.raises(_storage.KeyvaultCorruptError):
+            _storage.load_meta(root)
+
+    def test_keys_field_as_list_raises_corrupt(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text('{"version": 1, "keys": []}')
+        with pytest.raises(_storage.KeyvaultCorruptError):
+            _storage.load_meta(root)
+
+    def test_keys_field_as_string_raises_corrupt(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text('{"version": 1, "keys": "oops"}')
+        with pytest.raises(_storage.KeyvaultCorruptError):
+            _storage.load_meta(root)
+
+    def test_keys_field_as_null_raises_corrupt(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text('{"version": 1, "keys": null}')
+        with pytest.raises(_storage.KeyvaultCorruptError):
+            _storage.load_meta(root)
+
+
 # ---------------------------- exception types ----------------------------
 
 

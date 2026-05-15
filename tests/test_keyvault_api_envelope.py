@@ -514,6 +514,129 @@ class TestEnvelopePersistence:
         assert path1.parent != path2.parent
 
 
+# ---------------------- codex pre-merge review-fix tests ----------------------
+
+
+class TestEnvelopeIdValidation:
+    """Codex P1: caller-supplied ``envelope_id`` was appended directly into
+    the filesystem path. A malicious caller could include ``/`` or ``..``
+    and redirect ``decrypt`` to a file outside the managed ciphertext
+    directory (parse / prompt on an attacker-placed file). Fix: reject
+    anything except the 22-char URL-safe-base64 format that ``encrypt``
+    returns."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "../etc",
+            "..",
+            "a/b",
+            "a\\b",
+            "a\x00b",
+            "x" * 21,  # too short
+            "x" * 23,  # too long
+            "abcd!ghij_kmnopqrstuv",  # contains '!' (not in URL-safe alphabet, 21 chars)
+            "abcd!ghij_kmnopqrstuvw",  # contains '!' (22 chars, length OK but char invalid)
+            "x" * 22 + "=",  # base64 padding NOT allowed
+            "abcd ghij_kmnopqrstuvw",  # space inside (22 chars)
+        ],
+    )
+    def test_rejects_invalid_envelope_id_in_decrypt(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+        bad: str,
+    ) -> None:
+        _, sink = captured_audit
+        with pytest.raises(ValueError):
+            api.decrypt(registered_key, bad, "purpose", backend=backend, audit_sink=sink, home=home)
+
+    def test_accepts_valid_22_char_envelope_id(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+    ) -> None:
+        _, sink = captured_audit
+        eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+        # Round-trip succeeds.
+        assert api.decrypt(registered_key, eid, "purpose", backend=backend, audit_sink=sink, home=home) == b"x"
+
+    def test_encrypt_always_returns_validator_acceptable_id(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+    ) -> None:
+        # 64 fresh encrypts; every envelope_id must satisfy the validator.
+        _, sink = captured_audit
+        for _ in range(64):
+            eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+            api._validate_envelope_id(eid)  # must not raise
+
+
+class TestEncryptValidatesExistingDirs:
+    """Codex P2-1: ``encrypt`` skipped mode/symlink validation when the
+    key/purpose ciphertext subdirectory already existed (so a pre-created
+    symlinked or chmod'ed directory bypassed the file-safety contract)."""
+
+    def test_refuses_symlinked_key_directory(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+        tmp_path: Path,
+    ) -> None:
+        _, sink = captured_audit
+        kid_hex = _key_id_hash(registered_key).hex()
+        attacker_dir = tmp_path / "attacker-target"
+        attacker_dir.mkdir(mode=0o700)
+        ciphertexts = home / "mordred" / "keyvault" / "ciphertexts"
+        # Replace the would-be key dir with a symlink to attacker territory.
+        (ciphertexts / kid_hex).symlink_to(attacker_dir)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+
+    def test_refuses_symlinked_purpose_directory(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+        tmp_path: Path,
+    ) -> None:
+        _, sink = captured_audit
+        kid_hex = _key_id_hash(registered_key).hex()
+        purpose_hex = _purpose_hash("purpose").hex()
+        attacker_dir = tmp_path / "attacker-target"
+        attacker_dir.mkdir(mode=0o700)
+        kid_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex
+        kid_dir.mkdir(mode=0o700)
+        (kid_dir / purpose_hex).symlink_to(attacker_dir)
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+
+    def test_refuses_wrong_mode_existing_key_dir(
+        self,
+        registered_key: str,
+        backend: FakeBackend,
+        home: Path,
+        captured_audit: tuple[list[dict[str, Any]], Any],
+    ) -> None:
+        _, sink = captured_audit
+        kid_hex = _key_id_hash(registered_key).hex()
+        kid_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex
+        kid_dir.mkdir(mode=0o755)  # too permissive
+        with pytest.raises(_storage.KeyvaultPermissionError):
+            api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+
+
 # ----------------------------- helpers -----------------------------
 
 
