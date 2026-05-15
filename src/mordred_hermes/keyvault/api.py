@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import _storage, wrap
 from ._exceptions import WrapParseError
-from .digest import VerificationDigestMismatch
+from .digest import VerificationDigestMismatch, compute_digest
 from .digest import verify_digest as _digest_verify
 from .wrap import AuditSink, NativeBackend
 
@@ -43,8 +43,15 @@ __all__ = [
     "VerificationDigestMismatch",
     "decrypt",
     "encrypt",
+    "prepare_generate",
     "verify_digest",
 ]
+
+# Default seed-display TTL per SPEC.md §"SeedDisplayHandle (opaque)".
+# 60 seconds matches PR5's planned screen-blackout window; prepare_generate
+# bakes the deadline into the returned handle so the wipe-on-expiry path is
+# reachable from realistic call sites.
+_SEED_DISPLAY_DEFAULT_TTL_SECONDS = 60.0
 
 
 # ----------------------------- SeedDisplayHandle (PR4 step-D) -----------------------------
@@ -218,6 +225,48 @@ def verify_digest(
         pow_bytes,
         expected=expected,
     )
+
+
+def prepare_generate(
+    seed_phrase: str,
+    passphrase: str,
+    pow_bytes: bytes,
+) -> tuple[SeedDisplayHandle, bytes]:
+    """Compute the verification digest in-memory and package the normalized
+    seed for the display flow.
+
+    Two-phase generate (SPEC.md §"PR4 API contract / Two-phase generate",
+    codex BLOCKER #2): a single-call ``generate(seed, passphrase, pow)``
+    would create Keychain state and write meta.json before the user has
+    confirmed the digest via the offline channel. Splitting into
+    ``prepare_generate`` (this function, pure with respect to disk) and
+    ``confirm_generate`` (the durable phase, fail-closed on mismatch)
+    closes that hole.
+
+    Returns:
+        A tuple of ``(handle, expected_digest)``:
+
+        - ``handle``: opaque :class:`SeedDisplayHandle` holding the
+          normalized seed bytes with a default 60s deadline. PR5 will
+          consume this handle through the screen-blackout / 60s timer /
+          screenshot-detection display flow.
+        - ``expected_digest``: 32-byte BLAKE3 digest. The user verifies
+          this against the digest computed independently on the offline
+          medium, then passes it back to :func:`confirm_generate` /
+          :func:`generate` to finalize.
+
+    NOT performed by this function: Keychain creation, meta.json write,
+    digests/<kid>.commit, audit-sink emission. The signature reflects
+    that purity — no ``audit_sink`` / ``backend`` / ``home`` parameters.
+    """
+    normalized_seed = _normalize_seed_phrase(seed_phrase)
+    normalized_passphrase = _normalize_passphrase(passphrase)
+    expected_digest = compute_digest(normalized_seed, normalized_passphrase, pow_bytes)
+    handle = SeedDisplayHandle(
+        normalized_seed,
+        time.monotonic() + _SEED_DISPLAY_DEFAULT_TTL_SECONDS,
+    )
+    return handle, expected_digest
 
 
 # ----------------------------- MREN envelope helpers (step-C) -----------------------------

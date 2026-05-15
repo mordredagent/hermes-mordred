@@ -421,7 +421,7 @@ class TestPrepareGenerateSeedNormalization:
         (code-reviewer MEDIUM-1, 2026-05-15).
         """
         _, ref = api.prepare_generate("test seed", _SPEC_PASSPHRASE, _SPEC_POW)
-        _, with_zwsp = api.prepare_generate("test​seed", _SPEC_PASSPHRASE, _SPEC_POW)
+        _, with_zwsp = api.prepare_generate("te​st seed", _SPEC_PASSPHRASE, _SPEC_POW)
         assert ref == with_zwsp
 
     def test_seed_japanese_precomposed_equals_decomposed(self) -> None:
