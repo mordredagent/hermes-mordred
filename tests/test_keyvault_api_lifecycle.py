@@ -1265,3 +1265,187 @@ class TestConfirmGenerateDuplicate:
         assert len(pub) == 65
         meta = _storage.load_meta(kv_root)
         assert first.key_id_hash in meta["keys"]
+
+
+# ============================ generate (non-interactive wrapper) ============================
+#
+# Contract frozen in SPEC.md §"PR4 API contract / Two-phase generate":
+#
+#     def generate(seed_phrase, passphrase, pow_bytes, expected_digest, *,
+#                  key_id=None, backend, audit_sink, home=None) -> GenerateResult:
+#         # prepare_generate → confirm_generate in one call.
+#         # Tests / future automation use this; the wizard CLI MUST use the
+#         # two-phase form so the user confirms the digest offline.
+#
+# Implementation note: generate delegates fully to confirm_generate (it does
+# NOT pre-check the digest itself). confirm_generate consumes the handle,
+# compares expected_digest against the handle's prepared digest, and emits
+# keyvault.init_denied on a mismatch. The SPEC sketch showed an early
+# in-generate check that raised WITHOUT an audit emit; delegating is simpler
+# and gives a non-interactive mismatch the same audit trail as the
+# interactive path — a strict improvement, documented in the GREEN commit.
+
+
+class TestGenerateSignature:
+    """``generate`` is positional on (seed, passphrase, pow_bytes,
+    expected_digest) then keyword-only (key_id, backend, audit_sink, home).
+    """
+
+    def test_signature_positional_then_keyword_only(self) -> None:
+        sig = inspect.signature(api.generate)
+        params = sig.parameters
+        assert list(params) == [
+            "seed_phrase",
+            "passphrase",
+            "pow_bytes",
+            "expected_digest",
+            "key_id",
+            "backend",
+            "audit_sink",
+            "home",
+        ]
+        assert params["expected_digest"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert params["backend"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["audit_sink"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+class TestGenerateHappyPath:
+    """Correct expected_digest → full prepare→confirm in one call."""
+
+    def test_returns_generate_result(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        result = api.generate(
+            _SPEC_SEED,
+            _SPEC_PASSPHRASE,
+            _SPEC_POW,
+            _SPEC_DIGEST,
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        assert isinstance(result, api.GenerateResult)
+        assert result.key_id == "default"
+
+    def test_canonical_vector_succeeds(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        """The SPEC L355-362 fixed vector drives a full generate end to end:
+        the digest prepare_generate computes for those inputs equals
+        _SPEC_DIGEST, so generate finalizes successfully.
+        """
+        result = api.generate(
+            _SPEC_SEED,
+            _SPEC_PASSPHRASE,
+            _SPEC_POW,
+            _SPEC_DIGEST,
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        commit_path = kv_root / "digests" / f"{result.key_id_hash}.commit"
+        assert _storage.safe_read(commit_path) == _SPEC_DIGEST
+
+    def test_explicit_key_id_used(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        result = api.generate(
+            _SPEC_SEED,
+            _SPEC_PASSPHRASE,
+            _SPEC_POW,
+            _SPEC_DIGEST,
+            key_id="automation-key",
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        assert result.key_id == "automation-key"
+
+    def test_enclave_key_generated_and_meta_written(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        result = api.generate(
+            _SPEC_SEED,
+            _SPEC_PASSPHRASE,
+            _SPEC_POW,
+            _SPEC_DIGEST,
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        assert len(wrap.get_wrapping_key_public("default", backend=backend)) == 65
+        meta = _storage.load_meta(kv_root)
+        assert result.key_id_hash in meta["keys"]
+
+    def test_audit_emits_started_then_completed(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        api.generate(
+            _SPEC_SEED,
+            _SPEC_PASSPHRASE,
+            _SPEC_POW,
+            _SPEC_DIGEST,
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        assert [e["reason"] for e in audit.log] == [
+            "keyvault.init_started",
+            "keyvault.init_completed",
+        ]
+
+
+class TestGenerateMismatch:
+    """A wrong expected_digest is rejected — the durable phase never runs."""
+
+    def test_wrong_expected_digest_raises(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.generate(
+                _SPEC_SEED,
+                _SPEC_PASSPHRASE,
+                _SPEC_POW,
+                b"\x22" * 32,
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+
+    def test_mismatch_emits_init_denied(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        """generate delegates to confirm_generate, so a non-interactive
+        mismatch produces the same keyvault.init_denied audit trail as the
+        interactive confirm_generate path.
+        """
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.generate(
+                _SPEC_SEED,
+                _SPEC_PASSPHRASE,
+                _SPEC_POW,
+                b"\x22" * 32,
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+        assert [e["reason"] for e in audit.log] == ["keyvault.init_denied"]
+
+    def test_mismatch_generates_no_key(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.generate(
+                _SPEC_SEED,
+                _SPEC_PASSPHRASE,
+                _SPEC_POW,
+                b"\x22" * 32,
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key never created
+            wrap.get_wrapping_key_public("default", backend=backend)
+
+    def test_mismatch_touches_no_filesystem(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
+    ) -> None:
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.generate(
+                _SPEC_SEED,
+                _SPEC_PASSPHRASE,
+                _SPEC_POW,
+                b"\x22" * 32,
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+        assert not kv_root.exists()
