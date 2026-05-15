@@ -1456,6 +1456,71 @@ class TestConfirmGenerateReInit:
         meta = _storage.load_meta(kv_root)
         assert first.key_id_hash in meta["keys"]
 
+    def test_rejected_reinit_emits_no_init_started(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        """A rejected re-init must emit NO audit events at all — in
+        particular no keyvault.init_started. init_started is emitted only
+        AFTER the locked re-init check passes (codex pre-merge), so a
+        rejected init never produces a dangling 'init started' for an
+        operation that created nothing.
+        """
+        h1, d1 = _prepared()
+        api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
+        reject_sink = _AuditCapture()
+        h2, d2 = _prepared()
+        with pytest.raises(RuntimeError, match="already initialized"):
+            api.confirm_generate(h2, d2, backend=backend, audit_sink=reject_sink, home=home)
+        assert reject_sink.log == []
+
+    def test_concurrent_init_loser_emits_no_init_started(self, backend: FakeBackend, home: Path) -> None:
+        """Two confirm_generate calls race from an empty keyvault. Exactly
+        one wins; the loser fails the locked re-init guard. The loser must
+        NOT have emitted keyvault.init_started — that is a dangling 'init
+        started' for an init that created nothing (codex pre-merge P2).
+        The fix emits init_started only after the locked re-init check, so
+        the loser raises before reaching the emit.
+
+        sys.setswitchinterval is dropped low so both threads reliably reach
+        the (pre-fix) unlocked window before either commits — otherwise the
+        OS could run one call to completion first and the race never forms.
+        """
+        import sys
+        import threading
+
+        barrier = threading.Barrier(2)
+        results: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+        results_lock = threading.Lock()
+
+        def worker(name: str) -> None:
+            sink = _AuditCapture()
+            handle, digest = _prepared()
+            barrier.wait()
+            try:
+                api.confirm_generate(handle, digest, backend=backend, audit_sink=sink, home=home)
+            except RuntimeError:
+                with results_lock:
+                    results[name] = ("rejected", sink.log)
+            else:
+                with results_lock:
+                    results[name] = ("ok", sink.log)
+
+        original_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            threads = [threading.Thread(target=worker, args=(n,)) for n in ("a", "b")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            sys.setswitchinterval(original_interval)
+
+        outcomes = sorted(status for status, _ in results.values())
+        assert outcomes == ["ok", "rejected"], f"expected one win + one reject, got {outcomes}"
+        rejected_log = next(log for status, log in results.values() if status == "rejected")
+        assert rejected_log == [], f"the rejected concurrent init emitted audit events: {rejected_log}"
+
 
 # ============================ generate (non-interactive wrapper) ============================
 #
