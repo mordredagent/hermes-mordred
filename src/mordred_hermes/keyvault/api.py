@@ -7,12 +7,17 @@ Steps landed so far:
 - step-C: MREN envelope wire format + ``encrypt`` / ``decrypt`` (managed
   storage; per-ciphertext DEK wrapped under the Enclave wrapping key).
 
-Step-D lifecycle surface (lands across PR4c-1 / PR4c-2):
+Step-D lifecycle surface:
 
-- PR4c-1 (landed): ``SeedDisplayHandle`` + ``SeedDisplayExpired`` +
-  ``prepare_generate`` — the in-memory phase, pure with respect to disk.
-- PR4c-2 (pending): ``confirm_generate`` / ``generate`` /
-  ``export_backup`` / ``import_backup`` — the durable phases.
+- ``SeedDisplayHandle`` + ``SeedDisplayExpired`` + ``prepare_generate`` —
+  the in-memory phase, pure with respect to disk.
+- ``confirm_generate`` / ``generate`` — the durable key-generation phase,
+  fail-closed on a verification-digest mismatch.
+
+Step-E adds ``export_backup`` / ``import_backup`` — the ciphertext-rewrap
+manifest that makes a keyvault recoverable on a second device even though
+the Secure Enclave wrapping key is non-exportable. See SPEC.md
+§"export_backup / import_backup (ciphertext-rewrap manifest)".
 
 Authoritative contract lives in ``mordred-docs/mordred/SPEC.md``
 §"PR4 API contract & MREN envelope wire format". Codex pre-implementation
@@ -27,9 +32,11 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -41,8 +48,9 @@ from typing import NoReturn, SupportsIndex
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from . import _storage, wrap
+from . import _storage, backup, crypto, recovery, wrap
 from ._exceptions import WrapParseError
+from .backup import BackupCorrupt
 from .digest import VerificationDigestMismatch, compute_digest
 from .digest import verify_digest as _digest_verify
 from .wrap import AuditSink, NativeBackend
@@ -55,7 +63,9 @@ __all__ = [
     "confirm_generate",
     "decrypt",
     "encrypt",
+    "export_backup",
     "generate",
+    "import_backup",
     "prepare_generate",
     "verify_digest",
 ]
@@ -302,6 +312,17 @@ _DEK_LEN = 32
 _AES_NONCE_LEN = 12
 _AES_TAG_LEN = 16
 _ENVELOPE_ID_RAND_BYTES = 16
+
+# ----------------------------- backup manifest constants (step-E) -----------------------------
+# Frozen in SPEC.md §"export_backup / import_backup (ciphertext-rewrap
+# manifest)". The portable manifest AAD deliberately OMITS the per-device
+# MRKW wrapped-DEK prefix that the MREN envelope AAD carries — that prefix
+# changes on every machine, so a manifest entry decrypted on the import
+# device could never reconstruct it. ``manifest_aad`` instead binds only
+# fields that are recomputable from ``(key_id, purpose_hash)``, so a
+# tampered manifest ``key_id`` / ``purpose_hash_hex`` flips the GCM tag.
+_MANIFEST_MAGIC = b"MRMN"
+_MANIFEST_VERSION = 1
 
 
 def _normalize_seed_phrase(s: str) -> str:
@@ -747,14 +768,14 @@ def _envelope_path_for(root: Path, key_id: str, purpose: str, envelope_id: str) 
     return root / "ciphertexts" / _hash_id(key_id).hex() / _hash_id(purpose).hex() / f"{envelope_id}.gcm"
 
 
-def _encode_envelope(
+def _encode_envelope_from_hashes(
     dek: bytes,
     plaintext: bytes,
-    key_id: str,
-    purpose: str,
+    key_id_hash: bytes,
+    purpose_hash: bytes,
     wrapped_dek_blob: bytes,
 ) -> bytes:
-    """Build an MREN envelope (AAD-bound AES-GCM) from a pre-wrapped DEK.
+    """Build an MREN envelope from the pre-hashed key_id / purpose.
 
     Layout (SPEC.md §"PR4 API contract / MREN envelope"):
 
@@ -764,10 +785,16 @@ def _encode_envelope(
 
     AAD = the first 164 bytes; AES-GCM tag therefore covers every field
     except ``aes_blob`` itself.
+
+    The hash-input form (rather than cleartext ``key_id`` / ``purpose``)
+    exists because :func:`import_backup` reconstructs envelopes from a
+    manifest that only carries ``purpose_hash`` — the cleartext purpose is
+    unrecoverable from a stored envelope. :func:`_encode_envelope` is the
+    cleartext-input wrapper used by :func:`encrypt`.
     """
     if len(wrapped_dek_blob) != _WRAPPED_DEK_LEN:
         raise ValueError(f"wrapped_dek must be exactly {_WRAPPED_DEK_LEN} bytes")
-    aad = _ENVELOPE_MAGIC + bytes([_ENVELOPE_VERSION]) + _hash_id(key_id) + _hash_id(purpose) + wrapped_dek_blob
+    aad = _ENVELOPE_MAGIC + bytes([_ENVELOPE_VERSION]) + key_id_hash + purpose_hash + wrapped_dek_blob
     # Use ``if/raise`` rather than ``assert`` so the check is not stripped
     # under ``python -O`` / ``PYTHONOPTIMIZE=1`` (in-tree code-reviewer MEDIUM).
     if len(aad) != _ENVELOPE_AAD_LEN:
@@ -778,19 +805,34 @@ def _encode_envelope(
     return aad + len(aes_blob).to_bytes(_AES_BLOB_LEN_FIELD_LEN, "big") + aes_blob
 
 
-def _parse_envelope(
-    blob: bytes,
-    expected_key_id: str,
-    expected_purpose: str,
-) -> tuple[bytes, bytes, bytes]:
-    """Validate the MREN header and return ``(aad, wrapped_dek_blob, aes_blob)``.
+def _encode_envelope(
+    dek: bytes,
+    plaintext: bytes,
+    key_id: str,
+    purpose: str,
+    wrapped_dek_blob: bytes,
+) -> bytes:
+    """Build an MREN envelope (AAD-bound AES-GCM) from a pre-wrapped DEK.
 
-    Raises :exc:`mordred_hermes.keyvault._exceptions.WrapParseError` on any
-    structural mismatch, magic/version disagreement, key_id_hash mismatch,
-    or purpose_hash mismatch. The purpose_hash compare uses
-    :func:`hmac.compare_digest` so cross-purpose attempts cannot be
-    distinguished by timing (the wrap layer is then never reached, so the
-    user is not prompted — codex HIGH #2).
+    Thin wrapper over :func:`_encode_envelope_from_hashes` that hashes the
+    cleartext ``key_id`` / ``purpose`` first.
+    """
+    return _encode_envelope_from_hashes(
+        dek, plaintext, _hash_id(key_id), _hash_id(purpose), wrapped_dek_blob
+    )
+
+
+def _split_envelope(blob: bytes, expected_key_id_hash: bytes) -> tuple[bytes, bytes, bytes, bytes]:
+    """Structurally validate an MREN envelope and return its fields.
+
+    Returns ``(aad, purpose_hash, wrapped_dek_blob, aes_blob)``. Validates
+    length, magic, version, the ``key_id_hash`` match, and the
+    ``aes_blob_len`` framing; does NOT check ``purpose_hash`` because
+    :func:`export_backup` reads the purpose straight off the envelope (the
+    cleartext ``purpose`` is unrecoverable from a stored envelope) and
+    :func:`_parse_envelope` layers the purpose check on top.
+
+    The ``key_id_hash`` compare uses :func:`hmac.compare_digest`.
     """
     if len(blob) < _ENVELOPE_HEADER_LEN:
         raise WrapParseError(f"envelope too short: {len(blob)} bytes, expected at least {_ENVELOPE_HEADER_LEN}")
@@ -799,18 +841,11 @@ def _parse_envelope(
     if blob[4] != _ENVELOPE_VERSION:
         raise WrapParseError(f"envelope version mismatch: {blob[4]}")
 
-    expected_kid_hash = _hash_id(expected_key_id)
-    if not hmac.compare_digest(blob[5 : 5 + _KEY_ID_HASH_LEN], expected_kid_hash):
+    if not hmac.compare_digest(blob[5 : 5 + _KEY_ID_HASH_LEN], expected_key_id_hash):
         raise WrapParseError("envelope key_id_hash does not match expected key_id")
 
-    expected_purpose_hash = _hash_id(expected_purpose)
     purpose_offset = 5 + _KEY_ID_HASH_LEN
-    if not hmac.compare_digest(
-        blob[purpose_offset : purpose_offset + _PURPOSE_HASH_LEN],
-        expected_purpose_hash,
-    ):
-        raise WrapParseError("envelope purpose_hash does not match expected purpose")
-
+    purpose_hash = blob[purpose_offset : purpose_offset + _PURPOSE_HASH_LEN]
     wrapped_dek_start = purpose_offset + _PURPOSE_HASH_LEN
     wrapped_dek_blob = blob[wrapped_dek_start : wrapped_dek_start + _WRAPPED_DEK_LEN]
     aes_blob_len_offset = wrapped_dek_start + _WRAPPED_DEK_LEN  # = 164
@@ -828,10 +863,28 @@ def _parse_envelope(
             f"envelope aes_blob too short: {declared_len} bytes, "
             f"need at least {_AES_NONCE_LEN + _AES_TAG_LEN} (nonce + tag)"
         )
-    # ``safe_read`` returns ``bytes``; slicing ``bytes`` returns ``bytes`` —
-    # the explicit wrap is redundant (in-tree code-reviewer NIT-1).
     aad = blob[:_ENVELOPE_AAD_LEN]
     aes_blob = blob[_ENVELOPE_HEADER_LEN:]
+    return aad, purpose_hash, wrapped_dek_blob, aes_blob
+
+
+def _parse_envelope(
+    blob: bytes,
+    expected_key_id: str,
+    expected_purpose: str,
+) -> tuple[bytes, bytes, bytes]:
+    """Validate the MREN header and return ``(aad, wrapped_dek_blob, aes_blob)``.
+
+    Raises :exc:`mordred_hermes.keyvault._exceptions.WrapParseError` on any
+    structural mismatch, magic/version disagreement, key_id_hash mismatch,
+    or purpose_hash mismatch. The purpose_hash compare uses
+    :func:`hmac.compare_digest` so cross-purpose attempts cannot be
+    distinguished by timing (the wrap layer is then never reached, so the
+    user is not prompted — codex HIGH #2).
+    """
+    aad, purpose_hash, wrapped_dek_blob, aes_blob = _split_envelope(blob, _hash_id(expected_key_id))
+    if not hmac.compare_digest(purpose_hash, _hash_id(expected_purpose)):
+        raise WrapParseError("envelope purpose_hash does not match expected purpose")
     return aad, wrapped_dek_blob, aes_blob
 
 
@@ -958,3 +1011,243 @@ def decrypt(
         return AESGCM(dek).decrypt(nonce, ct_tag, aad)
     finally:
         del dek
+
+
+# ----------------------------- backup / restore (step-E) -----------------------------
+
+
+def _ensure_managed_subdir(path: Path) -> None:
+    """Create ``path`` at mode ``0o700``, or validate it if it exists.
+
+    Mirrors the per-directory guard :func:`encrypt` applies before writing
+    an envelope: an attacker who pre-creates the directory as a symlink (or
+    with a loose mode) is rejected rather than silently written through.
+    """
+    if path.exists() or path.is_symlink():
+        _storage._check_dir_mode(path)
+    else:
+        path.mkdir(mode=0o700)
+        os.chmod(path, 0o700)
+
+
+def export_backup(
+    key_id: str,
+    passphrase: str,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> bytes:
+    """Export the whole keyvault as a portable, passphrase-protected blob.
+
+    Cross-machine recovery is non-trivial because the Secure Enclave
+    wrapping key is non-exportable (codex BLOCKER #1): an envelope's
+    Enclave-wrapped DEK can never be unwrapped on a second device. So
+    ``export_backup`` builds a *ciphertext-rewrap manifest* — see SPEC.md
+    §"export_backup / import_backup":
+
+    1. Walk every ``ciphertexts/<key_id_hash>/<purpose_hash>/*.gcm``
+       envelope; unwrap each DEK through :func:`wrap.unwrap_dek` (one
+       biometric prompt per envelope on real hardware).
+    2. Decrypt the envelope under its original per-device AAD, then
+       re-encrypt the plaintext under a *portable* ``manifest_aad`` that
+       omits the per-device MRKW prefix (so the import device can rebuild
+       it from ``key_id`` + ``purpose_hash`` alone).
+    3. Pack every DEK + portable ciphertext into a canonical-JSON manifest.
+    4. Wrap the manifest in a PR2 ``MRKV`` blob whose Argon2id KEK is
+       derived from ``passphrase`` — that is what protects the DEKs at
+       rest — embedding the keyvault's verification digest so
+       :func:`import_backup` can verify-before-decrypt.
+
+    The returned bytes are the caller's to persist (the wizard's
+    ``hermes mordred keyvault export`` writes them to a user-chosen path).
+
+    Emits exactly one ``keyvault.backup_exported`` audit entry (POLICY.md
+    #24); a sink failure on that emit is suppressed since the blob is
+    already in hand.
+    """
+    root = _storage.resolve_keyvault_dir(home)
+    key_id_hash = _hash_id(key_id)
+    key_id_hash_hex = key_id_hash.hex()
+
+    # The verification digest written at generate time — read it first so a
+    # not-yet-initialized key fails fast (FileNotFoundError) before any walk.
+    verification_digest = _storage.safe_read(root / "digests" / f"{key_id_hash_hex}.commit")
+
+    cipher_root = root / "ciphertexts" / key_id_hash_hex
+    entries: list[dict[str, str]] = []
+
+    # Hold the keyvault lock for the whole walk so the manifest is a
+    # consistent snapshot — a concurrent encrypt() cannot add a half-written
+    # envelope mid-export.
+    with _storage.keyvault_lock(root):
+        if cipher_root.exists() or cipher_root.is_symlink():
+            _storage._check_dir_mode(cipher_root)
+            for gcm_path in sorted(cipher_root.glob("*/*.gcm")):
+                _storage._check_dir_mode(gcm_path.parent)
+                blob = _storage.safe_read(gcm_path)
+                aad, purpose_hash, wrapped_dek_blob, aes_blob = _split_envelope(blob, key_id_hash)
+                dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
+                try:
+                    plaintext = AESGCM(dek).decrypt(aes_blob[:_AES_NONCE_LEN], aes_blob[_AES_NONCE_LEN:], aad)
+                    # Portable AAD — no per-device MRKW prefix, so the import
+                    # device reconstructs it from key_id + purpose_hash.
+                    manifest_aad = _MANIFEST_MAGIC + key_id_hash + purpose_hash
+                    manifest_aes_blob = crypto.encrypt(dek, plaintext, aad=manifest_aad)
+                    entries.append(
+                        {
+                            "purpose_hash_hex": purpose_hash.hex(),
+                            "envelope_id": gcm_path.stem,
+                            "dek_hex": dek.hex(),
+                            "manifest_aes_blob_b64": base64.b64encode(manifest_aes_blob).decode("ascii"),
+                        }
+                    )
+                finally:
+                    del dek
+
+    manifest_json = json.dumps(
+        {"version": _MANIFEST_VERSION, "key_id": key_id, "envelopes": entries},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    out = backup.export(manifest_json, passphrase, verification_digest=verification_digest)
+
+    # Success-path emit — the blob is already built, so a sink failure must
+    # not lose it (POLICY.md #24: suppress via contextlib.suppress).
+    with contextlib.suppress(Exception):
+        audit_sink(
+            {
+                "event": "keyvault.backup_export",
+                "decision": "allow",
+                "reason": "keyvault.backup_exported",
+                "key_id_hash": wrap._audit_key_id_hex(key_id),
+                "blob_version": backup.VERSION,
+                "kdf_id": backup.KDF_ID_ARGON2ID,
+                "envelope_count": len(entries),
+            }
+        )
+    return out
+
+
+def import_backup(
+    blob: bytes,
+    passphrase: str,
+    *,
+    seed_phrase: str,
+    pow_bytes: bytes,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> str:
+    """Restore a keyvault from an :func:`export_backup` blob on this device.
+
+    Verify-before-decrypt (SPEC.md §"export_backup / import_backup", PR2
+    Codex review #4): the verification digest is recomputed from the
+    transcribed ``(seed_phrase, passphrase, pow_bytes)`` and checked against
+    the digest embedded in the blob BEFORE any KDF / decryption runs. A
+    mismatch raises :class:`RecoveryDigestMismatch` with NO Enclave or
+    filesystem mutation — steps 1-5 are pre-mutation.
+
+    On a digest match:
+
+    1. Decrypt the manifest, generate a fresh Enclave wrapping key for the
+       imported ``key_id`` on THIS device.
+    2. For each manifest entry: decrypt the portable ciphertext under its
+       ``manifest_aad``, re-wrap the DEK against the new Enclave key, and
+       reconstruct the MREN envelope bound to this device's AAD.
+    3. Write ``digests/<kid>.commit`` then the ``meta.json`` row (the
+       transaction commit point) under the keyvault lock.
+
+    Any failure after the Enclave key is created rolls back — the
+    ciphertext tree and the Enclave key are removed, and a ``meta.json``
+    row is dropped if it landed — then the original exception re-raises.
+
+    Returns the imported ``key_id``. Raises
+    :class:`mordred_hermes.keyvault.backup.BackupCorrupt` for a structurally
+    invalid blob or an unsupported manifest version.
+    """
+    # Steps 1-4 (pre-mutation): recompute the digest with split
+    # normalization, then let recovery.import_backup do the length guard +
+    # structural parse + verify-before-decrypt + manifest decryption. It
+    # raises RecoveryDigestMismatch / BackupCorrupt before any mutation.
+    recomputed_digest = compute_digest(
+        _normalize_seed_phrase(seed_phrase),
+        _normalize_passphrase(passphrase),
+        pow_bytes,
+    )
+    manifest_json = recovery.import_backup(
+        blob,
+        passphrase,
+        recomputed_digest=recomputed_digest,
+        audit_sink=audit_sink,
+    )
+
+    # 5. Parse + validate the manifest. It was just AES-GCM-authenticated,
+    #    so the contents are trusted; only the version gate is enforced.
+    manifest = json.loads(manifest_json)
+    if not isinstance(manifest, dict) or manifest.get("version") != _MANIFEST_VERSION:
+        raise BackupCorrupt("unsupported or malformed backup manifest")
+    imported_key_id: str = manifest["key_id"]
+    envelopes: list[dict[str, str]] = manifest["envelopes"]
+
+    root = _storage.resolve_keyvault_dir(home)
+    _storage.ensure_layout(root)
+    new_key_id_hash = _hash_id(imported_key_id)
+    new_key_id_hash_hex = new_key_id_hash.hex()
+    commit_path = root / "digests" / f"{new_key_id_hash_hex}.commit"
+
+    # 6. Create the destination Enclave key. OUTSIDE the rollback try: if
+    #    this raises (e.g. the key already exists) there is nothing yet to
+    #    roll back and the pre-existing key must NOT be deleted.
+    backend.generate_enclave_key(imported_key_id)
+
+    try:
+        with _storage.keyvault_lock(root):
+            # 7. Rebuild every envelope against this device's Enclave key.
+            for entry in envelopes:
+                _validate_envelope_id(entry["envelope_id"])
+                purpose_hash = bytes.fromhex(entry["purpose_hash_hex"])
+                manifest_aes_blob = base64.b64decode(entry["manifest_aes_blob_b64"])
+                dek = bytes.fromhex(entry["dek_hex"])
+                try:
+                    manifest_aad = _MANIFEST_MAGIC + new_key_id_hash + purpose_hash
+                    plaintext = crypto.decrypt(dek, manifest_aes_blob, aad=manifest_aad)
+                    new_wrapped_dek = wrap.wrap_dek(dek, imported_key_id, backend=backend)
+                    envelope_bytes = _encode_envelope_from_hashes(
+                        dek, plaintext, new_key_id_hash, purpose_hash, new_wrapped_dek
+                    )
+                finally:
+                    del dek
+                key_dir = root / "ciphertexts" / new_key_id_hash_hex
+                purpose_dir = key_dir / purpose_hash.hex()
+                _ensure_managed_subdir(key_dir)
+                _ensure_managed_subdir(purpose_dir)
+                _storage.atomic_write(purpose_dir / f"{entry['envelope_id']}.gcm", envelope_bytes)
+
+            # 8. Commit digest FIRST, meta.json row LAST — meta.json is the
+            #    transaction commit point (mirrors confirm_generate).
+            _storage.atomic_write(commit_path, recomputed_digest)
+            meta = _storage.load_meta(root)
+            meta["keys"][new_key_id_hash_hex] = {
+                "key_id": imported_key_id,
+                "created_at": _utc_now_iso(),
+            }
+            _storage.save_meta(root, meta)
+    except BaseException:
+        # Rollback — best-effort, each step independently suppressed so the
+        # ORIGINAL failure always propagates via the bare ``raise``.
+        # ``BaseException`` so a KeyboardInterrupt mid-import still cleans up.
+        with contextlib.suppress(Exception):
+            shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            commit_path.unlink(missing_ok=True)
+        with contextlib.suppress(Exception):
+            backend.delete_enclave_key(imported_key_id)
+        with contextlib.suppress(Exception):
+            repaired = _storage.load_meta(root)
+            if repaired["keys"].pop(new_key_id_hash_hex, None) is not None:
+                _storage.save_meta(root, repaired)
+        raise
+
+    return imported_key_id
