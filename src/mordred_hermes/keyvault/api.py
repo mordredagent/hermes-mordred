@@ -29,6 +29,7 @@ import hmac
 import os
 import re
 import secrets
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -102,16 +103,20 @@ class SeedDisplayHandle:
     the same buffer also observes zero bytes after release.
     """
 
-    # __slots__ order matches SPEC.md §"SeedDisplayHandle (opaque)" with one
-    # PR4-step-D extension: ``_expected_digest`` (4th slot) carries the
-    # BLAKE3 digest computed at prepare_generate time so confirm_generate
-    # can verify the user-typed digest via hmac.compare_digest without
-    # re-running the algorithm. The first three slots are SPEC-ordered;
-    # ruff's natural-sort lint is suppressed because the test pins the
-    # exact tuple value (see test_slots_value_is_exact_four_tuple). SPEC.md
-    # §"SeedDisplayHandle (opaque)" carries a matching "Step-D extension"
-    # callout pinning the same 4-tuple.
-    __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest")  # noqa: RUF023
+    # __slots__ order matches SPEC.md §"SeedDisplayHandle (opaque)" with two
+    # PR4-step-D extensions:
+    #   - ``_expected_digest`` (4th slot) carries the BLAKE3 digest computed
+    #     at prepare_generate time so confirm_generate can verify the
+    #     user-typed digest via hmac.compare_digest without re-running the
+    #     algorithm.
+    #   - ``_lock`` (5th slot) is a per-handle threading.Lock that serializes
+    #     consume() so the one-shot guarantee holds even if the handle is
+    #     shared across threads (codex pre-merge P2, 2026-05-15).
+    # The first three slots are SPEC-ordered; ruff's natural-sort lint is
+    # suppressed because the test pins the exact tuple value (see
+    # test_slots_value_is_exact_five_tuple). SPEC.md §"SeedDisplayHandle
+    # (opaque)" carries a matching "Step-D extension" callout.
+    __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest", "_lock")  # noqa: RUF023
 
     def __init__(
         self,
@@ -141,6 +146,10 @@ class SeedDisplayHandle:
         # ``time.monotonic() + ttl`` (default ttl = 60.0s per SPEC).
         self._deadline = deadline_monotonic
         self._expected_digest = digest
+        # Serializes consume() — the check / decode / wipe / set section is
+        # not atomic, so without this two threads sharing a handle could
+        # both pass the one-shot guard and release the seed twice.
+        self._lock = threading.Lock()
 
     def __repr__(self) -> str:
         return "<SeedDisplayHandle redacted>"
@@ -202,24 +211,30 @@ class SeedDisplayHandle:
         ``time.monotonic()`` has passed the deadline, the payload is
         wiped and :class:`SeedDisplayExpired` is raised instead of
         returning the seed.
-        """
-        if self._consumed:
-            raise RuntimeError("handle already consumed")
 
-        if time.monotonic() > self._deadline:
-            # Wipe BEFORE raising so the seed bytes do not survive in
-            # process memory just because the display window timed out.
+        The whole check / decode / wipe / set section runs under
+        ``self._lock`` so the one-shot guarantee holds even when the
+        handle is shared across threads — exactly one caller receives
+        the seed, every other caller raises.
+        """
+        with self._lock:
+            if self._consumed:
+                raise RuntimeError("handle already consumed")
+
+            if time.monotonic() > self._deadline:
+                # Wipe BEFORE raising so the seed bytes do not survive in
+                # process memory just because the display window timed out.
+                self._wipe()
+                self._consumed = True
+                raise SeedDisplayExpired("SeedDisplayHandle expired before consume()")
+
+            # Decode-then-wipe: hold the str on the local stack frame, then
+            # zero the underlying bytearray. The returned str is a fresh
+            # object; mutating the bytearray does not affect it.
+            seed = self._payload.decode("utf-8")
             self._wipe()
             self._consumed = True
-            raise SeedDisplayExpired("SeedDisplayHandle expired before consume()")
-
-        # Decode-then-wipe: hold the str on the local stack frame, then
-        # zero the underlying bytearray. The returned str is a fresh
-        # object; mutating the bytearray does not affect it.
-        seed = self._payload.decode("utf-8")
-        self._wipe()
-        self._consumed = True
-        return seed
+            return seed
 
     def _wipe(self) -> None:
         # In-place zero-fill via slice assignment — overwrites the existing

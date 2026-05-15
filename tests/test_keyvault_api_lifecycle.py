@@ -7,22 +7,27 @@ lifecycle entry points: ``SeedDisplayHandle`` opaque-class contract and
 ``import_backup``) lands in PR4c-2 and later.
 
 The ``SeedDisplayHandle`` contract is frozen in SPEC.md §"PR4 API
-contract / SeedDisplayHandle (opaque, codex BLOCKER #3)", with one
-step-D extension landed in PR4c-1: the 4th slot ``_expected_digest``,
+contract / SeedDisplayHandle (opaque, codex BLOCKER #3)", with two
+step-D extensions landed in PR4c-1 (the 4th + 5th slots), both
 documented in SPEC.md under the "Step-D extension" callout in the
 same section.
 
     class SeedDisplayHandle:
-        __slots__ = ("_payload", "_consumed", "_deadline", "_expected_digest")
+        __slots__ = ("_payload", "_consumed", "_deadline",
+                     "_expected_digest", "_lock")
         # __repr__ → "<SeedDisplayHandle redacted>"
         # __eq__   → raise TypeError(... comparison oracle ...)
         # __hash__ = None
+        # __copy__ / __deepcopy__ / __reduce__ / __reduce_ex__ /
+        #   __getstate__ / __setstate__ → raise TypeError (opaque)
         # consume(): one-shot, zero-fills _payload, second call raises
         #            RuntimeError; past deadline raises SeedDisplayExpired
-        #            after wiping.
+        #            after wiping. Whole body runs under _lock so the
+        #            one-shot guarantee holds across threads.
         # _expected_digest: 32-byte digest baked in by prepare_generate,
         #            read by confirm_generate for hmac.compare_digest
         #            against the user-typed digest.
+        # _lock: per-handle threading.Lock serializing consume().
 
 The class lives in ``api.py`` for PR4. PR5 will relocate it to
 ``seed_display.py`` and layer screen-blackout / 60s timer / screenshot
@@ -562,9 +567,7 @@ class TestConsumeThreadSafety:
             sys.setswitchinterval(original_interval)
 
         # Exactly one worker may have received the seed.
-        assert len(results) == 1, (
-            f"consume() released the seed {len(results)} times — must be exactly 1"
-        )
+        assert len(results) == 1, f"consume() released the seed {len(results)} times — must be exactly 1"
         assert results == ["racetestseed"]
         # Every other worker must have hit the one-shot guard.
         assert len(errors) == worker_count - 1
