@@ -270,6 +270,31 @@ class TestExpectedDigestMethod:
         handle.consume()  # display flow renders + wipes the seed
         assert handle.expected_digest() == digest
 
+    def test_expired_but_already_consumed_returns_digest(self) -> None:
+        """The deadline bounds how long the SEED stays in memory. Once the
+        display flow has consumed (and wiped) the seed, the deadline is
+        moot — expected_digest() must return the digest even past the
+        deadline, so a slow user who confirms after the 60s display window
+        still succeeds (codex pre-merge P2).
+        """
+        digest = b"\x5a" * 32
+        handle = _make_handle(deadline=_FAR_PAST, expected_digest=digest)
+        # consume() on an expired handle raises, but still wipes the seed
+        # and marks the handle consumed.
+        with pytest.raises(api.SeedDisplayExpired):
+            handle.consume()
+        # The seed is already gone — expiry no longer applies.
+        assert handle.expected_digest() == digest
+
+    def test_expired_and_never_consumed_still_raises(self) -> None:
+        """The mirror of the above: an expired handle whose seed was NEVER
+        consumed must still raise — the deadline guard exists precisely to
+        wipe a never-displayed seed.
+        """
+        handle = _make_handle(deadline=_FAR_PAST)
+        with pytest.raises(api.SeedDisplayExpired):
+            handle.expected_digest()
+
 
 # ============================ repr / str (no leakage) ============================
 
@@ -1639,3 +1664,97 @@ class TestGenerateMismatch:
                 home=home,
             )
         assert not kv_root.exists()
+
+
+class TestGenerateWipesHandle:
+    """``generate`` is non-interactive — there is no display flow to call
+    ``SeedDisplayHandle.consume()``, and ``confirm_generate`` only reads
+    the handle (it never consumes). ``generate`` must therefore wipe the
+    internal handle's seed payload itself, on both the success and the
+    mismatch paths, so the seed does not linger in memory until GC (codex
+    pre-merge P2).
+    """
+
+    @staticmethod
+    def _capture_handle(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+        """Patch api.prepare_generate so the test can grab the handle that
+        ``generate`` mints internally and never returns.
+        """
+        captured: list[Any] = []
+        real_prepare = api.prepare_generate
+
+        def capturing_prepare(seed: str, passphrase: str, pow_bytes: bytes) -> tuple[Any, bytes]:
+            handle, digest = real_prepare(seed, passphrase, pow_bytes)
+            captured.append(handle)
+            return handle, digest
+
+        monkeypatch.setattr(api, "prepare_generate", capturing_prepare)
+        return captured
+
+    def test_generate_wipes_handle_seed_on_success(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = self._capture_handle(monkeypatch)
+        api.generate(
+            _SPEC_SEED,
+            _SPEC_PASSPHRASE,
+            _SPEC_POW,
+            _SPEC_DIGEST,
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        handle = captured[0]
+        assert all(b == 0 for b in handle._payload), (  # type: ignore[attr-defined]
+            "generate() must wipe the internal handle's seed payload on success"
+        )
+
+    def test_generate_wipes_handle_seed_on_mismatch(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = self._capture_handle(monkeypatch)
+        with pytest.raises(api.VerificationDigestMismatch):
+            api.generate(
+                _SPEC_SEED,
+                _SPEC_PASSPHRASE,
+                _SPEC_POW,
+                b"\x22" * 32,
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+        handle = captured[0]
+        assert all(b == 0 for b in handle._payload), (  # type: ignore[attr-defined]
+            "generate() must wipe the internal handle's seed payload even when confirm raises"
+        )
+
+
+class TestConfirmGeneratePostDisplayDeadline:
+    """A slow user: the display flow consumed the seed, the 60s window
+    elapsed, then the user submits the confirmed digest. The seed is
+    already wiped, so confirm_generate must NOT reject on expiry (codex
+    pre-merge P2).
+    """
+
+    def test_confirm_succeeds_after_display_consume_past_deadline(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        digest = b"\x33" * 32
+        handle = _make_handle(deadline=_FAR_PAST, expected_digest=digest)
+        # The display flow consumed the seed; the handle was (or became)
+        # expired — consume() raises but still wipes + marks consumed.
+        with pytest.raises(api.SeedDisplayExpired):
+            handle.consume()
+        # The seed is already gone — confirm_generate must still finalize.
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+        assert isinstance(result, api.GenerateResult)
+
+    def test_confirm_still_rejects_expired_never_consumed_handle(
+        self, backend: FakeBackend, audit: _AuditCapture, home: Path
+    ) -> None:
+        """The mirror: an expired handle whose seed was never displayed is
+        still rejected — the deadline guard wipes the never-shown seed.
+        """
+        handle = _make_handle(deadline=_FAR_PAST)
+        with pytest.raises(api.SeedDisplayExpired):
+            api.confirm_generate(handle, _PLACEHOLDER_DIGEST, backend=backend, audit_sink=audit, home=home)
