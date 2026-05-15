@@ -217,6 +217,63 @@ class TestUnhashable:
             {handle: 1}  # noqa: B018 — intentional: trigger dict construction
 
 
+# ============================ copy / pickle (blocked) ============================
+
+
+class TestCopyPickleBlocked:
+    """Default ``copy.copy`` / ``copy.deepcopy`` / ``pickle`` bypass the
+    one-shot consume contract.
+
+    Codex pre-merge P2 (2026-05-15): a slotted handle is copyable and
+    picklable by default because Python's machinery walks ``__slots__``
+    and serializes each entry. The duplicate can ``consume()`` again
+    after the original was wiped, and the pickle bytes themselves
+    contain the raw seed payload. Blocking these dunders is the only
+    way to make "opaque + one-shot" actually mean what it says.
+    """
+
+    def test_copy_copy_raises_typeerror(self) -> None:
+        import copy
+
+        handle = _make_handle("supersecret")
+        with pytest.raises(TypeError) as excinfo:
+            copy.copy(handle)
+        # Error message mentions "opaque" so the failure mode is obvious.
+        assert "opaque" in str(excinfo.value).lower()
+
+    def test_copy_deepcopy_raises_typeerror(self) -> None:
+        import copy
+
+        handle = _make_handle("supersecret")
+        with pytest.raises(TypeError) as excinfo:
+            copy.deepcopy(handle)
+        assert "opaque" in str(excinfo.value).lower()
+
+    def test_pickle_dumps_raises_typeerror(self) -> None:
+        import pickle
+
+        handle = _make_handle("supersecret")
+        with pytest.raises(TypeError) as excinfo:
+            pickle.dumps(handle)
+        assert "opaque" in str(excinfo.value).lower()
+
+    def test_pickle_dumps_does_not_leak_seed_in_partial_buffer(self) -> None:
+        """Even if pickle.dumps raises, the seed must not have already
+        landed in any partial buffer that's accessible to the caller.
+        The TypeError must fire before any seed bytes are emitted.
+        """
+        import io
+        import pickle
+
+        handle = _make_handle("verysecretseedphrase")
+        buffer = io.BytesIO()
+        pickler = pickle.Pickler(buffer)
+        with pytest.raises(TypeError):
+            pickler.dump(handle)
+        # Whatever pickle wrote before raising must not contain the seed.
+        assert b"verysecretseedphrase" not in buffer.getvalue()
+
+
 # ============================ consume() — one-shot + zero-fill ============================
 
 

@@ -28,6 +28,7 @@ import secrets
 import time
 import unicodedata
 from pathlib import Path
+from typing import SupportsIndex
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -135,6 +136,29 @@ class SeedDisplayHandle:
     # handle from accidentally landing in a memoization cache that would
     # extend the seed's residency past the intended display window.
     __hash__ = None  # type: ignore[assignment]
+
+    # ----- copy / pickle blocked (codex pre-merge P2-1, 2026-05-15) -----
+    # A slotted handle is copyable and picklable by default because
+    # Python's machinery walks ``__slots__`` and serializes each entry.
+    # Without these guards, ``copy.deepcopy(handle)`` would produce a
+    # duplicate that can ``consume()`` again after the original was
+    # wiped, and ``pickle.dumps(handle)`` would emit a blob containing
+    # the raw seed bytes. Both bypass the opaque/one-shot contract, so
+    # we raise TypeError from each entry point. The exception fires
+    # before any output is produced, so partial pickle buffers cannot
+    # leak the seed either.
+
+    def __copy__(self) -> SeedDisplayHandle:
+        raise TypeError("SeedDisplayHandle is opaque and not copyable")
+
+    def __deepcopy__(self, memo: dict[int, object]) -> SeedDisplayHandle:
+        raise TypeError("SeedDisplayHandle is opaque and not copyable")
+
+    def __reduce__(self) -> tuple[object, ...]:
+        raise TypeError("SeedDisplayHandle is opaque and not picklable")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> tuple[object, ...]:
+        raise TypeError("SeedDisplayHandle is opaque and not picklable")
 
     def consume(self) -> str:
         """Return the normalized seed exactly once, wiping the payload.
