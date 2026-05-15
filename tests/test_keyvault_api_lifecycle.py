@@ -168,6 +168,36 @@ class TestExpectedDigestValidation:
         assert handle._expected_digest[0] == 0xAA  # type: ignore[attr-defined]
         assert handle._expected_digest == b"\xaa" * 32  # type: ignore[attr-defined]
 
+    def test_nonbyte_width_memoryview_validated_by_byte_length(self) -> None:
+        """``len()`` on a non-byte-width memoryview counts ELEMENTS, not
+        bytes. A memoryview over a 2-byte-element array holding 16 elements
+        is 32 bytes — it must be accepted. The constructor must coerce to
+        ``bytes`` first, then validate the byte length of the coerced value
+        (codex pre-merge P3, 2026-05-15).
+        """
+        from array import array
+
+        # 16 elements x 2 bytes/element = 32 bytes; len(memoryview) == 16.
+        view_32_bytes = memoryview(array("H", [0] * 16))
+        assert len(view_32_bytes) == 16  # sanity: element count, not bytes
+        assert view_32_bytes.nbytes == 32  # sanity: actual byte length
+        handle = api.SeedDisplayHandle(_SEED, _FAR_FUTURE, view_32_bytes)
+        assert handle._expected_digest == b"\x00" * 32  # type: ignore[attr-defined]
+
+    def test_nonbyte_width_memoryview_wrong_byte_length_rejected(self) -> None:
+        """The mirror case: a memoryview whose ELEMENT count is 32 but whose
+        BYTE length is 64 must be rejected. Element-count validation would
+        wrongly accept it; byte-length validation (post-coercion) rejects it.
+        """
+        from array import array
+
+        # 32 elements x 2 bytes/element = 64 bytes; len(memoryview) == 32.
+        view_64_bytes = memoryview(array("H", [0] * 32))
+        assert len(view_64_bytes) == 32  # element count would pass a naive check
+        assert view_64_bytes.nbytes == 64  # actual byte length is wrong
+        with pytest.raises(ValueError, match="32 bytes"):
+            api.SeedDisplayHandle(_SEED, _FAR_FUTURE, view_64_bytes)
+
 
 # ============================ repr / str (no leakage) ============================
 

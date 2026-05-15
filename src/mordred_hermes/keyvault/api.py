@@ -119,15 +119,20 @@ class SeedDisplayHandle:
         deadline_monotonic: float,
         expected_digest: bytes,
     ) -> None:
-        # Validate the digest length before materializing the seed buffer:
-        # hmac.compare_digest accepts unequal-length operands and returns
-        # False, so a wrong-length digest would otherwise become a silent
-        # always-mismatch at confirm_generate time. Fail loudly here, at the
-        # construction-site of the bug.
-        if len(expected_digest) != _VERIFICATION_DIGEST_LEN:
-            raise ValueError(
-                f"expected_digest must be exactly {_VERIFICATION_DIGEST_LEN} bytes, got {len(expected_digest)}"
-            )
+        # Coerce to immutable bytes FIRST, then validate the byte length of
+        # the coerced value. Two reasons the order matters:
+        #   - ``len()`` on a non-byte-width memoryview counts elements, not
+        #     bytes, so validating the raw argument would mis-measure such
+        #     inputs (codex pre-merge P3, 2026-05-15).
+        #   - ``bytes(...)`` decouples the handle from any caller-retained
+        #     mutable alias (bytearray / memoryview) so the compare target
+        #     cannot be mutated post-construction (codex pre-merge P2).
+        # hmac.compare_digest (used by confirm_generate) accepts unequal-
+        # length operands and returns False, so a wrong-length digest would
+        # otherwise become a silent always-mismatch — fail loudly here.
+        digest = bytes(expected_digest)
+        if len(digest) != _VERIFICATION_DIGEST_LEN:
+            raise ValueError(f"expected_digest must be exactly {_VERIFICATION_DIGEST_LEN} bytes, got {len(digest)}")
         # Store the seed as a wipeable bytearray (str is immutable, so
         # bytearray is the only way to actually zero the bytes in place).
         self._payload = bytearray(normalized_seed.encode("utf-8"))
@@ -135,13 +140,7 @@ class SeedDisplayHandle:
         # Absolute monotonic timestamp — caller computes
         # ``time.monotonic() + ttl`` (default ttl = 60.0s per SPEC).
         self._deadline = deadline_monotonic
-        # 32-byte expected digest baked in at prepare time; confirm_generate
-        # compares the user-typed digest against this via hmac.compare_digest.
-        # Coerced through ``bytes(...)`` so that even if the caller passed a
-        # mutable bytearray / memoryview, the handle stores an independent
-        # immutable copy — a caller-retained alias cannot mutate the compare
-        # target post-construction (codex pre-merge P2, 2026-05-15).
-        self._expected_digest = bytes(expected_digest)
+        self._expected_digest = digest
 
     def __repr__(self) -> str:
         return "<SeedDisplayHandle redacted>"
