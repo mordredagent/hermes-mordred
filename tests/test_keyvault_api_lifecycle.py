@@ -76,17 +76,19 @@ class TestSlotsLayout:
     on any other name.
     """
 
-    def test_slots_value_is_exact_four_tuple(self) -> None:
+    def test_slots_value_is_exact_five_tuple(self) -> None:
         """The handle carries (seed bytes, consumed flag, deadline, expected
-        digest). The 4th slot is what makes confirm_generate's defense-in-
-        depth verification (hmac.compare_digest against user-typed digest)
-        possible without re-running compute_digest at the api.py boundary.
+        digest, consume lock). The 4th slot makes confirm_generate's
+        defense-in-depth digest check possible; the 5th (``_lock``)
+        serializes ``consume()`` so the one-shot guarantee holds even if
+        the handle is shared across threads.
         """
         assert api.SeedDisplayHandle.__slots__ == (
             "_payload",
             "_consumed",
             "_deadline",
             "_expected_digest",
+            "_lock",
         )
 
     def test_instance_has_no_dict(self) -> None:
@@ -497,6 +499,76 @@ class TestDeadlineExpiry:
         """
         handle = _make_handle(deadline=time.monotonic() + 30.0)
         assert handle.consume() == _SEED
+
+
+# ============================ consume() — thread safety ============================
+
+
+class TestConsumeThreadSafety:
+    """``consume()`` is one-shot even when a handle is shared across threads.
+
+    Codex pre-merge P2 (2026-05-15): the ``if self._consumed`` check and the
+    later ``self._consumed = True`` set are separated by the deadline check,
+    the decode, and the wipe. Without serialization, two threads can both
+    pass the check before either sets the flag — both decode the live
+    ``_payload`` and the seed is released twice. ``consume()`` must hold a
+    per-handle lock across the whole check / decode / wipe / set section so
+    exactly one caller ever receives the seed.
+    """
+
+    def test_concurrent_consume_releases_seed_at_most_once(self) -> None:
+        """Burst many threads at one shared handle through a barrier so they
+        all enter ``consume()`` as simultaneously as the scheduler allows.
+        Exactly one call must return the seed; every other call must raise
+        RuntimeError("already consumed"). A second successful return is the
+        race this test guards against.
+
+        ``sys.setswitchinterval`` is dropped to a very small value for the
+        duration so the interpreter preempts threads aggressively inside the
+        check / decode / wipe / set window — without that, the unlocked
+        race almost never interleaves unfavorably and the test would pass
+        even against the buggy code.
+        """
+        import sys
+        import threading
+
+        worker_count = 64
+        handle = _make_handle("racetestseed")
+        barrier = threading.Barrier(worker_count)
+        results: list[str] = []
+        errors: list[BaseException] = []
+        results_lock = threading.Lock()
+
+        def worker() -> None:
+            barrier.wait()  # release all workers as close to simultaneously as possible
+            try:
+                seed = handle.consume()
+            except RuntimeError as exc:  # expected for all-but-one
+                with results_lock:
+                    errors.append(exc)
+            else:
+                with results_lock:
+                    results.append(seed)
+
+        original_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            sys.setswitchinterval(original_interval)
+
+        # Exactly one worker may have received the seed.
+        assert len(results) == 1, (
+            f"consume() released the seed {len(results)} times — must be exactly 1"
+        )
+        assert results == ["racetestseed"]
+        # Every other worker must have hit the one-shot guard.
+        assert len(errors) == worker_count - 1
+        assert all("already consumed" in str(e) for e in errors)
 
 
 # ============================ prepare_generate (in-memory phase) ============================
