@@ -385,7 +385,8 @@ def test_decrypt_emits_unwrap_authorized_audit(
     w.close()
 
     le.decrypt_log_file(log_path, backend=backend, audit_sink=sink)
-    assert any(e.get("event") == "keyvault.unwrap_authorized" for e in entries)
+    # wrap.unwrap_dek emits event=keyvault.unwrap_dek, reason=keyvault.unwrap_authorized
+    assert any(e.get("reason") == "keyvault.unwrap_authorized" for e in entries)
 
 
 def test_decrypt_denied_when_authorization_cancelled(
