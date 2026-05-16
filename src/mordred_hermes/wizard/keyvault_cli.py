@@ -1,6 +1,6 @@
-"""``hermes mordred keyvault {list,verify-digest,recover}`` — keyvault CLI.
+"""``hermes mordred keyvault {list,verify-digest,recover,init}`` — keyvault CLI.
 
-Phase 4 PR8 (``list`` / ``verify-digest``) + PR10 (``recover``).
+Phase 4 PR8 (``list`` / ``verify-digest``) + PR10 (``recover`` / ``init``).
 SPEC.md §4.2 / TODO.md §4.2.
 
 ``list`` / ``verify-digest`` only *read* the on-disk keyvault layout
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,13 +35,18 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault import _storage
 
 if TYPE_CHECKING:
+    from ..keyvault.api import SeedDisplayHandle
+    from ..keyvault.seed_display import SeedDisplaySurface
     from ..keyvault.wrap import NativeBackend
     from .configure import PromptIO
 
 __all__ = [
+    "TerminalSeedSurface",
+    "cli_init",
     "cli_list",
     "cli_recover",
     "cli_verify_digest",
+    "init_keyvault",
     "list_keys",
     "recover",
     "verify_digest",
@@ -203,6 +209,154 @@ def recover(
     return 0
 
 
+class TerminalSeedSurface:
+    """A terminal :class:`SeedDisplaySurface` for ``keyvault init``.
+
+    All three methods are safe to call repeatedly — ``display_seed``
+    invokes :meth:`clear` on every exit path, possibly twice.
+    """
+
+    def banner(self, message: str) -> None:
+        print(message, file=sys.stderr)
+
+    def show(self, seed: str) -> None:
+        words = seed.split()
+        print("\n=== SEED PHRASE — transcribe onto paper now ===")
+        for index, word in enumerate(words, start=1):
+            print(f"  {index:2}. {word}")
+        print("=== END SEED PHRASE ===\n")
+
+    def clear(self) -> None:
+        # ANSI clear-screen + cursor-home. Best-effort: harmless on a
+        # terminal that does not interpret the escape sequence.
+        print("\033[2J\033[H", end="", flush=True)
+
+
+def init_keyvault(
+    *,
+    home: Path | None = None,
+    backend: NativeBackend | None = None,
+    prompt_io: PromptIO | None = None,
+    surface: SeedDisplaySurface | None = None,
+    audit_sink: Any = None,
+    display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
+) -> int:
+    """Initialise the keyvault: generate the key, display the Seed, finalize.
+
+    Flow (SPEC.md §"``keyvault init`` flow"):
+
+    1. Re-init guard — v1 keyvault is single-key.
+    2. Prompt for the Passphrase twice (hidden, must match, non-empty).
+    3. Generate a 24-word BIP39 Seed Phrase + the seed-bound PoW.
+    4. ``prepare_generate`` — compute the verification digest in memory.
+    5. ``display_seed`` — show the Seed under a network blackout for 60s.
+    6. The operator computes the digest offline and transcribes it back.
+    7. ``confirm_generate`` — finalize only if the digest matches.
+
+    ``backend`` / ``prompt_io`` / ``surface`` / ``display_fn`` default to
+    the production implementations; tests inject fakes. Returns 0 on a
+    finalized keyvault, 1 on any refusal (already initialised, passphrase
+    mismatch, blackout failure, capture abort, expiry, digest mismatch,
+    Enclave error).
+    """
+    from ..keyvault import _bip39, api, seed_display
+    from ..keyvault import pow as kvpow
+
+    root = _storage.resolve_keyvault_dir(home)
+    if _storage.load_meta(root).get("keys"):
+        print(
+            "Keyvault already initialised — v1 keyvault is single-key. To restore a "
+            "different key, use `hermes mordred keyvault recover`.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if prompt_io is None:
+        from .configure import PromptToolkitIO
+
+        prompt_io = PromptToolkitIO()
+    passphrase = prompt_io.ask_password("Choose a Passphrase")
+    if passphrase != prompt_io.ask_password("Re-enter the Passphrase"):
+        print("Passphrases do not match — nothing was written.", file=sys.stderr)
+        return 1
+    if not passphrase:
+        print("Passphrase must not be empty.", file=sys.stderr)
+        return 1
+
+    # Generate the Seed Phrase and its seed-bound PoW (SPEC §"Proof-of-Work").
+    seed_phrase = _bip39.generate_mnemonic()
+    normalized_seed = api._normalize_seed_phrase(seed_phrase)
+    pow_bytes = kvpow.compute_pow(normalized_seed, difficulty_bits=kvpow.POW_DIFFICULTY_BITS)
+    # expected_digest is intentionally discarded — the operator must
+    # recompute it independently on an offline device, which is the
+    # mis-transcription cross-check confirm_generate enforces.
+    handle, _expected_digest = api.prepare_generate(seed_phrase, passphrase, pow_bytes)
+
+    if surface is None:
+        surface = TerminalSeedSurface()
+    show = display_fn if display_fn is not None else seed_display.display_seed
+    # The operator needs top4(PoW) to recompute the digest offline; it is
+    # derived from the (secret) seed but is itself only a 4-byte mask.
+    surface.banner(
+        f"PoW mask top4 = {pow_bytes[:4].hex()} — transcribe it with the Seed Phrase "
+        "and Passphrase to compute the verification digest on your offline device."
+    )
+
+    from ..keyvault._exceptions import WrapError
+    from ..keyvault.api import SeedDisplayExpired
+    from ..keyvault.digest import VerificationDigestMismatch
+    from ..keyvault.network_fallback import BlackoutNotAsserted
+    from ..keyvault.seed_display import SeedDisplayAborted
+
+    try:
+        show(handle, surface)
+    except BlackoutNotAsserted:
+        print(
+            "Seed display refused: this host is still reachable on the network. "
+            "Physically disconnect Wi-Fi / Ethernet / Bluetooth / USB tethering and retry.",
+            file=sys.stderr,
+        )
+        return 1
+    except SeedDisplayAborted as exc:
+        print(f"Seed display aborted: screen capture detected ({exc.detector}).", file=sys.stderr)
+        return 1
+    except SeedDisplayExpired:
+        print("Seed display window expired before the digest was confirmed.", file=sys.stderr)
+        return 1
+
+    digest_hex = prompt_io.ask_text("Verification digest from your offline device (hex)")
+    try:
+        user_digest = bytes.fromhex(digest_hex.strip())
+    except ValueError:
+        print("That is not a valid hex digest — nothing was written.", file=sys.stderr)
+        return 1
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    sink = audit_sink if audit_sink is not None else _stderr_audit_sink
+
+    try:
+        result = api.confirm_generate(handle, user_digest, backend=backend, audit_sink=sink, home=home)
+    except VerificationDigestMismatch:
+        print(
+            "Verification digest mismatch — the Seed or Passphrase was mis-transcribed. "
+            "Nothing was written; rerun `hermes mordred keyvault init`.",
+            file=sys.stderr,
+        )
+        return 1
+    except WrapError as exc:
+        print(f"Keyvault init failed: Secure Enclave error — {exc}", file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
+        # confirm_generate's own re-init guard (a race with the pre-check).
+        print(f"Keyvault init refused: {exc}", file=sys.stderr)
+        return 1
+    print(f"Keyvault initialised. Key: {result.key_id}")
+    return 0
+
+
 # -----------------------------------------------------------------------------
 # CLI adapters wired in cli.py.
 # -----------------------------------------------------------------------------
@@ -223,3 +377,9 @@ def cli_verify_digest(args: argparse.Namespace) -> int:
 def cli_recover(args: argparse.Namespace) -> int:
     """argparse handler for ``keyvault recover --blob <path>``."""
     return recover(blob_path=Path(args.blob))
+
+
+def cli_init(args: argparse.Namespace) -> int:
+    """argparse handler for ``keyvault init`` (takes no options)."""
+    del args
+    return init_keyvault()

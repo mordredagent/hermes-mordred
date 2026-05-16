@@ -22,7 +22,8 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _bip39, _storage, api, digest
+from mordred_hermes.keyvault import _bip39, _storage, api
+from mordred_hermes.keyvault import digest as kvdigest
 from mordred_hermes.keyvault import pow as kvpow
 from mordred_hermes.keyvault.network_fallback import BlackoutNotAsserted
 from mordred_hermes.wizard import keyvault_cli
@@ -344,7 +345,7 @@ class TestInit:
     def _expected_digest(self) -> bytes:
         norm_seed = api._normalize_seed_phrase(self.FIXED_SEED)
         pow_bytes = kvpow.compute_pow(norm_seed, difficulty_bits=4)
-        return digest.compute_digest(norm_seed, api._normalize_passphrase(self.PASSPHRASE), pow_bytes)
+        return kvdigest.compute_digest(norm_seed, api._normalize_passphrase(self.PASSPHRASE), pow_bytes)
 
     def _noop_display(self, handle: object, surface: object) -> None:
         return None
