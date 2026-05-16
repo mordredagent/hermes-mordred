@@ -311,3 +311,79 @@ class TestActivePathResolution:
 
         assert rc == 0
         assert "match-me" in capsys.readouterr().out
+
+
+class TestPurge:
+    """RED tests for Phase 4 PR8: ``hermes mordred audit purge --before``.
+
+    Deletes rotated audit-log files (``audit.log.<date>[...]``) dated
+    strictly before the ``--before`` cutoff — the manual cleanup path for
+    pre-Phase-4 plaintext history (PATHS.md §Consumer CLI). The active
+    ``audit.log`` is never touched. Backend-free.
+    """
+
+    def _seed_rotated(self, directory: Path, names: list[str]) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (directory / name).write_bytes(b"rotated audit data\n")
+
+    def test_invalid_before_date_returns_2(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = audit_cli.purge(before="not-a-date", audit_dir=tmp_path)
+        assert rc == 2
+        assert "YYYY-MM-DD" in capsys.readouterr().err
+
+    def test_deletes_files_strictly_before_cutoff(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed_rotated(
+            tmp_path,
+            [
+                "audit.log.2026-01-01.gz",
+                "audit.log.2026-02-15.3.gz",
+                "audit.log.2026-03-01.gz",  # == cutoff, kept (strictly-before)
+                "audit.log.2026-05-01",
+            ],
+        )
+        (tmp_path / "audit.log").write_bytes(b'{"ts":"x"}\n')  # active log
+
+        rc = audit_cli.purge(before="2026-03-01", audit_dir=tmp_path)
+
+        assert rc == 0
+        remaining = {p.name for p in tmp_path.iterdir()}
+        assert "audit.log.2026-01-01.gz" not in remaining
+        assert "audit.log.2026-02-15.3.gz" not in remaining
+        assert remaining == {"audit.log", "audit.log.2026-03-01.gz", "audit.log.2026-05-01"}
+
+    def test_active_log_is_never_deleted(self, tmp_path: Path) -> None:
+        (tmp_path / "audit.log").write_bytes(b'{"ts":"x"}\n')
+        self._seed_rotated(tmp_path, ["audit.log.2020-01-01.gz"])
+
+        audit_cli.purge(before="2030-01-01", audit_dir=tmp_path)
+
+        assert (tmp_path / "audit.log").exists()
+        assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
+
+    def test_nothing_to_purge_returns_0(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "audit.log").write_bytes(b'{"ts":"x"}\n')
+        rc = audit_cli.purge(before="2026-01-01", audit_dir=tmp_path)
+        assert rc == 0
+        assert "0" in capsys.readouterr().out
+
+    def test_ignores_non_dated_rotation_files(self, tmp_path: Path) -> None:
+        self._seed_rotated(tmp_path, ["audit.log.backup", "audit.log.2020-01-01.gz"])
+        audit_cli.purge(before="2030-01-01", audit_dir=tmp_path)
+        assert (tmp_path / "audit.log.backup").exists()  # not a dated rotation
+        assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
+
+    def test_cli_purge_adapter_delegates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._seed_rotated(tmp_path, ["audit.log.2020-01-01.gz"])
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: tmp_path / "audit.log")
+        rc = audit_cli.cli_purge(argparse.Namespace(before="2030-01-01"))
+        assert rc == 0
+        assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
