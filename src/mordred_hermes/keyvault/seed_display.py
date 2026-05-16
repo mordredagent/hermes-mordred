@@ -46,6 +46,7 @@ imports on any platform — same contract as :mod:`keyvault.native` and
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import sys
@@ -53,12 +54,19 @@ import time
 from collections.abc import Callable
 from typing import Any, NoReturn, Protocol
 
-from .api import SeedDisplayHandle
+from .api import SeedDisplayExpired, SeedDisplayHandle
 
 _LOG = logging.getLogger("mordred.keyvault.seed_display")
 
 DEFAULT_TTL_SECONDS: float = 60.0
-"""Seconds the seed stays on screen before auto-clear (SPEC §M5)."""
+"""Seconds the seed stays on screen before auto-clear (SPEC §M5).
+
+Tracks the same SPEC §M5 "60 seconds" as ``api._SEED_DISPLAY_DEFAULT_TTL_SECONDS``,
+but the two are deliberately independent knobs, not one value duplicated:
+api's constant bounds how long the *handle* may sit unconsumed, this one
+bounds how long the seed stays *on screen* after ``consume()``. Keep both
+at the SPEC value if it ever changes.
+"""
 
 DEFAULT_POLL_INTERVAL: float = 0.5
 """Seconds between screen-capture probes during the display window."""
@@ -169,6 +177,10 @@ def _default_capture_probe() -> str | None:
         return None
 
     try:
+        # Probes the MAIN display only. A capture confined to a secondary
+        # display is not detected — acceptable under the best-effort M5
+        # scope (the banner is the real mitigation). Probing every display
+        # via CGGetActiveDisplayList is a v2 hardening option.
         captured = bool(quartz.CGScreenIsBeingCaptured(quartz.CGMainDisplayID()))
     except Exception as exc:
         # Best-effort: a bridge error must not crash the display flow.
@@ -253,7 +265,14 @@ def display_seed(
             consumed.
         SeedDisplayAborted: A screen capture was detected before or
             during the display window.
+        ValueError: ``poll_interval`` is not positive.
     """
+    # Argument validation first — before any side effect. A non-positive
+    # poll_interval would make the timer loop spin (sleep(0)) and hammer
+    # the capture probe for the whole window instead of pacing it.
+    if poll_interval <= 0:
+        raise ValueError(f"poll_interval must be positive (got {poll_interval})")
+
     # network_fallback is imported lazily so a missing import is a
     # call-time error, consistent with the rest of keyvault.
     if blackout_assert is None:
@@ -272,6 +291,13 @@ def display_seed(
     #    consumed, so a capture-in-progress never sees the seed.
     detector = probe()
     if detector is not None:
+        # The seed was never rendered, but a hostile capture environment
+        # was just detected — consume the handle now so its payload is
+        # zero-filled immediately rather than lingering until the handle's
+        # own deadline. consume() also wipes on an expired handle, so the
+        # SeedDisplayExpired it would then raise is suppressed.
+        with contextlib.suppress(SeedDisplayExpired):
+            handle.consume()
         _abort(audit_sink, detector=detector)
 
     # 4. Release the seed (one-shot; SeedDisplayExpired propagates).
