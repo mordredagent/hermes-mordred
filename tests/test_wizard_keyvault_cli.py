@@ -18,11 +18,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _storage
+from mordred_hermes.keyvault import _bip39, _storage, api
+from mordred_hermes.keyvault import digest as kvdigest
+from mordred_hermes.keyvault import pow as kvpow
+from mordred_hermes.keyvault.network_fallback import BlackoutNotAsserted
 from mordred_hermes.wizard import keyvault_cli
+from tests._keyvault_fakes import FakeBackend
 
 
 def _key_id_hash(key_id: str) -> str:
@@ -131,3 +136,342 @@ class TestVerifyDigest:
         _build_keyvault(tmp_path, {"default": b"\x09" * 32})
         monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
         assert keyvault_cli.cli_verify_digest(argparse.Namespace()) == 0
+
+
+# ---------------------------------------------------------------------------
+# keyvault recover (Phase 4 PR10 step-C)
+# ---------------------------------------------------------------------------
+
+
+class ScriptedPromptIO:
+    """Test :class:`~mordred_hermes.wizard.configure.PromptIO` — no TTY.
+
+    ``text`` / ``password`` give a single fixed answer to every
+    ``ask_text`` / ``ask_password`` call. ``texts`` / ``passwords`` give
+    a queue popped in order (needed for the init flow, which asks for the
+    Passphrase twice and then the digest).
+    """
+
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        password: str = "",
+        texts: list[str] | None = None,
+        passwords: list[str] | None = None,
+    ) -> None:
+        self._text = text
+        self._password = password
+        self._texts = list(texts) if texts is not None else None
+        self._passwords = list(passwords) if passwords is not None else None
+
+    def ask_choice(self, label: str, choices: Any, default: str) -> str:
+        return default
+
+    def ask_text(self, label: str, default: str = "") -> str:
+        if self._texts is not None:
+            return self._texts.pop(0)
+        return self._text
+
+    def ask_bool(self, label: str, default: bool) -> bool:
+        return default
+
+    def ask_password(self, label: str, default: str = "") -> str:
+        if self._passwords is not None:
+            return self._passwords.pop(0)
+        return self._password
+
+
+class FakeSurface:
+    """No-op :class:`~mordred_hermes.keyvault.seed_display.SeedDisplaySurface`."""
+
+    def __init__(self) -> None:
+        self.shown: list[str] = []
+
+    def banner(self, message: str) -> None:
+        return None
+
+    def show(self, seed: str) -> None:
+        self.shown.append(seed)
+
+    def clear(self) -> None:
+        return None
+
+
+def _sink() -> Any:
+    """A throwaway audit sink (the CLI tests do not assert on audit entries)."""
+
+    def append(entry: dict[str, Any]) -> None:
+        return None
+
+    return append
+
+
+# A valid 24-word BIP39 phrase + passphrase used across recover tests.
+RECOVER_SEED = _bip39.entropy_to_mnemonic(bytes(range(32)))
+RECOVER_PASS = "correct horse battery staple"
+
+
+@pytest.fixture
+def _fast_pow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lower PoW difficulty so recover tests stay sub-second.
+
+    PoW is deterministic in the seed at any difficulty, so a blob built
+    and recovered under the same lowered difficulty round-trips cleanly.
+    """
+    monkeypatch.setattr(kvpow, "POW_DIFFICULTY_BITS", 4)
+
+
+def _make_backup_blob(home: Path, backend: FakeBackend) -> bytes:
+    """Build a real export blob on a 'device A' rooted at ``home``."""
+    pow_bytes = kvpow.compute_pow(api._normalize_seed_phrase(RECOVER_SEED), difficulty_bits=kvpow.POW_DIFFICULTY_BITS)
+    _handle, digest = api.prepare_generate(RECOVER_SEED, RECOVER_PASS, pow_bytes)
+    result = api.generate(RECOVER_SEED, RECOVER_PASS, pow_bytes, digest, backend=backend, audit_sink=_sink(), home=home)
+    api.encrypt(result.key_id, b"the-secret", "vault", backend=backend, audit_sink=_sink(), home=home)
+    return api.export_backup(result.key_id, RECOVER_PASS, backend=backend, audit_sink=_sink(), home=home)
+
+
+class TestRecover:
+    def test_missing_blob_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = keyvault_cli.recover(
+            blob_path=tmp_path / "nope.mrkv",
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password=RECOVER_PASS),
+        )
+        assert rc == 1
+        assert "nope.mrkv" in capsys.readouterr().err
+
+    def test_bad_seed_checksum_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        blob_file = tmp_path / "b.mrkv"
+        blob_file.write_bytes(b"unused")
+        bad_seed = " ".join(["abandon"] * 24)  # 24 words but an invalid BIP39 checksum
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(text=bad_seed, password=RECOVER_PASS),
+        )
+        assert rc == 1
+        assert "seed" in capsys.readouterr().err.lower()
+
+    def test_corrupt_blob_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None) -> None:
+        blob_file = tmp_path / "b.mrkv"
+        blob_file.write_bytes(b"not-a-real-MRKV-blob" * 8)
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password=RECOVER_PASS),
+        )
+        assert rc == 1
+        assert "corrupt" in capsys.readouterr().err.lower()
+
+    def test_recover_roundtrip(self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None) -> None:
+        blob = _make_backup_blob(tmp_path / "a", FakeBackend())
+        blob_file = tmp_path / "backup.mrkv"
+        blob_file.write_bytes(blob)
+
+        home_b = tmp_path / "b"
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=home_b,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password=RECOVER_PASS),
+        )
+        assert rc == 0
+        assert "recovered" in capsys.readouterr().out.lower()
+        meta = _storage.load_meta(_storage.resolve_keyvault_dir(home_b))
+        assert meta["keys"]  # the imported key landed on device B
+
+    def test_wrong_passphrase_returns_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
+    ) -> None:
+        blob = _make_backup_blob(tmp_path / "a", FakeBackend())
+        blob_file = tmp_path / "backup.mrkv"
+        blob_file.write_bytes(blob)
+
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path / "b",
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password="wrong passphrase"),
+        )
+        assert rc == 1
+        assert "mis-transcribed" in capsys.readouterr().err.lower()
+
+    def test_cli_recover_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict[str, Path] = {}
+
+        def fake(*, blob_path: Path) -> int:
+            seen["blob_path"] = blob_path
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "recover", fake)
+        assert keyvault_cli.cli_recover(argparse.Namespace(blob="/tmp/x.mrkv")) == 0
+        assert str(seen["blob_path"]) == "/tmp/x.mrkv"
+
+
+# ---------------------------------------------------------------------------
+# keyvault init (Phase 4 PR10 step-D)
+# ---------------------------------------------------------------------------
+
+
+class TestInit:
+    """``hermes mordred keyvault init`` orchestration.
+
+    ``display_fn`` is injected so the tests never run the full 60s
+    Seed-display flow (that flow is covered by test_keyvault_seed_display).
+    The PoW difficulty is lowered and the mnemonic pinned so the test can
+    precompute the verification digest the operator "transcribes" back.
+    """
+
+    FIXED_SEED = _bip39.entropy_to_mnemonic(bytes(range(1, 33)))
+    PASSPHRASE = "my secret passphrase"
+
+    @pytest.fixture(autouse=True)
+    def _patches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(kvpow, "POW_DIFFICULTY_BITS", 4)
+        monkeypatch.setattr(_bip39, "generate_mnemonic", lambda: self.FIXED_SEED)
+
+    def _expected_digest(self) -> bytes:
+        norm_seed = api._normalize_seed_phrase(self.FIXED_SEED)
+        pow_bytes = kvpow.compute_pow(norm_seed, difficulty_bits=4)
+        return kvdigest.compute_digest(norm_seed, api._normalize_passphrase(self.PASSPHRASE), pow_bytes)
+
+    def _noop_display(self, handle: object, surface: object) -> None:
+        return None
+
+    def test_already_initialised_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "already" in capsys.readouterr().err.lower()
+
+    def test_passphrase_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=["pass-a", "pass-b"]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "match" in capsys.readouterr().err.lower()
+
+    def test_empty_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=["", ""]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "empty" in capsys.readouterr().err.lower()
+
+    def test_blackout_failure_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        def refuse(handle: object, surface: object) -> None:
+            raise BlackoutNotAsserted("host is still reachable")
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            surface=FakeSurface(),
+            display_fn=refuse,
+        )
+        assert rc == 1
+        err = capsys.readouterr().err.lower()
+        assert "disconnect" in err or "network" in err
+        assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
+
+    def test_bad_digest_hex_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(texts=["not-hex-zz"], passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "hex" in capsys.readouterr().err.lower()
+
+    def test_digest_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(texts=["00" * 32], passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "mismatch" in capsys.readouterr().err.lower()
+        assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
+
+    def test_init_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        assert "initialised" in capsys.readouterr().out.lower()
+        meta = _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))
+        assert meta["keys"]
+
+    def test_cli_init_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        called: dict[str, bool] = {}
+
+        def fake() -> int:
+            called["yes"] = True
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
+        assert keyvault_cli.cli_init(argparse.Namespace()) == 0
+        assert called["yes"]
+
+    def test_init_provisions_audit_log_wrapping_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """init must also generate the audit-log wrapping key so the L465
+        encrypted-audit factory can engage afterward."""
+        from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+        backend = FakeBackend()
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=backend,
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        assert ("generate", AUDIT_LOG_KEY_ID) in backend.calls
+
+    def test_corrupt_keyvault_meta_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """A corrupt meta.json must surface a clean error, not a traceback."""
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text("{ not valid json", encoding="utf-8")
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "corrupt" in capsys.readouterr().err.lower()

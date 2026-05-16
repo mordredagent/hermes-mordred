@@ -209,3 +209,55 @@ class NDJSONWriter:
                 continue
             if mtime < cutoff:
                 child.unlink(missing_ok=True)
+
+
+def make_audit_writer(
+    audit_path: Path,
+    *,
+    keyvault_home: Path | None = None,
+    backend: Any = None,
+) -> Writer:
+    """Return the audit-log :class:`Writer` for the current keyvault state.
+
+    Phase 4 L465: once the Mordred keyvault is initialized the audit log
+    must be AES-GCM-encrypted at rest. This factory returns a keyvault
+    :class:`~mordred_hermes.keyvault.log_encryption.EncryptedWriter` when
+    the keyvault is initialized *and* its audit-log wrapping key is
+    usable, and an :class:`NDJSONWriter` otherwise.
+
+    Fail-open by design: an uninitialized keyvault, a corrupt keyvault, a
+    missing audit-log wrapping key, a non-macOS host, or any other
+    keyvault / Enclave error all fall back to :class:`NDJSONWriter` so
+    privacy_check never stops auditing. Every fallback is logged.
+
+    The keyvault crypto stack is imported only after the cheap,
+    stdlib-only "is the keyvault initialized?" probe passes, so an
+    uninitialized install carries no dependency on the keyvault plugin.
+    ``backend=None`` builds the production Secure-Enclave backend; tests
+    inject a software backend.
+    """
+    try:
+        from ._keyvault_probe import keyvault_initialized
+
+        if not keyvault_initialized(keyvault_home):
+            return NDJSONWriter(path=audit_path)
+
+        # Keyvault is initialized — only now touch the crypto stack.
+        from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
+        from ..keyvault.wrap import get_wrapping_key_public
+
+        if backend is None:
+            from ..keyvault._seckey_backend import _SecKeyBackend
+
+            backend = _SecKeyBackend()
+        # Probe that the audit-log wrapping key exists and the backend is
+        # usable. get_wrapping_key_public needs no Enclave authorization.
+        get_wrapping_key_public(AUDIT_LOG_KEY_ID, backend=backend)
+        return EncryptedWriter(audit_path, backend=backend)
+    except Exception as exc:
+        _LOG.warning(
+            "encrypted audit log unavailable (%s: %s); falling back to plaintext NDJSON",
+            type(exc).__name__,
+            exc,
+        )
+        return NDJSONWriter(path=audit_path)

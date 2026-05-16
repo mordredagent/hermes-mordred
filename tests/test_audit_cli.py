@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from mordred_hermes.wizard import audit_cli
+from tests._keyvault_fakes import FakeBackend
 
 
 def _seed_audit_log(path: Path, entries: list[dict[str, object]]) -> None:
@@ -379,3 +381,88 @@ class TestPurge:
         rc = audit_cli.cli_purge(argparse.Namespace(before="2030-01-01"))
         assert rc == 0
         assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
+
+
+class TestDecrypt:
+    """``hermes mordred audit decrypt --date`` over MRAL-encrypted logs.
+
+    Phase 4 PR10 step-B. Encrypted fixtures are produced by the real
+    :class:`~mordred_hermes.keyvault.log_encryption.EncryptedWriter` with
+    a software ``FakeBackend`` in place of the Secure Enclave.
+    """
+
+    @staticmethod
+    def _backend() -> FakeBackend:
+        from mordred_hermes.keyvault import log_encryption as le
+
+        be = FakeBackend()
+        be.generate_enclave_key(le.AUDIT_LOG_KEY_ID)
+        return be
+
+    @staticmethod
+    def _write_encrypted(path: Path, backend: FakeBackend, entries: list[dict[str, object]]) -> None:
+        from mordred_hermes.keyvault import log_encryption as le
+
+        writer = le.EncryptedWriter(path, backend=backend)
+        for entry in entries:
+            writer.append(entry)
+        writer.close()
+
+    def test_invalid_date_returns_2(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = audit_cli.decrypt(date="2026/05/10", audit_dir=tmp_path)
+        assert rc == 2
+        assert "YYYY-MM-DD" in capsys.readouterr().err
+
+    def test_no_file_for_date_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path)
+        assert rc == 1
+        assert "2026-05-10" in capsys.readouterr().err
+
+    def test_decrypts_rotated_file_for_date(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        be = self._backend()
+        self._write_encrypted(
+            tmp_path / "audit.log.2026-05-10",
+            be,
+            [{"event": "policy.strict.clearnet", "seq": 0}, {"event": "policy.strict.tor", "seq": 1}],
+        )
+        rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path, backend=be)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "policy.strict.clearnet" in out
+        assert "policy.strict.tor" in out
+
+    def test_decrypts_active_log_for_today(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        be = self._backend()
+        self._write_encrypted(tmp_path / "audit.log", be, [{"event": "keyvault.unwrap_authorized"}])
+        today = datetime.now(UTC).date().isoformat()
+        rc = audit_cli.decrypt(date=today, audit_dir=tmp_path, backend=be)
+        assert rc == 0
+        assert "keyvault.unwrap_authorized" in capsys.readouterr().out
+
+    def test_corrupt_file_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        be = self._backend()
+        # A pre-Phase-4 plaintext NDJSON line is valid JSON but lacks the
+        # MRAL header — decrypt must reject it, not dump garbage.
+        (tmp_path / "audit.log.2026-05-10").write_text('{"event":"plaintext"}\n', encoding="utf-8")
+        rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path, backend=be)
+        assert rc == 1
+        assert "2026-05-10" in capsys.readouterr().err
+
+    def test_auth_cancelled_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        be = self._backend()
+        self._write_encrypted(tmp_path / "audit.log.2026-05-10", be, [{"event": "x"}])
+        be.denied_reason = "user_cancelled"  # the unwrap prompt is denied
+        rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path, backend=be)
+        assert rc == 1
+        assert "cancel" in capsys.readouterr().err.lower()
+
+    def test_cli_decrypt_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict[str, str] = {}
+
+        def fake_decrypt(*, date: str) -> int:
+            seen["date"] = date
+            return 0
+
+        monkeypatch.setattr(audit_cli, "decrypt", fake_decrypt)
+        assert audit_cli.cli_decrypt(argparse.Namespace(date="2026-05-10")) == 0
+        assert seen["date"] == "2026-05-10"
