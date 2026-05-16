@@ -83,8 +83,10 @@ message.
   plaintext history). Never touches the active `audit.log`; non-dated
   rotation files are left alone. Exit codes: `0` (done), `2` (bad date).
 
-`audit decrypt` remains a stub — it needs the production Secure-Enclave
-`NativeBackend`.
+- `audit decrypt --date YYYY-MM-DD` — decrypt the `MRAL`-encrypted audit
+  log file(s) for a UTC date through the Secure-Enclave authorization
+  boundary and print entries as JSON. Exit codes: `0` (decrypted), `1`
+  (no file / corrupt / denied prompt / missing key), `2` (bad date).
 
 Implementation: `audit_cli.py`.
 
@@ -114,12 +116,23 @@ Secure-Enclave `NativeBackend`, no `cryptography`.
 
 Implementation: `keyvault_cli.py`.
 
-### `keyvault {init,recover}` / `audit decrypt`
+### `keyvault {init,recover}`
 
-Stubs — they need the production Secure-Enclave `NativeBackend`
-(`_SecKeyBackend`), which is not yet implemented. Subcommands parse
-cleanly but raise `NotImplementedError` naming that blocker so users get
-a clear deferred message instead of "invalid choice".
+Backend-coupled keyvault commands (Phase 4 PR10) — they build the
+production Secure-Enclave `_SecKeyBackend`.
+
+- `keyvault init` — generate a 24-word BIP39 Seed Phrase + seed-bound
+  PoW, prompt for the Passphrase, display the Seed under a network
+  blackout, and finalize once the operator confirms the verification
+  digest computed offline. Also provisions the audit-log wrapping key
+  so the encrypted-audit factory engages afterward.
+- `keyvault recover --blob <path>` — restore a keyvault from an
+  `export_backup` blob: prompts for the Seed Phrase + Passphrase,
+  recomputes the seed-bound PoW, and calls `api.import_backup`.
+
+Exit codes: `0` (done), `1` (any refusal — see the command's stderr).
+
+Implementation: `keyvault_cli.py`.
 
 ## Owned filesystem paths (see `mordred-docs/mordred/PATHS.md`)
 

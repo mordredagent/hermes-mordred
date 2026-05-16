@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -100,3 +101,42 @@ def test_delete_is_idempotent_on_real_keychain(live_key_id: str) -> None:
     _require_live_enclave()
     backend = _SecKeyBackend()
     backend.delete_enclave_key(live_key_id)  # must not raise
+
+
+def test_encrypt_decrypt_roundtrip_through_real_enclave(live_key_id: str, tmp_path: Path) -> None:
+    """L453: ``api.encrypt`` / ``api.decrypt`` AES-GCM roundtrip with the
+    per-envelope DEK wrapped and unwrapped through real Secure Enclave
+    authorization. The ``decrypt`` step triggers a biometric / passcode
+    prompt — approve it.
+    """
+    _require_live_enclave()
+    from mordred_hermes.keyvault import api
+
+    backend = _SecKeyBackend()
+    audit: list[dict[str, object]] = []
+    seed = "test seed phrase one two three four"
+    passphrase = "correct horse battery staple"
+    pow_bytes = bytes(range(32))
+    secret = b"the-protected-secret-payload"
+
+    try:
+        _handle, expected_digest = api.prepare_generate(seed, passphrase, pow_bytes)
+        api.generate(
+            seed,
+            passphrase,
+            pow_bytes,
+            expected_digest,
+            key_id=live_key_id,
+            backend=backend,
+            audit_sink=audit.append,
+            home=tmp_path,
+        )
+        envelope_id = api.encrypt(live_key_id, secret, "itest", backend=backend, audit_sink=audit.append, home=tmp_path)
+        # Authorization boundary — approve the prompt.
+        recovered = api.decrypt(
+            live_key_id, envelope_id, "itest", backend=backend, audit_sink=audit.append, home=tmp_path
+        )
+        assert recovered == secret
+        assert any(e.get("reason") == "keyvault.unwrap_authorized" for e in audit)
+    finally:
+        wrap.delete_wrapping_key(live_key_id, backend=backend)
