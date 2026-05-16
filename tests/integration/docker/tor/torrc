@@ -28,7 +28,10 @@ DataDirectory /tmp/tor-data
 Log notice file /var/log/tor/notices.log
 Log notice stdout
 
+# Stay IPv4-only: GitHub Actions runners have no working IPv6 egress,
+# so an IPv6 bootstrap attempt just wastes the deadline. `ClientUseIPv6 0`
+# is the whole knob — there is no `ClientPreferIPv4*` option, and torrc
+# fails *all* validation (Tor exits before bootstrap) on any unknown key.
 ClientUseIPv6 0
-ClientPreferIPv4OrAddrFamily 4
 
 DormantTimeoutEnabled 0
