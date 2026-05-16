@@ -281,6 +281,40 @@ def test_capture_detected_mid_display_clears_and_aborts() -> None:
     assert entries[0]["reason"] == "keyvault.seed_display_aborted_screenshot"
 
 
+def test_pre_display_abort_wipes_seed_from_handle() -> None:
+    """A capture detected before display still wipes the seed (code-review L1).
+
+    The seed was never rendered, but a hostile capture environment was
+    detected — the handle must be spent so the seed does not linger.
+    """
+    surface = FakeSurface()
+    handle = _handle()
+    with pytest.raises(sd.SeedDisplayAborted):
+        sd.display_seed(
+            handle,
+            surface,
+            blackout_assert=_ok_blackout,
+            capture_probe=lambda: "cg_screen_is_being_captured",
+        )
+    with pytest.raises(RuntimeError):  # handle already consumed (seed wiped)
+        handle.consume()
+
+
+def test_non_positive_poll_interval_rejected() -> None:
+    """poll_interval <= 0 must fail fast, not busy-loop (code-review M1)."""
+    surface = FakeSurface()
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="poll_interval"):
+            sd.display_seed(
+                _handle(),
+                surface,
+                blackout_assert=_ok_blackout,
+                capture_probe=_no_capture,
+                poll_interval=bad,
+                ttl_seconds=0.05,
+            )
+
+
 def test_audit_sink_failure_chains_onto_aborted() -> None:
     surface = FakeSurface()
 
