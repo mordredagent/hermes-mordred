@@ -31,7 +31,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
+
+if TYPE_CHECKING:
+    from ..keyvault.wrap import NativeBackend
 
 _LOG = logging.getLogger("mordred.privacy_check.audit")
 
@@ -215,7 +218,7 @@ def make_audit_writer(
     audit_path: Path,
     *,
     keyvault_home: Path | None = None,
-    backend: Any = None,
+    backend: NativeBackend | None = None,
 ) -> Writer:
     """Return the audit-log :class:`Writer` for the current keyvault state.
 

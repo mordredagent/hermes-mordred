@@ -37,7 +37,7 @@ from ..keyvault import _storage
 if TYPE_CHECKING:
     from ..keyvault.api import SeedDisplayHandle
     from ..keyvault.seed_display import SeedDisplaySurface
-    from ..keyvault.wrap import NativeBackend
+    from ..keyvault.wrap import AuditSink, NativeBackend
     from .configure import PromptIO
 
 __all__ = [
@@ -126,7 +126,7 @@ def recover(
     home: Path | None = None,
     backend: NativeBackend | None = None,
     prompt_io: PromptIO | None = None,
-    audit_sink: Any = None,
+    audit_sink: AuditSink | None = None,
 ) -> int:
     """Restore a keyvault from an ``export_backup`` blob on this device.
 
@@ -238,7 +238,7 @@ def init_keyvault(
     backend: NativeBackend | None = None,
     prompt_io: PromptIO | None = None,
     surface: SeedDisplaySurface | None = None,
-    audit_sink: Any = None,
+    audit_sink: AuditSink | None = None,
     display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
