@@ -24,8 +24,6 @@ import pytest
 
 from mordred_hermes.keyvault import _bip39, _storage, api
 from mordred_hermes.keyvault import pow as kvpow
-from mordred_hermes.keyvault.backup import BackupCorrupt
-from mordred_hermes.keyvault.recovery import RecoveryDigestMismatch
 from mordred_hermes.wizard import keyvault_cli
 from tests._keyvault_fakes import FakeBackend
 

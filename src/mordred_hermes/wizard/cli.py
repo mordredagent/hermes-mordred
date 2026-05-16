@@ -282,10 +282,9 @@ def _handle_keyvault_verify_digest(args: argparse.Namespace) -> int:
 
 
 def _handle_keyvault_recover(args: argparse.Namespace) -> int:
-    raise NotImplementedError(
-        "hermes mordred keyvault recover: blocked on the production Secure-Enclave "
-        "NativeBackend (_SecKeyBackend); lands in a later PR"
-    )
+    from . import keyvault_cli
+
+    return keyvault_cli.cli_recover(args)
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:
