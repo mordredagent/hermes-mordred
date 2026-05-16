@@ -486,3 +486,20 @@ class TestInit:
         )
         assert rc == 0
         assert ("generate", AUDIT_LOG_KEY_ID) in backend.calls
+
+    def test_corrupt_keyvault_meta_returns_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A corrupt meta.json must surface a clean error, not a traceback."""
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text("{ not valid json", encoding="utf-8")
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert "corrupt" in capsys.readouterr().err.lower()

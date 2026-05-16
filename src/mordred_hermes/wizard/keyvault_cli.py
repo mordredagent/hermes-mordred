@@ -263,7 +263,15 @@ def init_keyvault(
     from ..keyvault import pow as kvpow
 
     root = _storage.resolve_keyvault_dir(home)
-    if _storage.load_meta(root).get("keys"):
+    try:
+        existing_meta = _storage.load_meta(root)
+    except _storage.KeyvaultCorruptError as exc:
+        print(
+            f"Keyvault meta.json is corrupt — repair or remove it before init: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if existing_meta.get("keys"):
         print(
             "Keyvault already initialised — v1 keyvault is single-key. To restore a "
             "different key, use `hermes mordred keyvault recover`.",
