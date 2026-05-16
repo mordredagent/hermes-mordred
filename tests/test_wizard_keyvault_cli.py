@@ -224,13 +224,9 @@ def _fast_pow(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _make_backup_blob(home: Path, backend: FakeBackend) -> bytes:
     """Build a real export blob on a 'device A' rooted at ``home``."""
-    pow_bytes = kvpow.compute_pow(
-        api._normalize_seed_phrase(RECOVER_SEED), difficulty_bits=kvpow.POW_DIFFICULTY_BITS
-    )
+    pow_bytes = kvpow.compute_pow(api._normalize_seed_phrase(RECOVER_SEED), difficulty_bits=kvpow.POW_DIFFICULTY_BITS)
     _handle, digest = api.prepare_generate(RECOVER_SEED, RECOVER_PASS, pow_bytes)
-    result = api.generate(
-        RECOVER_SEED, RECOVER_PASS, pow_bytes, digest, backend=backend, audit_sink=_sink(), home=home
-    )
+    result = api.generate(RECOVER_SEED, RECOVER_PASS, pow_bytes, digest, backend=backend, audit_sink=_sink(), home=home)
     api.encrypt(result.key_id, b"the-secret", "vault", backend=backend, audit_sink=_sink(), home=home)
     return api.export_backup(result.key_id, RECOVER_PASS, backend=backend, audit_sink=_sink(), home=home)
 
@@ -259,9 +255,7 @@ class TestRecover:
         assert rc == 1
         assert "seed" in capsys.readouterr().err.lower()
 
-    def test_corrupt_blob_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
-    ) -> None:
+    def test_corrupt_blob_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None) -> None:
         blob_file = tmp_path / "b.mrkv"
         blob_file.write_bytes(b"not-a-real-MRKV-blob" * 8)
         rc = keyvault_cli.recover(
@@ -273,9 +267,7 @@ class TestRecover:
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
 
-    def test_recover_roundtrip(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
-    ) -> None:
+    def test_recover_roundtrip(self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None) -> None:
         blob = _make_backup_blob(tmp_path / "a", FakeBackend())
         blob_file = tmp_path / "backup.mrkv"
         blob_file.write_bytes(blob)
@@ -350,9 +342,7 @@ class TestInit:
     def _noop_display(self, handle: object, surface: object) -> None:
         return None
 
-    def test_already_initialised_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_already_initialised_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _build_keyvault(tmp_path, {"default": b"\x01" * 32})
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
@@ -364,9 +354,7 @@ class TestInit:
         assert rc == 1
         assert "already" in capsys.readouterr().err.lower()
 
-    def test_passphrase_mismatch_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_passphrase_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
             backend=FakeBackend(),
@@ -377,9 +365,7 @@ class TestInit:
         assert rc == 1
         assert "match" in capsys.readouterr().err.lower()
 
-    def test_empty_passphrase_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_empty_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
             backend=FakeBackend(),
@@ -390,9 +376,7 @@ class TestInit:
         assert rc == 1
         assert "empty" in capsys.readouterr().err.lower()
 
-    def test_blackout_failure_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_blackout_failure_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         def refuse(handle: object, surface: object) -> None:
             raise BlackoutNotAsserted("host is still reachable")
 
@@ -408,30 +392,22 @@ class TestInit:
         assert "disconnect" in err or "network" in err
         assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
 
-    def test_bad_digest_hex_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_bad_digest_hex_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=["not-hex-zz"], passwords=[self.PASSPHRASE, self.PASSPHRASE]
-            ),
+            prompt_io=ScriptedPromptIO(texts=["not-hex-zz"], passwords=[self.PASSPHRASE, self.PASSPHRASE]),
             surface=FakeSurface(),
             display_fn=self._noop_display,
         )
         assert rc == 1
         assert "hex" in capsys.readouterr().err.lower()
 
-    def test_digest_mismatch_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_digest_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=["00" * 32], passwords=[self.PASSPHRASE, self.PASSPHRASE]
-            ),
+            prompt_io=ScriptedPromptIO(texts=["00" * 32], passwords=[self.PASSPHRASE, self.PASSPHRASE]),
             surface=FakeSurface(),
             display_fn=self._noop_display,
         )
@@ -466,9 +442,7 @@ class TestInit:
         assert keyvault_cli.cli_init(argparse.Namespace()) == 0
         assert called["yes"]
 
-    def test_init_provisions_audit_log_wrapping_key(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_init_provisions_audit_log_wrapping_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """init must also generate the audit-log wrapping key so the L465
         encrypted-audit factory can engage afterward."""
         from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
@@ -487,9 +461,7 @@ class TestInit:
         assert rc == 0
         assert ("generate", AUDIT_LOG_KEY_ID) in backend.calls
 
-    def test_corrupt_keyvault_meta_returns_1(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_corrupt_keyvault_meta_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A corrupt meta.json must surface a clean error, not a traceback."""
         root = _storage.resolve_keyvault_dir(tmp_path)
         _storage.ensure_layout(root)
