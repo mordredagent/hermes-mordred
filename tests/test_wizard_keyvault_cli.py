@@ -465,3 +465,24 @@ class TestInit:
         monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
         assert keyvault_cli.cli_init(argparse.Namespace()) == 0
         assert called["yes"]
+
+    def test_init_provisions_audit_log_wrapping_key(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """init must also generate the audit-log wrapping key so the L465
+        encrypted-audit factory can engage afterward."""
+        from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+        backend = FakeBackend()
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=backend,
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        assert ("generate", AUDIT_LOG_KEY_ID) in backend.calls
