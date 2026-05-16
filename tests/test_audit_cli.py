@@ -327,16 +327,12 @@ class TestPurge:
         for name in names:
             (directory / name).write_bytes(b"rotated audit data\n")
 
-    def test_invalid_before_date_returns_2(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_invalid_before_date_returns_2(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = audit_cli.purge(before="not-a-date", audit_dir=tmp_path)
         assert rc == 2
         assert "YYYY-MM-DD" in capsys.readouterr().err
 
-    def test_deletes_files_strictly_before_cutoff(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_deletes_files_strictly_before_cutoff(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         self._seed_rotated(
             tmp_path,
             [
@@ -365,9 +361,7 @@ class TestPurge:
         assert (tmp_path / "audit.log").exists()
         assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
 
-    def test_nothing_to_purge_returns_0(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_nothing_to_purge_returns_0(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         (tmp_path / "audit.log").write_bytes(b'{"ts":"x"}\n')
         rc = audit_cli.purge(before="2026-01-01", audit_dir=tmp_path)
         assert rc == 0
@@ -379,9 +373,7 @@ class TestPurge:
         assert (tmp_path / "audit.log.backup").exists()  # not a dated rotation
         assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
 
-    def test_cli_purge_adapter_delegates(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_cli_purge_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._seed_rotated(tmp_path, ["audit.log.2020-01-01.gz"])
         monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: tmp_path / "audit.log")
         rc = audit_cli.cli_purge(argparse.Namespace(before="2030-01-01"))

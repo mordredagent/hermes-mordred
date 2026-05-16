@@ -18,7 +18,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Cross-platform crypto stack for the keyvault package. Kept separate
+# from `macos` so Linux CI installs it too and `mypy --strict src` can
+# resolve blake3 / argon2 / cryptography — these packages are
+# cross-platform even though the keyvault *feature* (Secure Enclave) is
+# macOS-only. The macOS gate is the pyobjc bridges in `macos` below.
+keyvault = [
+  "argon2-cffi>=23",
+  "cryptography>=42",
+  "blake3>=0.4",
+]
 macos = [
+  # Everything keyvault needs on a Mac = the cross-platform crypto stack
+  # (recursive extra) plus the pyobjc Security-framework bridges.
+  "mordred-hermes[keyvault]",
   "pyobjc-framework-Security>=10.0",
   # Phase 4 PR5: SCNetworkReachability probe for keyvault.network_fallback
   # (OS-API network-blackout fallback when mordred_network is absent).
@@ -26,9 +39,6 @@ macos = [
   # Phase 4 PR7: CGScreenIsBeingCaptured probe for keyvault.seed_display
   # (best-effort screenshot detection during the Seed display window, M5).
   "pyobjc-framework-Quartz>=10.0",
-  "argon2-cffi>=23",
-  "cryptography>=42",
-  "blake3>=0.4",
 ]
 # Phase 3 PR3a Task #5: Tor ControlPort cookie auth + `GETINFO circuit-status`
 # liveness probe. Optional because (a) stem's last release was 2021-12 so we
