@@ -78,8 +78,13 @@ message.
 - `audit tail -n N` — print the last `N` NDJSON entries.
 - `audit grep PATTERN` — Python regex over raw NDJSON lines. Exit codes:
   `0` (hit), `1` (no match / missing log), `2` (invalid regex).
+- `audit purge --before YYYY-MM-DD` — delete rotated `audit.log.<date>`
+  files dated strictly before the cutoff (manual cleanup of pre-Phase-4
+  plaintext history). Never touches the active `audit.log`; non-dated
+  rotation files are left alone. Exit codes: `0` (done), `2` (bad date).
 
-`audit {decrypt,purge}` remain Phase 4 stubs.
+`audit decrypt` remains a stub — it needs the production Secure-Enclave
+`NativeBackend`.
 
 Implementation: `audit_cli.py`.
 
@@ -95,11 +100,26 @@ unavailable.
 
 Implementation: `plugins_list.py`.
 
-### `network {use,status}` / `keyvault {init,list,verify-digest,recover}`
+### `keyvault {list,verify-digest}`
 
-Phase 3 / Phase 4 stubs. Subcommands parse cleanly but raise
-`NotImplementedError("Phase 3 ...")` / `("Phase 4 ...")` so users get a
-clear deferred message instead of "invalid choice".
+Backend-free keyvault inspection (Phase 4 PR8). Both only read the
+on-disk keyvault layout (`meta.json` + `digests/<hash>.commit`) — no
+Secure-Enclave `NativeBackend`, no `cryptography`.
+
+- `keyvault list` — print each key's cleartext id, on-disk hash and
+  `created_at`. The verification digest (key material) is never printed.
+- `keyvault verify-digest` — print the full 32-byte verification digest
+  of every key, hex-encoded, for offline cross-checking. Exit codes:
+  `0` (all read), `1` (empty vault / unreadable `digests/<hash>.commit`).
+
+Implementation: `keyvault_cli.py`.
+
+### `keyvault {init,recover}` / `audit decrypt`
+
+Stubs — they need the production Secure-Enclave `NativeBackend`
+(`_SecKeyBackend`), which is not yet implemented. Subcommands parse
+cleanly but raise `NotImplementedError` naming that blocker so users get
+a clear deferred message instead of "invalid choice".
 
 ## Owned filesystem paths (see `mordred-docs/mordred/PATHS.md`)
 
@@ -128,7 +148,8 @@ after `*,`); `detect()` is the only positional entry.
 | `install_dispatch` | `run(*, skill_arg, state, runner=_default_runner) -> int`; `cli_handler(ns)` |
 | `policy_writer` | `PolicySnapshot`; `PolicyWriter.write(snapshot)`; `PolicyWriter.upsert_mordred_sections(sections: Mapping[str, Mapping[str, Any]])` |
 | `policy_explainer` | `show()`, `explain(skill_id)`, `dry_run(skill_path)`, `reload()` + `cli_*(ns)` adapters |
-| `audit_cli` | `tail(*, n, log_path=None)`, `grep(*, pattern, log_path=None)`, `cli_tail(ns)`, `cli_grep(ns)`. `log_path=None` resolves the active writer path via `privacy_check._runtime.get_active_audit_path()` so reads follow the writer's configured `audit_log_path`; pass an explicit `log_path` to override (e.g. tests) |
+| `audit_cli` | `tail(*, n, log_path=None)`, `grep(*, pattern, log_path=None)`, `purge(*, before, audit_dir=None)`, `cli_tail(ns)`, `cli_grep(ns)`, `cli_purge(ns)`. `log_path`/`audit_dir` `=None` resolves the active writer path via `privacy_check._runtime.get_active_audit_path()` so reads/purges follow the writer's configured `audit_log_path`; pass an explicit value to override (e.g. tests) |
+| `keyvault_cli` | `list_keys(*, home=None) -> int`, `verify_digest(*, home=None) -> int`, `cli_list(ns)`, `cli_verify_digest(ns)`. Backend-free reads over `meta.json` + `digests/<hash>.commit`; `home=None` resolves the Hermes home via `_hermes_home()` |
 | `plugins_list` | `run(*, config_path=DEFAULT_CONFIG_PATH) -> int`; `cli_handler(ns)` |
 
 ## Fixture catalog
