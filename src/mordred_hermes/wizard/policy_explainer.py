@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .._home import HERMES_BASE
+from ..privacy_check._keyvault_probe import KeyvaultProbeError, keyvault_initialized
 from ..privacy_check._runtime import (
     DEFAULT_HERMES_CONFIG_PATH,
     get_active_policy_mode,
@@ -174,9 +175,24 @@ def _print_decision(
     except SkillMetadataError as e:
         print(f"Malformed SKILL.md: {e}", file=sys.stderr)
         return 1
+    # The keyvault-initialized probe is consulted only when the skill opts
+    # in via ``requires_keyvault: true`` (TODO.md §4.1); otherwise the
+    # explainer never touches the keyvault plugin or filesystem. A corrupt
+    # keyvault must not crash this diagnostic command — it is reported on
+    # stderr and treated as uninitialized (fail-closed: strict then shows
+    # the ``block`` decision).
+    vault_ready = True
+    if meta.requires_keyvault:
+        try:
+            vault_ready = keyvault_initialized()
+        except KeyvaultProbeError as e:
+            print(f"warning: {e}; treating keyvault as uninitialized", file=sys.stderr)
+            vault_ready = False
     outcome = evaluate_install(
         policy_mode=policy_mode,
         network_requirements=meta.network_requirements,
+        requires_keyvault=meta.requires_keyvault,
+        keyvault_initialized=vault_ready,
     )
     label = "dry-run:" if dry_run_label else "decision:"
     print(f"{label} {outcome.decision}", file=out)
@@ -184,6 +200,7 @@ def _print_decision(
         print(f"reason: {outcome.reason}", file=out)
     print(f"skill_id: {meta.name or '<unnamed>'}", file=out)
     print(f"network_requirements: {meta.network_requirements or '<unset>'}", file=out)
+    print(f"requires_keyvault: {meta.requires_keyvault}", file=out)
     print(f"policy_mode: {policy_mode}", file=out)
     return 0 if outcome.decision != "block" else 2
 

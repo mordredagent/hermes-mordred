@@ -119,3 +119,20 @@ def test_keyvault_codes_use_dotted_form() -> None:
         assert "_" not in code.split(".", 1)[0], (
             f"prefix segment of {code!r} must be a single token (got {code.split('.', 1)[0]!r})"
         )
+
+
+def test_policy_strict_keyvault_uninitialized_in_freeze() -> None:
+    """Phase 4 §4.1: emit site is ``install_wrapper.run`` — strict policy +
+    ``requires_keyvault: true`` skill + an uninitialized keyvault, paired
+    with an ``InstallBlocked`` raise. POLICY.md #25."""
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "policy.strict.keyvault_uninitialized" in get_args(ReasonCode)
+
+
+def test_policy_lenient_keyvault_uninitialized_warning_in_freeze() -> None:
+    """Phase 4 §4.1: lenient counterpart — install proceeds with an audit
+    ``decision=warn``. POLICY.md #26."""
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "policy.lenient.keyvault_uninitialized_warning" in get_args(ReasonCode)

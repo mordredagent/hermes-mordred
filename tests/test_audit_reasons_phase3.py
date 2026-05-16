@@ -82,20 +82,21 @@ def test_phase1_freeze_preserved() -> None:
     assert not missing, f"Phase 1 codes accidentally removed: {sorted(missing)}"
 
 
-def test_total_freeze_size_after_phase4_pr4_step_e() -> None:
-    """After Phase 4 PR4 step-E: 12 Phase 1 + 4 Phase 3 + 2 Phase 4 PR2 +
+def test_total_freeze_size_after_phase4_section_4_1() -> None:
+    """After Phase 4 §4.1: 12 Phase 1 + 4 Phase 3 + 2 Phase 4 PR2 +
     2 Phase 4 PR3 + 3 Phase 4 PR4c (keyvault.init_*) + 1 Phase 4 PR4 step-E
-    (keyvault.backup_exported) = 24.
+    (keyvault.backup_exported) + 2 Phase 4 §4.1 (policy.*.keyvault_uninitialized)
+    = 26.
 
-    ``keyvault.backup_exported`` (#24) graduated into the freeze in step-E
-    because its emit site — ``api.export_backup`` — now exists.
+    The §4.1 codes graduated into the freeze because their emit site —
+    ``install_wrapper.run``'s ``requires_keyvault`` enforcement — now exists.
 
     If a future PR bumps this, update POLICY.md's "Total freeze becomes N"
     statement in the same commit so the doc and the type stay in lockstep.
     """
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    assert len(get_args(ReasonCode)) == 24
+    assert len(get_args(ReasonCode)) == 26
 
 
 def test_no_underscore_typo_legacy_name() -> None:
