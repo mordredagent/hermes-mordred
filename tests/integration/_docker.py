@@ -189,6 +189,7 @@ def _wait_for_bootstrap_token(
     deadline.
     """
     deadline = time.monotonic() + timeout
+    combined = ""
     while time.monotonic() < deadline:
         proc = _run_compose(
             project_dir,
@@ -201,7 +202,12 @@ def _wait_for_bootstrap_token(
         if token in combined:
             return
         time.sleep(poll_interval)
-    raise BootstrapTimeout(f"service {service!r} did not emit {token!r} within {timeout}s")
+    # Attach the last log buffer we saw so a CI timeout is debuggable
+    # without re-running — an empty tail usually means the service
+    # never logged to stdout (see the torrc `Log notice stdout` note).
+    tail = "\n".join(combined.splitlines()[-20:]).strip()
+    detail = tail or "<no output captured from `docker compose logs`>"
+    raise BootstrapTimeout(f"service {service!r} did not emit {token!r} within {timeout}s; last log tail:\n{detail}")
 
 
 @contextmanager
