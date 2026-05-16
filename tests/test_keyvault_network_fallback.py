@@ -52,13 +52,13 @@ class _FakeSystemConfiguration:
         self._get_flags_result = get_flags_result
         self.create_calls: list[Any] = []
 
-    def SCNetworkReachabilityCreateWithName(  # noqa: N802 - mirrors C API
+    def SCNetworkReachabilityCreateWithName(  # mirrors the C API name
         self, allocator: Any, name: Any
     ) -> object:
         self.create_calls.append(name)
         return self._create_result
 
-    def SCNetworkReachabilityGetFlags(  # noqa: N802 - mirrors C API
+    def SCNetworkReachabilityGetFlags(  # mirrors the C API name
         self, target: Any, flags: Any
     ) -> tuple[bool, int]:
         return self._get_flags_result
