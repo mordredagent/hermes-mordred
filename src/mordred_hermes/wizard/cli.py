@@ -251,27 +251,42 @@ def _handle_audit_grep(args: argparse.Namespace) -> int:
 
 
 def _handle_audit_decrypt(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred audit decrypt: Phase 4 (TODO.md §4) not yet landed")
+    raise NotImplementedError(
+        "hermes mordred audit decrypt: blocked on the production Secure-Enclave "
+        "NativeBackend (_SecKeyBackend); lands in a later PR"
+    )
 
 
 def _handle_audit_purge(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred audit purge: Phase 4 (TODO.md §4) not yet landed")
+    from . import audit_cli
+
+    return audit_cli.cli_purge(args)
 
 
 def _handle_keyvault_init(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred keyvault init: Phase 4 (TODO.md §4) not yet landed")
+    raise NotImplementedError(
+        "hermes mordred keyvault init: blocked on the production Secure-Enclave "
+        "NativeBackend (_SecKeyBackend); lands in a later PR"
+    )
 
 
 def _handle_keyvault_list(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred keyvault list: Phase 4 (TODO.md §4) not yet landed")
+    from . import keyvault_cli
+
+    return keyvault_cli.cli_list(args)
 
 
 def _handle_keyvault_verify_digest(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred keyvault verify-digest: Phase 4 (TODO.md §4) not yet landed")
+    from . import keyvault_cli
+
+    return keyvault_cli.cli_verify_digest(args)
 
 
 def _handle_keyvault_recover(args: argparse.Namespace) -> int:
-    raise NotImplementedError("hermes mordred keyvault recover: Phase 4 (TODO.md §4) not yet landed")
+    raise NotImplementedError(
+        "hermes mordred keyvault recover: blocked on the production Secure-Enclave "
+        "NativeBackend (_SecKeyBackend); lands in a later PR"
+    )
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:

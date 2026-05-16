@@ -105,7 +105,14 @@ class TestSubcommandTree:
 
 
 class TestStubHandlersDeferProperly:
-    """Each Phase A stub raises NotImplementedError citing its real phase."""
+    """The remaining stub handlers raise NotImplementedError citing the blocker.
+
+    Phase 4 PR8 wired ``audit purge`` / ``keyvault list`` / ``keyvault
+    verify-digest`` (backend-free — real-handler tests in
+    test_audit_cli.py / test_wizard_keyvault_cli.py). The three commands
+    still stubbed (``audit decrypt`` / ``keyvault init`` / ``keyvault
+    recover``) all need the production Secure-Enclave ``NativeBackend``.
+    """
 
     @pytest.mark.parametrize(
         "argv,expected_marker",
@@ -118,12 +125,11 @@ class TestStubHandlersDeferProperly:
             # policy {show, explain, dry-run, reload}: wired in Phase D --
             # real-handler tests live in test_policy_explainer.py
             # audit tail/grep: wired in Phase F-2 -- real-handler tests in test_audit_cli.py
-            (["mordred", "audit", "decrypt", "--date", "2026-05-10"], "Phase 4"),
-            (["mordred", "audit", "purge", "--before", "2026-01-01"], "Phase 4"),
-            (["mordred", "keyvault", "init"], "Phase 4"),
-            (["mordred", "keyvault", "list"], "Phase 4"),
-            (["mordred", "keyvault", "verify-digest"], "Phase 4"),
-            (["mordred", "keyvault", "recover", "--blob", "x"], "Phase 4"),
+            # audit purge / keyvault list / verify-digest: wired in Phase 4 PR8 --
+            # real-handler tests in test_audit_cli.py / test_wizard_keyvault_cli.py
+            (["mordred", "audit", "decrypt", "--date", "2026-05-10"], "NativeBackend"),
+            (["mordred", "keyvault", "init"], "NativeBackend"),
+            (["mordred", "keyvault", "recover", "--blob", "x"], "NativeBackend"),
             # plugins list: wired in Phase F-3 -- real-handler tests in test_plugins_list.py
         ],
     )
@@ -187,10 +193,11 @@ class TestMainStandaloneEntry:
     def test_dispatches_to_stub_handler(self) -> None:
         """`hermes-mordred keyvault init` reaches a still-stubbed handler.
 
-        Targets a Phase 4 stub since Phases C/D/E/F now wire real handlers
-        for configure / policy / upgrade / install / audit / plugins.
+        Targets ``keyvault init`` — still blocked on the production
+        Secure-Enclave ``NativeBackend`` after Phase 4 PR8 wired the
+        backend-free keyvault/audit commands.
         """
-        with pytest.raises(NotImplementedError, match="Phase 4"):
+        with pytest.raises(NotImplementedError, match="NativeBackend"):
             main(["keyvault", "init"])
 
     def test_unknown_subcommand_argparse_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
