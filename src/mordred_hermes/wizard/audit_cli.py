@@ -16,6 +16,7 @@ import argparse
 import re
 import sys
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
 from ..privacy_check._runtime import get_active_audit_path
@@ -24,10 +25,15 @@ from ._runtime import DEFAULT_AUDIT_LOG_PATH
 __all__ = [
     "DEFAULT_AUDIT_LOG_PATH",
     "cli_grep",
+    "cli_purge",
     "cli_tail",
     "grep",
+    "purge",
     "tail",
 ]
+
+# The active audit log file name; rotated files are ``audit.log.<date>[...]``.
+_AUDIT_LOG_NAME = "audit.log"
 
 
 def _resolve_active_audit_path() -> Path:
@@ -120,6 +126,53 @@ def grep(*, pattern: str, log_path: Path | None = None) -> int:
     return 0 if hits else 1
 
 
+def purge(*, before: str, audit_dir: Path | None = None) -> int:
+    """Delete rotated audit-log files dated strictly before ``before``.
+
+    ``before`` is a ``YYYY-MM-DD`` date; rotated files named
+    ``audit.log.<date>[.N][.gz]`` whose date is < ``before`` are removed.
+    The active ``audit.log`` is never touched, and a file whose suffix is
+    not a parseable date (e.g. ``audit.log.backup``) is left alone.
+
+    This is the manual cleanup path for pre-Phase-4 plaintext audit
+    history (PATHS.md §Consumer CLI) — the operator picks the cutoff.
+
+    Returns 0 on success (including "nothing matched"), 2 when ``before``
+    is not a valid ``YYYY-MM-DD`` date.
+
+    ``audit_dir=None`` resolves the directory of the active writer path,
+    so the CLI cannot drift from where rotations actually land.
+    """
+    try:
+        cutoff = datetime.strptime(before, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"invalid --before date {before!r}: expected YYYY-MM-DD", file=sys.stderr)
+        return 2
+
+    directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
+    prefix = _AUDIT_LOG_NAME + "."
+    deleted = 0
+    if directory.exists():
+        for child in sorted(directory.iterdir()):
+            if child.name == _AUDIT_LOG_NAME or not child.name.startswith(prefix):
+                continue
+            date_token = child.name[len(prefix) :].split(".", 1)[0]
+            try:
+                file_date = datetime.strptime(date_token, "%Y-%m-%d").date()
+            except ValueError:
+                continue  # not a dated rotation file — leave it alone
+            if file_date < cutoff:
+                try:
+                    child.unlink()
+                except OSError as exc:
+                    print(f"could not purge {child.name}: {exc}", file=sys.stderr)
+                    continue
+                print(f"purged {child.name}")
+                deleted += 1
+    print(f"{deleted} rotated audit log file(s) purged.")
+    return 0
+
+
 # -----------------------------------------------------------------------------
 # CLI adapters wired in cli.py.
 # -----------------------------------------------------------------------------
@@ -131,3 +184,7 @@ def cli_tail(args: argparse.Namespace) -> int:
 
 def cli_grep(args: argparse.Namespace) -> int:
     return grep(pattern=str(args.pattern))
+
+
+def cli_purge(args: argparse.Namespace) -> int:
+    return purge(before=str(args.before))
