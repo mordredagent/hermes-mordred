@@ -260,4 +260,21 @@ def make_audit_writer(
             type(exc).__name__,
             exc,
         )
-        return NDJSONWriter(path=audit_path)
+        writer = NDJSONWriter(path=audit_path)
+        # L1 (PR #39 review): reaching this branch means the keyvault was
+        # initialized — or its state could not be read — so encryption was
+        # *expected*. Record the encrypted→plaintext downgrade in the trail
+        # itself, not only in Python logging. The clean "keyvault never
+        # initialized" path returns above and is intentionally silent.
+        # Best-effort: a degraded path must not let an audit-sink failure
+        # crash the caller (_runtime._load_state).
+        with contextlib.suppress(Exception):
+            writer.append(
+                {
+                    "event": "mordred.audit_writer",
+                    "decision": "warn",
+                    "reason": "mordred.degraded.audit_encryption_unavailable",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        return writer

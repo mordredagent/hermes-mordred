@@ -102,6 +102,19 @@ bringing the total to 26:
 - ``policy.lenient.keyvault_uninitialized_warning`` — lenient policy; same
   precondition. Decision ``warn`` — install proceeds, the operator is
   informed via the audit log (mirrors ``policy.lenient.unknown_metadata_warning``).
+
+Phase 4 PR #39 review follow-up (2026-05-17) adds 1 ``mordred.degraded.*``
+code, bringing the total to 27:
+
+- ``mordred.degraded.audit_encryption_unavailable`` — emitted by
+  ``audit.make_audit_writer`` when the keyvault is initialized (or its
+  state could not be read) but the encrypted :class:`EncryptedWriter`
+  cannot be built, so privacy_check falls open to a plaintext
+  :class:`NDJSONWriter`. Decision ``warn``. Fields:
+  ``event="mordred.audit_writer"``, ``detail`` (the fallback-triggering
+  exception's type + message; never key material). The clean
+  "keyvault never initialized" path stays silent — that is the baseline,
+  not a downgrade.
 """
 
 from typing import Literal
@@ -133,4 +146,5 @@ ReasonCode = Literal[
     "keyvault.backup_exported",
     "policy.strict.keyvault_uninitialized",
     "policy.lenient.keyvault_uninitialized_warning",
+    "mordred.degraded.audit_encryption_unavailable",
 ]
