@@ -20,7 +20,7 @@ Secure Enclave-backed key management. macOS Apple Silicon **or T2 Intel** (`pip 
 | `api.py` | PR4 | placeholder | Public Python API (generate / encrypt / decrypt / export_backup / import_backup / verify_digest); BIP39 Unicode normalization gates here; production `_SecKeyBackend` (pyobjc) lands with this PR |
 | `seed_display.py` | PR7 | **landed** | `display_seed()` orchestrator: blackout assert → M4 banner → screenshot pre-check → `SeedDisplayHandle.consume()` → 60s monotonic timer + capture polling → auto-clear; `_default_capture_probe` wraps macOS `CGScreenIsBeingCaptured` (best-effort, fails open); `SeedDisplaySurface` Protocol abstracts rendering |
 | `network_fallback.py` | PR5 | **landed** | OS-API blackout fallback: `resolve_blackout_assert()` delegates to `mordred_network` when importable, else probes macOS `SCNetworkReachability` (pyobjc, lazy import); `blackout_assert` fails closed when the probe cannot run |
-| `log_encryption.py` | PR4 | placeholder | Phase 1 audit `Writer` interface slot-in for AES-GCM |
+| `log_encryption.py` | PR6 | **landed** | `EncryptedWriter` (Phase 1 `Writer` Protocol) + `decrypt_log_file`; `MRAL` v1 line-oriented AES-GCM wire format, keyvault-wrapped DEK in the header, per-entry AAD bound to `SHA-256(header)` |
 
 `register(ctx)` remains a no-op until Phase 4 PR4 wires the public surface to Hermes.
 
