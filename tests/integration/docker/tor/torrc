@@ -7,9 +7,15 @@
 #   pick from 172.16.0.0/12 by default) so even if the bind ever
 #   drifts, only the test runner and the container itself can speak
 #   SOCKS.
-# - Log to /var/log/tor/notices.log so the docker-compose healthcheck
-#   can grep for the bootstrap token; the Dockerfile chowns the dir
-#   to the `tor` user.
+# - Log notice to TWO sinks, both required:
+#   * /var/log/tor/notices.log — the docker-compose healthcheck greps
+#     this file (the Dockerfile chowns the dir to the `tor` user).
+#   * stdout — the `_wait_for_bootstrap_token` helper polls
+#     `docker compose logs`, which only ever sees container stdout.
+#   A torrc with a `Log notice file` line and no `Log notice stdout`
+#   line sends *all* notices to the file once the config is parsed, so
+#   `Bootstrapped 100%` never reaches `docker compose logs` and the
+#   helper times out every run. Both lines are needed; do not drop one.
 
 SOCKSPort 0.0.0.0:9050
 SocksPolicy accept 127.0.0.1
@@ -20,8 +26,12 @@ SocksPolicy reject *
 
 DataDirectory /tmp/tor-data
 Log notice file /var/log/tor/notices.log
+Log notice stdout
 
+# Stay IPv4-only: GitHub Actions runners have no working IPv6 egress,
+# so an IPv6 bootstrap attempt just wastes the deadline. `ClientUseIPv6 0`
+# is the whole knob — there is no `ClientPreferIPv4*` option, and torrc
+# fails *all* validation (Tor exits before bootstrap) on any unknown key.
 ClientUseIPv6 0
-ClientPreferIPv4OrAddrFamily 4
 
 DormantTimeoutEnabled 0
