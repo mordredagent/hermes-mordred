@@ -87,6 +87,21 @@ site"), bringing the total to 24:
   ``event="keyvault.backup_export"``, ``key_id_hash``, ``blob_version=1``,
   ``kdf_id=1``, ``envelope_count``. Success-path emit — a sink failure is
   suppressed via ``contextlib.suppress`` (the blob is already returned).
+
+Phase 4 §4.1 freeze (2026-05-16) adds 2 install-time ``policy.*`` codes
+for ``metadata.mordred.requires_keyvault`` opt-in enforcement. Both have a
+same-PR emit site in ``install_wrapper.run`` (``pre_install`` event),
+bringing the total to 26:
+
+- ``policy.strict.keyvault_uninitialized`` — strict policy; the skill
+  declares ``requires_keyvault: true`` but the Mordred keyvault holds no
+  keys. Decision ``block`` (paired with an :class:`InstallBlocked` raise).
+  The keyvault-initialized check is backend-free (``meta.json`` read only,
+  see :mod:`._keyvault_probe`) so the decision is reproducible on every
+  platform.
+- ``policy.lenient.keyvault_uninitialized_warning`` — lenient policy; same
+  precondition. Decision ``warn`` — install proceeds, the operator is
+  informed via the audit log (mirrors ``policy.lenient.unknown_metadata_warning``).
 """
 
 from typing import Literal
@@ -116,4 +131,6 @@ ReasonCode = Literal[
     "keyvault.init_completed",
     "keyvault.init_denied",
     "keyvault.backup_exported",
+    "policy.strict.keyvault_uninitialized",
+    "policy.lenient.keyvault_uninitialized_warning",
 ]

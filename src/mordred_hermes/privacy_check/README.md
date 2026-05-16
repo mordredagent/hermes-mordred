@@ -20,12 +20,13 @@ Skill metadata enforcement and audit logging.
 
 | Module | Purpose |
 | --- | --- |
-| `policy.evaluate_install(*, policy_mode, network_requirements)` | Pure decision for `hermes mordred install <skill>`. |
+| `policy.evaluate_install(*, policy_mode, network_requirements, requires_keyvault=False, keyvault_initialized=True)` | Pure decision for `hermes mordred install <skill>`. Covers `network_requirements` and `requires_keyvault` opt-in enforcement (TODO §4.1). |
 | `policy.evaluate_pre_tool_call(*, policy_mode, tool_name, active_path)` | Pure decision for the `pre_tool_call` hook. |
 | `skill_frontmatter.parse(skill_md_path)` | Read SKILL.md, return `SkillMetadata`. Tolerates missing `metadata.mordred.*`. |
+| `_keyvault_probe.keyvault_initialized(home=None)` | Backend-free probe: True when the Mordred keyvault holds ≥1 key. Reads `meta.json` only; lazily imports `keyvault._storage`. |
 | `audit.NDJSONWriter(path=...)` | Single-writer audit logger. Implements the frozen `Writer` Protocol (Phase 4 swaps to `EncryptedWriter`). |
-| `install_wrapper.run(*, skill_path, policy_mode, audit, runner=...)` | Policy-gated wrapper for `hermes skills install <skill>`. |
-| `_audit_reasons.ReasonCode` | Frozen `Literal` of the 12 audit reason codes (see `mordred-docs/mordred/POLICY.md`). |
+| `install_wrapper.run(*, skill_path, policy_mode, audit, runner=..., keyvault_probe=...)` | Policy-gated wrapper for `hermes skills install <skill>`. `keyvault_probe` is consulted only for skills declaring `requires_keyvault: true`. |
+| `_audit_reasons.ReasonCode` | Frozen `Literal` of the 26 audit reason codes (see `mordred-docs/mordred/POLICY.md`). |
 | `_runtime.poison(reason)` / `is_poisoned()` | Defense-in-depth poison flag — every subsequent `pre_tool_call` blocks. |
 
 ### Configuration (under `plugins.mordred_privacy_check` in `~/.hermes/config.yaml`)

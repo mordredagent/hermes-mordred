@@ -20,6 +20,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from ..privacy_check._keyvault_probe import KeyvaultProbeError
 from ..privacy_check._runtime import PluginState, ensure_state
 from ..privacy_check.install_wrapper import (
     InstallBlocked,
@@ -53,6 +54,16 @@ def run(
     except InstallBlocked as blocked:
         print(
             f"blocked: {blocked.skill_id or '<unknown>'} ({blocked.reason})",
+            file=sys.stderr,
+        )
+        return 2
+    except KeyvaultProbeError as corrupt:
+        # The skill declares `requires_keyvault: true` but the keyvault's
+        # meta.json is corrupt — report cleanly instead of letting a
+        # keyvault-internal traceback escape. Install did not happen, so
+        # exit code 2 matches the InstallBlocked path.
+        print(
+            f"blocked: {skill_arg} (keyvault unreadable — {corrupt})",
             file=sys.stderr,
         )
         return 2

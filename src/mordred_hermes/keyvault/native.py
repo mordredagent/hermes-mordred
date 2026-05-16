@@ -117,15 +117,22 @@ def _probe_secure_enclave_capability() -> bool:
         :class:`WrapNativeUnavailable` handling around it.
 
     Note:
-        This stub returns ``False`` — full implementation lands in
-        step-B (``wrap.py``), where the SecKey generate / delete code
-        path is exercised against the live Enclave. Tests override the
+        Delegates to :func:`_seckey_backend.probe_capability`, which
+        generates and immediately deletes a ``.privateKeyUsage``-only
+        Enclave key (no biometry flag → no prompt). Tests override this
         function via ``monkeypatch.setattr``; the production code path
-        is exercised only on macOS arm64 with
-        ``MORDRED_KEYVAULT_LIVE=1`` (step-C live integration test).
+        is exercised only on macOS arm64 / T2 with
+        ``MORDRED_KEYVAULT_LIVE=1`` (live integration test).
     """
     _lazy_import_security()  # Surface WrapNativeUnavailable early.
-    return False
+
+    # Local import: ``_seckey_backend`` imports ``native`` at module
+    # scope for ``_lazy_import_security``; importing it here (rather than
+    # at the top of this file) keeps that dependency one-directional and
+    # avoids a circular import at load time.
+    from . import _seckey_backend
+
+    return _seckey_backend.probe_capability()
 
 
 def is_secure_enclave_available() -> bool:

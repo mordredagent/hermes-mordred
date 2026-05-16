@@ -27,6 +27,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 CLEARNET = FIXTURES / "clearnet_skill"
 TOR = FIXTURES / "tor_skill"
 MISSING = FIXTURES / "missing_metadata_skill"
+RKV = FIXTURES / "requires_keyvault_skill"
 
 
 @dataclass
@@ -170,3 +171,87 @@ def test_audit_records_skill_id_for_all_modes(
     entries = _audit_entries(tmp_path / "audit.log")
     assert len(entries) == 1
     assert entries[0]["skill_id"] == "tor-skill"
+
+
+class TestRequiresKeyvault:
+    """``metadata.mordred.requires_keyvault`` enforcement (TODO §4.1).
+
+    The keyvault-initialized probe is injected; ``lambda: False`` models an
+    uninitialized vault, ``lambda: True`` an initialized one.
+    """
+
+    def test_strict_blocks_when_keyvault_uninitialized(
+        self, writer: NDJSONWriter, runner: _RunnerSpy, tmp_path: Path
+    ) -> None:
+        with pytest.raises(InstallBlocked) as exc:
+            run(
+                skill_path=RKV,
+                policy_mode="strict",
+                audit=writer,
+                runner=runner,
+                keyvault_probe=lambda: False,
+            )
+        assert exc.value.reason == "policy.strict.keyvault_uninitialized"
+        assert exc.value.skill_id == "requires-keyvault-skill"
+        assert runner.calls == [], "runner must not be invoked when blocked"
+        entry = _audit_entries(tmp_path / "audit.log")[0]
+        assert entry["event"] == "pre_install"
+        assert entry["decision"] == "block"
+        assert entry["reason"] == "policy.strict.keyvault_uninitialized"
+        assert entry["skill_id"] == "requires-keyvault-skill"
+
+    def test_strict_allows_when_keyvault_initialized(self, writer: NDJSONWriter, runner: _RunnerSpy) -> None:
+        result = run(
+            skill_path=RKV,
+            policy_mode="strict",
+            audit=writer,
+            runner=runner,
+            keyvault_probe=lambda: True,
+        )
+        assert result.outcome.decision == "allow"
+        assert result.skill_id == "requires-keyvault-skill"
+        assert runner.calls == [["hermes", "skills", "install", str(RKV)]]
+
+    def test_lenient_warns_when_keyvault_uninitialized(
+        self, writer: NDJSONWriter, runner: _RunnerSpy, tmp_path: Path
+    ) -> None:
+        result = run(
+            skill_path=RKV,
+            policy_mode="lenient",
+            audit=writer,
+            runner=runner,
+            keyvault_probe=lambda: False,
+        )
+        assert result.outcome.decision == "warn"
+        assert result.outcome.reason == "policy.lenient.keyvault_uninitialized_warning"
+        assert runner.calls == [["hermes", "skills", "install", str(RKV)]]
+        entry = _audit_entries(tmp_path / "audit.log")[0]
+        assert entry["decision"] == "warn"
+        assert entry["reason"] == "policy.lenient.keyvault_uninitialized_warning"
+
+    def test_off_allows_when_keyvault_uninitialized(self, writer: NDJSONWriter, runner: _RunnerSpy) -> None:
+        result = run(
+            skill_path=RKV,
+            policy_mode="off",
+            audit=writer,
+            runner=runner,
+            keyvault_probe=lambda: False,
+        )
+        assert result.outcome.decision == "allow"
+        assert result.outcome.reason is None
+        assert runner.calls == [["hermes", "skills", "install", str(RKV)]]
+
+    def test_probe_not_called_for_skill_without_opt_in(self, writer: NDJSONWriter, runner: _RunnerSpy) -> None:
+        """A skill that does not declare ``requires_keyvault`` must never trigger the probe."""
+
+        def boom() -> bool:
+            raise AssertionError("keyvault probe must not run for non-opt-in skills")
+
+        result = run(
+            skill_path=TOR,
+            policy_mode="strict",
+            audit=writer,
+            runner=runner,
+            keyvault_probe=boom,
+        )
+        assert result.outcome.decision == "allow"
