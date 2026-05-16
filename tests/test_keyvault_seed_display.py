@@ -365,10 +365,11 @@ class _FakeQuartz:
         self._captured = captured
         self._raises = raises
 
-    def CGMainDisplayID(self) -> int:  # noqa: N802 - mirrors the pyobjc symbol
+    def CGMainDisplayID(self) -> int:
+        # CamelCase mirrors the pyobjc CoreGraphics symbol names.
         return 1
 
-    def CGScreenIsBeingCaptured(self, display: int) -> bool:  # noqa: N802
+    def CGScreenIsBeingCaptured(self, display: int) -> bool:
         if self._raises:
             raise RuntimeError("pyobjc bridge error")
         return self._captured

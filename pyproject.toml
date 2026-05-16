@@ -23,6 +23,9 @@ macos = [
   # Phase 4 PR5: SCNetworkReachability probe for keyvault.network_fallback
   # (OS-API network-blackout fallback when mordred_network is absent).
   "pyobjc-framework-SystemConfiguration>=10.0",
+  # Phase 4 PR7: CGScreenIsBeingCaptured probe for keyvault.seed_display
+  # (best-effort screenshot detection during the Seed display window, M5).
+  "pyobjc-framework-Quartz>=10.0",
   "argon2-cffi>=23",
   "cryptography>=42",
   "blake3>=0.4",
