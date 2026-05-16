@@ -1,10 +1,11 @@
-"""``hermes mordred audit {tail,grep}`` -- read-only audit log inspection.
+"""``hermes mordred audit {tail,grep,decrypt,purge}`` -- audit log CLI.
 
 Wizard owns READS over ``~/.hermes/mordred/audit.log``; privacy_check
-remains the sole writer (PATHS.md). Phase 1 plaintext NDJSON only --
-Phase 4 will swap the writer for an encrypted format; this reader
-detects non-JSON headers and surfaces a "use audit decrypt (Phase 4)"
-message instead of dumping garbage.
+remains the sole writer (PATHS.md). ``tail`` / ``grep`` read the Phase 1
+plaintext NDJSON format; ``decrypt`` reads the Phase 4 ``MRAL``
+AES-GCM-encrypted format through the Secure Enclave authorization
+boundary. The plaintext reader detects non-JSON headers and points the
+operator at ``audit decrypt`` instead of dumping garbage.
 
 Naive read implementation (``read().splitlines()``) is acceptable v1
 because :mod:`privacy_check.audit` enforces a 10 MB rotation cap.
@@ -13,20 +14,30 @@ because :mod:`privacy_check.audit` enforces a 10 MB rotation cap.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
-from collections.abc import Iterator
-from datetime import datetime
+from collections.abc import Callable, Iterator
+from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ..privacy_check._runtime import get_active_audit_path
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
+if TYPE_CHECKING:
+    from ..keyvault.wrap import NativeBackend
+
+#: Sink shape for the DEK-unwrap audit entry emitted by ``decrypt_log_file``.
+AuditSink = Callable[[dict[str, Any]], None]
+
 __all__ = [
     "DEFAULT_AUDIT_LOG_PATH",
+    "cli_decrypt",
     "cli_grep",
     "cli_purge",
     "cli_tail",
+    "decrypt",
     "grep",
     "purge",
     "tail",
@@ -62,7 +73,7 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
         # is either an encrypted blob (Phase 4) or corruption.
         print(
             f"Audit log at {log_path} appears encrypted or corrupted; "
-            "use `hermes mordred audit decrypt` (Phase 4) once available.",
+            "use `hermes mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log.",
             file=sys.stderr,
         )
         return None
@@ -173,6 +184,112 @@ def purge(*, before: str, audit_dir: Path | None = None) -> int:
     return 0
 
 
+def _resolve_decrypt_targets(directory: Path, target: date) -> list[Path]:
+    """Return the encrypted-log files holding ``target``'s entries.
+
+    Rotated files are ``audit.log.<date>[.N][.gz]``; the active
+    ``audit.log`` holds the current UTC day until it rotates, so it is
+    included only when ``target`` is today.
+    """
+    if not directory.exists():
+        return []
+    rotated_prefix = f"{_AUDIT_LOG_NAME}.{target.isoformat()}"
+    targets = [
+        child
+        for child in sorted(directory.iterdir())
+        if child.is_file() and (child.name == rotated_prefix or child.name.startswith(rotated_prefix + "."))
+    ]
+    if target == datetime.now(UTC).date():
+        active = directory / _AUDIT_LOG_NAME
+        if active.is_file():
+            targets.append(active)
+    return targets
+
+
+def _stderr_unwrap_sink(entry: dict[str, Any]) -> None:
+    """Surface the DEK-unwrap authorization decision to the operator.
+
+    ``decrypt_log_file`` records ``keyvault.unwrap_authorized`` /
+    ``keyvault.unwrap_denied`` through this sink. ``audit decrypt`` is an
+    explicit, biometric-gated operator action over their own log, so v1
+    surfaces the decision on stderr rather than re-appending it into the
+    audit log — re-appending would need the encrypted writer and risk a
+    plaintext/ciphertext mismatch. Persisted decrypt-operation auditing
+    is a documented v2 follow-up.
+    """
+    event = entry.get("event", "?")
+    decision = entry.get("decision", "?")
+    print(f"[audit] {event} decision={decision}", file=sys.stderr)
+
+
+def decrypt(
+    *,
+    date: str,
+    audit_dir: Path | None = None,
+    backend: NativeBackend | None = None,
+    audit_sink: AuditSink | None = None,
+) -> int:
+    """Decrypt the ``MRAL``-encrypted audit log file(s) for one UTC date.
+
+    Prints every entry as a canonical JSON line, oldest first. Resolves
+    rotated ``audit.log.<date>[.N][.gz]`` files plus — when ``date`` is
+    today (UTC) — the active ``audit.log``.
+
+    ``backend=None`` constructs the production Secure-Enclave backend;
+    tests inject a software backend. ``audit_dir=None`` resolves the
+    directory of the active writer path.
+
+    Returns:
+        0  every resolved file decrypted;
+        1  no file for the date, a corrupt file, a denied Enclave
+           prompt, or a missing wrapping key;
+        2  ``date`` is not a valid ``YYYY-MM-DD`` date.
+    """
+    try:
+        target = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"invalid --date {date!r}: expected YYYY-MM-DD", file=sys.stderr)
+        return 2
+
+    directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
+    targets = _resolve_decrypt_targets(directory, target)
+    if not targets:
+        print(f"No audit log file found for {date} under {directory}", file=sys.stderr)
+        return 1
+
+    from ..keyvault import log_encryption
+    from ..keyvault._exceptions import WrapAuthCancelled, WrapKeyNotFound
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    sink = audit_sink if audit_sink is not None else _stderr_unwrap_sink
+
+    rc = 0
+    for path in targets:
+        try:
+            entries = log_encryption.decrypt_log_file(path, backend=backend, audit_sink=sink)
+        except WrapAuthCancelled:
+            print(f"{path.name}: Secure Enclave authorization was cancelled", file=sys.stderr)
+            return 1
+        except WrapKeyNotFound:
+            print(
+                f"{path.name}: audit-log wrapping key not found — is the keyvault initialized?",
+                file=sys.stderr,
+            )
+            return 1
+        except log_encryption.AuditLogDecryptError as exc:
+            print(f"{path.name}: {exc}", file=sys.stderr)
+            rc = 1
+            continue
+        plural = "entry" if len(entries) == 1 else "entries"
+        print(f"# {path.name} — {len(entries)} {plural}")
+        for entry in entries:
+            print(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+    return rc
+
+
 # -----------------------------------------------------------------------------
 # CLI adapters wired in cli.py.
 # -----------------------------------------------------------------------------
@@ -188,3 +305,7 @@ def cli_grep(args: argparse.Namespace) -> int:
 
 def cli_purge(args: argparse.Namespace) -> int:
     return purge(before=str(args.before))
+
+
+def cli_decrypt(args: argparse.Namespace) -> int:
+    return decrypt(date=str(args.date))

@@ -251,10 +251,9 @@ def _handle_audit_grep(args: argparse.Namespace) -> int:
 
 
 def _handle_audit_decrypt(args: argparse.Namespace) -> int:
-    raise NotImplementedError(
-        "hermes mordred audit decrypt: blocked on the production Secure-Enclave "
-        "NativeBackend (_SecKeyBackend); lands in a later PR"
-    )
+    from . import audit_cli
+
+    return audit_cli.cli_decrypt(args)
 
 
 def _handle_audit_purge(args: argparse.Namespace) -> int:

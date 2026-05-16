@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -434,7 +434,7 @@ class TestDecrypt:
     def test_decrypts_active_log_for_today(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         be = self._backend()
         self._write_encrypted(tmp_path / "audit.log", be, [{"event": "keyvault.unwrap_authorized"}])
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         rc = audit_cli.decrypt(date=today, audit_dir=tmp_path, backend=be)
         assert rc == 0
         assert "keyvault.unwrap_authorized" in capsys.readouterr().out
