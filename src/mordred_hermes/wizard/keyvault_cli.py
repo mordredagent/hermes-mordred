@@ -353,6 +353,23 @@ def init_keyvault(
         # confirm_generate's own re-init guard (a race with the pre-check).
         print(f"Keyvault init refused: {exc}", file=sys.stderr)
         return 1
+
+    # L465: provision the audit-log wrapping key so privacy_check's
+    # encrypted-audit factory (privacy_check.audit.make_audit_writer)
+    # engages on the next session. Best-effort — the keyvault is already
+    # durably initialised; if this fails the audit log simply stays
+    # plaintext until repaired.
+    try:
+        from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
+        from ..keyvault.wrap import generate_wrapping_key
+
+        generate_wrapping_key(AUDIT_LOG_KEY_ID, backend=backend)
+    except WrapError as exc:
+        print(
+            f"note: audit-log wrapping key not provisioned ({exc}); the audit log "
+            "stays plaintext until the keyvault is repaired.",
+            file=sys.stderr,
+        )
     print(f"Keyvault initialised. Key: {result.key_id}")
     return 0
 

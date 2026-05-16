@@ -104,43 +104,6 @@ class TestSubcommandTree:
         assert hasattr(ns, "func"), f"set_defaults(func=...) missing for {argv!r}"
 
 
-class TestStubHandlersDeferProperly:
-    """The remaining stub handlers raise NotImplementedError citing the blocker.
-
-    Phase 4 PR8 wired ``audit purge`` / ``keyvault list`` / ``keyvault
-    verify-digest`` (backend-free — real-handler tests in
-    test_audit_cli.py / test_wizard_keyvault_cli.py). The three commands
-    still stubbed (``audit decrypt`` / ``keyvault init`` / ``keyvault
-    recover``) all need the production Secure-Enclave ``NativeBackend``.
-    """
-
-    @pytest.mark.parametrize(
-        "argv,expected_marker",
-        [
-            # configure: wired in Phase C -- real-handler test lives in test_configure.py
-            # upgrade: wired in Phase E -- real-handler tests live in test_upgrade.py
-            # install: wired in Phase F-1 -- real-handler tests in test_install_dispatch.py
-            # network {use, status}: wired in Phase 3 PR2-C --
-            # real-handler tests live in test_wizard_network_cli.py
-            # policy {show, explain, dry-run, reload}: wired in Phase D --
-            # real-handler tests live in test_policy_explainer.py
-            # audit tail/grep: wired in Phase F-2 -- real-handler tests in test_audit_cli.py
-            # audit purge / keyvault list / verify-digest: wired in Phase 4 PR8 --
-            # real-handler tests in test_audit_cli.py / test_wizard_keyvault_cli.py
-            (["mordred", "audit", "decrypt", "--date", "2026-05-10"], "NativeBackend"),
-            (["mordred", "keyvault", "init"], "NativeBackend"),
-            (["mordred", "keyvault", "recover", "--blob", "x"], "NativeBackend"),
-            # plugins list: wired in Phase F-3 -- real-handler tests in test_plugins_list.py
-        ],
-    )
-    def test_stub_raises_with_phase_marker(self, argv: list[str], expected_marker: str) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(argv)
-        with pytest.raises(NotImplementedError) as exc:
-            dispatch(ns)
-        assert expected_marker in str(exc.value)
-
-
 class TestUpgradeFlagShape:
     """The H5 conflict-resolution flags must accept their documented choices."""
 
@@ -189,16 +152,6 @@ class TestMainStandaloneEntry:
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "COMMAND" in err or "required" in err.lower()
-
-    def test_dispatches_to_stub_handler(self) -> None:
-        """`hermes-mordred keyvault init` reaches a still-stubbed handler.
-
-        Targets ``keyvault init`` — still blocked on the production
-        Secure-Enclave ``NativeBackend`` after Phase 4 PR8 wired the
-        backend-free keyvault/audit commands.
-        """
-        with pytest.raises(NotImplementedError, match="NativeBackend"):
-            main(["keyvault", "init"])
 
     def test_unknown_subcommand_argparse_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:

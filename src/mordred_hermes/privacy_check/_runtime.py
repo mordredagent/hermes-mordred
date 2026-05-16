@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from .._home import HERMES_BASE, hermes_home
-from .audit import NDJSONWriter, Writer
+from .audit import Writer, make_audit_writer
 from .policy import PolicyMode
 
 _LOG = logging.getLogger("mordred.privacy_check")
@@ -179,7 +179,10 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
     audit_path = audit_path_override
     if audit_path is None:
         audit_path = _resolve_audit_path(section.get("audit_log_path"))
-    audit = NDJSONWriter(path=audit_path)
+    # L465: encrypt the audit log once the keyvault is initialized. The
+    # factory fails open to plaintext NDJSON. keyvault_home is the Hermes
+    # home — the directory holding config.yaml.
+    audit = make_audit_writer(audit_path, keyvault_home=config_path.parent)
 
     return PluginState(
         policy_mode=policy_mode,
