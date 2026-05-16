@@ -33,11 +33,15 @@ key + a software ephemeral private key and never prompts the user
   raise. Decision ``block``. Fields: ``event="keyvault.unwrap_dek"``,
   ``native_error_code`` (translated; never the raw OSStatus).
 
-PR4 (``keyvault.init_*`` / ``keyvault.backup_exported``) reason codes
-are deliberately NOT in the freeze yet — they land in PR4 step-0 once
-the emit site exists, to avoid the "frozen but unused" footgun that
-Phase 2 hit with ``policy.strict.local_stream_interrupted`` (POLICY.md
-entry #12).
+PR4 step-D (``keyvault.init_*``) and step-E (``keyvault.backup_exported``)
+reason codes graduate into the freeze as each emit site lands — the
+"freeze a code only once it has an emit site" discipline that avoids the
+"frozen but unused" footgun Phase 2 hit with
+``policy.strict.local_stream_interrupted`` (POLICY.md entry #12).
+``keyvault.backup_exported`` (#24) is frozen as of step-E because
+``api.export_backup`` now emits it; the membership assertion lives in
+``test_keyvault_api_backup.test_backup_exported_is_now_in_freeze``
+alongside the emit-site behavior tests.
 """
 
 from __future__ import annotations
@@ -101,17 +105,6 @@ def test_keyvault_init_denied_in_freeze() -> None:
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
     assert "keyvault.init_denied" in get_args(ReasonCode)
-
-
-def test_backup_exported_deliberately_not_frozen_yet() -> None:
-    """``keyvault.backup_exported`` (#24) is NOT frozen yet — it lands with
-    the ``api.export_backup`` emit site (a later step-D slice). Freezing it
-    before the emit site exists would reintroduce the "frozen but unused"
-    footgun that Phase 2 hit with ``policy.strict.local_stream_interrupted``.
-    """
-    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
-
-    assert "keyvault.backup_exported" not in get_args(ReasonCode)
 
 
 def test_keyvault_codes_use_dotted_form() -> None:

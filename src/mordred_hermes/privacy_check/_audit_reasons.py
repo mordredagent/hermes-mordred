@@ -77,11 +77,16 @@ in ``api.confirm_generate`` (POLICY.md #21-23):
   Decision ``block``. Fields: ``event="keyvault.init"``, ``key_id_hash``.
   Sink failure is chained as ``__context__`` on the raised exception.
 
-``keyvault.backup_exported`` (#24) is still deliberately NOT frozen — it
-lands with the ``api.export_backup`` emit site (a later step-D slice),
-preserving the "freeze only with an emit site" discipline that avoids
-the "frozen but unused" footgun Phase 2 hit with
-``policy.strict.local_stream_interrupted`` (POLICY.md entry #12 caveat).
+Phase 4 PR4 step-E (2026-05-16) adds 1 ``keyvault.backup_exported`` code.
+Its emit site — ``api.export_backup`` — landed in step-E, so the code
+graduates into the freeze under condition (a) ("has a same-PR emit
+site"), bringing the total to 24:
+
+- ``keyvault.backup_exported`` — emitted by ``api.export_backup`` once the
+  portable MRKV backup blob is materialized. Decision ``allow``. Fields:
+  ``event="keyvault.backup_export"``, ``key_id_hash``, ``blob_version=1``,
+  ``kdf_id=1``, ``envelope_count``. Success-path emit — a sink failure is
+  suppressed via ``contextlib.suppress`` (the blob is already returned).
 """
 
 from typing import Literal
@@ -110,4 +115,5 @@ ReasonCode = Literal[
     "keyvault.init_started",
     "keyvault.init_completed",
     "keyvault.init_denied",
+    "keyvault.backup_exported",
 ]
