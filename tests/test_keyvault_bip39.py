@@ -24,10 +24,7 @@ ALL_ZERO_MNEMONIC = (
     "abandon abandon abandon abandon abandon abandon abandon art"
 )
 ALL_FF_ENTROPY = b"\xff" * 32
-ALL_FF_MNEMONIC = (
-    "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo "
-    "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo vote"
-)
+ALL_FF_MNEMONIC = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo vote"
 
 
 class TestWordlist:
