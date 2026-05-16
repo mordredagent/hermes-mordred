@@ -138,9 +138,12 @@ def _query_reachability_flags() -> int:
 
     Raises:
         NetworkFallbackUnavailable: On non-macOS hosts, when pyobjc is
-            missing, or when either ``SCNetworkReachability`` call fails.
-            Never returns a sentinel ``int`` for a failure — a failed probe
-            must surface so :func:`blackout_assert` can fail closed.
+            missing, or when the ``SCNetworkReachability`` probe fails for
+            any reason — a NULL handle, an ``ok=False`` result, or an
+            unexpected pyobjc-bridge error. This is the *only* exception
+            type the function raises: every failure mode is funnelled here
+            so :func:`blackout_assert` can rely on a single type and fail
+            closed. Never returns a sentinel ``int`` for a failure.
     """
     if sys.platform != "darwin":
         raise NetworkFallbackUnavailable(
@@ -158,14 +161,25 @@ def _query_reachability_flags() -> int:
             "network-blackout fallback."
         ) from exc
 
-    target = sc.SCNetworkReachabilityCreateWithName(None, _PROBE_HOST)
-    if target is None:
-        raise NetworkFallbackUnavailable(f"SCNetworkReachabilityCreateWithName returned NULL for {_PROBE_HOST!r}")
+    # Funnel every pyobjc-bridge failure mode into NetworkFallbackUnavailable:
+    # an objc.error from the bridge, or a malformed return that breaks the
+    # ``ok, flags`` unpack, must NOT escape as a foreign exception type — the
+    # contract above and blackout_assert's fail-closed catch depend on it.
+    try:
+        target = sc.SCNetworkReachabilityCreateWithName(None, _PROBE_HOST)
+        if target is None:
+            raise NetworkFallbackUnavailable(f"SCNetworkReachabilityCreateWithName returned NULL for {_PROBE_HOST!r}")
 
-    ok, flags = sc.SCNetworkReachabilityGetFlags(target, None)
-    if not ok:
-        raise NetworkFallbackUnavailable("SCNetworkReachabilityGetFlags failed to read reachability flags")
-    return int(flags)
+        ok, flags = sc.SCNetworkReachabilityGetFlags(target, None)
+        if not ok:
+            raise NetworkFallbackUnavailable("SCNetworkReachabilityGetFlags failed to read reachability flags")
+        return int(flags)
+    except NetworkFallbackUnavailable:
+        raise
+    except Exception as exc:
+        raise NetworkFallbackUnavailable(
+            f"SCNetworkReachability probe failed unexpectedly: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _os_reachability_probe() -> bool:

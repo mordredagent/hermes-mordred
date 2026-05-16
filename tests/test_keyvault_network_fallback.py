@@ -188,6 +188,50 @@ def test_query_reachability_flags_get_flags_fails(
         nf._query_reachability_flags()
 
 
+def test_query_reachability_flags_bridge_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected pyobjc-bridge error (objc.error, etc.) must be funnelled
+    into ``NetworkFallbackUnavailable`` so it never escapes as a foreign type
+    — ``blackout_assert``'s fail-closed catch depends on this."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    class _RaisingSC:
+        def SCNetworkReachabilityCreateWithName(  # mirrors the C API name
+            self, allocator: Any, name: Any
+        ) -> object:
+            raise RuntimeError("objc bridge blew up")
+
+    monkeypatch.setattr(nf, "_import_systemconfiguration", lambda: _RaisingSC())
+    with pytest.raises(nf.NetworkFallbackUnavailable) as excinfo:
+        nf._query_reachability_flags()
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_query_reachability_flags_malformed_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed ``SCNetworkReachabilityGetFlags`` return that breaks the
+    ``ok, flags`` unpack surfaces as ``NetworkFallbackUnavailable``, not a
+    raw ``ValueError``."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    class _MalformedSC:
+        def SCNetworkReachabilityCreateWithName(  # mirrors the C API name
+            self, allocator: Any, name: Any
+        ) -> object:
+            return "fake-target"
+
+        def SCNetworkReachabilityGetFlags(  # mirrors the C API name
+            self, target: Any, flags: Any
+        ) -> object:
+            return "not-a-two-tuple"
+
+    monkeypatch.setattr(nf, "_import_systemconfiguration", lambda: _MalformedSC())
+    with pytest.raises(nf.NetworkFallbackUnavailable):
+        nf._query_reachability_flags()
+
+
 # --------------------------------------------------------------------------
 # _os_reachability_probe — query + interpret
 # --------------------------------------------------------------------------
