@@ -41,6 +41,25 @@ from . import _docker
 _COMPOSE_DIR = Path(__file__).parent / "docker" / "tor"
 _SOCKS_PORT = 9050
 _LOOPBACK = "127.0.0.1"
+_TOR_SKILL_DIR = Path(__file__).parent.parent / "fixtures" / "tor_skill"
+
+
+def _load_tor_skill_probe() -> Any:
+    """Load ``tor_skill/network_probe.py`` — the fixture skill's
+    executable counterpart (see :class:`TestTorSkillEndToEnd`).
+
+    ``tests/fixtures/`` is not a package, so the probe is loaded by
+    path. The hermetic response-handling tests live in
+    ``tests/test_tor_skill_fixture.py``.
+    """
+    import importlib.util
+
+    path = _TOR_SKILL_DIR / "network_probe.py"
+    spec = importlib.util.spec_from_file_location("tor_skill_network_probe", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # Codex P2-1 (2026-05-14): tag the suite ``integration`` so the default
@@ -154,4 +173,59 @@ class TestProxyEnvRoundTrip:
         body: dict[str, Any] = response.json()
         assert body.get("IsTor") is True, (
             f"httpx via HTTPS_PROXY did not exit via Tor (proxy ignored or env regressed?): {body!r}"
+        )
+
+
+class TestTorSkillEndToEnd:
+    """Contract 4 (TODO §3.3 L380): a skill that declares
+    ``network_requirements: tor`` routes its *own* traffic through Tor
+    once the ``tor`` path is active.
+
+    Method C — Hermes has no ``skill invoke`` API (a skill is a Markdown
+    instruction sheet, not callable code), so the ``tor_skill`` fixture
+    ships ``network_probe.py`` as the executable counterpart to its
+    ``SKILL.md``. This test applies the env that
+    ``hermes mordred network use tor`` installs, then runs the fixture
+    probe and asserts it exited via Tor — closing the install-to-runtime
+    loop that ``test_install_dispatch.py`` opens at install time.
+
+    Scope: the CLI/runtime switch mechanism itself
+    (``network_cli.handle_use`` -> ``Runtime.use("tor")`` -> ``os.environ``
+    mutation) is covered by ``test_wizard_network_cli.py`` and
+    ``test_network_runtime.py``. This test takes the resulting proxy env
+    as its starting point and verifies the *skill* side.
+
+    External-network dependent: only genuine transport flakes are
+    skipped. A ``network_probe.py`` API regression surfaces as
+    ``AttributeError`` / ``TypeError`` and fails the test.
+    """
+
+    def test_tor_skill_probe_exits_via_tor(
+        self,
+        tor_container: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        httpx = pytest.importorskip("httpx", reason="httpx[socks] required")
+        # SOCKS support is an optional httpx extra; without it the probe
+        # raises ImportError mid-request — skip cleanly rather than fail.
+        pytest.importorskip("socksio", reason="httpx[socks] backend required")
+        probe = _load_tor_skill_probe()
+
+        # Apply the proxy env `hermes mordred network use tor` installs;
+        # the probe builds its httpx client afterwards (Phase 0.8 §8.1
+        # Regime A — a child process spawned after Runtime.use("tor")).
+        env = proxy_env.desired_env(path="tor", tor_socks_port=_SOCKS_PORT)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        # Skip only on genuine transport flakes (check.torproject.org
+        # down, Tor circuit hiccup). A network_probe.py regression raises
+        # AttributeError/TypeError, which propagates and fails the test.
+        try:
+            body = probe.probe_exit_ip(timeout=30.0)
+        except httpx.HTTPError as e:
+            pytest.skip(f"upstream probe flaked: {e!r}")
+
+        assert body.get("IsTor") is True, (
+            f"tor-skill probe did not exit via Tor (network use tor env not honoured?): {body!r}"
         )
