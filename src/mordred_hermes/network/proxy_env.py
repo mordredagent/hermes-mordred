@@ -106,11 +106,11 @@ def _build_no_proxy(extras: Iterable[str]) -> str:
 class LibraryRequirement:
     """Minimum HTTP client library version that grew ``socks5h://`` support.
 
-    Pinned conservatively in PR3a (PR3c playbook flips
-    ``unverified_baseline=True`` per entry after operator pins the
-    installed versions seen in the field). ``notes`` carries the documented
-    caveat for the operator -- usually pointing at a release-notes URL or
-    an upstream issue.
+    ``unverified_baseline`` was ``True`` for the PR3a conservative
+    baseline; TODO §0.8 L118-122 cleared it once
+    ``tests/integration/test_socks5h_libs.py`` empirically exercised the
+    library against an in-process SOCKS5 inspector. ``notes`` carries the
+    verified behaviour and any operator caveat.
     """
 
     library: str
@@ -124,34 +124,52 @@ SOCKS5H_LIBRARY_REQUIREMENTS: Final[Mapping[str, LibraryRequirement]] = {
         library="httpx",
         min_version="0.27.0",
         notes=(
-            "httpx[socks] grew socks5h:// URL-scheme support in 0.27.x. "
-            "Earlier releases silently coerce socks5h:// → socks5:// and "
-            "leak DNS through the system resolver."
+            "Verified at httpx 0.28.1 + socksio 1.0.0 "
+            "(tests/integration/test_socks5h_libs.py): the socksio transport "
+            "defers DNS to the proxy for BOTH socks5:// and socks5h:// URLs, "
+            "so a socks5h:// HTTPS_PROXY is honoured and even a misconfigured "
+            "socks5:// cannot leak. socks5h:// URL-scheme support landed in "
+            "httpx 0.27.x."
         ),
+        unverified_baseline=False,
     ),
     "urllib3": LibraryRequirement(
         library="urllib3",
         min_version="2.0.0",
         notes=(
-            "Used via requests[socks]; SOCKSProxyManager learned socks5h:// "
-            "in 2.x. Older 1.26.x branch only knows socks5://."
+            "Verified at urllib3 2.7.0 + PySocks 1.7.1 "
+            "(tests/integration/test_socks5h_libs.py): "
+            "urllib3.contrib.socks.SOCKSProxyManager honours the socks5h:// "
+            "scheme with server-side DNS. The 1.26.x branch only knows "
+            "socks5://."
         ),
+        unverified_baseline=False,
     ),
     "requests": LibraryRequirement(
         library="requests",
         min_version="2.32.0",
         notes=(
-            "requests[socks] needs PySocks + urllib3 with socks5h support. Pin both upper bounds during PR3c playbook."
+            "Verified at requests 2.33.1 (urllib3 2.x + PySocks 1.7.1, "
+            "tests/integration/test_socks5h_libs.py): requests[socks] honours "
+            "the scheme distinction -- socks5h:// = remote DNS, socks5:// = "
+            "local DNS. Needs urllib3 with socks5h support (2.x); the 1.26.x "
+            "branch leaks DNS."
         ),
+        unverified_baseline=False,
     ),
     "aiohttp": LibraryRequirement(
         library="aiohttp",
         min_version="3.10.0",
         notes=(
-            "aiohttp historically routes SOCKS via aiohttp-socks. "
-            "Pre-3.10.x releases lack socks5h:// scheme parsing -- the "
-            "DNS query runs locally even when the URL says socks5h."
+            "Verified at aiohttp 3.13.5 + aiohttp-socks 0.11.0 "
+            "(tests/integration/test_socks5h_libs.py). CAVEAT: python-socks "
+            "(the aiohttp-socks engine) does NOT parse the socks5h:// URL "
+            "scheme -- ProxyConnector.from_url('socks5h://...') raises "
+            "ValueError. Remote DNS requires socks5:// + an explicit "
+            "rdns=True. A caller forwarding Mordred's socks5h:// HTTPS_PROXY "
+            "straight into from_url must translate the scheme first."
         ),
+        unverified_baseline=False,
     ),
 }
 

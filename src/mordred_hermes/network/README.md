@@ -77,11 +77,20 @@ Naming normalized to dotted form (`network.use` rather than the `network_use` fo
 
 Either way, **already-running subprocesses are not affected** — Hermes spawns with `env=dict(os.environ | env)` snapshot. The `live_subprocess_count` audit field is an informational signal of this risk per path switch.
 
-## Deferred to PR3c
+## Phase 3 PR3c status (2026-05-17)
 
-- Real-traffic verification of `KNOWN_PROVIDERS` (TODO §0.8 L110-117): anthropic / openai / gemini / mordred-local / bedrock / vertex through HTTPS_PROXY (Wireshark + Tor circuit log).
-- SOCKS5h library compatibility verification (TODO §0.8 L118-122).
-- Once verified, per-entry `unverified_baseline` flips to `False`.
-- Stem-against-real-Tor deep liveness probe (requires bind-mounted `data_dir` so the host can read `control_auth_cookie`). PR3b kept the harness ephemeral; PR3c extends it to a `tor-with-controlport` variant.
+Real-traffic verification (TODO §0.8 L110-122) landed via two hermetic integration suites driven by an in-process SOCKS5 inspector (`tests/integration/_socks5_inspector.py`, which records the RFC 1928 ATYP byte of every CONNECT) — no Tor, no Docker, no live network or API credentials needed.
+
+- `tests/integration/test_socks5h_libs.py` — SOCKS5h library compatibility (TODO §0.8 L118-122). Verified httpx / urllib3 / requests / aiohttp; every `proxy_env.SOCKS5H_LIBRARY_REQUIREMENTS` entry now has `unverified_baseline=False`. Finding: `python-socks` (the aiohttp-socks engine) rejects the bare `socks5h://` URL scheme with `ValueError` — remote DNS needs `socks5://` + an explicit `rdns=True`. httpx defers DNS for both `socks5://` and `socks5h://`.
+- `tests/integration/test_provider_transport.py` — provider transport (TODO §0.8 L110-117). `anthropic` / `openai` / `gemini` / `mordred-local` verified → `unverified_baseline=False`. Finding: the current `google-genai` SDK is httpx-based, so `KNOWN_PROVIDERS["gemini"].transport` was corrected `"requests"` → `"httpx"`.
+
+CI: the `integration-tor` job installs `mordred-hermes[dev,integration]` and runs all three integration suites (`test_tor.py`, `test_socks5h_libs.py`, `test_provider_transport.py`).
+
+Still deferred:
+
+- `bedrock` keeps `unverified_baseline=True` — `respects_socks5h=False` is verified (botocore's urllib3 transport has no SOCKS support) but the `dns_quirk` / IPv6 facts need a real AWS packet capture.
+- `vertex` keeps `unverified_baseline=True` — `google-cloud-aiplatform` deep verify (heavy SDK, GCP-side `partial` proxy behaviour) is out of scope.
+- Live Mullvad VPN path verification (Phase 3 acceptance gate L381) — `test_vpn.py` stays `MORDRED_LIVE_VPN_TEST` gated; no `mullvad` CLI on the dev box.
+- Stem-against-real-Tor deep liveness probe (requires bind-mounted `data_dir` so the host can read `control_auth_cookie`).
 
 See `mordred-docs/mordred/SPEC.md` §Plugin: `mordred_network` and `mordred-docs/mordred/TODO.md` §3.

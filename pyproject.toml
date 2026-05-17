@@ -49,6 +49,23 @@ macos = [
 tor-control = [
   "stem>=1.8.0,<2",
 ]
+# TODO §0.8 L110-122: real-traffic SOCKS5h library + provider transport
+# verification. Heavy and optional — only the `integration-tor` CI job
+# and operators running `pytest -m integration` need it. The SOCKS
+# client libraries back `tests/integration/test_socks5h_libs.py`; the
+# provider SDKs back `test_provider_transport.py` and are
+# import-or-skipped, so a partial install still runs what it can.
+integration = [
+  "httpx[socks]>=0.27",
+  "requests[socks]>=2.32",
+  "aiohttp-socks>=0.10",
+  "anthropic>=0.40",
+  "openai>=1.40",
+  # >=1.20: floor where google.genai.types.HttpOptions(base_url=...) is
+  # stable — test_provider_transport.py builds the client with it.
+  "google-genai>=1.20",
+  "boto3>=1.34",
+]
 dev = [
   "pytest>=8",
   "pytest-cov",

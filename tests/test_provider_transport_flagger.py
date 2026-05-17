@@ -32,11 +32,21 @@ def test_known_providers_includes_v1_baseline() -> None:
     assert expected.issubset(set(KNOWN_PROVIDERS))
 
 
-def test_every_baseline_entry_is_unverified_in_pr1() -> None:
+def test_baseline_verification_state() -> None:
+    """TODO §0.8 L110-117: providers whose transport is empirically backed
+    by ``tests/integration/test_provider_transport.py`` have
+    ``unverified_baseline`` cleared. ``bedrock`` is only partially verified
+    (``respects_socks5h=False`` confirmed; the ``dns_quirk`` / IPv6 facts
+    still need a real AWS packet capture) and ``vertex`` is untested (heavy
+    SDK + GCP-side behaviour) — both stay flagged."""
     from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
-    for name, entry in KNOWN_PROVIDERS.items():
-        assert entry.unverified_baseline is True, f"{name} flipped early"
+    verified = {"anthropic", "openai", "gemini", "mordred-local"}
+    deferred = {"bedrock", "vertex"}
+    for name in verified:
+        assert KNOWN_PROVIDERS[name].unverified_baseline is False, f"{name} should be verified"
+    for name in deferred:
+        assert KNOWN_PROVIDERS[name].unverified_baseline is True, f"{name} verify still deferred"
 
 
 def test_anthropic_respects_socks5h() -> None:
