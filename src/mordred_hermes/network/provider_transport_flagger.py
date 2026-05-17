@@ -5,10 +5,14 @@ SOCKS5h transport actually reaches the upstream API — or whether the SDK
 will bypass the proxy (DNS leak, plain TCP, etc.) and surface as silent
 deanonymization.
 
-PR1 ships a **baseline allowlist** marked ``unverified_baseline=True``.
-PR3 runs the real-traffic verifications from TODO §0.8 L110-117
-(Wireshark / Tor circuit log per provider) and flips the flag once each
-entry has empirical backing.
+The baseline allowlist shipped marked ``unverified_baseline=True``.
+TODO §0.8 L110-117 verification (``tests/integration/test_provider_transport.py``
+drives each SDK against an in-process SOCKS5 inspector) has since
+cleared the flag on the ``anthropic`` / ``openai`` / ``gemini`` /
+``mordred-local`` entries. ``bedrock`` keeps the flag — only
+``respects_socks5h=False`` is empirically confirmed; the ``dns_quirk`` /
+IPv6 facts still need a real AWS packet capture. ``vertex`` is untested
+(heavy SDK + GCP-side proxy behaviour) and stays flagged.
 
 Severity policy:
 
@@ -84,6 +88,9 @@ KNOWN_PROVIDERS: Final[Mapping[str, ProviderEntry]] = {
         respects_socks5h=True,
         transport_class="http",
         respects_ipv6_proxy=True,
+        # TODO §0.8 L110-117: verified — the SDK's env-trusting httpx
+        # client routes a socks5h:// HTTPS_PROXY (ATYP=DOMAINNAME).
+        unverified_baseline=False,
     ),
     "openai": ProviderEntry(
         name="openai",
@@ -92,14 +99,21 @@ KNOWN_PROVIDERS: Final[Mapping[str, ProviderEntry]] = {
         respects_socks5h=True,
         transport_class="http",
         respects_ipv6_proxy=True,
+        # TODO §0.8 L110-117: verified — same env-trusting httpx path.
+        unverified_baseline=False,
     ),
     "gemini": ProviderEntry(
         name="gemini",
-        transport="requests",
+        # TODO §0.8 L110-117 finding: the current `google-genai` SDK is
+        # httpx-based. The PR1 baseline said "requests" — that was the
+        # legacy `google-generativeai` SDK; corrected here.
+        transport="httpx",
         respects_proxy=True,
         respects_socks5h=True,
         transport_class="http",
         respects_ipv6_proxy=True,
+        # Verified — google-genai routes a socks5h:// proxy correctly.
+        unverified_baseline=False,
     ),
     "mordred-local": ProviderEntry(
         name="mordred-local",
@@ -112,16 +126,22 @@ KNOWN_PROVIDERS: Final[Mapping[str, ProviderEntry]] = {
         # marking True so an override that drops `localhost_only` still
         # behaves correctly under the IPv6 check.
         respects_ipv6_proxy=True,
+        # TODO §0.8 L110-117: verified — the proxy_env NO_PROXY default
+        # (localhost,127.0.0.1,::1) keeps a localhost endpoint off Tor.
+        unverified_baseline=False,
     ),
     "bedrock": ProviderEntry(
         name="bedrock",
         transport="boto3",
         respects_proxy=True,
+        # TODO §0.8 L110-117: respects_socks5h=False is VERIFIED — botocore's
+        # urllib3 transport has no SOCKS support (test_provider_transport.py
+        # TestBedrock). dns_quirk and respects_ipv6_proxy remain unverified
+        # (a real AWS packet capture is needed), so unverified_baseline
+        # stays True for the entry as a whole.
         respects_socks5h=False,
         dns_quirk=True,
         transport_class="http",
-        # boto3 IPv6 routing historically bypasses HTTPS_PROXY (PR3 live
-        # verify needed; flagged True under unverified_baseline).
         respects_ipv6_proxy=False,
     ),
     "vertex": ProviderEntry(
@@ -130,7 +150,9 @@ KNOWN_PROVIDERS: Final[Mapping[str, ProviderEntry]] = {
         respects_proxy="partial",
         respects_socks5h=False,
         transport_class="http",
-        # google-cloud SDK has known IPv6 vs proxy quirks; pending PR3 verify.
+        # TODO §0.8 L110-117: deferred — google-cloud-aiplatform is a heavy
+        # SDK and the "partial" proxy behaviour is GCP-side; not exercised
+        # by test_provider_transport.py. unverified_baseline stays True.
         respects_ipv6_proxy=False,
     ),
 }
