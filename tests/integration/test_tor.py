@@ -214,6 +214,5 @@ class TestTorSkillEndToEnd:
             pytest.skip(f"upstream probe flaked: {e!r}")
 
         assert body.get("IsTor") is True, (
-            f"tor-skill probe did not exit via Tor "
-            f"(network use tor env not honoured?): {body!r}"
+            f"tor-skill probe did not exit via Tor (network use tor env not honoured?): {body!r}"
         )
