@@ -4,8 +4,9 @@ Wizard owns READS over ``~/.hermes/mordred/audit.log``; privacy_check
 remains the sole writer (PATHS.md). ``tail`` / ``grep`` read the Phase 1
 plaintext NDJSON format; ``decrypt`` reads the Phase 4 ``MRAL``
 AES-GCM-encrypted format through the Secure Enclave authorization
-boundary. The plaintext reader detects non-JSON headers and points the
-operator at ``audit decrypt`` instead of dumping garbage.
+boundary. The plaintext reader detects an encrypted (``MRAL``) or corrupt
+log and points the operator at ``audit decrypt`` instead of dumping
+garbage.
 
 Naive read implementation (``read().splitlines()``) is acceptable v1
 because :mod:`privacy_check.audit` enforces a 10 MB rotation cap.
@@ -46,6 +47,32 @@ __all__ = [
 # The active audit log file name; rotated files are ``audit.log.<date>[...]``.
 _AUDIT_LOG_NAME = "audit.log"
 
+# Phase 4 ``MRAL`` encrypted-log format tag. Mirrors
+# ``keyvault.log_encryption.MAGIC`` (b"MRAL") — kept as a literal so the
+# stdlib-only tail/grep read path carries no keyvault/cryptography import
+# (the keyvault crypto stack is macOS-extra-gated; see this module's
+# docstring on platform-independent reads).
+_MRAL_FMT = "MRAL"
+
+
+def _looks_like_mral_header(first_line: bytes) -> bool:
+    """Return True if ``first_line`` is a Phase 4 ``MRAL`` encrypted-log header.
+
+    The ``MRAL`` format's line 0 is a JSON header
+    (``{"fmt":"MRAL","ver":...,"key_id":...,"wdek":...}``), so — unlike a
+    raw binary blob — it *does* start with ``{`` and would slip past a
+    first-byte check. Detection therefore keys off the ``fmt`` field. A
+    genuine NDJSON audit entry is also a JSON object but never carries
+    ``fmt == "MRAL"``.
+    """
+    if first_line[:1] != b"{":
+        return False
+    try:
+        header = json.loads(first_line)
+    except ValueError:  # JSONDecodeError / UnicodeDecodeError both subclass it
+        return False
+    return isinstance(header, dict) and header.get("fmt") == _MRAL_FMT
+
 
 def _resolve_active_audit_path() -> Path:
     """Indirection seam over :func:`get_active_audit_path`.
@@ -68,15 +95,20 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
         print(f"No audit log at {log_path}", file=sys.stderr)
         return None
     raw = log_path.read_bytes()
-    if raw and raw[:1] != b"{":
-        # Phase 1 plaintext NDJSON always starts with '{'. Anything else
-        # is either an encrypted blob (Phase 4) or corruption.
-        print(
-            f"Audit log at {log_path} appears encrypted or corrupted; "
-            "use `hermes mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log.",
-            file=sys.stderr,
-        )
-        return None
+    if raw:
+        first_line = raw.split(b"\n", 1)[0]
+        # Reject anything that is not Phase 1 plaintext NDJSON. Two cases:
+        # a non-``{`` first byte (a raw binary blob or corruption), and a
+        # Phase 4 ``MRAL`` log — whose JSON header *also* starts with ``{``,
+        # so the byte check alone would wave it through (see
+        # _looks_like_mral_header).
+        if first_line[:1] != b"{" or _looks_like_mral_header(first_line):
+            print(
+                f"Audit log at {log_path} appears encrypted or corrupted; "
+                "use `hermes mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log.",
+                file=sys.stderr,
+            )
+            return None
     text = raw.decode("utf-8", errors="replace")
     return (ln for ln in text.splitlines() if ln.strip())
 

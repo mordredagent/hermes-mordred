@@ -37,7 +37,7 @@ from ..keyvault import _storage
 if TYPE_CHECKING:
     from ..keyvault.api import SeedDisplayHandle
     from ..keyvault.seed_display import SeedDisplaySurface
-    from ..keyvault.wrap import NativeBackend
+    from ..keyvault.wrap import AuditSink, NativeBackend
     from .configure import PromptIO
 
 __all__ = [
@@ -126,7 +126,7 @@ def recover(
     home: Path | None = None,
     backend: NativeBackend | None = None,
     prompt_io: PromptIO | None = None,
-    audit_sink: Any = None,
+    audit_sink: AuditSink | None = None,
 ) -> int:
     """Restore a keyvault from an ``export_backup`` blob on this device.
 
@@ -205,6 +205,10 @@ def recover(
     except WrapError as exc:
         print(f"Recovery failed: Secure Enclave error — {exc}", file=sys.stderr)
         return 1
+    # L2 (PR #39 review): import_backup has consumed the seed/passphrase;
+    # drop the str references (CPython cannot zero an immutable str in
+    # place — this shortens the exposure window rather than scrubbing it).
+    del seed_phrase, passphrase, normalized_seed
     print(f"Keyvault recovered. Imported key: {key_id}")
     return 0
 
@@ -238,7 +242,7 @@ def init_keyvault(
     backend: NativeBackend | None = None,
     prompt_io: PromptIO | None = None,
     surface: SeedDisplaySurface | None = None,
-    audit_sink: Any = None,
+    audit_sink: AuditSink | None = None,
     display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
@@ -299,6 +303,14 @@ def init_keyvault(
     # recompute it independently on an offline device, which is the
     # mis-transcription cross-check confirm_generate enforces.
     handle, _expected_digest = api.prepare_generate(seed_phrase, passphrase, pow_bytes)
+    # L2 (PR #39 review): the seed is now held in the handle's wipeable
+    # bytearray and the digest is computed; drop the CLI's str references
+    # so they are GC-eligible during the 60s seed-display window and the
+    # interactive digest prompt instead of pinned for the whole function.
+    # CPython cannot zero an immutable str in place — this shortens the
+    # exposure window, it does not scrub the bytes; the handle's bytearray
+    # is the one wipeable copy.
+    del seed_phrase, normalized_seed, passphrase
 
     if surface is None:
         surface = TerminalSeedSurface()

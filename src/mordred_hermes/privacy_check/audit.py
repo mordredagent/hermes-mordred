@@ -31,7 +31,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
+
+if TYPE_CHECKING:
+    from ..keyvault.wrap import NativeBackend
 
 _LOG = logging.getLogger("mordred.privacy_check.audit")
 
@@ -211,11 +214,71 @@ class NDJSONWriter:
                 child.unlink(missing_ok=True)
 
 
+# Phase 4 ``MRAL`` encrypted-log format tag — mirrors
+# ``keyvault.log_encryption.MAGIC`` (b"MRAL"). Duplicated as a literal so
+# this module stays importable without the macOS-extra-gated keyvault
+# crypto stack (``wizard.audit_cli`` keeps its own copy for the same
+# reason). ``MRAL`` is a frozen v1 wire constant, so the copies cannot drift.
+_MRAL_FMT: Final = "MRAL"
+
+
+def _audit_log_is_encrypted(audit_path: Path) -> bool:
+    """Return True if ``audit_path`` is a Phase 4 ``MRAL``-encrypted log.
+
+    The ``MRAL`` format's line 0 is a JSON header carrying ``fmt:"MRAL"``;
+    a plaintext NDJSON log's first line is an ordinary audit entry that
+    never carries that field. A missing or unreadable file is "not
+    encrypted" — the caller then has nothing to preserve.
+    """
+    try:
+        with audit_path.open("rb") as fh:
+            first_line = fh.readline(MAX_ENTRY_BYTES + 1)
+    except OSError:
+        return False
+    if first_line[:1] != b"{":
+        return False
+    try:
+        header = json.loads(first_line)
+    except ValueError:  # JSONDecodeError / UnicodeDecodeError both subclass it
+        return False
+    return isinstance(header, dict) and header.get("fmt") == _MRAL_FMT
+
+
+def _rotate_encrypted_log_aside(audit_path: Path) -> None:
+    """Move an existing ``MRAL`` log aside before a plaintext writer opens it.
+
+    A fallback :class:`NDJSONWriter` opens ``audit_path`` with ``O_APPEND``.
+    If a prior session left a Phase 4 ``MRAL``-encrypted log there, a
+    plaintext append would splice cleartext into the ciphertext stream and
+    make ``decrypt_log_file`` (``hermes mordred audit decrypt``) fail for
+    the whole file — losing that file's encrypted entries. Rename the
+    encrypted log to a dated ``audit.log.<date>`` sibling, which
+    ``audit decrypt --date`` still resolves and decrypts, so the plaintext
+    writer starts a fresh file. This mirrors :class:`EncryptedWriter`'s
+    rotate-aside of a foreign plaintext file (the forward transition).
+    """
+    if not _audit_log_is_encrypted(audit_path):
+        return
+    date_suffix = _today_utc_date()
+    target = audit_path.with_name(f"{audit_path.name}.{date_suffix}")
+    n = 0
+    while target.exists() or target.with_suffix(target.suffix + ".gz").exists():
+        n += 1
+        target = audit_path.with_name(f"{audit_path.name}.{date_suffix}.{n}")
+    os.replace(audit_path, target)
+    _LOG.warning(
+        "audit log at %s is MRAL-encrypted but a plaintext writer is taking over; "
+        "rotated the encrypted log aside to %s (still readable via `audit decrypt`)",
+        audit_path,
+        target,
+    )
+
+
 def make_audit_writer(
     audit_path: Path,
     *,
     keyvault_home: Path | None = None,
-    backend: Any = None,
+    backend: NativeBackend | None = None,
 ) -> Writer:
     """Return the audit-log :class:`Writer` for the current keyvault state.
 
@@ -240,6 +303,9 @@ def make_audit_writer(
         from ._keyvault_probe import keyvault_initialized
 
         if not keyvault_initialized(keyvault_home):
+            # A de-initialized keyvault can leave a stale MRAL log behind;
+            # rotate it aside so the plaintext writer does not corrupt it.
+            _rotate_encrypted_log_aside(audit_path)
             return NDJSONWriter(path=audit_path)
 
         # Keyvault is initialized — only now touch the crypto stack.
@@ -260,4 +326,25 @@ def make_audit_writer(
             type(exc).__name__,
             exc,
         )
-        return NDJSONWriter(path=audit_path)
+        # Codex PR #40 review (P1): if the keyvault was encrypting until
+        # now, audit_path is an MRAL log — rotate it aside so the plaintext
+        # fallback below does not splice cleartext into the ciphertext.
+        _rotate_encrypted_log_aside(audit_path)
+        writer = NDJSONWriter(path=audit_path)
+        # L1 (PR #39 review): reaching this branch means the keyvault was
+        # initialized — or its state could not be read — so encryption was
+        # *expected*. Record the encrypted→plaintext downgrade in the trail
+        # itself, not only in Python logging. The clean "keyvault never
+        # initialized" path returns above and is intentionally silent.
+        # Best-effort: a degraded path must not let an audit-sink failure
+        # crash the caller (_runtime._load_state).
+        with contextlib.suppress(Exception):
+            writer.append(
+                {
+                    "event": "mordred.audit_writer",
+                    "decision": "warn",
+                    "reason": "mordred.degraded.audit_encryption_unavailable",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        return writer

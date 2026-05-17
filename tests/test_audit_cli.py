@@ -30,6 +30,25 @@ def _seed_audit_log(path: Path, entries: list[dict[str, object]]) -> None:
             f.write(json.dumps(e, separators=(",", ":"), sort_keys=True) + "\n")
 
 
+def _seed_mral_log(path: Path, entries: list[dict[str, object]]) -> None:
+    """Write a real Phase 4 ``MRAL``-encrypted audit log.
+
+    Produced by the genuine :class:`~mordred_hermes.keyvault.log_encryption.EncryptedWriter`
+    (software ``FakeBackend`` standing in for the Secure Enclave) so the
+    fixture matches the on-disk format the encrypted-audit factory ships:
+    line 0 is a ``{"fmt":"MRAL",...}`` JSON header.
+    """
+    from mordred_hermes.keyvault import log_encryption as le
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backend = FakeBackend()
+    backend.generate_enclave_key(le.AUDIT_LOG_KEY_ID)
+    writer = le.EncryptedWriter(path, backend=backend)
+    for entry in entries:
+        writer.append(entry)
+    writer.close()
+
+
 class TestTail:
     def test_tail_returns_last_n_entries(
         self,
@@ -128,6 +147,32 @@ class TestTail:
         assert "encrypted" in err
         assert "phase 4" in err or "audit decrypt" in err
 
+    def test_tail_mral_encrypted_log_is_detected_not_dumped(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A Phase 4 ``MRAL`` log must be detected, not dumped as NDJSON.
+
+        Regression for the ``raw[:1] != b"{"`` guard: the encrypted format's
+        line 0 is a JSON header (``{"fmt":"MRAL",...}``), so it *also* starts
+        with ``{`` and the byte-prefix check waves it through. ``tail`` then
+        prints the header + base64 ciphertext instead of the redirect hint.
+        """
+        log = tmp_path / "audit.log"
+        _seed_mral_log(log, [{"event": "policy.strict.tor"}])
+        # The encrypted file genuinely starts with '{' — that is the trap.
+        assert log.read_bytes()[:1] == b"{"
+
+        rc = audit_cli.tail(n=10, log_path=log)
+
+        out, err = capsys.readouterr()
+        assert rc == 1
+        assert "audit decrypt" in err.lower()
+        # The header / ciphertext must never reach stdout.
+        assert out == ""
+        assert "MRAL" not in out
+
 
 class TestGrep:
     def test_grep_returns_matching_lines(
@@ -175,6 +220,26 @@ class TestGrep:
 
         assert rc == 2
         assert "invalid" in capsys.readouterr().err.lower()
+
+    def test_grep_mral_encrypted_log_is_detected_not_searched(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``grep`` over a Phase 4 ``MRAL`` log must redirect, not search ciphertext.
+
+        Same root cause as :meth:`TestTail.test_tail_mral_encrypted_log_is_detected_not_dumped`
+        — ``grep`` shares the ``_iter_lines`` reader.
+        """
+        log = tmp_path / "audit.log"
+        _seed_mral_log(log, [{"event": "policy.strict.tor"}])
+
+        rc = audit_cli.grep(pattern="fmt", log_path=log)
+
+        out, err = capsys.readouterr()
+        assert rc == 1
+        assert "audit decrypt" in err.lower()
+        assert out == ""
 
 
 class TestCLIHandlers:
