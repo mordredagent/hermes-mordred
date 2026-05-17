@@ -30,6 +30,7 @@ import asyncio
 import importlib.metadata as importlib_metadata
 
 import pytest
+from packaging.version import Version
 
 from mordred_hermes.network.proxy_env import SOCKS5H_LIBRARY_REQUIREMENTS
 
@@ -39,32 +40,15 @@ from ._socks5_inspector import ATYP_DOMAINNAME, socks5_inspector
 pytestmark = pytest.mark.integration
 
 
-def _version_tuple(raw: str) -> tuple[int, ...]:
-    """Parse the leading numeric components of a version string.
-
-    ``"0.28.1"`` → ``(0, 28, 1)``. Stops at the first non-numeric
-    component (``"3.10.0rc1"`` → ``(3, 10, 0)``) — enough to compare
-    against the simple ``min_version`` pins in the allowlist.
-    """
-    parts: list[int] = []
-    for component in raw.split("."):
-        digits = ""
-        for ch in component:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts)
-
-
 def _assert_meets_baseline(library: str) -> None:
-    """Fail if the installed ``library`` is older than its pinned min_version."""
+    """Fail if the installed ``library`` is older than its pinned min_version.
+
+    Uses :class:`packaging.version.Version` for PEP 440-correct ordering
+    (``packaging`` is a hard pytest dependency, always importable here).
+    """
     requirement = SOCKS5H_LIBRARY_REQUIREMENTS[library]
     installed = importlib_metadata.version(library)
-    assert _version_tuple(installed) >= _version_tuple(requirement.min_version), (
+    assert Version(installed) >= Version(requirement.min_version), (
         f"{library} {installed} is below the socks5h baseline {requirement.min_version}"
     )
 

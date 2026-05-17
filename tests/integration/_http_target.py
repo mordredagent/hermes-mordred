@@ -14,14 +14,15 @@ two outcomes when a SOCKS proxy is configured:
   bypassed the proxy and connected to the origin directly (a leak when
   the proxy was supposed to be the only egress).
 
-Dependency-free: stdlib :mod:`http.server` on a daemon thread, bound
-dual-stack on the loopback interface, torn down on ``with``-block exit.
+Dependency-free: stdlib :mod:`http.server` on a daemon thread, bound to
+the ``127.0.0.1`` loopback address (never all-interfaces), torn down on
+``with``-block exit. The :mod:`_socks5_inspector` relay normalises every
+loopback destination to ``127.0.0.1``, so an IPv4-only origin is reached
+regardless of how the client encoded the (always-loopback) host.
 """
 
 from __future__ import annotations
 
-import contextlib
-import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -44,7 +45,7 @@ class HttpTarget:
 
     host: str
     port: int
-    _server: _DualStackServer
+    _server: _CountingServer
     ok_body: bytes = _OK_BODY
 
     @property
@@ -64,7 +65,7 @@ class HttpTarget:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server: _DualStackServer  # narrow the BaseHTTPRequestHandler attribute
+    server: _CountingServer  # narrow the BaseHTTPRequestHandler attribute
 
     def _respond(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
@@ -86,27 +87,17 @@ class _Handler(BaseHTTPRequestHandler):
         """Silence the per-request stderr logging."""
 
 
-class _DualStackServer(ThreadingHTTPServer):
-    """HTTP server reachable on both IPv4 and IPv6 loopback.
+class _CountingServer(ThreadingHTTPServer):
+    """Loopback-bound HTTP server that counts the requests it serves.
 
-    ``localhost`` resolves to ``127.0.0.1`` *and* ``::1`` on a typical
-    box; a client (or the SOCKS relay) may connect via either. Binding
-    a v4-only socket would make the v6 attempt fail with "connection
-    refused" and mask the real ATYP result. An ``AF_INET6`` socket with
-    ``IPV6_V6ONLY=0`` accepts v4-mapped connections too.
+    Bound to ``127.0.0.1`` (IPv4 loopback) only — never all-interfaces —
+    so the origin is unreachable to anything but the local test runner.
     """
 
-    address_family = socket.AF_INET6
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(self, server_address: tuple[str, int], handler: type[BaseHTTPRequestHandler]) -> None:
         self._hit_lock = threading.Lock()
         self.hit_count = 0
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
-
-    def server_bind(self) -> None:
-        with contextlib.suppress(OSError):
-            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        super().server_bind()
+        super().__init__(server_address, handler)
 
     def record_hit(self) -> None:
         with self._hit_lock:
@@ -115,14 +106,13 @@ class _DualStackServer(ThreadingHTTPServer):
 
 @contextmanager
 def http_target(host: str = "localhost") -> Iterator[HttpTarget]:
-    """Run an HTTP server on loopback for the duration of the block.
+    """Run an HTTP server on ``127.0.0.1`` for the duration of the block.
 
     ``host`` is the *name* callers should use when building the request
-    URL (default ``"localhost"``); the socket binds dual-stack loopback
-    so the request reaches it whether the client resolves the name to
-    IPv4 or IPv6.
+    URL (default ``"localhost"``); the socket binds the ``127.0.0.1``
+    loopback address.
     """
-    server = _DualStackServer(("::", 0), _Handler)
+    server = _CountingServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

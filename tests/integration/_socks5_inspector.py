@@ -149,6 +149,22 @@ def _reply(client: socket.socket, rep: int) -> None:
     client.sendall(bytes((_SOCKS_VERSION, rep, 0x00, ATYP_IPV4, 0, 0, 0, 0, 0, 0)))
 
 
+def _relay_host(host: str) -> str:
+    """Normalise any loopback destination to IPv4 loopback for the relay.
+
+    The inspector only ever serves loopback test origins (the
+    :mod:`_http_target` server binds ``127.0.0.1``). Whatever loopback
+    form the client encoded — the ``localhost`` hostname, ``::1``, or a
+    ``127.x`` literal — the relay connects to ``127.0.0.1`` so it reaches
+    the IPv4-only origin. This only affects where bytes are *relayed*;
+    the recorded :class:`CapturedConnect` still carries the exact host
+    and ATYP the client sent, which is what the tests assert on.
+    """
+    if host in {"localhost", "::1"} or host.startswith("127."):
+        return "127.0.0.1"
+    return host
+
+
 def _pump(src: socket.socket, dst: socket.socket) -> None:
     """Copy ``src`` → ``dst`` until EOF, then half-close ``dst``."""
     try:
@@ -176,8 +192,11 @@ def _handle(client: socket.socket, inspector: Socks5Inspector) -> None:
             return
         inspector._record(CapturedConnect(atyp=atyp, dest_host=host, dest_port=port))
         try:
-            # Server-side DNS resolution — the whole point of socks5h.
-            upstream = socket.create_connection((host, port), timeout=10.0)
+            # The capture above already recorded the true host/ATYP the
+            # client sent (socks5h server-side resolution is the point).
+            # Relaying normalises loopback forms to 127.0.0.1 so the
+            # IPv4-only test origin is reached either way.
+            upstream = socket.create_connection((_relay_host(host), port), timeout=10.0)
         except OSError:
             _reply(client, _REP_CONNECTION_REFUSED)
             return
