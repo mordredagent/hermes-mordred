@@ -1,0 +1,35 @@
+# M7 — PyPI name-reservation stub (TODO §0.5 L70).
+#
+# This is NOT the real Mordred plugin bundle. It is an intentionally
+# empty `0.0.0.dev0` distribution whose only job is to claim the
+# `mordred-hermes` name on TestPyPI/PyPI *before* the public docs
+# launch, preventing name-squat / supply-chain attacks.
+#
+# Build + upload happen via `.github/workflows/release.yml` in
+# `mode=reserve` (or a manual `twine upload`). The real package — the
+# sibling `mordred-hermes/pyproject.toml`, version `0.1.0a0` — is
+# published later in `mode=release`. PEP 440 guarantees
+# `0.0.0.dev0 < 0.1.0a0`, so this stub never blocks the real release;
+# `tests/test_packaging_versions.py` pins that invariant.
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mordred-hermes"
+version = "0.0.0.dev0"
+description = "Name-reservation placeholder for the Mordred privacy plugin bundle (real release pending)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "InternetMaximalism" }]
+license = { text = "MIT" }
+
+[project.urls]
+Homepage = "https://github.com/InternetMaximalism/Mordred-Hermes"
+Source = "https://github.com/InternetMaximalism/Mordred-Hermes"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mordred_hermes"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/pyproject.toml"]
