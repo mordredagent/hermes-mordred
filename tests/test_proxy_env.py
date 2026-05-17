@@ -210,12 +210,14 @@ class TestSocks5hLibraryAllowlist:
         for lib in ("httpx", "urllib3", "requests", "aiohttp"):
             assert lib in SOCKS5H_LIBRARY_REQUIREMENTS, f"baseline missing {lib}"
 
-    def test_every_entry_carries_unverified_baseline(self) -> None:
-        """PR3a baseline pinned conservatively; PR3c playbook flips per entry."""
+    def test_every_entry_is_verified(self) -> None:
+        """TODO §0.8 L118-122: every allowlist entry is empirically backed by
+        ``tests/integration/test_socks5h_libs.py`` — the live SOCKS5h
+        verification clears ``unverified_baseline`` once a library is covered."""
         from mordred_hermes.network.proxy_env import SOCKS5H_LIBRARY_REQUIREMENTS
 
         for lib, entry in SOCKS5H_LIBRARY_REQUIREMENTS.items():
-            assert entry.unverified_baseline is True, f"{lib} flipped before PR3c playbook"
+            assert entry.unverified_baseline is False, f"{lib} not yet verified by the integration suite"
 
     def test_aiohttp_documented_caveat(self) -> None:
         """aiohttp older releases do not understand ``socks5h://``; min should be high."""
