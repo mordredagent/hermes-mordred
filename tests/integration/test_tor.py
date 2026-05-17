@@ -189,8 +189,15 @@ class TestTorSkillEndToEnd:
     probe and asserts it exited via Tor — closing the install-to-runtime
     loop that ``test_install_dispatch.py`` opens at install time.
 
-    External-network dependent: skipped (not failed) when the probe
-    request itself errors so an upstream outage does not block CI.
+    Scope: the CLI/runtime switch mechanism itself
+    (``network_cli.handle_use`` -> ``Runtime.use("tor")`` -> ``os.environ``
+    mutation) is covered by ``test_wizard_network_cli.py`` and
+    ``test_network_runtime.py``. This test takes the resulting proxy env
+    as its starting point and verifies the *skill* side.
+
+    External-network dependent: only genuine transport flakes are
+    skipped. A ``network_probe.py`` API regression surfaces as
+    ``AttributeError`` / ``TypeError`` and fails the test.
     """
 
     def test_tor_skill_probe_exits_via_tor(
@@ -198,7 +205,10 @@ class TestTorSkillEndToEnd:
         tor_container: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        pytest.importorskip("httpx", reason="httpx[socks] required")
+        httpx = pytest.importorskip("httpx", reason="httpx[socks] required")
+        # SOCKS support is an optional httpx extra; without it the probe
+        # raises ImportError mid-request — skip cleanly rather than fail.
+        pytest.importorskip("socksio", reason="httpx[socks] backend required")
         probe = _load_tor_skill_probe()
 
         # Apply the proxy env `hermes mordred network use tor` installs;
@@ -208,9 +218,12 @@ class TestTorSkillEndToEnd:
         for key, value in env.items():
             monkeypatch.setenv(key, value)
 
+        # Skip only on genuine transport flakes (check.torproject.org
+        # down, Tor circuit hiccup). A network_probe.py regression raises
+        # AttributeError/TypeError, which propagates and fails the test.
         try:
             body = probe.probe_exit_ip(timeout=30.0)
-        except Exception as e:
+        except httpx.HTTPError as e:
             pytest.skip(f"upstream probe flaked: {e!r}")
 
         assert body.get("IsTor") is True, (
