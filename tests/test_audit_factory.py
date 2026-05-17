@@ -115,6 +115,75 @@ class TestMakeAuditWriter:
         assert isinstance(writer, NDJSONWriter)
         assert _DOWNGRADE_REASON not in _audit_reasons(log_path)
 
+    def test_downgrade_preserves_existing_encrypted_log(self, tmp_path: Path) -> None:
+        """A degraded fallback must not corrupt an existing MRAL log.
+
+        Codex PR #40 review (P1): if ``audit.log`` is already a Phase 4
+        ``MRAL``-encrypted file and the keyvault later breaks, the fallback
+        ``NDJSONWriter`` must not ``O_APPEND`` plaintext onto the ciphertext
+        stream — that would make ``audit decrypt`` fail for the whole file.
+        The encrypted log is rotated aside (still decryptable) and a fresh
+        plaintext ``audit.log`` is started.
+        """
+        _init_meta(tmp_path)
+        log_path = tmp_path / "audit.log"
+
+        # A prior session wrote an encrypted MRAL log.
+        enc_backend = FakeBackend()
+        enc_backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
+        enc = make_audit_writer(log_path, keyvault_home=tmp_path, backend=enc_backend)
+        assert isinstance(enc, EncryptedWriter)
+        enc.append({"event": "policy.strict.clearnet"})
+        enc.close()
+
+        # The keyvault breaks (audit-log wrapping key gone) — degraded path.
+        broken = FakeBackend()  # AUDIT_LOG_KEY_ID intentionally not generated
+        writer = make_audit_writer(log_path, keyvault_home=tmp_path, backend=broken)
+        assert isinstance(writer, NDJSONWriter)
+
+        # The MRAL log was rotated aside, not appended onto — and the
+        # original encrypted entry is still decryptable.
+        rotated = sorted(p for p in tmp_path.iterdir() if p.name.startswith("audit.log."))
+        assert rotated, "the encrypted log must be rotated aside, not corrupted"
+        entries = decrypt_log_file(rotated[-1], backend=enc_backend, audit_sink=lambda e: None)
+        assert entries[0]["event"] == "policy.strict.clearnet"
+
+        # The fresh active log is plaintext NDJSON carrying the downgrade marker.
+        assert _DOWNGRADE_REASON in _audit_reasons(log_path)
+
+    def test_uninitialized_with_stale_encrypted_log_rotates_it_aside(self, tmp_path: Path) -> None:
+        """A de-initialized keyvault must also not corrupt a stale MRAL log.
+
+        If the keyvault made encrypted logs and was later de-initialized,
+        ``make_audit_writer`` returns an ``NDJSONWriter`` via the
+        keyvault-uninitialized path — which must also rotate the stale
+        ``MRAL`` log aside rather than append plaintext onto it. This path
+        stays silent (no downgrade marker — an uninitialized keyvault is
+        the baseline).
+        """
+        _init_meta(tmp_path)
+        log_path = tmp_path / "audit.log"
+        enc_backend = FakeBackend()
+        enc_backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
+        enc = make_audit_writer(log_path, keyvault_home=tmp_path, backend=enc_backend)
+        enc.append({"event": "policy.strict.tor"})
+        enc.close()
+
+        # De-initialize the keyvault: drop every key row.
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        meta = _storage.load_meta(root)
+        meta["keys"].clear()
+        _storage.save_meta(root, meta)
+
+        writer = make_audit_writer(log_path, keyvault_home=tmp_path, backend=enc_backend)
+        assert isinstance(writer, NDJSONWriter)
+
+        rotated = sorted(p for p in tmp_path.iterdir() if p.name.startswith("audit.log."))
+        assert rotated, "the stale encrypted log must be rotated aside"
+        entries = decrypt_log_file(rotated[-1], backend=enc_backend, audit_sink=lambda e: None)
+        assert entries[0]["event"] == "policy.strict.tor"
+        assert _DOWNGRADE_REASON not in _audit_reasons(log_path)
+
     def test_factory_encrypted_writer_roundtrips(self, tmp_path: Path) -> None:
         """A factory-produced EncryptedWriter writes a decryptable MRAL log."""
         _init_meta(tmp_path)
