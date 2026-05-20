@@ -333,6 +333,51 @@ class TestStrictPartialFailureRollback:
             assert call[:2] != ("mullvad", "always-require-vpn")
 
 
+class TestMullvadCli2026Drift:
+    """Mullvad CLI 2026.2 dropped the ``always-require-vpn`` subcommand;
+    its kill-switch semantics are now subsumed by ``lockdown-mode``. The
+    bring-up sequence must not invoke ``always-require-vpn`` on any
+    code path or strict-mode sessions raise ``BringupFailed`` against
+    every modern Mullvad install.
+    """
+
+    def test_strict_mode_does_not_invoke_removed_subcommand(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        def runner_2026_2(
+            argv: list[str] | tuple[str, ...],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            argv_t = tuple(argv)
+            if "always-require-vpn" in argv_t:
+                return subprocess.CompletedProcess(
+                    args=list(argv_t),
+                    returncode=2,
+                    stdout="",
+                    stderr="error: unrecognized subcommand 'always-require-vpn'\n",
+                )
+            return subprocess.CompletedProcess(args=list(argv_t), returncode=0, stdout="", stderr="")
+
+        handle = vpn.bring_up(
+            cli_path="/bin/mullvad",
+            region="auto",
+            policy_mode="strict",
+            runner=runner_2026_2,
+        )
+        assert handle.cli_path == "/bin/mullvad"
+        assert handle.lockdown_enforced is True
+
+    def test_strict_mode_never_emits_always_require_argv(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner({})
+        vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
+        for call in runner.calls:
+            assert "always-require-vpn" not in call, (
+                f"bring_up must not invoke the removed Mullvad CLI subcommand; saw {call!r}"
+            )
+
+
 class TestRegionTranslation:
     """Codex round 6 P1 (2026-05-14): the Mullvad CLI uses ``any`` (not
     ``auto``) for automatic relay selection. Our config / wizard
