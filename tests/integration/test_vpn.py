@@ -143,7 +143,7 @@ class TestMullvadLockdownRollback:
         try:
             assert handle.lockdown_applied_by_us, "expected `bring_up` to flip lockdown-mode on (it was off pre-test)"
         finally:
-            vpn.disconnect(handle, preserve_lockdown=False, clear_always_require=True)
+            vpn.disconnect(handle, preserve_lockdown=False)
 
         result = subprocess.run(
             [authenticated_cli, "lockdown-mode", "get"],
