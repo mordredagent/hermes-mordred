@@ -148,29 +148,49 @@ class TestInputValidation:
 
 
 class TestOfflinePortability:
-    def test_script_has_no_mordred_imports(self) -> None:
+    def _import_statements(self) -> list[str]:
+        """Parse the script and return every ``import …`` / ``from … import …``
+        statement as source text. Docstring cross-references that mention
+        a package name do not count — only actual imports.
+        """
+        import ast
+
+        tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+        out: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                out.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                # ImportFrom.module can be None for "from . import x"; guard it.
+                out.append(node.module or "")
+        return out
+
+    def test_script_imports_no_mordred_hermes_module(self) -> None:
         """The script must be runnable on an air-gapped machine that
-        only has ``python3`` + ``blake3`` — it must not import any
-        ``mordred_hermes`` module. Static check on the source."""
-        source = _SCRIPT.read_text(encoding="utf-8")
-        assert "mordred_hermes" not in source, (
-            "scripts/keyvault_offline_digest.py must not depend on the "
-            "mordred_hermes package — it has to run on a stripped-down "
-            "offline device with only stdlib + blake3 available"
+        only has ``python3`` + ``blake3`` — it must not *import* any
+        ``mordred_hermes`` module. Docstring cross-references are fine
+        (and useful: drift warning), so this checks AST imports only.
+        """
+        imports = self._import_statements()
+        offenders = [m for m in imports if m.startswith("mordred_hermes")]
+        assert not offenders, (
+            f"scripts/keyvault_offline_digest.py imports {offenders!r} — "
+            "must not depend on the mordred_hermes package (offline portability)"
         )
 
-    def test_script_has_no_third_party_imports_beyond_blake3(self) -> None:
+    def test_script_imports_no_other_third_party_beyond_blake3(self) -> None:
         """Allow-list: stdlib + ``blake3`` only. If a future change
-        pulls in ``cryptography``, ``argon2``, ``mordred_hermes``, …
-        the operator-prep instructions in setup.md break silently."""
-        source = _SCRIPT.read_text(encoding="utf-8")
-        # Forbidden third-party tokens that have appeared in adjacent
-        # keyvault modules. Not exhaustive — defence in depth.
-        for forbidden in ("cryptography", "argon2", "pyobjc"):
-            assert forbidden not in source, (
-                f"scripts/keyvault_offline_digest.py imports/references "
-                f"'{forbidden}' — that breaks the offline-portable invariant"
-            )
+        pulls in ``cryptography``, ``argon2``, …, the operator-prep
+        instructions in setup.md break silently."""
+        imports = self._import_statements()
+        # Forbidden third-party top-level packages that have appeared in
+        # adjacent keyvault modules. Match on the leading dotted segment.
+        forbidden = {"cryptography", "argon2", "pyobjc", "mordred_hermes"}
+        offenders = [m for m in imports if m.split(".", 1)[0] in forbidden]
+        assert not offenders, (
+            f"scripts/keyvault_offline_digest.py imports {offenders!r} — "
+            "breaks the stdlib + blake3 invariant"
+        )
 
 
 @pytest.mark.skipif(not _SCRIPT.exists(), reason="script not yet implemented (RED)")
