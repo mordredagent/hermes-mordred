@@ -152,6 +152,12 @@ def _import_quartz() -> Any:
     return importlib.import_module("Quartz")
 
 
+# Fires the missing-pyobjc warning once per process. The capture probe
+# is polled tightly across the 60s display window, so without this guard
+# the operator's terminal is flooded with the same warning during init.
+_QUARTZ_IMPORT_WARNED = False
+
+
 def _default_capture_probe() -> str | None:
     """Best-effort macOS screenshot-capture probe (SPEC §M5).
 
@@ -169,11 +175,14 @@ def _default_capture_probe() -> str | None:
     try:
         quartz = _import_quartz()
     except ImportError:
-        _LOG.warning(
-            "pyobjc-framework-Quartz is not installed; screen-capture "
-            "detection is disabled (best-effort only, M5). Install "
-            "mordred-hermes[macos] to enable it."
-        )
+        global _QUARTZ_IMPORT_WARNED
+        if not _QUARTZ_IMPORT_WARNED:
+            _LOG.warning(
+                "pyobjc-framework-Quartz is not installed; screen-capture "
+                "detection is disabled (best-effort only, M5). Install "
+                "mordred-hermes[macos] to enable it."
+            )
+            _QUARTZ_IMPORT_WARNED = True
         return None
 
     try:

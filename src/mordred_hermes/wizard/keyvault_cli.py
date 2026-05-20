@@ -321,9 +321,24 @@ def init_keyvault(
     # for preparing the second device + running the tool is documented in
     # `mordred-docs/mordred/setup.md` §"Offline verification digest".
     surface.banner(
-        f"PoW mask top4 = {pow_bytes[:4].hex()} — transcribe it with the Seed Phrase "
-        "and Passphrase to compute the verification digest on your offline device. "
-        "Use `scripts/keyvault_offline_digest.py` (see setup.md §Offline verification digest)."
+        "\n"
+        "────────────────────────────────────────────────────────────\n"
+        "  Next: compute the verification digest on your OFFLINE device\n"
+        "────────────────────────────────────────────────────────────\n"
+        "\n"
+        "  On the second (air-gapped) device, run:\n"
+        "      python3 scripts/keyvault_offline_digest.py\n"
+        "\n"
+        "  It will ask for THREE values — transcribe them in this order:\n"
+        "\n"
+        "    [1] Seed Phrase     →  the 24 words shown below (60s only)\n"
+        "    [2] Passphrase      →  the passphrase you just chose\n"
+        f"    [3] top4(PoW) hex   →  {pow_bytes[:4].hex()}    ← copy this 8-char string verbatim\n"
+        "\n"
+        "  The script prints a 64-char digest. Re-enter it on THIS\n"
+        "  device at the `Verification digest ...` prompt below.\n"
+        "  (Recipe: mordred-docs/mordred/setup.md §Offline verification digest)\n"
+        "────────────────────────────────────────────────────────────"
     )
 
     from ..keyvault._exceptions import WrapError
