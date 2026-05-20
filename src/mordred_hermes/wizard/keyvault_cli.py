@@ -317,9 +317,13 @@ def init_keyvault(
     show = display_fn if display_fn is not None else seed_display.display_seed
     # The operator needs top4(PoW) to recompute the digest offline; it is
     # derived from the (secret) seed but is itself only a 4-byte mask.
+    # The offline tool is `scripts/keyvault_offline_digest.py`; the recipe
+    # for preparing the second device + running the tool is documented in
+    # `mordred-docs/mordred/setup.md` §"Offline verification digest".
     surface.banner(
         f"PoW mask top4 = {pow_bytes[:4].hex()} — transcribe it with the Seed Phrase "
-        "and Passphrase to compute the verification digest on your offline device."
+        "and Passphrase to compute the verification digest on your offline device. "
+        "Use `scripts/keyvault_offline_digest.py` (see setup.md §Offline verification digest)."
     )
 
     from ..keyvault._exceptions import WrapError
