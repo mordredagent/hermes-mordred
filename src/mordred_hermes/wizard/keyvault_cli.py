@@ -332,8 +332,37 @@ def init_keyvault(
         show(handle, surface)
     except BlackoutNotAsserted:
         print(
-            "Seed display refused: this host is still reachable on the network. "
-            "Physically disconnect Wi-Fi / Ethernet / Bluetooth / USB tethering and retry.",
+            "\n"
+            "────────────────────────────────────────────────────────────\n"
+            "  Next step: go offline before the Seed Phrase is shown\n"
+            "────────────────────────────────────────────────────────────\n"
+            "\n"
+            "  This is the expected safety check, not an error. Mordred\n"
+            "  will only reveal your Seed Phrase when the host is fully\n"
+            "  air-gapped, so the seed cannot leak over any active link.\n"
+            "\n"
+            "  Please disconnect every network interface, then re-run\n"
+            "  `hermes-mordred keyvault init`:\n"
+            "\n"
+            "    1. Turn Wi-Fi OFF                 (menu bar → Wi-Fi → Off)\n"
+            "    2. Unplug Ethernet cables\n"
+            "    3. Turn Bluetooth OFF             (blocks PAN / tethering)\n"
+            "    4. Disable iPhone Personal Hotspot / USB tethering\n"
+            "    5. Stop any VPN or virtual NIC    (Tailscale, ZeroTier, …)\n"
+            "\n"
+            "  Verify you are offline before retrying:\n"
+            "\n"
+            "      route get 1.1.1.1\n"
+            "\n"
+            "  You are offline when the command prints:\n"
+            "      route: writing to routing socket: not in table\n"
+            "  If instead it shows an `interface:` line with a real NIC\n"
+            "  (e.g. `en0`, `en6`, `utun3`), that NIC is still routing —\n"
+            "  disable it and re-check before retrying.\n"
+            "\n"
+            "  Nothing has been written yet — your passphrase was not\n"
+            "  saved. Re-run after going offline to continue.\n"
+            "────────────────────────────────────────────────────────────\n",
             file=sys.stderr,
         )
         return 1
