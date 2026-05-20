@@ -71,20 +71,23 @@ DEFAULT_RUNNER: Final[SubprocessRunner] = _default_runner
 class MullvadHandle:
     """What we configured. The Mullvad daemon owns the actual tunnel state.
 
-    Codex round 8 P1 (2026-05-14): the two ``*_applied_by_us`` flags
-    record whether we changed a kill-switch setting from ``off`` to
-    ``on`` (vs. the user already had it on before Mordred ran). Only
-    settings WE flipped are eligible for rollback on disconnect /
+    Codex round 8 P1 (2026-05-14): ``lockdown_applied_by_us`` records
+    whether we changed the lockdown setting from ``off`` to ``on``
+    (vs. the user already had it on before Mordred ran). Only the
+    setting WE flipped is eligible for rollback on disconnect /
     bring-up failure — undoing the user's pre-existing security
     posture would weaken their machine after a transient bring-up
     failure.
+
+    Mullvad CLI 2026.2 removed the separate ``always-require-vpn``
+    subcommand; its semantics are now subsumed by ``lockdown-mode``,
+    so the handle no longer carries a corresponding flag.
     """
 
     cli_path: str
     region: str
     lockdown_enforced: bool
     lockdown_applied_by_us: bool = False
-    always_require_applied_by_us: bool = False
 
 
 def detect_cli(*, which: Callable[[str], str | None] = shutil.which) -> str:
@@ -112,19 +115,24 @@ def bring_up(
 ) -> MullvadHandle:
     """Run the configured bring-up sequence.
 
-    Strict mode enforces lockdown + always-require-vpn; lenient/off
-    respect the user's existing settings. Region defaults to ``auto``
-    when callers don't pass one.
+    Strict mode enforces ``lockdown-mode`` (the kill-switch); lenient
+    and off respect the user's existing settings. Region defaults to
+    ``auto`` when callers don't pass one.
 
     Does *not* block on ``Connected`` — call :func:`wait_connected`
     afterwards (split so callers can audit each step independently).
 
     Codex round 4 P1 (2026-05-14): every step now inspects
     ``returncode`` and raises :class:`BringupFailed` on non-zero so a
-    failed ``lockdown-mode set on`` / ``always-require-vpn`` /
-    ``relay`` / ``connect`` cannot produce a handle. Without this the
-    runtime would mark the VPN path ``READY`` even though Mullvad
-    refused the request — strict mode would fail open.
+    failed ``lockdown-mode set on`` / ``relay`` / ``connect`` cannot
+    produce a handle. Without this the runtime would mark the VPN
+    path ``READY`` even though Mullvad refused the request — strict
+    mode would fail open.
+
+    Mullvad CLI 2026.2 drift (2026-05-20): the standalone
+    ``always-require-vpn`` subcommand was removed; its kill-switch
+    semantics are now subsumed by ``lockdown-mode``, so strict mode
+    only flips that one setting.
     """
     # Codex round 7 P2-A + round 8 P1-A (2026-05-14): only enable
     # strict kill-switch settings we found OFF, and only roll back the
@@ -133,7 +141,6 @@ def bring_up(
     #       fails — would weaken their security posture, and
     #   (2) re-applying a setting that was already on — pointless churn.
     lockdown_applied = False
-    always_require_applied = False
     applied_strict: list[tuple[str, ...]] = []
     try:
         if policy_mode == "strict":
@@ -141,10 +148,6 @@ def bring_up(
                 _run_or_raise(runner, (cli_path, "lockdown-mode", "set", "on"))
                 applied_strict.append((cli_path, "lockdown-mode", "set", "off"))
                 lockdown_applied = True
-            if not _is_setting_on(runner, cli_path, "always-require-vpn"):
-                _run_or_raise(runner, (cli_path, "always-require-vpn", "set", "on"))
-                applied_strict.append((cli_path, "always-require-vpn", "set", "off"))
-                always_require_applied = True
         # Codex round 6 P1 (2026-05-14): the Mullvad CLI keyword for
         # automatic relay selection is ``any``, not ``auto``. We keep
         # ``auto`` as the user-facing alias (wizard prompt +
@@ -170,7 +173,6 @@ def bring_up(
         region=region,
         lockdown_enforced=(policy_mode == "strict"),
         lockdown_applied_by_us=lockdown_applied,
-        always_require_applied_by_us=always_require_applied,
     )
 
 
@@ -236,25 +238,21 @@ def disconnect(
     *,
     runner: SubprocessRunner = DEFAULT_RUNNER,
     preserve_lockdown: bool = True,
-    clear_always_require: bool = False,
 ) -> None:
-    """Disconnect the tunnel; optionally clear strict kill-switch settings.
+    """Disconnect the tunnel; optionally clear the strict kill-switch.
 
     Strict-mode sessions preserve lockdown so the user must explicitly
     opt out next session — matches the TODO §3.1 L311 contract
     ("strict 中は lockdown 維持").
 
-    Codex round 9 P1-A (2026-05-14): added ``clear_always_require``
-    so runtime cleanup after a wait-timeout failure can roll back
-    ``always-require-vpn set on`` (when WE applied it). Without this
-    a partial bring-up leaves the user with always-require-vpn on
-    blocking their traffic until manually reset.
+    Mullvad CLI 2026.2 drift (2026-05-20): the ``always-require-vpn``
+    rollback path (Codex round 9 P1-A) is gone — the subcommand was
+    removed upstream and ``lockdown-mode`` now covers the same
+    "block traffic when not connected" guarantee.
     """
     runner((handle.cli_path, "disconnect"))
     if not preserve_lockdown:
         runner((handle.cli_path, "lockdown-mode", "set", "off"))
-    if clear_always_require:
-        runner((handle.cli_path, "always-require-vpn", "set", "off"))
 
 
 _AGE_TOKEN_RE: Final = re.compile(

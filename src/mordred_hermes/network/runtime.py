@@ -499,13 +499,14 @@ class Runtime:
             )
         except OSError as bring_err:
             raise BringupFailed(f"mullvad bring-up failed: {bring_err}") from bring_err
-        # Codex r8-P1-B + r9-P1-A (2026-05-14): preserve user's
-        # pre-existing kill-switch settings on cleanup; only clear what
-        # WE applied. ``MullvadHandle`` carries both ``*_applied_by_us``
-        # flags so we never strip security posture the user established
-        # before Mordred ran.
+        # Codex r8-P1-B (2026-05-14): preserve the user's pre-existing
+        # lockdown setting on cleanup; only clear what WE applied.
+        # ``MullvadHandle.lockdown_applied_by_us`` records whether we
+        # flipped it so we never strip security posture the user
+        # established before Mordred ran. Mullvad CLI 2026.2 dropped
+        # the separate ``always-require-vpn`` rollback path (now
+        # subsumed by ``lockdown-mode``).
         preserve_on_cleanup = not vpn_handle.lockdown_applied_by_us
-        clear_always_require = vpn_handle.always_require_applied_by_us
         try:
             self._vpn_wait(cli_path=cli_path)
         except BringupFailed:
@@ -513,7 +514,6 @@ class Runtime:
                 self._vpn_disconnect(
                     vpn_handle,
                     preserve_lockdown=preserve_on_cleanup,
-                    clear_always_require=clear_always_require,
                 )
             except Exception as cleanup_err:
                 _LOG.warning("mullvad cleanup after wait failure: %s", cleanup_err)
@@ -523,7 +523,6 @@ class Runtime:
                 self._vpn_disconnect(
                     vpn_handle,
                     preserve_lockdown=preserve_on_cleanup,
-                    clear_always_require=clear_always_require,
                 )
             except Exception as cleanup_err:
                 _LOG.warning("mullvad cleanup after wait OSError: %s", cleanup_err)

@@ -111,7 +111,7 @@ class TestDetectCli:
 
 
 class TestBringUp:
-    def test_strict_enforces_lockdown_and_always_require(self) -> None:
+    def test_strict_enforces_lockdown(self) -> None:
         from mordred_hermes.network.paths import vpn
 
         runner = _FakeRunner({})
@@ -122,7 +122,6 @@ class TestBringUp:
             runner=runner,
         )
         assert ("/bin/mullvad", "lockdown-mode", "set", "on") in runner.calls
-        assert ("/bin/mullvad", "always-require-vpn", "set", "on") in runner.calls
 
     def test_lenient_does_not_enforce_lockdown(self) -> None:
         from mordred_hermes.network.paths import vpn
@@ -183,14 +182,6 @@ class TestBringUpReturnCodes:
         with pytest.raises(BringupFailed):
             vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
 
-    def test_failed_always_require_command_raises(self) -> None:
-        from mordred_hermes.network._exceptions import BringupFailed
-        from mordred_hermes.network.paths import vpn
-
-        runner = _FakeRunner({("mullvad", "always-require-vpn", "set", "on"): _result(returncode=2)})
-        with pytest.raises(BringupFailed):
-            vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-
     def test_failed_relay_set_raises(self) -> None:
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import vpn
@@ -226,11 +217,10 @@ class TestPreservePreExistingLockdown:
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import vpn
 
-        # Pre-existing user state: lockdown ON, always-require-vpn OFF.
+        # Pre-existing user state: lockdown ON.
         runner = _FakeRunner(
             {
                 ("mullvad", "lockdown-mode", "get"): _result(stdout="Network lockdown when disconnected: on\n"),
-                ("mullvad", "always-require-vpn", "get"): _result(stdout="Always require VPN: off\n"),
                 ("mullvad", "connect"): _result(returncode=1),  # force failure
             }
         )
@@ -238,11 +228,9 @@ class TestPreservePreExistingLockdown:
             vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
 
         # lockdown was already on → we never touched it, so it stays on.
-        # always-require-vpn was off → we set it on → rollback to off.
         assert ("mullvad", "lockdown-mode", "set", "off") not in runner.calls, (
             "user's pre-existing lockdown was disabled on bring-up failure"
         )
-        assert ("mullvad", "always-require-vpn", "set", "off") in runner.calls
 
     def test_lockdown_already_on_is_not_set_again(self) -> None:
         """Skip the redundant ``set on`` when state already matches."""
@@ -251,13 +239,11 @@ class TestPreservePreExistingLockdown:
         runner = _FakeRunner(
             {
                 ("mullvad", "lockdown-mode", "get"): _result(stdout="Network lockdown when disconnected: on\n"),
-                ("mullvad", "always-require-vpn", "get"): _result(stdout="Always require VPN: on\n"),
             }
         )
         vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-        # Neither set-on was issued, because both were already on.
+        # No redundant set-on was issued, because lockdown was already on.
         assert ("mullvad", "lockdown-mode", "set", "on") not in runner.calls
-        assert ("mullvad", "always-require-vpn", "set", "on") not in runner.calls
 
     def test_handle_records_what_we_applied(self) -> None:
         """The returned handle reflects whether *we* enabled lockdown
@@ -268,13 +254,11 @@ class TestPreservePreExistingLockdown:
         runner = _FakeRunner(
             {
                 ("mullvad", "lockdown-mode", "get"): _result(stdout="Network lockdown when disconnected: off\n"),
-                ("mullvad", "always-require-vpn", "get"): _result(stdout="Always require VPN: off\n"),
             }
         )
         handle = vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-        # We changed both from off → on, so we should clean up on disconnect.
+        # We changed lockdown from off → on, so we should clean up on disconnect.
         assert handle.lockdown_applied_by_us is True
-        assert handle.always_require_applied_by_us is True
 
     def test_handle_records_what_already_was(self) -> None:
         from mordred_hermes.network.paths import vpn
@@ -282,13 +266,11 @@ class TestPreservePreExistingLockdown:
         runner = _FakeRunner(
             {
                 ("mullvad", "lockdown-mode", "get"): _result(stdout="Network lockdown when disconnected: on\n"),
-                ("mullvad", "always-require-vpn", "get"): _result(stdout="Always require VPN: on\n"),
             }
         )
         handle = vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-        # User already had them on; we did NOT apply them.
+        # User already had lockdown on; we did NOT apply it.
         assert handle.lockdown_applied_by_us is False
-        assert handle.always_require_applied_by_us is False
 
 
 class TestStrictPartialFailureRollback:
@@ -298,39 +280,27 @@ class TestStrictPartialFailureRollback:
     with a persistent kill-switch that blocks all traffic after the
     session aborts."""
 
-    def test_rolls_back_lockdown_when_always_require_vpn_fails(self) -> None:
-        from mordred_hermes.network._exceptions import BringupFailed
-        from mordred_hermes.network.paths import vpn
-
-        runner = _FakeRunner({("mullvad", "always-require-vpn", "set", "on"): _result(returncode=1)})
-        with pytest.raises(BringupFailed):
-            vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-        # Rollback in reverse: at minimum lockdown-mode is reset to off.
-        assert ("mullvad", "lockdown-mode", "set", "off") in runner.calls
-
-    def test_rolls_back_lockdown_and_always_when_connect_fails(self) -> None:
+    def test_rolls_back_lockdown_when_connect_fails(self) -> None:
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import vpn
 
         runner = _FakeRunner({("mullvad", "connect"): _result(returncode=2)})
         with pytest.raises(BringupFailed):
             vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-        # Both strict settings must have been undone.
+        # The strict setting we applied must have been undone.
         assert ("mullvad", "lockdown-mode", "set", "off") in runner.calls
-        assert ("mullvad", "always-require-vpn", "set", "off") in runner.calls
 
     def test_lenient_failure_does_not_alter_user_settings(self) -> None:
-        """Lenient mode never set lockdown/always-require-vpn, so no rollback fires."""
+        """Lenient mode never sets lockdown, so no rollback fires."""
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import vpn
 
         runner = _FakeRunner({("mullvad", "connect"): _result(returncode=2)})
         with pytest.raises(BringupFailed):
             vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="off", runner=runner)
-        # Must NOT touch lockdown/always-require-vpn at all in lenient/off.
+        # Must NOT touch lockdown at all in lenient/off.
         for call in runner.calls:
             assert call[:2] != ("mullvad", "lockdown-mode")
-            assert call[:2] != ("mullvad", "always-require-vpn")
 
 
 class TestMullvadCli2026Drift:

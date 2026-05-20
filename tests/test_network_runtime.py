@@ -713,26 +713,28 @@ class TestHealthProbeLockRelease:
 
 class TestVpnWaitFailureRollback:
     """Codex round 9 P1-A (2026-05-14): if ``bring_up()`` succeeded
-    (lockdown + always-require-vpn applied) but ``wait_connected()``
-    times out, runtime cleanup must roll back BOTH settings it
-    applied. Otherwise ``always-require-vpn`` stays on (since
-    ``disconnect()`` only undoes lockdown) and blocks the user's
-    traffic after the session aborts.
+    (lockdown applied) but ``wait_connected()`` times out, runtime
+    cleanup must roll back the setting it applied. Otherwise lockdown
+    stays on after the session aborts and blocks the user's traffic.
+
+    Mullvad CLI 2026.2 drift (2026-05-20): the standalone
+    ``always-require-vpn`` rollback path was removed upstream;
+    ``lockdown-mode`` is now the single kill-switch surface, so only
+    its applied-by-us state needs to drive the cleanup.
     """
 
-    def test_wait_failure_clears_always_require_when_applied_by_us(self) -> None:
+    def test_wait_failure_clears_lockdown_when_applied_by_us(self) -> None:
         from mordred_hermes.network.paths import vpn as vpn_real
 
         vpn = _VpnFakes()
 
-        # We turn lockdown + always-require-vpn on, then wait_connected times out.
+        # We turn lockdown on, then wait_connected times out.
         def applying_bring_up(**kwargs: Any) -> Any:
             return vpn_real.MullvadHandle(
                 cli_path=kwargs["cli_path"],
                 region=kwargs["region"],
                 lockdown_enforced=(kwargs["policy_mode"] == "strict"),
                 lockdown_applied_by_us=True,
-                always_require_applied_by_us=True,
             )
 
         vpn.bring_up = applying_bring_up  # type: ignore[method-assign]
@@ -748,29 +750,26 @@ class TestVpnWaitFailureRollback:
         with pytest.raises(BringupFailed):
             rt.use("vpn")
 
-        # Runtime cleanup must have called disconnect with flags that
-        # clear BOTH applied settings.
+        # Runtime cleanup must have called disconnect with the flag
+        # that clears the applied setting.
         assert len(vpn.disconnect_calls) == 1
         call = vpn.disconnect_calls[0]
         # Lockdown WAS applied by us → clear it on cleanup.
         assert call.get("preserve_lockdown") is False
-        # always-require-vpn WAS applied by us → clear it on cleanup.
-        assert call.get("clear_always_require") is True
         rt.stop()
 
-    def test_wait_failure_preserves_user_settings_when_not_applied(self) -> None:
+    def test_wait_failure_preserves_user_lockdown_when_not_applied(self) -> None:
         from mordred_hermes.network.paths import vpn as vpn_real
 
         vpn = _VpnFakes()
 
-        # User already had both on, so we did NOT apply them.
+        # User already had lockdown on, so we did NOT apply it.
         def neutral_bring_up(**kwargs: Any) -> Any:
             return vpn_real.MullvadHandle(
                 cli_path=kwargs["cli_path"],
                 region=kwargs["region"],
                 lockdown_enforced=(kwargs["policy_mode"] == "strict"),
                 lockdown_applied_by_us=False,
-                always_require_applied_by_us=False,
             )
 
         vpn.bring_up = neutral_bring_up  # type: ignore[method-assign]
@@ -786,10 +785,9 @@ class TestVpnWaitFailureRollback:
         with pytest.raises(BringupFailed):
             rt.use("vpn")
 
-        # Runtime cleanup must NOT touch settings we did not apply.
+        # Runtime cleanup must NOT touch a setting we did not apply.
         call = vpn.disconnect_calls[0]
         assert call.get("preserve_lockdown") is True
-        assert call.get("clear_always_require") is False
         rt.stop()
 
 
