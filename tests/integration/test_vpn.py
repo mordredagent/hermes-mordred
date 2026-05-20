@@ -187,3 +187,101 @@ class TestMullvadHandshakeFreshness:
             )
         finally:
             vpn.disconnect(handle, preserve_lockdown=True)
+
+
+class TestMullvadIPv6Behaviour:
+    """IPv6 egress gate (TODO §3.1 L346 v1 caveat / Codex 2026-05-20 must-fix).
+
+    ``RuntimeConfig.disable_ipv6`` is **advisory only** in v1: it flips
+    IPv4-only resolver hints and the ``provider_transport_flagger`` IPv6
+    warning, but kernel-level IPv6 firewalling is v2-N2 deferred. On a
+    dual-stack host with ``disable_ipv6=false`` (lenient default) the
+    OS may route IPv6 traffic around the Mullvad tunnel.
+
+    This gate compares the host's IPv6 egress address pre-tunnel against
+    during-tunnel and documents three acceptable outcomes:
+
+    - **tunneled**: during-tunnel IPv6 differs from baseline → Mullvad is
+      routing IPv6 too (no leak).
+    - **blocked**: during-tunnel IPv6 unreachable → kill-switch / OS-level
+      block (no leak).
+    - **leaked**: during-tunnel IPv6 == baseline → IPv6 bypassed the
+      tunnel; **FAIL** so the leak surfaces in CI rather than prod.
+
+    Skips when curl is unavailable or the host has no reachable IPv6
+    pre-tunnel (nothing to compare — common on IPv4-only CI runners).
+    """
+
+    _IPV6_PROBE_URL = "https://ifconfig.co"
+    _IPV6_PROBE_TIMEOUT = 8.0
+
+    @classmethod
+    def _fetch_ipv6_egress(cls) -> str | None:
+        """Return the host's IPv6 egress, or ``None`` if unreachable.
+
+        Failure-to-connect is intentionally collapsed to ``None`` (not
+        an exception) — "no IPv6 reachable from here" is the normal
+        skip condition, not a test bug.
+        """
+        result = subprocess.run(
+            [
+                "curl",
+                "-6",
+                "-s",
+                "--max-time",
+                str(cls._IPV6_PROBE_TIMEOUT),
+                cls._IPV6_PROBE_URL,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=cls._IPV6_PROBE_TIMEOUT + 2.0,
+        )
+        if result.returncode != 0:
+            return None
+        addr = (result.stdout or "").strip()
+        # ifconfig.co returns a bare IP literal. Reject anything that
+        # doesn't look like a v6 literal (HTML error pages, IPv4
+        # fallback bugs, captive-portal responses, etc.).
+        if ":" not in addr or len(addr) > 64:
+            return None
+        return addr
+
+    def test_ipv6_during_tunnel_does_not_leak_baseline_address(
+        self,
+        authenticated_cli: str,
+    ) -> None:
+        """Pre-tunnel IPv6 egress must NOT remain reachable during a
+        lenient VPN session — same address pre+during = leak.
+
+        The lenient + ``disable_ipv6=false`` combination is the realistic
+        worst case: v1 has no kernel firewall, so a dual-stack host
+        without OS-level IPv6 blocking would expose clear IPv6 traffic
+        even while WireGuard is up.
+        """
+        if shutil.which("curl") is None:
+            pytest.skip("curl binary not on $PATH; IPv6 probe needs it")
+
+        baseline = self._fetch_ipv6_egress()
+        if baseline is None:
+            pytest.skip("host has no reachable IPv6 egress pre-tunnel; nothing to compare")
+
+        handle = vpn.bring_up(
+            cli_path=authenticated_cli,
+            region="auto",
+            policy_mode="lenient",
+        )
+        try:
+            vpn.wait_connected(cli_path=authenticated_cli, timeout=30.0)
+            during = self._fetch_ipv6_egress()
+            # tunneled (different) or blocked (None) both pass; same = leak.
+            assert during != baseline, (
+                f"IPv6 leak: egress address {baseline!r} reachable both "
+                f"before and during the Mullvad session, indicating IPv6 "
+                f"traffic is bypassing the WireGuard tunnel. v1 has no "
+                f"kernel-level IPv6 firewall (TODO §3.1 L346, v2-N2 "
+                f"deferred); until then set policy.json disable_ipv6=true "
+                f"or use strict mode + Mullvad lockdown-mode."
+            )
+        finally:
+            vpn.disconnect(handle, preserve_lockdown=True)
