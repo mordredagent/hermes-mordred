@@ -254,17 +254,23 @@ class _PyobjcSecKeyOps:
             sec.kSecUseDataProtectionKeychain: True,
             sec.kSecPrivateKeyAttrs: private_key_attrs,
         }
+        # Phase 3 — route SecKeyCreateRandomKey through a pure-ctypes
+        # CoreFoundation path to bypass the pyobjc-framework-Security
+        # bridge bug entirely. The bug surfaces during framework-internal
+        # CFDictionaryGetValue probes on the attrs dict and is the reason
+        # ``sec.SecKeyCreateRandomKey(attrs, None)`` raises a bare
+        # KeyError('public'). See ``_seckey_ctypes`` for details.
+        #
+        # The legacy try/except (KeyError, TypeError) wrapper is kept as
+        # defence-in-depth: ``create_random_key_via_ctypes`` never raises
+        # those on a healthy macOS host, but if a future regression slips
+        # the bridge back into the path we still get a clean WrapError
+        # rather than a partial-write crash.
+        from . import _seckey_ctypes
+
         try:
-            private_key, err = sec.SecKeyCreateRandomKey(attrs, None)
+            private_key, err = _seckey_ctypes.create_random_key_via_ctypes(sec, attrs)
         except (KeyError, TypeError) as exc:
-            # pyobjc-framework-Security bridge regression: when
-            # kSecAttrTokenIDSecureEnclave is requested, the C extension
-            # raises a bare KeyError for CFString constants ('public' /
-            # 'private' / 'applepay') or a TypeError on metadata-signature
-            # mismatch instead of returning (None, NSError). Version-
-            # independent across pyobjc 10/11/12. Wrap as _OpsError so
-            # _SecKeyBackend translates to WrapError and init_keyvault
-            # rolls back partial state.
             raise _OpsError(
                 -1,
                 "pyobjc-bridge",
