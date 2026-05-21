@@ -364,3 +364,119 @@ def test_pyobjc_ops_is_default_backend_ops() -> None:
     pyobjc bridge — importing it must not touch pyobjc."""
     real = _SecKeyBackend()
     assert isinstance(real._ops, _PyobjcSecKeyOps)
+
+
+# ---------------------------------------------------------------------------
+# _PyobjcSecKeyOps — pyobjc bridge error containment
+# ---------------------------------------------------------------------------
+
+
+class _BridgeSentinel:
+    """Any attribute access returns a unique sentinel value.
+
+    Stand-in for the CFString constants the production code reads off the
+    pyobjc ``Security`` module (``kSecAttrKeyType``, ``kSecPrivateKeyAttrs``
+    …). ``kSecAccessControl*`` names get distinct ``int`` powers-of-two so
+    the production code's bit-OR (``flags | sec.kSecAccessControlBiometry…``)
+    works; everything else is a unique str so dict-build paths still work.
+    """
+
+    _bits: dict[str, int] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("kSecAccessControl"):
+            bit = self._bits.get(name)
+            if bit is None:
+                bit = 1 << len(self._bits)
+                self._bits[name] = bit
+            return bit
+        return f"<sentinel:{name}>"
+
+
+def _make_bridge_fake(raise_exc: Exception) -> Any:
+    """Build a fake pyobjc ``Security`` module whose
+    ``SecKeyCreateRandomKey`` raises ``raise_exc``.
+
+    Mirrors the in-the-wild pyobjc bridge regression observed against
+    Apple's Secure Enclave: the bridge can raise opaque ``KeyError`` /
+    ``TypeError`` from inside the C extension before the Python caller
+    ever sees a ``(None, NSError)`` tuple.
+    """
+
+    class _Fake(_BridgeSentinel):
+        def SecAccessControlCreateWithFlags(  # noqa: N802 — Apple API name
+            self,
+            _allocator: Any,
+            _protection: Any,
+            _flags: Any,
+            _error: Any,
+        ) -> tuple[Any, Any]:
+            return ("<access-control>", None)
+
+        def SecKeyCreateRandomKey(self, _attrs: Any, _error: Any) -> Any:  # noqa: N802
+            raise raise_exc
+
+    return _Fake()
+
+
+def _install_bridge_fake(monkeypatch: pytest.MonkeyPatch, raise_exc: Exception) -> None:
+    """Inject ``_make_bridge_fake(raise_exc)`` as the cached Security module."""
+    import mordred_hermes.keyvault.native as native
+
+    monkeypatch.setattr(native, "_security_module", _make_bridge_fake(raise_exc))
+
+
+@pytest.mark.parametrize(
+    ("raise_exc", "fragment"),
+    [
+        (KeyError("public"), "public"),  # the canonical observed regression
+        (KeyError("private"), "private"),  # token-ID path variant
+        (KeyError("applepay"), "applepay"),  # recursive bridge lookup variant
+        (TypeError("Need 2 arguments, got 1"), "Need 2 arguments"),
+    ],
+)
+def test_pyobjc_ops_create_wraps_bridge_errors_as_ops_error(
+    monkeypatch: pytest.MonkeyPatch,
+    raise_exc: Exception,
+    fragment: str,
+) -> None:
+    """``KeyError`` / ``TypeError`` leaking from ``SecKeyCreateRandomKey``
+    must be wrapped as :class:`_OpsError` with the ``pyobjc-bridge``
+    domain so ``_SecKeyBackend`` can translate it to ``WrapError`` and
+    ``init_keyvault`` does not leave partial state behind.
+
+    Reproduces the observed regression where pyobjc's
+    ``pyobjc-framework-Security`` bridge raises a bare ``KeyError`` for
+    the CFString constants ``'public'`` / ``'private'`` / ``'applepay'``
+    from inside the C extension when ``kSecAttrTokenIDSecureEnclave`` is
+    requested. Bridge bug is version-independent (pyobjc 10/11/12).
+    """
+    _install_bridge_fake(monkeypatch, raise_exc)
+    ops = _PyobjcSecKeyOps()
+
+    with pytest.raises(_OpsError) as excinfo:
+        ops.create_keypair(b"tag", "label")
+
+    assert excinfo.value.domain == "pyobjc-bridge"
+    assert excinfo.value.__cause__ is raise_exc
+    assert fragment in str(excinfo.value)
+
+
+def test_pyobjc_bridge_keyerror_surfaces_as_wrap_error_through_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense-in-depth: a pyobjc bridge ``KeyError`` reaching the
+    backend must come out as :class:`WrapError`, not propagate through.
+
+    This is the contract :func:`init_keyvault` relies on to roll back
+    partial Secure-Enclave / ciphertext / digest writes.
+    """
+    _install_bridge_fake(monkeypatch, KeyError("public"))
+    backend = _SecKeyBackend(ops=_PyobjcSecKeyOps())
+
+    with pytest.raises(WrapError) as excinfo:
+        backend.generate_enclave_key("wallet-key")
+
+    assert not isinstance(excinfo.value, WrapKeyNotFound)
+    assert isinstance(excinfo.value.__cause__, _OpsError)
+    assert excinfo.value.__cause__.domain == "pyobjc-bridge"

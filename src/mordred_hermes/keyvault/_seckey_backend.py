@@ -254,7 +254,22 @@ class _PyobjcSecKeyOps:
             sec.kSecUseDataProtectionKeychain: True,
             sec.kSecPrivateKeyAttrs: private_key_attrs,
         }
-        private_key, err = sec.SecKeyCreateRandomKey(attrs, None)
+        try:
+            private_key, err = sec.SecKeyCreateRandomKey(attrs, None)
+        except (KeyError, TypeError) as exc:
+            # pyobjc-framework-Security bridge regression: when
+            # kSecAttrTokenIDSecureEnclave is requested, the C extension
+            # raises a bare KeyError for CFString constants ('public' /
+            # 'private' / 'applepay') or a TypeError on metadata-signature
+            # mismatch instead of returning (None, NSError). Version-
+            # independent across pyobjc 10/11/12. Wrap as _OpsError so
+            # _SecKeyBackend translates to WrapError and init_keyvault
+            # rolls back partial state.
+            raise _OpsError(
+                -1,
+                "pyobjc-bridge",
+                f"SecKeyCreateRandomKey bridge error: {exc!r}",
+            ) from exc
         if private_key is None:
             raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCreateRandomKey failed")
         public_key = sec.SecKeyCopyPublicKey(private_key)
