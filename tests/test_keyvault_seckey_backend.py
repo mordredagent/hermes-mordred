@@ -490,7 +490,7 @@ def test_keychain_query_does_not_request_data_protection_keychain() -> None:
     the same keychain) is still satisfied — uniformly via the legacy
     keychain instead of uniformly via the Data Protection Keychain.
     """
-    import Security as sec
+    sec = pytest.importorskip("Security")
 
     from mordred_hermes.keyvault._seckey_backend import _keychain_query
 
@@ -510,9 +510,9 @@ def test_pyobjc_ops_create_attrs_do_not_request_data_protection_keychain(
     ``SecKeyCreateRandomKey``. We capture attrs via the ctypes helper
     seam instead of touching the real Security framework.
     """
-    import contextlib
+    sec = pytest.importorskip("Security")
 
-    import Security as sec
+    import contextlib
 
     from mordred_hermes.keyvault import _seckey_ctypes
     from mordred_hermes.keyvault._seckey_backend import _OpsError, _PyobjcSecKeyOps
