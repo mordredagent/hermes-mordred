@@ -61,7 +61,7 @@ def _build_enclave_attrs(sec, *, tag: bytes, persist: bool):
         sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
         sec.kSecAttrKeySizeInBits: 256,
         sec.kSecAttrTokenID: sec.kSecAttrTokenIDSecureEnclave,
-        sec.kSecUseDataProtectionKeychain: True,
+        # Phase 4: legacy macOS Keychain (no kSecUseDataProtectionKeychain).
         sec.kSecPrivateKeyAttrs: private_key_attrs,
     }
 
