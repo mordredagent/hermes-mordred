@@ -477,6 +477,66 @@ def test_pyobjc_ops_create_wraps_bridge_errors_as_ops_error(
     assert fragment in str(excinfo.value)
 
 
+def test_keychain_query_does_not_request_data_protection_keychain() -> None:
+    """Phase 4: ``_keychain_query`` must not pin
+    ``kSecUseDataProtectionKeychain=True``. The Data Protection Keychain
+    requires the ``keychain-access-groups`` entitlement, which an
+    unsigned local Python interpreter does not carry, so writes fail
+    with ``errSecMissingEntitlement (-34018)``. Phase 4 switches to the
+    legacy macOS keychain so each developer can run ``keyvault init``
+    locally without code-signing infrastructure.
+
+    The codex-review HIGH invariant (every ``SecItem*`` op must target
+    the same keychain) is still satisfied — uniformly via the legacy
+    keychain instead of uniformly via the Data Protection Keychain.
+    """
+    sec = pytest.importorskip("Security")
+
+    from mordred_hermes.keyvault._seckey_backend import _keychain_query
+
+    query = _keychain_query(sec, b"mordred-hermes.test-tag")
+    assert sec.kSecUseDataProtectionKeychain not in query, (
+        "Phase 4 removed the Data Protection Keychain dependency; "
+        "_keychain_query must not pin kSecUseDataProtectionKeychain=True."
+    )
+
+
+def test_pyobjc_ops_create_attrs_do_not_request_data_protection_keychain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 4 mirror of :func:`test_keychain_query_does_not_request_data_protection_keychain`
+    for the write side: ``_PyobjcSecKeyOps._create`` must not include
+    ``kSecUseDataProtectionKeychain=True`` in the attrs passed to
+    ``SecKeyCreateRandomKey``. We capture attrs via the ctypes helper
+    seam instead of touching the real Security framework.
+    """
+    sec = pytest.importorskip("Security")
+
+    import contextlib
+
+    from mordred_hermes.keyvault import _seckey_ctypes
+    from mordred_hermes.keyvault._seckey_backend import _OpsError, _PyobjcSecKeyOps
+
+    captured: list[dict] = []
+
+    def _capture(_sec: Any, attrs: dict) -> tuple[Any, Any]:
+        captured.append(attrs)
+        return None, None  # benign — _create will raise _OpsError after this
+
+    monkeypatch.setattr(_seckey_ctypes, "create_random_key_via_ctypes", _capture)
+
+    ops = _PyobjcSecKeyOps()
+    with contextlib.suppress(_OpsError):
+        ops.create_keypair(b"mordred-hermes.test-tag", "Phase 4 attrs probe")
+
+    assert captured, "ctypes helper was not invoked by _PyobjcSecKeyOps._create"
+    attrs = captured[0]
+    assert sec.kSecUseDataProtectionKeychain not in attrs, (
+        "Phase 4 removed the Data Protection Keychain dependency; "
+        "_create attrs must not request kSecUseDataProtectionKeychain=True."
+    )
+
+
 def test_pyobjc_bridge_keyerror_surfaces_as_wrap_error_through_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

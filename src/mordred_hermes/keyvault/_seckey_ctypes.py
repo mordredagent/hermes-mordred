@@ -76,6 +76,11 @@ _SEC_CONST_NAMES = (
     "kSecAttrKeySizeInBits",
     "kSecAttrTokenID",
     "kSecAttrTokenIDSecureEnclave",
+    # Reserved: re-introduce when iOS Data Protection Keychain support
+    # is added. Phase 4 dropped DPK from `_PyobjcSecKeyOps._create` and
+    # `_keychain_query` for unsigned-Python compatibility, but the
+    # bridge layer still resolves the dlsym address so a future
+    # callsite can re-add it without touching this constant table.
     "kSecUseDataProtectionKeychain",
     "kSecPrivateKeyAttrs",
     "kSecAttrIsPermanent",

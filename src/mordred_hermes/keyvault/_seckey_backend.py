@@ -248,10 +248,14 @@ class _PyobjcSecKeyOps:
             sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
             sec.kSecAttrKeySizeInBits: 256,
             sec.kSecAttrTokenID: sec.kSecAttrTokenIDSecureEnclave,
-            # Secure-Enclave keys live in the data-protection keychain;
-            # every SecItem* lookup must target the same keychain (see
-            # _keychain_query) or it misses the key (codex review HIGH).
-            sec.kSecUseDataProtectionKeychain: True,
+            # Phase 4: persist to the legacy macOS Keychain. The Data
+            # Protection Keychain (kSecUseDataProtectionKeychain=True)
+            # requires the keychain-access-groups entitlement, which an
+            # unsigned local Python interpreter cannot carry — writes
+            # fail with errSecMissingEntitlement (-34018). The codex-
+            # review HIGH invariant (every SecItem* op targets the same
+            # keychain) is still satisfied uniformly via the legacy
+            # keychain; see _keychain_query.
             sec.kSecPrivateKeyAttrs: private_key_attrs,
         }
         # Phase 3 — route SecKeyCreateRandomKey through a pure-ctypes
@@ -364,10 +368,15 @@ def _keychain_query(sec: Any, tag: bytes) -> dict[Any, Any]:
 
     Pins ``kSecAttrKeyClassPrivate`` + the Secure-Enclave token so a
     same-tag *software* key can never be matched and used without the
-    Enclave prompt (codex review BLOCKER). ``kSecUseDataProtectionKeychain``
-    is required on macOS: Secure-Enclave keys live in the data-protection
-    keychain — ``SecItem*`` calls otherwise hit the legacy file-based
-    keychain and fail with ``errSecParam`` (codex review HIGH, live-repro).
+    Enclave prompt (codex review BLOCKER).
+
+    Phase 4: queries target the legacy macOS Keychain (no
+    ``kSecUseDataProtectionKeychain=True``) to match the write side in
+    ``_PyobjcSecKeyOps._create``. The Data Protection Keychain requires
+    the ``keychain-access-groups`` entitlement, which an unsigned local
+    Python interpreter cannot carry. The codex-review HIGH invariant
+    (every ``SecItem*`` op targets the same keychain) is still satisfied
+    — uniformly via the legacy keychain instead of uniformly via DPK.
     """
     return {
         sec.kSecClass: sec.kSecClassKey,
@@ -375,7 +384,6 @@ def _keychain_query(sec: Any, tag: bytes) -> dict[Any, Any]:
         sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
         sec.kSecAttrKeyClass: sec.kSecAttrKeyClassPrivate,
         sec.kSecAttrTokenID: sec.kSecAttrTokenIDSecureEnclave,
-        sec.kSecUseDataProtectionKeychain: True,
     }
 
 
