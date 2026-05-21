@@ -440,18 +440,33 @@ def test_pyobjc_ops_create_wraps_bridge_errors_as_ops_error(
     raise_exc: Exception,
     fragment: str,
 ) -> None:
-    """``KeyError`` / ``TypeError`` leaking from ``SecKeyCreateRandomKey``
-    must be wrapped as :class:`_OpsError` with the ``pyobjc-bridge``
-    domain so ``_SecKeyBackend`` can translate it to ``WrapError`` and
-    ``init_keyvault`` does not leave partial state behind.
+    """``KeyError`` / ``TypeError`` leaking from the SecKey-creation
+    code path must be wrapped as :class:`_OpsError` with the
+    ``pyobjc-bridge`` domain so ``_SecKeyBackend`` can translate it to
+    ``WrapError`` and ``init_keyvault`` does not leave partial state
+    behind.
 
-    Reproduces the observed regression where pyobjc's
-    ``pyobjc-framework-Security`` bridge raises a bare ``KeyError`` for
-    the CFString constants ``'public'`` / ``'private'`` / ``'applepay'``
-    from inside the C extension when ``kSecAttrTokenIDSecureEnclave`` is
-    requested. Bridge bug is version-independent (pyobjc 10/11/12).
+    Post-Phase-3, ``_PyobjcSecKeyOps._create`` routes through
+    :func:`_seckey_ctypes.create_random_key_via_ctypes` instead of
+    ``sec.SecKeyCreateRandomKey``, so the bridge bug can no longer
+    surface via the legacy call site. The wrapper is kept as
+    defence-in-depth in case a future regression slips a pyobjc dict
+    back into the path. This test installs a fake ctypes helper that
+    raises the historically observed bridge exceptions and asserts the
+    wrapper still translates them.
     """
+    from mordred_hermes.keyvault import _seckey_ctypes
+
+    # Need a fake `sec` for the upstream `_access_control` call before
+    # the ctypes helper runs — the bridge fake provides
+    # SecAccessControlCreateWithFlags returning a sentinel.
     _install_bridge_fake(monkeypatch, raise_exc)
+
+    def _raising_ctypes_helper(_sec: Any, _attrs: Any) -> tuple[Any, Any]:
+        raise raise_exc
+
+    monkeypatch.setattr(_seckey_ctypes, "create_random_key_via_ctypes", _raising_ctypes_helper)
+
     ops = _PyobjcSecKeyOps()
 
     with pytest.raises(_OpsError) as excinfo:
@@ -471,7 +486,16 @@ def test_pyobjc_bridge_keyerror_surfaces_as_wrap_error_through_backend(
     This is the contract :func:`init_keyvault` relies on to roll back
     partial Secure-Enclave / ciphertext / digest writes.
     """
-    _install_bridge_fake(monkeypatch, KeyError("public"))
+    from mordred_hermes.keyvault import _seckey_ctypes
+
+    raise_exc = KeyError("public")
+    _install_bridge_fake(monkeypatch, raise_exc)
+
+    def _raising_ctypes_helper(_sec: Any, _attrs: Any) -> tuple[Any, Any]:
+        raise raise_exc
+
+    monkeypatch.setattr(_seckey_ctypes, "create_random_key_via_ctypes", _raising_ctypes_helper)
+
     backend = _SecKeyBackend(ops=_PyobjcSecKeyOps())
 
     with pytest.raises(WrapError) as excinfo:
