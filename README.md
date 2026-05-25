@@ -12,9 +12,31 @@ Five plugins exposed via the `hermes_agent.plugins` entry-point group:
 
 ## Status
 
-Phase 0 scaffold. All `register(ctx)` functions are stubs; Phase 1+ will wire actual behavior.
+Active alpha (`0.1.0a0`). The five entry-point plugins are implemented beyond
+the original Phase 0 scaffold; the default unit suite is intended to stay
+hermetic, while hardware- and network-mutating checks remain opt-in.
 
 See `../mordred-docs/mordred/` for SPEC, PLAN, TODO, PATHS, MIGRATION, UPSTREAM, CI.
+
+## Validation
+
+Default local checks:
+
+```sh
+UV_CACHE_DIR=/tmp/uv-cache uv run ruff check src tests
+HERMES_HOME=/private/tmp/hermes-mordred-test-home UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q
+```
+
+Manual live-device validation was reported successful on 2026-05-25 for the
+hardware/network-gated suites that are excluded from default PR CI:
+
+```sh
+MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v
+MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v
+```
+
+The Tor path is covered separately by the hermetic Docker-based
+`integration-tor` CI job.
 
 ## Install (development)
 
