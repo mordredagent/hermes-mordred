@@ -10,7 +10,7 @@ HKDF / AES-KW / wire-format paths run with real crypto (not mocks).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -381,7 +381,7 @@ class _BridgeSentinel:
     works; everything else is a unique str so dict-build paths still work.
     """
 
-    _bits: dict[str, int] = {}
+    _bits: ClassVar[dict[str, int]] = {}
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("kSecAccessControl"):
@@ -404,7 +404,7 @@ def _make_bridge_fake(raise_exc: Exception) -> Any:
     """
 
     class _Fake(_BridgeSentinel):
-        def SecAccessControlCreateWithFlags(  # noqa: N802 — Apple API name
+        def SecAccessControlCreateWithFlags(
             self,
             _allocator: Any,
             _protection: Any,
@@ -413,7 +413,7 @@ def _make_bridge_fake(raise_exc: Exception) -> Any:
         ) -> tuple[Any, Any]:
             return ("<access-control>", None)
 
-        def SecKeyCreateRandomKey(self, _attrs: Any, _error: Any) -> Any:  # noqa: N802
+        def SecKeyCreateRandomKey(self, _attrs: Any, _error: Any) -> Any:
             raise raise_exc
 
     return _Fake()

@@ -143,11 +143,10 @@ def bring_up(
     lockdown_applied = False
     applied_strict: list[tuple[str, ...]] = []
     try:
-        if policy_mode == "strict":
-            if not _is_setting_on(runner, cli_path, "lockdown-mode"):
-                _run_or_raise(runner, (cli_path, "lockdown-mode", "set", "on"))
-                applied_strict.append((cli_path, "lockdown-mode", "set", "off"))
-                lockdown_applied = True
+        if policy_mode == "strict" and not _is_setting_on(runner, cli_path, "lockdown-mode"):
+            _run_or_raise(runner, (cli_path, "lockdown-mode", "set", "on"))
+            applied_strict.append((cli_path, "lockdown-mode", "set", "off"))
+            lockdown_applied = True
         # Codex round 6 P1 (2026-05-14): the Mullvad CLI keyword for
         # automatic relay selection is ``any``, not ``auto``. We keep
         # ``auto`` as the user-facing alias (wizard prompt +

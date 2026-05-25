@@ -16,9 +16,10 @@ fully bypassed. The fix's hot path requires:
    downstream ``SecKeyCopyPublicKey`` / ``SecKeyCopyExternalRepresentation``
    calls — which do *not* trigger the bridge bug — keep working unchanged.
 
-The macOS-gated smoke test below exercises a real Secure-Enclave key
-generation (``.privateKeyUsage`` only, no biometry → no Touch ID prompt)
-so the helper's RED→GREEN cycle is observable on the developer machine.
+The macOS-gated integration smoke test below exercises a real Secure-Enclave
+key generation (``.privateKeyUsage`` only, no biometry → no Touch ID prompt)
+so the helper's RED→GREEN cycle is observable on the developer machine without
+making the default unit suite depend on local hardware / sandbox access.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ def _build_enclave_attrs(sec, *, tag: bytes, persist: bool):
     }
 
 
+@pytest.mark.integration
 def test_create_random_key_via_ctypes_generates_real_enclave_key() -> None:
     """End-to-end smoke: pure-ctypes path produces a real Secure-Enclave
     ``SecKeyRef`` with no ``KeyError`` from the pyobjc bridge.
