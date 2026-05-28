@@ -244,6 +244,7 @@ def init_keyvault(
     surface: SeedDisplaySurface | None = None,
     audit_sink: AuditSink | None = None,
     display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
+    store_seed_for_hd: bool = False,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
 
@@ -310,6 +311,12 @@ def init_keyvault(
     # CPython cannot zero an immutable str in place — this shortens the
     # exposure window, it does not scrub the bytes; the handle's bytearray
     # is the one wipeable copy.
+    #
+    # HD mode (store_seed_for_hd, Option A) is the deliberate exception: the
+    # seed must survive to be SE-encrypted after the key is finalized, so we
+    # keep one reference until storage. The operator opted into at-rest seed
+    # storage, so the slightly longer in-memory exposure is inherent.
+    mnemonic_for_hd = seed_phrase if store_seed_for_hd else None
     del seed_phrase, normalized_seed, passphrase
 
     if surface is None:
@@ -438,6 +445,30 @@ def init_keyvault(
             "stays plaintext until the keyvault is repaired.",
             file=sys.stderr,
         )
+
+    # HD mode (Option A): SE-encrypt the just-generated seed so the HD wallet
+    # can derive Ethereum accounts later without re-entering the 24 words. The
+    # keyvault is already durably initialised at this point, so a storage
+    # failure is surfaced as a note rather than failing the whole init.
+    if mnemonic_for_hd is not None:
+        try:
+            from ..keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+
+            sink = audit_sink if audit_sink is not None else _stderr_audit_sink
+            seed_env_id = store_seed_phrase(result.key_id, mnemonic_for_hd, backend=backend, audit_sink=sink, home=home)
+            address, path = derive_ethereum_key(
+                result.key_id, seed_env_id, 0, backend=backend, audit_sink=sink, home=home
+            )
+            print(f"HD wallet enabled. Seed stored (envelope {seed_env_id}); account 0 ({path}) = {address}")
+        except (WrapError, ImportError) as exc:
+            print(
+                f"note: HD seed not stored ({exc}); the keyvault is still initialised, "
+                "but derive_ethereum_key will be unavailable until the seed is stored.",
+                file=sys.stderr,
+            )
+        finally:
+            del mnemonic_for_hd
+
     print(f"Keyvault initialised. Key: {result.key_id}")
     return 0
 

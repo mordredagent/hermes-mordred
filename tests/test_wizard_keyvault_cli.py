@@ -496,9 +496,7 @@ class TestInit:
 
         # Deriving via the stored seed must match an independent derivation
         # from the same (fixed) mnemonic — proving the round-trip is correct.
-        addr, path = derive_ethereum_key(
-            "default", seed_env_id, 0, backend=backend, audit_sink=_sink(), home=tmp_path
-        )
+        addr, path = derive_ethereum_key("default", seed_env_id, 0, backend=backend, audit_sink=_sink(), home=tmp_path)
         expected_priv = _bip32.derive_path(_bip39.mnemonic_to_seed(self.FIXED_SEED), "m/44'/60'/0'/0/0")
         expected_addr = keys.PrivateKey(expected_priv).public_key.to_checksum_address()
         assert addr == expected_addr
