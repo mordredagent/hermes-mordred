@@ -434,13 +434,24 @@ class TestInit:
     def test_cli_init_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         called: dict[str, bool] = {}
 
-        def fake() -> int:
+        def fake(**kwargs: Any) -> int:
             called["yes"] = True
             return 0
 
         monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
-        assert keyvault_cli.cli_init(argparse.Namespace()) == 0
+        assert keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=False)) == 0
         assert called["yes"]
+
+    def test_cli_init_forwards_store_seed_for_hd_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake(**kwargs: Any) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
+        keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=True))
+        assert captured.get("store_seed_for_hd") is True
 
     def test_init_provisions_audit_log_wrapping_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """init must also generate the audit-log wrapping key so the L465
@@ -522,6 +533,27 @@ class TestInit:
         root = _storage.resolve_keyvault_dir(tmp_path)
         purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
         assert not list((root / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))
+
+    def test_init_store_seed_does_not_unwrap(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Storing the seed at init time is offline (wrap uses the public key).
+
+        init must NOT perform an Enclave ECDH/unwrap, which on a real device
+        would force a Touch ID / passcode prompt at the end of init.
+        """
+        backend = FakeBackend()
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=backend,
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+            store_seed_for_hd=True,
+        )
+        assert rc == 0
+        assert not any(call[0] == "ecdh" for call in backend.calls)
 
     def test_corrupt_keyvault_meta_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A corrupt meta.json must surface a clean error, not a traceback."""
