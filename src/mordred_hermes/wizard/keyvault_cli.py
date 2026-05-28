@@ -257,6 +257,11 @@ def init_keyvault(
     5. ``display_seed`` — show the Seed under a network blackout for 60s.
     6. The operator computes the digest offline and transcribes it back.
     7. ``confirm_generate`` — finalize only if the digest matches.
+    8. If ``store_seed_for_hd`` (Option A): SE-encrypt the generated seed
+       (offline wrap, no prompt) so the HD wallet can derive Ethereum
+       accounts later without re-entering the words. Best-effort — the
+       keyvault is already durable, so a storage failure degrades to a note.
+       Default ``False`` keeps the seed paper-only (never persisted).
 
     ``backend`` / ``prompt_io`` / ``surface`` / ``display_fn`` default to
     the production implementations; tests inject fakes. Returns 0 on a
@@ -451,19 +456,23 @@ def init_keyvault(
     # keyvault is already durably initialised at this point, so a storage
     # failure is surfaced as a note rather than failing the whole init.
     if mnemonic_for_hd is not None:
+        # Storing is OFFLINE — store_seed_phrase wraps the DEK with the
+        # Enclave *public* key, so it never triggers an authorization prompt.
+        # We deliberately do NOT derive an account here: derivation unwraps
+        # (ECDH), which on an interactive wrapping key would force a Touch ID
+        # prompt at the very end of init. Derivation happens on demand later.
+        # The catch is broad (Exception) because the keyvault is already
+        # durable; any storage failure must degrade to a note, not a traceback.
         try:
-            from ..keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+            from ..keyvault.ethereum import store_seed_phrase
 
             sink = audit_sink if audit_sink is not None else _stderr_audit_sink
             seed_env_id = store_seed_phrase(result.key_id, mnemonic_for_hd, backend=backend, audit_sink=sink, home=home)
-            address, path = derive_ethereum_key(
-                result.key_id, seed_env_id, 0, backend=backend, audit_sink=sink, home=home
-            )
-            print(f"HD wallet enabled. Seed stored (envelope {seed_env_id}); account 0 ({path}) = {address}")
-        except (WrapError, ImportError) as exc:
+            print(f"HD wallet enabled. Seed stored SE-encrypted (envelope {seed_env_id}).")
+        except Exception as exc:
             print(
-                f"note: HD seed not stored ({exc}); the keyvault is still initialised, "
-                "but derive_ethereum_key will be unavailable until the seed is stored.",
+                f"note: HD seed not stored ({exc!r}); the keyvault is still initialised, "
+                "but HD derivation is unavailable until the seed is stored.",
                 file=sys.stderr,
             )
         finally:
@@ -496,6 +505,5 @@ def cli_recover(args: argparse.Namespace) -> int:
 
 
 def cli_init(args: argparse.Namespace) -> int:
-    """argparse handler for ``keyvault init`` (takes no options)."""
-    del args
-    return init_keyvault()
+    """argparse handler for ``keyvault init`` (``--store-seed-for-hd`` opt-in)."""
+    return init_keyvault(store_seed_for_hd=getattr(args, "store_seed_for_hd", False))
