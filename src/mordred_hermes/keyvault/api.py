@@ -486,6 +486,7 @@ def confirm_generate(
     backend: NativeBackend,
     audit_sink: AuditSink,
     home: Path | None = None,
+    unattended: bool | None = None,
 ) -> GenerateResult:
     """Finalize key generation once the verification digest is confirmed.
 
@@ -602,7 +603,7 @@ def confirm_generate(
         # Create the Enclave wrapping key. OUTSIDE the inner rollback try:
         # if this raises (e.g. a meta/Keychain inconsistency surfacing as a
         # duplicate) the key belongs elsewhere and must NOT be deleted.
-        wrap.generate_wrapping_key(resolved_key_id, backend=backend)
+        wrap.generate_wrapping_key(resolved_key_id, backend=backend, unattended=unattended)
 
         try:
             commit_path = root / "digests" / f"{key_id_hash_hex}.commit"
@@ -669,6 +670,7 @@ def generate(
     backend: NativeBackend,
     audit_sink: AuditSink,
     home: Path | None = None,
+    unattended: bool | None = None,
 ) -> GenerateResult:
     """Non-interactive convenience wrapper: prepare → confirm in one call.
 
@@ -695,6 +697,7 @@ def generate(
             backend=backend,
             audit_sink=audit_sink,
             home=home,
+            unattended=unattended,
         )
     finally:
         # generate() is non-interactive — there is no display flow to call

@@ -57,7 +57,7 @@ class _FakeOps:
         self.delete_error: _OpsError | None = None
         self.exchange_error: _OpsError | None = None
 
-    def create_keypair(self, tag: bytes, label: str) -> bytes:
+    def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
         self.calls.append(("create", tag))
         if self.create_error is not None:
             raise self.create_error
@@ -348,22 +348,46 @@ def test_probe_capability_raises_native_unavailable_off_macos(monkeypatch: pytes
     """On non-Darwin, ``probe_capability`` reaches ``_lazy_import_security``
     which short-circuits to ``WrapNativeUnavailable``. ``native.is_secure_
     enclave_available`` swallows that into ``False`` — verified in
-    ``test_keyvault_native.py``; here we confirm the raise contract."""
+    ``test_keyvault_native.py``; here we confirm the raise contract.
+
+    The helper is patched out so the platform check is reached regardless
+    of whether ``mordred-hermes-sekey`` is installed on the test machine.
+    """
     import sys
 
     import mordred_hermes.keyvault.native as native
+    from mordred_hermes.keyvault import _seckey_helper
 
     monkeypatch.setattr(native, "_security_module", None)
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(_seckey_helper, "_find_helper", lambda: None)
     with pytest.raises(WrapNativeUnavailable):
         probe_capability()
 
 
-def test_pyobjc_ops_is_default_backend_ops() -> None:
-    """Constructing ``_SecKeyBackend()`` with no ``ops`` wires the real
-    pyobjc bridge — importing it must not touch pyobjc."""
+def test_pyobjc_ops_is_default_backend_ops_no_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the signed helper is absent, ``_SecKeyBackend()`` wires the
+    in-process pyobjc bridge (``_PyobjcSecKeyOps``)."""
+    from mordred_hermes.keyvault import _seckey_helper
+
+    monkeypatch.setattr(_seckey_helper, "_find_helper", lambda: None)
     real = _SecKeyBackend()
     assert isinstance(real._ops, _PyobjcSecKeyOps)
+
+
+def test_helper_ops_is_default_backend_ops_when_helper_present(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the signed helper is present, ``_SecKeyBackend()`` wires
+    ``_HelperSecKeyOps`` instead of ``_PyobjcSecKeyOps``."""
+    from mordred_hermes.keyvault import _seckey_helper
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    fake = tmp_path / "fake-helper"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(_seckey_helper, "_find_helper", lambda: str(fake))
+    real = _SecKeyBackend()
+    assert isinstance(real._ops, _HelperSecKeyOps)
 
 
 # ---------------------------------------------------------------------------

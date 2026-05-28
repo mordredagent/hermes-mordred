@@ -46,6 +46,14 @@ macos = [
 # (b) the shallow `process.poll()` fallback covers lenient/off operators who
 # don't need the deeper M9 liveness signal. Strict-mode operators install
 # with `pip install mordred-hermes[tor-control]`.
+ethereum = [
+  # keyvault crypto stack is a prerequisite (AES-GCM encrypt/decrypt).
+  "mordred-hermes[keyvault]",
+  # secp256k1 key operations + EIP-55 address derivation + signing.
+  "eth-keys>=0.6",
+  # keccak256 backend required by eth-keys via eth-hash.
+  "eth-hash[pycryptodome]>=0.5",
+]
 tor-control = [
   "stem>=1.8.0,<2",
 ]
@@ -153,3 +161,4 @@ warn_redundant_casts = true
 module = ["hermes_cli", "hermes_cli.*", "hermes_constants", "providers", "providers.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
+

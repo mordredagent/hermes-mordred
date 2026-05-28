@@ -165,11 +165,17 @@ class NativeBackend(Protocol):
     ``env_file_writer.EnvFileWriter``) — review-fix-1 HIGH-3.
     """
 
-    def generate_enclave_key(self, key_id: str) -> bytes:
+    def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
         """Create a new Enclave-backed P-256 keypair tagged with
         ``key_id`` and return the SEC1 uncompressed public key. Raises
         :class:`WrapKeyNotFound` if a key with this id already exists
-        (the production backend translates ``errSecDuplicateItem``)."""
+        (the production backend translates ``errSecDuplicateItem``).
+
+        ``unattended`` selects the key's authorization policy:
+        ``False`` (or ``None`` → safe default) gates every ``enclave_ecdh``
+        behind Touch ID / passcode; ``True`` creates a key usable without
+        a prompt (still hardware-bound). ``None`` lets the backend fall
+        back to the ``MORDRED_SEKEY_UNATTENDED`` env default."""
         ...
 
     def get_enclave_public_key(self, key_id: str) -> bytes:
@@ -372,7 +378,9 @@ def _emit_unwrap_denied(
 # ---------------------------------------------------------------------------
 
 
-def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> bytes:
+def generate_wrapping_key(
+    key_id: str, *, backend: NativeBackend, unattended: bool | None = None
+) -> bytes:
     """Create + persist a Secure-Enclave-backed P-256 keypair for ``key_id``.
 
     Returns the SEC1 uncompressed public key (65 bytes) so callers — e.g.
@@ -384,8 +392,13 @@ def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> bytes:
     already exists in the Keychain (backend translates
     ``errSecDuplicateItem`` to this exception so callers do not need to
     know the OSStatus).
+
+    ``unattended`` is forwarded to :meth:`NativeBackend.generate_enclave_key`
+    to pick the key's authorization policy (interactive vs. prompt-free);
+    ``None`` uses the backend default (``MORDRED_SEKEY_UNATTENDED`` env,
+    else interactive).
     """
-    return backend.generate_enclave_key(key_id)
+    return backend.generate_enclave_key(key_id, unattended=unattended)
 
 
 def get_wrapping_key_public(key_id: str, *, backend: NativeBackend) -> bytes:
