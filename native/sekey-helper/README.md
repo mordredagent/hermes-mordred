@@ -1,20 +1,22 @@
 # mordred-hermes-sekey
 
-A small, signed Swift CLI that performs Secure Enclave (SE) operations on
+A small, signed Swift CLI that performs Secure Enclave (SE) P-256 operations on
 behalf of the (unsigned) Python `mordred-hermes` keyvault.
 
 ## Why this exists
 
 An unsigned / ad-hoc-signed Python interpreter cannot carry the
-`keychain-access-groups` entitlement, so persisting SE keys fails with
-`errSecMissingEntitlement (-34018)`. A separately-signed helper binary
-(Developer ID + bundle ID + entitlement) can, so Python shells out to it —
-the same pattern the 1Password CLI uses.
+`keychain-access-groups` entitlement, so persisting SE keys in the Keychain
+fails with `errSecMissingEntitlement (-34018)`.  This helper uses
+**CryptoKit** (`SecureEnclave.P256.KeyAgreement.PrivateKey`) and persists key
+blobs as ordinary files under `~/.hermes/mordred/keyvault/sekey/<tag_hex>`.
+File-backed CryptoKit keys do not require a Keychain entitlement; an ad-hoc
+codesign is sufficient.
 
 ```
 Python (unsigned)
-  └─ subprocess ──▶ mordred-hermes-sekey (signed)
-                       └─ SecKeyCreateRandomKey(SE) / ECDH / SecItemDelete
+  └─ subprocess ──▶ mordred-hermes-sekey (ad-hoc signed)
+                       └─ CryptoKit SecureEnclave key (file-store)
 ```
 
 ## Protocol (one process invocation = one operation)
@@ -35,9 +37,9 @@ Failure (any command), exit code 1:
 {"error":{"domain":"OSStatus","status":-25300,"message":".."}}
 ```
 
-`tag_hex` is the Keychain `kSecAttrApplicationTag` as hex. The helper uses it
-verbatim — the cleartext `key_id` is never sent (Python derives the tag as a
-SHA-256 prefix). `ecdh` triggers the Touch ID / passcode system prompt.
+`tag_hex` is derived from `key_id` as a SHA-256 prefix by the Python side.
+The cleartext `key_id` is never sent across the subprocess boundary.
+`ecdh` triggers the Touch ID / passcode system prompt.
 
 ## Build, sign, install
 
@@ -45,9 +47,8 @@ SHA-256 prefix). `ecdh` triggers the Touch ID / passcode system prompt.
 ./build.sh
 ```
 
-This runs `swift build -c release`, codesigns with the Developer ID identity
-and `sekey-helper.entitlements` (hardened runtime), and installs to
-`~/.local/bin/mordred-hermes-sekey`.
+This runs `swift build -c release`, codesigns ad-hoc (no Developer ID
+required), and installs to `~/.local/bin/mordred-hermes-sekey`.
 
 Overrides via env: `MORDRED_SEKEY_SIGN_IDENTITY`, `MORDRED_SEKEY_INSTALL_DIR`.
 

@@ -662,9 +662,6 @@ class _SecKeyBackend:
         try:
             self._sw_ops.delete_key(_sw_application_tag(key_id))
         except _OpsError as exc:
-            if se_exc is not None:
-                # Both failed — SE with entitlement error, SW with a real error.
-                raise WrapError(f"failed to delete wrapping key for {key_id!r}") from exc
             raise WrapError(f"failed to delete wrapping key for {key_id!r}") from exc
 
     # ----- ECDH -----

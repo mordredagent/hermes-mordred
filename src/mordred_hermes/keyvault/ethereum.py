@@ -128,15 +128,18 @@ def generate_ethereum_key(
             continue
 
     priv_bytes: bytes = priv.to_bytes()
-    envelope_id = api.encrypt(
-        key_id,
-        priv_bytes,
-        _PURPOSE,
-        backend=backend,
-        audit_sink=audit_sink,
-        home=home,
-    )
-    address: str = priv.public_key.to_checksum_address()
+    try:
+        envelope_id = api.encrypt(
+            key_id,
+            priv_bytes,
+            _PURPOSE,
+            backend=backend,
+            audit_sink=audit_sink,
+            home=home,
+        )
+        address: str = priv.public_key.to_checksum_address()
+    finally:
+        del priv_bytes
     return envelope_id, address
 
 
