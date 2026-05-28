@@ -461,6 +461,70 @@ class TestInit:
         assert rc == 0
         assert ("generate", AUDIT_LOG_KEY_ID) in backend.calls
 
+    def test_init_store_seed_for_hd_persists_seed_and_derives(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """init with store_seed_for_hd=True SE-encrypts the seed and lets the
+        HD wallet derive deterministic Ethereum accounts from it afterward."""
+        import hashlib
+
+        from eth_keys import keys
+
+        from mordred_hermes.keyvault import _bip32, _bip39
+        from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE, derive_ethereum_key
+
+        backend = FakeBackend()
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=backend,
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+            store_seed_for_hd=True,
+        )
+        assert rc == 0
+
+        # The seed is now stored SE-encrypted under bip39.seed.v1.
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
+        seed_envs = list((root / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))
+        assert len(seed_envs) == 1
+        seed_env_id = seed_envs[0].stem
+
+        # Deriving via the stored seed must match an independent derivation
+        # from the same (fixed) mnemonic — proving the round-trip is correct.
+        addr, path = derive_ethereum_key(
+            "default", seed_env_id, 0, backend=backend, audit_sink=_sink(), home=tmp_path
+        )
+        expected_priv = _bip32.derive_path(_bip39.mnemonic_to_seed(self.FIXED_SEED), "m/44'/60'/0'/0/0")
+        expected_addr = keys.PrivateKey(expected_priv).public_key.to_checksum_address()
+        assert addr == expected_addr
+        assert path == "m/44'/60'/0'/0/0"
+
+    def test_init_default_does_not_store_seed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Default init (paper-only) must NOT persist the seed at rest."""
+        import hashlib
+
+        from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
+        assert not list((root / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))
+
     def test_corrupt_keyvault_meta_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A corrupt meta.json must surface a clean error, not a traceback."""
         root = _storage.resolve_keyvault_dir(tmp_path)
