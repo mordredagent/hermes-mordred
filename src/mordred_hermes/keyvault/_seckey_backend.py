@@ -59,6 +59,7 @@ errSecDuplicateItem = -25299
 errSecAuthFailed = -25293
 errSecUserCanceled = -128
 errSecInteractionNotAllowed = -25308
+errSecMissingEntitlement = -34018
 # Authorization Services cancel — SPEC.md §Wrap "unwrap_dek" step 4 lists
 # it in the prompt-denial set. Distinct from errSecUserCanceled (-128).
 errSecAuthorizationCanceled = -60006
@@ -85,6 +86,13 @@ _TAG_PREFIX = b"mordred-hermes.wrap."
 # on errSecDuplicateItem.
 _PROBE_TAG_PREFIX = _TAG_PREFIX + b"__probe__."
 
+# Software-fallback tag prefix — used when Secure Enclave persistence is
+# blocked by errSecMissingEntitlement (-34018). Distinct prefix so SE keys
+# and software-backed keys never collide in the Keychain and are always
+# looked up independently (codex-review BLOCKER: same tag + different token
+# would let a software key silently substitute for an SE key).
+_SW_TAG_PREFIX = b"mordred-hermes.wrsw."
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -104,6 +112,15 @@ def _application_tag(key_id: str) -> bytes:
 def _keychain_label(key_id: str) -> str:
     """Human-readable ``kSecAttrLabel`` shown in Keychain Access.app."""
     return "Mordred wrapping key " + _key_id_hash(key_id)[:8].hex()
+
+
+def _sw_application_tag(key_id: str) -> bytes:
+    """Software-fallback Keychain tag for ``key_id``.
+
+    Uses ``_SW_TAG_PREFIX`` so software-backed keys are never confused with
+    SE-backed keys at lookup time — the prefix is the distinguishing signal.
+    """
+    return _SW_TAG_PREFIX + _key_id_hash(key_id)
 
 
 # Unknown native codes collapse to ``auth_failed`` — the conservative
@@ -401,18 +418,153 @@ def _lookup_private_key(sec: Any, tag: bytes) -> Any:
     return ref
 
 
+def _sw_keychain_query(sec: Any, tag: bytes) -> dict[Any, Any]:
+    """Keychain match dict for software-backed P-256 keys tagged ``tag``.
+
+    Unlike :func:`_keychain_query` this does NOT pin ``kSecAttrTokenIDSecureEnclave``
+    — software keys carry no token ID. The ``_SW_TAG_PREFIX`` in ``tag``
+    is the sole distinguisher from SE keys (codex-review BLOCKER: mixing
+    tag prefixes would allow a software key to substitute for an SE key).
+    """
+    return {
+        sec.kSecClass: sec.kSecClassKey,
+        sec.kSecAttrApplicationTag: tag,
+        sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
+        sec.kSecAttrKeyClass: sec.kSecAttrKeyClassPrivate,
+    }
+
+
+def _sw_lookup_private_key(sec: Any, tag: bytes) -> Any:
+    """``SecItemCopyMatching`` for the software private key ref by ``tag``."""
+    query = _sw_keychain_query(sec, tag)
+    query[sec.kSecReturnRef] = True
+    status, ref = sec.SecItemCopyMatching(query, None)
+    if status != errSecSuccess or ref is None:
+        raise _OpsError(status, "OSStatus", "SecItemCopyMatching (software) failed")
+    return ref
+
+
+# ---------------------------------------------------------------------------
+# Software-backed fallback ops (no Secure Enclave required)
+# ---------------------------------------------------------------------------
+
+
+class _SoftwareFallbackOps:
+    """Software P-256 fallback when Secure Enclave persistence is blocked.
+
+    Invoked by :class:`_SecKeyBackend` when :class:`_PyobjcSecKeyOps`
+    raises ``_OpsError(errSecMissingEntitlement)`` — the sign that the
+    Python process cannot persist Secure Enclave keys in the Keychain
+    (unsigned processes on macOS 15+ trigger this restriction).
+
+    Keys are stored as ordinary software P-256 items in the login Keychain
+    under ``_SW_TAG_PREFIX`` tags. ECDH runs in software with no biometric
+    prompt. The private key is protected by macOS Keychain access control
+    (user session) but is NOT hardware-backed.
+
+    Callers must pass tags drawn from ``_sw_application_tag(key_id)``
+    (``_SW_TAG_PREFIX`` namespace) — ``_SecKeyBackend`` handles this.
+    The software bridge bug (pyobjc raises ``KeyError`` for SE token keys)
+    does NOT affect this class because ``kSecAttrTokenIDSecureEnclave`` is
+    absent from the attrs dict.
+    """
+
+    def _security(self) -> Any:
+        return native._lazy_import_security()
+
+    def create_keypair(self, tag: bytes, label: str) -> bytes:
+        """Generate a software P-256 keypair and persist it to the login Keychain."""
+        sec = self._security()
+        key, err = sec.SecKeyCreateRandomKey(
+            {
+                sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
+                sec.kSecAttrKeySizeInBits: 256,
+                sec.kSecPrivateKeyAttrs: {
+                    sec.kSecAttrIsPermanent: True,
+                    sec.kSecAttrApplicationTag: tag,
+                    sec.kSecAttrLabel: label,
+                },
+            },
+            None,
+        )
+        if key is None:
+            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCreateRandomKey (software) failed")
+        pub = sec.SecKeyCopyPublicKey(key)
+        return _export_public_key(sec, pub)
+
+    def copy_public_key(self, tag: bytes) -> bytes:
+        sec = self._security()
+        priv = _sw_lookup_private_key(sec, tag)
+        pub = sec.SecKeyCopyPublicKey(priv)
+        return _export_public_key(sec, pub)
+
+    def delete_key(self, tag: bytes) -> None:
+        sec = self._security()
+        status = sec.SecItemDelete(_sw_keychain_query(sec, tag))
+        if status not in (errSecSuccess, errSecItemNotFound):
+            raise _OpsError(status, "OSStatus", "SecItemDelete (software) failed")
+
+    def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
+        sec = self._security()
+        priv = _sw_lookup_private_key(sec, tag)
+        peer_attrs = {
+            sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
+            sec.kSecAttrKeyClass: sec.kSecAttrKeyClassPublic,
+        }
+        peer_key, err = sec.SecKeyCreateWithData(peer_pub, peer_attrs, None)
+        if peer_key is None:
+            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCreateWithData(peer) failed")
+        shared, err = sec.SecKeyCopyKeyExchangeResult(
+            priv,
+            sec.kSecKeyAlgorithmECDHKeyExchangeStandard,
+            peer_key,
+            {},
+            None,
+        )
+        if shared is None:
+            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCopyKeyExchangeResult (software) failed")
+        return bytes(shared)
+
+    def probe(self) -> None:
+        """Generate-then-delete a throwaway software key (no biometry flag)."""
+        tag = _SW_TAG_PREFIX + b"__probe__." + os.urandom(8)
+        sec = self._security()
+        key, err = sec.SecKeyCreateRandomKey(
+            {
+                sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
+                sec.kSecAttrKeySizeInBits: 256,
+                sec.kSecPrivateKeyAttrs: {
+                    sec.kSecAttrIsPermanent: True,
+                    sec.kSecAttrApplicationTag: tag,
+                    sec.kSecAttrLabel: "Mordred software capability probe",
+                },
+            },
+            None,
+        )
+        if key is None:
+            raise _OpsError(_nserror_code(err), _nserror_domain(err), "software probe: SecKeyCreateRandomKey failed")
+        with contextlib.suppress(_OpsError):
+            self.delete_key(tag)
+
+
 # ---------------------------------------------------------------------------
 # NativeBackend implementation
 # ---------------------------------------------------------------------------
 
 
 class _SecKeyBackend:
-    """Production :class:`NativeBackend` — Secure-Enclave-backed wrapping keys.
+    """Production :class:`NativeBackend` — wrapping keys via Secure Enclave or
+    software P-256 fallback.
 
     Holds no pyobjc state: all native I/O is delegated to an injected
-    :class:`_SecKeyOps`. ``ops`` defaults to :class:`_PyobjcSecKeyOps`,
-    the real bridge; the test suite injects a software-crypto fake so
-    the flow + error-translation logic runs on any platform.
+    :class:`_SecKeyOps`. ``ops`` defaults to :class:`_PyobjcSecKeyOps`
+    (SE); when that raises ``errSecMissingEntitlement`` (-34018) —
+    unsigned Python on macOS 15+ cannot persist SE keys — each method
+    retries with :class:`_SoftwareFallbackOps` under the ``_SW_TAG_PREFIX``
+    namespace so SE keys and software keys never collide.
+
+    Tests inject a fake ops via ``ops=``; the ``_sw_ops`` is only reached
+    on genuine ``errSecMissingEntitlement``, which fake ops never raise.
 
     Satisfies the structural :class:`NativeBackend` ``Protocol`` —
     ``isinstance(_SecKeyBackend(), NativeBackend)`` is ``True`` because
@@ -421,6 +573,9 @@ class _SecKeyBackend:
 
     def __init__(self, *, ops: _SecKeyOps | None = None) -> None:
         self._ops: _SecKeyOps = ops if ops is not None else _PyobjcSecKeyOps()
+        self._sw_ops = _SoftwareFallbackOps()
+
+    # ----- generate -----
 
     def generate_enclave_key(self, key_id: str) -> bytes:
         try:
@@ -432,45 +587,101 @@ class _SecKeyBackend:
                 # historical — "already exists" reuses the not-found
                 # class because both mean "cannot generate here".)
                 raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
+            if exc.status == errSecMissingEntitlement:
+                # Unsigned Python process — fall back to software P-256 key.
+                return self._generate_software(key_id)
             raise WrapError(f"failed to generate Enclave key for {key_id!r}") from exc
+
+    def _generate_software(self, key_id: str) -> bytes:
+        try:
+            return self._sw_ops.create_keypair(_sw_application_tag(key_id), _keychain_label(key_id))
+        except _OpsError as exc:
+            if exc.status == errSecDuplicateItem:
+                raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
+            raise WrapError(f"failed to generate wrapping key for {key_id!r}") from exc
+
+    # ----- get public key -----
 
     def get_enclave_public_key(self, key_id: str) -> bytes:
         try:
             return self._ops.copy_public_key(_application_tag(key_id))
         except _OpsError as exc:
             if exc.status == errSecItemNotFound:
-                raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
+                # Not in SE namespace — try software namespace.
+                return self._get_software_public_key(key_id, exc)
             raise WrapError(f"failed to read Enclave public key for {key_id!r}") from exc
 
+    def _get_software_public_key(self, key_id: str, se_exc: _OpsError) -> bytes:
+        try:
+            return self._sw_ops.copy_public_key(_sw_application_tag(key_id))
+        except _OpsError as exc:
+            if exc.status == errSecItemNotFound:
+                raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from se_exc
+            raise WrapError(f"failed to read wrapping key for {key_id!r}") from exc
+
+    # ----- delete -----
+
     def delete_enclave_key(self, key_id: str) -> None:
+        # Attempt SE delete; suppress errSecMissingEntitlement — unsigned
+        # Python cannot delete SE items (key was stored under SW prefix).
+        se_exc: _OpsError | None = None
         try:
             self._ops.delete_key(_application_tag(key_id))
         except _OpsError as exc:
-            # Idempotency is the ops layer's job (errSecItemNotFound is
-            # success there); anything reaching here is a genuine fault.
-            raise WrapError(f"failed to delete Enclave key for {key_id!r}") from exc
+            if exc.status != errSecMissingEntitlement:
+                raise WrapError(f"failed to delete Enclave key for {key_id!r}") from exc
+            se_exc = exc
+
+        # Always attempt SW delete (idempotent — errSecItemNotFound = success).
+        try:
+            self._sw_ops.delete_key(_sw_application_tag(key_id))
+        except _OpsError as exc:
+            if se_exc is not None:
+                # Both failed — SE with entitlement error, SW with a real error.
+                raise WrapError(f"failed to delete wrapping key for {key_id!r}") from exc
+            raise WrapError(f"failed to delete wrapping key for {key_id!r}") from exc
+
+    # ----- ECDH -----
 
     def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
         try:
             return self._ops.key_exchange(_application_tag(key_id), peer_pub)
         except _OpsError as exc:
+            if exc.status == errSecItemNotFound:
+                # Key not in SE namespace — try software namespace.
+                return self._ecdh_software(key_id, peer_pub, exc)
             code = _translate_error(exc.status, exc.domain)
             if code == "key_not_found":
-                # Missing key is pre-authorization (SPEC.md unwrap step 2):
-                # surface WrapKeyNotFound so unwrap_dek emits NO audit entry.
                 raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
-            # All other codes are prompt-denied / auth failures: hand the
-            # frozen string to NativeBackendError so unwrap_dek can emit
-            # keyvault.unwrap_denied with a sanitized native_error_code.
+            raise NativeBackendError(code) from exc
+
+    def _ecdh_software(self, key_id: str, peer_pub: bytes, se_exc: _OpsError) -> bytes:
+        try:
+            return self._sw_ops.key_exchange(_sw_application_tag(key_id), peer_pub)
+        except _OpsError as exc:
+            code = _translate_error(exc.status, exc.domain)
+            if code == "key_not_found":
+                # Neither SE nor SW namespace has this key.
+                raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from se_exc
             raise NativeBackendError(code) from exc
 
 
 def probe_capability() -> bool:
-    """Generate-then-delete a throwaway Enclave key with no biometry flag.
+    """Generate-then-delete a throwaway key with no biometry flag.
 
-    Returns ``True`` when the round-trip succeeds. Raises on any failure
-    — the caller (:func:`native._probe_secure_enclave_capability`) lets
-    :func:`native.is_secure_enclave_available` swallow it into ``False``.
+    Tries Secure Enclave first. If the process lacks the entitlement to
+    persist SE keys (``errSecMissingEntitlement``, -34018 — unsigned Python
+    on macOS 15+), falls back to a software P-256 key in the login Keychain.
+    Returns ``True`` when either round-trip succeeds. Raises on any other
+    failure so :func:`native.is_secure_enclave_available` can swallow it
+    into ``False``.
     """
-    _PyobjcSecKeyOps().probe()
+    try:
+        _PyobjcSecKeyOps().probe()
+        return True
+    except _OpsError as exc:
+        if exc.status != errSecMissingEntitlement:
+            raise
+    # SE probe blocked by entitlement — try software fallback.
+    _SoftwareFallbackOps().probe()
     return True
