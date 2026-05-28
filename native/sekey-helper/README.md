@@ -60,7 +60,18 @@ Failure (any command), exit code 1:
 `tag_hex` is derived from `key_id` as a SHA-256 prefix by the Python side.
 The cleartext `key_id` is never sent across the subprocess boundary.
 
-`ecdh` is the authorization boundary: it triggers a system prompt because the
+### Authorization policy (per key)
+
+`generate` takes an optional `"unattended"` boolean (default `false`):
+
+- **`false` (interactive, default):** the key is gated by Touch ID / passcode, so every `ecdh` prompts. Use for a human-approved vault.
+- **`true` (unattended):** the key carries only `.privateKeyUsage` — still Enclave-bound (cannot be copied to another machine) but `ecdh` runs **without a prompt** while the session is unlocked. Use for autonomous encrypt+decrypt (e.g. hermes / Claude Code).
+
+The choice is baked into the key's `dataRepresentation` at generation time and cannot change afterward. Encryption (`wrap_dek`) never needs the private key, so it is always prompt-free regardless of this flag — only decryption (`unwrap_dek` → `ecdh`) is affected.
+
+On the Python side this is `unattended=` on `api.generate` / `wrap.generate_wrapping_key` / `backend.generate_enclave_key`; when unspecified, the default comes from the `MORDRED_SEKEY_UNATTENDED=1` env var, else interactive.
+
+When **interactive**, `ecdh` triggers a system prompt because the
 key is created with the access control
 `[.privateKeyUsage, .biometryCurrentSet, .or, .devicePasscode]` — Touch ID
 preferred, with a **device-passcode fallback**. The fallback matters: with

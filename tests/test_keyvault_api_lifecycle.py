@@ -1518,10 +1518,12 @@ class TestGenerateSignature:
             "backend",
             "audit_sink",
             "home",
+            "unattended",
         ]
         assert params["expected_digest"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
         assert params["backend"].kind is inspect.Parameter.KEYWORD_ONLY
         assert params["audit_sink"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["unattended"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 class TestGenerateHappyPath:

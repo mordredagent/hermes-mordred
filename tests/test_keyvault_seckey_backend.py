@@ -57,7 +57,7 @@ class _FakeOps:
         self.delete_error: _OpsError | None = None
         self.exchange_error: _OpsError | None = None
 
-    def create_keypair(self, tag: bytes, label: str) -> bytes:
+    def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
         self.calls.append(("create", tag))
         if self.create_error is not None:
             raise self.create_error

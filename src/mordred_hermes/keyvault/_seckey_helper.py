@@ -142,8 +142,11 @@ class _HelperSecKeyOps:
     def __init__(self, binary: str) -> None:
         self._binary = binary
 
-    def create_keypair(self, tag: bytes, label: str) -> bytes:
-        response = _run_helper(self._binary, {"cmd": "generate", "tag_hex": tag.hex(), "label": label})
+    def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
+        response = _run_helper(
+            self._binary,
+            {"cmd": "generate", "tag_hex": tag.hex(), "label": label, "unattended": unattended},
+        )
         return _hex_field(response, "public_key_hex")
 
     def copy_public_key(self, tag: bytes) -> bytes:

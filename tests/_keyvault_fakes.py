@@ -31,7 +31,7 @@ class FakeBackend:
         self.denied_reason: NativeErrorCode | None = None
         self.calls: list[tuple[str, str]] = []
 
-    def generate_enclave_key(self, key_id: str) -> bytes:
+    def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
         self.calls.append(("generate", key_id))
         if key_id in self._keys:
             raise WrapKeyNotFound(f"key {key_id!r} already exists")

@@ -11,11 +11,18 @@
 // (the tag is a SHA-256 prefix computed Python-side).
 //
 // Requests (stdin):
-//   {"cmd":"generate","tag_hex":"..","label":".."}
+//   {"cmd":"generate","tag_hex":"..","label":"..","unattended":false}
 //   {"cmd":"public_key","tag_hex":".."}
 //   {"cmd":"delete","tag_hex":".."}
 //   {"cmd":"ecdh","tag_hex":"..","peer_pub_hex":".."}
 //   {"cmd":"probe"}
+//
+// "unattended" (generate only, default false): when false the key is created
+// with a Touch-ID/passcode-gated access control, so every ECDH prompts. When
+// true the key carries only .privateKeyUsage — it stays Enclave-bound (cannot
+// be exfiltrated to another machine) but ECDH runs WITHOUT a prompt as long as
+// the session is unlocked, for autonomous use. The choice is baked into the
+// key's dataRepresentation at generation time and cannot change afterward.
 // Success (stdout, exit 0):
 //   {"public_key_hex":"04.."}   {"shared_hex":".."}   {"ok":true}
 // Failure (stdout, exit 1):
@@ -51,6 +58,7 @@ struct Request: Decodable {
     let tag_hex: String?
     let label: String?
     let peer_pub_hex: String?
+    let unattended: Bool?
 }
 
 struct HelperError: Error {
@@ -189,13 +197,14 @@ func loadKey(tagHex: String) throws -> SecureEnclave.P256.KeyAgreement.PrivateKe
     }
 }
 
-func generate(tagHex: String) throws -> Data {
+func generate(tagHex: String, unattended: Bool) throws -> Data {
     // Refuse to overwrite an existing key — mirrors errSecDuplicateItem so the
     // backend maps it to "already exists" rather than silently rotating.
     if FileManager.default.fileExists(atPath: blobURL(tagHex: tagHex).path) {
         throw HelperError(domain: "OSStatus", status: errDuplicateItem, message: "key already exists for tag")
     }
-    let access = try makeAccessControl(biometry: true)
+    // unattended → .privateKeyUsage only (no prompt); otherwise biometry-gated.
+    let access = try makeAccessControl(biometry: !unattended)
     let key: SecureEnclave.P256.KeyAgreement.PrivateKey
     do {
         key = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
@@ -296,7 +305,7 @@ func requireTagHex(_ req: Request) -> String {
 do {
     switch request.cmd {
     case "generate":
-        emit(["public_key_hex": hexEncode(try generate(tagHex: requireTagHex(request)))])
+        emit(["public_key_hex": hexEncode(try generate(tagHex: requireTagHex(request), unattended: request.unattended ?? false))])
     case "public_key":
         emit(["public_key_hex": hexEncode(try publicKey(tagHex: requireTagHex(request)))])
     case "delete":

@@ -99,6 +99,26 @@ _SW_TAG_PREFIX = b"mordred-hermes.wrsw."
 # ---------------------------------------------------------------------------
 
 
+# Env var that sets the default authorization policy for newly generated
+# wrapping keys when a caller does not pass ``unattended`` explicitly.
+# ``MORDRED_SEKEY_UNATTENDED=1`` makes new keys ``.privateKeyUsage``-only
+# (no Touch ID / passcode prompt on ECDH); anything else keeps the safe
+# interactive default. Per-call ``unattended=`` always wins over the env.
+_UNATTENDED_ENV = "MORDRED_SEKEY_UNATTENDED"
+
+
+def _resolve_unattended(unattended: bool | None) -> bool:
+    """Resolve the effective unattended policy for key generation.
+
+    Explicit ``True`` / ``False`` is authoritative. ``None`` (caller did
+    not specify) falls back to the ``MORDRED_SEKEY_UNATTENDED`` env var,
+    defaulting to interactive (``False``) when unset.
+    """
+    if unattended is not None:
+        return unattended
+    return os.environ.get(_UNATTENDED_ENV, "") == "1"
+
+
 def _application_tag(key_id: str) -> bytes:
     """Keychain ``kSecAttrApplicationTag`` for ``key_id``.
 
@@ -190,9 +210,16 @@ class _SecKeyOps(Protocol):
     platform.
     """
 
-    def create_keypair(self, tag: bytes, label: str) -> bytes:
+    def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
         """Generate a permanent Secure-Enclave P-256 keypair tagged
         ``tag`` and return the SEC1 uncompressed public key (65 bytes).
+
+        ``unattended=False`` (default) gates the private key behind a
+        Touch ID / passcode access control, so every ECDH prompts.
+        ``unattended=True`` creates a ``.privateKeyUsage``-only key:
+        still Enclave-bound (non-exportable) but usable without a prompt
+        while the session is unlocked, for autonomous flows.
+
         Raises :class:`_OpsError` (``errSecDuplicateItem`` if the tag is
         already taken)."""
         ...
@@ -302,8 +329,8 @@ class _PyobjcSecKeyOps:
         public_key = sec.SecKeyCopyPublicKey(private_key)
         return _export_public_key(sec, public_key)
 
-    def create_keypair(self, tag: bytes, label: str) -> bytes:
-        return self._create(tag, label, biometry=True)
+    def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
+        return self._create(tag, label, biometry=not unattended)
 
     def copy_public_key(self, tag: bytes) -> bytes:
         sec = self._security()
@@ -472,8 +499,13 @@ class _SoftwareFallbackOps:
     def _security(self) -> Any:
         return native._lazy_import_security()
 
-    def create_keypair(self, tag: bytes, label: str) -> bytes:
-        """Generate a software P-256 keypair and persist it to the login Keychain."""
+    def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
+        """Generate a software P-256 keypair and persist it to the login Keychain.
+
+        ``unattended`` is accepted for Protocol parity but ignored: software
+        keys carry no biometric access control and never prompt, so the flag
+        has no effect here.
+        """
         sec = self._security()
         key, err = sec.SecKeyCreateRandomKey(
             {
@@ -603,9 +635,12 @@ class _SecKeyBackend:
 
     # ----- generate -----
 
-    def generate_enclave_key(self, key_id: str) -> bytes:
+    def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
+        resolved = _resolve_unattended(unattended)
         try:
-            return self._ops.create_keypair(_application_tag(key_id), _keychain_label(key_id))
+            return self._ops.create_keypair(
+                _application_tag(key_id), _keychain_label(key_id), unattended=resolved
+            )
         except _OpsError as exc:
             if exc.status == errSecDuplicateItem:
                 # SPEC.md: an existing tag surfaces as WrapKeyNotFound so
@@ -615,12 +650,14 @@ class _SecKeyBackend:
                 raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
             if exc.status == errSecMissingEntitlement:
                 # Unsigned Python process — fall back to software P-256 key.
-                return self._generate_software(key_id)
+                return self._generate_software(key_id, unattended=resolved)
             raise WrapError(f"failed to generate Enclave key for {key_id!r}") from exc
 
-    def _generate_software(self, key_id: str) -> bytes:
+    def _generate_software(self, key_id: str, *, unattended: bool = False) -> bytes:
         try:
-            return self._sw_ops.create_keypair(_sw_application_tag(key_id), _keychain_label(key_id))
+            return self._sw_ops.create_keypair(
+                _sw_application_tag(key_id), _keychain_label(key_id), unattended=unattended
+            )
         except _OpsError as exc:
             if exc.status == errSecDuplicateItem:
                 raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
