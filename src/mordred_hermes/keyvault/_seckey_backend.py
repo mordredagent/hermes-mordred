@@ -650,13 +650,11 @@ class _SecKeyBackend:
     def delete_enclave_key(self, key_id: str) -> None:
         # Attempt SE delete; suppress errSecMissingEntitlement — unsigned
         # Python cannot delete SE items (key was stored under SW prefix).
-        se_exc: _OpsError | None = None
         try:
             self._ops.delete_key(_application_tag(key_id))
         except _OpsError as exc:
             if exc.status != errSecMissingEntitlement:
                 raise WrapError(f"failed to delete Enclave key for {key_id!r}") from exc
-            se_exc = exc
 
         # Always attempt SW delete (idempotent — errSecItemNotFound = success).
         try:

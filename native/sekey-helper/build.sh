@@ -17,10 +17,13 @@ cd "$SCRIPT_DIR"
 INSTALL_DIR="${MORDRED_SEKEY_INSTALL_DIR:-$HOME/.local/bin}"
 BINARY_NAME="mordred-hermes-sekey"
 
+# Resolve output directory before building (--show-bin-path exits immediately).
+BIN_DIR="$(swift build -c release --show-bin-path)"
+
 echo "==> swift build -c release"
 swift build -c release
 
-BUILT_BIN="$(swift build -c release --show-bin-path)/$BINARY_NAME"
+BUILT_BIN="$BIN_DIR/$BINARY_NAME"
 if [[ ! -f "$BUILT_BIN" ]]; then
     echo "ERROR: built binary not found at $BUILT_BIN" >&2
     exit 1
