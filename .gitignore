@@ -12,3 +12,7 @@ dist/
 .coverage.*
 coverage.xml
 htmlcov/
+
+# Local dev-only keyvault init helper (bypasses safety controls, prints seed).
+# Must never be committed.
+dev_init_keyvault.py

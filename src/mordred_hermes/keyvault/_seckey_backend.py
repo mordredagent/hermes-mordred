@@ -548,6 +548,32 @@ class _SoftwareFallbackOps:
 
 
 # ---------------------------------------------------------------------------
+# Ops selection
+# ---------------------------------------------------------------------------
+
+
+def _default_ops() -> _SecKeyOps:
+    """Pick the SE ops backend: signed helper if present, else pyobjc.
+
+    A separately Developer-ID-signed ``mordred-hermes-sekey`` CLI can carry
+    the ``keychain-access-groups`` entitlement that an unsigned Python
+    interpreter cannot, so when it is installed it becomes the real SE path
+    (no software fallback needed). When absent we keep the in-process pyobjc
+    ops, which itself degrades to software P-256 on ``errSecMissingEntitlement``.
+
+    The import is function-local to keep the ``_seckey_helper`` ↔
+    ``_seckey_backend`` dependency one-directional (``_seckey_helper`` imports
+    ``_OpsError`` from this module at load time).
+    """
+    from . import _seckey_helper
+
+    binary = _seckey_helper._find_helper()
+    if binary is not None:
+        return _seckey_helper._HelperSecKeyOps(binary)
+    return _PyobjcSecKeyOps()
+
+
+# ---------------------------------------------------------------------------
 # NativeBackend implementation
 # ---------------------------------------------------------------------------
 
@@ -572,7 +598,7 @@ class _SecKeyBackend:
     """
 
     def __init__(self, *, ops: _SecKeyOps | None = None) -> None:
-        self._ops: _SecKeyOps = ops if ops is not None else _PyobjcSecKeyOps()
+        self._ops: _SecKeyOps = ops if ops is not None else _default_ops()
         self._sw_ops = _SoftwareFallbackOps()
 
     # ----- generate -----
@@ -669,13 +695,22 @@ class _SecKeyBackend:
 def probe_capability() -> bool:
     """Generate-then-delete a throwaway key with no biometry flag.
 
-    Tries Secure Enclave first. If the process lacks the entitlement to
-    persist SE keys (``errSecMissingEntitlement``, -34018 — unsigned Python
-    on macOS 15+), falls back to a software P-256 key in the login Keychain.
-    Returns ``True`` when either round-trip succeeds. Raises on any other
-    failure so :func:`native.is_secure_enclave_available` can swallow it
-    into ``False``.
+    When the signed ``mordred-hermes-sekey`` helper is installed, probe
+    through it — it is the real SE path and a success there proves hardware
+    capability. Otherwise try in-process pyobjc Secure Enclave; if the
+    process lacks the entitlement to persist SE keys
+    (``errSecMissingEntitlement``, -34018 — unsigned Python on macOS 15+),
+    fall back to a software P-256 key in the login Keychain. Returns ``True``
+    when a round-trip succeeds. Raises on any other failure so
+    :func:`native.is_secure_enclave_available` can swallow it into ``False``.
     """
+    from . import _seckey_helper
+
+    binary = _seckey_helper._find_helper()
+    if binary is not None:
+        _seckey_helper._HelperSecKeyOps(binary).probe()
+        return True
+
     try:
         _PyobjcSecKeyOps().probe()
         return True

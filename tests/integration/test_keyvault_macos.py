@@ -63,6 +63,24 @@ def test_capability_probe_reports_true_on_enclave_hardware() -> None:
     assert native.is_secure_enclave_available() is True
 
 
+def test_signed_helper_is_selected_when_present() -> None:
+    """When the signed ``mordred-hermes-sekey`` helper is installed, the
+    default backend ops must route through it (not the in-process pyobjc
+    path). This guards the discovery + wiring so the round-trip tests below
+    are actually exercising the helper. Skipped when the helper is absent.
+    """
+    _require_live_enclave()
+
+    from mordred_hermes.keyvault import _seckey_backend, _seckey_helper
+
+    if _seckey_helper._find_helper() is None:
+        pytest.skip(
+            "signed helper not installed; build it via "
+            "native/sekey-helper/build.sh or set MORDRED_SEKEY_HELPER"
+        )
+    assert isinstance(_seckey_backend._default_ops(), _seckey_helper._HelperSecKeyOps)
+
+
 def test_generate_wrap_unwrap_roundtrip_through_real_enclave(live_key_id: str) -> None:
     """Full Tier-1 protection path: generate an Enclave wrapping key,
     wrap a DEK offline, then unwrap it through the authorization
