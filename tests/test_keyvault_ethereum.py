@@ -178,3 +178,80 @@ def test_ethereum_signature_is_frozen() -> None:
 
 def test_purpose_constant_is_versioned() -> None:
     assert _PURPOSE == "ethereum.key.v1"
+
+
+# ---------------------------------------------------------------------------
+# HD wallet: store_seed_phrase + derive_ethereum_key + sign_hash_hd
+# (Option A — seed is stored SE-encrypted, keys derived deterministically)
+# ---------------------------------------------------------------------------
+
+_HARDHAT_MNEMONIC = "test test test test test test test test test test test junk"
+_HARDHAT_ADDR0 = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+_HARDHAT_ADDR1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+
+def test_store_seed_phrase_returns_envelope_id_and_writes_seed_envelope(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    env_id = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    assert isinstance(env_id, str) and len(env_id) > 0
+
+    # The seed envelope lives under the bip39.seed.v1 purpose hash, distinct
+    # from the random-key purpose (ethereum.key.v1).
+    purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
+    seed_envelopes = list((tmp_path / "mordred" / "keyvault" / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))
+    assert len(seed_envelopes) == 1
+
+
+def test_store_seed_phrase_rejects_invalid_checksum(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    bad = "test test test test test test test test test test test test"  # bad BIP39 checksum
+    with pytest.raises(ValueError):
+        store_seed_phrase("default", bad, **kw)
+
+
+def test_derive_ethereum_key_matches_known_bip44_address(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+
+    _, log, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+
+    addr0, path0 = derive_ethereum_key("default", seed_env, 0, **kw)
+    addr1, _ = derive_ethereum_key("default", seed_env, 1, **kw)
+
+    assert addr0 == _HARDHAT_ADDR0
+    assert addr1 == _HARDHAT_ADDR1
+    assert path0 == "m/44'/60'/0'/0/0"
+    # Decrypting the seed goes through the Enclave -> one unwrap_authorized
+    # audit entry per derive.
+    assert any(e.get("reason") == "keyvault.unwrap_authorized" for e in log)
+
+
+def test_derive_ethereum_key_is_deterministic(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    assert derive_ethereum_key("default", seed_env, 7, **kw) == derive_ethereum_key("default", seed_env, 7, **kw)
+
+
+def test_sign_hash_hd_recovers_to_derived_address(tmp_path: Path) -> None:
+    from eth_keys import keys
+
+    from mordred_hermes.keyvault.ethereum import derive_ethereum_key, sign_hash_hd, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    addr, _ = derive_ethereum_key("default", seed_env, 0, **kw)
+
+    message_hash = hashlib.sha256(b"hello mordred").digest()
+    sig = sign_hash_hd("default", seed_env, 0, message_hash, **kw)
+
+    # Reconstruct an eth_keys Signature (v back to recovery id 0/1) and
+    # recover the signer; it must equal the derived address.
+    rec_sig = keys.Signature(vrs=(sig.v - 27, int.from_bytes(sig.r, "big"), int.from_bytes(sig.s, "big")))
+    recovered = rec_sig.recover_public_key_from_msg_hash(message_hash).to_checksum_address()
+    assert recovered == addr
