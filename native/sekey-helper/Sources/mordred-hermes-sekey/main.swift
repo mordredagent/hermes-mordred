@@ -1,14 +1,14 @@
-// mordred-hermes-sekey — Secure Enclave helper CLI.
+// mordred-hermes-sekey — Secure Enclave helper CLI (CryptoKit file-store).
 //
 // One process invocation == one operation. Reads a single JSON request
-// object from stdin, performs the Security.framework call, writes a single
+// object from stdin, performs the Secure Enclave operation, writes a single
 // JSON response object to stdout, and exits (0 on success, 1 on error).
 //
 // The Python side (`mordred_hermes.keyvault._seckey_helper`) spawns this
 // binary once per `_SecKeyOps` method call. This binary is policy-free: it
-// receives the Keychain application tag as hex bytes and uses it verbatim,
-// so the cleartext key_id never crosses the process boundary (the tag is a
-// SHA-256 prefix computed Python-side).
+// receives the application tag as hex bytes and uses it verbatim as the
+// store filename, so the cleartext key_id never crosses the process boundary
+// (the tag is a SHA-256 prefix computed Python-side).
 //
 // Requests (stdin):
 //   {"cmd":"generate","tag_hex":"..","label":".."}
@@ -20,16 +20,29 @@
 //   {"public_key_hex":"04.."}   {"shared_hex":".."}   {"ok":true}
 // Failure (stdout, exit 1):
 //   {"error":{"domain":"OSStatus","status":-25300,"message":".."}}
+//
+// Persistence model: each key is a CryptoKit `SecureEnclave.P256.KeyAgreement`
+// private key. We store its `dataRepresentation` — an opaque blob that ONLY
+// this device's Secure Enclave can decrypt and use — in a plain file at
+// `<store>/<tag_hex>.bin`. No Keychain, no keychain-access-groups entitlement,
+// no provisioning profile, no .app bundle: an ad-hoc-signed bare CLI works.
+// The blob is useless without the originating Enclave, so the file at rest
+// leaks nothing. ECDH triggers the Touch ID / passcode prompt because the key
+// is generated with a `.biometryCurrentSet` access control; reading the public
+// key does not.
 
+import CryptoKit
 import Foundation
 import Security
 
-// NOTE: This helper deliberately uses the *legacy* file-based Keychain and
-// carries NO keychain-access-groups entitlement. A Developer-ID-signed
-// (non-App-Store) binary that requests keychain-access-groups without a
-// provisioning profile is SIGKILLed by AMFI on launch. Secure Enclave keys
-// persist fine in the legacy Keychain without that entitlement, so we match
-// the in-process pyobjc path (_seckey_backend._keychain_query) exactly.
+// MARK: - OSStatus mirror
+//
+// We re-emit the same OSStatus ints the legacy Keychain path used so the
+// Python `_translate_error` table keeps working unchanged across the boundary.
+
+let errItemNotFound = -25300   // errSecItemNotFound
+let errDuplicateItem = -25299  // errSecDuplicateItem
+let errAuthFailed = -25293     // errSecAuthFailed
 
 // MARK: - Wire types
 
@@ -65,60 +78,87 @@ func hexEncode(_ d: Data) -> String {
     d.map { String(format: "%02x", $0) }.joined()
 }
 
-// MARK: - CFError extraction
+// MARK: - Blob store
+//
+// Resolution order for the store directory:
+//   1. MORDRED_SEKEY_STORE — explicit absolute directory (authoritative).
+//   2. $HERMES_HOME/mordred/keyvault/sekey
+//   3. ~/.hermes/mordred/keyvault/sekey
+// This mirrors mordred_hermes._home.hermes_home so the SE blobs live under
+// the same keyvault tree the Python side uses for everything else.
 
-func helperError(_ cfError: Unmanaged<CFError>?, _ fallbackMessage: String) -> HelperError {
-    guard let cfError = cfError else {
-        return HelperError(domain: "OSStatus", status: Int(errSecAuthFailed), message: fallbackMessage)
+func storeDir() -> URL {
+    let env = ProcessInfo.processInfo.environment
+    if let explicit = env["MORDRED_SEKEY_STORE"], !explicit.isEmpty {
+        return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath, isDirectory: true)
     }
-    let err = cfError.takeRetainedValue() as Error as NSError
-    return HelperError(domain: err.domain, status: err.code, message: err.localizedDescription)
+    let base: URL
+    if let hermesHome = env["HERMES_HOME"], !hermesHome.isEmpty {
+        base = URL(fileURLWithPath: (hermesHome as NSString).expandingTildeInPath, isDirectory: true)
+    } else {
+        base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hermes", isDirectory: true)
+    }
+    return base
+        .appendingPathComponent("mordred", isDirectory: true)
+        .appendingPathComponent("keyvault", isDirectory: true)
+        .appendingPathComponent("sekey", isDirectory: true)
 }
 
-// MARK: - Keychain query builders
-
-func privateKeyQuery(tag: Data, returnRef: Bool) -> [String: Any] {
-    var q: [String: Any] = [
-        kSecClass as String: kSecClassKey,
-        kSecAttrApplicationTag as String: tag,
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-    ]
-    if returnRef {
-        q[kSecReturnRef as String] = true
-    }
-    return q
+func blobURL(tagHex: String) -> URL {
+    storeDir().appendingPathComponent("\(tagHex).bin", isDirectory: false)
 }
 
-func lookupPrivateKey(tag: Data) throws -> SecKey {
-    var ref: CFTypeRef?
-    let status = SecItemCopyMatching(privateKeyQuery(tag: tag, returnRef: true) as CFDictionary, &ref)
-    guard status == errSecSuccess, let item = ref else {
-        throw HelperError(domain: "OSStatus", status: Int(status), message: "SecItemCopyMatching failed")
+func ensureStoreDir() throws {
+    let dir = storeDir()
+    do {
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+    } catch {
+        throw HelperError(domain: "helper", status: -1, message: "failed to create store dir: \(error.localizedDescription)")
     }
-    // Force-cast is safe: the query pins kSecClassKey + kSecReturnRef, so a
-    // success status guarantees a SecKey ref.
-    return (item as! SecKey)
 }
 
-func exportPublicKey(_ privateKey: SecKey) throws -> Data {
-    guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
-        throw HelperError(domain: "OSStatus", status: Int(errSecAuthFailed), message: "SecKeyCopyPublicKey failed")
+func writeBlob(_ blob: Data, tagHex: String) throws {
+    try ensureStoreDir()
+    let url = blobURL(tagHex: tagHex)
+    do {
+        try blob.write(to: url, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    } catch {
+        throw HelperError(domain: "helper", status: -1, message: "failed to write blob: \(error.localizedDescription)")
     }
-    var cfErr: Unmanaged<CFError>?
-    guard let data = SecKeyCopyExternalRepresentation(publicKey, &cfErr) else {
-        throw helperError(cfErr, "SecKeyCopyExternalRepresentation failed")
-    }
-    return data as Data
 }
 
-// MARK: - Operations
+func readBlob(tagHex: String) throws -> Data {
+    let url = blobURL(tagHex: tagHex)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        throw HelperError(domain: "OSStatus", status: errItemNotFound, message: "no key for tag")
+    }
+    do {
+        return try Data(contentsOf: url)
+    } catch {
+        throw HelperError(domain: "helper", status: -1, message: "failed to read blob: \(error.localizedDescription)")
+    }
+}
 
-func createKey(tag: Data, label: String?, biometry: Bool) throws -> Data {
+// MARK: - Access control
+
+func makeAccessControl(biometry: Bool) throws -> SecAccessControl {
     var flags: SecAccessControlCreateFlags = [.privateKeyUsage]
     if biometry {
+        // Biometry-preferred with a device-passcode fallback:
+        // `.biometryCurrentSet` keeps the "key is invalidated when the
+        // enrolled fingerprint set changes" defense (an attacker who enrolls
+        // their own finger cannot use the key), while `.or, .devicePasscode`
+        // lets the user fall back to the Mac password when Touch ID is
+        // unavailable, flaky, or locked out — without it, a biometry lockout
+        // makes the wrapping key permanently unusable until a screen unlock.
         flags.insert(.biometryCurrentSet)
+        flags.insert(.or)
+        flags.insert(.devicePasscode)
     }
     var acErr: Unmanaged<CFError>?
     guard let access = SecAccessControlCreateWithFlags(
@@ -127,71 +167,97 @@ func createKey(tag: Data, label: String?, biometry: Bool) throws -> Data {
         flags,
         &acErr
     ) else {
-        throw helperError(acErr, "SecAccessControlCreateWithFlags failed")
+        let message: String
+        if let cf = acErr?.takeRetainedValue() {
+            message = (cf as Error).localizedDescription
+        } else {
+            message = "SecAccessControlCreateWithFlags failed"
+        }
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: message)
     }
-
-    var privateKeyAttrs: [String: Any] = [
-        kSecAttrIsPermanent as String: true,
-        kSecAttrApplicationTag as String: tag,
-        kSecAttrAccessControl as String: access,
-    ]
-    if let label = label {
-        privateKeyAttrs[kSecAttrLabel as String] = label
-    }
-
-    let attrs: [String: Any] = [
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeySizeInBits as String: 256,
-        kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecPrivateKeyAttrs as String: privateKeyAttrs,
-    ]
-
-    var cfErr: Unmanaged<CFError>?
-    guard let privateKey = SecKeyCreateRandomKey(attrs as CFDictionary, &cfErr) else {
-        throw helperError(cfErr, "SecKeyCreateRandomKey failed")
-    }
-    return try exportPublicKey(privateKey)
+    return access
 }
 
-func deleteKey(tag: Data) throws {
-    let status = SecItemDelete(privateKeyQuery(tag: tag, returnRef: false) as CFDictionary)
-    // errSecItemNotFound is success — delete is contractually idempotent.
-    guard status == errSecSuccess || status == errSecItemNotFound else {
-        throw HelperError(domain: "OSStatus", status: Int(status), message: "SecItemDelete failed")
+// MARK: - Operations
+
+func loadKey(tagHex: String) throws -> SecureEnclave.P256.KeyAgreement.PrivateKey {
+    let blob = try readBlob(tagHex: tagHex)
+    do {
+        return try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: blob)
+    } catch {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "failed to load enclave key: \(error.localizedDescription)")
     }
 }
 
-func ecdh(tag: Data, peerPub: Data) throws -> Data {
-    let privateKey = try lookupPrivateKey(tag: tag)
-    let peerAttrs: [String: Any] = [
-        kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-        kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
-    ]
-    var cfErr: Unmanaged<CFError>?
-    guard let peerKey = SecKeyCreateWithData(peerPub as CFData, peerAttrs as CFDictionary, &cfErr) else {
-        throw helperError(cfErr, "SecKeyCreateWithData(peer) failed")
+func generate(tagHex: String) throws -> Data {
+    // Refuse to overwrite an existing key — mirrors errSecDuplicateItem so the
+    // backend maps it to "already exists" rather than silently rotating.
+    if FileManager.default.fileExists(atPath: blobURL(tagHex: tagHex).path) {
+        throw HelperError(domain: "OSStatus", status: errDuplicateItem, message: "key already exists for tag")
     }
-    guard let shared = SecKeyCopyKeyExchangeResult(
-        privateKey,
-        .ecdhKeyExchangeStandard,
-        peerKey,
-        [:] as CFDictionary,
-        &cfErr
-    ) else {
-        throw helperError(cfErr, "SecKeyCopyKeyExchangeResult failed")
+    let access = try makeAccessControl(biometry: true)
+    let key: SecureEnclave.P256.KeyAgreement.PrivateKey
+    do {
+        key = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
+    } catch {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "SecureEnclave key generation failed: \(error.localizedDescription)")
     }
-    return shared as Data
+    try writeBlob(key.dataRepresentation, tagHex: tagHex)
+    return key.publicKey.x963Representation
+}
+
+func publicKey(tagHex: String) throws -> Data {
+    try loadKey(tagHex: tagHex).publicKey.x963Representation
+}
+
+func deleteKey(tagHex: String) throws {
+    let url = blobURL(tagHex: tagHex)
+    // Idempotent: a missing key is success, not an error.
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    do {
+        try FileManager.default.removeItem(at: url)
+    } catch {
+        // Lost a race with another deleter? Treat a now-absent file as success.
+        if FileManager.default.fileExists(atPath: url.path) {
+            throw HelperError(domain: "helper", status: -1, message: "failed to delete blob: \(error.localizedDescription)")
+        }
+    }
+}
+
+func ecdh(tagHex: String, peerPub: Data) throws -> Data {
+    let key = try loadKey(tagHex: tagHex)
+    let peer: P256.KeyAgreement.PublicKey
+    do {
+        peer = try P256.KeyAgreement.PublicKey(x963Representation: peerPub)
+    } catch {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "invalid peer public key: \(error.localizedDescription)")
+    }
+    let shared: SharedSecret
+    do {
+        // This is the authorization boundary — triggers the Touch ID /
+        // passcode prompt because the key carries .biometryCurrentSet.
+        shared = try key.sharedSecretFromKeyAgreement(with: peer)
+    } catch {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "key agreement failed: \(error.localizedDescription)")
+    }
+    // Raw 32-byte X coordinate — identical to SecKeyCopyKeyExchangeResult
+    // (.ecdhKeyExchangeStandard) and the software fallback, so wrap.py's HKDF
+    // input is unchanged.
+    return shared.withUnsafeBytes { Data($0) }
 }
 
 func probe() throws {
-    // A throwaway .privateKeyUsage-only key (no biometry → no prompt). A
-    // random suffix prevents concurrent probes from colliding on the tag.
-    var suffix = Data(count: 8)
-    _ = suffix.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 8, $0.baseAddress!) }
-    let tag = "mordred-hermes.wrap.__probe__.".data(using: .utf8)! + suffix
-    _ = try createKey(tag: tag, label: "Mordred capability probe", biometry: false)
-    // Cleanup failure must not flip capability detection to false.
-    try? deleteKey(tag: tag)
+    guard SecureEnclave.isAvailable else {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "Secure Enclave not available")
+    }
+    // Generate a throwaway .privateKeyUsage-only key (no biometry → no prompt)
+    // and never persist it. Success proves the hardware path works.
+    let access = try makeAccessControl(biometry: false)
+    do {
+        _ = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
+    } catch {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "probe key generation failed: \(error.localizedDescription)")
+    }
 }
 
 // MARK: - Output
@@ -220,29 +286,27 @@ guard let request = try? JSONDecoder().decode(Request.self, from: input) else {
     fail("invalid JSON request on stdin")
 }
 
-func requireTag(_ req: Request) -> Data {
-    guard let hex = req.tag_hex, let tag = hexDecode(hex) else {
+func requireTagHex(_ req: Request) -> String {
+    guard let hex = req.tag_hex, hexDecode(hex) != nil else {
         fail("missing or invalid tag_hex")
     }
-    return tag
+    return hex
 }
 
 do {
     switch request.cmd {
     case "generate":
-        let pub = try createKey(tag: requireTag(request), label: request.label, biometry: true)
-        emit(["public_key_hex": hexEncode(pub)])
+        emit(["public_key_hex": hexEncode(try generate(tagHex: requireTagHex(request)))])
     case "public_key":
-        let privateKey = try lookupPrivateKey(tag: requireTag(request))
-        emit(["public_key_hex": hexEncode(try exportPublicKey(privateKey))])
+        emit(["public_key_hex": hexEncode(try publicKey(tagHex: requireTagHex(request)))])
     case "delete":
-        try deleteKey(tag: requireTag(request))
+        try deleteKey(tagHex: requireTagHex(request))
         emit(["ok": true])
     case "ecdh":
         guard let peerHex = request.peer_pub_hex, let peer = hexDecode(peerHex) else {
             fail("missing or invalid peer_pub_hex")
         }
-        emit(["shared_hex": hexEncode(try ecdh(tag: requireTag(request), peerPub: peer))])
+        emit(["shared_hex": hexEncode(try ecdh(tagHex: requireTagHex(request), peerPub: peer))])
     case "probe":
         try probe()
         emit(["ok": true])

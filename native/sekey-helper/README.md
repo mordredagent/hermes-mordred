@@ -6,18 +6,38 @@ behalf of the (unsigned) Python `mordred-hermes` keyvault.
 ## Why this exists
 
 An unsigned / ad-hoc-signed Python interpreter cannot carry the
-`keychain-access-groups` entitlement, so persisting SE keys in the Keychain
-fails with `errSecMissingEntitlement (-34018)`.  This helper uses
-**CryptoKit** (`SecureEnclave.P256.KeyAgreement.PrivateKey`) and persists key
-blobs as ordinary files under `~/.hermes/mordred/keyvault/sekey/<tag_hex>`.
-File-backed CryptoKit keys do not require a Keychain entitlement; an ad-hoc
-codesign is sufficient.
+`keychain-access-groups` entitlement, so persisting SE keys *in the Keychain*
+fails with `errSecMissingEntitlement (-34018)`. The usual fix
+(`keychain-access-groups` + a provisioning profile + a `.app` bundle) requires
+a **paid Apple Developer Program** membership — and a bare Developer-ID CLI
+that requests the entitlement without a profile is SIGKILLed by AMFI.
+
+This helper sidesteps all of that with **CryptoKit**
+(`SecureEnclave.P256.KeyAgreement.PrivateKey`): it never touches the Keychain.
+The private key lives in the Secure Enclave; its `dataRepresentation` — an
+opaque blob that *only this device's Enclave* can decrypt and use — is written
+to an ordinary file. A leaked blob is useless on any other machine, so no
+entitlement, no provisioning profile, no `.app` bundle, and **no paid Developer
+account** are needed. An **ad-hoc codesign** (`codesign --sign -`) is enough.
 
 ```
 Python (unsigned)
   └─ subprocess ──▶ mordred-hermes-sekey (ad-hoc signed)
-                       └─ CryptoKit SecureEnclave key (file-store)
+                       └─ CryptoKit SecureEnclave key
+                            • private key: in the Secure Enclave
+                            • dataRepresentation blob: <store>/<tag_hex>.bin
 ```
+
+### Key blob store
+
+`<store>` is resolved in this order:
+
+1. `MORDRED_SEKEY_STORE` — explicit directory (authoritative).
+2. `$HERMES_HOME/mordred/keyvault/sekey`
+3. `~/.hermes/mordred/keyvault/sekey`
+
+This mirrors `mordred_hermes._home.hermes_home`. The directory is created
+`0700` and each `<tag_hex>.bin` blob is written `0600`.
 
 ## Protocol (one process invocation = one operation)
 
@@ -39,7 +59,20 @@ Failure (any command), exit code 1:
 
 `tag_hex` is derived from `key_id` as a SHA-256 prefix by the Python side.
 The cleartext `key_id` is never sent across the subprocess boundary.
-`ecdh` triggers the Touch ID / passcode system prompt.
+
+`ecdh` is the authorization boundary: it triggers a system prompt because the
+key is created with the access control
+`[.privateKeyUsage, .biometryCurrentSet, .or, .devicePasscode]` — Touch ID
+preferred, with a **device-passcode fallback**. The fallback matters: with
+`.biometryCurrentSet` alone, a biometry lockout (e.g. repeated failed Touch ID
+reads, which happen with an ad-hoc-signed CLI) would make the wrapping key
+unusable until a screen unlock. `.biometryCurrentSet` still invalidates the key
+if the enrolled fingerprint set changes.
+
+Error status ints mirror the legacy Keychain path so the Python
+`_translate_error` table is unchanged: duplicate → `-25299`
+(`errSecDuplicateItem`), missing → `-25300` (`errSecItemNotFound`), any auth /
+generic failure → `-25293` (`errSecAuthFailed`), all with `domain:"OSStatus"`.
 
 ## Build, sign, install
 
@@ -47,10 +80,12 @@ The cleartext `key_id` is never sent across the subprocess boundary.
 ./build.sh
 ```
 
-This runs `swift build -c release`, codesigns ad-hoc (no Developer ID
-required), and installs to `~/.local/bin/mordred-hermes-sekey`.
+This runs `swift build -c release`, codesigns ad-hoc (no Developer ID, no
+provisioning profile, no paid Apple Developer account required), and installs to
+`~/.local/bin/mordred-hermes-sekey`.
 
-Overrides via env: `MORDRED_SEKEY_SIGN_IDENTITY`, `MORDRED_SEKEY_INSTALL_DIR`.
+Overrides via env: `MORDRED_SEKEY_INSTALL_DIR` (install target),
+`MORDRED_SEKEY_STORE` (key blob directory).
 
 Smoke test:
 

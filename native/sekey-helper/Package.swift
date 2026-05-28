@@ -1,6 +1,11 @@
 // swift-tools-version:5.9
 import PackageDescription
 
+// The CryptoKit file-store design (SecureEnclave.P256 + dataRepresentation)
+// needs no Keychain, no keychain-access-groups entitlement, no bundle ID, and
+// no provisioning profile — so this is a plain executable target with no
+// Info.plist embedding or unsafe linker flags. Ad-hoc signing (build.sh) is
+// sufficient for Secure Enclave use.
 let package = Package(
     name: "mordred-hermes-sekey",
     platforms: [
@@ -9,19 +14,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "mordred-hermes-sekey",
-            path: "Sources/mordred-hermes-sekey",
-            linkerSettings: [
-                // Embed Info.plist into the __TEXT,__info_plist section so the
-                // CLI carries a bundle identifier (io.intmax.mordred-hermes-sekey).
-                // A bundle ID is required for the keychain-access-groups
-                // entitlement to take effect under Developer ID signing.
-                .unsafeFlags([
-                    "-Xlinker", "-sectcreate",
-                    "-Xlinker", "__TEXT",
-                    "-Xlinker", "__info_plist",
-                    "-Xlinker", "Resources/Info.plist",
-                ]),
-            ]
+            path: "Sources/mordred-hermes-sekey"
         ),
     ]
 )
