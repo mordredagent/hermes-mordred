@@ -97,10 +97,23 @@ def ckd_priv(private_key: bytes, chain_code: bytes, index: int) -> tuple[bytes, 
 
 
 def _parse_index(segment: str) -> int:
-    """Parse one path segment ("44'", "60", "0h") into an integer index."""
-    if segment.endswith(("'", "h", "H")):
-        return int(segment[:-1]) + _HARDENED_OFFSET
-    return int(segment)
+    """Parse one path segment ("44'", "60", "0h") into an integer index.
+
+    The child number (before the hardened offset) must fit in 31 bits —
+    BIP32 child numbers are a uint32 split into the hardened bit plus a
+    31-bit index. Anything negative, non-integer, or ``>= 2**31`` raises
+    :class:`ValueError` so a malformed path fails cleanly here rather than
+    as an ``OverflowError`` deep inside :func:`ckd_priv`.
+    """
+    hardened = segment.endswith(("'", "h", "H"))
+    raw = segment[:-1] if hardened else segment
+    try:
+        number = int(raw)
+    except ValueError:
+        raise ValueError(f"invalid BIP32 path segment: {segment!r}") from None
+    if number < 0 or number >= _HARDENED_OFFSET:
+        raise ValueError(f"BIP32 child number out of range [0, 2**31): {number}")
+    return number + _HARDENED_OFFSET if hardened else number
 
 
 def derive_path(seed: bytes, path: str) -> bytes:
