@@ -20,7 +20,15 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import unicodedata
 from importlib.resources import files
+
+#: BIP39 PBKDF2 parameters (BIP-0039 §"From mnemonic to seed"): HMAC-SHA512,
+#: 2048 iterations, 64-byte output. The salt is "mnemonic" concatenated with
+#: the (optional) passphrase. Both mnemonic and passphrase are NFKD-normalized.
+_SEED_PBKDF2_ROUNDS = 2048
+_SEED_LEN = 64
+_SEED_SALT_PREFIX = "mnemonic"
 
 #: v1 keyvault: 256-bit entropy → 24 words. No other size is accepted.
 _ENTROPY_BYTES = 32
@@ -93,3 +101,60 @@ def mnemonic_to_entropy(mnemonic: str) -> bytes:
 def generate_mnemonic() -> str:
     """Generate a fresh random 24-word BIP39 mnemonic (256-bit entropy)."""
     return entropy_to_mnemonic(secrets.token_bytes(_ENTROPY_BYTES))
+
+
+#: Standard BIP39 mnemonic word counts (ENT = 128..256 bits).
+_VALID_WORD_COUNTS = (12, 15, 18, 21, 24)
+
+
+def validate_mnemonic(mnemonic: str) -> None:
+    """Validate any standard BIP39 mnemonic: wordlist membership + checksum.
+
+    Unlike :func:`mnemonic_to_entropy` (v1 keyvault is 24-word-only), this
+    accepts every standard BIP39 length (12/15/18/21/24 words) so the HD
+    wallet can also store an imported external seed (e.g. a 12-word
+    MetaMask phrase). Raises :class:`ValueError` on a wrong word count, an
+    unknown word, or a checksum mismatch.
+    """
+    words = mnemonic.split()
+    count = len(words)
+    if count not in _VALID_WORD_COUNTS:
+        raise ValueError(f"BIP39 mnemonic must be one of {_VALID_WORD_COUNTS} words, got {count}")
+    bits = 0
+    for word in words:
+        try:
+            index = _WORD_INDEX[word]
+        except KeyError:
+            raise ValueError(f"word not in the BIP39 English wordlist: {word!r}") from None
+        bits = (bits << _BITS_PER_WORD) | index
+    total_bits = count * _BITS_PER_WORD  # MS = ENT + ENT/32
+    checksum_bits = total_bits // 33  # CS = MS/33 = ENT/32
+    entropy_bits = total_bits - checksum_bits
+    entropy = (bits >> checksum_bits).to_bytes(entropy_bits // 8, "big")
+    checksum = bits & ((1 << checksum_bits) - 1)
+    expected = hashlib.sha256(entropy).digest()[0] >> (8 - checksum_bits)
+    if checksum != expected:
+        raise ValueError("BIP39 checksum mismatch — mnemonic is corrupt or mis-transcribed")
+
+
+def mnemonic_to_seed(mnemonic: str, passphrase: str = "") -> bytes:
+    """Derive the 64-byte BIP39 seed from a mnemonic + optional passphrase.
+
+    Implements BIP-0039 §"From mnemonic to seed": the binary seed is
+    ``PBKDF2(HMAC-SHA512, password=NFKD(mnemonic), salt="mnemonic"||NFKD(passphrase),
+    2048 rounds, dklen=64)``. Both inputs are NFKD-normalized as the spec
+    mandates; no casefolding (the wordlist is already lowercase, and a
+    passphrase's case is significant).
+
+    The ``passphrase`` here is the BIP39 "25th word", independent of the
+    keyvault's own Passphrase used for the verification digest / backup KDF.
+    """
+    norm_mnemonic = unicodedata.normalize("NFKD", mnemonic)
+    salt = unicodedata.normalize("NFKD", _SEED_SALT_PREFIX + passphrase)
+    return hashlib.pbkdf2_hmac(
+        "sha512",
+        norm_mnemonic.encode("utf-8"),
+        salt.encode("utf-8"),
+        _SEED_PBKDF2_ROUNDS,
+        dklen=_SEED_LEN,
+    )
