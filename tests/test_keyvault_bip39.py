@@ -101,10 +101,7 @@ class TestGenerateMnemonic:
 # Canonical TREZOR BIP39 seed vector (bitcoin/bips bip-0039): the
 # 256-bit-zero entropy mnemonic with passphrase "TREZOR" derives this
 # 64-byte seed via PBKDF2-HMAC-SHA512 (2048 rounds, salt "mnemonic"||pass).
-_TREZOR_MNEMONIC = (
-    "abandon abandon abandon abandon abandon abandon abandon abandon "
-    "abandon abandon abandon about"
-)
+_TREZOR_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 _TREZOR_PASSPHRASE = "TREZOR"
 _TREZOR_SEED_HEX = (
     "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553"

@@ -41,8 +41,7 @@ def _eth_keys():  # type: ignore[return]
         return eth_keys
     except ImportError as exc:
         raise ImportError(
-            "eth-keys is required for BIP32 derivation. "
-            'Install it with: pip install "mordred-hermes[ethereum]"'
+            'eth-keys is required for BIP32 derivation. Install it with: pip install "mordred-hermes[ethereum]"'
         ) from exc
 
 

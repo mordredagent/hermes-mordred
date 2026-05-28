@@ -13,14 +13,13 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.keyvault.ethereum import (
-    EthereumSignature,
     _PURPOSE,
+    EthereumSignature,
     generate_ethereum_key,
     get_ethereum_address,
     sign_hash,
 )
 from tests._keyvault_fakes import FakeBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -113,9 +112,7 @@ def test_sign_hash_produces_valid_signature(tmp_path: Path) -> None:
     assert len(sig.s) == 32
 
     # Recover public key from signature and verify it matches the address.
-    eth_sig = eth_keys.keys.Signature(
-        vrs=(sig.v - 27, int.from_bytes(sig.r, "big"), int.from_bytes(sig.s, "big"))
-    )
+    eth_sig = eth_keys.keys.Signature(vrs=(sig.v - 27, int.from_bytes(sig.r, "big"), int.from_bytes(sig.s, "big")))
     recovered_pub = eth_sig.recover_public_key_from_msg_hash(msg_hash)
     assert recovered_pub.to_checksum_address() == address
 

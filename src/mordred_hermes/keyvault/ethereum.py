@@ -70,7 +70,7 @@ class EthereumSignature:
     65-byte form ``r || s || v`` is available via :attr:`as_bytes`.
     """
 
-    v: int    # 27 or 28
+    v: int  # 27 or 28
     r: bytes  # 32 bytes, big-endian
     s: bytes  # 32 bytes, big-endian
 
@@ -93,8 +93,7 @@ def _eth_keys():  # type: ignore[return]
         return eth_keys
     except ImportError as exc:
         raise ImportError(
-            "eth-keys is required for Ethereum key operations. "
-            'Install it with: pip install "mordred-hermes[ethereum]"'
+            'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
         ) from exc
 
 
@@ -137,7 +136,7 @@ def generate_ethereum_key(
         try:
             priv = eth.keys.PrivateKey(os.urandom(_SCALAR_BYTES))
             break
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
 
     priv_bytes: bytes = priv.to_bytes()
@@ -240,9 +239,7 @@ def sign_hash(
         ValueError: ``message_hash`` is not exactly 32 bytes.
     """
     if len(message_hash) != _SCALAR_BYTES:
-        raise ValueError(
-            f"message_hash must be exactly {_SCALAR_BYTES} bytes, got {len(message_hash)}"
-        )
+        raise ValueError(f"message_hash must be exactly {_SCALAR_BYTES} bytes, got {len(message_hash)}")
 
     from . import api
 
@@ -343,9 +340,7 @@ def derive_ethereum_key(
     from . import _bip32, _bip39, api
 
     eth = _eth_keys()
-    seed_bytes = api.decrypt(
-        key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home
-    )
+    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
     priv_bytes: bytes | None = None
     try:
         mnemonic = seed_bytes.decode("utf-8")
@@ -385,9 +380,7 @@ def sign_hash_hd(
     from . import _bip32, _bip39, api
 
     eth = _eth_keys()
-    seed_bytes = api.decrypt(
-        key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home
-    )
+    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
     priv_bytes: bytes | None = None
     try:
         mnemonic = seed_bytes.decode("utf-8")
