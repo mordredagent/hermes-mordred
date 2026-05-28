@@ -151,7 +151,14 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p = sub.add_parser("keyvault", help="Mordred keyvault management (Phase 4)")
     ksub = p.add_subparsers(dest="keyvault_command", required=True, metavar="COMMAND")
 
-    ksub.add_parser("init", help="Initialise the keyvault").set_defaults(func=_handle_keyvault_init)
+    p_init = ksub.add_parser("init", help="Initialise the keyvault")
+    p_init.add_argument(
+        "--store-seed-for-hd",
+        action="store_true",
+        help="SE-encrypt the generated seed so HD Ethereum accounts can be derived later "
+        "(Option A: seed stored at rest; default is paper-only).",
+    )
+    p_init.set_defaults(func=_handle_keyvault_init)
     ksub.add_parser("list", help="List key IDs").set_defaults(func=_handle_keyvault_list)
     ksub.add_parser("verify-digest", help="Verify the keyvault digest").set_defaults(
         func=_handle_keyvault_verify_digest

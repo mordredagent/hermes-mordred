@@ -41,8 +41,21 @@ if TYPE_CHECKING:
 # colliding with envelopes written by this version.
 _PURPOSE = "ethereum.key.v1"
 
+# Purpose tag for the SE-encrypted BIP39 seed phrase backing the HD wallet
+# (Option A). Distinct from _PURPOSE so a stored seed and a stored random
+# key never collide in the keyvault ciphertext tree.
+_SEED_PURPOSE = "bip39.seed.v1"
+
+# BIP44 coin type for Ethereum (SLIP-44): m/44'/60'/account'/change/index.
+_ETH_COIN_TYPE = 60
+
 # secp256k1 private key is always a 32-byte (256-bit) big-endian scalar.
 _SCALAR_BYTES = 32
+
+
+def _bip44_eth_path(index: int, *, account: int = 0, change: int = 0) -> str:
+    """Build the BIP44 Ethereum derivation path for an account index."""
+    return f"m/44'/{_ETH_COIN_TYPE}'/{account}'/{change}/{index}"
 
 
 @dataclass(frozen=True)
@@ -57,7 +70,7 @@ class EthereumSignature:
     65-byte form ``r || s || v`` is available via :attr:`as_bytes`.
     """
 
-    v: int    # 27 or 28
+    v: int  # 27 or 28
     r: bytes  # 32 bytes, big-endian
     s: bytes  # 32 bytes, big-endian
 
@@ -80,8 +93,7 @@ def _eth_keys():  # type: ignore[return]
         return eth_keys
     except ImportError as exc:
         raise ImportError(
-            "eth-keys is required for Ethereum key operations. "
-            'Install it with: pip install "mordred-hermes[ethereum]"'
+            'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
         ) from exc
 
 
@@ -124,7 +136,7 @@ def generate_ethereum_key(
         try:
             priv = eth.keys.PrivateKey(os.urandom(_SCALAR_BYTES))
             break
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
 
     priv_bytes: bytes = priv.to_bytes()
@@ -227,9 +239,7 @@ def sign_hash(
         ValueError: ``message_hash`` is not exactly 32 bytes.
     """
     if len(message_hash) != _SCALAR_BYTES:
-        raise ValueError(
-            f"message_hash must be exactly {_SCALAR_BYTES} bytes, got {len(message_hash)}"
-        )
+        raise ValueError(f"message_hash must be exactly {_SCALAR_BYTES} bytes, got {len(message_hash)}")
 
     from . import api
 
@@ -254,3 +264,135 @@ def sign_hash(
         )
     finally:
         del priv_bytes
+
+
+# ---------------------------------------------------------------------------
+# HD wallet (BIP32/BIP44) — Option A: the BIP39 seed is stored SE-encrypted,
+# and Ethereum accounts are derived deterministically from it on demand.
+# ---------------------------------------------------------------------------
+
+
+def store_seed_phrase(
+    key_id: str,
+    mnemonic: str,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+) -> str:
+    """Encrypt a BIP39 mnemonic under the Enclave wrapping key and store it.
+
+    The mnemonic's BIP39 checksum is validated first (any standard length,
+    12-24 words — so an imported external wallet seed is accepted), then the
+    UTF-8 bytes are encrypted via :func:`~mordred_hermes.keyvault.api.encrypt`
+    under purpose ``"bip39.seed.v1"`` (offline wrap, no biometric prompt).
+
+    Returns the ``envelope_id`` to pass to :func:`derive_ethereum_key` /
+    :func:`sign_hash_hd`.
+
+    Security note (Option A): the seed now exists at rest as ciphertext. The
+    Enclave-wrapped DEK means a stolen ``.gcm`` is useless off this device,
+    but a process running as this user (with an unattended wrapping key) can
+    decrypt and derive every account — the same threat model the keyvault
+    already documents (protects at-rest; does not protect a live-compromised
+    host). The paper seed remains the cross-device recovery anchor.
+    """
+    from . import _bip39, api
+
+    _bip39.validate_mnemonic(mnemonic)
+    seed_bytes = mnemonic.encode("utf-8")
+    try:
+        return api.encrypt(
+            key_id,
+            seed_bytes,
+            _SEED_PURPOSE,
+            backend=backend,
+            audit_sink=audit_sink,
+            home=home,
+        )
+    finally:
+        del seed_bytes
+
+
+def derive_ethereum_key(
+    key_id: str,
+    seed_envelope_id: str,
+    index: int,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+    bip39_passphrase: str = "",
+    account: int = 0,
+    change: int = 0,
+) -> tuple[str, str]:
+    """Derive a deterministic Ethereum account from the stored seed.
+
+    Decrypts the SE-encrypted seed (triggers Enclave authorization — Touch
+    ID / passcode unless the wrapping key is unattended), runs BIP39
+    mnemonic→seed then BIP44 ``m/44'/60'/account'/change/index`` derivation,
+    and returns ``(checksum_address, path)``. The plaintext seed and the
+    derived private scalar live in memory only for the duration of the call.
+
+    ``bip39_passphrase`` is the optional BIP39 "25th word" — independent of
+    the keyvault's own Passphrase.
+    """
+    from . import _bip32, _bip39, api
+
+    eth = _eth_keys()
+    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
+    priv_bytes: bytes | None = None
+    try:
+        mnemonic = seed_bytes.decode("utf-8")
+        path = _bip44_eth_path(index, account=account, change=change)
+        priv_bytes = _bip32.derive_path(_bip39.mnemonic_to_seed(mnemonic, bip39_passphrase), path)
+        address: str = eth.keys.PrivateKey(priv_bytes).public_key.to_checksum_address()
+        return address, path
+    finally:
+        del seed_bytes
+        if priv_bytes is not None:
+            del priv_bytes
+
+
+def sign_hash_hd(
+    key_id: str,
+    seed_envelope_id: str,
+    index: int,
+    message_hash: bytes,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None = None,
+    bip39_passphrase: str = "",
+    account: int = 0,
+    change: int = 0,
+) -> EthereumSignature:
+    """Sign a 32-byte hash with an HD-derived Ethereum account.
+
+    Decrypts the SE-encrypted seed, derives the private key at
+    ``m/44'/60'/account'/change/index``, signs ``message_hash``, then drops
+    the key reference. See :func:`sign_hash` for the ``message_hash``
+    construction rules (EIP-191 / EIP-712 / raw tx).
+    """
+    if len(message_hash) != _SCALAR_BYTES:
+        raise ValueError(f"message_hash must be exactly {_SCALAR_BYTES} bytes, got {len(message_hash)}")
+
+    from . import _bip32, _bip39, api
+
+    eth = _eth_keys()
+    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
+    priv_bytes: bytes | None = None
+    try:
+        mnemonic = seed_bytes.decode("utf-8")
+        path = _bip44_eth_path(index, account=account, change=change)
+        priv_bytes = _bip32.derive_path(_bip39.mnemonic_to_seed(mnemonic, bip39_passphrase), path)
+        sig = eth.keys.PrivateKey(priv_bytes).sign_msg_hash(message_hash)
+        return EthereumSignature(
+            v=sig.v + 27,
+            r=sig.r.to_bytes(_SCALAR_BYTES, "big"),
+            s=sig.s.to_bytes(_SCALAR_BYTES, "big"),
+        )
+    finally:
+        del seed_bytes
+        if priv_bytes is not None:
+            del priv_bytes

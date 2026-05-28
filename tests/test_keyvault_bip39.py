@@ -96,3 +96,28 @@ class TestGenerateMnemonic:
 
     def test_generates_distinct_phrases(self) -> None:
         assert _bip39.generate_mnemonic() != _bip39.generate_mnemonic()
+
+
+# Canonical TREZOR BIP39 seed vector (bitcoin/bips bip-0039): the
+# 256-bit-zero entropy mnemonic with passphrase "TREZOR" derives this
+# 64-byte seed via PBKDF2-HMAC-SHA512 (2048 rounds, salt "mnemonic"||pass).
+_TREZOR_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+_TREZOR_PASSPHRASE = "TREZOR"
+_TREZOR_SEED_HEX = (
+    "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553"
+    "1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+)
+_HARDHAT_MNEMONIC = "test test test test test test test test test test test junk"
+
+
+class TestMnemonicToSeed:
+    def test_matches_trezor_vector(self) -> None:
+        seed = _bip39.mnemonic_to_seed(_TREZOR_MNEMONIC, _TREZOR_PASSPHRASE)
+        assert seed.hex() == _TREZOR_SEED_HEX
+        assert len(seed) == 64
+
+    def test_default_passphrase_is_empty(self) -> None:
+        assert _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC) == _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC, "")
+
+    def test_passphrase_changes_output(self) -> None:
+        assert _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC, "") != _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC, "extra")
