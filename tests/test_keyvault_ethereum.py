@@ -252,3 +252,38 @@ def test_sign_hash_hd_recovers_to_derived_address(tmp_path: Path) -> None:
     rec_sig = keys.Signature(vrs=(sig.v - 27, int.from_bytes(sig.r, "big"), int.from_bytes(sig.s, "big")))
     recovered = rec_sig.recover_public_key_from_msg_hash(message_hash).to_checksum_address()
     assert recovered == addr
+
+
+def test_derive_bip39_passphrase_changes_address(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    plain, _ = derive_ethereum_key("default", seed_env, 0, **kw)
+    with_pass, _ = derive_ethereum_key("default", seed_env, 0, bip39_passphrase="secret25thword", **kw)
+    assert plain != with_pass
+
+
+def test_derive_account_and_change_alter_path_and_address(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+
+    base_addr, base_path = derive_ethereum_key("default", seed_env, 0, **kw)
+    acct_addr, acct_path = derive_ethereum_key("default", seed_env, 0, account=1, **kw)
+    chg_addr, chg_path = derive_ethereum_key("default", seed_env, 0, change=1, **kw)
+
+    assert base_path == "m/44'/60'/0'/0/0"
+    assert acct_path == "m/44'/60'/1'/0/0"
+    assert chg_path == "m/44'/60'/0'/1/0"
+    assert len({base_addr, acct_addr, chg_addr}) == 3
+
+
+def test_derive_rejects_negative_index(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import derive_ethereum_key, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    with pytest.raises(ValueError):
+        derive_ethereum_key("default", seed_env, -1, **kw)

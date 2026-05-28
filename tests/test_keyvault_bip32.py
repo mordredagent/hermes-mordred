@@ -61,3 +61,25 @@ def test_derive_path_rejects_non_master_prefix() -> None:
 
 def test_hardened_and_unhardened_indices_differ() -> None:
     assert _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0") != _bip32.derive_path(_seed(), "m/44'/60'/0'/0/0'")
+
+
+def test_derive_path_rejects_negative_index() -> None:
+    with pytest.raises(ValueError):
+        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/-1")
+
+
+def test_derive_path_rejects_oversized_index() -> None:
+    # 2**32 cannot be serialized into the 4-byte BIP32 child number field.
+    with pytest.raises(ValueError):
+        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/4294967296")
+
+
+def test_derive_path_rejects_hardened_overflow() -> None:
+    # A child number >= 2**31 is invalid before the hardened offset is added.
+    with pytest.raises(ValueError):
+        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/2147483648'")
+
+
+def test_derive_path_rejects_non_integer_segment() -> None:
+    with pytest.raises(ValueError):
+        _bip32.derive_path(_seed(), "m/44'/60'/0'/0/abc")
