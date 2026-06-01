@@ -98,7 +98,11 @@ def ops() -> _FakeOps:
 
 @pytest.fixture
 def backend(ops: _FakeOps) -> _SecKeyBackend:
-    return _SecKeyBackend(ops=ops)
+    # Inject a software fake for the SW namespace too: the dual-namespace flow
+    # (errSecItemNotFound fall-through, delete) otherwise reaches the real
+    # _SoftwareFallbackOps → native._security, which only loads on macOS. With a
+    # fake sw_ops the flow + error translation run cross-platform (green on Linux).
+    return _SecKeyBackend(ops=ops, sw_ops=_FakeOps())
 
 
 # ---------------------------------------------------------------------------

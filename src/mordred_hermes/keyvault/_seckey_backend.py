@@ -621,17 +621,21 @@ class _SecKeyBackend:
     retries with :class:`_SoftwareFallbackOps` under the ``_SW_TAG_PREFIX``
     namespace so SE keys and software keys never collide.
 
-    Tests inject a fake ops via ``ops=``; the ``_sw_ops`` is only reached
-    on genuine ``errSecMissingEntitlement``, which fake ops never raise.
+    The ``_sw_ops`` (software namespace) is reached not only on
+    ``errSecMissingEntitlement`` but also on ``errSecItemNotFound`` (a key may
+    live in the software namespace) and on every delete. It is injectable via
+    ``sw_ops=`` so a test can exercise the dual-namespace flow with software
+    fakes — without it, the real :class:`_SoftwareFallbackOps` reaches
+    ``native._security`` and the flow can only run on macOS.
 
     Satisfies the structural :class:`NativeBackend` ``Protocol`` —
     ``isinstance(_SecKeyBackend(), NativeBackend)`` is ``True`` because
     that Protocol is ``@runtime_checkable``.
     """
 
-    def __init__(self, *, ops: _SecKeyOps | None = None) -> None:
+    def __init__(self, *, ops: _SecKeyOps | None = None, sw_ops: _SecKeyOps | None = None) -> None:
         self._ops: _SecKeyOps = ops if ops is not None else _default_ops()
-        self._sw_ops = _SoftwareFallbackOps()
+        self._sw_ops: _SecKeyOps = sw_ops if sw_ops is not None else _SoftwareFallbackOps()
 
     # ----- generate -----
 

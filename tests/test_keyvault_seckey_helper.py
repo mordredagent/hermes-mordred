@@ -292,7 +292,11 @@ def test_spawn_failure_when_binary_missing() -> None:
 
 
 def test_backend_generate_get_delete_via_helper(fake_helper: str) -> None:
-    backend = _SecKeyBackend(ops=_HelperSecKeyOps(fake_helper))
+    ops = _HelperSecKeyOps(fake_helper)
+    # sw_ops reuses the helper ops (the software namespace uses distinct tags),
+    # so the delete + get-after-delete fall-through never reaches the real
+    # _SoftwareFallbackOps → native._security (which only loads on macOS).
+    backend = _SecKeyBackend(ops=ops, sw_ops=ops)
     key_id = "wiring-test-key"
 
     pub = backend.generate_enclave_key(key_id)
