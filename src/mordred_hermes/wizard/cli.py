@@ -243,6 +243,21 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_migrate.set_defaults(func=_handle_vault_migrate)
 
+    p_set_memory_key = vsub.add_parser(
+        "set-memory-key",
+        help="Store/rotate HERMES_MEMORY_KEY in the vault .env so Hermes can encrypt agent memory at rest",
+    )
+    p_set_memory_key.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_set_memory_key.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Replace an existing key with a fresh one (default: leave an existing key unchanged)",
+    )
+    p_set_memory_key.set_defaults(func=_handle_vault_set_memory_key)
+
 
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
@@ -403,6 +418,12 @@ def _handle_vault_migrate(args: argparse.Namespace) -> int:
     from . import vault_cli
 
     return vault_cli.cli_migrate(args)
+
+
+def _handle_vault_set_memory_key(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_set_memory_key(args)
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:
