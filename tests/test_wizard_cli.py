@@ -95,6 +95,9 @@ class TestSubcommandTree:
             ["mordred", "keyvault", "list"],
             ["mordred", "keyvault", "verify-digest"],
             ["mordred", "keyvault", "recover", "--blob", "/tmp/x"],
+            ["mordred", "vault", "migrate"],
+            ["mordred", "vault", "migrate", "/tmp/.env", "/tmp/config.yaml"],
+            ["mordred", "vault", "migrate", "--root", "/tmp/vault"],
             ["mordred", "plugins", "list"],
         ],
     )

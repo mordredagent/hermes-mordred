@@ -34,7 +34,18 @@ if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
     from .configure import PromptIO
 
-__all__ = ["add", "cat", "cli_add", "cli_cat", "cli_init", "cli_status", "init", "status"]
+__all__ = [
+    "add",
+    "cat",
+    "cli_add",
+    "cli_cat",
+    "cli_init",
+    "cli_migrate",
+    "cli_status",
+    "init",
+    "migrate",
+    "status",
+]
 
 # Default vault root, relative to the Hermes home: ``<home>/mordred/vault``.
 _VAULT_SUBDIR = ("mordred", "vault")
@@ -341,6 +352,120 @@ def add(
     return 0
 
 
+def migrate(
+    *,
+    root: Path,
+    sources: list[Path],
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Batch-import each plaintext file in ``sources`` into the vault at ``root``.
+
+    A batch :func:`add`: opens the vault **once** on the hot path (the device
+    wrapping key — Secure Enclave or its software fallback, no passphrase) and
+    enrolls every source under its basename (``source.name``), so importing the
+    operator's existing plaintext (``~/.hermes/.env`` / ``config.yaml``) is one
+    command.
+
+    **Read-all-then-enroll-all**: every source is read up front, so an
+    unreadable path or a duplicate basename aborts *before* the vault is touched
+    — a typo never leaves a half-migrated vault. (A rare device error mid-enroll
+    can still leave the files committed before it enrolled; each
+    :meth:`enroll_file` is its own crash-safe generation.) A consequence is that
+    all source plaintexts coexist in RAM from the read phase until return —
+    acceptable under the §2 threat model, which excludes live-RAM attackers.
+    Like :func:`add`, the plaintext sources are **not** removed — the operator
+    owns shredding them.
+
+    ``backend`` / ``store`` default to the production implementations; tests
+    inject fakes. Returns 0 on success (an empty ``sources`` is a no-op success),
+    1 on a duplicate name, an unreadable source, an uninitialised / unverifiable
+    vault, or a device key-store error.
+    """
+    if not sources:
+        print("Nothing to migrate.")
+        return 0
+
+    # Each source enrolls under its basename; a name claimed by two sources is
+    # ambiguous (which one wins?) — refuse before any I/O, enroll nothing.
+    by_name: dict[str, Path] = {}
+    for source in sources:
+        name = source.name
+        if name in by_name:
+            print(
+                f"refusing to migrate: {name!r} maps to more than one source "
+                f"({by_name[name]}, {source}) — migrate them under distinct names.",
+                file=sys.stderr,
+            )
+            return 1
+        by_name[name] = source
+
+    # Read every plaintext first so a bad path fails the whole run before the
+    # first commit (read-all-then-enroll-all: no partially migrated vault).
+    plaintexts: list[tuple[str, bytes]] = []
+    for name, source in by_name.items():
+        try:
+            plaintexts.append((name, source.read_bytes()))
+        except OSError as exc:
+            print(f"cannot read source file {source}: {exc}", file=sys.stderr)
+            return 1
+
+    from ..keyvault import anchor, manifest, vault
+    from ..keyvault._exceptions import WrapError
+
+    key_id = anchor_label = _vault_identity(root)
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    if store is None:
+        from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+        store = KeychainAnchorStore()
+
+    try:
+        opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
+    except anchor.AnchorMissing:
+        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
+        return 1
+    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
+        # A freshness-pin mismatch is the anchor's whole purpose — surface it as
+        # possible tampering / rollback, not a generic open failure.
+        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
+        return 1
+    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
+        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
+        return 1
+    except WrapError as exc:
+        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+        return 1
+
+    enrolled = 0
+    try:
+        for name, plaintext in plaintexts:
+            opened.enroll_file(name, plaintext)
+            enrolled += 1
+        generation = opened.generation
+    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        # `enrolled` is the index of the file that failed (incremented only after
+        # a successful enroll). Bounds-guard the lookup so a failure raised
+        # anywhere in the try — even after the loop — still fails closed with a
+        # message rather than an IndexError traceback.
+        failed = plaintexts[enrolled][0] if enrolled < len(plaintexts) else "<unknown>"
+        print(
+            f"cannot migrate {failed!r} ({enrolled} of {len(plaintexts)} already enrolled): {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    finally:
+        opened.close()
+
+    listed = ", ".join(_display_name(n) for n, _ in plaintexts)
+    print(f"Migrated {len(plaintexts)} file(s) into the vault at {root} (now at generation {generation}): {listed}.")
+    return 0
+
+
 # -----------------------------------------------------------------------------
 # CLI adapters wired in cli.py.
 # -----------------------------------------------------------------------------
@@ -349,6 +474,40 @@ def add(
 def cli_add(args: argparse.Namespace) -> int:
     """argparse handler for ``vault add <name> <source> [--root PATH]``."""
     return add(root=_resolve_root(getattr(args, "root", None)), name=args.name, source=Path(args.source))
+
+
+def _default_migrate_sources() -> list[Path]:
+    """The canonical Hermes plaintext files to import — those that exist.
+
+    The vault's reason for being (design §8.2): the operator's existing
+    ``<hermes home>/.env`` and ``<hermes home>/config.yaml``. Absent ones are
+    skipped so a no-argument ``vault migrate`` imports whatever is actually
+    there. Resolved via this module's :func:`_hermes_home` so tests can
+    monkeypatch the home.
+    """
+    home = _hermes_home()
+    # Order is intentional and asserted by tests: .env before config.yaml.
+    return [p for p in (home / ".env", home / "config.yaml") if p.is_file()]
+
+
+def cli_migrate(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault migrate [SOURCE ...] [--root PATH]``.
+
+    With explicit ``SOURCE`` paths, migrates exactly those. With none, imports
+    the canonical Hermes plaintext set (:func:`_default_migrate_sources`). When
+    neither is available, prints guidance and returns 1 rather than silently
+    doing nothing.
+    """
+    explicit = [Path(s) for s in (getattr(args, "source", None) or [])]
+    sources = explicit if explicit else _default_migrate_sources()
+    if not sources:
+        print(
+            "Nothing to migrate: no .env or config.yaml under the Hermes home. "
+            "Pass file paths explicitly to migrate other files.",
+            file=sys.stderr,
+        )
+        return 1
+    return migrate(root=_resolve_root(getattr(args, "root", None)), sources=sources)
 
 
 def cli_init(args: argparse.Namespace) -> int:

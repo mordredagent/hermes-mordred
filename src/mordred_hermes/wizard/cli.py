@@ -216,6 +216,22 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_cat.set_defaults(func=_handle_vault_cat)
 
+    p_migrate = vsub.add_parser(
+        "migrate",
+        help="Import existing plaintext files into the vault (default: .env + config.yaml under the Hermes home)",
+    )
+    p_migrate.add_argument(
+        "source",
+        nargs="*",
+        help="Plaintext file(s) to import, each enrolled under its basename "
+        "(default: .env and config.yaml under the Hermes home)",
+    )
+    p_migrate.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_migrate.set_defaults(func=_handle_vault_migrate)
+
 
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
@@ -364,6 +380,12 @@ def _handle_vault_cat(args: argparse.Namespace) -> int:
     from . import vault_cli
 
     return vault_cli.cli_cat(args)
+
+
+def _handle_vault_migrate(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_migrate(args)
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:
