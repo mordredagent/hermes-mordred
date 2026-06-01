@@ -75,8 +75,7 @@ def test_signed_helper_is_selected_when_present() -> None:
 
     if _seckey_helper._find_helper() is None:
         pytest.skip(
-            "signed helper not installed; build it via "
-            "native/sekey-helper/build.sh or set MORDRED_SEKEY_HELPER"
+            "signed helper not installed; build it via native/sekey-helper/build.sh or set MORDRED_SEKEY_HELPER"
         )
     assert isinstance(_seckey_backend._default_ops(), _seckey_helper._HelperSecKeyOps)
 

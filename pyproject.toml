@@ -77,8 +77,14 @@ integration = [
 dev = [
   "pytest>=8",
   "pytest-cov",
-  "ruff",
-  "mypy>=1.10",
+  # Pin the linters exactly. CI installs this extra with unpinned pip, so a
+  # floating ruff/mypy silently reformats or re-type-checks the whole tree on
+  # every new release and turns CI red with no code change (an unpinned float
+  # to ruff 0.15.15 did exactly this). Pin to the locked version so local (uv)
+  # and CI (pip) always run identical formatters and rules; bump deliberately,
+  # reformatting in the same commit.
+  "ruff==0.15.13",
+  "mypy==2.1.0",
 ]
 
 # Entry points point at the MODULE (not module:register). Hermes loader
@@ -161,4 +167,16 @@ warn_redundant_casts = true
 module = ["hermes_cli", "hermes_cli.*", "hermes_constants", "providers", "providers.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# Untyped third-party modules with no stubs:
+# - eth-keys lives in the optional `ethereum` extra, which CI does not install
+#   (only `dev` / `keyvault` / `macos`), so keyvault/ethereum.py must type-check
+#   without it present.
+# - objc (pyobjc) is the macOS-only Security/CoreFoundation bridge used by
+#   keyvault/_seckey_ctypes.py; it ships no py.typed marker and is absent on the
+#   Linux runner entirely.
+# Treat both as untyped so `mypy --strict src` resolves cross-platform.
+[[tool.mypy.overrides]]
+module = ["eth_keys", "eth_keys.*", "objc"]
+ignore_missing_imports = true
 

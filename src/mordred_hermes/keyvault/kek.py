@@ -31,8 +31,13 @@ bulk performance — for per-operation user authorization use
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import secrets
 from types import TracebackType
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from . import crypto, wrap
 from .wrap import DEK_LEN, AuditSink, NativeBackend
@@ -109,6 +114,23 @@ class MasterKey:
         """AES-GCM decrypt a :meth:`encrypt` blob. Raises ``InvalidTag`` on
         tamper or ``aad`` mismatch."""
         return crypto.decrypt(self._key_bytes(), blob, aad=aad)
+
+    def mac(self, data: bytes, *, info: bytes) -> bytes:
+        """HMAC-SHA256 over ``data`` under a subkey derived from this master.
+
+        For authenticating non-secret-but-integrity-critical state that must be
+        bound to the master without being encrypted — e.g. the vault manifest
+        (enrolled-file set + per-file ciphertext digests), whose contents must
+        be readable to bootstrap the master but tamper-evident once it is open.
+
+        ``info`` domain-separates independent MAC purposes: the subkey is
+        ``HKDF-SHA256(master, info=info)``, so the same master yields unrelated
+        tags for different ``info`` labels. Returns a 32-byte tag. Raises
+        :class:`ValueError` if the master is closed. Compare with
+        :func:`hmac.compare_digest` to verify.
+        """
+        subkey = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(self._key_bytes())
+        return hmac.new(subkey, data, hashlib.sha256).digest()
 
     def close(self) -> None:
         """Best-effort zero the key buffer and block further use. Idempotent.

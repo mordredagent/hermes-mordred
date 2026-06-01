@@ -94,12 +94,8 @@ class _LibBundle:
     """Lazy-loaded handles for CoreFoundation + Security ctypes bindings."""
 
     def __init__(self) -> None:
-        self.cf = ctypes.CDLL(
-            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-        )
-        self.sec = ctypes.CDLL(
-            "/System/Library/Frameworks/Security.framework/Security"
-        )
+        self.cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        self.sec = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
 
         # --- CoreFoundation -------------------------------------------
         self.cf.CFDictionaryCreate.restype = c_void_p
@@ -126,22 +122,25 @@ class _LibBundle:
         self.cf.CFRelease.restype = None
         self.cf.CFRelease.argtypes = [c_void_p]
 
-        self.kCFBooleanTrue = c_void_p.in_dll(self.cf, "kCFBooleanTrue").value
-        self.kCFBooleanFalse = c_void_p.in_dll(self.cf, "kCFBooleanFalse").value
-        self.key_callbacks = ctypes.addressof(
-            c_void_p.in_dll(self.cf, "kCFTypeDictionaryKeyCallBacks")
-        )
-        self.value_callbacks = ctypes.addressof(
-            c_void_p.in_dll(self.cf, "kCFTypeDictionaryValueCallBacks")
-        )
+        true_ptr = c_void_p.in_dll(self.cf, "kCFBooleanTrue").value
+        false_ptr = c_void_p.in_dll(self.cf, "kCFBooleanFalse").value
+        if true_ptr is None or false_ptr is None:
+            raise RuntimeError("CoreFoundation kCFBoolean constants are NULL")
+        self.kCFBooleanTrue: int = true_ptr
+        self.kCFBooleanFalse: int = false_ptr
+        self.key_callbacks = ctypes.addressof(c_void_p.in_dll(self.cf, "kCFTypeDictionaryKeyCallBacks"))
+        self.value_callbacks = ctypes.addressof(c_void_p.in_dll(self.cf, "kCFTypeDictionaryValueCallBacks"))
 
         # --- Security -------------------------------------------------
         self.sec.SecKeyCreateRandomKey.restype = c_void_p
         self.sec.SecKeyCreateRandomKey.argtypes = [c_void_p, POINTER(c_void_p)]
 
-        self.consts: dict[str, int] = {
-            name: c_void_p.in_dll(self.sec, name).value for name in _SEC_CONST_NAMES
-        }
+        self.consts: dict[str, int] = {}
+        for name in _SEC_CONST_NAMES:
+            const_ptr = c_void_p.in_dll(self.sec, name).value
+            if const_ptr is None:
+                raise RuntimeError(f"Security constant {name} is NULL")
+            self.consts[name] = const_ptr
         self._str_const_lookup: dict[str, int] | None = None
 
 
@@ -171,9 +170,7 @@ def _str_const_lookup(sec_module: Any) -> dict[str, int]:
     cached = bundle._str_const_lookup
     if cached is not None:
         return cached
-    lookup = {
-        getattr(sec_module, name): bundle.consts[name] for name in _SEC_CONST_NAMES
-    }
+    lookup = {getattr(sec_module, name): bundle.consts[name] for name in _SEC_CONST_NAMES}
     bundle._str_const_lookup = lookup
     return lookup
 
@@ -194,7 +191,7 @@ def _build_cf(value: Any, sec_module: Any, owned: list[int]) -> int:
 
     if isinstance(value, int):
         n = c_int64(value)
-        cfn = bundle.cf.CFNumberCreate(None, _kCFNumberSInt64Type, byref(n))
+        cfn: int = bundle.cf.CFNumberCreate(None, _kCFNumberSInt64Type, byref(n))
         if not cfn:
             raise MemoryError("CFNumberCreate returned NULL")
         owned.append(cfn)
@@ -202,7 +199,7 @@ def _build_cf(value: Any, sec_module: Any, owned: list[int]) -> int:
 
     if isinstance(value, (bytes, bytearray)):
         buf = bytes(value)
-        d = bundle.cf.CFDataCreate(None, buf, len(buf))
+        d: int = bundle.cf.CFDataCreate(None, buf, len(buf))
         if not d:
             raise MemoryError("CFDataCreate returned NULL")
         owned.append(d)
@@ -214,9 +211,7 @@ def _build_cf(value: Any, sec_module: Any, owned: list[int]) -> int:
         if const_ptr is not None:
             return const_ptr
         b = value.encode("utf-8")
-        s = bundle.cf.CFStringCreateWithBytes(
-            None, b, len(b), _kCFStringEncodingUTF8, False
-        )
+        s: int = bundle.cf.CFStringCreateWithBytes(None, b, len(b), _kCFStringEncodingUTF8, False)
         if not s:
             raise MemoryError("CFStringCreateWithBytes returned NULL")
         owned.append(s)
@@ -232,10 +227,11 @@ def _build_cf(value: Any, sec_module: Any, owned: list[int]) -> int:
     # across the call.
     import objc  # local import — pyobjc unavailable on non-Darwin
 
-    return objc.pyobjc_id(value)
+    pyobjc_id: int = objc.pyobjc_id(value)
+    return pyobjc_id
 
 
-def _build_dict(py_dict: dict, sec_module: Any, owned: list[int]) -> int:
+def _build_dict(py_dict: dict[Any, Any], sec_module: Any, owned: list[int]) -> int:
     """Recursively convert a Python dict to a CFDictionaryRef."""
     bundle = _bundle()
     n = len(py_dict)
@@ -244,7 +240,7 @@ def _build_dict(py_dict: dict, sec_module: Any, owned: list[int]) -> int:
     for i, (k, v) in enumerate(py_dict.items()):
         keys[i] = c_void_p(_build_cf(k, sec_module, owned))
         vals[i] = c_void_p(_build_cf(v, sec_module, owned))
-    d = bundle.cf.CFDictionaryCreate(
+    d: int = bundle.cf.CFDictionaryCreate(
         None,
         keys,
         vals,
@@ -258,7 +254,7 @@ def _build_dict(py_dict: dict, sec_module: Any, owned: list[int]) -> int:
     return d
 
 
-def create_random_key_via_ctypes(sec_module: Any, attrs: dict) -> tuple[Any, Any]:
+def create_random_key_via_ctypes(sec_module: Any, attrs: dict[Any, Any]) -> tuple[Any, Any]:
     """Call ``SecKeyCreateRandomKey`` via ``ctypes`` to bypass the pyobjc
     NSDictionary bridge bug.
 

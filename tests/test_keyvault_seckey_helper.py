@@ -46,7 +46,7 @@ from mordred_hermes.keyvault._seckey_helper import (
 # Errors use the SAME OSStatus ints as the real helper so _translate_error
 # behaves identically. State (keys) lives in $FAKE_SEKEY_STORE so a
 # generate→public_key→ecdh→delete sequence works across separate invocations.
-_FAKE_HELPER_BODY = r'''
+_FAKE_HELPER_BODY = r"""
 import json, os, sys
 
 def err(status, domain="OSStatus", message="fake error"):
@@ -118,7 +118,7 @@ elif cmd == "probe":
     print(json.dumps({"ok": True}))
 else:
     err(-1, "helper", "unknown cmd")
-'''
+"""
 
 
 @pytest.fixture
@@ -147,18 +147,14 @@ def _x962(public_key: ec.EllipticCurvePublicKey) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_find_helper_env_authoritative_when_file_exists(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_find_helper_env_authoritative_when_file_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "helper"
     target.write_text("#!/bin/sh\n")
     monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(target))
     assert _find_helper() == str(target)
 
 
-def test_find_helper_env_missing_returns_none_not_fallthrough(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_find_helper_env_missing_returns_none_not_fallthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # env set but the target does not exist → None (do NOT fall through to
     # ~/.local/bin or PATH; a typo must surface as "no helper").
     monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(tmp_path / "nonexistent"))

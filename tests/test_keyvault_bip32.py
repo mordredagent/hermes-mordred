@@ -18,6 +18,11 @@ import pytest
 
 from mordred_hermes.keyvault import _bip32, _bip39
 
+# eth_keys turns a derived private scalar into a checksum address; it lives in
+# the optional `ethereum` extra, which CI does not install (only dev / keyvault
+# / macos). Skip the whole module when it is absent (matches the docstring).
+pytest.importorskip("eth_keys")
+
 _HARDHAT_MNEMONIC = "test test test test test test test test test test test junk"
 _HARDHAT_ADDRESSES = {
     0: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",

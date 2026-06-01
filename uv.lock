@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-05-21T05:54:16.089317Z"
+exclude-newer = "2026-05-25T02:59:53.026815Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -1499,6 +1499,13 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+ethereum = [
+    { name = "argon2-cffi" },
+    { name = "blake3" },
+    { name = "cryptography" },
+    { name = "eth-hash", extra = ["pycryptodome"] },
+    { name = "eth-keys" },
+]
 integration = [
     { name = "aiohttp-socks" },
     { name = "anthropic" },
@@ -1525,12 +1532,6 @@ tor-control = [
     { name = "stem" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "eth-hash", extra = ["pycryptodome"] },
-    { name = "eth-keys" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "aiohttp-socks", marker = "extra == 'integration'", specifier = ">=0.10" },
@@ -1539,11 +1540,14 @@ requires-dist = [
     { name = "blake3", marker = "extra == 'keyvault'", specifier = ">=0.4" },
     { name = "boto3", marker = "extra == 'integration'", specifier = ">=1.34" },
     { name = "cryptography", marker = "extra == 'keyvault'", specifier = ">=42" },
+    { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'ethereum'", specifier = ">=0.5" },
+    { name = "eth-keys", marker = "extra == 'ethereum'", specifier = ">=0.6" },
     { name = "google-genai", marker = "extra == 'integration'", specifier = ">=1.20" },
     { name = "hermes-agent", specifier = ">=0.11.0" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=0.27" },
+    { name = "mordred-hermes", extras = ["keyvault"], marker = "extra == 'ethereum'" },
     { name = "mordred-hermes", extras = ["keyvault"], marker = "extra == 'macos'" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = "==2.1.0" },
     { name = "openai", marker = "extra == 'integration'", specifier = ">=1.40" },
     { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-security", marker = "extra == 'macos'", specifier = ">=10.0" },
@@ -1552,16 +1556,10 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "requests", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=2.32" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
-    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
     { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
 ]
-provides-extras = ["keyvault", "macos", "tor-control", "integration", "dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "eth-hash", extras = ["pycryptodome"], specifier = ">=0.8.0" },
-    { name = "eth-keys", specifier = ">=0.7.0" },
-]
+provides-extras = ["keyvault", "macos", "ethereum", "tor-control", "integration", "dev"]
 
 [[package]]
 name = "multidict"

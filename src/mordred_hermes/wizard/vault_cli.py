@@ -1,0 +1,366 @@
+"""``hermes mordred vault {status,...}`` — at-rest vault CLI.
+
+Design note: ``mordred-docs/mordred/SECRETS_ENV_ENCRYPTION.ja.md`` §8.2.
+
+The at-rest vault (``keyvault/{vault,manifest,anchor,file_container}.py``)
+generalises secret-at-rest encryption beyond the legacy keyvault. This module
+exposes its **cold-path** commands — open via
+:func:`mordred_hermes.keyvault.vault.recover_vault` (the passphrase recovery
+sidecar), which needs neither the Secure-Enclave ``NativeBackend`` nor the
+device-bound anchor store, so they work on any platform and on a vault copied
+to another machine.
+
+A cold-path open is **read-only** (no device anchor to commit against);
+enrolling requires re-keying onto a device first.
+
+Heavy imports (the cryptography-backed vault modules) stay function-local so
+this module imports on any platform, matching ``keyvault_cli.py``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .._home import hermes_home as _hermes_home
+
+if TYPE_CHECKING:
+    from ..keyvault.anchor import AnchorStore
+    from ..keyvault.vault import OpenVault
+    from ..keyvault.wrap import NativeBackend
+    from .configure import PromptIO
+
+__all__ = ["add", "cat", "cli_add", "cli_cat", "cli_init", "cli_status", "init", "status"]
+
+# Default vault root, relative to the Hermes home: ``<home>/mordred/vault``.
+_VAULT_SUBDIR = ("mordred", "vault")
+
+
+def _resolve_root(root: str | None) -> Path:
+    """Resolve the vault root, defaulting to ``<hermes home>/mordred/vault``.
+
+    The home is resolved via this module's :func:`_hermes_home` (not deferred)
+    so tests can monkeypatch it to point at a ``tmp_path``.
+
+    A user-supplied root is **resolved to an absolute, normalized path** so the
+    same vault yields the same :func:`_vault_identity` regardless of spelling
+    (relative path, ``..``, cwd) — otherwise a second ``init`` could fail to see
+    an existing anchor and clobber the vault. ``_hermes_home`` is already
+    absolute, so the default branch needs no resolution.
+    """
+    if root is not None:
+        return Path(root).resolve()
+    return _hermes_home().joinpath(*_VAULT_SUBDIR)
+
+
+def _display_name(name: str) -> str:
+    """Render an enrolled name safely for the terminal.
+
+    Enrolled names are arbitrary strings; one containing control characters
+    (e.g. ANSI escapes) would otherwise inject into the operator's terminal
+    when listed. Non-printable names are shown backslash-escaped.
+    """
+    return name if name.isprintable() else name.encode("unicode_escape").decode("ascii")
+
+
+def _vault_identity(root: Path) -> str:
+    """Stable id (SE wrapping-key tag + Keychain anchor account) for a vault root.
+
+    Derived from the root path so distinct vaults never collide in the shared
+    Keychain anchor service. The same root string always maps to the same id.
+    """
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return f"mordred-hermes.vault.{digest}"
+
+
+def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | None:
+    """Open a vault read-only via the passphrase recovery sidecar.
+
+    Prompts for the passphrase and opens through
+    :func:`...vault.recover_vault` — no Secure-Enclave backend, no device
+    anchor. Fail-closed: a non-vault root, a missing recovery sidecar, a wrong
+    passphrase, or a tampered manifest/sidecar each print a reason to stderr
+    and return ``None``. On success returns the opened (read-only) vault; the
+    caller owns closing it.
+    """
+    from cryptography.exceptions import InvalidTag
+
+    from ..keyvault import backup, manifest, recovery, vault
+
+    if prompt_io is None:
+        from .configure import PromptToolkitIO
+
+        prompt_io = PromptToolkitIO()
+    passphrase = prompt_io.ask_password("Vault passphrase")
+
+    try:
+        return vault.recover_vault(root, passphrase)
+    except vault.VaultError as exc:
+        print(f"Not a recoverable vault at {root}: {exc}", file=sys.stderr)
+        return None
+    except recovery.RecoveryDigestMismatch:
+        print(
+            "Vault rejected: the recovery sidecar does not match the manifest (substituted wmk / tampering).",
+            file=sys.stderr,
+        )
+        return None
+    except manifest.ManifestError:
+        print("Vault rejected: the manifest failed authentication (tampering).", file=sys.stderr)
+        return None
+    except backup.BackupCorrupt as exc:
+        print(f"Vault rejected: the recovery sidecar is corrupt — {exc}", file=sys.stderr)
+        return None
+    except InvalidTag:
+        print("Wrong passphrase — vault not opened.", file=sys.stderr)
+        return None
+    except OSError as exc:
+        print(f"Cannot read vault at {root}: {exc}", file=sys.stderr)
+        return None
+    finally:
+        # CPython cannot zero an immutable str in place; dropping the reference
+        # shortens the exposure window, it does not scrub the bytes.
+        del passphrase
+
+
+def status(*, root: Path, prompt_io: PromptIO | None = None) -> int:
+    """Print a vault's generation and enrolled file names (cold path).
+
+    Opens read-only via :func:`_open_cold_path`. Enrolled *names* are listed;
+    file *contents* are never decrypted or printed. Returns 0 on a successful
+    open, 1 on any fail-closed open error (reason already on stderr).
+    """
+    opened = _open_cold_path(root, prompt_io=prompt_io)
+    if opened is None:
+        return 1
+    try:
+        names = sorted(opened.list_files())
+        print(f"Vault at {root}")
+        print(f"  generation: {opened.generation}")
+        print(f"  files: {len(names)}")
+        for name in names:
+            print(f"    {_display_name(name)}")
+        print("  (read-only: opened via passphrase recovery)")
+    finally:
+        opened.close()
+    return 0
+
+
+def cat(*, root: Path, name: str, prompt_io: PromptIO | None = None) -> int:
+    """Write one enrolled file's decrypted bytes to stdout (cold path).
+
+    Opens read-only via :func:`_open_cold_path`, decrypts file ``name``, and
+    writes its raw bytes to stdout — binary-safe, byte-exact, no trailing
+    newline added. Fail-closed: a failed open, or a name that is absent /
+    unreadable / fails its content-address or AEAD check, prints a reason to
+    stderr and returns 1. Returns 0 on success.
+    """
+    from ..keyvault import vault
+
+    opened = _open_cold_path(root, prompt_io=prompt_io)
+    if opened is None:
+        return 1
+    try:
+        data = opened.read_file(name)
+    except vault.VaultError as exc:
+        print(f"cannot read {name!r}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        opened.close()
+
+    try:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # Downstream closed early (e.g. `vault cat … | head`); not an error.
+        return 0
+    except OSError as exc:
+        print(f"failed writing {name!r} to stdout: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def init(
+    *,
+    root: Path,
+    prompt_io: PromptIO | None = None,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Create a fresh encrypted vault at ``root`` sealed under a new passphrase.
+
+    Seals one master under both the device wrapping key (hot path) and an
+    Argon2id passphrase recovery sidecar (cold path). The wrapping key prefers
+    the Secure Enclave and transparently falls back to a software key when the
+    Enclave is unavailable (e.g. a non-provisioned interpreter); the cold path
+    is unaffected either way.
+
+    Refuses to clobber an already-initialised vault (its anchor is present).
+    ``backend`` / ``store`` / ``prompt_io`` default to the production
+    implementations; tests inject fakes. Returns 0 on success, 1 on a re-init,
+    a passphrase mismatch / empty passphrase, or a Secure-Enclave / Keychain
+    error.
+    """
+    from ..keyvault import anchor, vault
+    from ..keyvault._exceptions import WrapError, WrapKeyNotFound
+
+    key_id = anchor_label = _vault_identity(root)
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    if store is None:
+        from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+        store = KeychainAnchorStore()
+
+    # Re-init guard before prompting: an existing anchor means a live vault. A
+    # Keychain read failure here is fail-closed (we cannot prove the vault is
+    # absent, so we must not risk clobbering one).
+    try:
+        already_initialised = store.read(anchor_label) is not None
+    except (anchor.AnchorError, OSError) as exc:
+        print(f"Cannot determine vault state at {root}: {exc}", file=sys.stderr)
+        return 1
+    if already_initialised:
+        print(f"A vault is already initialised at {root} — refusing to clobber it.", file=sys.stderr)
+        return 1
+
+    if prompt_io is None:
+        from .configure import PromptToolkitIO
+
+        prompt_io = PromptToolkitIO()
+    passphrase = prompt_io.ask_password("Choose a vault recovery passphrase")
+    if not passphrase:
+        print("Passphrase must not be empty — nothing was written.", file=sys.stderr)
+        return 1
+    if passphrase != prompt_io.ask_password("Re-enter the passphrase"):
+        print("Passphrases do not match — nothing was written.", file=sys.stderr)
+        return 1
+
+    try:
+        # Ensure the device wrapping key exists (init seals under it). A
+        # pre-existing key from a crashed earlier init is reused — not an error.
+        with contextlib.suppress(WrapKeyNotFound):
+            backend.generate_enclave_key(key_id)
+        # Create the vault, then close immediately — init enrolls nothing, and
+        # the context manager guarantees the in-RAM master is zeroed on exit.
+        with vault.init_vault(
+            root, key_id=key_id, passphrase=passphrase, backend=backend, store=store, anchor_label=anchor_label
+        ):
+            pass
+    except vault.VaultError as exc:
+        # A concurrent init won the anchor race after our pre-check.
+        print(f"Vault init refused: {exc}", file=sys.stderr)
+        return 1
+    except (anchor.AnchorError, WrapError, OSError) as exc:
+        print(f"Vault init failed: device key store / anchor error — {exc}", file=sys.stderr)
+        return 1
+    finally:
+        del passphrase
+
+    print(f"Vault initialised at {root}.")
+    print("  At-rest protection uses this device's key store (Secure Enclave when available, else a software key).")
+    print("  Keep your recovery passphrase safe — it is the only way to open this vault if the device is lost.")
+    return 0
+
+
+def add(
+    *,
+    root: Path,
+    name: str,
+    source: Path,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Enroll ``source``'s bytes into the vault at ``root`` under ``name``.
+
+    Opens the vault on the **hot path** (the device wrapping key — Secure
+    Enclave or its software fallback, no passphrase) via
+    :func:`...vault.open_vault`, then commits the encrypted file. Enrolling an
+    existing ``name`` supersedes it (a new generation).
+
+    Note: the plaintext ``source`` file is **not** removed — the operator owns
+    shredding it if the on-disk plaintext is no longer wanted.
+
+    ``backend`` / ``store`` default to the production implementations; tests
+    inject fakes. Returns 0 on success, 1 on an uninitialised / unverifiable
+    vault, an unreadable source, or a device key-store error.
+    """
+    from ..keyvault import anchor, manifest, vault
+    from ..keyvault._exceptions import WrapError
+
+    key_id = anchor_label = _vault_identity(root)
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    if store is None:
+        from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+        store = KeychainAnchorStore()
+
+    try:
+        plaintext = source.read_bytes()
+    except OSError as exc:
+        print(f"cannot read source file {source}: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
+    except anchor.AnchorMissing:
+        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
+        return 1
+    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
+        # A freshness-pin mismatch is the anchor's whole purpose — surface it as
+        # possible tampering / rollback, not a generic open failure.
+        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
+        return 1
+    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
+        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
+        return 1
+    except WrapError as exc:
+        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        opened.enroll_file(name, plaintext)
+        generation = opened.generation
+    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        print(f"cannot add {name!r}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        opened.close()
+
+    print(f"Added {name!r} to the vault at {root} (now at generation {generation}).")
+    return 0
+
+
+# -----------------------------------------------------------------------------
+# CLI adapters wired in cli.py.
+# -----------------------------------------------------------------------------
+
+
+def cli_add(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault add <name> <source> [--root PATH]``."""
+    return add(root=_resolve_root(getattr(args, "root", None)), name=args.name, source=Path(args.source))
+
+
+def cli_init(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault init [--root PATH]``."""
+    return init(root=_resolve_root(getattr(args, "root", None)))
+
+
+def cli_status(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault status [--root PATH]``."""
+    return status(root=_resolve_root(getattr(args, "root", None)))
+
+
+def cli_cat(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault cat <name> [--root PATH]``."""
+    return cat(root=_resolve_root(getattr(args, "root", None)), name=args.name)

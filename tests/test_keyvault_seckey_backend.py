@@ -375,9 +375,7 @@ def test_pyobjc_ops_is_default_backend_ops_no_helper(monkeypatch: pytest.MonkeyP
     assert isinstance(real._ops, _PyobjcSecKeyOps)
 
 
-def test_helper_ops_is_default_backend_ops_when_helper_present(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_helper_ops_is_default_backend_ops_when_helper_present(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """When the signed helper is present, ``_SecKeyBackend()`` wires
     ``_HelperSecKeyOps`` instead of ``_PyobjcSecKeyOps``."""
     from mordred_hermes.keyvault import _seckey_helper

@@ -59,9 +59,7 @@ class TestSelfTest:
     def test_self_test_exits_zero(self) -> None:
         """``--self-test`` validates SPEC fixed vector and exits 0."""
         result = _run("", "--self-test")
-        assert result.returncode == 0, (
-            f"--self-test failed: stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
+        assert result.returncode == 0, f"--self-test failed: stdout={result.stdout!r} stderr={result.stderr!r}"
 
     def test_self_test_mentions_spec_digest(self) -> None:
         """Self-test output reports the SPEC digest hex so an operator
@@ -76,9 +74,7 @@ class TestInteractiveDigest:
         script must print the canonical 32-byte digest hex."""
         stdin = f"{SPEC_SEED}\n{SPEC_PASS}\n{SPEC_POW[:4].hex()}\n"
         result = _run(stdin)
-        assert result.returncode == 0, (
-            f"interactive run failed: stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
+        assert result.returncode == 0, f"interactive run failed: stdout={result.stdout!r} stderr={result.stderr!r}"
         assert SPEC_DIGEST.hex() in result.stdout
 
     def test_matches_in_repo_compute_digest(self) -> None:
@@ -114,8 +110,7 @@ class TestInteractiveDigest:
         result = _run(stdin)
         assert result.returncode == 0
         assert expected_hex in result.stdout, (
-            "noisy seed should normalise to the canonical SPEC digest; "
-            f"got stdout={result.stdout!r}"
+            f"noisy seed should normalise to the canonical SPEC digest; got stdout={result.stdout!r}"
         )
 
     def test_passphrase_preserves_case_and_invisibles(self) -> None:
@@ -128,8 +123,7 @@ class TestInteractiveDigest:
         result = _run(stdin)
         assert result.returncode == 0
         assert SPEC_DIGEST.hex() not in result.stdout, (
-            "uppercase passphrase must not produce the canonical digest "
-            "(NFKD-only normalisation preserves case)"
+            "uppercase passphrase must not produce the canonical digest (NFKD-only normalisation preserves case)"
         )
 
 
@@ -188,8 +182,7 @@ class TestOfflinePortability:
         forbidden = {"cryptography", "argon2", "pyobjc", "mordred_hermes"}
         offenders = [m for m in imports if m.split(".", 1)[0] in forbidden]
         assert not offenders, (
-            f"scripts/keyvault_offline_digest.py imports {offenders!r} — "
-            "breaks the stdlib + blake3 invariant"
+            f"scripts/keyvault_offline_digest.py imports {offenders!r} — breaks the stdlib + blake3 invariant"
         )
 
 

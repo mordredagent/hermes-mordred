@@ -198,3 +198,46 @@ def test_seal_does_not_emit_audit(backend: FakeBackend) -> None:
     assert audit == []
     # And it must not have triggered an ECDH (the authorization op).
     assert not any(call[0] == "ecdh" for call in backend.calls)
+
+
+# ---------------------------------------------------------------------------
+# MAC — domain-separated authentication keyed by the master (manifest use)
+# ---------------------------------------------------------------------------
+
+
+def test_mac_is_deterministic_and_32_bytes(backend: FakeBackend) -> None:
+    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
+    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
+    tag = mk.mac(b"manifest-body", info=b"mordred-manifest-v1")
+    assert isinstance(tag, bytes) and len(tag) == 32
+    assert mk.mac(b"manifest-body", info=b"mordred-manifest-v1") == tag
+
+
+def test_mac_differs_by_data(backend: FakeBackend) -> None:
+    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
+    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
+    info = b"mordred-manifest-v1"
+    assert mk.mac(b"body-a", info=info) != mk.mac(b"body-b", info=info)
+
+
+def test_mac_differs_by_info(backend: FakeBackend) -> None:
+    # Domain separation: same data under different info must not collide.
+    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
+    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
+    assert mk.mac(b"body", info=b"purpose-a") != mk.mac(b"body", info=b"purpose-b")
+
+
+def test_mac_differs_by_master(backend: FakeBackend) -> None:
+    w1 = kek.seal_master_key(_KEY_ID, backend=backend)
+    w2 = kek.seal_master_key(_KEY_ID, backend=backend)
+    mk1 = kek.open_master_key(w1, _KEY_ID, backend=backend)
+    mk2 = kek.open_master_key(w2, _KEY_ID, backend=backend)
+    assert mk1.mac(b"body", info=b"i") != mk2.mac(b"body", info=b"i")
+
+
+def test_mac_after_close_raises(backend: FakeBackend) -> None:
+    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
+    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
+    mk.close()
+    with pytest.raises(ValueError):
+        mk.mac(b"body", info=b"i")

@@ -57,3 +57,34 @@ class FakeBackend:
             raise WrapKeyNotFound(f"no key for {key_id!r}")
         peer = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_pub)
         return self._keys[key_id].exchange(ec.ECDH(), peer)
+
+
+class FakeAnchorStore:
+    """In-memory stand-in for the device-bound Keychain anchor store.
+
+    Models a small non-secret key→value Keychain item that an offline
+    attacker can read but not write (the real item is ``ThisDeviceOnly`` +
+    ``AfterFirstUnlock``; a powered-off / stolen device cannot mint or edit
+    it). Tests drive the vault's freshness pin (``SHA-256(wmk)`` +
+    ``generation``) through this without any real Keychain.
+
+    The fake never enforces write-protection — tests need to *set up* and
+    *tamper* state freely; the real store's write-control is what the
+    threat model actually leans on.
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[str, bytes] = {}
+        self.calls: list[tuple[str, str]] = []
+
+    def read(self, label: str) -> bytes | None:
+        self.calls.append(("read", label))
+        return self._items.get(label)
+
+    def write(self, label: str, value: bytes) -> None:
+        self.calls.append(("write", label))
+        self._items[label] = value
+
+    def delete(self, label: str) -> None:
+        self.calls.append(("delete", label))
+        self._items.pop(label, None)

@@ -41,6 +41,7 @@ def _setup_subparser(parser: argparse.ArgumentParser) -> None:
     _add_policy(sub)
     _add_audit(sub)
     _add_keyvault(sub)
+    _add_vault(sub)
     _add_plugins(sub)
 
 
@@ -168,6 +169,54 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_recover.set_defaults(func=_handle_keyvault_recover)
 
 
+def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("vault", help="At-rest secrets/env vault")
+    vsub = p.add_subparsers(dest="vault_command", required=True, metavar="COMMAND")
+
+    p_init = vsub.add_parser(
+        "init",
+        help="Create a new encrypted vault sealed under a recovery passphrase",
+    )
+    p_init.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_init.set_defaults(func=_handle_vault_init)
+
+    p_add = vsub.add_parser(
+        "add",
+        help="Encrypt a file into the vault under a logical name",
+    )
+    p_add.add_argument("name", help="Logical name to store the file under (e.g. .env)")
+    p_add.add_argument("source", help="Path to the plaintext file to encrypt into the vault")
+    p_add.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_add.set_defaults(func=_handle_vault_add)
+
+    p_status = vsub.add_parser(
+        "status",
+        help="Show a vault's generation and enrolled file names (opens read-only via passphrase recovery)",
+    )
+    p_status.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_status.set_defaults(func=_handle_vault_status)
+
+    p_cat = vsub.add_parser(
+        "cat",
+        help="Print one enrolled file's decrypted bytes to stdout (opens read-only via passphrase recovery)",
+    )
+    p_cat.add_argument("name", help="Enrolled file name to decrypt and print")
+    p_cat.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_cat.set_defaults(func=_handle_vault_cat)
+
+
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "plugins",
@@ -291,6 +340,30 @@ def _handle_keyvault_recover(args: argparse.Namespace) -> int:
     from . import keyvault_cli
 
     return keyvault_cli.cli_recover(args)
+
+
+def _handle_vault_init(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_init(args)
+
+
+def _handle_vault_add(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_add(args)
+
+
+def _handle_vault_status(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_status(args)
+
+
+def _handle_vault_cat(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_cat(args)
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:

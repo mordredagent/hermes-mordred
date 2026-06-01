@@ -638,9 +638,7 @@ class _SecKeyBackend:
     def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
         resolved = _resolve_unattended(unattended)
         try:
-            return self._ops.create_keypair(
-                _application_tag(key_id), _keychain_label(key_id), unattended=resolved
-            )
+            return self._ops.create_keypair(_application_tag(key_id), _keychain_label(key_id), unattended=resolved)
         except _OpsError as exc:
             if exc.status == errSecDuplicateItem:
                 # SPEC.md: an existing tag surfaces as WrapKeyNotFound so

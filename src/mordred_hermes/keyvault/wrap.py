@@ -378,9 +378,7 @@ def _emit_unwrap_denied(
 # ---------------------------------------------------------------------------
 
 
-def generate_wrapping_key(
-    key_id: str, *, backend: NativeBackend, unattended: bool | None = None
-) -> bytes:
+def generate_wrapping_key(key_id: str, *, backend: NativeBackend, unattended: bool | None = None) -> bytes:
     """Create + persist a Secure-Enclave-backed P-256 keypair for ``key_id``.
 
     Returns the SEC1 uncompressed public key (65 bytes) so callers — e.g.

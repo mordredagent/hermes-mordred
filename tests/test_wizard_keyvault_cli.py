@@ -477,6 +477,9 @@ class TestInit:
     ) -> None:
         """init with store_seed_for_hd=True SE-encrypts the seed and lets the
         HD wallet derive deterministic Ethereum accounts from it afterward."""
+        # eth_keys (optional `ethereum` extra) is required only by this HD test;
+        # skip just this case when it is absent rather than the whole module.
+        pytest.importorskip("eth_keys")
         import hashlib
 
         from eth_keys import keys

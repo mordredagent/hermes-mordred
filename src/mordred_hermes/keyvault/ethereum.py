@@ -31,7 +31,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .wrap import AuditSink, NativeBackend
@@ -85,10 +85,10 @@ class EthereumSignature:
         return self.as_bytes.hex()
 
 
-def _eth_keys():  # type: ignore[return]
+def _eth_keys() -> Any:
     """Lazy import of ``eth_keys``, with an actionable error if absent."""
     try:
-        import eth_keys  # type: ignore[import-untyped]
+        import eth_keys
 
         return eth_keys
     except ImportError as exc:
@@ -193,7 +193,8 @@ def get_ethereum_address(
     )
     try:
         priv = eth.keys.PrivateKey(priv_bytes)
-        return priv.public_key.to_checksum_address()
+        address: str = priv.public_key.to_checksum_address()
+        return address
     finally:
         # Drop the last strong reference so CPython can reclaim the bytes
         # within the current frame.  bytes is immutable in CPython, so

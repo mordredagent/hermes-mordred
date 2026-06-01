@@ -95,9 +95,7 @@ def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = json.loads(proc.stdout.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         snippet = proc.stdout[:200]
-        raise _OpsError(
-            -1, "helper", f"helper returned non-JSON (exit {proc.returncode}): {snippet!r}"
-        ) from exc
+        raise _OpsError(-1, "helper", f"helper returned non-JSON (exit {proc.returncode}): {snippet!r}") from exc
 
     if not isinstance(response, dict):
         raise _OpsError(-1, "helper", f"helper returned non-object JSON: {response!r}")

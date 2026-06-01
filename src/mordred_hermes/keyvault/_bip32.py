@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from typing import Any
 
 # secp256k1 group order n. A derived scalar must be in ``[1, n-1]``.
 _SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -33,10 +34,10 @@ _HARDENED_OFFSET = 0x80000000
 _KEY_LEN = 32
 
 
-def _eth_keys():  # type: ignore[return]
+def _eth_keys() -> Any:
     """Lazy import of ``eth_keys`` with an actionable error if absent."""
     try:
-        import eth_keys  # type: ignore[import-untyped]
+        import eth_keys
 
         return eth_keys
     except ImportError as exc:
@@ -52,7 +53,7 @@ def _compressed_public_key(private_key: bytes) -> bytes:
     unhardened CKD needs the compressed form ``(0x02|0x03) || X``.
     """
     eth = _eth_keys()
-    pub = eth.keys.PrivateKey(private_key).public_key.to_bytes()  # 64 bytes: X || Y
+    pub: bytes = eth.keys.PrivateKey(private_key).public_key.to_bytes()  # 64 bytes: X || Y
     x, y = pub[:_KEY_LEN], pub[_KEY_LEN:]
     prefix = b"\x02" if (y[-1] & 1) == 0 else b"\x03"
     return prefix + x
