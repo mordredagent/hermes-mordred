@@ -42,10 +42,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TerminalSeedSurface",
+    "cli_enable_se",
     "cli_init",
     "cli_list",
     "cli_recover",
     "cli_verify_digest",
+    "enable_se",
     "init_keyvault",
     "list_keys",
     "recover",
@@ -483,6 +485,147 @@ def init_keyvault(
 
 
 # -----------------------------------------------------------------------------
+# enable-se — build + ad-hoc-sign + install the Secure Enclave helper.
+#
+# Upgrades the keyvault wrapping key from the software P-256 fallback to the
+# real hardware Secure Enclave via the CryptoKit ``dataRepresentation`` helper
+# (``native/sekey-helper``). That helper needs only an ad-hoc codesign — no
+# entitlement, no provisioning profile, no paid Apple Developer account.
+#
+# Each step is a module-level seam so the orchestration is unit-testable with
+# no Swift toolchain and no Secure Enclave (the build / probe are mocked).
+# -----------------------------------------------------------------------------
+
+
+def _se_platform_reason() -> str | None:
+    """Return why the SE helper can't be built here, or ``None`` when it can.
+
+    The CryptoKit ``SecureEnclave`` APIs exist only on macOS (Apple Silicon or
+    a T2 Mac). A coarse ``Darwin`` guard is enough; true SE *presence* is
+    confirmed by the post-install probe.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return f"Secure Enclave requires macOS on Apple Silicon (this host is {platform.system() or 'unknown'})"
+    return None
+
+
+def _missing_build_tools() -> list[str]:
+    """Return the build tools (``swift``, ``codesign``) not found on ``PATH``."""
+    import shutil
+
+    return [tool for tool in ("swift", "codesign") if shutil.which(tool) is None]
+
+
+def _locate_sekey_source() -> Path | None:
+    """Locate the ``sekey-helper`` source tree (delegates to ``_seckey_helper``)."""
+    from ..keyvault import _seckey_helper
+
+    return _seckey_helper._locate_helper_source()
+
+
+def _run_sekey_build(src: Path, *, install_dir: Path | None, unattended: bool | None) -> tuple[int, str]:
+    """Run ``build.sh`` in ``src``; return ``(returncode, combined_output)``.
+
+    ``install_dir`` / ``unattended`` are forwarded as the env vars the build
+    script and helper honour (``MORDRED_SEKEY_INSTALL_DIR`` /
+    ``MORDRED_SEKEY_UNATTENDED``).
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    if install_dir is not None:
+        env["MORDRED_SEKEY_INSTALL_DIR"] = str(install_dir)
+    if unattended is not None:
+        env["MORDRED_SEKEY_UNATTENDED"] = "1" if unattended else "0"
+    try:
+        proc = subprocess.run(
+            ["bash", str(src / "build.sh")],
+            cwd=str(src),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, f"failed to run build.sh: {exc}"
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _verify_sekey_helper() -> bool:
+    """Probe the freshly-installed helper to confirm Secure Enclave access."""
+    from ..keyvault import _seckey_helper
+
+    binary = _seckey_helper._find_helper()
+    if binary is None:
+        return False
+    try:
+        _seckey_helper._HelperSecKeyOps(binary).probe()
+        return True
+    except Exception:
+        return False
+
+
+def enable_se(
+    *,
+    install_dir: Path | None = None,
+    unattended: bool | None = None,
+    home: Path | None = None,
+) -> int:
+    """Build + ad-hoc-sign + install the SE helper, then verify it works.
+
+    Returns ``0`` on success, ``1`` on any guard / build / verify failure. On
+    failure the keyvault keeps using the software P-256 fallback, so the
+    at-rest guarantee never downgrades. ``home`` is accepted for symmetry with
+    the other keyvault commands; the helper resolves its key-blob store from
+    ``HERMES_HOME`` itself.
+    """
+    del home  # the helper resolves its store via HERMES_HOME; accepted for symmetry
+
+    reason = _se_platform_reason()
+    if reason is not None:
+        print(f"error: {reason}", file=sys.stderr)
+        return 1
+
+    missing = _missing_build_tools()
+    if missing:
+        print(
+            f"error: missing build tool(s): {', '.join(missing)}. "
+            "Install the Xcode command-line tools first (xcode-select --install).",
+            file=sys.stderr,
+        )
+        return 1
+
+    src = _locate_sekey_source()
+    if src is None:
+        print(
+            "error: could not locate the sekey-helper sources (native/sekey-helper). "
+            "Build from a source checkout of mordred-hermes.",
+            file=sys.stderr,
+        )
+        return 1
+
+    rc, output = _run_sekey_build(src, install_dir=install_dir, unattended=unattended)
+    if rc != 0:
+        print(f"error: sekey-helper build failed:\n{output}", file=sys.stderr)
+        return 1
+
+    if not _verify_sekey_helper():
+        print(
+            "error: helper installed but the Secure Enclave probe failed; "
+            "the keyvault will keep using the software fallback.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(output.strip() or "Secure Enclave helper installed.")
+    print("Hardware Secure Enclave is now active for the keyvault.")
+    return 0
+
+
+# -----------------------------------------------------------------------------
 # CLI adapters wired in cli.py.
 # -----------------------------------------------------------------------------
 
@@ -507,3 +650,14 @@ def cli_recover(args: argparse.Namespace) -> int:
 def cli_init(args: argparse.Namespace) -> int:
     """argparse handler for ``keyvault init`` (``--store-seed-for-hd`` opt-in)."""
     return init_keyvault(store_seed_for_hd=getattr(args, "store_seed_for_hd", False))
+
+
+def cli_enable_se(args: argparse.Namespace) -> int:
+    """argparse handler for ``keyvault enable-se [--install-dir P] [--unattended]``.
+
+    ``--unattended`` absent → ``None`` (let ``MORDRED_SEKEY_UNATTENDED`` / the
+    interactive default decide), not ``False``.
+    """
+    install_dir = Path(args.install_dir) if getattr(args, "install_dir", None) else None
+    unattended = True if getattr(args, "unattended", False) else None
+    return enable_se(install_dir=install_dir, unattended=unattended)

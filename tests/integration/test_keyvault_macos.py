@@ -157,3 +157,26 @@ def test_encrypt_decrypt_roundtrip_through_real_enclave(live_key_id: str, tmp_pa
         assert any(e.get("reason") == "keyvault.unwrap_authorized" for e in audit)
     finally:
         wrap.delete_wrapping_key(live_key_id, backend=backend)
+
+
+def test_enable_se_builds_installs_and_verifies_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end ``hermes mordred keyvault enable-se``.
+
+    Builds + ad-hoc-signs + installs the CryptoKit Secure Enclave helper, then
+    verifies the SE probe succeeds through it — proving real hardware SE works
+    from a plain (unsigned) interpreter with no paid Apple Developer account.
+    Needs the Xcode/Swift toolchain. Installs into a temp dir (pointed at via
+    ``MORDRED_SEKEY_HELPER``) so the operator's ``~/.local/bin`` is untouched.
+    """
+    _require_live_enclave()
+    from mordred_hermes.wizard import keyvault_cli
+
+    missing = keyvault_cli._missing_build_tools()
+    if missing:
+        pytest.skip(f"missing build tool(s) {missing}; install the Xcode command-line tools")
+
+    install_dir = tmp_path / "bin"
+    monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(install_dir / "mordred-hermes-sekey"))
+    rc = keyvault_cli.enable_se(install_dir=install_dir, unattended=True)
+    assert rc == 0
+    assert (install_dir / "mordred-hermes-sekey").is_file()

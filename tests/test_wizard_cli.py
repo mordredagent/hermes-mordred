@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.wizard import register
+from mordred_hermes.wizard import keyvault_cli, register
 from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 
 
@@ -162,3 +163,45 @@ class TestMainStandaloneEntry:
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "invalid choice" in err
+
+
+class TestEnableSEWiring:
+    """``hermes mordred keyvault enable-se`` parser wiring + adapter."""
+
+    def test_enable_se_parses_and_wires_handler(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "keyvault", "enable-se"])
+        assert hasattr(ns, "func"), "set_defaults(func=...) missing for keyvault enable-se"
+
+    def test_enable_se_flags_parse(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "keyvault", "enable-se", "--install-dir", "/tmp/bin", "--unattended"])
+        assert ns.install_dir == "/tmp/bin"
+        assert ns.unattended is True
+
+    def test_cli_enable_se_forwards_args(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_enable_se(**kwargs: Any) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "enable_se", _fake_enable_se)
+        ns = argparse.Namespace(install_dir="/tmp/bin", unattended=True)
+        rc = keyvault_cli.cli_enable_se(ns)
+        assert rc == 0
+        assert captured["install_dir"] == Path("/tmp/bin")
+        assert captured["unattended"] is True
+
+    def test_cli_enable_se_absent_flags_pass_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_enable_se(**kwargs: Any) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "enable_se", _fake_enable_se)
+        ns = argparse.Namespace(install_dir=None, unattended=False)
+        keyvault_cli.cli_enable_se(ns)
+        assert captured["install_dir"] is None
+        assert captured["unattended"] is None  # absence → env default, not False

@@ -119,8 +119,18 @@ min-hermes-version = "0.11.0"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mordred_hermes"]
 
+# Ship the Secure Enclave helper's Swift *sources* inside the package (NOT the
+# Swift `.build/` artifacts) so `hermes mordred keyvault enable-se` can build
+# them after a plain `pip install`. `_seckey_helper._locate_helper_source()`
+# finds them via importlib.resources at `mordred_hermes/_native/sekey-helper/`.
+[tool.hatch.build.targets.wheel.force-include]
+"native/sekey-helper/build.sh" = "mordred_hermes/_native/sekey-helper/build.sh"
+"native/sekey-helper/Package.swift" = "mordred_hermes/_native/sekey-helper/Package.swift"
+"native/sekey-helper/Sources" = "mordred_hermes/_native/sekey-helper/Sources"
+"native/sekey-helper/README.md" = "mordred_hermes/_native/sekey-helper/README.md"
+
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/README.md", "/pyproject.toml"]
+include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

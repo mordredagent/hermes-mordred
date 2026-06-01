@@ -167,6 +167,17 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_recover = ksub.add_parser("recover", help="Restore from a backup blob")
     p_recover.add_argument("--blob", required=True)
     p_recover.set_defaults(func=_handle_keyvault_recover)
+    p_enable_se = ksub.add_parser(
+        "enable-se",
+        help="Build + install the hardware Secure Enclave helper (ad-hoc signed; no Apple Developer account)",
+    )
+    p_enable_se.add_argument("--install-dir", help="Install directory for the helper (default: ~/.local/bin)")
+    p_enable_se.add_argument(
+        "--unattended",
+        action="store_true",
+        help="Create an unattended SE key (decrypt runs without a Touch ID prompt while the session is unlocked)",
+    )
+    p_enable_se.set_defaults(func=_handle_keyvault_enable_se)
 
 
 def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -356,6 +367,12 @@ def _handle_keyvault_recover(args: argparse.Namespace) -> int:
     from . import keyvault_cli
 
     return keyvault_cli.cli_recover(args)
+
+
+def _handle_keyvault_enable_se(args: argparse.Namespace) -> int:
+    from . import keyvault_cli
+
+    return keyvault_cli.cli_enable_se(args)
 
 
 def _handle_vault_init(args: argparse.Namespace) -> int:

@@ -67,6 +67,37 @@ def _find_helper() -> str | None:
     return shutil.which(_HELPER_NAME)
 
 
+def _locate_helper_source() -> Path | None:
+    """Locate the ``sekey-helper`` Swift source tree (``build.sh`` + sources).
+
+    ``hermes mordred keyvault enable-se`` builds the helper from source, so it
+    must find the source directory before invoking ``build.sh``. Resolution:
+
+    1. **Source checkout** — walk up from this module to a ``native/sekey-helper``
+       directory containing ``build.sh`` (editable install / repo clone).
+    2. **Installed wheel** — a ``_native/sekey-helper`` copy shipped inside the
+       package (added to the wheel separately; see packaging).
+
+    Returns the directory :class:`~pathlib.Path`, or ``None`` when neither is
+    present (e.g. a wheel install without the bundled sources).
+    """
+    marker = "build.sh"
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "native" / "sekey-helper"
+        if (candidate / marker).is_file():
+            return candidate
+    # Installed-wheel fallback: a package-data copy under the package root.
+    try:
+        from importlib.resources import files
+
+        packaged = files("mordred_hermes").joinpath("_native", "sekey-helper")
+        if packaged.joinpath(marker).is_file():
+            return Path(str(packaged))
+    except (ModuleNotFoundError, TypeError, OSError):
+        pass
+    return None
+
+
 def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Invoke the helper once with ``payload`` on stdin, return parsed stdout.
 

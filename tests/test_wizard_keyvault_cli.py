@@ -572,3 +572,186 @@ class TestInit:
         )
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
+
+
+class TestEnableSE:
+    """``hermes mordred keyvault enable-se`` — build + install the SE helper.
+
+    The command orchestrates platform/toolchain guards → locate source →
+    build+sign+install → verify. Each step is a module-level seam so these
+    behavioural tests run with no Swift toolchain and no Secure Enclave.
+    """
+
+    def _patch_all_ok(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+        calls: dict[str, Any] = {"build": 0, "verify": 0}
+        monkeypatch.setattr(keyvault_cli, "_se_platform_reason", lambda: None, raising=False)
+        monkeypatch.setattr(keyvault_cli, "_missing_build_tools", lambda: [], raising=False)
+        monkeypatch.setattr(keyvault_cli, "_locate_sekey_source", lambda: tmp_path / "sekey-helper", raising=False)
+
+        def _build(src: Path, *, install_dir: Path | None, unattended: bool | None) -> tuple[int, str]:
+            calls["build"] += 1
+            calls["build_args"] = (src, install_dir, unattended)
+            return 0, "Installed: ~/.local/bin/mordred-hermes-sekey"
+
+        def _verify() -> bool:
+            calls["verify"] += 1
+            return True
+
+        monkeypatch.setattr(keyvault_cli, "_run_sekey_build", _build, raising=False)
+        monkeypatch.setattr(keyvault_cli, "_verify_sekey_helper", _verify, raising=False)
+        return calls
+
+    def test_happy_path_builds_verifies_returns_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        calls = self._patch_all_ok(monkeypatch, tmp_path)
+        rc = keyvault_cli.enable_se(home=tmp_path)
+        assert rc == 0
+        assert calls["build"] == 1 and calls["verify"] == 1
+        assert "mordred-hermes-sekey" in capsys.readouterr().out
+
+    def test_unsupported_platform_returns_1_without_building(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            keyvault_cli, "_se_platform_reason", lambda: "Secure Enclave requires macOS on Apple Silicon", raising=False
+        )
+        monkeypatch.setattr(
+            keyvault_cli,
+            "_run_sekey_build",
+            lambda *a, **k: pytest.fail("build ran on unsupported platform"),
+            raising=False,
+        )
+        rc = keyvault_cli.enable_se(home=tmp_path)
+        assert rc == 1
+        assert "macOS" in capsys.readouterr().err
+
+    def test_missing_toolchain_returns_1_with_actionable_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(keyvault_cli, "_missing_build_tools", lambda: ["swift", "codesign"], raising=False)
+        monkeypatch.setattr(
+            keyvault_cli, "_run_sekey_build", lambda *a, **k: pytest.fail("build ran without toolchain"), raising=False
+        )
+        rc = keyvault_cli.enable_se(home=tmp_path)
+        assert rc == 1
+        assert "swift" in capsys.readouterr().err
+
+    def test_missing_source_returns_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(keyvault_cli, "_locate_sekey_source", lambda: None, raising=False)
+        monkeypatch.setattr(
+            keyvault_cli, "_run_sekey_build", lambda *a, **k: pytest.fail("build ran without source"), raising=False
+        )
+        rc = keyvault_cli.enable_se(home=tmp_path)
+        assert rc == 1
+
+    def test_build_failure_returns_1_and_surfaces_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            keyvault_cli, "_run_sekey_build", lambda *a, **k: (1, "swift build error: boom"), raising=False
+        )
+        rc = keyvault_cli.enable_se(home=tmp_path)
+        assert rc == 1
+        assert "boom" in capsys.readouterr().err
+
+    def test_verify_failure_returns_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(keyvault_cli, "_verify_sekey_helper", lambda: False, raising=False)
+        rc = keyvault_cli.enable_se(home=tmp_path)
+        assert rc == 1
+
+
+class TestEnableSESeams:
+    """Direct coverage tests for the enable-se seams (mocked at the stdlib edge)."""
+
+    def test_platform_reason_none_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        assert keyvault_cli._se_platform_reason() is None
+
+    def test_platform_reason_set_off_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        reason = keyvault_cli._se_platform_reason()
+        assert reason is not None and "macOS" in reason
+
+    def test_missing_build_tools_reports_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda name: None if name == "swift" else "/usr/bin/" + name)
+        assert keyvault_cli._missing_build_tools() == ["swift"]
+
+    def test_missing_build_tools_empty_when_all_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+        assert keyvault_cli._missing_build_tools() == []
+
+    def test_locate_sekey_source_delegates(self) -> None:
+        # In a source checkout this resolves the native/sekey-helper tree.
+        src = keyvault_cli._locate_sekey_source()
+        assert src is not None
+        assert (src / "build.sh").is_file()
+
+    def test_run_sekey_build_forwards_env_and_returns_output(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        class _CP:
+            returncode = 0
+            stdout = "ok-out"
+            stderr = ""
+
+        def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+            seen["cmd"] = cmd
+            seen["env"] = kwargs["env"]
+            return _CP()
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+        rc, out = keyvault_cli._run_sekey_build(tmp_path, install_dir=tmp_path / "bin", unattended=True)
+        assert rc == 0 and "ok-out" in out
+        assert seen["env"]["MORDRED_SEKEY_INSTALL_DIR"] == str(tmp_path / "bin")
+        assert seen["env"]["MORDRED_SEKEY_UNATTENDED"] == "1"
+        assert seen["cmd"][0] == "bash"
+
+    def test_run_sekey_build_oserror_returns_1(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        def _boom(*a: Any, **k: Any) -> Any:
+            raise OSError("no bash")
+
+        monkeypatch.setattr("subprocess.run", _boom)
+        rc, out = keyvault_cli._run_sekey_build(tmp_path, install_dir=None, unattended=None)
+        assert rc == 1 and "no bash" in out
+
+    def test_verify_sekey_helper_false_when_no_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: None)
+        assert keyvault_cli._verify_sekey_helper() is False
+
+    def test_verify_sekey_helper_true_on_probe_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: "/fake/helper")
+
+        class _Ops:
+            def __init__(self, binary: str) -> None:
+                pass
+
+            def probe(self) -> None:
+                return None
+
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
+        assert keyvault_cli._verify_sekey_helper() is True
+
+    def test_verify_sekey_helper_false_on_probe_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: "/fake/helper")
+
+        class _Ops:
+            def __init__(self, binary: str) -> None:
+                pass
+
+            def probe(self) -> None:
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
+        assert keyvault_cli._verify_sekey_helper() is False

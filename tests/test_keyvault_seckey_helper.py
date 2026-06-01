@@ -325,3 +325,22 @@ def test_backend_uses_application_tag(fake_helper: str, monkeypatch: pytest.Monk
     assert seen, "helper was never called with a tag"
     assert all(t == _application_tag(key_id).hex() for t in seen)
     assert key_id.encode().hex() not in seen[0]
+
+
+# ---------------------------------------------------------------------------
+# _locate_helper_source — find the Swift helper's build sources (for enable-se)
+# ---------------------------------------------------------------------------
+
+
+def test_locate_helper_source_finds_build_sources_in_checkout() -> None:
+    """From a source checkout, locate native/sekey-helper with its build files.
+
+    ``hermes mordred keyvault enable-se`` needs to build the helper from
+    source, so it must first locate the source tree (``build.sh`` +
+    ``Package.swift`` + the Swift entrypoint).
+    """
+    src = _seckey_helper._locate_helper_source()
+    assert src is not None, "should find native/sekey-helper from the source tree"
+    assert (src / "build.sh").is_file()
+    assert (src / "Package.swift").is_file()
+    assert (src / "Sources" / "mordred-hermes-sekey" / "main.swift").is_file()

@@ -87,12 +87,22 @@ generic failure → `-25293` (`errSecAuthFailed`), all with `domain:"OSStatus"`.
 
 ## Build, sign, install
 
+The easiest way is the Mordred CLI — it locates these sources (in a source
+checkout or a `pip install`-ed wheel), builds + ad-hoc-signs + installs the
+helper, then verifies the Secure Enclave probe:
+
+```bash
+hermes mordred keyvault enable-se          # add --unattended for prompt-free decrypt
+```
+
+Or run the build script directly:
+
 ```bash
 ./build.sh
 ```
 
-This runs `swift build -c release`, codesigns ad-hoc (no Developer ID, no
-provisioning profile, no paid Apple Developer account required), and installs to
+Both run `swift build -c release`, codesign ad-hoc (no Developer ID, no
+provisioning profile, no paid Apple Developer account required), and install to
 `~/.local/bin/mordred-hermes-sekey`.
 
 Overrides via env: `MORDRED_SEKEY_INSTALL_DIR` (install target),
