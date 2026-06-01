@@ -47,25 +47,18 @@ __all__ = [
     "status",
 ]
 
-# Default vault root, relative to the Hermes home: ``<home>/mordred/vault``.
-_VAULT_SUBDIR = ("mordred", "vault")
-
 
 def _resolve_root(root: str | None) -> Path:
     """Resolve the vault root, defaulting to ``<hermes home>/mordred/vault``.
 
-    The home is resolved via this module's :func:`_hermes_home` (not deferred)
-    so tests can monkeypatch it to point at a ``tmp_path``.
-
-    A user-supplied root is **resolved to an absolute, normalized path** so the
-    same vault yields the same :func:`_vault_identity` regardless of spelling
-    (relative path, ``..``, cwd) — otherwise a second ``init`` could fail to see
-    an existing anchor and clobber the vault. ``_hermes_home`` is already
-    absolute, so the default branch needs no resolution.
+    Delegates to :func:`mordred_hermes.keyvault._identity.resolve_root` — the
+    shared derivation the runtime decrypt shim also uses — so the CLI and the
+    shim resolve the same root (and thus the same :func:`_vault_identity`) for a
+    given input. A user-supplied root is resolved to an absolute, normalized path
+    so spelling differences (relative path, ``..``, cwd) never yield a different
+    vault identity.
     """
-    if root is not None:
-        return Path(root).resolve()
-    return _hermes_home().joinpath(*_VAULT_SUBDIR)
+    return _identity.resolve_root(root)
 
 
 def _display_name(name: str) -> str:

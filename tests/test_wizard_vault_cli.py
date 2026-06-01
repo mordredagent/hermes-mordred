@@ -443,7 +443,9 @@ class TestResolveRoot:
         assert vault_cli._resolve_root("/some/where/vault") == Path("/some/where/vault")
 
     def test_default_root_under_hermes_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(vault_cli, "_hermes_home", lambda: tmp_path)
+        # _resolve_root delegates to _identity.resolve_root, so the default-root
+        # home seam now lives in _identity (not vault_cli).
+        monkeypatch.setattr(vault_cli._identity, "_hermes_home", lambda: tmp_path)
         assert vault_cli._resolve_root(None) == tmp_path / "mordred" / "vault"
 
     # H-2: a relative or non-normalized root must resolve to a stable absolute

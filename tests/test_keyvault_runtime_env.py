@@ -130,6 +130,60 @@ class TestInjectVaultEnv:
             _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
         assert environ == {}
 
+    def test_anchor_absent_with_disk_artifacts_fails_closed(self, tmp_path: Path) -> None:
+        """Manifests on disk but the device anchor gone → fail closed.
+
+        Silently no-oping would let an anchor-delete downgrade the process to
+        whatever plaintext remains (e.g. an un-shredded ``.env``).
+        """
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_env(root, backend, store, b"FOO=bar\n")
+        store.delete(_identity.vault_identity(root))  # drop the anchor, keep manifests
+        assert list(root.glob("manifest.*.mvmf"))  # vault artifacts remain on disk
+
+        environ: dict[str, str] = {}
+        with pytest.raises(vault.VaultError):
+            _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
+        assert environ == {}
+
+    def test_non_utf8_payload_fails_closed(self, tmp_path: Path) -> None:
+        """A non-UTF-8 enrolled ``.env`` raises a domain VaultError, not a raw decode error."""
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_env(root, backend, store, b"\xff\xfe\x00not utf-8")
+        environ: dict[str, str] = {}
+        with pytest.raises(vault.VaultError):
+            _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
+        assert environ == {}
+
+    def test_blob_corruption_fails_closed(self, tmp_path: Path) -> None:
+        """A corrupted blob fails its content-address / AEAD check on read — fail closed."""
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_env(root, backend, store, b"FOO=bar\n")
+        blobs = list((root / "blobs").glob("*.blob"))
+        assert blobs
+        raw = bytearray(blobs[0].read_bytes())
+        raw[-1] ^= 0x01
+        blobs[0].write_bytes(bytes(raw))
+
+        environ: dict[str, str] = {}
+        with pytest.raises(vault.VaultError):
+            _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
+        assert environ == {}
+
+    def test_does_not_interpolate_dollar_values(self, tmp_path: Path) -> None:
+        """Secret values are injected verbatim — no ``${VAR}`` dotenv interpolation."""
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_env(root, backend, store, b"FOO=bar\nBAZ=${FOO}/x\n")
+        environ: dict[str, str] = {}
+        n = _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)
+        assert n == 2
+        assert environ["FOO"] == "bar"
+        assert environ["BAZ"] == "${FOO}/x"  # literal, not the interpolated "bar/x"
+
 
 class TestInstallVaultEnvDecrypt:
     def test_noop_off_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:

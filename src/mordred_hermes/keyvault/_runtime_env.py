@@ -44,10 +44,14 @@ def inject_vault_env(
     is authoritative over stale shell values.
 
     **Fail-closed**: if a vault is present at ``root`` but cannot be opened,
-    verified, or read, the underlying error propagates — the process must not
-    start with unverified secret provisioning. If no vault is present (no anchor),
-    returns 0, so Hermes runs unchanged when at-rest encryption is not set up; a
-    vault present but with no enrolled ``name`` also returns 0.
+    verified, or read (tamper, wrong/locked key, non-UTF-8 payload), the error
+    propagates — the process must not start with unverified secret provisioning.
+    If no anchor exists **and** no vault artifacts are on disk, returns 0 (Hermes
+    runs unchanged when at-rest encryption is not set up). A missing anchor while
+    ``manifest.*.mvmf`` remain on disk is treated as tampering (anchor deletion)
+    and raises. A vault present but with no enrolled ``name`` returns 0.
+
+    Values are injected verbatim (no ``${VAR}`` interpolation).
 
     ``backend`` / ``store`` default to the production implementations; tests
     inject fakes. Returns the number of variables injected.
@@ -67,21 +71,32 @@ def inject_vault_env(
 
         store = KeychainAnchorStore()
 
-    # No anchor → no vault here: a clean no-op. A read *error* (e.g. locked
-    # Keychain) is NOT swallowed — it propagates fail-closed, since we cannot
-    # prove the vault is absent.
+    # No anchor → no vault here: a clean no-op. BUT if vault artifacts are still
+    # on disk while the anchor is gone, that is anomalous — silently no-oping
+    # would let an anchor deletion downgrade us to whatever plaintext remains, so
+    # we fail closed. A read *error* (e.g. a locked Keychain) is likewise never
+    # swallowed: it propagates fail-closed, since we cannot prove the vault absent.
     if store.read(anchor_label) is None:
+        if any(root.glob("manifest.*.mvmf")):
+            raise vault.VaultError(
+                f"vault artifacts present at {root} but the device anchor is missing "
+                "— refusing to start (possible anchor deletion)."
+            )
         return 0
 
-    opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
-    try:
+    with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
         if name not in opened.list_files():
             return 0
         plaintext = opened.read_file(name)
-    finally:
-        opened.close()
 
-    values = dotenv_values(stream=io.StringIO(plaintext.decode("utf-8")))
+    try:
+        text = plaintext.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise vault.VaultError(f"enrolled {name!r} is not valid UTF-8 — cannot parse as .env") from exc
+
+    # interpolate=False: secret values are injected verbatim; a value containing
+    # ``${...}`` must not be expanded against other vars / os.environ.
+    values = dotenv_values(stream=io.StringIO(text), interpolate=False)
     injected = 0
     for env_key, env_value in values.items():
         if env_value is None:  # a bare ``KEY`` with no ``=value`` parses to None — skip it
