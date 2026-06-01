@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
+from ..keyvault import _identity
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -81,11 +81,11 @@ def _display_name(name: str) -> str:
 def _vault_identity(root: Path) -> str:
     """Stable id (SE wrapping-key tag + Keychain anchor account) for a vault root.
 
-    Derived from the root path so distinct vaults never collide in the shared
-    Keychain anchor service. The same root string always maps to the same id.
+    Delegates to :func:`mordred_hermes.keyvault._identity.vault_identity` — the
+    shared derivation the runtime decrypt shim also uses, so the CLI and the shim
+    open the same vault for a given root.
     """
-    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
-    return f"mordred-hermes.vault.{digest}"
+    return _identity.vault_identity(root)
 
 
 def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | None:

@@ -11,5 +11,15 @@ from typing import Any
 
 
 def register(ctx: Any) -> None:
-    """Hermes plugin entry point. Phase 0 stub — no keyvault API registered yet."""
-    return None
+    """Hermes plugin entry point.
+
+    Installs the runtime env transparent-decrypt shim (design note §8.2 item 3):
+    on macOS, secrets enrolled in the at-rest vault are decrypted and injected
+    into ``os.environ`` at startup, so an unattended process reads them from the
+    vault instead of plaintext on disk. Fail-closed — a present-but-unverifiable
+    vault raises rather than starting with unverified secret provisioning. A no-op
+    where no vault is set up or off macOS.
+    """
+    from ._runtime_env import install_vault_env_decrypt
+
+    install_vault_env_decrypt()
