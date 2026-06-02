@@ -195,6 +195,24 @@ class TestOnSessionStart:
         )
         assert rt.isolation_token is None
 
+    def test_without_session_id_clears_stale_token(self, tmp_path: Path) -> None:
+        """A reused Runtime must not leak a prior session's circuit token into a
+        session that supplies no session_id — clear it rather than inherit."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.isolation_token = "stale-from-prev-session"
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+
+        hooks.on_session_start(
+            policy_json_path=policy,
+            config_path=config,
+            audit=_FakeAudit(),
+        )
+        assert rt.isolation_token is None
+
     def test_sets_isolation_token_even_when_clearnet_off(self, tmp_path: Path) -> None:
         """Session identity is established regardless of the initial path, so a
         later manual ``network use tor`` rides the session's circuit."""

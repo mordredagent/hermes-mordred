@@ -127,6 +127,11 @@ def on_session_start(
 ) -> None:
     """Bring up the configured default path.
 
+    Also establishes the session's per-session Tor circuit-isolation token
+    from the Hermes ``session_id`` (v2-N1) before bring-up, clearing it when
+    no id is supplied so a reused runtime cannot leak a prior session's
+    circuit identity.
+
     - ``off`` + clearnet default: skip - the user may manually switch
       paths later via ``hermes mordred network use``.
     - Otherwise: call :func:`api.use` for the configured default.
@@ -153,9 +158,12 @@ def on_session_start(
     # the SOCKS credential (``IsolateSOCKSAuth``). Set even for the
     # clearnet/off early-return so a later manual ``network use tor`` rides
     # the same per-session circuit. Per-skill keying remains v2-H2-blocked.
+    #
+    # Always push (clearing to None when absent) so a reused Runtime never
+    # leaks a prior session's token into a session that supplied no id —
+    # inheriting it would correlate the two onto one circuit.
     session_id = kwargs.get("session_id")
-    if session_id:
-        api.set_isolation_token(str(session_id))
+    api.set_isolation_token(str(session_id) if session_id else None)
 
     if policy_mode == "off" and target == _DEFAULT_NETWORK_PATH:
         return
