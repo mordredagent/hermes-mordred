@@ -55,6 +55,7 @@ class _FakeRuntime:
         self.dropped: bool = False
         self._active_path: str = "clearnet"
         self._ready: bool = False
+        self.isolation_token: str | None = None
 
     def use(self, path: str) -> None:
         self.use_calls.append(path)
@@ -87,6 +88,11 @@ class _FakeRuntime:
         # disk policy into the runtime before api.use. The fake records
         # the value so tests can assert propagation.
         self.policy_mode = policy_mode
+
+    def set_isolation_token(self, token: str | None) -> None:
+        # v2-N1 wiring: on_session_start pushes the session_id as the
+        # per-session circuit-isolation token before bring-up.
+        self.isolation_token = token
 
 
 class _FakeCtx:
@@ -153,6 +159,59 @@ class TestOnSessionStart:
             config_path=config,
             audit=_FakeAudit(),
         )
+        assert rt.use_calls == []
+
+    def test_sets_isolation_token_from_session_id(self, tmp_path: Path) -> None:
+        """v2-N1 wiring: the session_id becomes the per-session circuit token,
+        pushed to the runtime before bring-up."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+
+        hooks.on_session_start(
+            policy_json_path=policy,
+            config_path=config,
+            audit=_FakeAudit(),
+            session_id="abc-123",
+        )
+        assert rt.isolation_token == "abc-123"
+        assert rt.use_calls == ["tor"]
+
+    def test_without_session_id_leaves_token_unset(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+
+        hooks.on_session_start(
+            policy_json_path=policy,
+            config_path=config,
+            audit=_FakeAudit(),
+        )
+        assert rt.isolation_token is None
+
+    def test_sets_isolation_token_even_when_clearnet_off(self, tmp_path: Path) -> None:
+        """Session identity is established regardless of the initial path, so a
+        later manual ``network use tor`` rides the session's circuit."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "off")
+        config = _write_config(tmp_path, "clearnet")
+
+        hooks.on_session_start(
+            policy_json_path=policy,
+            config_path=config,
+            audit=_FakeAudit(),
+            session_id="xyz-789",
+        )
+        assert rt.isolation_token == "xyz-789"
         assert rt.use_calls == []
 
     def test_strict_default_tor_brings_up_tor(self, tmp_path: Path) -> None:

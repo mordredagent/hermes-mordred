@@ -102,6 +102,7 @@ class RuntimeConfig:
     no_proxy_extra: tuple[str, ...] = ()
     liveness_interval_seconds: float = 30.0
     liveness_failure_threshold: int = 2
+    isolation_token: str | None = None  # per-session Tor circuit-isolation key (v2-N1)
 
 
 @dataclass(slots=True)
@@ -331,6 +332,22 @@ class Runtime:
         """
         with self._lock:
             self._config.policy_mode = policy_mode
+
+    def set_isolation_token(self, token: str | None) -> None:
+        """Set the per-session Tor circuit-isolation token (v2-N1).
+
+        The hooks layer pushes the Hermes ``session_id`` here at session
+        start so :meth:`_apply_env` injects it as the SOCKS credential and
+        Tor's ``IsolateSOCKSAuth`` gives the session its own circuit. Takes
+        effect on the next path application (``on_session_start`` sets it
+        before bring-up). Held under ``_lock`` for the same reason as
+        :meth:`update_policy_mode`.
+
+        The token must be a non-secret identifier — it lands in
+        ``os.environ`` (HTTPS_PROXY) and is inherited by child processes.
+        """
+        with self._lock:
+            self._config.isolation_token = token
 
     def is_dropped(self) -> bool:
         """Sticky flag - True iff the liveness worker observed
@@ -565,6 +582,7 @@ class Runtime:
             path=target,
             tor_socks_port=port,
             no_proxy_extra=self._config.no_proxy_extra,
+            isolation_token=self._config.isolation_token,
         )
         for k, v in desired.items():
             self._env[k] = v

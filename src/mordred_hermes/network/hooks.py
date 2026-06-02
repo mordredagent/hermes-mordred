@@ -123,7 +123,7 @@ def on_session_start(
     policy_json_path: Path,
     config_path: Path,
     audit: _AuditWriter | None = None,
-    **_kwargs: Any,
+    **kwargs: Any,
 ) -> None:
     """Bring up the configured default path.
 
@@ -146,6 +146,16 @@ def on_session_start(
     # ``policy_mode`` would silently downgrade a strict bring-up
     # failure to a lenient fallback.
     api.update_policy_mode(policy_mode)
+
+    # v2-N1: establish the session's circuit-isolation identity before any
+    # bring-up. The Hermes ``session_id`` is a non-secret identifier, so it
+    # is safe to place in ``os.environ`` (HTTPS_PROXY) where Tor reads it as
+    # the SOCKS credential (``IsolateSOCKSAuth``). Set even for the
+    # clearnet/off early-return so a later manual ``network use tor`` rides
+    # the same per-session circuit. Per-skill keying remains v2-H2-blocked.
+    session_id = kwargs.get("session_id")
+    if session_id:
+        api.set_isolation_token(str(session_id))
 
     if policy_mode == "off" and target == _DEFAULT_NETWORK_PATH:
         return

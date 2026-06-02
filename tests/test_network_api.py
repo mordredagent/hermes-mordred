@@ -171,3 +171,29 @@ def test_network_status_shape() -> None:
     assert s.active_path == "clearnet"
     assert s.ready is True
     assert s.last_health is True
+
+
+class TestSetIsolationToken:
+    """v2-N1 wiring: ``api.set_isolation_token`` delegates to the runtime
+    (mirrors ``update_policy_mode``); no-op when no runtime is registered."""
+
+    def test_delegates_to_runtime(self) -> None:
+        from mordred_hermes.network import api
+
+        class _Rec:
+            def __init__(self) -> None:
+                self.token: str | None = "UNSET"
+
+            def set_isolation_token(self, token: str | None) -> None:
+                self.token = token
+
+        rec = _Rec()
+        api.set_isolation_token("sess-1", runtime=rec)  # type: ignore[arg-type]
+        assert rec.token == "sess-1"
+
+    def test_noop_when_unregistered(self) -> None:
+        from mordred_hermes.network import api
+
+        api.reset_runtime_for_tests()
+        # Must not raise when no runtime is registered.
+        api.set_isolation_token("sess-1")

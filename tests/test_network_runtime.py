@@ -174,6 +174,7 @@ def _make_runtime(
     no_proxy_extra: tuple[str, ...] = (),
     disable_ipv6: bool = True,
     tor_data_dir: Path | None = None,
+    isolation_token: str | None = None,
 ) -> Any:
     """Build a Runtime with fakes wired in. Used by every test below."""
     from mordred_hermes.network.runtime import Runtime, RuntimeConfig
@@ -191,6 +192,7 @@ def _make_runtime(
         no_proxy_extra=no_proxy_extra,
         liveness_interval_seconds=liveness_interval,
         liveness_failure_threshold=liveness_threshold,
+        isolation_token=isolation_token,
     )
     return Runtime(
         config=cfg,
@@ -297,6 +299,37 @@ class TestTorUse:
         assert env["HTTP_PROXY"] == "socks5h://127.0.0.1:9050"
         assert env["ALL_PROXY"] == "socks5h://127.0.0.1:9050"
         assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+        rt.stop()
+
+    def test_use_tor_with_isolation_token_sets_credential(self) -> None:
+        """A configured isolation_token rides into the SOCKS proxy URL so Tor's
+        IsolateSOCKSAuth gives this session its own circuit (v2-N1 wiring)."""
+        env: dict[str, str] = {}
+        tor = _TorFakes(pick_port_return=9050)
+        rt = _make_runtime(tor_fakes=tor, env=env, isolation_token="sess-42")
+        rt.use("tor")
+        assert env["HTTPS_PROXY"] == "socks5h://sess-42:sess-42@127.0.0.1:9050"
+        assert env["ALL_PROXY"] == "socks5h://sess-42:sess-42@127.0.0.1:9050"
+        rt.stop()
+
+    def test_set_isolation_token_then_use_applies_credential(self) -> None:
+        """``set_isolation_token`` (mirrors ``update_policy_mode``) takes effect
+        on the next path application."""
+        env: dict[str, str] = {}
+        tor = _TorFakes(pick_port_return=9050)
+        rt = _make_runtime(tor_fakes=tor, env=env)
+        rt.set_isolation_token("sess-9")
+        rt.use("tor")
+        assert env["HTTPS_PROXY"] == "socks5h://sess-9:sess-9@127.0.0.1:9050"
+        rt.stop()
+
+    def test_no_isolation_token_keeps_bare_url(self) -> None:
+        """Regression guard: unset token → credential-free URL (unchanged)."""
+        env: dict[str, str] = {}
+        tor = _TorFakes(pick_port_return=9050)
+        rt = _make_runtime(tor_fakes=tor, env=env)
+        rt.use("tor")
+        assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9050"
         rt.stop()
 
     def test_status_reports_tor_active(self) -> None:

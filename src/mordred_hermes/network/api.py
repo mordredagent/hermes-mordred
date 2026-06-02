@@ -74,6 +74,8 @@ class Runtime(Protocol):
     # concrete runtime narrows at the call site.
     def update_policy_mode(self, policy_mode: Any) -> None: ...
 
+    def set_isolation_token(self, token: str | None) -> None: ...
+
 
 _RUNTIME: Runtime | None = None
 
@@ -169,6 +171,19 @@ def update_policy_mode(policy_mode: str, *, runtime: Runtime | None = None) -> N
     if rt is None:
         return
     rt.update_policy_mode(policy_mode)
+
+
+def set_isolation_token(token: str | None, *, runtime: Runtime | None = None) -> None:
+    """Set the per-session Tor circuit-isolation token (v2-N1).
+
+    ``hooks.on_session_start`` calls this with the Hermes ``session_id`` so
+    each session rides its own Tor circuit (``IsolateSOCKSAuth``). No-op when
+    no runtime is registered, mirroring :func:`update_policy_mode`.
+    """
+    rt = runtime if runtime is not None else _RUNTIME
+    if rt is None:
+        return
+    rt.set_isolation_token(token)
 
 
 def is_dropped(*, runtime: Runtime | None = None) -> bool:
