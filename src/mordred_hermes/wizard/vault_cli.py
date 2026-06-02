@@ -135,6 +135,47 @@ def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | No
         del passphrase
 
 
+def _open_hot_path_or_report(
+    root: Path, *, backend: NativeBackend | None = None, store: AnchorStore | None = None
+) -> OpenVault | None:
+    """Open the vault at ``root`` on the **hot path**, or report and return ``None``.
+
+    The shared open used by :func:`add` / :func:`migrate` / :func:`set_memory_key`:
+    opens via the device wrapping key (Secure Enclave or its software fallback,
+    no passphrase). ``backend`` / ``store`` default to the production
+    implementations; tests inject fakes. On any fail-closed open error a reason is
+    printed to stderr and ``None`` is returned (a freshness-pin mismatch is
+    surfaced as possible tampering, an uninitialised vault points at ``vault
+    init``). The caller owns closing the returned vault.
+    """
+    from ..keyvault import anchor, manifest, vault
+    from ..keyvault._exceptions import WrapError
+
+    key_id = anchor_label = _vault_identity(root)
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    if store is None:
+        from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+        store = KeychainAnchorStore()
+
+    try:
+        return vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
+    except anchor.AnchorMissing:
+        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
+    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
+        # A freshness-pin mismatch is the anchor's whole purpose — surface it as
+        # possible tampering / rollback, not a generic open failure.
+        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
+    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
+        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
+    except WrapError as exc:
+        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+    return None
+
+
 def status(*, root: Path, prompt_io: PromptIO | None = None) -> int:
     """Print a vault's generation and enrolled file names (cold path).
 
@@ -300,19 +341,8 @@ def add(
     inject fakes. Returns 0 on success, 1 on an uninitialised / unverifiable
     vault, an unreadable source, or a device key-store error.
     """
-    from ..keyvault import anchor, manifest, vault
+    from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
-
-    key_id = anchor_label = _vault_identity(root)
-
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
 
     try:
         plaintext = source.read_bytes()
@@ -320,21 +350,8 @@ def add(
         print(f"cannot read source file {source}: {exc}", file=sys.stderr)
         return 1
 
-    try:
-        opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
-    except anchor.AnchorMissing:
-        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
-        return 1
-    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
-        # A freshness-pin mismatch is the anchor's whole purpose — surface it as
-        # possible tampering / rollback, not a generic open failure.
-        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
-        return 1
-    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
-        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
-        return 1
-    except WrapError as exc:
-        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+    opened = _open_hot_path_or_report(root, backend=backend, store=store)
+    if opened is None:
         return 1
 
     try:
@@ -408,35 +425,11 @@ def migrate(
             print(f"cannot read source file {source}: {exc}", file=sys.stderr)
             return 1
 
-    from ..keyvault import anchor, manifest, vault
+    from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 
-    key_id = anchor_label = _vault_identity(root)
-
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
-
-    try:
-        opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
-    except anchor.AnchorMissing:
-        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
-        return 1
-    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
-        # A freshness-pin mismatch is the anchor's whole purpose — surface it as
-        # possible tampering / rollback, not a generic open failure.
-        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
-        return 1
-    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
-        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
-        return 1
-    except WrapError as exc:
-        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+    opened = _open_hot_path_or_report(root, backend=backend, store=store)
+    if opened is None:
         return 1
 
     enrolled = 0
@@ -639,33 +632,11 @@ def set_memory_key(
     / unverifiable vault, a non-UTF-8 or unreadable enrolled ``.env``, a
     malformed-``.env`` refusal, or a device key-store error.
     """
-    from ..keyvault import anchor, manifest, vault
+    from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 
-    key_id = anchor_label = _vault_identity(root)
-
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
-
-    try:
-        opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
-    except anchor.AnchorMissing:
-        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
-        return 1
-    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
-        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
-        return 1
-    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
-        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
-        return 1
-    except WrapError as exc:
-        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+    opened = _open_hot_path_or_report(root, backend=backend, store=store)
+    if opened is None:
         return 1
 
     try:

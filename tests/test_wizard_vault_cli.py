@@ -1146,3 +1146,38 @@ class TestSetMemoryKey:
         assert rc == 0
         assert seen["root"] == tmp_path
         assert seen["rotate"] is True
+
+
+class TestOpenHotPath:
+    """``_open_hot_path_or_report`` — the shared hot-path open used by add /
+    migrate / set_memory_key. Returns the opened vault (caller closes it), or
+    prints a fail-closed reason to stderr and returns ``None``.
+    """
+
+    def test_returns_opened_vault_when_initialised(self, tmp_path: Path) -> None:
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        assert (
+            vault_cli.init(
+                root=root, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]), backend=backend, store=store
+            )
+            == 0
+        )
+        opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
+        assert opened is not None
+        try:
+            assert opened.generation == 0  # freshly initialised, nothing enrolled
+        finally:
+            opened.close()
+
+    def test_uninitialised_returns_none_and_points_at_init(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        opened = vault_cli._open_hot_path_or_report(tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
+        assert opened is None
+        assert "init" in capsys.readouterr().err.lower()  # guidance: run `vault init` first
+
+    def test_keychain_error_returns_none(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        opened = vault_cli._open_hot_path_or_report(tmp_path / "v", backend=FakeBackend(), store=_ReadRaisesStore())
+        assert opened is None
+        assert capsys.readouterr().err.strip() != ""
