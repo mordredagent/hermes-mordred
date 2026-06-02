@@ -72,9 +72,14 @@ def render_torrc(*, socks_port: int, control_port: int, data_dir: Path) -> str:
 
     Kept minimal on purpose. ``ClientUseIPv6 0`` and friends are layered
     on by Phase 3 PR2 once the wizard collects the policy.json fields.
+
+    ``IsolateSOCKSAuth`` is set explicitly so per-context circuit
+    isolation (``proxy_env`` injects a per-token SOCKS credential) does not
+    rely on Tor's silent default-on behaviour — a future Tor release could
+    change the SOCKSPort default flags.
     """
     return (
-        f"SOCKSPort 127.0.0.1:{socks_port}\n"
+        f"SOCKSPort 127.0.0.1:{socks_port} IsolateSOCKSAuth\n"
         f"ControlPort 127.0.0.1:{control_port}\n"
         f"CookieAuthentication 1\n"
         f"DataDirectory {data_dir}\n"

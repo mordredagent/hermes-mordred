@@ -133,6 +133,15 @@ class TestTorrcRender:
         content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
         assert f"DataDirectory {tmp_path}" in content
 
+    def test_includes_isolate_socks_auth(self, tmp_path: Path) -> None:
+        """v2-N1: make ``IsolateSOCKSAuth`` explicit on the SOCKSPort line so
+        per-credential circuit isolation does not rely on Tor's silent
+        default-on behaviour (a future Tor release could change the default)."""
+        from mordred_hermes.network.paths import tor
+
+        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
+        assert "SOCKSPort 127.0.0.1:9050 IsolateSOCKSAuth" in content
+
 
 # --------------------------------------------------------------------------- #
 # Port collision handling                                                     #

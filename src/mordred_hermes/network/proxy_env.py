@@ -18,9 +18,11 @@ the localhost LLM through Tor (TODO §3.1 L316).
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
+from urllib.parse import quote
 
 from ._exceptions import UnknownPath
 
@@ -39,6 +41,11 @@ _MANAGED_KEYS: Final[frozenset[str]] = frozenset((*_PROXY_KEYS, "NO_PROXY", "no_
 
 DEFAULT_TOR_SOCKS_PORT: Final[int] = 9050
 
+# RFC 1929 encodes each SOCKS5 username/password length in a single octet,
+# so each field is capped at 255 bytes. A longer credential is rejected by
+# Tor — ``_tor_proxy_url`` substitutes a stable digest above this length.
+_MAX_SOCKS_CRED_LEN: Final[int] = 255
+
 
 def managed_var_names() -> set[str]:
     """Return the set of env var names this module manages.
@@ -55,6 +62,7 @@ def desired_env(
     path: ActivePath,
     tor_socks_port: int = DEFAULT_TOR_SOCKS_PORT,
     no_proxy_extra: Iterable[str] = (),
+    isolation_token: str | None = None,
 ) -> dict[str, str]:
     """Compute the env vars that should be set for the given path.
 
@@ -66,13 +74,18 @@ def desired_env(
     static-check time; the runtime check defends against
     config-file-driven flips (the policy.json field is plain string at
     the storage layer).
+
+    ``isolation_token`` (Tor path only) injects a per-context SOCKS5
+    credential so Tor's ``IsolateSOCKSAuth`` assigns the context its own
+    circuit. ``None`` / empty leaves the URL credential-free. It is a
+    silent no-op on the clearnet / vpn paths, which carry no SOCKS proxy.
     """
     if path not in ("tor", "vpn", "clearnet"):
         raise UnknownPath(f"unknown network path: {path!r}")
 
     env: dict[str, str] = {}
     if path == "tor":
-        proxy_url = f"socks5h://127.0.0.1:{tor_socks_port}"
+        proxy_url = _tor_proxy_url(tor_socks_port, isolation_token)
         for key in _PROXY_KEYS:
             env[key] = proxy_url
 
@@ -83,6 +96,35 @@ def desired_env(
     env["NO_PROXY"] = no_proxy_value
     env["no_proxy"] = no_proxy_value
     return env
+
+
+def _tor_proxy_url(socks_port: int, isolation_token: str | None) -> str:
+    """Build the ``socks5h://`` Tor proxy URL, optionally carrying a
+    per-context SOCKS credential for circuit isolation.
+
+    When ``isolation_token`` is a non-empty string it becomes both the
+    SOCKS username and password (percent-encoded), so Tor's
+    ``IsolateSOCKSAuth`` (set in ``paths.tor.render_torrc``) maps the
+    context to its own circuit. An empty or ``None`` token yields the bare
+    URL with no userinfo — backward compatible with non-isolated callers.
+
+    The credential is percent-encoded with ``safe=""`` so a token
+    containing ``:`` / ``@`` / ``/`` cannot break out of the userinfo and
+    hijack the host or port.
+
+    A token whose encoded form exceeds ``_MAX_SOCKS_CRED_LEN`` (RFC 1929's
+    255-octet field limit) is replaced by its sha256 hexdigest so Tor does
+    not reject the SOCKS auth — distinctness (hence isolation) is preserved
+    by the hash.
+    """
+    if isolation_token:
+        cred = quote(isolation_token, safe="")
+        if len(cred) > _MAX_SOCKS_CRED_LEN:
+            # sha256 hexdigest is 64 ASCII chars — URL-safe and well within
+            # the 255-octet limit, while keeping distinct tokens distinct.
+            cred = hashlib.sha256(isolation_token.encode("utf-8")).hexdigest()
+        return f"socks5h://{cred}:{cred}@127.0.0.1:{socks_port}"
+    return f"socks5h://127.0.0.1:{socks_port}"
 
 
 def _build_no_proxy(extras: Iterable[str]) -> str:

@@ -277,3 +277,164 @@ class TestSocks5hLibraryAllowlist:
         assert len(result) == 2
         assert any("my-internal-http-lib" in r for r in result)
         assert any("another-unknown" in r for r in result)
+
+
+# --------------------------------------------------------------------------- #
+# v2-N1 foundation: per-context Tor circuit isolation via SOCKS auth          #
+# --------------------------------------------------------------------------- #
+
+
+class TestStreamIsolation:
+    """Per-context Tor circuit isolation (v2-N1 foundation).
+
+    Tor's ``IsolateSOCKSAuth`` (a ``SOCKSPort`` flag, made explicit in
+    ``render_torrc``) maps each distinct SOCKS username/password pair to a
+    separate circuit. ``desired_env`` injects the caller-supplied
+    ``isolation_token`` as that credential so distinct sessions / providers
+    ride distinct exit circuits and cannot be correlated onto one circuit.
+
+    Per-*skill* isolation needs ``origin_skill`` in the ``pre_tool_call``
+    payload (absent in v1 — SPEC §並列 tool_call) and is deferred to v2-H2;
+    this foundation isolates on whatever token the runtime supplies.
+    """
+
+    def test_token_injects_socks_userinfo(self) -> None:
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        assert env["HTTPS_PROXY"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+        assert env["HTTP_PROXY"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+        assert env["ALL_PROXY"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+
+    def test_token_injects_lowercase_keys_too(self) -> None:
+        """Codex round 5 P1 parity: the lowercase keys must carry the credential too."""
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        assert env["https_proxy"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+        assert env["all_proxy"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+
+    def test_none_token_leaves_url_unchanged(self) -> None:
+        """Backward compat: no token → the bare socks5h URL (no userinfo)."""
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token=None)
+        assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9050"
+
+    def test_default_omits_isolation(self) -> None:
+        """``isolation_token`` defaults to None — existing callers are untouched."""
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050)
+        assert "@" not in env["HTTPS_PROXY"]
+
+    def test_empty_token_leaves_url_unchanged(self) -> None:
+        """An empty token must NOT produce ``socks5h://:@host`` — treat as no isolation."""
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="")
+        assert env["HTTPS_PROXY"] == "socks5h://127.0.0.1:9050"
+        assert "@" not in env["HTTPS_PROXY"]
+
+    def test_distinct_tokens_yield_distinct_userinfo(self) -> None:
+        """The isolation property: different tokens → different credentials →
+        (via IsolateSOCKSAuth) different circuits."""
+        from mordred_hermes.network import proxy_env
+
+        a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="alpha")
+        b = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="beta")
+        assert a["HTTPS_PROXY"] != b["HTTPS_PROXY"]
+
+    def test_same_token_is_stable(self) -> None:
+        """The same token must map to the same credential — circuit reuse within a context."""
+        from mordred_hermes.network import proxy_env
+
+        a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        b = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        assert a["HTTPS_PROXY"] == b["HTTPS_PROXY"]
+
+    def test_token_is_percent_encoded(self) -> None:
+        """A token with URL-significant bytes must be percent-encoded so the
+        proxy URL stays well-formed (host/port not hijacked by ``@`` or ``:``)."""
+        from urllib.parse import urlsplit
+
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="a:b@c/d")
+        parts = urlsplit(env["HTTPS_PROXY"])
+        assert parts.hostname == "127.0.0.1"
+        assert parts.port == 9050
+        # Raw delimiters must not survive in the credential.
+        assert parts.username == "a%3Ab%40c%2Fd"
+        assert parts.password == "a%3Ab%40c%2Fd"
+
+    def test_token_still_uses_socks5h_scheme(self) -> None:
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="x")
+        for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+            assert env[key].startswith("socks5h://"), env[key]
+
+    def test_token_ignored_off_tor(self) -> None:
+        """clearnet / vpn carry no SOCKS proxy, so a token is a silent no-op."""
+        from mordred_hermes.network import proxy_env
+
+        for path in ("clearnet", "vpn"):
+            env = proxy_env.desired_env(path=path, isolation_token="sess-1")  # type: ignore[arg-type]
+            assert "HTTPS_PROXY" not in env
+
+    def test_token_does_not_affect_no_proxy(self) -> None:
+        from mordred_hermes.network import proxy_env
+
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        np = env["NO_PROXY"].split(",")
+        assert "localhost" in np
+        assert "127.0.0.1" in np
+        assert "::1" in np
+
+    def test_token_at_socks_limit_is_not_hashed(self) -> None:
+        """RFC 1929 caps SOCKS username/password at 255 octets. A token whose
+        encoded form is exactly 255 stays readable (boundary, inclusive)."""
+        from urllib.parse import urlsplit
+
+        from mordred_hermes.network import proxy_env
+
+        token = "a" * 255  # a-z are URL-safe → encoded length == 255
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token=token)
+        parts = urlsplit(env["HTTPS_PROXY"])
+        assert parts.username == token
+        assert parts.password == token
+
+    def test_long_token_hashed_within_socks_limit(self) -> None:
+        """A token whose encoded form exceeds 255 octets is replaced by a stable
+        sha256 hexdigest so Tor does not reject the SOCKS auth (M1)."""
+        import hashlib
+        from urllib.parse import urlsplit
+
+        from mordred_hermes.network import proxy_env
+
+        token = "a" * 256  # one octet over the RFC 1929 limit
+        expected = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token=token)
+        parts = urlsplit(env["HTTPS_PROXY"])
+        assert parts.username == expected
+        assert parts.password == expected
+        assert len(parts.username or "") <= 255
+        assert parts.hostname == "127.0.0.1"
+        assert parts.port == 9050
+
+    def test_long_token_isolation_preserved(self) -> None:
+        """Hashing must keep distinct long tokens distinct (circuit isolation)."""
+        from mordred_hermes.network import proxy_env
+
+        a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="x" * 300)
+        b = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="y" * 300)
+        assert a["HTTPS_PROXY"] != b["HTTPS_PROXY"]
+
+    def test_long_token_is_stable(self) -> None:
+        """The same long token hashes to the same credential — circuit reuse."""
+        from mordred_hermes.network import proxy_env
+
+        a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="z" * 400)
+        b = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="z" * 400)
+        assert a["HTTPS_PROXY"] == b["HTTPS_PROXY"]
