@@ -94,6 +94,25 @@ def _find_helper() -> str | None:
     return find_sekey_helper()
 
 
+def _is_sekey_source(candidate: Path) -> bool:
+    """True when ``candidate`` is a genuine ``mordred-hermes-sekey`` Swift package.
+
+    ``enable_se`` *executes* the ``build.sh`` that :func:`_locate_helper_source`
+    resolves to, so matching on ``build.sh`` alone would let a writable ancestor
+    (e.g. ``/tmp/native/sekey-helper/build.sh``) hijack the build. Require the
+    Swift manifest with the expected package name and the entry point too, so a
+    bare planted ``build.sh`` is rejected. (Mirror of :func:`_is_tpmkey_source`.)
+    """
+    manifest = candidate / "Package.swift"
+    entry = candidate / "Sources" / _HELPER_NAME / "main.swift"
+    if not ((candidate / "build.sh").is_file() and manifest.is_file() and entry.is_file()):
+        return False
+    try:
+        return f'name: "{_HELPER_NAME}"' in manifest.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
 def _locate_helper_source() -> Path | None:
     """Locate the ``sekey-helper`` Swift source tree (``build.sh`` + sources).
 
@@ -101,25 +120,26 @@ def _locate_helper_source() -> Path | None:
     must find the source directory before invoking ``build.sh``. Resolution:
 
     1. **Source checkout** — walk up from this module to a ``native/sekey-helper``
-       directory containing ``build.sh`` (editable install / repo clone).
+       directory (editable install / repo clone).
     2. **Installed wheel** — a ``_native/sekey-helper`` copy shipped inside the
        package (added to the wheel separately; see packaging).
 
-    Returns the directory :class:`~pathlib.Path`, or ``None`` when neither is
-    present (e.g. a wheel install without the bundled sources).
+    Each candidate is validated by :func:`_is_sekey_source` so a decoy
+    ``build.sh`` cannot hijack the build. Returns the directory
+    :class:`~pathlib.Path`, or ``None`` when neither is present (e.g. a wheel
+    install without the bundled sources).
     """
-    marker = "build.sh"
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "native" / "sekey-helper"
-        if (candidate / marker).is_file():
+        if _is_sekey_source(candidate):
             return candidate
     # Installed-wheel fallback: a package-data copy under the package root.
     try:
         from importlib.resources import files
 
-        packaged = files("mordred_hermes").joinpath("_native", "sekey-helper")
-        if packaged.joinpath(marker).is_file():
-            return Path(str(packaged))
+        packaged = Path(str(files("mordred_hermes").joinpath("_native", "sekey-helper")))
+        if _is_sekey_source(packaged):
+            return packaged
     except (ModuleNotFoundError, TypeError, OSError):
         pass
     return None

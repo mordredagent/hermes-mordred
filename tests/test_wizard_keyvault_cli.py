@@ -593,8 +593,9 @@ class TestEnableSE:
             calls["build_args"] = (src, install_dir, unattended)
             return 0, "Installed: ~/.local/bin/mordred-hermes-sekey"
 
-        def _verify() -> bool:
+        def _verify(*, install_dir: Path | None = None) -> bool:
             calls["verify"] += 1
+            calls["verify_install_dir"] = install_dir
             return True
 
         monkeypatch.setattr(keyvault_cli, "_run_sekey_build", _build, raising=False)
@@ -608,6 +609,8 @@ class TestEnableSE:
         rc = keyvault_cli.enable_se(home=tmp_path)
         assert rc == 0
         assert calls["build"] == 1 and calls["verify"] == 1
+        # No --install-dir given → verify must be probed with install_dir=None.
+        assert calls["verify_install_dir"] is None
         assert "mordred-hermes-sekey" in capsys.readouterr().out
 
     def test_unsupported_platform_returns_1_without_building(
@@ -665,9 +668,20 @@ class TestEnableSE:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(keyvault_cli, "_verify_sekey_helper", lambda: False, raising=False)
+        monkeypatch.setattr(keyvault_cli, "_verify_sekey_helper", lambda **_k: False, raising=False)
         rc = keyvault_cli.enable_se(home=tmp_path)
         assert rc == 1
+
+    def test_install_dir_threaded_to_build_and_verify(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # enable-se parity with codex MEDIUM-1: --install-dir must reach BOTH the
+        # build (env) and the verify (where to look for the installed binary), so
+        # a custom not-on-PATH install dir does not yield a false verify failure.
+        calls = self._patch_all_ok(monkeypatch, tmp_path)
+        install_dir = tmp_path / "bin"
+        rc = keyvault_cli.enable_se(install_dir=install_dir, home=tmp_path)
+        assert rc == 0
+        assert calls["build_args"][1] == install_dir
+        assert calls["verify_install_dir"] == install_dir
 
 
 class TestEnableSESeams:
@@ -755,6 +769,39 @@ class TestEnableSESeams:
 
         monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
         assert keyvault_cli._verify_sekey_helper() is False
+
+    def test_verify_sekey_helper_prefers_install_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # enable-se parity with codex MEDIUM-1: when --install-dir is given, verify
+        # must probe the binary THERE, not only env / ~/.local/bin / PATH via
+        # _find_helper.
+        binary = tmp_path / "mordred-hermes-sekey"
+        binary.write_text("#!/bin/sh\n")
+        monkeypatch.setattr(
+            "mordred_hermes.keyvault._seckey_helper._find_helper",
+            lambda: pytest.fail("must not fall back to _find_helper when install_dir has the binary"),
+        )
+        seen: dict[str, str] = {}
+
+        class _Ops:
+            def __init__(self, b: str) -> None:
+                seen["binary"] = b
+
+            def probe(self) -> None:
+                return None
+
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
+        assert keyvault_cli._verify_sekey_helper(install_dir=tmp_path) is True
+        assert seen["binary"] == str(binary)
+
+    def test_verify_sekey_helper_falls_back_when_install_dir_binary_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # install_dir given but the binary is not there yet (e.g. a silent build
+        # failure) → fall back to _find_helper, which here finds nothing.
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._find_helper", lambda: None)
+        assert keyvault_cli._verify_sekey_helper(install_dir=empty_dir) is False
 
 
 class TestEnableTPM:

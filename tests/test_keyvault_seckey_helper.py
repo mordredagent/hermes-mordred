@@ -350,6 +350,64 @@ def test_locate_helper_source_finds_build_sources_in_checkout() -> None:
     assert (src / "Sources" / "mordred-hermes-sekey" / "main.swift").is_file()
 
 
+def _make_fake_sekey_source(
+    root: Path,
+    *,
+    name: str = "mordred-hermes-sekey",
+    with_manifest: bool = True,
+    with_main: bool = True,
+) -> Path:
+    """Materialize a (possibly decoy) ``native/sekey-helper`` Swift package under ``root``.
+
+    The entry-point dir is fixed at ``Sources/mordred-hermes-sekey/`` (the
+    ``_HELPER_NAME`` constant ``_is_sekey_source`` checks), independent of
+    ``name`` — ``name`` only varies the *manifest* package name so the
+    wrong-name case isolates the manifest-name rejection with every structural
+    file present (mirrors ``_make_fake_tpmkey_crate``).
+    """
+    src = root / "native" / "sekey-helper"
+    (src / "Sources" / "mordred-hermes-sekey").mkdir(parents=True)
+    (src / "build.sh").write_text("#!/usr/bin/env bash\n")
+    if with_manifest:
+        (src / "Package.swift").write_text(f'let package = Package(\n    name: "{name}",\n)\n')
+    if with_main:
+        (src / "Sources" / "mordred-hermes-sekey" / "main.swift").write_text('print("hi")\n')
+    return src
+
+
+class TestIsSekeySource:
+    """``_is_sekey_source`` — reject build-hijack decoys (enable-se parity with codex MEDIUM-3).
+
+    ``enable_se`` executes the ``build.sh`` that ``_locate_helper_source``
+    resolves to, so a bare ``build.sh`` planted under a writable ancestor
+    (e.g. ``/tmp/native/sekey-helper/build.sh``) must NOT be accepted as the
+    package to build — require the Swift manifest with the expected package
+    name and the entry point too.
+    """
+
+    def test_accepts_genuine_source(self, tmp_path: Path) -> None:
+        src = _make_fake_sekey_source(tmp_path)
+        assert _seckey_helper._is_sekey_source(src) is True
+
+    def test_rejects_build_sh_only_decoy(self, tmp_path: Path) -> None:
+        src = _make_fake_sekey_source(tmp_path, with_manifest=False, with_main=False)
+        assert _seckey_helper._is_sekey_source(src) is False
+
+    def test_rejects_wrong_package_name(self, tmp_path: Path) -> None:
+        src = _make_fake_sekey_source(tmp_path, name="evil-helper")
+        assert _seckey_helper._is_sekey_source(src) is False
+
+    def test_rejects_missing_entry_point(self, tmp_path: Path) -> None:
+        src = _make_fake_sekey_source(tmp_path, with_main=False)
+        assert _seckey_helper._is_sekey_source(src) is False
+
+    def test_locate_helper_source_finds_real_source(self) -> None:
+        # The real source checkout has a genuine package; locate must resolve it.
+        src = _seckey_helper._locate_helper_source()
+        assert src is not None
+        assert _seckey_helper._is_sekey_source(src)
+
+
 def _make_fake_tpmkey_crate(
     root: Path,
     *,

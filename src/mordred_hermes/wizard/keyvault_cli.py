@@ -556,11 +556,24 @@ def _run_sekey_build(src: Path, *, install_dir: Path | None, unattended: bool | 
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
-def _verify_sekey_helper() -> bool:
-    """Probe the freshly-installed helper to confirm Secure Enclave access."""
+def _verify_sekey_helper(*, install_dir: Path | None = None) -> bool:
+    """Probe the freshly-installed helper to confirm Secure Enclave access.
+
+    When ``install_dir`` is given (``enable-se --install-dir``), the binary just
+    installed there is preferred — ``_find_helper`` only searches
+    ``MORDRED_SEKEY_HELPER`` / ``~/.local/bin`` / ``PATH``, so a custom,
+    not-on-PATH install dir would otherwise yield a false verification failure.
+    (Mirror of :func:`_verify_tpmkey_helper`.)
+    """
     from ..keyvault import _seckey_helper
 
-    binary = _seckey_helper._find_helper()
+    binary: str | None = None
+    if install_dir is not None:
+        candidate = install_dir / _seckey_helper._HELPER_NAME
+        if candidate.is_file():
+            binary = str(candidate)
+    if binary is None:
+        binary = _seckey_helper._find_helper()
     if binary is None:
         return False
     try:
@@ -614,7 +627,7 @@ def enable_se(
         print(f"error: sekey-helper build failed:\n{output}", file=sys.stderr)
         return 1
 
-    if not _verify_sekey_helper():
+    if not _verify_sekey_helper(install_dir=install_dir):
         print(
             "error: helper installed but the Secure Enclave probe failed; "
             "the keyvault will keep using the software fallback.",
