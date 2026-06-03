@@ -27,7 +27,9 @@ class TestLooksLikeHermes:
             ["/usr/local/bin/hermes"],
             ["/usr/local/bin/hermes", "mordred", "vault", "status"],
             ["/opt/venv/bin/hermes-mordred", "vault", "status"],
-            ["/opt/venv/lib/python3.11/site-packages/hermes_cli/__main__.py"],  # python -m hermes_cli
+            [
+                "/opt/venv/lib/python3.11/site-packages/hermes_cli/cli.py"
+            ],  # path INSIDE hermes_cli/ (direct-path; NOT `-m`)
             ["/opt/venv/bin/hermes.exe"],  # Windows-style console script (.exe suffix stripped)
         ],
     )
@@ -42,6 +44,8 @@ class TestLooksLikeHermes:
             ["/Users/me/hermes-venv/bin/pytest"],  # venv NAMED hermes, but not a hermes process
             ["/usr/bin/python", "-c", "print(1)"],
             ["/usr/bin/pip", "install", "x"],
+            ["-m"],  # `python -m ...` at site-init: argv[0] is '-m' (module name not yet in argv)
+            ["-m", "hermes_cli"],  # not matched (and `python -m hermes_cli` is not even runnable: no __main__)
         ],
     )
     def test_non_hermes_invocations(self, argv: list[str]) -> None:

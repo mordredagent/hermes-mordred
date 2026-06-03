@@ -1,4 +1,4 @@
-"""``hermes mordred vault {enable,disable}-config-decrypt`` — config.yaml at-rest opt-in.
+"""``hermes-mordred vault {enable,disable}-config-decrypt`` — config.yaml at-rest opt-in.
 
 ROADMAP v2-F8: put ``~/.hermes/config.yaml`` under the at-rest vault with
 transparent decrypt at Hermes startup (the ``.pth`` hook in

@@ -312,3 +312,14 @@ class TestInstallConfigDecrypt:
         monkeypatch.setattr(_config_bootstrap, "materialize_config", _materialize)
         assert _config_bootstrap.install_config_decrypt() == 0
         assert seen["home"] == tmp_path / "home"
+
+
+class TestRecoveryHint:
+    def test_uses_today_working_console_script(self) -> None:
+        """The fail-closed recovery hint must use ``hermes-mordred`` — the console
+        script wired today (``pyproject.toml`` ``[project.scripts]``). The
+        ``hermes mordred ...`` form only works once Hermes 0.12+ wires entry-point
+        CLIs, so emitting it would strand a user on the recovery path on current
+        installs."""
+        assert "hermes-mordred vault disable-config-decrypt" in _config_bootstrap._RECOVERY_HINT
+        assert "hermes mordred " not in _config_bootstrap._RECOVERY_HINT

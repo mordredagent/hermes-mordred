@@ -131,7 +131,7 @@ packages = ["src/mordred_hermes"]
 # config.yaml at-rest transparent decrypt (ROADMAP v2-F8). The .pth lands at the
 # site-packages root and runs a cheap inline guard at every interpreter start;
 # only a Hermes invocation (or MORDRED_CONFIG_DECRYPT=1) imports _pth_bootstrap.
-# Opt-in at runtime via `hermes mordred vault enable-config-decrypt` (the marker);
+# Opt-in at runtime via `hermes-mordred vault enable-config-decrypt` (the marker);
 # absent that marker the hook is a no-op even for Hermes.
 "packaging/pth/mordred_hermes_config_decrypt.pth" = "mordred_hermes_config_decrypt.pth"
 

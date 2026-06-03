@@ -54,14 +54,14 @@ __all__ = ["install_config_decrypt", "materialize_config", "reseal_config"]
 
 _CONFIG_NAME = "config.yaml"
 # Opt-in marker: its presence puts config.yaml on the vault-managed lifecycle.
-# Written by ``hermes mordred vault enable-config-decrypt`` (wizard CLI).
+# Written by ``hermes-mordred vault enable-config-decrypt`` (wizard CLI).
 _MARKER_SUBPATH = ("mordred", "config-vault.marker")
 
 # A fail-closed materialize raises at interpreter startup via the .pth hook, which
 # fires for EVERY Hermes invocation — including the recovery command itself. So the
 # recovery hint must tell the operator to bypass the hook with MORDRED_CONFIG_DECRYPT=0,
 # or `disable-config-decrypt` would be blocked by the very hook it is trying to undo.
-_RECOVERY_HINT = "to recover, run: MORDRED_CONFIG_DECRYPT=0 hermes mordred vault disable-config-decrypt"
+_RECOVERY_HINT = "to recover, run: MORDRED_CONFIG_DECRYPT=0 hermes-mordred vault disable-config-decrypt"
 
 
 def _marker_path(home: Path) -> Path:
