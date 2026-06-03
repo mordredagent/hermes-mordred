@@ -1,10 +1,12 @@
-"""Subprocess ``_SecKeyOps`` backed by the signed ``mordred-hermes-sekey`` CLI.
+"""Subprocess ``_SecKeyOps`` backed by the ad-hoc-signed ``mordred-hermes-sekey`` CLI.
 
 An unsigned / ad-hoc-signed Python interpreter cannot carry the
 ``keychain-access-groups`` entitlement, so persisting Secure Enclave keys
-fails with ``errSecMissingEntitlement`` (-34018). The fix is a separately
-Developer-ID-signed helper binary (with a bundle ID + entitlement) that
-Python shells out to — the same architecture the 1Password CLI uses.
+*in the Keychain* fails with ``errSecMissingEntitlement`` (-34018). The fix
+is a small helper binary that Python shells out to: it uses CryptoKit
+``SecureEnclave.P256`` and stores the key's ``dataRepresentation`` as a file
+(never the Keychain), so no entitlement, provisioning profile, or paid
+Developer account is needed — an ad-hoc ``codesign --sign -`` is enough.
 
 This module is the Python half: it locates the helper
 (:func:`_find_helper`), drives the JSON-over-stdio protocol

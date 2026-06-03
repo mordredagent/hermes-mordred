@@ -1,4 +1,4 @@
-"""Production ``NativeBackend`` — Secure-Enclave keypairs via pyobjc.
+"""Production ``NativeBackend`` — Secure-Enclave wrapping keys with a software P-256 fallback.
 
 Phase 4 PR4 (production backend). :class:`_SecKeyBackend` is the real
 implementation of the :class:`mordred_hermes.keyvault.wrap.NativeBackend`
@@ -23,6 +23,23 @@ Design — two layers (mirrors ``native.py``'s narrow-boundary convention):
    (``tests/integration/test_keyvault_macos.py``, gated by
    ``MORDRED_KEYVAULT_LIVE=1``) — CI cannot satisfy a biometric prompt
    (SPEC.md review HIGH-4).
+
+Backend selection (see :func:`_default_ops`) — the in-process pyobjc ops
+below are NOT the primary hardware path. When the ad-hoc-signed
+``mordred-hermes-sekey`` helper is installed it owns real Secure-Enclave
+keys via CryptoKit (``SecureEnclave.P256``, storing the key's
+``dataRepresentation`` as a file — no Keychain, so it sidesteps the
+``keychain-access-groups`` entitlement an unsigned Python cannot carry; see
+:mod:`._seckey_helper` and ``native/sekey-helper/``).
+:class:`_PyobjcSecKeyOps` is only the fallback used when that helper is
+absent, and it persists a *real* Enclave key solely on an entitled
+interpreter; on an ordinary unsigned Python every SE write fails
+``errSecMissingEntitlement`` (-34018) and :class:`_SecKeyBackend`
+transparently degrades to a software P-256 key (:class:`_SoftwareFallbackOps`).
+Effective hierarchy: signed helper → in-process pyobjc SE (entitled only) →
+software P-256. The pyobjc path is retained — rather than deleted in favour
+of helper-or-software — so an entitled embedded interpreter keeps an
+in-process SE option (decision recorded 2026-06-03).
 
 The pyobjc bridge is reached exclusively through
 :func:`mordred_hermes.keyvault.native._lazy_import_security`, so this
@@ -243,12 +260,16 @@ class _SecKeyOps(Protocol):
 
 
 class _PyobjcSecKeyOps:
-    """Production :class:`_SecKeyOps` — real ``Security.framework`` calls.
+    """In-process :class:`_SecKeyOps` — real ``Security.framework`` calls.
 
-    Exercised only by the live integration test. Every method resolves
-    the pyobjc ``Security`` module lazily via
-    :func:`native._lazy_import_security`, so importing this class costs
-    nothing on a non-macOS host.
+    The fallback path used only when the signed ``mordred-hermes-sekey``
+    helper is absent (see :func:`_default_ops` and the module "Backend
+    selection" note): it persists a real Secure-Enclave key only on an
+    *entitled* interpreter, otherwise :class:`_SecKeyBackend` degrades to
+    software P-256 on ``errSecMissingEntitlement``. Exercised only by the
+    live integration test. Every method resolves the pyobjc ``Security``
+    module lazily via :func:`native._lazy_import_security`, so importing this
+    class costs nothing on a non-macOS host.
     """
 
     def _security(self) -> Any:
@@ -292,7 +313,8 @@ class _PyobjcSecKeyOps:
             sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
             sec.kSecAttrKeySizeInBits: 256,
             sec.kSecAttrTokenID: sec.kSecAttrTokenIDSecureEnclave,
-            # Phase 4: persist to the legacy macOS Keychain. The Data
+            # In-process fallback path (see module "Backend selection"):
+            # persist to the legacy macOS Keychain. The Data
             # Protection Keychain (kSecUseDataProtectionKeychain=True)
             # requires the keychain-access-groups entitlement, which an
             # unsigned local Python interpreter cannot carry — writes
