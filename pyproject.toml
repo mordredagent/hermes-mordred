@@ -150,6 +150,19 @@ markers = [
 ]
 xfail_strict = true
 
+[tool.coverage.run]
+source = ["src/mordred_hermes"]
+
+[tool.coverage.report]
+# CI coverage floor — enforces the project's 80% minimum (code-review
+# standard) on every `pytest --cov` run, per matrix cell. pytest-cov reads
+# this automatically. The floor is 80, not the ~89% observed on macOS,
+# because the gate must also pass on the Linux runner where the macOS-only
+# pyobjc/ctypes Secure-Enclave paths (_seckey_ctypes, _PyobjcSecKeyOps,
+# _anchor_keychain ops) don't execute — pulling that matrix cell to ~85%.
+# Ratchet upward once a Linux CI run confirms the true floor.
+fail_under = 80
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

@@ -39,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _storage, api, wrap
+from mordred_hermes.keyvault import _envelope_codec, _storage, api, wrap
 from mordred_hermes.keyvault._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
@@ -99,10 +99,12 @@ def _purpose_hash(purpose: str) -> bytes:
 
 class TestMrenWireFormat:
     def test_constants_match_spec(self) -> None:
-        assert api._ENVELOPE_MAGIC == b"MREN"
-        assert api._ENVELOPE_VERSION == 1
-        assert api._ENVELOPE_HEADER_LEN == 168  # magic+version+kid+purpose+wrap+len
-        assert api._ENVELOPE_AAD_LEN == 164  # all but aes_blob_len
+        # Wire-format constants moved to _envelope_codec (api re-imports the
+        # codec functions it uses; the constants now live with the wire format).
+        assert _envelope_codec._ENVELOPE_MAGIC == b"MREN"
+        assert _envelope_codec._ENVELOPE_VERSION == 1
+        assert _envelope_codec._ENVELOPE_HEADER_LEN == 168  # magic+version+kid+purpose+wrap+len
+        assert _envelope_codec._ENVELOPE_AAD_LEN == 164  # all but aes_blob_len
 
     def test_minimum_envelope_size_is_196_bytes(
         self,
