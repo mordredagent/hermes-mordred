@@ -1,0 +1,1 @@
+import os, sys; (os.environ.get('MORDRED_CONFIG_DECRYPT') == '1' or (len(sys.argv) > 0 and (os.path.basename((sys.argv[0] or '')).split('.')[0] in ('hermes', 'hermes-mordred') or '/hermes_cli/' in (sys.argv[0] or '').replace('\\', '/')))) and __import__('mordred_hermes._pth_bootstrap', fromlist=['run']).run()

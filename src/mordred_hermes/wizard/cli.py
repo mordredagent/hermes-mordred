@@ -258,6 +258,26 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_set_memory_key.set_defaults(func=_handle_vault_set_memory_key)
 
+    p_enable_cfg = vsub.add_parser(
+        "enable-config-decrypt",
+        help="Put config.yaml under the at-rest vault (transparent decrypt at Hermes startup, v2-F8)",
+    )
+    p_enable_cfg.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_enable_cfg.set_defaults(func=_handle_vault_enable_config_decrypt)
+
+    p_disable_cfg = vsub.add_parser(
+        "disable-config-decrypt",
+        help="Stop managing config.yaml in the vault and restore a plaintext copy (recovery)",
+    )
+    p_disable_cfg.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_disable_cfg.set_defaults(func=_handle_vault_disable_config_decrypt)
+
 
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
@@ -424,6 +444,18 @@ def _handle_vault_set_memory_key(args: argparse.Namespace) -> int:
     from . import vault_cli
 
     return vault_cli.cli_set_memory_key(args)
+
+
+def _handle_vault_enable_config_decrypt(args: argparse.Namespace) -> int:
+    from . import config_decrypt_cli
+
+    return config_decrypt_cli.cli_enable(args)
+
+
+def _handle_vault_disable_config_decrypt(args: argparse.Namespace) -> int:
+    from . import config_decrypt_cli
+
+    return config_decrypt_cli.cli_disable(args)
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:
