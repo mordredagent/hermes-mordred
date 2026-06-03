@@ -21,6 +21,7 @@ detection pass unnoticed. We ``pytest.fail`` instead.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import time
@@ -54,6 +55,24 @@ def live_key_id() -> str:
     """A per-run unique key_id so repeated runs never collide in the
     Keychain. Cleanup happens in the test's ``finally`` block."""
     return f"mordred-itest-{time.time_ns()}"
+
+
+class _FixedPassphrase:
+    """Minimal ``PromptIO`` stand-in returning a constant passphrase, so a live
+    ``vault init`` runs non-interactively (``init`` only calls ``ask_password``)."""
+
+    def __init__(self, passphrase: str) -> None:
+        self._passphrase = passphrase
+
+    def ask_password(self, _prompt: str) -> str:
+        return self._passphrase
+
+
+def _config_vault_root(home: Path) -> Path:
+    """The vault root the config-decrypt hook and wizard agree on for a home:
+    ``<home>/mordred/vault`` (``_identity.default_vault_root`` / wizard
+    ``_default_root``)."""
+    return home / "mordred" / "vault"
 
 
 def test_capability_probe_reports_true_on_enclave_hardware() -> None:
@@ -180,3 +199,134 @@ def test_enable_se_builds_installs_and_verifies_helper(tmp_path: Path, monkeypat
     rc = keyvault_cli.enable_se(install_dir=install_dir, unattended=True)
     assert rc == 0
     assert (install_dir / "mordred-hermes-sekey").is_file()
+
+
+def test_config_decrypt_lifecycle_through_real_enclave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """v2-F8 end-to-end on a real Secure Enclave (ROADMAP v2-F8 final item).
+
+    Exercises the full ``config.yaml`` at-rest lifecycle through the CryptoKit SE
+    helper — startup decrypt (``materialize_config``) and shutdown reseal
+    (``reseal_config``) — plus the ``enable``/``disable`` wizard path:
+
+      init vault → enable-config-decrypt (enroll + marker) → reseal (seal at
+      rest, drop plaintext) → materialize (transparent decrypt on next start) →
+      round-trip stability → disable (recover sealed plaintext, drop marker).
+
+    The wrapping key is generated ``.privateKeyUsage``-only
+    (``MORDRED_SEKEY_UNATTENDED=1``) — the correct policy for an unattended
+    startup hook — so the real-Enclave ECDH runs with no Touch ID prompt.
+    ``HERMES_HOME`` is redirected into ``tmp_path`` so the SE key blob store and
+    home are isolated; the only login-Keychain residue (the device anchor) is
+    removed in ``finally``.
+    """
+    _require_live_enclave()
+    from mordred_hermes.keyvault import _seckey_backend, _seckey_helper
+    from mordred_hermes.keyvault._anchor_keychain import KeychainAnchorStore
+    from mordred_hermes.keyvault._config_bootstrap import _marker_path, materialize_config, reseal_config
+    from mordred_hermes.keyvault._identity import vault_identity
+    from mordred_hermes.wizard import config_decrypt_cli, vault_cli
+
+    if _seckey_helper._find_helper() is None:
+        pytest.skip("signed helper not installed; build it via native/sekey-helper/build.sh")
+
+    # time_ns() keeps the vault root — and thus the login-Keychain anchor label —
+    # unique across runs even when pytest recycles a tmp_path number (mirrors the
+    # live_key_id fixture rationale), so a crashed prior run can't block init.
+    home = tmp_path / f"hermes-home-{time.time_ns()}"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))  # isolates SE blob store + home resolution
+    monkeypatch.setenv("MORDRED_SEKEY_UNATTENDED", "1")  # .privateKeyUsage-only → no prompt
+    root = _config_vault_root(home)
+    anchor_label = vault_identity(root)
+
+    config_path = home / "config.yaml"
+    original = b"# mordred itest config\nmodel: test-model\nplugins:\n  mordred-x: {}\n"
+    config_path.write_bytes(original)
+
+    try:
+        # Real-SE wrapping key + vault (unattended → no prompt on later ECDH).
+        assert vault_cli.init(root=root, prompt_io=_FixedPassphrase("itest-passphrase")) == 0
+        # The CryptoKit helper — NOT the software P-256 fallback — must be the path,
+        # else this would not be a hardware Secure Enclave e2e.
+        assert isinstance(_seckey_backend._default_ops(), _seckey_helper._HelperSecKeyOps)
+
+        # enable-config-decrypt: enroll config.yaml into the vault + write the opt-in marker.
+        assert config_decrypt_cli.enable(home=home, root=root) == 0
+        assert _marker_path(home).exists()
+        # The SE private key persisted as a CryptoKit dataRepresentation blob under the
+        # isolated home — concrete proof the real Enclave path ran (software keys live
+        # in the Keychain, never as a *.bin blob here).
+        sekey_blobs = list((home / "mordred" / "keyvault" / "sekey").glob("*.bin"))
+        assert sekey_blobs, "expected a Secure Enclave key blob — real SE path did not run"
+
+        # reseal-on-stop: re-enroll if changed, then remove the on-disk plaintext so
+        # config.yaml is encrypted at rest between sessions.
+        assert reseal_config(root=root, home=home) == 1
+        assert not config_path.exists()
+
+        # decrypt-on-start: the .pth hook's materialize step decrypts the enrolled
+        # config back onto disk through the real Enclave. THIS is the transparent decrypt.
+        assert materialize_config(root=root, home=home) == 1
+        assert config_path.read_bytes() == original
+
+        # Round-trip is stable across a second seal/unseal cycle.
+        assert reseal_config(root=root, home=home) == 1
+        assert not config_path.exists()
+        assert materialize_config(root=root, home=home) == 1
+        assert config_path.read_bytes() == original
+
+        # disable-config-decrypt recovers a sealed-away plaintext and drops the marker.
+        assert reseal_config(root=root, home=home) == 1
+        assert not config_path.exists()
+        assert config_decrypt_cli.disable(home=home, root=root) == 0
+        assert not _marker_path(home).exists()
+        assert config_path.read_bytes() == original
+    finally:
+        # SE key blobs live under tmp_path (auto-removed); only the login-Keychain
+        # device anchor is real-system residue.
+        with contextlib.suppress(Exception):
+            KeychainAnchorStore().delete(anchor_label)
+
+
+def test_config_decrypt_fail_closed_on_missing_anchor_through_real_enclave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v2-F8 fail-closed on a real Enclave: when config.yaml is marked
+    vault-managed but the device anchor is gone (deletion), the startup
+    materialize refuses (``VaultError``) rather than booting Hermes on a
+    default / stale config.
+    """
+    _require_live_enclave()
+    from mordred_hermes.keyvault import _seckey_helper, vault
+    from mordred_hermes.keyvault._anchor_keychain import KeychainAnchorStore
+    from mordred_hermes.keyvault._config_bootstrap import materialize_config, reseal_config
+    from mordred_hermes.keyvault._identity import vault_identity
+    from mordred_hermes.wizard import config_decrypt_cli, vault_cli
+
+    if _seckey_helper._find_helper() is None:
+        pytest.skip("signed helper not installed; build it via native/sekey-helper/build.sh")
+
+    # time_ns() keeps the vault root — and thus the login-Keychain anchor label —
+    # unique across runs even when pytest recycles a tmp_path number (mirrors the
+    # live_key_id fixture rationale), so a crashed prior run can't block init.
+    home = tmp_path / f"hermes-home-{time.time_ns()}"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("MORDRED_SEKEY_UNATTENDED", "1")
+    root = _config_vault_root(home)
+    anchor_label = vault_identity(root)
+    (home / "config.yaml").write_bytes(b"model: itest\n")
+
+    try:
+        assert vault_cli.init(root=root, prompt_io=_FixedPassphrase("itest-passphrase")) == 0
+        assert config_decrypt_cli.enable(home=home, root=root) == 0
+        assert reseal_config(root=root, home=home) == 1  # plaintext sealed away
+
+        # Simulate device-anchor deletion: the marker still promises a vault-managed
+        # config, so materialize must fail closed (not fall back to a default config).
+        KeychainAnchorStore().delete(anchor_label)
+        with pytest.raises(vault.VaultError):
+            materialize_config(root=root, home=home)
+    finally:
+        with contextlib.suppress(Exception):
+            KeychainAnchorStore().delete(anchor_label)
