@@ -49,11 +49,13 @@ module imports cleanly on Linux / Windows just like ``native.py``.
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
-from typing import Any, Protocol
+import sys
+from typing import Any, Final, Protocol
 
 from . import native
-from ._exceptions import WrapError, WrapKeyNotFound
+from ._exceptions import WrapError, WrapKeyNotFound, WrapNativeUnavailable
 
 # ``_key_id_hash`` is imported deliberately: the Keychain tag MUST use the
 # exact SHA-256 prefix that ``wrap`` binds into the blob's ``key_id_hash``
@@ -184,15 +186,58 @@ _OSSTATUS_ERROR_TABLE: dict[int, NativeErrorCode] = {
     errSecInteractionNotAllowed: "biometry_lockout",
 }
 
+# ---------------------------------------------------------------------------
+# Platform-neutral failure taxonomy (v2-OS2 — Linux TPM / Windows CNG)
+# ---------------------------------------------------------------------------
+#
+# A non-macOS backend helper (TPM, CNG) has no ``OSStatus`` ints. Instead of
+# inventing fake ``errSec*`` values it reports a neutral ``reason`` alongside
+# the failure. When ``_OpsError.reason`` is set, ``_SecKeyBackend`` dispatches
+# purely on it and the numeric ``status`` is ignored; when it is ``None`` the
+# legacy macOS dispatch on ``errSec*`` runs unchanged. The two worlds never
+# mix, so the Secure-Enclave path is byte-for-byte identical to before.
 
-def _translate_error(status: int, domain: str) -> NativeErrorCode:
-    """Translate a raw ``OSStatus`` / ``LAError`` int to a frozen code.
+OPS_NOT_FOUND: Final = "NOT_FOUND"
+OPS_EXISTS: Final = "EXISTS"
+OPS_UNAVAILABLE: Final = "UNAVAILABLE"
+OPS_AUTH_DENIED: Final = "AUTH_DENIED"
+
+# Inbound-validation allow-list: a helper-supplied reason outside this set is
+# normalised to ``None`` (forward-compatible — an older client just loses the
+# neutral shortcut and falls back to the numeric status).
+_OPS_REASONS: Final = frozenset({OPS_NOT_FOUND, OPS_EXISTS, OPS_UNAVAILABLE, OPS_AUTH_DENIED})
+
+# Neutral reason → frozen NativeErrorCode. ``OPS_EXISTS`` is intentionally
+# absent: "already exists" is handled in ``generate_enclave_key`` before any
+# translation, and is not a meaningful ECDH/lookup failure code.
+#
+# ``OPS_UNAVAILABLE`` deliberately collapses to ``auth_failed`` (the
+# conservative default) in Phase 1: the frozen :data:`NativeErrorCode` set
+# has no "hardware went away" member, and no helper emits ``UNAVAILABLE``
+# yet (the TPM helper does not exist until Phase 2). Adding a dedicated
+# ``hardware_unavailable`` code — and routing mid-operation ``UNAVAILABLE``
+# to :class:`WrapNativeUnavailable` instead of :class:`NativeBackendError` —
+# is a SPEC change tracked for Phase 2, when a real helper can exercise it.
+_REASON_ERROR_TABLE: dict[str, NativeErrorCode] = {
+    OPS_NOT_FOUND: "key_not_found",
+    OPS_AUTH_DENIED: "auth_failed",
+    OPS_UNAVAILABLE: "auth_failed",
+}
+
+
+def _translate_error(status: int, domain: str, reason: str | None = None) -> NativeErrorCode:
+    """Translate a raw ``OSStatus`` / ``LAError`` int — or a neutral
+    ``reason`` — to a frozen code.
 
     The frozen set is :data:`mordred_hermes.keyvault.wrap.NativeErrorCode`.
     Raw ints MUST NOT cross the audit boundary (SPEC.md / POLICY.md #20:
     they carry biometric-attempt-count state), so every native failure
-    is collapsed here into one of five closed strings.
+    is collapsed here into one of five closed strings. A non-macOS helper
+    supplies ``reason`` and is dispatched through :data:`_REASON_ERROR_TABLE`,
+    ignoring ``status`` entirely.
     """
+    if reason is not None:
+        return _REASON_ERROR_TABLE.get(reason, _DEFAULT_ERROR_CODE)
     table = _LA_ERROR_TABLE if domain == _LA_ERROR_DOMAIN else _OSSTATUS_ERROR_TABLE
     return table.get(status, _DEFAULT_ERROR_CODE)
 
@@ -200,15 +245,27 @@ def _translate_error(status: int, domain: str) -> NativeErrorCode:
 class _OpsError(Exception):
     """Raised by :class:`_SecKeyOps` to carry a native failure.
 
-    Holds the raw ``status`` int and ``domain`` string only. The
-    translation into the frozen :data:`NativeErrorCode` set happens in
-    :class:`_SecKeyBackend` so the ops layer stays a thin pyobjc shim
-    with no policy. ``status`` never reaches the audit log.
+    Holds the raw ``status`` int and ``domain`` string, plus an optional
+    platform-neutral ``reason`` (one of :data:`_OPS_REASONS`). macOS pyobjc
+    ops leave ``reason=None`` and carry only the ``OSStatus``; a non-macOS
+    helper (TPM / CNG) sets ``reason`` so :class:`_SecKeyBackend` can
+    dispatch without inventing fake ``errSec*`` ints. The translation into
+    the frozen :data:`NativeErrorCode` set happens in
+    :class:`_SecKeyBackend` so the ops layer stays a thin shim with no
+    policy. Neither ``status`` nor ``reason`` reaches the audit log.
     """
 
-    def __init__(self, status: int, domain: str = "OSStatus", message: str = "") -> None:
+    def __init__(
+        self,
+        status: int,
+        domain: str = "OSStatus",
+        message: str = "",
+        *,
+        reason: str | None = None,
+    ) -> None:
         self.status = status
         self.domain = domain
+        self.reason = reason
         super().__init__(message or f"native keychain op failed: domain={domain} status={status}")
 
 
@@ -607,13 +664,18 @@ class _SoftwareFallbackOps:
 
 
 def _default_ops() -> _SecKeyOps:
-    """Pick the SE ops backend: signed helper if present, else pyobjc.
+    """Pick the primary hardware ops for this platform, or fail closed.
 
-    A separately Developer-ID-signed ``mordred-hermes-sekey`` CLI can carry
-    the ``keychain-access-groups`` entitlement that an unsigned Python
-    interpreter cannot, so when it is installed it becomes the real SE path
-    (no software fallback needed). When absent we keep the in-process pyobjc
-    ops, which itself degrades to software P-256 on ``errSecMissingEntitlement``.
+    - **macOS**: a separately Developer-ID- (or ad-hoc-) signed
+      ``mordred-hermes-sekey`` CLI when installed (the real Secure-Enclave
+      path via CryptoKit); otherwise the in-process pyobjc bridge, which
+      itself degrades to software P-256 on ``errSecMissingEntitlement``.
+    - **Linux**: the ``mordred-hermes-tpmkey`` TPM 2.0 helper when
+      installed; otherwise :class:`WrapNativeUnavailable`. There is no
+      software floor off macOS (codex review HIGH) — a host without a
+      usable TPM fails closed rather than silently downgrading to a
+      non-hardware key.
+    - **Other platforms**: not yet supported (v2-OS2 tracks Windows CNG).
 
     The import is function-local to keep the ``_seckey_helper`` ↔
     ``_seckey_backend`` dependency one-directional (``_seckey_helper`` imports
@@ -621,10 +683,68 @@ def _default_ops() -> _SecKeyOps:
     """
     from . import _seckey_helper
 
-    binary = _seckey_helper._find_helper()
-    if binary is not None:
-        return _seckey_helper._HelperSecKeyOps(binary)
-    return _PyobjcSecKeyOps()
+    if sys.platform == "darwin":
+        binary = _seckey_helper._find_helper()
+        if binary is not None:
+            return _seckey_helper._HelperSecKeyOps(binary)
+        return _PyobjcSecKeyOps()
+
+    if sys.platform == "linux":
+        binary = _seckey_helper.find_tpmkey_helper()
+        if binary is not None:
+            return _seckey_helper._HelperSecKeyOps(binary)
+        raise WrapNativeUnavailable(
+            "Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; "
+            "none found (set MORDRED_TPMKEY_HELPER or install it). See v2-OS2."
+        )
+
+    raise WrapNativeUnavailable(
+        f"hardware keyvault backend not available on platform {sys.platform!r} "
+        "(v2-OS2 tracks Windows support)."
+    )
+
+
+def _default_sw_ops() -> _SecKeyOps | None:
+    """The software-fallback namespace partner for the primary ops.
+
+    Only macOS has one: :class:`_SoftwareFallbackOps` persists a software
+    P-256 key in the login Keychain — the degradation path when an unsigned
+    interpreter cannot persist a Secure-Enclave key. Off macOS there is no
+    software namespace; returning ``None`` makes :class:`_SecKeyBackend` fail
+    closed (a missing key is :class:`WrapKeyNotFound`, never a
+    ``Security.framework`` call that would not even import). codex review
+    HIGH: do not route Linux through :class:`_SoftwareFallbackOps`.
+    """
+    if sys.platform == "darwin":
+        return _SoftwareFallbackOps()
+    return None
+
+
+def _is_reason(exc: _OpsError, reason: str, *statuses: int) -> bool:
+    """Whether ``exc`` denotes ``reason``.
+
+    A reason-carrying error (non-macOS helper) is judged purely by its
+    neutral :attr:`_OpsError.reason`; a legacy error (``reason is None`` —
+    macOS pyobjc / ``Security.framework``) is judged by its numeric
+    ``OSStatus``. The two never mix, so the macOS dispatch is unchanged.
+    """
+    if exc.reason is not None:
+        return exc.reason == reason
+    return exc.status in statuses
+
+
+class _UnsetSwOps(enum.Enum):
+    """Sentinel: ``sw_ops`` was not passed → derive the per-platform default.
+
+    A distinct type (not ``None``) so that an explicit ``sw_ops=None`` —
+    "no software namespace, fail closed" — is distinguishable from "caller
+    did not specify" — "use :func:`_default_sw_ops`".
+    """
+
+    SENTINEL = "sentinel"
+
+
+_DEFAULT_SW_OPS: Final = _UnsetSwOps.SENTINEL
 
 
 # ---------------------------------------------------------------------------
@@ -650,14 +770,26 @@ class _SecKeyBackend:
     fakes — without it, the real :class:`_SoftwareFallbackOps` reaches
     ``native._security`` and the flow can only run on macOS.
 
+    ``_sw_ops`` may be ``None`` — there is no software namespace off macOS
+    (see :func:`_default_sw_ops`). When ``None`` the backend **fails closed**:
+    a missing key surfaces as :class:`WrapKeyNotFound` directly, and no
+    ``Security.framework`` call is ever attempted. Not passing ``sw_ops``
+    derives the per-platform default; passing ``sw_ops=None`` explicitly
+    forces fail-closed.
+
     Satisfies the structural :class:`NativeBackend` ``Protocol`` —
     ``isinstance(_SecKeyBackend(), NativeBackend)`` is ``True`` because
     that Protocol is ``@runtime_checkable``.
     """
 
-    def __init__(self, *, ops: _SecKeyOps | None = None, sw_ops: _SecKeyOps | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ops: _SecKeyOps | None = None,
+        sw_ops: _SecKeyOps | None | _UnsetSwOps = _DEFAULT_SW_OPS,
+    ) -> None:
         self._ops: _SecKeyOps = ops if ops is not None else _default_ops()
-        self._sw_ops: _SecKeyOps = sw_ops if sw_ops is not None else _SoftwareFallbackOps()
+        self._sw_ops: _SecKeyOps | None = _default_sw_ops() if isinstance(sw_ops, _UnsetSwOps) else sw_ops
 
     # ----- generate -----
 
@@ -666,24 +798,30 @@ class _SecKeyBackend:
         try:
             return self._ops.create_keypair(_application_tag(key_id), _keychain_label(key_id), unattended=resolved)
         except _OpsError as exc:
-            if exc.status == errSecDuplicateItem:
+            if _is_reason(exc, OPS_EXISTS, errSecDuplicateItem):
                 # SPEC.md: an existing tag surfaces as WrapKeyNotFound so
                 # callers do not need to know the OSStatus. (The name is
                 # historical — "already exists" reuses the not-found
                 # class because both mean "cannot generate here".)
                 raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
-            if exc.status == errSecMissingEntitlement:
-                # Unsigned Python process — fall back to software P-256 key.
+            if self._sw_ops is not None and exc.reason is None and exc.status == errSecMissingEntitlement:
+                # macOS only: unsigned Python cannot persist SE keys — fall
+                # back to a software P-256 key. A reason-carrying helper
+                # (TPM / CNG) never raises this, so the branch is inert
+                # off macOS.
                 return self._generate_software(key_id, unattended=resolved)
             raise WrapError(f"failed to generate Enclave key for {key_id!r}") from exc
 
     def _generate_software(self, key_id: str, *, unattended: bool = False) -> bytes:
+        # Only reached on the macOS entitlement-fallback path (caller guards
+        # ``sw_ops is not None``).
+        assert self._sw_ops is not None
         try:
             return self._sw_ops.create_keypair(
                 _sw_application_tag(key_id), _keychain_label(key_id), unattended=unattended
             )
         except _OpsError as exc:
-            if exc.status == errSecDuplicateItem:
+            if _is_reason(exc, OPS_EXISTS, errSecDuplicateItem):
                 raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
             raise WrapError(f"failed to generate wrapping key for {key_id!r}") from exc
 
@@ -693,12 +831,18 @@ class _SecKeyBackend:
         try:
             return self._ops.copy_public_key(_application_tag(key_id))
         except _OpsError as exc:
-            if exc.status == errSecItemNotFound:
+            if _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
+                if self._sw_ops is None:
+                    # Fail closed: no software namespace off macOS.
+                    raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
                 # Not in SE namespace — try software namespace.
                 return self._get_software_public_key(key_id, exc)
             raise WrapError(f"failed to read Enclave public key for {key_id!r}") from exc
 
     def _get_software_public_key(self, key_id: str, se_exc: _OpsError) -> bytes:
+        # Only reached on the macOS dual-namespace path: the caller already
+        # returned/raised when ``sw_ops is None``, so it is non-None here.
+        assert self._sw_ops is not None
         try:
             return self._sw_ops.copy_public_key(_sw_application_tag(key_id))
         except _OpsError as exc:
@@ -711,11 +855,17 @@ class _SecKeyBackend:
     def delete_enclave_key(self, key_id: str) -> None:
         # Attempt SE delete; suppress errSecMissingEntitlement — unsigned
         # Python cannot delete SE items (key was stored under SW prefix).
+        # That suppression is macOS-only (reason is None); any reason-carrying
+        # helper error propagates.
         try:
             self._ops.delete_key(_application_tag(key_id))
         except _OpsError as exc:
-            if exc.status != errSecMissingEntitlement:
+            if not (exc.reason is None and exc.status == errSecMissingEntitlement):
                 raise WrapError(f"failed to delete Enclave key for {key_id!r}") from exc
+
+        # No software namespace off macOS — nothing more to delete.
+        if self._sw_ops is None:
+            return
 
         # Always attempt SW delete (idempotent — errSecItemNotFound = success).
         try:
@@ -729,19 +879,25 @@ class _SecKeyBackend:
         try:
             return self._ops.key_exchange(_application_tag(key_id), peer_pub)
         except _OpsError as exc:
-            if exc.status == errSecItemNotFound:
+            if _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
+                if self._sw_ops is None:
+                    # Fail closed: no software namespace off macOS.
+                    raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
                 # Key not in SE namespace — try software namespace.
                 return self._ecdh_software(key_id, peer_pub, exc)
-            code = _translate_error(exc.status, exc.domain)
+            code = _translate_error(exc.status, exc.domain, exc.reason)
             if code == "key_not_found":
                 raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
             raise NativeBackendError(code) from exc
 
     def _ecdh_software(self, key_id: str, peer_pub: bytes, se_exc: _OpsError) -> bytes:
+        # Only reached on the macOS dual-namespace path: the caller already
+        # raised when ``sw_ops is None``, so ``_sw_ops`` is non-None here.
+        assert self._sw_ops is not None
         try:
             return self._sw_ops.key_exchange(_sw_application_tag(key_id), peer_pub)
         except _OpsError as exc:
-            code = _translate_error(exc.status, exc.domain)
+            code = _translate_error(exc.status, exc.domain, exc.reason)
             if code == "key_not_found":
                 # Neither SE nor SW namespace has this key.
                 raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from se_exc
@@ -751,16 +907,31 @@ class _SecKeyBackend:
 def probe_capability() -> bool:
     """Generate-then-delete a throwaway key with no biometry flag.
 
-    When the signed ``mordred-hermes-sekey`` helper is installed, probe
-    through it — it is the real SE path and a success there proves hardware
-    capability. Otherwise try in-process pyobjc Secure Enclave; if the
-    process lacks the entitlement to persist SE keys
-    (``errSecMissingEntitlement``, -34018 — unsigned Python on macOS 15+),
-    fall back to a software P-256 key in the login Keychain. Returns ``True``
-    when a round-trip succeeds. Raises on any other failure so
-    :func:`native.is_secure_enclave_available` can swallow it into ``False``.
+    Platform-aware, mirroring :func:`_default_ops`:
+
+    - **macOS**: probe through the signed ``mordred-hermes-sekey`` helper
+      when installed (the real SE path); otherwise in-process pyobjc
+      Secure Enclave, degrading to a software P-256 key in the login
+      Keychain on ``errSecMissingEntitlement`` (-34018 — unsigned Python on
+      macOS 15+).
+    - **Linux**: probe through the ``mordred-hermes-tpmkey`` TPM 2.0 helper
+      when installed; otherwise :class:`WrapNativeUnavailable` (no software
+      floor off macOS).
+
+    Returns ``True`` when a round-trip succeeds. Raises on any other failure
+    so :func:`native.is_secure_enclave_available` can swallow it into
+    ``False``.
     """
     from . import _seckey_helper
+
+    if sys.platform == "linux":
+        binary = _seckey_helper.find_tpmkey_helper()
+        if binary is not None:
+            _seckey_helper._HelperSecKeyOps(binary).probe()
+            return True
+        raise WrapNativeUnavailable(
+            "Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; none found."
+        )
 
     binary = _seckey_helper._find_helper()
     if binary is not None:

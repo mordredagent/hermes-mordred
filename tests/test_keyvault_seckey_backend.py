@@ -349,14 +349,16 @@ def test_unwrap_denial_emits_audit_through_seckey_backend(ops: _FakeOps, backend
 
 
 def test_probe_capability_raises_native_unavailable_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On non-Darwin, ``probe_capability`` reaches ``_lazy_import_security``
-    which short-circuits to ``WrapNativeUnavailable``. ``native.is_secure_
-    enclave_available`` swallows that into ``False`` — verified in
-    ``test_keyvault_native.py``; here we confirm the raise contract.
+    """On Linux with no TPM helper, ``probe_capability`` fails closed with
+    ``WrapNativeUnavailable`` (the dedicated Linux branch raises before ever
+    touching ``_lazy_import_security``). ``native.is_secure_enclave_available``
+    swallows that into ``False`` — verified in ``test_keyvault_native.py``;
+    here we confirm the raise contract.
 
-    The helper is patched out so the platform check is reached regardless
-    of whether ``mordred-hermes-sekey`` is installed on the test machine.
-    """
+    Both helpers are patched out so the platform check is reached regardless
+    of whether ``mordred-hermes-tpmkey`` is installed on the test machine
+    (without the ``find_tpmkey_helper`` patch this test would try to exec a
+    real helper if one happened to be installed)."""
     import sys
 
     import mordred_hermes.keyvault.native as native
@@ -365,6 +367,7 @@ def test_probe_capability_raises_native_unavailable_off_macos(monkeypatch: pytes
     monkeypatch.setattr(native, "_security_module", None)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(_seckey_helper, "_find_helper", lambda: None)
+    monkeypatch.setattr(_seckey_helper, "find_tpmkey_helper", lambda: None)
     with pytest.raises(WrapNativeUnavailable):
         probe_capability()
 

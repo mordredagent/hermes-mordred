@@ -33,10 +33,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ._seckey_backend import _OpsError
+from ._seckey_backend import _OPS_REASONS, _OpsError
 
 # Helper executable name (as installed by native/sekey-helper/build.sh).
 _HELPER_NAME = "mordred-hermes-sekey"
+
+# Linux TPM 2.0 helper executable name (native/tpmkey-helper/build.sh). It
+# speaks the identical JSON-over-stdio protocol as the Secure-Enclave helper,
+# so :class:`_HelperSecKeyOps` drives either one unchanged.
+_TPM_HELPER_NAME = "mordred-hermes-tpmkey"
 
 # Wall-clock budget for a single helper invocation. Generous because the
 # ``ecdh`` command blocks on the Touch ID / passcode system prompt — the user
@@ -45,28 +50,48 @@ _HELPER_NAME = "mordred-hermes-sekey"
 _TIMEOUT_SECONDS = 120.0
 
 
-def _find_helper() -> str | None:
-    """Locate the signed helper binary, or ``None`` if unavailable.
+def _find_named_helper(env_var: str, name: str) -> str | None:
+    """Locate a helper binary by env override, then ``~/.local/bin``, then PATH.
 
-    Resolution order:
+    The resolution order is identical for every backend helper (Secure
+    Enclave, TPM, …) — only the env-var name and binary name differ:
 
-    1. ``MORDRED_SEKEY_HELPER`` — an explicit absolute path. When set it is
+    1. ``env_var`` — an explicit absolute path. When set it is
        authoritative: a missing target yields ``None`` (we do NOT silently
        fall through to the default search, so a typo surfaces as "no helper"
        rather than picking up a different binary).
-    2. ``~/.local/bin/mordred-hermes-sekey`` — the default install location.
-    3. ``mordred-hermes-sekey`` on ``PATH``.
+    2. ``~/.local/bin/<name>`` — the default install location.
+    3. ``<name>`` on ``PATH``.
     """
-    env = os.environ.get("MORDRED_SEKEY_HELPER")
+    env = os.environ.get(env_var)
     if env:
         path = Path(env).expanduser()
         return str(path) if path.is_file() else None
 
-    local = Path.home() / ".local" / "bin" / _HELPER_NAME
+    local = Path.home() / ".local" / "bin" / name
     if local.is_file():
         return str(local)
 
-    return shutil.which(_HELPER_NAME)
+    return shutil.which(name)
+
+
+def find_sekey_helper() -> str | None:
+    """Locate the macOS Secure-Enclave helper (``mordred-hermes-sekey``)."""
+    return _find_named_helper("MORDRED_SEKEY_HELPER", _HELPER_NAME)
+
+
+def find_tpmkey_helper() -> str | None:
+    """Locate the Linux TPM 2.0 helper (``mordred-hermes-tpmkey``)."""
+    return _find_named_helper("MORDRED_TPMKEY_HELPER", _TPM_HELPER_NAME)
+
+
+# Back-compat alias: the original Secure-Enclave-only locator. Production
+# callers (``_default_ops``, ``probe_capability``) and tests still reference
+# ``_find_helper`` / monkeypatch it, so it remains exactly
+# ``find_sekey_helper``.
+def _find_helper() -> str | None:
+    """Deprecated alias for :func:`find_sekey_helper` (back-compat)."""
+    return find_sekey_helper()
 
 
 def _locate_helper_source() -> Path | None:
@@ -98,6 +123,20 @@ def _locate_helper_source() -> Path | None:
     except (ModuleNotFoundError, TypeError, OSError):
         pass
     return None
+
+
+def _normalize_reason(value: Any) -> str | None:
+    """Validate a helper-supplied ``reason`` against the neutral taxonomy.
+
+    Returns the value only when it is a recognised member of
+    :data:`mordred_hermes.keyvault._seckey_backend._OPS_REASONS`
+    (``NOT_FOUND`` / ``EXISTS`` / ``UNAVAILABLE`` / ``AUTH_DENIED``);
+    anything else — including ``None`` or an unknown future reason —
+    becomes ``None`` so dispatch falls back to the numeric status. This
+    keeps an older client forward-compatible: a helper may add reasons
+    without breaking it (it just loses the neutral shortcut).
+    """
+    return value if isinstance(value, str) and value in _OPS_REASONS else None
 
 
 def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -139,6 +178,7 @@ def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
             int(error.get("status", -1)),
             str(error.get("domain", "helper")),
             str(error.get("message", "")),
+            reason=_normalize_reason(error.get("reason")),
         )
 
     if proc.returncode != 0:
