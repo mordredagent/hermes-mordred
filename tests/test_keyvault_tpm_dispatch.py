@@ -236,9 +236,7 @@ def test_default_ops_linux_without_tpm_helper_fails_closed(monkeypatch: pytest.M
         _default_ops()
 
 
-def test_default_ops_linux_with_tpm_helper_uses_helper_ops(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_default_ops_linux_with_tpm_helper_uses_helper_ops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = tmp_path / "mordred-hermes-tpmkey"
     fake.write_text("#!/bin/sh\n")
     monkeypatch.setattr(sys, "platform", "linux")

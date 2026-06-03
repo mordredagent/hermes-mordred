@@ -10,6 +10,7 @@ HKDF / AES-KW / wire-format paths run with real crypto (not mocks).
 
 from __future__ import annotations
 
+import sys
 from typing import Any, ClassVar
 
 import pytest
@@ -372,6 +373,18 @@ def test_probe_capability_raises_native_unavailable_off_macos(monkeypatch: pytes
         probe_capability()
 
 
+# These two assert the *macOS* default-ops wiring (no explicit ``ops=``), so
+# they exercise the Darwin branch of ``_default_ops()``. Off Darwin that branch
+# fails closed with ``WrapNativeUnavailable`` (no TPM helper) — the Linux wiring
+# is covered instead by ``test_keyvault_tpm_dispatch.py``. Skip rather than
+# fail on non-macOS CI.
+_macos_only = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="macOS default-ops wiring; Linux fail-closed branch covered in test_keyvault_tpm_dispatch.py",
+)
+
+
+@_macos_only
 def test_pyobjc_ops_is_default_backend_ops_no_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     """When the signed helper is absent, ``_SecKeyBackend()`` wires the
     in-process pyobjc bridge (``_PyobjcSecKeyOps``)."""
@@ -382,6 +395,7 @@ def test_pyobjc_ops_is_default_backend_ops_no_helper(monkeypatch: pytest.MonkeyP
     assert isinstance(real._ops, _PyobjcSecKeyOps)
 
 
+@_macos_only
 def test_helper_ops_is_default_backend_ops_when_helper_present(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """When the signed helper is present, ``_SecKeyBackend()`` wires
     ``_HelperSecKeyOps`` instead of ``_PyobjcSecKeyOps``."""

@@ -699,8 +699,7 @@ def _default_ops() -> _SecKeyOps:
         )
 
     raise WrapNativeUnavailable(
-        f"hardware keyvault backend not available on platform {sys.platform!r} "
-        "(v2-OS2 tracks Windows support)."
+        f"hardware keyvault backend not available on platform {sys.platform!r} (v2-OS2 tracks Windows support)."
     )
 
 
@@ -929,9 +928,7 @@ def probe_capability() -> bool:
         if binary is not None:
             _seckey_helper._HelperSecKeyOps(binary).probe()
             return True
-        raise WrapNativeUnavailable(
-            "Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; none found."
-        )
+        raise WrapNativeUnavailable("Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; none found.")
 
     binary = _seckey_helper._find_helper()
     if binary is not None:
