@@ -25,6 +25,7 @@ must reconstruct everything from the passphrase-protected manifest.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -388,3 +389,52 @@ def test_backup_exported_is_now_in_freeze() -> None:
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
     assert "keyvault.backup_exported" in get_args(ReasonCode)
+
+
+class TestImportBackupManifestValidation:
+    """``import_backup`` must reject a structurally-malformed (but AES-GCM-
+    authenticated) manifest with ``BackupCorrupt`` BEFORE generating the
+    destination Enclave key — not propagate a raw ``KeyError`` / ``TypeError``
+    and generate-then-roll-back a phantom key.
+    """
+
+    def _import_crafted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        manifest_json: bytes,
+        backend: FakeBackend,
+    ) -> str:
+        # Bypass the real recovery (digest verify + AES-GCM decrypt) so the
+        # crafted manifest reaches api's post-decrypt validation directly.
+        monkeypatch.setattr(api.recovery, "import_backup", lambda *a, **k: manifest_json)
+        return api.import_backup(
+            b"dummy-blob",
+            "passphrase",
+            seed_phrase="abandon " * 24,
+            pow_bytes=b"\x00" * 32,
+            backend=backend,
+            audit_sink=lambda e: None,
+            home=tmp_path,
+        )
+
+    def test_missing_key_id_is_backup_corrupt(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        bad = json.dumps({"version": 1, "envelopes": []}).encode("utf-8")
+        with pytest.raises(BackupCorrupt):
+            self._import_crafted(monkeypatch, tmp_path, bad, backend)
+        assert backend.calls == [], "no Enclave key may be generated for a malformed manifest"
+
+    def test_envelopes_not_a_list_is_backup_corrupt(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        bad = json.dumps({"version": 1, "key_id": "default", "envelopes": "nope"}).encode("utf-8")
+        with pytest.raises(BackupCorrupt):
+            self._import_crafted(monkeypatch, tmp_path, bad, backend)
+        assert backend.calls == []
+
+    def test_key_id_not_str_is_backup_corrupt(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        bad = json.dumps({"version": 1, "key_id": 123, "envelopes": []}).encode("utf-8")
+        with pytest.raises(BackupCorrupt):
+            self._import_crafted(monkeypatch, tmp_path, bad, backend)
+        assert backend.calls == []

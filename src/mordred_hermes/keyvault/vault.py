@@ -56,6 +56,7 @@ installed.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 from pathlib import Path
 from types import TracebackType
@@ -374,7 +375,7 @@ class OpenVault:
             blob = safe_read(bpath)
         except FileNotFoundError as e:
             raise VaultError(f"ciphertext blob for {name!r} is missing (digest {digest})") from e
-        if hashlib.sha256(blob).hexdigest() != digest:
+        if not hmac.compare_digest(hashlib.sha256(blob).hexdigest(), digest):
             raise VaultError(f"ciphertext blob for {name!r} does not match its content address — rejected")
         try:
             return file_container.decode(blob, self._master, name=name)
@@ -420,7 +421,7 @@ class OpenVault:
             # require a reopen.
             pinned = anchor.read_anchor(store, self._label)
             stale_generation = pinned.generation != self._manifest.generation
-            wmk_changed = pinned.wmk_sha256 != anchor.wmk_fingerprint(self._wmk)
+            wmk_changed = not hmac.compare_digest(pinned.wmk_sha256, anchor.wmk_fingerprint(self._wmk))
             if stale_generation or wmk_changed:
                 raise VaultError(
                     f"stale vault handle: in-memory generation {self._manifest.generation} no longer matches the "

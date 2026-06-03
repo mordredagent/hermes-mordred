@@ -1,8 +1,8 @@
 """Tor path — drives the official ``tor`` daemon as a child subprocess.
 
-PR1 scope: rendering, port allocation, bootstrap wait, lifecycle. PR2 will
-add the richer control-port liveness probe (``GETINFO circuit-status`` via
-``stem`` — TODO §3.1 L300) and wire :func:`start_process` into
+Covers rendering, port allocation, bootstrap wait, and lifecycle, plus the
+richer control-port liveness probe (``GETINFO circuit-status`` via ``stem`` —
+:func:`circuit_status_health`) and the wiring of :func:`start_process` into
 :mod:`mordred_hermes.network.runtime`.
 
 Subprocess and socket I/O are factored through injectable callables so

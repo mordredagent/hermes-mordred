@@ -97,11 +97,12 @@ _DEFAULT_KEY_ID = "default"
 
 # ----------------------------- SeedDisplayHandle (PR4 step-D) -----------------------------
 # Opaque-class contract frozen in SPEC.md §"PR4 API contract / SeedDisplayHandle
-# (opaque, codex BLOCKER #3)". PR5 will relocate this class to ``seed_display.py``
-# and layer screen-blackout / 60s timer / screenshot detection on top; the
-# external contract (slots, redacted repr, raising __eq__, __hash__ = None,
-# one-shot consume() with in-place wipe + deadline guard) MUST hold verbatim
-# after the relocation.
+# (opaque, codex BLOCKER #3)". The class stays here in api.py (kept to avoid
+# breaking api.py consumers — PR7 decision); the screen-blackout / 60s timer /
+# screenshot-detection flow that consumes it lives in ``seed_display.py``
+# (:func:`display_seed`). The external contract (slots, redacted repr, raising
+# __eq__, __hash__ = None, one-shot consume() with in-place wipe + deadline
+# guard) holds verbatim.
 
 
 class SeedDisplayExpired(Exception):
@@ -398,9 +399,9 @@ def prepare_generate(
         A tuple of ``(handle, expected_digest)``:
 
         - ``handle``: opaque :class:`SeedDisplayHandle` holding the
-          normalized seed bytes with a default 60s deadline. PR5 will
-          consume this handle through the screen-blackout / 60s timer /
-          screenshot-detection display flow.
+          normalized seed bytes with a default 60s deadline.
+          ``seed_display.display_seed`` consumes this handle through the
+          screen-blackout / 60s timer / screenshot-detection display flow.
         - ``expected_digest``: 32-byte BLAKE3 digest. The user verifies
           this against the digest computed independently on the offline
           medium, then passes it back to :func:`confirm_generate` /
@@ -984,6 +985,16 @@ def export_backup(
 
     out = backup.export(manifest_json, passphrase, verification_digest=verification_digest)
 
+    # Best-effort memory hygiene: every unwrapped DEK is now sealed inside
+    # ``out``. Python cannot zero immutable ``bytes`` / ``str``, but dropping
+    # the plaintext manifest and the per-entry ``dek_hex`` strings shortens
+    # their heap lifetime instead of pinning all DEKs for the whole call.
+    envelope_count = len(entries)
+    for _entry in entries:
+        _entry.clear()
+    entries.clear()
+    del manifest_json
+
     # Success-path emit — the blob is already built, so a sink failure must
     # not lose it (POLICY.md #24: suppress via contextlib.suppress).
     with contextlib.suppress(Exception):
@@ -995,7 +1006,7 @@ def export_backup(
                 "key_id_hash": wrap._audit_key_id_hex(key_id),
                 "blob_version": backup.VERSION,
                 "kdf_id": backup.KDF_ID_ARGON2ID,
-                "envelope_count": len(entries),
+                "envelope_count": envelope_count,
             }
         )
     return out
@@ -1059,8 +1070,17 @@ def import_backup(
     manifest = json.loads(manifest_json)
     if not isinstance(manifest, dict) or manifest.get("version") != _MANIFEST_VERSION:
         raise BackupCorrupt("unsupported or malformed backup manifest")
-    imported_key_id: str = manifest["key_id"]
-    envelopes: list[dict[str, str]] = manifest["envelopes"]
+    # Validate the authenticated manifest's shape BEFORE generating the
+    # destination Enclave key (below): a malformed field must fail closed as
+    # BackupCorrupt, not raise a raw KeyError/TypeError that generates and
+    # then rolls back a phantom Enclave key (security review finding).
+    imported_key_id = manifest.get("key_id")
+    if not isinstance(imported_key_id, str) or not imported_key_id:
+        raise BackupCorrupt("backup manifest missing or invalid 'key_id'")
+    envelopes_raw = manifest.get("envelopes")
+    if not isinstance(envelopes_raw, list):
+        raise BackupCorrupt("backup manifest missing or invalid 'envelopes'")
+    envelopes: list[dict[str, str]] = envelopes_raw
 
     root = _storage.resolve_keyvault_dir(home)
     _storage.ensure_layout(root)

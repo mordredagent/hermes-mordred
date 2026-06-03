@@ -34,6 +34,7 @@ Both pinned values are non-secret, so storing them in the clear is fine.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
@@ -191,7 +192,7 @@ def verify_anchor(store: AnchorStore, label: str, *, wmk: bytes, generation: int
         AnchorMismatch: the wmk fingerprint or generation does not match.
     """
     pinned = read_anchor(store, label)
-    if pinned.wmk_sha256 != wmk_fingerprint(wmk):
+    if not hmac.compare_digest(pinned.wmk_sha256, wmk_fingerprint(wmk)):
         raise AnchorMismatch("wmk fingerprint does not match the device-bound anchor")
     if pinned.generation != generation:
         raise AnchorMismatch(

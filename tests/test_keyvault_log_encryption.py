@@ -512,3 +512,25 @@ def test_legacy_plaintext_file_is_rotated_aside(
     blob = rotated[0]
     data = gzip.decompress(blob.read_bytes()) if blob.suffix == ".gz" else blob.read_bytes()
     assert b"legacy.entry" in data
+
+
+def test_close_zeroes_the_dek_buffer(log_path: Path, backend: FakeBackend) -> None:
+    """Security (defense-in-depth): ``close()`` must wipe the audit-log DEK in
+    place, not merely drop the reference.
+
+    The DEK is long-lived — held for the active file's whole lifetime, across
+    many appends — so a non-zeroable ``bytes`` would linger in the heap until
+    GC. Mirroring ``kek.MasterKey``, the writer keeps it in a ``bytearray`` and
+    zeroes it on ``close()``.
+    """
+    w = le.EncryptedWriter(log_path, backend=backend)
+    w.append({"event": "keyvault.unwrap_authorized", "decision": "allow"})
+    captured = w._dek  # hold a reference to the underlying key buffer
+    assert captured is not None
+    assert isinstance(captured, bytearray), "DEK must be kept in a zeroable bytearray"
+    assert any(captured), "precondition: a freshly minted DEK is not all-zero"
+
+    w.close()
+
+    assert not any(captured), "DEK buffer must be zeroed in place on close(), not just dereferenced"
+    assert w._dek is None

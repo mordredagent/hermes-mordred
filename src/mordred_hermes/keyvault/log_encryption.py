@@ -205,7 +205,7 @@ class EncryptedWriter:
         # ``None`` => no active encrypted file yet (lazy: created on first
         # append and after each rotation). The plaintext DEK lives here for
         # the active file's lifetime; the wrapped form is on disk.
-        self._dek: bytes | None = None
+        self._dek: bytearray | None = None
         self._aad = b""
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -230,17 +230,26 @@ class EncryptedWriter:
                 os.close(fd)
 
     def close(self) -> None:
-        """Drop the in-memory DEK reference.
+        """Zero and drop the in-memory DEK.
 
-        ``bytes`` is immutable so the key cannot be zeroed in place; the
-        at-rest protection is the keyvault wrapping. Dropping the
-        reference lets the DEK be garbage-collected once no entry write
-        is in flight. Kept for the ``Writer`` Protocol contract — each
-        ``append`` already opens and closes its own fd.
+        The DEK lives in a ``bytearray`` (see :meth:`_active`) so it is wiped
+        in place here — the long-lived audit-log key is scrubbed from the heap
+        rather than merely dereferenced. Kept for the ``Writer`` Protocol
+        contract — each ``append`` already opens and closes its own fd.
         """
         with self._lock:
-            self._dek = None
-            self._aad = b""
+            self._wipe_dek()
+
+    def _wipe_dek(self) -> None:
+        """Zero the DEK buffer in place (it is a ``bytearray``), then drop it.
+
+        Caller must hold ``self._lock``. Mirrors ``kek.MasterKey``'s wipe so
+        the audit-log DEK is scrubbed, not just dereferenced.
+        """
+        if self._dek is not None:
+            self._dek[:] = bytes(len(self._dek))
+        self._dek = None
+        self._aad = b""
 
     # -- internals ---------------------------------------------------------
 
@@ -253,13 +262,13 @@ class EncryptedWriter:
         rotated aside first so it is preserved, not clobbered.
         """
         if self._dek is not None:
-            return self._dek, self._aad
+            return bytes(self._dek), self._aad
 
         if self.path.exists():
             self._rotate(_today_utc_date())
 
-        dek = os.urandom(DEK_LEN)
-        wrapped = wrap_dek(dek, self.key_id, backend=self.backend)
+        dek = bytearray(os.urandom(DEK_LEN))
+        wrapped = wrap_dek(bytes(dek), self.key_id, backend=self.backend)
         header = {
             "fmt": MAGIC.decode("ascii"),
             "ver": FORMAT_VERSION,
@@ -280,7 +289,7 @@ class EncryptedWriter:
 
         self._dek = dek
         self._aad = aad
-        return dek, aad
+        return bytes(dek), aad
 
     def _maybe_rotate(self, incoming_bytes: int) -> None:
         """Rotate the active file on a UTC date change or a size-cap breach.
@@ -293,16 +302,14 @@ class EncryptedWriter:
         today = _today_utc_date()
         if self._last_date and self._last_date != today and self._dek is not None and self.path.exists():
             self._rotate(self._last_date)
-            self._dek = None
-            self._aad = b""
+            self._wipe_dek()
         elif (
             self._dek is not None
             and self.path.exists()
             and self.path.stat().st_size + incoming_bytes > self.rotate_bytes
         ):
             self._rotate(today)
-            self._dek = None
-            self._aad = b""
+            self._wipe_dek()
         self._last_date = today
 
     def _rotate(self, date_suffix: str) -> None:
