@@ -125,6 +125,49 @@ def _locate_helper_source() -> Path | None:
     return None
 
 
+def _is_tpmkey_source(candidate: Path) -> bool:
+    """True when ``candidate`` is a genuine ``mordred-hermes-tpmkey`` crate.
+
+    ``enable_tpm`` *executes* the ``build.sh`` that :func:`_locate_tpmkey_source`
+    resolves to, so matching on ``build.sh`` alone would let a writable ancestor
+    (e.g. ``/tmp/native/tpmkey-helper/build.sh``) hijack the build. Require the
+    Cargo manifest with the expected package name and the Rust entry point too,
+    so a bare planted ``build.sh`` is rejected.
+    """
+    manifest = candidate / "Cargo.toml"
+    if not ((candidate / "build.sh").is_file() and manifest.is_file() and (candidate / "src" / "main.rs").is_file()):
+        return False
+    try:
+        return f'name = "{_TPM_HELPER_NAME}"' in manifest.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def _locate_tpmkey_source() -> Path | None:
+    """Locate the ``tpmkey-helper`` Rust source tree (``build.sh`` + Cargo crate).
+
+    Mirror of :func:`_locate_helper_source` for the Linux TPM 2.0 helper
+    (``native/tpmkey-helper``). ``hermes mordred keyvault enable-tpm`` builds it
+    from source, so it must find the directory before invoking ``build.sh``.
+    Resolution: a ``native/tpmkey-helper`` source checkout, then a bundled
+    ``_native/tpmkey-helper`` wheel copy. Each candidate is validated by
+    :func:`_is_tpmkey_source` so a decoy ``build.sh`` cannot hijack the build.
+    """
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "native" / "tpmkey-helper"
+        if _is_tpmkey_source(candidate):
+            return candidate
+    try:
+        from importlib.resources import files
+
+        packaged = Path(str(files("mordred_hermes").joinpath("_native", "tpmkey-helper")))
+        if _is_tpmkey_source(packaged):
+            return packaged
+    except (ModuleNotFoundError, TypeError, OSError):
+        pass
+    return None
+
+
 def _normalize_reason(value: Any) -> str | None:
     """Validate a helper-supplied ``reason`` against the neutral taxonomy.
 

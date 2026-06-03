@@ -51,3 +51,19 @@ def test_wheel_excludes_swift_build_artifacts(tmp_path: Path) -> None:
     names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
     assert not any(".build/" in n for n in names), "Swift .build/ artifacts must not ship in the wheel"
     assert not any(n.endswith(".o") for n in names), "object files must not ship in the wheel"
+
+
+#: Destination prefix the wheel must expose for the TPM helper sources (v2-OS2 2c).
+_TPMKEY_WHEEL_PREFIX = "mordred_hermes/_native/tpmkey-helper/"
+
+
+def test_wheel_bundles_tpmkey_helper_sources(tmp_path: Path) -> None:
+    names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
+    assert _TPMKEY_WHEEL_PREFIX + "build.sh" in names
+    assert _TPMKEY_WHEEL_PREFIX + "Cargo.toml" in names
+    assert any(n.startswith(_TPMKEY_WHEEL_PREFIX + "src/") and n.endswith("main.rs") for n in names)
+
+
+def test_wheel_excludes_rust_target_artifacts(tmp_path: Path) -> None:
+    names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
+    assert not any("tpmkey-helper/target/" in n for n in names), "Rust target/ artifacts must not ship in the wheel"

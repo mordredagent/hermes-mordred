@@ -43,11 +43,13 @@ if TYPE_CHECKING:
 __all__ = [
     "TerminalSeedSurface",
     "cli_enable_se",
+    "cli_enable_tpm",
     "cli_init",
     "cli_list",
     "cli_recover",
     "cli_verify_digest",
     "enable_se",
+    "enable_tpm",
     "init_keyvault",
     "list_keys",
     "recover",
@@ -661,3 +663,166 @@ def cli_enable_se(args: argparse.Namespace) -> int:
     install_dir = Path(args.install_dir) if getattr(args, "install_dir", None) else None
     unattended = True if getattr(args, "unattended", False) else None
     return enable_se(install_dir=install_dir, unattended=unattended)
+
+
+# -----------------------------------------------------------------------------
+# enable-tpm — build + install the Linux TPM 2.0 helper (v2-OS2 Phase 2c).
+#
+# The Linux counterpart to enable-se: builds the ``mordred-hermes-tpmkey`` Rust
+# helper (``native/tpmkey-helper``) and verifies it. The TPM is Tier 2
+# (machine-bound) — the key cannot leave the chip, but there is no per-use
+# user-presence gate, so (unlike enable-se) there is no ``--unattended`` flag.
+# Each step is a module-level seam so the orchestration is unit-testable with
+# no Rust toolchain and no TPM.
+# -----------------------------------------------------------------------------
+
+
+def _tpm_platform_reason() -> str | None:
+    """Return why the TPM helper can't be built here, or ``None`` when it can.
+
+    The ``tss-esapi`` / libtss2 backend is Linux-only (Windows TPM via CNG is a
+    separate future helper). A coarse ``Linux`` guard is enough; true TPM
+    *presence* is confirmed by the post-install probe.
+    """
+    import platform
+
+    if platform.system() != "Linux":
+        return f"TPM 2.0 keyvault requires Linux (this host is {platform.system() or 'unknown'})"
+    return None
+
+
+def _missing_tpm_build_tools() -> list[str]:
+    """Return the build tools (``cargo``) not found on ``PATH``."""
+    import shutil
+
+    return [tool for tool in ("cargo",) if shutil.which(tool) is None]
+
+
+def _locate_tpmkey_source() -> Path | None:
+    """Locate the ``tpmkey-helper`` source tree (delegates to ``_seckey_helper``)."""
+    from ..keyvault import _seckey_helper
+
+    return _seckey_helper._locate_tpmkey_source()
+
+
+def _run_tpmkey_build(src: Path, *, install_dir: Path | None) -> tuple[int, str]:
+    """Run ``build.sh`` in ``src``; return ``(returncode, combined_output)``.
+
+    ``install_dir`` is forwarded as ``MORDRED_TPMKEY_INSTALL_DIR``. The TPM is
+    Tier 2 with no per-use gate, so there is no ``unattended`` env var (cf.
+    :func:`_run_sekey_build`).
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    if install_dir is not None:
+        env["MORDRED_TPMKEY_INSTALL_DIR"] = str(install_dir)
+    try:
+        proc = subprocess.run(
+            ["bash", str(src / "build.sh")],
+            cwd=str(src),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, f"failed to run build.sh: {exc}"
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _verify_tpmkey_helper(*, install_dir: Path | None = None) -> bool:
+    """Probe the freshly-installed helper to confirm TPM access.
+
+    When ``install_dir`` is given (``enable-tpm --install-dir``), the binary
+    just installed there is preferred — ``find_tpmkey_helper`` only searches
+    ``MORDRED_TPMKEY_HELPER`` / ``~/.local/bin`` / ``PATH``, so a custom,
+    not-on-PATH install dir would otherwise yield a false verification failure.
+    """
+    from ..keyvault import _seckey_helper
+
+    binary: str | None = None
+    if install_dir is not None:
+        candidate = install_dir / _seckey_helper._TPM_HELPER_NAME
+        if candidate.is_file():
+            binary = str(candidate)
+    if binary is None:
+        binary = _seckey_helper.find_tpmkey_helper()
+    if binary is None:
+        return False
+    try:
+        _seckey_helper._HelperSecKeyOps(binary).probe()
+        return True
+    except Exception:
+        return False
+
+
+def enable_tpm(
+    *,
+    install_dir: Path | None = None,
+    home: Path | None = None,
+) -> int:
+    """Build + install the TPM helper, then verify it works.
+
+    Returns ``0`` on success, ``1`` on any guard / build / verify failure. On
+    failure the keyvault keeps using the software P-256 fallback, so the
+    at-rest guarantee never downgrades. ``home`` is accepted for symmetry with
+    the other keyvault commands; the helper resolves its key-blob store from
+    ``HERMES_HOME`` itself.
+    """
+    del home  # the helper resolves its store via HERMES_HOME; accepted for symmetry
+
+    reason = _tpm_platform_reason()
+    if reason is not None:
+        print(f"error: {reason}", file=sys.stderr)
+        return 1
+
+    missing = _missing_tpm_build_tools()
+    if missing:
+        print(
+            f"error: missing build tool(s): {', '.join(missing)}. "
+            "Install the Rust toolchain first (https://rustup.rs).",
+            file=sys.stderr,
+        )
+        return 1
+
+    src = _locate_tpmkey_source()
+    if src is None:
+        print(
+            "error: could not locate the tpmkey-helper sources (native/tpmkey-helper). "
+            "Build from a source checkout of mordred-hermes.",
+            file=sys.stderr,
+        )
+        return 1
+
+    rc, output = _run_tpmkey_build(src, install_dir=install_dir)
+    if rc != 0:
+        print(f"error: tpmkey-helper build failed:\n{output}", file=sys.stderr)
+        return 1
+
+    if not _verify_tpmkey_helper(install_dir=install_dir):
+        print(
+            "error: helper installed but the TPM probe did not succeed, so no "
+            "hardware key is active. On Linux the keyvault fails closed (there is "
+            "no software fallback off macOS), so keyvault operations needing a "
+            "hardware key error until a working helper is in place. Note: the "
+            "v2-OS2 Phase 2a helper has no TPM backend yet — that lands in Phase "
+            "2b — so this failure is expected until then.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(output.strip() or "TPM 2.0 helper installed.")
+    print("Hardware TPM 2.0 is now active for the keyvault.")
+    return 0
+
+
+def cli_enable_tpm(args: argparse.Namespace) -> int:
+    """argparse handler for ``keyvault enable-tpm [--install-dir P]``.
+
+    The TPM is Tier 2 (machine-bound) with no per-use gate, so there is no
+    ``--unattended`` flag (cf. :func:`cli_enable_se`).
+    """
+    install_dir = Path(args.install_dir) if getattr(args, "install_dir", None) else None
+    return enable_tpm(install_dir=install_dir)

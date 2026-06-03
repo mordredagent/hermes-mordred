@@ -205,3 +205,52 @@ class TestEnableSEWiring:
         keyvault_cli.cli_enable_se(ns)
         assert captured["install_dir"] is None
         assert captured["unattended"] is None  # absence → env default, not False
+
+
+class TestEnableTPMWiring:
+    """``hermes mordred keyvault enable-tpm`` parser wiring + adapter (v2-OS2 2c).
+
+    The TPM is Tier 2 (machine-bound), so ``enable-tpm`` exposes only
+    ``--install-dir`` — there is deliberately no ``--unattended`` per-use gate.
+    """
+
+    def test_enable_tpm_parses_and_wires_handler(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "keyvault", "enable-tpm"])
+        assert hasattr(ns, "func"), "set_defaults(func=...) missing for keyvault enable-tpm"
+
+    def test_enable_tpm_install_dir_parses(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "keyvault", "enable-tpm", "--install-dir", "/tmp/bin"])
+        assert ns.install_dir == "/tmp/bin"
+
+    def test_enable_tpm_rejects_unattended_flag(self) -> None:
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mordred", "keyvault", "enable-tpm", "--unattended"])
+
+    def test_cli_enable_tpm_forwards_install_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_enable_tpm(**kwargs: Any) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "enable_tpm", _fake_enable_tpm)
+        ns = argparse.Namespace(install_dir="/tmp/bin")
+        rc = keyvault_cli.cli_enable_tpm(ns)
+        assert rc == 0
+        assert captured["install_dir"] == Path("/tmp/bin")
+        assert "unattended" not in captured  # Tier 2: no per-use gate
+
+    def test_cli_enable_tpm_absent_install_dir_passes_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _fake_enable_tpm(**kwargs: Any) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "enable_tpm", _fake_enable_tpm)
+        ns = argparse.Namespace(install_dir=None)
+        keyvault_cli.cli_enable_tpm(ns)
+        assert captured["install_dir"] is None

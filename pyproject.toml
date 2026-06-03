@@ -128,6 +128,15 @@ packages = ["src/mordred_hermes"]
 "native/sekey-helper/Package.swift" = "mordred_hermes/_native/sekey-helper/Package.swift"
 "native/sekey-helper/Sources" = "mordred_hermes/_native/sekey-helper/Sources"
 "native/sekey-helper/README.md" = "mordred_hermes/_native/sekey-helper/README.md"
+# The Linux TPM 2.0 helper's Rust *sources* (NOT the cargo `target/` artifacts)
+# so `hermes mordred keyvault enable-tpm` can build them after a plain
+# `pip install`. `_seckey_helper._locate_tpmkey_source()` finds them via
+# importlib.resources at `mordred_hermes/_native/tpmkey-helper/` (v2-OS2 2c).
+"native/tpmkey-helper/build.sh" = "mordred_hermes/_native/tpmkey-helper/build.sh"
+"native/tpmkey-helper/Cargo.toml" = "mordred_hermes/_native/tpmkey-helper/Cargo.toml"
+"native/tpmkey-helper/Cargo.lock" = "mordred_hermes/_native/tpmkey-helper/Cargo.lock"
+"native/tpmkey-helper/src" = "mordred_hermes/_native/tpmkey-helper/src"
+"native/tpmkey-helper/README.md" = "mordred_hermes/_native/tpmkey-helper/README.md"
 # config.yaml at-rest transparent decrypt (ROADMAP v2-F8). The .pth lands at the
 # site-packages root and runs a cheap inline guard at every interpreter start;
 # only a Hermes invocation (or MORDRED_CONFIG_DECRYPT=1) imports _pth_bootstrap.

@@ -178,6 +178,12 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         help="Create an unattended SE key (decrypt runs without a Touch ID prompt while the session is unlocked)",
     )
     p_enable_se.set_defaults(func=_handle_keyvault_enable_se)
+    p_enable_tpm = ksub.add_parser(
+        "enable-tpm",
+        help="Build + install the Linux TPM 2.0 helper (machine-bound; Tier 2, no per-use prompt)",
+    )
+    p_enable_tpm.add_argument("--install-dir", help="Install directory for the helper (default: ~/.local/bin)")
+    p_enable_tpm.set_defaults(func=_handle_keyvault_enable_tpm)
 
 
 def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -408,6 +414,12 @@ def _handle_keyvault_enable_se(args: argparse.Namespace) -> int:
     from . import keyvault_cli
 
     return keyvault_cli.cli_enable_se(args)
+
+
+def _handle_keyvault_enable_tpm(args: argparse.Namespace) -> int:
+    from . import keyvault_cli
+
+    return keyvault_cli.cli_enable_tpm(args)
 
 
 def _handle_vault_init(args: argparse.Namespace) -> int:

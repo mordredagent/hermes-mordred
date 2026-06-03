@@ -348,3 +348,52 @@ def test_locate_helper_source_finds_build_sources_in_checkout() -> None:
     assert (src / "build.sh").is_file()
     assert (src / "Package.swift").is_file()
     assert (src / "Sources" / "mordred-hermes-sekey" / "main.swift").is_file()
+
+
+def _make_fake_tpmkey_crate(
+    root: Path,
+    *,
+    name: str = "mordred-hermes-tpmkey",
+    with_manifest: bool = True,
+    with_main: bool = True,
+) -> Path:
+    """Materialize a (possibly decoy) ``native/tpmkey-helper`` crate under ``root``."""
+    crate = root / "native" / "tpmkey-helper"
+    (crate / "src").mkdir(parents=True)
+    (crate / "build.sh").write_text("#!/usr/bin/env bash\n")
+    if with_manifest:
+        (crate / "Cargo.toml").write_text(f'[package]\nname = "{name}"\n')
+    if with_main:
+        (crate / "src" / "main.rs").write_text("fn main() {}\n")
+    return crate
+
+
+class TestIsTpmkeySource:
+    """``_is_tpmkey_source`` — reject build-hijack decoys (codex MEDIUM-3).
+
+    ``enable_tpm`` executes the ``build.sh`` that ``_locate_tpmkey_source``
+    resolves to, so a bare ``build.sh`` planted under a writable ancestor must
+    NOT be accepted as the crate to build.
+    """
+
+    def test_accepts_genuine_crate(self, tmp_path: Path) -> None:
+        crate = _make_fake_tpmkey_crate(tmp_path)
+        assert _seckey_helper._is_tpmkey_source(crate) is True
+
+    def test_rejects_build_sh_only_decoy(self, tmp_path: Path) -> None:
+        crate = _make_fake_tpmkey_crate(tmp_path, with_manifest=False, with_main=False)
+        assert _seckey_helper._is_tpmkey_source(crate) is False
+
+    def test_rejects_wrong_package_name(self, tmp_path: Path) -> None:
+        crate = _make_fake_tpmkey_crate(tmp_path, name="evil-helper")
+        assert _seckey_helper._is_tpmkey_source(crate) is False
+
+    def test_rejects_missing_entry_point(self, tmp_path: Path) -> None:
+        crate = _make_fake_tpmkey_crate(tmp_path, with_main=False)
+        assert _seckey_helper._is_tpmkey_source(crate) is False
+
+    def test_locate_tpmkey_source_finds_real_crate(self) -> None:
+        # The real source checkout has a genuine crate; locate must resolve it.
+        src = _seckey_helper._locate_tpmkey_source()
+        assert src is not None
+        assert _seckey_helper._is_tpmkey_source(src)
