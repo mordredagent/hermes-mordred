@@ -11,6 +11,7 @@ HKDF / AES-KW / wire-format paths run with real crypto (not mocks).
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
@@ -373,6 +374,38 @@ def test_probe_capability_raises_native_unavailable_off_macos(monkeypatch: pytes
     monkeypatch.setattr(_seckey_helper, "find_tpmkey_helper", lambda: None)
     with pytest.raises(WrapNativeUnavailable):
         probe_capability()
+
+
+def test_probe_capability_win32_without_winkey_helper_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows with no CNG helper, ``probe_capability`` fails closed with
+    ``WrapNativeUnavailable``. The win32 branch raises before the macOS path,
+    so ``_find_helper`` / ``_lazy_import_security`` are never reached."""
+    import sys
+
+    from mordred_hermes.keyvault import _seckey_helper
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: None)
+    with pytest.raises(WrapNativeUnavailable):
+        probe_capability()
+
+
+def test_probe_capability_win32_with_winkey_helper_returns_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the CNG helper present, the win32 branch probes through it and
+    returns True (no fall-through to the macOS pyobjc path)."""
+    import sys
+
+    from mordred_hermes.keyvault import _seckey_helper
+
+    fake = tmp_path / "mordred-hermes-winkey"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: str(fake))
+    # No-op the actual helper invocation (we are not spawning a real binary).
+    monkeypatch.setattr(_seckey_helper._HelperSecKeyOps, "probe", lambda self: None)
+    assert probe_capability() is True
 
 
 # These two assert the *macOS* default-ops wiring (no explicit ``ops=``), so

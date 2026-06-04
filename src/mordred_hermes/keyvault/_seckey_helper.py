@@ -43,6 +43,11 @@ _HELPER_NAME = "mordred-hermes-sekey"
 # so :class:`_HelperSecKeyOps` drives either one unchanged.
 _TPM_HELPER_NAME = "mordred-hermes-tpmkey"
 
+# Windows CNG helper executable name (native/winkey-helper/build script). Same
+# JSON-over-stdio protocol as the SE / TPM helpers (CNG Platform Crypto Provider
+# / TPM-backed ECDH P-256), so :class:`_HelperSecKeyOps` drives it unchanged.
+_WIN_HELPER_NAME = "mordred-hermes-winkey"
+
 # Wall-clock budget for a single helper invocation. Generous because the
 # ``ecdh`` command blocks on the Touch ID / passcode system prompt — the user
 # must physically approve it. A missing helper or a hung op fails fast enough
@@ -83,6 +88,11 @@ def find_sekey_helper() -> str | None:
 def find_tpmkey_helper() -> str | None:
     """Locate the Linux TPM 2.0 helper (``mordred-hermes-tpmkey``)."""
     return _find_named_helper("MORDRED_TPMKEY_HELPER", _TPM_HELPER_NAME)
+
+
+def find_winkey_helper() -> str | None:
+    """Locate the Windows CNG helper (``mordred-hermes-winkey``)."""
+    return _find_named_helper("MORDRED_WINKEY_HELPER", _WIN_HELPER_NAME)
 
 
 # Back-compat alias: the original Secure-Enclave-only locator. Production

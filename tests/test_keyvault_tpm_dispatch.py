@@ -57,9 +57,11 @@ from mordred_hermes.keyvault._seckey_errors import (
 )
 from mordred_hermes.keyvault._seckey_helper import (
     _TPM_HELPER_NAME,
+    _WIN_HELPER_NAME,
     _HelperSecKeyOps,
     find_sekey_helper,
     find_tpmkey_helper,
+    find_winkey_helper,
 )
 
 
@@ -248,9 +250,28 @@ def test_default_ops_linux_with_tpm_helper_uses_helper_ops(tmp_path: Path, monke
 
 
 def test_default_ops_unsupported_platform_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "win32")
+    # A platform with no hardware backend at all (not macOS/Linux/Windows).
+    monkeypatch.setattr(sys, "platform", "freebsd")
     with pytest.raises(WrapNativeUnavailable):
         _default_ops()
+
+
+def test_default_ops_win32_without_winkey_helper_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows fails closed (no software floor off macOS) when the CNG helper
+    # is absent — same contract as Linux without the TPM helper (v2-OS2).
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: None)
+    with pytest.raises(WrapNativeUnavailable):
+        _default_ops()
+
+
+def test_default_ops_win32_with_winkey_helper_uses_helper_ops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = tmp_path / "mordred-hermes-winkey"
+    fake.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: str(fake))
+    ops = _default_ops()
+    assert isinstance(ops, _HelperSecKeyOps)
 
 
 def test_default_ops_darwin_keeps_secure_enclave_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -271,8 +292,10 @@ def test_default_sw_ops_is_software_fallback_on_darwin(monkeypatch: pytest.Monke
     assert isinstance(_default_sw_ops(), _SoftwareFallbackOps)
 
 
-def test_default_sw_ops_is_none_off_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_default_sw_ops_is_none_off_darwin(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No software namespace off macOS (Linux TPM and Windows CNG both fail closed).
+    monkeypatch.setattr(sys, "platform", platform)
     assert _default_sw_ops() is None
 
 
@@ -306,6 +329,25 @@ def test_find_tpmkey_helper_path_lookup(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(Path, "home", lambda: Path("/nonexistent-home"))
     monkeypatch.setattr(_seckey_helper.shutil, "which", lambda name: "/opt/bin/" + name)
     assert find_tpmkey_helper() == "/opt/bin/" + _TPM_HELPER_NAME
+
+
+def test_find_winkey_helper_env_authoritative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "win-helper"
+    target.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("MORDRED_WINKEY_HELPER", str(target))
+    assert find_winkey_helper() == str(target)
+
+
+def test_find_winkey_helper_env_missing_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MORDRED_WINKEY_HELPER", str(tmp_path / "nope"))
+    assert find_winkey_helper() is None
+
+
+def test_find_winkey_helper_path_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MORDRED_WINKEY_HELPER", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: Path("/nonexistent-home"))
+    monkeypatch.setattr(_seckey_helper.shutil, "which", lambda name: "/opt/bin/" + name)
+    assert find_winkey_helper() == "/opt/bin/" + _WIN_HELPER_NAME
 
 
 def test_find_sekey_and_legacy_find_helper_agree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

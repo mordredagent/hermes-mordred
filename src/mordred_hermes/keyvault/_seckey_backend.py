@@ -486,7 +486,10 @@ def _default_ops() -> _SecKeyOps:
       software floor off macOS (codex review HIGH) — a host without a
       usable TPM fails closed rather than silently downgrading to a
       non-hardware key.
-    - **Other platforms**: not yet supported (v2-OS2 tracks Windows CNG).
+    - **Windows**: the ``mordred-hermes-winkey`` CNG helper (TPM-backed via
+      the Platform Crypto Provider) when installed; otherwise
+      :class:`WrapNativeUnavailable` — same fail-closed contract as Linux.
+    - **Other platforms**: not yet supported.
 
     The import is function-local so importing ``_seckey_backend`` does not pull
     in ``_seckey_helper`` (and its subprocess machinery) at module load. Both
@@ -510,9 +513,16 @@ def _default_ops() -> _SecKeyOps:
             "none found (set MORDRED_TPMKEY_HELPER or install it). See v2-OS2."
         )
 
-    raise WrapNativeUnavailable(
-        f"hardware keyvault backend not available on platform {sys.platform!r} (v2-OS2 tracks Windows support)."
-    )
+    if sys.platform == "win32":
+        binary = _seckey_helper.find_winkey_helper()
+        if binary is not None:
+            return _seckey_helper._HelperSecKeyOps(binary)
+        raise WrapNativeUnavailable(
+            "Windows keyvault requires the mordred-hermes-winkey CNG helper; "
+            "none found (set MORDRED_WINKEY_HELPER or install it). See v2-OS2."
+        )
+
+    raise WrapNativeUnavailable(f"hardware keyvault backend not available on platform {sys.platform!r} (v2-OS2).")
 
 
 def _default_sw_ops() -> _SecKeyOps | None:
@@ -728,6 +738,9 @@ def probe_capability() -> bool:
     - **Linux**: probe through the ``mordred-hermes-tpmkey`` TPM 2.0 helper
       when installed; otherwise :class:`WrapNativeUnavailable` (no software
       floor off macOS).
+    - **Windows**: probe through the ``mordred-hermes-winkey`` CNG helper
+      when installed; otherwise :class:`WrapNativeUnavailable` (same
+      fail-closed contract as Linux).
 
     Returns ``True`` when a round-trip succeeds. Raises on any other failure
     so :func:`native.is_secure_enclave_available` can swallow it into
@@ -741,6 +754,13 @@ def probe_capability() -> bool:
             _seckey_helper._HelperSecKeyOps(binary).probe()
             return True
         raise WrapNativeUnavailable("Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; none found.")
+
+    if sys.platform == "win32":
+        binary = _seckey_helper.find_winkey_helper()
+        if binary is not None:
+            _seckey_helper._HelperSecKeyOps(binary).probe()
+            return True
+        raise WrapNativeUnavailable("Windows keyvault requires the mordred-hermes-winkey CNG helper; none found.")
 
     binary = _seckey_helper._find_helper()
     if binary is not None:
