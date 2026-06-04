@@ -40,16 +40,18 @@ from mordred_hermes.keyvault._exceptions import (
     WrapNativeUnavailable,
 )
 from mordred_hermes.keyvault._seckey_backend import (
+    _default_ops,
+    _default_sw_ops,
+    _PyobjcSecKeyOps,
+    _SecKeyBackend,
+    _SoftwareFallbackOps,
+)
+from mordred_hermes.keyvault._seckey_errors import (
     OPS_AUTH_DENIED,
     OPS_EXISTS,
     OPS_NOT_FOUND,
     OPS_UNAVAILABLE,
-    _default_ops,
-    _default_sw_ops,
     _OpsError,
-    _PyobjcSecKeyOps,
-    _SecKeyBackend,
-    _SoftwareFallbackOps,
     _translate_error,
     errSecItemNotFound,
 )

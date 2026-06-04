@@ -20,11 +20,14 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from mordred_hermes.keyvault import wrap
 from mordred_hermes.keyvault._exceptions import WrapError, WrapKeyNotFound, WrapNativeUnavailable
 from mordred_hermes.keyvault._seckey_backend import (
+    _PyobjcSecKeyOps,
+    _SecKeyBackend,
+    probe_capability,
+)
+from mordred_hermes.keyvault._seckey_errors import (
     _application_tag,
     _keychain_label,
     _OpsError,
-    _PyobjcSecKeyOps,
-    _SecKeyBackend,
     _translate_error,
     errSecAuthFailed,
     errSecAuthorizationCanceled,
@@ -32,7 +35,6 @@ from mordred_hermes.keyvault._seckey_backend import (
     errSecInteractionNotAllowed,
     errSecItemNotFound,
     errSecUserCanceled,
-    probe_capability,
 )
 from mordred_hermes.keyvault.wrap import NativeBackend, NativeBackendError
 

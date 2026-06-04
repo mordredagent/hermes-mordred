@@ -15,7 +15,7 @@ the :class:`mordred_hermes.keyvault._seckey_backend._SecKeyOps` Protocol.
 
 The boundary is identical to the pyobjc ops: every method returns plain
 ``bytes`` / ``None`` or raises
-:class:`mordred_hermes.keyvault._seckey_backend._OpsError` carrying the raw
+:class:`mordred_hermes.keyvault._seckey_errors._OpsError` carrying the raw
 ``OSStatus`` + domain. That lets :class:`_SecKeyBackend`'s existing
 error-translation logic (``_translate_error``, ``errSec*`` branches) run
 unchanged regardless of whether the SE op went through pyobjc or the helper.
@@ -33,7 +33,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ._seckey_backend import _OPS_REASONS, _OpsError
+from ._seckey_errors import _OPS_REASONS, _OpsError
 
 # Helper executable name (as installed by native/sekey-helper/build.sh).
 _HELPER_NAME = "mordred-hermes-sekey"
@@ -192,7 +192,7 @@ def _normalize_reason(value: Any) -> str | None:
     """Validate a helper-supplied ``reason`` against the neutral taxonomy.
 
     Returns the value only when it is a recognised member of
-    :data:`mordred_hermes.keyvault._seckey_backend._OPS_REASONS`
+    :data:`mordred_hermes.keyvault._seckey_errors._OPS_REASONS`
     (``NOT_FOUND`` / ``EXISTS`` / ``UNAVAILABLE`` / ``AUTH_DENIED``);
     anything else — including ``None`` or an unknown future reason —
     becomes ``None`` so dispatch falls back to the numeric status. This
@@ -270,7 +270,7 @@ class _HelperSecKeyOps:
     One method call == one helper process invocation (the protocol is
     request/response per process). Tags and peer public keys cross the
     boundary as hex; the cleartext ``key_id`` never does (the tag is a
-    SHA-256 prefix derived in :mod:`_seckey_backend`).
+    SHA-256 prefix derived in :mod:`_seckey_errors`).
     """
 
     def __init__(self, binary: str) -> None:
