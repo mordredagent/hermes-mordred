@@ -31,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _storage, api, backup
+from mordred_hermes.keyvault import _secret_ops, _storage, api, backup
 from mordred_hermes.keyvault.backup import BackupCorrupt
 from mordred_hermes.keyvault.recovery import RecoveryDigestMismatch
 
@@ -407,7 +407,7 @@ class TestImportBackupManifestValidation:
     ) -> str:
         # Bypass the real recovery (digest verify + AES-GCM decrypt) so the
         # crafted manifest reaches api's post-decrypt validation directly.
-        monkeypatch.setattr(api.recovery, "import_backup", lambda *a, **k: manifest_json)
+        monkeypatch.setattr(_secret_ops.recovery, "import_backup", lambda *a, **k: manifest_json)
         return api.import_backup(
             b"dummy-blob",
             "passphrase",

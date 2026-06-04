@@ -39,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _envelope_codec, _storage, api, wrap
+from mordred_hermes.keyvault import _envelope_codec, _secret_ops, _storage, api, wrap
 from mordred_hermes.keyvault._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
@@ -607,7 +607,7 @@ class TestEnvelopeIdValidation:
         _, sink = captured_audit
         for _ in range(64):
             eid = api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
-            api._validate_envelope_id(eid)  # must not raise
+            _secret_ops._validate_envelope_id(eid)  # must not raise
 
 
 class TestEncryptValidatesExistingDirs:
