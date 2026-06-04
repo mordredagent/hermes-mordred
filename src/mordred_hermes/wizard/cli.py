@@ -411,15 +411,15 @@ def _handle_keyvault_recover(args: argparse.Namespace) -> int:
 
 
 def _handle_keyvault_enable_se(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
+    from . import keyvault_native_cli
 
-    return keyvault_cli.cli_enable_se(args)
+    return keyvault_native_cli.cli_enable_se(args)
 
 
 def _handle_keyvault_enable_tpm(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
+    from . import keyvault_native_cli
 
-    return keyvault_cli.cli_enable_tpm(args)
+    return keyvault_native_cli.cli_enable_tpm(args)
 
 
 def _handle_vault_init(args: argparse.Namespace) -> int:

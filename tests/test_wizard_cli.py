@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.wizard import keyvault_cli, register
+from mordred_hermes.wizard import keyvault_native_cli, register
 from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 
 
@@ -186,9 +186,9 @@ class TestEnableSEWiring:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(keyvault_cli, "enable_se", _fake_enable_se)
+        monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
         ns = argparse.Namespace(install_dir="/tmp/bin", unattended=True)
-        rc = keyvault_cli.cli_enable_se(ns)
+        rc = keyvault_native_cli.cli_enable_se(ns)
         assert rc == 0
         assert captured["install_dir"] == Path("/tmp/bin")
         assert captured["unattended"] is True
@@ -200,11 +200,25 @@ class TestEnableSEWiring:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(keyvault_cli, "enable_se", _fake_enable_se)
+        monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
         ns = argparse.Namespace(install_dir=None, unattended=False)
-        keyvault_cli.cli_enable_se(ns)
+        keyvault_native_cli.cli_enable_se(ns)
         assert captured["install_dir"] is None
         assert captured["unattended"] is None  # absence → env default, not False
+
+    def test_dispatch_routes_handler_to_native_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # End-to-end: the cli.py handler must import + delegate to
+        # keyvault_native_cli (the post-split home), not the old keyvault_cli.
+        seen: dict[str, Any] = {}
+
+        def _fake_cli_enable_se(args: argparse.Namespace) -> int:
+            seen["args"] = args
+            return 7
+
+        monkeypatch.setattr(keyvault_native_cli, "cli_enable_se", _fake_cli_enable_se)
+        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-se"])
+        assert dispatch(ns) == 7
+        assert seen["args"] is ns
 
 
 class TestEnableTPMWiring:
@@ -236,9 +250,9 @@ class TestEnableTPMWiring:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(keyvault_cli, "enable_tpm", _fake_enable_tpm)
+        monkeypatch.setattr(keyvault_native_cli, "enable_tpm", _fake_enable_tpm)
         ns = argparse.Namespace(install_dir="/tmp/bin")
-        rc = keyvault_cli.cli_enable_tpm(ns)
+        rc = keyvault_native_cli.cli_enable_tpm(ns)
         assert rc == 0
         assert captured["install_dir"] == Path("/tmp/bin")
         assert "unattended" not in captured  # Tier 2: no per-use gate
@@ -250,7 +264,21 @@ class TestEnableTPMWiring:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(keyvault_cli, "enable_tpm", _fake_enable_tpm)
+        monkeypatch.setattr(keyvault_native_cli, "enable_tpm", _fake_enable_tpm)
         ns = argparse.Namespace(install_dir=None)
-        keyvault_cli.cli_enable_tpm(ns)
+        keyvault_native_cli.cli_enable_tpm(ns)
         assert captured["install_dir"] is None
+
+    def test_dispatch_routes_handler_to_native_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # End-to-end: the cli.py handler must import + delegate to
+        # keyvault_native_cli (the post-split home), not the old keyvault_cli.
+        seen: dict[str, Any] = {}
+
+        def _fake_cli_enable_tpm(args: argparse.Namespace) -> int:
+            seen["args"] = args
+            return 7
+
+        monkeypatch.setattr(keyvault_native_cli, "cli_enable_tpm", _fake_cli_enable_tpm)
+        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm"])
+        assert dispatch(ns) == 7
+        assert seen["args"] is ns

@@ -188,15 +188,15 @@ def test_enable_se_builds_installs_and_verifies_helper(tmp_path: Path, monkeypat
     ``MORDRED_SEKEY_HELPER``) so the operator's ``~/.local/bin`` is untouched.
     """
     _require_live_enclave()
-    from mordred_hermes.wizard import keyvault_cli
+    from mordred_hermes.wizard import keyvault_native_cli
 
-    missing = keyvault_cli._missing_build_tools()
+    missing = keyvault_native_cli._missing_build_tools()
     if missing:
         pytest.skip(f"missing build tool(s) {missing}; install the Xcode command-line tools")
 
     install_dir = tmp_path / "bin"
     monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(install_dir / "mordred-hermes-sekey"))
-    rc = keyvault_cli.enable_se(install_dir=install_dir, unattended=True)
+    rc = keyvault_native_cli.enable_se(install_dir=install_dir, unattended=True)
     assert rc == 0
     assert (install_dir / "mordred-hermes-sekey").is_file()
 
