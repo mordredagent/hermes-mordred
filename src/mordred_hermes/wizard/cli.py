@@ -306,9 +306,9 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_status.set_defaults(func=_handle_encryption_status)
 
-    # enable / disable / purge over the vault-backed targets. (workspace toggling
-    # is added by the macOS workspace phase; status already reports all four.)
-    _toggle_targets = ["env", "config", "memory"]
+    # enable / disable / purge over all four targets (workspace is macOS-only and
+    # gated at runtime; status reports all four).
+    _toggle_targets = ["env", "config", "memory", "workspace"]
 
     p_enable = esub.add_parser("enable", help="Turn on at-rest encryption for a target")
     p_enable.add_argument("target", choices=_toggle_targets)

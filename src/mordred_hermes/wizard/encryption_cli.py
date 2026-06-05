@@ -346,6 +346,14 @@ def _dispatch(verb: str, target: str) -> int:
         if verb == "disable":
             return memory_cli.disable(home=home)
         return memory_cli.purge(home=home, root=root)
+    if target == "workspace":
+        from . import workspace_cli
+
+        if verb == "enable":
+            return workspace_cli.cli_enable()
+        if verb == "disable":
+            return workspace_cli.cli_disable()
+        return workspace_cli.cli_purge()
 
     print(f"encryption {verb} {target}: not available in this build.", file=sys.stderr)
     return 2
