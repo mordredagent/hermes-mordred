@@ -3,6 +3,12 @@
 No subprocess is spawned and no real prompt_toolkit call happens; both
 seams go through Protocol-typed doubles. Persistence is verified by
 reading the files PolicyWriter actually wrote.
+
+Network-privacy prompts no longer live here: they moved to
+``hermes mordred network init`` (see ``test_wizard_network_init.py``) so
+first-run setup stays short and privacy is opt-in via an explicit command
+(user request 2026-06-05). ``configure`` therefore must NOT touch the
+``plugins.mordred_network`` section.
 """
 
 from __future__ import annotations
@@ -12,7 +18,6 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
 
 import pytest
 
@@ -82,6 +87,22 @@ def _writer(tmp_path: Path) -> PolicyWriter:
     )
 
 
+# The seven core prompts collected by ``configure`` after the network split.
+# Order: policy, allow_cloud_llm, allowlist, local endpoint, local model,
+# cloud attempt action, agent harness.
+def _core_answers(
+    *,
+    policy: str = "lenient",
+    allow_cloud: bool = False,
+    allowlist: str = "",
+    endpoint: str = "http://x/v1",
+    model: str = "",
+    cloud_attempt: str = "always-block",
+    harness: str = "none",
+) -> list[object]:
+    return [policy, allow_cloud, allowlist, endpoint, model, cloud_attempt, harness]
+
+
 # -----------------------------------------------------------------------------
 # collect_answers: prompt sequence + snapshot mapping.
 # -----------------------------------------------------------------------------
@@ -90,28 +111,18 @@ def _writer(tmp_path: Path) -> PolicyWriter:
 class TestCollectAnswers:
     def test_strict_with_anthropic_allowlist(self) -> None:
         prompts = _ScriptedPromptIO(
-            answers=[
-                "strict",  # policy
-                True,  # allow_cloud_llm
-                "anthropic,openai",  # cloud_provider_allowlist
-                "http://example/v1",  # local_llm_endpoint (Phase 2)
-                "llama-3",  # local_llm_model_id (Phase 2)
-                "prompt-once",  # cloud_attempt_action (Phase 2)
-                "codex",  # harness_primary (Phase 2 PR2)
-                # Phase 3 PR3a Task #6 — network prompt sextet:
-                "clearnet",  # default_network_path
-                "/usr/bin/tor",  # tor_binary_path
-                "9050",  # tor_socks_port (ask_text)
-                "",  # mullvad account (password; empty = no .env line)
-                "auto",  # mullvad_relay_country
-                False,  # mullvad_killswitch
-            ]
+            answers=_core_answers(
+                policy="strict",
+                allow_cloud=True,
+                allowlist="anthropic,openai",
+                endpoint="http://example/v1",
+                model="llama-3",
+                cloud_attempt="prompt-once",
+                harness="codex",
+            )
         )
         result = collect_answers(prompts)
         assert isinstance(result, ConfigureResult)
-        # Codex M3 (PR1): Phase 2 fields now live INSIDE the snapshot so
-        # llm_guard can read them through policy.json without a separate
-        # ConfigureResult.phase2_fields side channel.
         assert result.snapshot == PolicySnapshot(
             policy="strict",
             allow_cloud_llm=True,
@@ -123,23 +134,7 @@ class TestCollectAnswers:
         )
 
     def test_lenient_with_empty_allowlist(self) -> None:
-        prompts = _ScriptedPromptIO(
-            answers=[
-                "lenient",
-                False,
-                "",
-                "http://localhost:1234/v1",
-                "",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+        prompts = _ScriptedPromptIO(answers=_core_answers(endpoint="http://localhost:1234/v1"))
         result = collect_answers(prompts)
         assert result.snapshot.policy == "lenient"
         assert result.snapshot.allow_cloud_llm is False
@@ -147,66 +142,27 @@ class TestCollectAnswers:
         assert result.snapshot.harness_primary == "none"
 
     def test_csv_whitespace_stripped(self) -> None:
-        prompts = _ScriptedPromptIO(
-            answers=[
-                "off",
-                False,
-                "  anthropic ,  openai  ,",
-                "x",
-                "",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+        prompts = _ScriptedPromptIO(answers=_core_answers(policy="off", allowlist="  anthropic ,  openai  ,"))
         result = collect_answers(prompts)
         assert result.snapshot.cloud_provider_allowlist == ("anthropic", "openai")
 
-    def test_prompt_order_is_stable(self) -> None:
-        """Order matters for snapshot tests; lock it explicitly.
-
-        Task #6 added 6 network prompts at the end. The leading 7 stay
-        stable so Phase 1 / Phase 2 snapshot tests aren't disturbed.
-        """
-        prompts = _ScriptedPromptIO(
-            answers=[
-                "lenient",
-                False,
-                "",
-                "x",
-                "y",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+    def test_prompt_order_is_stable_and_jargon_free(self) -> None:
+        """Order matters for snapshot tests; lock it explicitly. The labels
+        must also carry no internal ``(Phase N)`` jargon (user request)."""
+        prompts = _ScriptedPromptIO(answers=_core_answers())
         collect_answers(prompts)
         labels = [label for _, label, _ in prompts.seen]
         assert labels == [
             "Mordred policy mode",
             "Allow cloud LLM providers (passes through provider override)?",
             "Cloud provider allowlist (comma-separated; empty = none)",
-            "Local LLM endpoint URL (Phase 2)",
-            "Local LLM model id (Phase 2)",
-            "On cloud LLM attempt under strict mode (Phase 2)",
-            "Agent harness primary (Phase 2; strict mode refuses if a known harness)",
-            "Default network path",
-            "Tor binary path",
-            "Tor SOCKS port",
-            "Mullvad account number (stored in ~/.hermes/.env)",
-            "Mullvad relay country (`auto` or 2-letter code)",
-            "Mullvad killswitch (lockdown-mode)",
+            "Local LLM endpoint URL",
+            "Local LLM model id",
+            "On cloud LLM attempt under strict mode",
+            "Agent harness (strict mode refuses if a known harness is detected)",
         ]
+        for label in labels:
+            assert "Phase" not in label, f"user-facing label leaks internal jargon: {label!r}"
 
 
 # -----------------------------------------------------------------------------
@@ -217,21 +173,14 @@ class TestCollectAnswers:
 class TestRun:
     def test_persists_snapshot_to_disk(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(
-            answers=[
-                "strict",
-                False,
-                "anthropic",
-                "http://x/v1",
-                "qwen",
-                "prompt-once",
-                "codex",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                True,
-            ]
+            answers=_core_answers(
+                policy="strict",
+                allowlist="anthropic",
+                endpoint="http://x/v1",
+                model="qwen",
+                cloud_attempt="prompt-once",
+                harness="codex",
+            )
         )
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
@@ -245,46 +194,28 @@ class TestRun:
             "allow_cloud_llm": False,
             "cloud_provider_allowlist": ["anthropic"],
             "audit_log_path": None,
-            # Phase 2 fields persisted (Codex M3 — PR1 scope).
             "local_llm_endpoint": "http://x/v1",
             "local_llm_model_id": "qwen",
             "cloud_attempt_action": "prompt-once",
-            # Phase 3 PR3a Task #7: strict policy → disable_ipv6=True
-            # is computed by collect_answers and persisted explicitly.
+            # strict policy → disable_ipv6=True is computed by collect_answers.
             "disable_ipv6": True,
         }
         ytext = (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert "policy: strict" in ytext
         assert "mordred_privacy_check" in ytext
-        # config.yaml privacy_check section must NOT carry Phase 2 fields
-        # (plugin-boundary discipline — they belong to mordred_llm_guard).
         assert "local_llm_endpoint" not in ytext
         assert "cloud_attempt_action" not in ytext
-        # Phase 2 PR2: mordred_llm_guard section gains harness_primary.
         assert "mordred_llm_guard" in ytext
         assert "harness_primary: codex" in ytext
+        # configure must NOT write the network section -- that's `network init`.
+        assert "default_path" not in ytext
+        assert "tor_binary_path" not in ytext
         assert result.snapshot.policy == "strict"
         assert result.snapshot.local_llm_endpoint == "http://x/v1"
         assert result.snapshot.harness_primary == "codex"
 
     def test_skip_hermes_setup_does_not_call_runner(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(
-            answers=[
-                "off",
-                False,
-                "",
-                "x",
-                "",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+        prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
@@ -292,23 +223,7 @@ class TestRun:
         assert runner.calls == [], "skip_hermes_setup must not invoke the runner"
 
     def test_setup_failure_warns_but_continues(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        prompts = _ScriptedPromptIO(
-            answers=[
-                "lenient",
-                False,
-                "",
-                "x",
-                "",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+        prompts = _ScriptedPromptIO(answers=_core_answers())
         runner = _SetupRunnerSpy(returncode=42)
         w = _writer(tmp_path)
 
@@ -320,28 +235,43 @@ class TestRun:
         assert any("hermes setup" in r.getMessage() and "42" in r.getMessage() for r in caplog.records)
 
     def test_non_interactive_forwarded_to_runner(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(
-            answers=[
-                "lenient",
-                False,
-                "",
-                "x",
-                "",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+        prompts = _ScriptedPromptIO(answers=_core_answers())
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
         run(setup_runner=runner, prompt_io=prompts, policy_writer=w, non_interactive=True)
         assert runner.calls == [True]
+
+
+class TestConfigureLeavesNetworkSectionIntact:
+    """``configure`` is network-free after the split: an existing
+    ``plugins.mordred_network`` section (written by ``network init`` or by
+    hand) must survive a configure run untouched."""
+
+    def test_existing_network_section_untouched(self, tmp_path: Path) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "plugins:\n"
+            "  mordred_network:\n"
+            "    default_path: tor\n"
+            "    tor_binary_path: /opt/tor/bin/tor\n"
+            "    mullvad_relay_country: jp\n",
+            encoding="utf-8",
+        )
+        prompts = _ScriptedPromptIO(answers=_core_answers(policy="strict"))
+        run(setup_runner=_SetupRunnerSpy(), prompt_io=prompts, policy_writer=_writer(tmp_path), skip_hermes_setup=True)
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with config.open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        section = data["plugins"]["mordred_network"]
+        assert section["default_path"] == "tor"
+        assert section["tor_binary_path"] == "/opt/tor/bin/tor"
+        assert section["mullvad_relay_country"] == "jp"
+        # And configure still wrote its own sections alongside.
+        assert data["plugins"]["mordred_privacy_check"]["policy"] == "strict"
 
 
 # -----------------------------------------------------------------------------
@@ -405,23 +335,7 @@ class TestCliHandler:
         assert "non-interactive" in captured.err.lower()
 
     def test_interactive_path_runs_end_to_end(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        scripted = _ScriptedPromptIO(
-            answers=[
-                "off",
-                False,
-                "",
-                "x",
-                "",
-                "always-block",
-                "none",
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",
-                "auto",
-                False,
-            ]
-        )
+        scripted = _ScriptedPromptIO(answers=_core_answers(policy="off"))
         _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
         ns = argparse.Namespace(non_interactive=False)
         rc = cli_handler(ns)
@@ -429,75 +343,15 @@ class TestCliHandler:
         body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
         assert body["policy"] == "off"
 
-
-class TestCliHandlerWiresWriters:
-    """H4 (review 2026-05-14): ``cli_handler`` accepts a Mullvad secret
-    via ``ask_password`` but does NOT pass an ``env_writer`` or
-    ``credentials_writer`` to :func:`run`. The secret is captured into
-    ``ConfigureResult._mullvad_account_secret`` then dropped on the floor
-    -- the .env and credentials JSON the operator expects never appear.
-
-    Fix: instantiate :class:`DotEnvFileWriter` and
-    :class:`JSONCredentialsWriter` in ``cli_handler`` and forward them to
-    ``run()`` so the end-to-end interactive path actually persists what
-    the wizard collected.
-    """
-
-    _ANSWERS_WITH_MULLVAD_SECRET: ClassVar[list[object]] = [
-        "off",  # policy
-        False,  # allow_cloud_llm
-        "",  # cloud_provider_allowlist
-        "x",  # local_llm_endpoint
-        "",  # local_llm_model_id
-        "always-block",  # cloud_attempt_action
-        "none",  # harness_primary
-        "clearnet",  # default_network_path
-        "/usr/bin/tor",  # tor_binary_path
-        "9050",  # tor_socks_port
-        "MULL-12345678",  # mullvad_account_secret -- password prompt
-        "auto",  # mullvad_relay_country
-        True,  # mullvad_killswitch
-    ]
-
-    def test_dotenv_file_written_with_secret(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        from mordred_hermes import _home as home_mod
-
-        monkeypatch.setattr(home_mod, "HERMES_BASE", tmp_path)
-        scripted = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD_SECRET))
+    def test_interactive_path_prints_network_init_hint(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """After configure, the user is pointed at the on-demand privacy command."""
+        scripted = _ScriptedPromptIO(answers=_core_answers(policy="lenient"))
         _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
-
-        ns = argparse.Namespace(non_interactive=False)
-        rc = cli_handler(ns)
-        assert rc == 0
-
-        env_path = tmp_path / ".env"
-        assert env_path.exists(), (
-            f"H4: cli_handler must wire DotEnvFileWriter; no {env_path} written. "
-            "Mullvad account number was silently discarded."
-        )
-        text = env_path.read_text(encoding="utf-8")
-        assert "MORDRED_MULLVAD_ACCOUNT=MULL-12345678" in text, text
-
-    def test_credentials_json_written(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        from mordred_hermes import _home as home_mod
-
-        monkeypatch.setattr(home_mod, "HERMES_BASE", tmp_path)
-        scripted = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD_SECRET))
-        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
-
-        ns = argparse.Namespace(non_interactive=False)
-        rc = cli_handler(ns)
-        assert rc == 0
-
-        creds_path = tmp_path / "mordred" / "credentials" / "network.json"
-        assert creds_path.exists(), (
-            f"H4: cli_handler must wire JSONCredentialsWriter; no {creds_path} written. "
-            "Mullvad relay/killswitch indirection JSON was silently discarded."
-        )
-        body = json.loads(creds_path.read_text(encoding="utf-8"))
-        assert body["mullvad"]["account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
-        assert body["mullvad"]["relay_country"] == "auto"
-        assert body["mullvad"]["killswitch"] is True
+        cli_handler(argparse.Namespace(non_interactive=False))
+        out = capsys.readouterr().out.lower()
+        assert "network init" in out
 
 
 # -----------------------------------------------------------------------------
@@ -578,401 +432,27 @@ def test_setup_runner_spy_matches_protocol() -> None:
     assert r is not None
 
 
-# --------------------------------------------------------------------------- #
-# Phase 3 PR3a Task #6: Mullvad / Tor wizard prompts + NetworkAnswers         #
-# --------------------------------------------------------------------------- #
-
-
-class _SpyEnvFileWriter:
-    def __init__(self) -> None:
-        self.calls: list[tuple[Path, str, str]] = []
-
-    def upsert(self, path: Path, *, key: str, value: str) -> None:
-        self.calls.append((path, key, value))
-
-
-class _SpyCredentialsWriter:
-    def __init__(self) -> None:
-        self.calls: list[tuple[Path, str, str, bool]] = []
-
-    def write_network(
-        self,
-        path: Path,
-        *,
-        mullvad_account_id_env: str,
-        mullvad_relay_country: str,
-        mullvad_killswitch: bool,
-    ) -> None:
-        self.calls.append((path, mullvad_account_id_env, mullvad_relay_country, mullvad_killswitch))
-
-
-class TestConfigureResultRedactsSecret:
-    """C1 (security review 2026-05-14): the dataclass auto-repr emits
-    ``_mullvad_account_secret=<plaintext>`` for any in-flight result before
-    ``run()`` constructs the cleared copy. ``repr()`` is implicitly called
-    by tracebacks, logging, ``pytest --showlocals``, and debugger sessions.
-    """
-
-    def test_repr_does_not_contain_secret(self) -> None:
-        from mordred_hermes.wizard.configure import (
-            ConfigureResult,
-            NetworkAnswers,
-        )
-
-        result = ConfigureResult(
-            snapshot=PolicySnapshot(policy="strict"),
-            network_answers=NetworkAnswers(
-                default_network_path="vpn",
-                tor_binary_path="/usr/bin/tor",
-                tor_socks_port=9050,
-                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
-                mullvad_relay_country="auto",
-                mullvad_killswitch=True,
-            ),
-            _mullvad_account_secret="DO-NOT-LEAK-1234567890",
-        )
-        # The secret value must not appear in repr.
-        assert "DO-NOT-LEAK-1234567890" not in repr(result), repr(result)
-
-    def test_str_does_not_contain_secret(self) -> None:
-        from mordred_hermes.wizard.configure import (
-            ConfigureResult,
-            NetworkAnswers,
-        )
-
-        result = ConfigureResult(
-            snapshot=PolicySnapshot(policy="strict"),
-            network_answers=NetworkAnswers(
-                default_network_path="vpn",
-                tor_binary_path="/usr/bin/tor",
-                tor_socks_port=9050,
-                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
-                mullvad_relay_country="auto",
-                mullvad_killswitch=True,
-            ),
-            _mullvad_account_secret="DO-NOT-LEAK-1234567890",
-        )
-        assert "DO-NOT-LEAK-1234567890" not in str(result)
-
-
-class TestRunWiresNetworkWriters:
-    """``run()`` accepts ``env_writer`` + ``credentials_writer`` Protocol-typed
-    dependencies and routes Mullvad inputs to them. Each is optional so
-    existing call sites (Phase 1 tests + cli_handler) keep working without
-    modification."""
-
-    _ANSWERS_WITH_MULLVAD: ClassVar[list[object]] = [
-        "lenient",
-        False,
-        "",
-        "http://x/v1",
-        "qwen",
-        "always-block",
-        "none",
-        "vpn",  # default_network_path
-        "/usr/bin/tor",
-        "9050",
-        "secret-account-123",  # password (will go to env writer)
-        "jp",
-        True,
-    ]
-
-    def test_env_writer_receives_mullvad_secret(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
-        runner = _SetupRunnerSpy()
-        w = _writer(tmp_path)
-        env_w = _SpyEnvFileWriter()
-        cred_w = _SpyCredentialsWriter()
-        env_path = tmp_path / ".env"
-        credentials_path = tmp_path / "credentials" / "network.json"
-
-        run(
-            setup_runner=runner,
-            prompt_io=prompts,
-            policy_writer=w,
-            env_writer=env_w,
-            credentials_writer=cred_w,
-            env_path=env_path,
-            credentials_path=credentials_path,
-        )
-
-        assert env_w.calls == [(env_path, "MORDRED_MULLVAD_ACCOUNT", "secret-account-123")]
-
-    def test_credentials_writer_receives_network_answers(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
-        runner = _SetupRunnerSpy()
-        w = _writer(tmp_path)
-        env_w = _SpyEnvFileWriter()
-        cred_w = _SpyCredentialsWriter()
-
-        run(
-            setup_runner=runner,
-            prompt_io=prompts,
-            policy_writer=w,
-            env_writer=env_w,
-            credentials_writer=cred_w,
-            env_path=tmp_path / ".env",
-            credentials_path=tmp_path / "credentials" / "network.json",
-        )
-
-        assert cred_w.calls == [(tmp_path / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "jp", True)]
-
-    def test_optional_writers_default_to_no_op(self, tmp_path: Path) -> None:
-        """Backward compat: existing call sites pass only policy_writer."""
-        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
-        runner = _SetupRunnerSpy()
-        w = _writer(tmp_path)
-        # No env_writer / credentials_writer -- must not crash.
-        result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
-        assert result.network_answers.mullvad_relay_country == "jp"  # type: ignore[attr-defined]
-
-    def test_secret_does_not_appear_in_returned_result(self, tmp_path: Path) -> None:
-        """The Mullvad secret flows to EnvFileWriter only -- it must NOT leak
-        into the ConfigureResult that the caller might serialise."""
-        prompts = _ScriptedPromptIO(answers=list(self._ANSWERS_WITH_MULLVAD))
-        runner = _SetupRunnerSpy()
-        w = _writer(tmp_path)
-        env_w = _SpyEnvFileWriter()
-
-        result = run(
-            setup_runner=runner,
-            prompt_io=prompts,
-            policy_writer=w,
-            env_writer=env_w,
-            env_path=tmp_path / ".env",
-        )
-
-        import dataclasses
-
-        # Walk every dataclass field on the result + its nested
-        # network_answers; none of the *stringy* values should equal the
-        # secret. The env writer's call list is the only place it lives.
-        secret = "secret-account-123"
-
-        def _values_of(obj: object) -> list[object]:
-            if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-                return [v for f in dataclasses.fields(obj) for v in _values_of(getattr(obj, f.name))]
-            return [obj]
-
-        leaked = [v for v in _values_of(result) if v == secret]
-        assert leaked == [], f"secret leaked into ConfigureResult: {leaked!r}"
+# -----------------------------------------------------------------------------
+# PromptIO.ask_password remains part of the shared prompt surface (reused by
+# `network init` for the Mullvad secret).
+# -----------------------------------------------------------------------------
 
 
 class TestPromptIOAskPassword:
-    """``PromptIO`` grows an ``ask_password`` method so secrets (Mullvad
-    account number) don't appear in shell history or _ScriptedPromptIO.seen
-    string-coerced records.
-    """
-
     def test_protocol_has_ask_password(self) -> None:
-        """Static check: PromptIO.ask_password exists with the documented shape."""
         import inspect
 
         sig = inspect.signature(PromptIO.ask_password)  # type: ignore[attr-defined]
         params = list(sig.parameters)
-        # self + label + default
         assert "label" in params
         assert "default" in params
 
     def test_scripted_prompt_io_supports_ask_password(self) -> None:
         scripted = _ScriptedPromptIO(answers=["secret-123"])
-        result = scripted.ask_password("Mullvad account id", default="")  # type: ignore[attr-defined]
+        result = scripted.ask_password("Mullvad account id", default="")
         assert result == "secret-123"
 
     def test_refusing_prompt_io_ask_password_raises(self) -> None:
         rp = _RefusingPromptIO()
         with pytest.raises(NonInteractiveAbort):
-            rp.ask_password("secret", default="")  # type: ignore[attr-defined]
-
-
-class TestNetworkAnswersDataclass:
-    """A new ``NetworkAnswers`` dataclass carries the 5 (well, 6 with bool)
-    new wizard outputs alongside ``ConfigureResult.snapshot``. Task #7 will
-    fold these into ``PolicySnapshot`` proper; PR3a Task #6 keeps them on
-    a sibling field so the prompt + writer slice ships first."""
-
-    def test_network_answers_importable(self) -> None:
-        from mordred_hermes.wizard.configure import NetworkAnswers
-
-        assert NetworkAnswers is not None
-
-    def test_network_answers_fields_present(self) -> None:
-        import dataclasses
-
-        from mordred_hermes.wizard.configure import NetworkAnswers
-
-        names = {f.name for f in dataclasses.fields(NetworkAnswers)}
-        assert names == {
-            "default_network_path",
-            "tor_binary_path",
-            "tor_socks_port",
-            "mullvad_account_id_env",
-            "mullvad_relay_country",
-            "mullvad_killswitch",
-        }
-
-    def test_network_answers_is_frozen(self) -> None:
-        import dataclasses
-
-        from mordred_hermes.wizard.configure import NetworkAnswers
-
-        na = NetworkAnswers(
-            default_network_path="clearnet",
-            tor_binary_path="/usr/bin/tor",
-            tor_socks_port=9050,
-            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
-            mullvad_relay_country="auto",
-            mullvad_killswitch=False,
-        )
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            na.default_network_path = "tor"  # type: ignore[misc]
-
-
-class TestNetworkPrompts:
-    """``collect_answers`` runs 6 new network prompts after the existing
-    Phase 1 / Phase 2 fields. Default values mirror lenient-mode
-    expectations (no Mullvad account, no killswitch); strict-mode
-    operators set them via the prompts."""
-
-    _BASE_ANSWERS: ClassVar[list[object]] = [
-        "lenient",  # policy
-        False,  # allow_cloud_llm
-        "",  # cloud_provider_allowlist
-        "http://x/v1",  # local_llm_endpoint
-        "qwen",  # local_llm_model_id
-        "always-block",  # cloud_attempt_action
-        "none",  # harness_primary
-    ]
-    _NETWORK_ANSWERS: ClassVar[list[object]] = [
-        "tor",  # default_network_path
-        "/opt/tor/bin/tor",  # tor_binary_path
-        "9150",  # tor_socks_port (ask_text -> coerce to int)
-        "my-secret-account",  # mullvad_account_id (ask_password -> .env value, ConfigureResult holds env-var REF only)
-        "jp",  # mullvad_relay_country
-        True,  # mullvad_killswitch
-    ]
-
-    def test_collects_six_network_prompts(self) -> None:
-        prompts = _ScriptedPromptIO(answers=[*self._BASE_ANSWERS, *self._NETWORK_ANSWERS])
-        result = collect_answers(prompts)
-        from mordred_hermes.wizard.configure import NetworkAnswers
-
-        assert isinstance(result.network_answers, NetworkAnswers)  # type: ignore[attr-defined]
-        na = result.network_answers  # type: ignore[attr-defined]
-        assert na.default_network_path == "tor"
-        assert na.tor_binary_path == "/opt/tor/bin/tor"
-        assert na.tor_socks_port == 9150
-        assert na.mullvad_account_id_env == "MORDRED_MULLVAD_ACCOUNT"
-        assert na.mullvad_relay_country == "jp"
-        assert na.mullvad_killswitch is True
-
-    def test_empty_mullvad_account_yields_blank_env_ref(self) -> None:
-        """User leaves Mullvad password blank → ``mullvad_account_id_env`` is
-        still the canonical env-var name; the writer will see an empty value
-        and decide whether to write the .env line."""
-        prompts = _ScriptedPromptIO(
-            answers=[
-                *self._BASE_ANSWERS,
-                "clearnet",
-                "/usr/bin/tor",
-                "9050",
-                "",  # empty password
-                "auto",
-                False,
-            ]
-        )
-        result = collect_answers(prompts)
-        na = result.network_answers  # type: ignore[attr-defined]
-        assert na.mullvad_account_id_env == "MORDRED_MULLVAD_ACCOUNT"
-        # The actual secret is captured separately for the EnvFileWriter
-        # (the prompts.seen record carries it). ConfigureResult only carries
-        # the env-var reference.
-
-    def test_prompt_order_now_includes_six_network_labels(self) -> None:
-        """Label-order regression: the 6 new network labels come AFTER the
-        existing 7 Phase 1/Phase 2 prompts so snapshot tests that depend on
-        the leading prompts continue to pass."""
-        prompts = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "auto", False]
-        )
-        collect_answers(prompts)
-        labels = [label for _, label, _ in prompts.seen]
-        # First 7 are unchanged (Phase 1 / Phase 2).
-        assert labels[:7] == [
-            "Mordred policy mode",
-            "Allow cloud LLM providers (passes through provider override)?",
-            "Cloud provider allowlist (comma-separated; empty = none)",
-            "Local LLM endpoint URL (Phase 2)",
-            "Local LLM model id (Phase 2)",
-            "On cloud LLM attempt under strict mode (Phase 2)",
-            "Agent harness primary (Phase 2; strict mode refuses if a known harness)",
-        ]
-        # Next 6 are the new network prompts.
-        assert labels[7:] == [
-            "Default network path",
-            "Tor binary path",
-            "Tor SOCKS port",
-            "Mullvad account number (stored in ~/.hermes/.env)",
-            "Mullvad relay country (`auto` or 2-letter code)",
-            "Mullvad killswitch (lockdown-mode)",
-        ]
-
-    def test_tor_socks_port_coerced_to_int(self) -> None:
-        """The text prompt returns a string; collect_answers must coerce."""
-        prompts = _ScriptedPromptIO(answers=[*self._BASE_ANSWERS, "tor", "/usr/bin/tor", "9150", "", "auto", False])
-        result = collect_answers(prompts)
-        assert result.network_answers.tor_socks_port == 9150  # type: ignore[attr-defined]
-        assert isinstance(result.network_answers.tor_socks_port, int)  # type: ignore[attr-defined]
-
-    def test_invalid_tor_socks_port_falls_back_to_default(self) -> None:
-        """A non-numeric port answer falls back to 9050 with a warning rather
-        than aborting the whole configure flow."""
-        prompts = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "tor", "/usr/bin/tor", "not-a-port", "", "auto", False]
-        )
-        result = collect_answers(prompts)
-        assert result.network_answers.tor_socks_port == 9050  # type: ignore[attr-defined]
-
-    def test_invalid_relay_country_falls_back_to_auto(self) -> None:
-        """M7 (review 2026-05-14): the relay country prompt accepts free
-        text today, so a typo like ``"unitedstates"`` or ``"u.s."`` lands
-        directly in network.json and the Mullvad CLI rejects it later.
-        Validate the prompt: accept ``"auto"`` or any 2-letter alphabetic
-        code (normalized to lowercase). Garbage falls back to ``"auto"``
-        with a WARN so the wizard never aborts on a typo.
-        """
-        prompts = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "unitedstates", False]
-        )
-        result = collect_answers(prompts)
-        assert result.network_answers.mullvad_relay_country == "auto", (  # type: ignore[attr-defined]
-            "M7: free-text typos must collapse to 'auto' (with WARN), not be passed through to the Mullvad CLI"
-        )
-
-    def test_valid_2letter_relay_country_passes_through_lowercased(self) -> None:
-        """``"JP"`` or ``"jp"`` is the Mullvad-CLI-acceptable shape; both
-        must be normalized to lowercase ``"jp"`` for consistency on disk.
-        """
-        prompts_lower = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "jp", False]
-        )
-        result_lower = collect_answers(prompts_lower)
-        assert result_lower.network_answers.mullvad_relay_country == "jp"  # type: ignore[attr-defined]
-
-        prompts_upper = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "JP", False]
-        )
-        result_upper = collect_answers(prompts_upper)
-        assert result_upper.network_answers.mullvad_relay_country == "jp", (  # type: ignore[attr-defined]
-            "M7: uppercase 2-letter code must normalize to lowercase for consistency"
-        )
-
-    def test_auto_relay_country_preserved(self) -> None:
-        """The default sentinel must survive validation unchanged so the
-        Mullvad runtime keeps its automatic-selection behavior.
-        """
-        prompts = _ScriptedPromptIO(
-            answers=[*self._BASE_ANSWERS, "clearnet", "/usr/bin/tor", "9050", "", "auto", False]
-        )
-        result = collect_answers(prompts)
-        assert result.network_answers.mullvad_relay_country == "auto"  # type: ignore[attr-defined]
+            rp.ask_password("secret", default="")

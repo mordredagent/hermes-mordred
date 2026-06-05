@@ -58,7 +58,7 @@ class _HasConfigYamlSection(Protocol):
     """Structural shape required by :meth:`PolicyWriter.write` for the
     optional ``network_answers`` argument.
 
-    Implemented by :class:`mordred_hermes.wizard.configure.NetworkAnswers`.
+    Implemented by :class:`mordred_hermes.wizard.network_cli.NetworkAnswers`.
     Kept as a Protocol (not a concrete import) to avoid the
     ``configure -> policy_writer -> configure`` import cycle while still
     enforcing the contract under ``mypy --strict``. ``runtime_checkable`` so
@@ -408,7 +408,7 @@ class PolicyWriter:
         ``mordred_llm_guard`` to the upserted set so ``harness_primary``
         lands in config.yaml. Phase 3 PR3a Task #7 adds an optional
         ``network_answers`` (concretely
-        ``mordred_hermes.wizard.configure.NetworkAnswers`` but typed here
+        ``mordred_hermes.wizard.network_cli.NetworkAnswers`` but typed here
         via the :class:`_HasConfigYamlSection` Protocol to avoid the
         ``configure -> policy_writer -> configure`` import cycle) which
         lands in ``plugins.mordred_network`` via the Task #1

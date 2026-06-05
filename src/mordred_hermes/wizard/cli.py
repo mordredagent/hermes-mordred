@@ -1,22 +1,20 @@
-"""argparse subparser tree for ``hermes mordred ...``.
+"""argparse subparser tree for ``hermes mordred ...`` / ``hermes-mordred ...``.
 
-Phase A (1.3) ships the full command surface so that ``hermes mordred --help``
-already lists every subcommand. Each handler delegates to its own module
-(populated phase-by-phase). Subcommands whose modules are not implemented
-yet raise :class:`NotImplementedError` from a stable error message —
-``hermes mordred network status`` returns a clear "deferred to Phase 3"
-message rather than ``argparse: invalid choice``.
+Builds the full command surface so ``--help`` lists every subcommand. Each
+handler delegates to its own module and returns an exit code. All subcommands
+below are implemented.
 
-Subcommand tree (SPEC.md §Plugin: ``mordred_wizard`` L386-407):
+Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 
-- ``configure``                              — Phase C / TODO §1.3 L172
-- ``upgrade [--reset|--non-interactive|...]``— Phase E / TODO §1.3 L173
-- ``install <skill>``                        — Phase F (delegates to privacy_check)
-- ``network {use,status} [path]``            — Phase 3 stub
-- ``policy {show,explain,dry-run,reload}``   — Phase D / TODO §1.3 L185
-- ``audit {tail,grep,decrypt,purge}``        — Phase F (decrypt/purge: Phase 4)
-- ``keyvault {init,list,verify-digest,recover}`` — Phase 4 stub
-- ``plugins list``                           — Phase F (closes §0.5 L128 UX gap)
+- ``configure``                                  — interactive Mordred setup (policy / LLM / harness)
+- ``upgrade [--reset|--non-interactive|...]``    — idempotent migration (detects ~/.openclaw)
+- ``install <skill>``                            — install a skill through the policy gate
+- ``network {use,status,init}``                  — network-privacy path control + on-demand setup
+- ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
+- ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
+- ``keyvault {init,list,verify-digest,recover,enable-se,enable-tpm}`` — keyvault management
+- ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
+- ``plugins list``                               — list discovered Mordred plugins
 """
 
 from __future__ import annotations
@@ -97,7 +95,7 @@ def _add_install(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
 
 def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("network", help="Network path control (Phase 3)")
+    p = sub.add_parser("network", help="Network privacy path control (Tor / VPN / clearnet)")
     nsub = p.add_subparsers(dest="network_command", required=True, metavar="COMMAND")
 
     p_use = nsub.add_parser("use", help="Switch active network path")
@@ -106,6 +104,17 @@ def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
     p_status = nsub.add_parser("status", help="Show active path and liveness")
     p_status.set_defaults(func=_handle_network_status)
+
+    p_init = nsub.add_parser(
+        "init",
+        help="Set up network privacy on demand (Tor / VPN / clearnet, Mullvad account)",
+    )
+    p_init.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Fail fast on any prompt (CI / scripted use)",
+    )
+    p_init.set_defaults(func=_handle_network_init)
 
 
 def _add_policy(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -139,17 +148,17 @@ def _add_audit(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     p_grep.add_argument("pattern")
     p_grep.set_defaults(func=_handle_audit_grep)
 
-    p_decrypt = asub.add_parser("decrypt", help="Decrypt encrypted audit entries (Phase 4)")
+    p_decrypt = asub.add_parser("decrypt", help="Decrypt encrypted audit entries")
     p_decrypt.add_argument("--date", required=True, help="YYYY-MM-DD")
     p_decrypt.set_defaults(func=_handle_audit_decrypt)
 
-    p_purge = asub.add_parser("purge", help="Manually purge pre-Phase-4 plaintext entries (Phase 4)")
+    p_purge = asub.add_parser("purge", help="Manually purge plaintext audit entries")
     p_purge.add_argument("--before", required=True, help="YYYY-MM-DD")
     p_purge.set_defaults(func=_handle_audit_purge)
 
 
 def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("keyvault", help="Mordred keyvault management (Phase 4)")
+    p = sub.add_parser("keyvault", help="Mordred keyvault management")
     ksub = p.add_subparsers(dest="keyvault_command", required=True, metavar="COMMAND")
 
     p_init = ksub.add_parser("init", help="Initialise the keyvault")
@@ -295,7 +304,7 @@ def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
 
 # -----------------------------------------------------------------------------
-# Handlers — Phase A stubs. Subsequent phases swap each body for the real impl.
+# Handlers — each delegates to its module (lazy-imported to keep CLI start fast).
 # Each handler accepts ``argparse.Namespace`` and returns an exit code (int).
 # -----------------------------------------------------------------------------
 
@@ -336,6 +345,12 @@ def _handle_network_status(args: argparse.Namespace) -> int:
     from . import network_cli
 
     return network_cli.handle_status(args)
+
+
+def _handle_network_init(args: argparse.Namespace) -> int:
+    from . import network_cli
+
+    return network_cli.handle_init(args)
 
 
 def _handle_policy_show(args: argparse.Namespace) -> int:
@@ -481,9 +496,7 @@ def dispatch(args: argparse.Namespace) -> int:
 
     Hermes calls the handler set via ``set_defaults(func=...)`` directly,
     so this helper is mainly for tests that build a Namespace by hand.
-    Returns the handler's exit code (0 = success). Re-raises
-    :class:`NotImplementedError` from stub handlers so tests can assert
-    on the deferred-phase message.
+    Returns the handler's exit code (0 = success).
     """
     func = getattr(args, "func", None)
     if func is None:

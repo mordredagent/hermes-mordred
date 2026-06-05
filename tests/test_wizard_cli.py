@@ -83,6 +83,8 @@ class TestSubcommandTree:
             ["mordred", "network", "use", "vpn"],
             ["mordred", "network", "use", "clearnet"],
             ["mordred", "network", "status"],
+            ["mordred", "network", "init"],
+            ["mordred", "network", "init", "--non-interactive"],
             ["mordred", "policy", "show"],
             ["mordred", "policy", "explain", "skill-id"],
             ["mordred", "policy", "dry-run", "/tmp/SKILL.md"],

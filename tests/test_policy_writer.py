@@ -454,7 +454,7 @@ class TestNetworkAnswersToConfigYamlSection:
     alongside snapshot fields."""
 
     def test_to_config_yaml_section_shape(self) -> None:
-        from mordred_hermes.wizard.configure import NetworkAnswers
+        from mordred_hermes.wizard.network_cli import NetworkAnswers
 
         na = NetworkAnswers(
             default_network_path="vpn",
@@ -484,7 +484,7 @@ class TestPolicyWriterWritesNetworkSection:
     changes (Task #1 contract)."""
 
     def test_write_upserts_network_section_when_answers_provided(self, tmp_path: Path) -> None:
-        from mordred_hermes.wizard.configure import NetworkAnswers
+        from mordred_hermes.wizard.network_cli import NetworkAnswers
 
         w = _writer(tmp_path)
         snap = PolicySnapshot(policy="strict")
@@ -522,7 +522,7 @@ class TestPolicyWriterWritesNetworkSection:
         """When a prior network section exists (e.g., from a previous
         configure run that the user partially edited), the wizard must
         merge -- not clobber -- per the Task #1 contract."""
-        from mordred_hermes.wizard.configure import NetworkAnswers
+        from mordred_hermes.wizard.network_cli import NetworkAnswers
 
         config_path = tmp_path / "config.yaml"
         seed = """\
