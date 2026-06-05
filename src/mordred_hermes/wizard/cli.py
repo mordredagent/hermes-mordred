@@ -113,7 +113,22 @@ def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p_init.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Fail fast on any prompt (CI / scripted use)",
+        help="Apply from flags without prompting (CI / scripted use); keeps the existing Mullvad secret",
+    )
+    p_init.add_argument("--path", choices=["tor", "vpn", "clearnet"], help="Default network path")
+    p_init.add_argument("--tor-binary", help="Tor binary path (filesystem path or shell-resolvable name)")
+    p_init.add_argument("--tor-socks-port", type=int, help="Tor SOCKS port")
+    p_init.add_argument("--mullvad-relay", help="Mullvad relay country ('auto' or a 2-letter code)")
+    p_init.add_argument(
+        "--mullvad-killswitch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable the Mullvad killswitch (lockdown-mode)",
+    )
+    p_init.add_argument(
+        "--clear-mullvad",
+        action="store_true",
+        help="Remove the stored Mullvad account secret from ~/.hermes/.env",
     )
     p_init.set_defaults(func=_handle_network_init)
 

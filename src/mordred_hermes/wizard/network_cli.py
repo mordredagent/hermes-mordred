@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,10 +33,8 @@ from .._home import HERMES_BASE
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from .configure import (
-    NonInteractiveAbort,
     PromptIO,
     PromptToolkitIO,
-    _RefusingPromptIO,
 )
 from .credentials_writer import CredentialsWriter, JSONCredentialsWriter
 from .env_file_writer import DotEnvFileWriter, EnvFileWriter
@@ -299,6 +296,7 @@ def collect_network_answers(
     prompt_io: PromptIO,
     *,
     existing: Mapping[str, Any] | None = None,
+    prompt_secret: bool = True,
 ) -> NetworkInitInputs:
     """Run the six network-privacy prompts, seeding defaults from ``existing``.
 
@@ -330,11 +328,16 @@ def collect_network_answers(
             default=str(existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT),
         )
     )
-    # Blank = keep the current secret (re-run safe). The label says so.
-    mullvad_account_secret = prompt_io.ask_password(
-        label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
-        default="",
-    )
+    # Blank = keep the current secret (re-run safe). The label says so. When the
+    # caller has already decided to clear the secret (``--clear-mullvad``), skip
+    # the prompt entirely.
+    if prompt_secret:
+        mullvad_account_secret = prompt_io.ask_password(
+            label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
+            default="",
+        )
+    else:
+        mullvad_account_secret = ""
     mullvad_relay_country = _coerce_mullvad_relay_country(
         prompt_io.ask_text(
             label="Mullvad relay country (`auto` or 2-letter code)",
@@ -360,6 +363,53 @@ def collect_network_answers(
     )
 
 
+def network_answers_from_args(
+    args: argparse.Namespace,
+    *,
+    existing: Mapping[str, Any] | None = None,
+) -> NetworkInitInputs:
+    """Build :class:`NetworkInitInputs` from non-interactive CLI flags.
+
+    Unspecified flags fall back to the existing on-disk section, then to the
+    safe static defaults. The Mullvad secret is never taken from a flag (it
+    would leak via ``ps`` / shell history): non-interactive runs keep the
+    existing secret (or clear it via ``--clear-mullvad``), so the carrier
+    secret is always ``""``.
+    """
+    existing = existing or {}
+
+    path = getattr(args, "path", None) or existing.get("default_path") or "clearnet"
+    if not (isinstance(path, str) and path in _VALID_PATHS):
+        path = "clearnet"
+
+    tor_binary_path = getattr(args, "tor_binary", None) or str(existing.get("tor_binary_path") or "tor")
+
+    port_arg = getattr(args, "tor_socks_port", None)
+    port_seed = port_arg if port_arg is not None else (existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT)
+    tor_socks_port = _coerce_tor_socks_port(str(port_seed))
+
+    relay_arg = getattr(args, "mullvad_relay", None)
+    relay_seed = relay_arg if relay_arg is not None else (existing.get("mullvad_relay_country") or "auto")
+    mullvad_relay_country = _coerce_mullvad_relay_country(str(relay_seed))
+
+    killswitch_arg = getattr(args, "mullvad_killswitch", None)
+    mullvad_killswitch = (
+        killswitch_arg
+        if isinstance(killswitch_arg, bool)
+        else _coerce_seed_bool(existing.get("mullvad_killswitch", False))
+    )
+
+    network_answers = NetworkAnswers(
+        default_network_path=path,
+        tor_binary_path=tor_binary_path,
+        tor_socks_port=tor_socks_port,
+        mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
+        mullvad_relay_country=mullvad_relay_country,
+        mullvad_killswitch=mullvad_killswitch,
+    )
+    return NetworkInitInputs(network_answers=network_answers, _mullvad_account_secret="")
+
+
 def run_init(
     *,
     prompt_io: PromptIO,
@@ -368,40 +418,67 @@ def run_init(
     credentials_writer: CredentialsWriter,
     env_path: Path | None = None,
     credentials_path: Path | None = None,
+    clear_mullvad: bool = False,
 ) -> int:
-    """Persist the collected network-privacy answers. Returns an exit code.
+    """Collect answers interactively, then persist. Returns an exit code.
 
-    Routing mirrors what ``configure`` used to do, but as a standalone,
-    re-runnable command:
+    ``clear_mullvad`` removes the stored Mullvad secret (and skips the secret
+    prompt). See :func:`_persist_network` for the persistence contract.
+    """
+    existing = _read_existing_network_section(policy_writer.config_path)
+    inputs = collect_network_answers(prompt_io, existing=existing, prompt_secret=not clear_mullvad)
+    return _persist_network(
+        inputs,
+        policy_writer=policy_writer,
+        env_writer=env_writer,
+        credentials_writer=credentials_writer,
+        env_path=env_path,
+        credentials_path=credentials_path,
+        clear_mullvad=clear_mullvad,
+    )
+
+
+def _persist_network(
+    inputs: NetworkInitInputs,
+    *,
+    policy_writer: PolicyWriter,
+    env_writer: EnvFileWriter,
+    credentials_writer: CredentialsWriter,
+    env_path: Path | None = None,
+    credentials_path: Path | None = None,
+    clear_mullvad: bool = False,
+) -> int:
+    """Persist collected network-privacy answers. Returns an exit code.
 
     - ``plugins.mordred_network`` is **merged** (not whole-replaced) into
       ``config.yaml`` so unrelated user-edited sub-fields survive.
-    - A non-empty Mullvad secret goes to the :class:`EnvFileWriter`
-      (``~/.hermes/.env``). A blank answer is a no-op there, keeping any
-      existing secret (re-run safe) rather than stripping the line.
+    - Mullvad secret: ``clear_mullvad`` removes the ``~/.hermes/.env`` line;
+      otherwise a non-empty secret is written and a blank one is a no-op
+      (keeping the current secret across re-runs).
     - The relay/killswitch indirection goes to the :class:`CredentialsWriter`
       (``~/.hermes/mordred/credentials/network.json``).
     """
-    existing = _read_existing_network_section(policy_writer.config_path)
-    inputs = collect_network_answers(prompt_io, existing=existing)
     na = inputs.network_answers
-
     policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
 
     resolved_env_path = env_path if env_path is not None else (HERMES_BASE / ".env")
-    # ``wrote_secret`` is a bool (never the plaintext), safe to hold as a local.
-    # The secret itself is accessed only inline at the upsert below, so it never
-    # sits in this frame's locals where --showlocals / a debugger / a rich
-    # traceback could surface it (Codex review 2026-06-05). Blank secret: do NOT
-    # upsert "" -- that strips the line; leave the existing .env untouched so a
-    # re-run keeps the current secret.
-    wrote_secret = bool(inputs._mullvad_account_secret)
-    if wrote_secret:
+    # ``secret_written`` / ``secret_cleared`` are bools (never the plaintext); the
+    # secret itself is accessed only inline at the upsert call, so it never sits
+    # in this frame's locals where --showlocals / a debugger / a rich traceback
+    # could surface it (Codex review 2026-06-05).
+    secret_written = False
+    secret_cleared = False
+    if clear_mullvad:
+        env_writer.upsert(resolved_env_path, key=na.mullvad_account_id_env, value="")
+        secret_cleared = True
+    elif inputs._mullvad_account_secret:
         env_writer.upsert(
             resolved_env_path,
             key=na.mullvad_account_id_env,
             value=inputs._mullvad_account_secret,
         )
+        secret_written = True
+    # else: blank => leave the existing .env untouched (keep the current secret).
 
     resolved_credentials_path = (
         credentials_path if credentials_path is not None else (HERMES_BASE / "mordred" / "credentials" / "network.json")
@@ -413,31 +490,43 @@ def run_init(
         mullvad_killswitch=na.mullvad_killswitch,
     )
 
-    print(_init_summary(na, secret_written=wrote_secret))
+    print(_init_summary(na, secret_written=secret_written, secret_cleared=secret_cleared))
     return 0
 
 
 def handle_init(args: argparse.Namespace) -> int:
     """Process ``hermes mordred network init``.
 
-    Thin CLI adapter: pick the prompt backend (real prompt_toolkit, or the
-    refusing double under ``--non-interactive``) and the production writers,
-    then delegate to :func:`run_init`. ``--non-interactive`` aborts with exit
-    code 2 because there is no flag surface to pre-specify the answers yet.
+    ``--non-interactive`` is flag-driven (no prompts, no abort): the answers
+    come from the CLI flags, seeded from the existing config, and the Mullvad
+    secret is left unchanged unless ``--clear-mullvad`` removes it. Otherwise
+    the prompts run interactively. The production writers are used in both modes.
     """
     non_interactive = bool(getattr(args, "non_interactive", False))
+    clear_mullvad = bool(getattr(args, "clear_mullvad", False))
     config_path = _resolve_config_path(args)
-    prompt_io: PromptIO = _RefusingPromptIO() if non_interactive else PromptToolkitIO()
-    try:
-        return run_init(
-            prompt_io=prompt_io,
-            policy_writer=PolicyWriter(config_path=config_path),
-            env_writer=DotEnvFileWriter(),
-            credentials_writer=JSONCredentialsWriter(),
+    policy_writer = PolicyWriter(config_path=config_path)
+    env_writer = DotEnvFileWriter()
+    credentials_writer = JSONCredentialsWriter()
+
+    if non_interactive:
+        existing = _read_existing_network_section(config_path)
+        inputs = network_answers_from_args(args, existing=existing)
+        return _persist_network(
+            inputs,
+            policy_writer=policy_writer,
+            env_writer=env_writer,
+            credentials_writer=credentials_writer,
+            clear_mullvad=clear_mullvad,
         )
-    except NonInteractiveAbort as e:
-        print(f"hermes mordred network init: {e}", file=sys.stderr)
-        return 2
+
+    return run_init(
+        prompt_io=PromptToolkitIO(),
+        policy_writer=policy_writer,
+        env_writer=env_writer,
+        credentials_writer=credentials_writer,
+        clear_mullvad=clear_mullvad,
+    )
 
 
 def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
@@ -470,14 +559,19 @@ def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
     return dict(section)
 
 
-def _init_summary(na: NetworkAnswers, *, secret_written: bool) -> str:
+def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: bool = False) -> str:
     """User-facing confirmation printed after a successful ``network init``.
 
     Echoes the resolved settings so the user can verify what was saved, and
-    whether the Mullvad secret was updated or left unchanged (blank = keep).
+    whether the Mullvad secret was stored, cleared, or left unchanged.
     """
     killswitch = "enabled" if na.mullvad_killswitch else "disabled"
-    account = "stored in ~/.hermes/.env" if secret_written else "unchanged"
+    if secret_cleared:
+        account = "cleared"
+    elif secret_written:
+        account = "stored in ~/.hermes/.env"
+    else:
+        account = "unchanged"
     lines = [
         "",
         "Network privacy initialised:",
@@ -501,5 +595,6 @@ __all__ = [
     "handle_init",
     "handle_status",
     "handle_use",
+    "network_answers_from_args",
     "run_init",
 ]

@@ -185,6 +185,15 @@ class TestCollectNetworkAnswers:
         for label in labels:
             assert "Phase" not in label, f"user-facing label leaks internal jargon: {label!r}"
 
+    def test_prompt_secret_false_skips_password_prompt(self) -> None:
+        # Only five answers: no Mullvad password slot is consumed when secret prompt is off.
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9050", "auto", False])
+        inputs = collect_network_answers(prompts, prompt_secret=False)
+        assert inputs._mullvad_account_secret == ""
+        kinds = [k for k, _, _ in prompts.seen]
+        assert "password" not in kinds
+        assert len(kinds) == 5
+
 
 class TestCollectNetworkAnswersSeedsDefaults:
     """Re-run safety: each prompt's default comes from the existing on-disk
@@ -486,6 +495,12 @@ class TestInitSummary:
         assert "disabled" in out.lower()  # killswitch False
         assert "clearnet" in out.lower()
 
+    def test_summary_marks_secret_cleared(self) -> None:
+        from mordred_hermes.wizard.network_cli import _init_summary
+
+        out = _init_summary(self._na(), secret_written=False, secret_cleared=True)
+        assert "cleared" in out.lower()
+
     def test_run_init_prints_resolved_settings(self, tmp_path: Path) -> None:
         """End-to-end: run_init's printed summary reflects the saved path."""
         import io
@@ -508,13 +523,178 @@ class TestInitSummary:
         assert "stored" in out.lower()  # _ANSWERS_FULL has a non-blank secret
 
 
-class TestHandleInit:
-    def test_non_interactive_returns_exit_code_2(self, capsys: pytest.CaptureFixture[str]) -> None:
-        ns = argparse.Namespace(non_interactive=True)
-        rc = handle_init(ns)
-        assert rc == 2
-        assert "non-interactive" in capsys.readouterr().err.lower()
+class TestNetworkAnswersFromArgs:
+    """Non-interactive flag surface: build NetworkAnswers from CLI args,
+    seeding unspecified fields from the existing config. The Mullvad secret is
+    NEVER taken from a flag (would leak via ps / shell history)."""
 
+    def _args(self, **kw: Any) -> argparse.Namespace:
+        base = dict(path=None, tor_binary=None, tor_socks_port=None, mullvad_relay=None, mullvad_killswitch=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_builds_from_flags(self) -> None:
+        from mordred_hermes.wizard.network_cli import network_answers_from_args
+
+        args = self._args(
+            path="tor", tor_binary="/usr/bin/tor", tor_socks_port=9150, mullvad_relay="jp", mullvad_killswitch=True
+        )
+        inputs = network_answers_from_args(args, existing={})
+        na = inputs.network_answers
+        assert na.default_network_path == "tor"
+        assert na.tor_binary_path == "/usr/bin/tor"
+        assert na.tor_socks_port == 9150
+        assert na.mullvad_relay_country == "jp"
+        assert na.mullvad_killswitch is True
+        assert inputs._mullvad_account_secret == ""  # never from a flag
+
+    def test_unspecified_flags_seed_from_existing(self) -> None:
+        from mordred_hermes.wizard.network_cli import network_answers_from_args
+
+        existing = {
+            "default_path": "vpn",
+            "tor_binary_path": "/opt/tor/bin/tor",
+            "tor_socks_port": 19050,
+            "mullvad_relay_country": "se",
+            "mullvad_killswitch": True,
+        }
+        inputs = network_answers_from_args(self._args(), existing=existing)
+        na = inputs.network_answers
+        assert na.default_network_path == "vpn"
+        assert na.tor_binary_path == "/opt/tor/bin/tor"
+        assert na.tor_socks_port == 19050
+        assert na.mullvad_relay_country == "se"
+        assert na.mullvad_killswitch is True
+
+    def test_no_flags_no_existing_uses_safe_defaults(self) -> None:
+        from mordred_hermes.wizard.network_cli import network_answers_from_args
+
+        na = network_answers_from_args(self._args(), existing={}).network_answers
+        assert na.default_network_path == "clearnet"
+        assert na.tor_binary_path == "tor"
+        assert na.tor_socks_port == 9050
+        assert na.mullvad_relay_country == "auto"
+        assert na.mullvad_killswitch is False
+
+    def test_port_and_relay_coerced(self) -> None:
+        from mordred_hermes.wizard.network_cli import network_answers_from_args
+
+        na = network_answers_from_args(
+            self._args(path="clearnet", tor_socks_port=70000, mullvad_relay="unitedstates"), existing={}
+        ).network_answers
+        assert na.tor_socks_port == 9050  # out of range -> default
+        assert na.mullvad_relay_country == "auto"  # invalid -> auto
+
+
+class TestClearMullvad:
+    """``--clear-mullvad`` removes the stored secret (env line), overriding the
+    blank=keep default, and the summary reports it as cleared."""
+
+    def _args(self, **kw: Any) -> argparse.Namespace:
+        base = dict(path="clearnet", tor_binary=None, tor_socks_port=None, mullvad_relay=None, mullvad_killswitch=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_clear_calls_env_writer_with_empty_value(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard.network_cli import _persist_network, network_answers_from_args
+
+        env_w = _SpyEnvFileWriter()
+        env_path = tmp_path / ".env"
+        inputs = network_answers_from_args(self._args(), existing={})
+        rc = _persist_network(
+            inputs,
+            policy_writer=_writer(tmp_path),
+            env_writer=env_w,
+            credentials_writer=_SpyCredentialsWriter(),
+            env_path=env_path,
+            credentials_path=tmp_path / "credentials" / "network.json",
+            clear_mullvad=True,
+        )
+        assert rc == 0
+        assert env_w.calls == [(env_path, "MORDRED_MULLVAD_ACCOUNT", "")]
+
+    def test_clear_strips_existing_env_line(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard.network_cli import _persist_network, network_answers_from_args
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("MORDRED_MULLVAD_ACCOUNT=OLD\nOTHER=keep\n", encoding="utf-8")
+        inputs = network_answers_from_args(self._args(), existing={})
+        _persist_network(
+            inputs,
+            policy_writer=_writer(tmp_path),
+            env_writer=DotEnvFileWriter(),
+            credentials_writer=JSONCredentialsWriter(),
+            env_path=env_path,
+            credentials_path=tmp_path / "credentials" / "network.json",
+            clear_mullvad=True,
+        )
+        text = env_path.read_text(encoding="utf-8")
+        assert "MORDRED_MULLVAD_ACCOUNT" not in text
+        assert "OTHER=keep" in text
+
+    def test_clear_summary_says_cleared(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.wizard.network_cli import _persist_network, network_answers_from_args
+
+        inputs = network_answers_from_args(self._args(), existing={})
+        _persist_network(
+            inputs,
+            policy_writer=_writer(tmp_path),
+            env_writer=_SpyEnvFileWriter(),
+            credentials_writer=_SpyCredentialsWriter(),
+            env_path=tmp_path / ".env",
+            credentials_path=tmp_path / "credentials" / "network.json",
+            clear_mullvad=True,
+        )
+        assert "cleared" in capsys.readouterr().out.lower()
+
+
+class TestHandleInitNonInteractive:
+    """``network init --non-interactive`` is flag-driven (no abort). The secret
+    is left unchanged unless ``--clear-mullvad`` removes it."""
+
+    def _ns(self, tmp_path: Path, **kw: Any) -> argparse.Namespace:
+        base = dict(
+            non_interactive=True,
+            clear_mullvad=False,
+            config_path=tmp_path / "config.yaml",
+            path=None,
+            tor_binary=None,
+            tor_socks_port=None,
+            mullvad_relay=None,
+            mullvad_killswitch=None,
+        )
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_flag_driven_persists_without_prompt(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import network_cli as nc
+
+        monkeypatch.setattr(nc, "HERMES_BASE", tmp_path)
+        rc = handle_init(self._ns(tmp_path, path="tor", tor_binary="/usr/bin/tor", tor_socks_port=9050))
+        assert rc == 0
+        from ruamel.yaml import YAML
+
+        data = YAML(typ="safe", pure=True).load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
+
+    def test_keeps_existing_secret(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import network_cli as nc
+
+        monkeypatch.setattr(nc, "HERMES_BASE", tmp_path)
+        (tmp_path / ".env").write_text("MORDRED_MULLVAD_ACCOUNT=KEEP\n", encoding="utf-8")
+        assert handle_init(self._ns(tmp_path, path="tor")) == 0
+        assert "MORDRED_MULLVAD_ACCOUNT=KEEP" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+    def test_clear_mullvad_strips_secret(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import network_cli as nc
+
+        monkeypatch.setattr(nc, "HERMES_BASE", tmp_path)
+        (tmp_path / ".env").write_text("MORDRED_MULLVAD_ACCOUNT=GONE\n", encoding="utf-8")
+        assert handle_init(self._ns(tmp_path, path="clearnet", clear_mullvad=True)) == 0
+        assert "MORDRED_MULLVAD_ACCOUNT" not in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+class TestHandleInit:
     def test_interactive_path_persists_and_prints(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
