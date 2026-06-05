@@ -40,6 +40,7 @@ def _setup_subparser(parser: argparse.ArgumentParser) -> None:
     _add_audit(sub)
     _add_keyvault(sub)
     _add_vault(sub)
+    _add_encryption(sub)
     _add_plugins(sub)
 
 
@@ -294,6 +295,37 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     p_disable_cfg.set_defaults(func=_handle_vault_disable_config_decrypt)
 
 
+def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "encryption",
+        help="Unified at-rest encryption toggle (env / config / memory / workspace)",
+    )
+    esub = p.add_subparsers(dest="encryption_command", required=True, metavar="COMMAND")
+
+    p_status = esub.add_parser("status", help="Show encryption state of all targets (non-prompting)")
+    p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    p_status.set_defaults(func=_handle_encryption_status)
+
+    # enable / disable / purge over the vault-backed targets. (workspace toggling
+    # is added by the macOS workspace phase; status already reports all four.)
+    _toggle_targets = ["env", "config", "memory"]
+
+    p_enable = esub.add_parser("enable", help="Turn on at-rest encryption for a target")
+    p_enable.add_argument("target", choices=_toggle_targets)
+    p_enable.add_argument("--non-interactive", action="store_true", help="Apply without prompting (CI / scripted use)")
+    p_enable.set_defaults(func=_handle_encryption_enable)
+
+    p_disable = esub.add_parser("disable", help="Turn off encryption for a target (reversible; keeps the vault copy)")
+    p_disable.add_argument("target", choices=_toggle_targets)
+    p_disable.add_argument("--non-interactive", action="store_true", help="Apply without prompting (CI / scripted use)")
+    p_disable.set_defaults(func=_handle_encryption_disable)
+
+    p_purge = esub.add_parser("purge", help="Remove the encrypted copy for a target (destructive; needs --yes)")
+    p_purge.add_argument("target", choices=_toggle_targets)
+    p_purge.add_argument("-y", "--yes", action="store_true", help="Confirm the destructive purge")
+    p_purge.set_defaults(func=_handle_encryption_purge)
+
+
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "plugins",
@@ -483,6 +515,30 @@ def _handle_vault_disable_config_decrypt(args: argparse.Namespace) -> int:
     from . import config_decrypt_cli
 
     return config_decrypt_cli.cli_disable(args)
+
+
+def _handle_encryption_status(args: argparse.Namespace) -> int:
+    from . import encryption_cli
+
+    return encryption_cli.cli_status(args)
+
+
+def _handle_encryption_enable(args: argparse.Namespace) -> int:
+    from . import encryption_cli
+
+    return encryption_cli.cli_enable(args)
+
+
+def _handle_encryption_disable(args: argparse.Namespace) -> int:
+    from . import encryption_cli
+
+    return encryption_cli.cli_disable(args)
+
+
+def _handle_encryption_purge(args: argparse.Namespace) -> int:
+    from . import encryption_cli
+
+    return encryption_cli.cli_purge(args)
 
 
 def _handle_plugins_list(args: argparse.Namespace) -> int:

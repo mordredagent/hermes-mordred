@@ -134,6 +134,55 @@ class TestDisable:
         assert rc == 1
 
 
+class TestPurge:
+    def test_unenrolls_and_keeps_plaintext(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / "config.yaml").write_bytes(_CONFIG)
+        config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+
+        rc = config_decrypt_cli.purge(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert not _marker_path(home).exists()
+        assert (home / "config.yaml").read_bytes() == _CONFIG  # plaintext kept
+        assert _read_vault_config(root, backend, store) is None  # removed from the vault
+
+    def test_restores_sealed_plaintext_then_unenrolls(self, tmp_path: Path) -> None:
+        """Safe order: a sealed-away plaintext is recovered BEFORE the vault copy is dropped."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / "config.yaml").write_bytes(_CONFIG)
+        config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        (home / "config.yaml").unlink()  # sealed (reseal-on-exit removed the plaintext)
+
+        rc = config_decrypt_cli.purge(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert (home / "config.yaml").read_bytes() == _CONFIG  # recovered, not lost
+        assert _read_vault_config(root, backend, store) is None
+
+    def test_idempotent_unmanaged(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        rc = config_decrypt_cli.purge(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore())
+        assert rc == 0
+
+    def test_refuses_when_managed_but_no_vault_and_no_plaintext(self, tmp_path: Path) -> None:
+        """Marker present, plaintext absent, vault gone → don't silently drop into 'defaults'."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        marker = _marker_path(home)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("vault-managed\n", encoding="utf-8")
+        # no config.yaml on disk, no vault manifest at root
+        rc = config_decrypt_cli.purge(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore())
+        assert rc == 1
+        assert _marker_path(home).exists()  # marker NOT dropped — fail-closed preserved
+
+
 class TestCliAdapters:
     def test_cli_enable_resolves_home_and_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import argparse

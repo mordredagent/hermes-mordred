@@ -15,17 +15,28 @@ import io
 import os
 import sys
 from collections.abc import MutableMapping
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .._home import hermes_home as _hermes_home
 from ._identity import default_vault_root, vault_identity
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from .anchor import AnchorStore
     from .wrap import NativeBackend
 
 __all__ = ["inject_vault_env", "install_vault_env_decrypt"]
+
+# Opt-out marker: its presence suppresses runtime .env injection even while the
+# vault still holds an enrolled ``.env`` (the reversible "disable" state). Mirrors
+# the config opt-IN marker in :mod:`._config_bootstrap`, but inverted — env is
+# injected by default once enrolled, so the marker turns it OFF.
+_ENV_OPTOUT_SUBPATH = ("mordred", "env-vault.optout")
+
+
+def _env_optout_marker_path(home: Path) -> Path:
+    """The env opt-out marker path: ``<home>/mordred/env-vault.optout``."""
+    return home.joinpath(*_ENV_OPTOUT_SUBPATH)
 
 
 def inject_vault_env(
@@ -113,9 +124,16 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     Enclave or its software fallback), which is macOS-specific. On other platforms
     this is a no-op so Hermes runs unchanged. Injects into ``os.environ`` by
     default. Returns the number of variables injected.
+
+    Honors the env **opt-out marker** (the reversible "disable" state): when
+    ``<home>/mordred/env-vault.optout`` is present the vault is never opened and
+    nothing is injected, even if ``.env`` is still enrolled — the operator has
+    restored a plaintext ``.env`` and wants the runtime to use that.
     """
     if sys.platform != "darwin":
         return 0
     if environ is None:
         environ = os.environ
+    if _env_optout_marker_path(_hermes_home()).exists():
+        return 0
     return inject_vault_env(root=default_vault_root(), environ=environ)

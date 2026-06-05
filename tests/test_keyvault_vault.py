@@ -492,3 +492,92 @@ def test_init_rejects_symlinked_root(tmp_path: Path, backend: FakeBackend, store
 
     with pytest.raises(vault.VaultError):
         _init(root, backend, store)
+
+
+# ---------------------------------------------------------------------------
+# unenroll_file — the purge primitive (mirror of enroll_file)
+# ---------------------------------------------------------------------------
+
+
+def test_unenroll_removes_name_and_bumps_generation(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"SECRET=1\n")
+    gen_before = v.generation
+    v.unenroll_file(".env")
+    assert ".env" not in v.list_files()
+    assert v.generation == gen_before + 1
+    with pytest.raises(vault.VaultError):
+        v.read_file(".env")  # fail-closed: no longer enrolled
+    v.close()
+
+
+def test_unenroll_keeps_other_files_intact(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"SECRET=1\n")
+    v.enroll_file("config.yaml", b"model: x\n")
+    v.unenroll_file(".env")
+    assert v.list_files() == ["config.yaml"]
+    assert v.read_file("config.yaml") == b"model: x\n"
+    v.close()
+
+
+def test_unenroll_gcs_orphan_blob(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"SECRET=1\n")
+    assert len(list((tmp_path / "blobs").glob("*.blob"))) == 1
+    v.unenroll_file(".env")
+    # the removed file's ciphertext blob is no longer referenced → GC'd
+    assert list((tmp_path / "blobs").glob("*.blob")) == []
+    v.close()
+
+
+def test_unenroll_absent_name_is_noop(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    v = _init(tmp_path, backend, store)
+    v.enroll_file("config.yaml", b"x")
+    gen_before = v.generation
+    v.unenroll_file(".env")  # never enrolled → clean no-op, no generation churn
+    assert v.generation == gen_before
+    assert v.list_files() == ["config.yaml"]
+    v.close()
+
+
+def test_unenroll_persists_after_reopen(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"S=1\n")
+    v.enroll_file("config.yaml", b"y")
+    v.unenroll_file(".env")
+    v.close()
+
+    reopened = _open(tmp_path, backend, store)
+    assert reopened.list_files() == ["config.yaml"]
+    with pytest.raises(vault.VaultError):
+        reopened.read_file(".env")
+    reopened.close()
+
+
+def test_unenroll_recovery_mode_raises(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    """A recovery-mode handle has no device anchor to commit against — refuse."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"S=1\n")
+    v.close()
+
+    rec = vault.recover_vault(tmp_path, _PASSPHRASE)
+    with pytest.raises(vault.VaultError):
+        rec.unenroll_file(".env")
+    rec.close()
+
+
+def test_unenroll_stale_handle_raises(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    """A handle whose in-RAM generation lags the device anchor must fail closed."""
+    a = _init(tmp_path, backend, store)
+    a.enroll_file(".env", b"S=1\n")
+
+    b = _open(tmp_path, backend, store)  # second writer advances the vault
+    b.enroll_file("config.yaml", b"y")
+    b.close()
+
+    with pytest.raises(vault.VaultError):
+        a.unenroll_file(".env")  # handle `a` is now stale
+    a.close()

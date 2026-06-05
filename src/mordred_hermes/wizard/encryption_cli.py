@@ -1,0 +1,371 @@
+"""``hermes mordred encryption`` — unified at-rest toggle for four targets.
+
+One consistent command surface to turn on/off the at-rest encryption of:
+
+- ``env``       — ``~/.hermes/.env`` enrolled into the vault (runtime-injected)
+- ``config``    — ``~/.hermes/config.yaml`` via the ``.pth`` startup decrypt hook
+- ``memory``    — Hermes agent memory (``HERMES_MEMORY_KEY`` + ``config.yaml`` flag)
+- ``workspace`` — the external Touch ID/SE Claude Code workspace (``claude-private``)
+
+This module owns the ``status`` reader and the namespace dispatch. ``status`` is
+deliberately **side-effect-free**: it never opens the vault cold path (no
+passphrase prompt) and never probes the device key store. It reads only on-disk
+artifacts —
+
+- enrollment from the *plaintext* manifest body
+  (:func:`mordred_hermes.keyvault.manifest.parse_unverified`; the names are
+  operational metadata, not secret),
+- the config opt-in marker file,
+- the ``memory.encryption.enabled`` flag in ``config.yaml``,
+- the workspace sparsebundle / wrapped-passphrase / mountpoint.
+
+``active`` is the *effective* state on **this** OS. The runtime decrypt shims are
+macOS-only (:mod:`mordred_hermes.keyvault._runtime_env`,
+:mod:`mordred_hermes.keyvault._config_bootstrap`), so an enrolled-but-off-darwin
+target is reported ``active=False`` rather than implying protection that is not
+wired here.
+
+Heavy imports stay function-local so this module imports on any platform, like
+the other wizard CLI modules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from .._home import hermes_home as _hermes_home
+from ..keyvault._config_bootstrap import _marker_path as _config_marker_path
+from ..keyvault._identity import resolve_root
+from ..keyvault._runtime_env import _env_optout_marker_path
+
+__all__ = [
+    "TARGETS",
+    "TargetStatus",
+    "WorkspacePaths",
+    "cli_status",
+    "collect_status",
+    "config_status",
+    "env_status",
+    "memory_status",
+    "render_json",
+    "render_text",
+    "status",
+    "workspace_status",
+]
+
+#: The four toggleable targets, in display order.
+TARGETS: tuple[str, ...] = ("env", "config", "memory", "workspace")
+
+_CONFIG_NAME = "config.yaml"
+_DARWIN = "darwin"
+
+
+@dataclass(frozen=True)
+class TargetStatus:
+    """The resolved state of one encryption target.
+
+    - ``configured``: the toggle is on (enrolled / marker present / flag true /
+      workspace artifacts on disk), independent of the current OS.
+    - ``active``: it is *effectively* protecting data on **this** OS right now.
+    """
+
+    target: str
+    configured: bool
+    active: bool
+    detail: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "target": self.target,
+            "configured": self.configured,
+            "active": self.active,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class WorkspacePaths:
+    """On-disk locations of the external ``claude-private`` workspace."""
+
+    image: Path
+    blob: Path
+    mount: Path
+
+
+# -----------------------------------------------------------------------------
+# Side-effect-free detection primitives
+# -----------------------------------------------------------------------------
+def _enrolled_names(root: Path) -> set[str]:
+    """Logical names enrolled in the vault at ``root`` — no device key, no cold path.
+
+    Reads the newest ``manifest.<gen>.mvmf`` and parses its *unverified* body. The
+    manifest body is plaintext JSON whose ``files`` keys are the enrolled names
+    (operational metadata, not secret), so this needs neither the master key nor a
+    passphrase. Returns an empty set when there is no vault / no manifest / the
+    manifest is unreadable — status must never raise.
+    """
+    from ..keyvault import manifest, vault
+
+    try:
+        generation = vault._latest_manifest_generation(root)
+        if generation is None:
+            return set()
+        blob = vault._manifest_path(root, generation).read_bytes()
+        parsed = manifest.parse_unverified(blob)
+    except (OSError, manifest.ManifestError):
+        return set()
+    return set(parsed.files)
+
+
+def _memory_flag_enabled(home: Path) -> bool:
+    """Whether ``config.yaml`` has ``memory.encryption.enabled: true``.
+
+    Side-effect-free read. A missing / unreadable / sealed-away config.yaml is
+    treated as not-enabled (the flag is simply not observable here).
+    """
+    config_path = home / _CONFIG_NAME
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        data = YAML(typ="safe").load(text)
+    except YAMLError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    memory = data.get("memory")
+    encryption = memory.get("encryption") if isinstance(memory, dict) else None
+    enabled = encryption.get("enabled") if isinstance(encryption, dict) else None
+    return enabled is True
+
+
+def _os_note(active: bool, platform: str) -> str:
+    return "active" if active else f"enrolled; inactive on this OS ({platform})"
+
+
+# -----------------------------------------------------------------------------
+# Per-target detectors
+# -----------------------------------------------------------------------------
+def env_status(*, root: Path, home: Path, platform: str) -> TargetStatus:
+    enrolled = ".env" in _enrolled_names(root)
+    opted_out = _env_optout_marker_path(home).exists()
+    configured = enrolled
+    # The runtime shim skips injection when the opt-out marker is present, so an
+    # enrolled-but-opted-out target is NOT active even on macOS.
+    active = enrolled and not opted_out and platform == _DARWIN
+    if not enrolled:
+        detail = "not enrolled"
+    elif opted_out:
+        detail = "enrolled but disabled (opt-out marker present)"
+    else:
+        detail = _os_note(active, platform)
+    return TargetStatus("env", configured, active, detail)
+
+
+def config_status(*, home: Path, platform: str) -> TargetStatus:
+    configured = _config_marker_path(home).exists()
+    active = configured and platform == _DARWIN
+    detail = "vault-managed; " + _os_note(active, platform) if configured else "not vault-managed"
+    return TargetStatus("config", configured, active, detail)
+
+
+def memory_status(*, home: Path, platform: str) -> TargetStatus:
+    configured = _memory_flag_enabled(home)
+    active = configured and platform == _DARWIN
+    detail = _os_note(active, platform) if configured else "encryption disabled"
+    return TargetStatus("memory", configured, active, detail)
+
+
+def workspace_status(
+    *,
+    image: Path,
+    blob: Path,
+    mount: Path,
+    platform: str,
+    on_path: Callable[[str], bool] | None = None,
+) -> TargetStatus:
+    """Detect the external ``claude-private`` workspace from on-disk artifacts.
+
+    ``configured`` = the encrypted volume and its wrapped passphrase both exist.
+    ``active`` additionally requires macOS (the SE/APFS protection is macOS-only).
+    ``on_path`` resolves whether a helper binary is installed (defaults to
+    :func:`shutil.which`); injected in tests.
+    """
+    if on_path is None:
+        import shutil
+
+        def on_path(name: str) -> bool:
+            return shutil.which(name) is not None
+
+    configured = image.exists() and blob.exists()
+    is_macos = platform == _DARWIN
+    active = configured and is_macos
+    mounted = _is_mountpoint(mount)
+    tools_installed = on_path("claude-private") and on_path("claude-vault-key")
+
+    if not is_macos:
+        detail = "macOS only — not available on this OS"
+    elif not configured:
+        detail = "tools installed; volume not set up" if tools_installed else "not installed"
+    elif mounted:
+        detail = "set up; currently mounted (mid-session — not sealed)"
+    else:
+        detail = "set up; sealed when idle"
+    return TargetStatus("workspace", configured, active, detail)
+
+
+def _is_mountpoint(path: Path) -> bool:
+    try:
+        return os.path.ismount(str(path))
+    except OSError:
+        return False
+
+
+# -----------------------------------------------------------------------------
+# Aggregation + rendering
+# -----------------------------------------------------------------------------
+def collect_status(
+    *,
+    home: Path,
+    root: Path,
+    platform: str,
+    workspace: WorkspacePaths,
+    on_path: Callable[[str], bool] | None = None,
+) -> list[TargetStatus]:
+    return [
+        env_status(root=root, home=home, platform=platform),
+        config_status(home=home, platform=platform),
+        memory_status(home=home, platform=platform),
+        workspace_status(
+            image=workspace.image,
+            blob=workspace.blob,
+            mount=workspace.mount,
+            platform=platform,
+            on_path=on_path,
+        ),
+    ]
+
+
+def render_json(statuses: list[TargetStatus]) -> str:
+    return json.dumps([s.to_dict() for s in statuses], indent=2)
+
+
+def render_text(statuses: list[TargetStatus]) -> str:
+    width = max(len(s.target) for s in statuses)
+    lines = ["Mordred at-rest encryption:"]
+    for s in statuses:
+        mark = "on " if s.configured else "off"
+        lines.append(f"  {s.target.ljust(width)}  [{mark}]  {s.detail}")
+    return "\n".join(lines)
+
+
+# -----------------------------------------------------------------------------
+# Default path resolution (production) — overridable in tests
+# -----------------------------------------------------------------------------
+def _default_workspace_paths() -> WorkspacePaths:
+    """Resolve the ``claude-private`` artifact locations from env + HOME defaults.
+
+    Mirrors the external wrapper's own defaults / ``CLAUDE_PRIVATE_*`` overrides
+    (see ``~/.local/share/claude-private/bin/claude-private``).
+    """
+    home = Path(os.path.expanduser("~"))
+    image = Path(os.environ.get("CLAUDE_PRIVATE_IMAGE", str(home / "Private" / "claude-private.sparsebundle")))
+    keydir = Path(os.environ.get("CLAUDE_PRIVATE_KEYDIR", str(home / ".config" / "claude-private")))
+    mount = Path(os.environ.get("CLAUDE_PRIVATE_MOUNT", str(home / ".claude-private-mnt")))
+    return WorkspacePaths(image=image, blob=keydir / "passphrase.wrapped", mount=mount)
+
+
+def status(
+    *,
+    home: Path,
+    root: Path,
+    platform: str,
+    workspace: WorkspacePaths,
+    as_json: bool = False,
+    on_path: Callable[[str], bool] | None = None,
+) -> int:
+    """Print the state of all four targets. Always returns 0 (read-only)."""
+    statuses = collect_status(home=home, root=root, platform=platform, workspace=workspace, on_path=on_path)
+    print(render_json(statuses) if as_json else render_text(statuses))
+    return 0
+
+
+# -----------------------------------------------------------------------------
+# CLI adapters wired in cli.py
+# -----------------------------------------------------------------------------
+def cli_status(args: argparse.Namespace) -> int:
+    """argparse handler for ``encryption status [--json]`` — resolves defaults."""
+    home = _hermes_home()
+    return status(
+        home=home,
+        root=resolve_root(None),
+        platform=sys.platform,
+        workspace=_default_workspace_paths(),
+        as_json=bool(getattr(args, "json", False)),
+    )
+
+
+# -----------------------------------------------------------------------------
+# enable / disable / purge dispatch — routes a (verb, target) to its engine.
+# The encryption surface always uses the default vault root (a custom --root would
+# not be seen by the macOS startup shims, which read default_vault_root()).
+# -----------------------------------------------------------------------------
+def _dispatch(verb: str, target: str) -> int:
+    from . import config_decrypt_cli, env_decrypt_cli, memory_cli
+
+    home = _hermes_home()
+    root = resolve_root(None)
+    platform = sys.platform
+
+    if target == "env":
+        if verb == "enable":
+            return env_decrypt_cli.enable(home=home, root=root, platform=platform)
+        if verb == "disable":
+            return env_decrypt_cli.disable(home=home, root=root)
+        return env_decrypt_cli.purge(home=home, root=root)
+    if target == "config":
+        if verb == "enable":
+            return config_decrypt_cli.enable(home=home, root=root)
+        if verb == "disable":
+            return config_decrypt_cli.disable(home=home, root=root)
+        return config_decrypt_cli.purge(home=home, root=root)
+    if target == "memory":
+        if verb == "enable":
+            return memory_cli.enable(home=home, root=root)
+        if verb == "disable":
+            return memory_cli.disable(home=home)
+        return memory_cli.purge(home=home, root=root)
+
+    print(f"encryption {verb} {target}: not available in this build.", file=sys.stderr)
+    return 2
+
+
+def cli_enable(args: argparse.Namespace) -> int:
+    return _dispatch("enable", args.target)
+
+
+def cli_disable(args: argparse.Namespace) -> int:
+    return _dispatch("disable", args.target)
+
+
+def cli_purge(args: argparse.Namespace) -> int:
+    """``encryption purge <target> --yes`` — destructive; refuse without --yes."""
+    if not bool(getattr(args, "yes", False)):
+        print(
+            f"encryption purge {args.target} is destructive (removes the encrypted copy). "
+            "Re-run with --yes to confirm.",
+            file=sys.stderr,
+        )
+        return 2
+    return _dispatch("purge", args.target)

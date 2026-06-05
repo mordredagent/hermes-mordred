@@ -434,6 +434,58 @@ class OpenVault:
             self._manifest = new_manifest
             self._gc(superseded_generation=new_generation - 1)
 
+    def unenroll_file(self, name: str) -> None:
+        """Remove enrolled file ``name`` and commit — the mirror of :meth:`enroll_file`.
+
+        Drops ``name`` from the manifest, bumps the generation, writes the new
+        manifest, then flips the anchor (the commit point). The superseded blob is
+        no longer referenced, so :meth:`_gc` garbage-collects it after the commit.
+        A crash before the flip leaves the previous generation committed.
+
+        Removing a name that is not enrolled is a clean no-op: nothing is written
+        and the generation does not advance (so ``purge`` is idempotent).
+
+        Raises:
+            VaultError: the vault is closed, was opened in recovery mode (no device
+                anchor to commit against), or the handle is stale (another writer
+                advanced the vault since this handle last committed).
+        """
+        self._check()
+        if name not in self._manifest.files:
+            return  # nothing enrolled under this name — idempotent no-op, no churn
+        if self._store is None:
+            raise VaultError(
+                "vault opened in recovery mode (no device-bound anchor) — re-key onto a device before unenrolling"
+            )
+        store = self._store
+        new_generation = self._manifest.generation + 1
+        new_files = dict(self._manifest.files)
+        del new_files[name]
+        new_manifest = manifest.VaultManifest(
+            key_id=self._key_id, wmk=self._wmk, files=new_files, generation=new_generation
+        )
+
+        _ensure_lock(self._root)
+        with keyvault_lock(self._root):
+            # Same stale-writer guard as enroll_file: the device anchor is the
+            # source of truth. If another process advanced it since this handle
+            # opened, writing manifest.<N+1> over the newer state and flipping the
+            # anchor back would roll the vault back and let _gc drop the newer
+            # writer's blobs — fail closed and require a reopen.
+            pinned = anchor.read_anchor(store, self._label)
+            stale_generation = pinned.generation != self._manifest.generation
+            wmk_changed = not hmac.compare_digest(pinned.wmk_sha256, anchor.wmk_fingerprint(self._wmk))
+            if stale_generation or wmk_changed:
+                raise VaultError(
+                    f"stale vault handle: in-memory generation {self._manifest.generation} no longer matches the "
+                    f"device anchor (generation {pinned.generation}) — another writer advanced the vault; reopen it"
+                )
+            atomic_write(_manifest_path(self._root, new_generation), manifest.encode(new_manifest, self._master))
+            # ---- commit: the anchor flip makes generation N+1 authoritative ----
+            anchor.write_anchor(store, self._label, wmk=self._wmk, generation=new_generation)
+            self._manifest = new_manifest
+            self._gc(superseded_generation=new_generation - 1)
+
     def _gc(self, *, superseded_generation: int) -> None:
         """Best-effort: drop the superseded manifest + any orphan blobs.
 
