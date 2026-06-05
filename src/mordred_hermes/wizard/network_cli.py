@@ -389,13 +389,14 @@ def run_init(
     policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
 
     resolved_env_path = env_path if env_path is not None else (HERMES_BASE / ".env")
-    # Access the secret inline (no intermediate local) so the plaintext never
-    # sits in run_init's frame locals where --showlocals / a debugger / a rich
-    # traceback could surface it -- the repr-hidden carrier is the only home.
-    # Blank secret: intentionally do NOT call upsert with "" -- that would strip
-    # an existing line; leaving .env untouched keeps the current secret across
-    # re-runs (Codex review 2026-06-05).
-    if inputs._mullvad_account_secret:
+    # ``wrote_secret`` is a bool (never the plaintext), safe to hold as a local.
+    # The secret itself is accessed only inline at the upsert below, so it never
+    # sits in this frame's locals where --showlocals / a debugger / a rich
+    # traceback could surface it (Codex review 2026-06-05). Blank secret: do NOT
+    # upsert "" -- that strips the line; leave the existing .env untouched so a
+    # re-run keeps the current secret.
+    wrote_secret = bool(inputs._mullvad_account_secret)
+    if wrote_secret:
         env_writer.upsert(
             resolved_env_path,
             key=na.mullvad_account_id_env,
@@ -412,7 +413,7 @@ def run_init(
         mullvad_killswitch=na.mullvad_killswitch,
     )
 
-    print(_init_summary(na))
+    print(_init_summary(na, secret_written=wrote_secret))
     return 0
 
 
@@ -469,14 +470,27 @@ def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
     return dict(section)
 
 
-def _init_summary(na: NetworkAnswers) -> str:
-    """User-facing confirmation printed after a successful ``network init``."""
-    lines = [f"Network privacy initialised: default path = {na.default_network_path!r}."]
+def _init_summary(na: NetworkAnswers, *, secret_written: bool) -> str:
+    """User-facing confirmation printed after a successful ``network init``.
+
+    Echoes the resolved settings so the user can verify what was saved, and
+    whether the Mullvad secret was updated or left unchanged (blank = keep).
+    """
+    killswitch = "enabled" if na.mullvad_killswitch else "disabled"
+    account = "stored in ~/.hermes/.env" if secret_written else "unchanged"
+    lines = [
+        "",
+        "Network privacy initialised:",
+        f"  default path       : {na.default_network_path}",
+        f"  tor binary         : {na.tor_binary_path}",
+        f"  tor socks port     : {na.tor_socks_port}",
+        f"  mullvad relay      : {na.mullvad_relay_country}",
+        f"  mullvad killswitch : {killswitch}",
+        f"  mullvad account    : {account}",
+    ]
     if na.default_network_path == "clearnet":
-        lines.append("  (clearnet = no anonymising layer; re-run `network init` and pick tor/vpn to enable privacy.)")
-    lines.append(
-        "  Applied at the next `hermes` session. Use `hermes-mordred network use <path>` to switch immediately."
-    )
+        lines.append("  note: clearnet = no anonymising layer; re-run and pick tor/vpn to enable privacy.")
+    lines.append("  Applied at the next `hermes` session, or `hermes-mordred network use <path>` to switch now.")
     return "\n".join(lines)
 
 

@@ -453,6 +453,61 @@ class TestRunInitSeedsDefaultsFromDisk:
 # --------------------------------------------------------------------------- #
 
 
+class TestInitSummary:
+    """UX scope B: the post-init summary echoes the resolved settings so the
+    user can confirm what was saved (and whether the Mullvad secret changed)."""
+
+    def _na(self, *, path: str = "tor", killswitch: bool = True) -> NetworkAnswers:
+        return NetworkAnswers(
+            default_network_path=path,
+            tor_binary_path="/usr/bin/tor",
+            tor_socks_port=9150,
+            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+            mullvad_relay_country="jp",
+            mullvad_killswitch=killswitch,
+        )
+
+    def test_summary_echoes_settings_when_secret_written(self) -> None:
+        from mordred_hermes.wizard.network_cli import _init_summary
+
+        out = _init_summary(self._na(), secret_written=True)
+        assert "tor" in out
+        assert "/usr/bin/tor" in out
+        assert "9150" in out
+        assert "jp" in out
+        assert "enabled" in out.lower()  # killswitch True
+        assert "stored" in out.lower()  # secret written
+
+    def test_summary_marks_secret_unchanged_and_clearnet_note(self) -> None:
+        from mordred_hermes.wizard.network_cli import _init_summary
+
+        out = _init_summary(self._na(path="clearnet", killswitch=False), secret_written=False)
+        assert "unchanged" in out.lower()
+        assert "disabled" in out.lower()  # killswitch False
+        assert "clearnet" in out.lower()
+
+    def test_run_init_prints_resolved_settings(self, tmp_path: Path) -> None:
+        """End-to-end: run_init's printed summary reflects the saved path."""
+        import io
+        from contextlib import redirect_stdout
+
+        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_FULL))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            run_init(
+                prompt_io=prompts,
+                policy_writer=_writer(tmp_path),
+                env_writer=_SpyEnvFileWriter(),
+                credentials_writer=_SpyCredentialsWriter(),
+                env_path=tmp_path / ".env",
+                credentials_path=tmp_path / "credentials" / "network.json",
+            )
+        out = buf.getvalue()
+        assert "vpn" in out  # _ANSWERS_FULL default_path
+        assert "9150" in out
+        assert "stored" in out.lower()  # _ANSWERS_FULL has a non-blank secret
+
+
 class TestHandleInit:
     def test_non_interactive_returns_exit_code_2(self, capsys: pytest.CaptureFixture[str]) -> None:
         ns = argparse.Namespace(non_interactive=True)

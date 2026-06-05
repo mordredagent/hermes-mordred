@@ -456,3 +456,41 @@ class TestPromptIOAskPassword:
         rp = _RefusingPromptIO()
         with pytest.raises(NonInteractiveAbort):
             rp.ask_password("secret", default="")
+
+
+# -----------------------------------------------------------------------------
+# Completion summary (UX scope B): a structured recap printed after configure.
+# -----------------------------------------------------------------------------
+
+
+class TestConfigureSummary:
+    def test_render_summary_contains_resolved_fields(self) -> None:
+        from mordred_hermes.wizard.configure import _render_configure_summary
+
+        snap = PolicySnapshot(policy="strict", allow_cloud_llm=True, harness_primary="codex")
+        out = _render_configure_summary(snap)
+        assert "strict" in out
+        assert "codex" in out
+        # cloud-LLM state is shown as a human yes/no, not the raw bool.
+        assert "policy" in out.lower()
+        assert "cloud" in out.lower()
+        # Points the user at the on-demand network privacy command.
+        assert "network init" in out
+
+    def test_render_summary_reflects_cloud_disallowed(self) -> None:
+        from mordred_hermes.wizard.configure import _render_configure_summary
+
+        out = _render_configure_summary(PolicySnapshot(policy="lenient", allow_cloud_llm=False))
+        assert "no" in out.lower()
+
+    def test_cli_handler_prints_summary_with_chosen_values(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        scripted = _ScriptedPromptIO(answers=_core_answers(policy="strict", harness="codex"))
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+        rc = cli_handler(argparse.Namespace(non_interactive=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "strict" in out
+        assert "codex" in out
+        assert "network init" in out

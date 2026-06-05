@@ -304,6 +304,28 @@ def run(
     return result
 
 
+def _render_configure_summary(snapshot: PolicySnapshot) -> str:
+    """A structured recap printed after a successful ``configure``.
+
+    Shown once all prompts complete (so it survives the full-screen
+    ``radiolist_dialog`` prompts, which clear the terminal). Echoes the
+    resolved choices and points the user at the on-demand network-privacy
+    command, which first-run setup deliberately does not cover.
+    """
+    cloud = "yes" if snapshot.allow_cloud_llm else "no"
+    return "\n".join(
+        [
+            "",
+            "Mordred configured:",
+            f"  policy mode       : {snapshot.policy}",
+            f"  cloud LLM allowed : {cloud}",
+            f"  agent harness     : {snapshot.harness_primary}",
+            "",
+            "Next: run `hermes-mordred network init` to set up network privacy (Tor / VPN / clearnet).",
+        ]
+    )
+
+
 def cli_handler(args: argparse.Namespace) -> int:
     """Adapter from argparse Namespace to :func:`run`. Wired in cli.py.
 
@@ -317,7 +339,7 @@ def cli_handler(args: argparse.Namespace) -> int:
     non_interactive = bool(getattr(args, "non_interactive", False))
     prompt_io: PromptIO = _RefusingPromptIO() if non_interactive else PromptToolkitIO()
     try:
-        run(
+        result = run(
             setup_runner=SubprocessSetupRunner(),
             prompt_io=prompt_io,
             policy_writer=PolicyWriter(),
@@ -326,8 +348,5 @@ def cli_handler(args: argparse.Namespace) -> int:
     except NonInteractiveAbort as e:
         print(f"hermes mordred configure: {e}", file=sys.stderr)
         return 2
-    print(
-        "Mordred configured. Run `hermes-mordred network init` to set up "
-        "network privacy (Tor / VPN / clearnet) when you want it."
-    )
+    print(_render_configure_summary(result.snapshot))
     return 0
