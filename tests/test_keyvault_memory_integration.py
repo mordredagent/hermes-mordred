@@ -22,7 +22,7 @@ import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mordred_hermes.keyvault import _identity, _runtime_env, vault
-from mordred_hermes.wizard import vault_cli
+from mordred_hermes.wizard import vault_memory_key
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
@@ -39,7 +39,7 @@ def _isolate_ambient_memory_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
     home = tmp_path / "ambient_home"
     home.mkdir()
-    monkeypatch.setattr(vault_cli, "_hermes_home", lambda: home)
+    monkeypatch.setattr(vault_memory_key, "_hermes_home", lambda: home)
 
 
 def _init_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
@@ -99,7 +99,7 @@ class TestVaultEnvToMemoryKey:
         backend, store = FakeBackend(), FakeAnchorStore()
         _init_vault(root, backend, store)
 
-        rc = vault_cli.set_memory_key(root=root, backend=backend, store=store)
+        rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
         assert rc == 0
 
         environ: dict[str, str] = {}
@@ -114,7 +114,7 @@ class TestVaultEnvToMemoryKey:
         _init_vault(root, backend, store)
         _enroll_env(root, backend, store, b"ANTHROPIC_API_KEY=sk-secret\nFOO=bar\n")
 
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
 
         environ: dict[str, str] = {}
         _runtime_env.inject_vault_env(root=root, environ=environ, backend=backend, store=store)

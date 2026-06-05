@@ -26,7 +26,7 @@ from mordred_hermes.keyvault import kek, manifest, vault
 from mordred_hermes.keyvault._anchor_keychain import KeychainAnchorError
 from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault._storage import KeyvaultPermissionError
-from mordred_hermes.wizard import vault_cli
+from mordred_hermes.wizard import vault_cli, vault_memory_key
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
@@ -781,7 +781,7 @@ class TestSetMemoryKey:
         monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
         empty_home = tmp_path / "ambient_home"
         empty_home.mkdir()
-        monkeypatch.setattr(vault_cli, "_hermes_home", lambda: empty_home)
+        monkeypatch.setattr(vault_memory_key, "_hermes_home", lambda: empty_home)
 
     def _init(self, root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
         assert (
@@ -820,7 +820,7 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._decodes_to_32_bytes(self._key_value(root))  # a valid AES-256 key
 
     def test_preserves_existing_env_lines(self, tmp_path: Path) -> None:
@@ -830,7 +830,7 @@ class TestSetMemoryKey:
         src = tmp_path / "s"
         src.write_bytes(b"ANTHROPIC_API_KEY=sk-secret\nFOO=bar\n")
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         text = self._env_text(root)
         assert "ANTHROPIC_API_KEY=sk-secret" in text
         assert "FOO=bar" in text
@@ -841,10 +841,10 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         first_value = self._key_value(root)
         gen = self._generation(root)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._key_value(root) == first_value  # unchanged
         assert self._generation(root) == gen  # no needless re-enroll
 
@@ -852,9 +852,9 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         first_value = self._key_value(root)
-        assert vault_cli.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
         text = self._env_text(root)
         assert self._key_value(root) != first_value  # rotated
         assert text.count("HERMES_MEMORY_KEY=") == 1  # replaced in place, not duplicated
@@ -863,7 +863,7 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         captured = capsys.readouterr()
         value = self._key_value(root)
         assert value not in captured.out
@@ -873,13 +873,13 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         out = capsys.readouterr().out.lower()
         assert "config.yaml" in out
         assert "encryption" in out  # tells the operator how to turn it on
 
     def test_uninitialised_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = vault_cli.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
+        rc = vault_memory_key.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
 
@@ -887,7 +887,7 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        rc = vault_cli.set_memory_key(root=root, backend=backend, store=_ReadRaisesStore())
+        rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=_ReadRaisesStore())
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
 
@@ -900,7 +900,7 @@ class TestSetMemoryKey:
         src.write_bytes(b"\xff\xfe not utf-8")
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
         gen = self._generation(root)
-        rc = vault_cli.set_memory_key(root=root, backend=backend, store=store)
+        rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
         assert self._generation(root) == gen  # nothing enrolled
@@ -915,7 +915,7 @@ class TestSetMemoryKey:
         src.write_bytes(b"HERMES_MEMORY_KEY=aaa\nHERMES_MEMORY_KEY=bbb\nFOO=bar\n")
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
 
-        assert vault_cli.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
         text = self._env_text(root)
         assert text.count("HERMES_MEMORY_KEY=") == 1  # both duplicates collapsed to one
         assert "FOO=bar" in text  # unrelated entry preserved
@@ -927,10 +927,10 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         capsys.readouterr()  # drop the initial store output (no warning expected there)
 
-        assert vault_cli.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
         err = capsys.readouterr().err.lower()
         assert "warning" in err
         assert "memor" in err  # names the agent-memory files at risk
@@ -940,7 +940,7 @@ class TestSetMemoryKey:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert "warning" not in capsys.readouterr().err.lower()
 
     def test_read_oserror_fails_closed(
@@ -952,7 +952,7 @@ class TestSetMemoryKey:
             return _ReadOSErrorVault()
 
         monkeypatch.setattr(vault, "open_vault", _fake_open)
-        rc = vault_cli.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
+        rc = vault_memory_key.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
 
@@ -972,7 +972,7 @@ class TestSetMemoryKey:
         src.write_bytes(b"HERMES_MEMORY_KEY=\nFOO=bar\n")  # empty value → not 32 bytes
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
 
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._decodes_to_32_bytes(self._key_value(root))  # now a usable key
         assert "FOO=bar" in self._env_text(root)
         assert "warning" not in capsys.readouterr().err.lower()  # nothing was orphaned
@@ -985,7 +985,7 @@ class TestSetMemoryKey:
         src = tmp_path / "s"
         src.write_bytes(b"HERMES_MEMORY_KEY=abc\n")
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._key_value(root) != "abc"
         assert self._decodes_to_32_bytes(self._key_value(root))
 
@@ -1007,7 +1007,7 @@ class TestSetMemoryKey:
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
         gen = self._generation(root)
 
-        rc = vault_cli.set_memory_key(root=root, backend=backend, store=store)
+        rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
         assert rc == 1
         assert "rotate" in capsys.readouterr().err.lower()  # guidance points at --rotate
         assert self._env_text(root).count("HERMES_MEMORY_KEY=") == 2  # .env untouched
@@ -1025,7 +1025,7 @@ class TestSetMemoryKey:
         gen = self._generation(root)
 
         # Recognized as already set (the runtime's dotenv parse strips quotes) → no-op.
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._generation(root) == gen  # untouched, not regenerated
 
     def test_bare_key_line_does_not_shadow_written_key(self, tmp_path: Path) -> None:
@@ -1042,12 +1042,12 @@ class TestSetMemoryKey:
         src.write_bytes(b"HERMES_MEMORY_KEY=bad\nHERMES_MEMORY_KEY\nFOO=bar\n")
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
 
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         text = self._env_text(root)
         assert "FOO=bar" in text  # unrelated entry preserved
         # The effective value the runtime would inject is now a usable 32-byte key,
         # not None — i.e. the bare shadow was removed, not left behind.
-        assert vault_cli._is_valid_memory_key(vault_cli._effective_memory_key(text))
+        assert vault_memory_key._is_valid_memory_key(vault_memory_key._effective_memory_key(text))
 
     def test_bare_key_with_trailing_comment_does_not_shadow(self, tmp_path: Path) -> None:
         """Re-review P2: ``HERMES_MEMORY_KEY # comment`` is a dotenv bare entry (None) too.
@@ -1062,10 +1062,11 @@ class TestSetMemoryKey:
         src.write_bytes(b"HERMES_MEMORY_KEY=bad\nHERMES_MEMORY_KEY # disabled\nFOO=bar\n")
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
 
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         text = self._env_text(root)
         assert "FOO=bar" in text
-        assert vault_cli._is_valid_memory_key(vault_cli._effective_memory_key(text))  # runtime gets a real key
+        # the effective value the runtime would inject is now a usable 32-byte key
+        assert vault_memory_key._is_valid_memory_key(vault_memory_key._effective_memory_key(text))
 
     def test_refuses_valid_key_with_trailing_comment_shadowed(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1084,7 +1085,7 @@ class TestSetMemoryKey:
         assert vault_cli.add(root=root, name=".env", source=src, backend=backend, store=store) == 0
         gen = self._generation(root)
 
-        rc = vault_cli.set_memory_key(root=root, backend=backend, store=store)
+        rc = vault_memory_key.set_memory_key(root=root, backend=backend, store=store)
         assert rc == 1
         assert "rotate" in capsys.readouterr().err.lower()
         assert self._generation(root) == gen  # .env untouched — no data loss
@@ -1101,7 +1102,7 @@ class TestSetMemoryKey:
         existing = base64.urlsafe_b64encode(b"\x55" * 32).decode("ascii")
         monkeypatch.setenv("HERMES_MEMORY_KEY", existing)
 
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._key_value(root) == existing  # adopted the env key, not regenerated
 
     def test_adopts_plaintext_home_env_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1114,9 +1115,9 @@ class TestSetMemoryKey:
         existing = base64.urlsafe_b64encode(b"\x66" * 32).decode("ascii")
         (home / ".env").write_text(f"HERMES_MEMORY_KEY={existing}\n", encoding="utf-8")
         monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
-        monkeypatch.setattr(vault_cli, "_hermes_home", lambda: home)
+        monkeypatch.setattr(vault_memory_key, "_hermes_home", lambda: home)
 
-        assert vault_cli.set_memory_key(root=root, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._key_value(root) == existing  # adopted from the plaintext .env
 
     def test_rotate_mints_fresh_even_with_ambient_key(
@@ -1129,7 +1130,7 @@ class TestSetMemoryKey:
         ambient = base64.urlsafe_b64encode(b"\x77" * 32).decode("ascii")
         monkeypatch.setenv("HERMES_MEMORY_KEY", ambient)
 
-        assert vault_cli.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
+        assert vault_memory_key.set_memory_key(root=root, rotate=True, backend=backend, store=store) == 0
         assert self._key_value(root) != ambient  # a fresh key, not the ambient one
         assert "warning" in capsys.readouterr().err.lower()  # rotating away a usable key warns
 
@@ -1141,8 +1142,8 @@ class TestSetMemoryKey:
             seen["rotate"] = rotate
             return 0
 
-        monkeypatch.setattr(vault_cli, "set_memory_key", _spy)
-        rc = vault_cli.cli_set_memory_key(argparse.Namespace(root=str(tmp_path), rotate=True))
+        monkeypatch.setattr(vault_memory_key, "set_memory_key", _spy)
+        rc = vault_memory_key.cli_set_memory_key(argparse.Namespace(root=str(tmp_path), rotate=True))
         assert rc == 0
         assert seen["root"] == tmp_path
         assert seen["rotate"] is True

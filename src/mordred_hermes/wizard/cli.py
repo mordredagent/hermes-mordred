@@ -468,9 +468,9 @@ def _handle_vault_migrate(args: argparse.Namespace) -> int:
 
 
 def _handle_vault_set_memory_key(args: argparse.Namespace) -> int:
-    from . import vault_cli
+    from . import vault_memory_key
 
-    return vault_cli.cli_set_memory_key(args)
+    return vault_memory_key.cli_set_memory_key(args)
 
 
 def _handle_vault_enable_config_decrypt(args: argparse.Namespace) -> int:
