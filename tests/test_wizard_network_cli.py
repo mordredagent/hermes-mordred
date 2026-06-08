@@ -272,6 +272,43 @@ class TestNetworkUseStandalone:
         out = capsys.readouterr().out
         assert "next session" in out.lower() or "deferred" in out.lower()
 
+    def test_no_runtime_tor_missing_prints_install_guidance(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard import cli
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        args = _make_args(path="tor", config_path=tmp_path / "config.yaml")
+        rc = cli._handle_network_use(args)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Tor is not available yet" in out
+        assert "brew install tor" in out
+        assert "--tor-binary" in out
+
+    def test_no_runtime_vpn_missing_prints_install_guidance(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard import cli
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
+        args = _make_args(path="vpn", config_path=tmp_path / "config.yaml")
+        rc = cli._handle_network_use(args)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Mullvad CLI is not available yet" in out
+        assert "mullvad account login" in out
+        assert "network init --path vpn" in out
+
 
 # --------------------------------------------------------------------------- #
 # network status                                                              #
@@ -334,6 +371,45 @@ class TestNetworkStatusStandalone:
         assert rc == 0
         out = capsys.readouterr().out
         assert "clearnet" in out.lower()
+
+
+class TestNetworkInitGuidance:
+    def test_init_summary_warns_when_selected_tor_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        summary = network_cli._init_summary(
+            network_cli.NetworkAnswers(
+                default_network_path="tor",
+                tor_binary_path="tor",
+                tor_socks_port=9050,
+                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=False,
+            ),
+            secret_written=False,
+        )
+        assert "Tor is not available yet" in summary
+        assert "--tor-binary" in summary
+
+    def test_init_summary_warns_when_selected_vpn_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
+        summary = network_cli._init_summary(
+            network_cli.NetworkAnswers(
+                default_network_path="vpn",
+                tor_binary_path="tor",
+                tor_socks_port=9050,
+                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=False,
+            ),
+            secret_written=False,
+        )
+        assert "Mullvad CLI is not available yet" in summary
+        assert "mullvad account login" in summary
 
 
 # --------------------------------------------------------------------------- #

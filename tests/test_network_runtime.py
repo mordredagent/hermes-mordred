@@ -654,8 +654,12 @@ class TestTorSpawnOSErrorWrapping:
 
         tor.start_process = missing_binary  # type: ignore[method-assign]
         rt = _make_runtime(tor_fakes=tor, policy_mode="strict")
-        with pytest.raises(BringupFailed):
+        with pytest.raises(BringupFailed) as excinfo:
             rt.use("tor")
+        msg = str(excinfo.value)
+        assert "Install Tor" in msg
+        assert "brew install tor" in msg
+        assert "--tor-binary" in msg
         rt.stop()
 
     def test_tor_spawn_permissionerror_becomes_bringup_failed(self) -> None:

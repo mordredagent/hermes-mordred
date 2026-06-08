@@ -48,6 +48,7 @@ from ._exceptions import (
     UnknownPath,
 )
 from .api import NetworkStatus
+from .guidance import tor_install_guidance
 from .paths import clearnet as clearnet_mod
 from .paths import tor as tor_mod
 from .paths import vpn as vpn_mod
@@ -470,7 +471,8 @@ class Runtime:
                 # OSError as an ordinary :class:`Exception` and strict
                 # mode would fail open.
                 raise BringupFailed(
-                    f"tor binary {self._config.tor_binary!r} could not be spawned: {spawn_err}"
+                    f"tor binary {self._config.tor_binary!r} could not be spawned: {spawn_err}. "
+                    f"{tor_install_guidance(tor_binary=self._config.tor_binary)}"
                 ) from spawn_err
             try:
                 self._tor_wait(proc)

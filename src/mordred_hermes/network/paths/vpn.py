@@ -28,10 +28,11 @@ from pathlib import Path
 from typing import Final, Literal
 
 from .._exceptions import BringupFailed
+from ..guidance import MACOS_MULLVAD_APP_CLI, mullvad_install_guidance
 
 PATH_NAME: Final[str] = "vpn"
 
-MACOS_APP_BUNDLE_PATH: Final[str] = "/Applications/Mullvad VPN.app/Contents/Resources/mullvad"
+MACOS_APP_BUNDLE_PATH: Final[str] = MACOS_MULLVAD_APP_CLI
 
 DEFAULT_CONNECT_TIMEOUT: Final[float] = 10.0
 DEFAULT_POLL_INTERVAL: Final[float] = 0.5
@@ -103,7 +104,9 @@ def detect_cli(*, which: Callable[[str], str | None] = shutil.which) -> str:
         return path
     if Path(MACOS_APP_BUNDLE_PATH).exists():
         return MACOS_APP_BUNDLE_PATH
-    raise BringupFailed("mullvad client not installed (checked $PATH and macOS app bundle)")
+    raise BringupFailed(
+        f"mullvad client not installed (checked $PATH and macOS app bundle). {mullvad_install_guidance()}"
+    )
 
 
 def bring_up(

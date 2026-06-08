@@ -101,8 +101,12 @@ class TestDetectCli:
         from mordred_hermes.network.paths import vpn
 
         monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
-        with pytest.raises(BringupFailed):
+        with pytest.raises(BringupFailed) as excinfo:
             vpn.detect_cli(which=lambda _: None)
+        msg = str(excinfo.value)
+        assert "Install the official Mullvad VPN app/CLI" in msg
+        assert "mullvad account login" in msg
+        assert "PATH" in msg
 
 
 # --------------------------------------------------------------------------- #

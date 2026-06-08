@@ -32,6 +32,7 @@ from typing import Any, Final
 from .._home import HERMES_BASE
 from ..network import api
 from ..network._exceptions import MordredNetworkError
+from ..network.guidance import dependency_warning
 from .configure import (
     PromptIO,
     PromptToolkitIO,
@@ -77,6 +78,9 @@ def handle_use(args: argparse.Namespace) -> int:
     live = _runtime_registered()
     if not live:
         print(f"set default_path = {target!r} in {config_path}. Change is deferred to the next `hermes` session.")
+        warning = _dependency_warning_for_configured_path(config_path, target)
+        if warning:
+            print(warning)
         return 0
 
     try:
@@ -180,6 +184,14 @@ def _read_default_path_from_config(config_path: Path) -> str:
     if isinstance(value, str) and value in _VALID_PATHS:
         return value
     return "clearnet"
+
+
+def _dependency_warning_for_configured_path(config_path: Path, target: str) -> str | None:
+    """Warn when the selected path needs a missing external program."""
+    network = _read_existing_network_section(config_path)
+    raw_tor_binary = network.get("tor_binary_path")
+    tor_binary = raw_tor_binary if isinstance(raw_tor_binary, str) and raw_tor_binary else "tor"
+    return dependency_warning(target, tor_binary=tor_binary)
 
 
 # --------------------------------------------------------------------------- #
@@ -584,6 +596,9 @@ def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: b
     ]
     if na.default_network_path == "clearnet":
         lines.append("  note: clearnet = no anonymising layer; re-run and pick tor/vpn to enable privacy.")
+    warning = dependency_warning(na.default_network_path, tor_binary=na.tor_binary_path)
+    if warning:
+        lines.append(f"  {warning}")
     lines.append("  Applied at the next `hermes` session, or `hermes-mordred network use <path>` to switch now.")
     return "\n".join(lines)
 
