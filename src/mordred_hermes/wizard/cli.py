@@ -178,11 +178,19 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     ksub = p.add_subparsers(dest="keyvault_command", required=True, metavar="COMMAND")
 
     p_init = ksub.add_parser("init", help="Initialise the keyvault")
-    p_init.add_argument(
+    p_init.set_defaults(store_seed_for_hd=True)
+    seed_storage = p_init.add_mutually_exclusive_group()
+    seed_storage.add_argument(
         "--store-seed-for-hd",
+        dest="store_seed_for_hd",
         action="store_true",
-        help="SE-encrypt the generated seed so HD Ethereum accounts can be derived later "
-        "(Option A: seed stored at rest; default is paper-only).",
+        help="SE-encrypt the generated seed so HD Ethereum accounts can be derived later (default).",
+    )
+    seed_storage.add_argument(
+        "--paper-only",
+        dest="store_seed_for_hd",
+        action="store_false",
+        help="Do not store the generated seed at rest; require the paper seed for later recovery/import.",
     )
     p_init.set_defaults(func=_handle_keyvault_init)
     ksub.add_parser("list", help="List key IDs").set_defaults(func=_handle_keyvault_list)

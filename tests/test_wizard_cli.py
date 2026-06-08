@@ -99,6 +99,8 @@ class TestSubcommandTree:
             ["mordred", "audit", "decrypt", "--date", "2026-05-10"],
             ["mordred", "audit", "purge", "--before", "2026-01-01"],
             ["mordred", "keyvault", "init"],
+            ["mordred", "keyvault", "init", "--store-seed-for-hd"],
+            ["mordred", "keyvault", "init", "--paper-only"],
             ["mordred", "keyvault", "list"],
             ["mordred", "keyvault", "verify-digest"],
             ["mordred", "keyvault", "recover", "--blob", "/tmp/x"],
@@ -112,6 +114,16 @@ class TestSubcommandTree:
         parser = _build_parser()
         ns = parser.parse_args(argv)
         assert hasattr(ns, "func"), f"set_defaults(func=...) missing for {argv!r}"
+
+    def test_keyvault_init_defaults_to_encrypted_seed_storage(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "keyvault", "init"])
+        assert ns.store_seed_for_hd is True
+
+    def test_keyvault_init_paper_only_opts_out_of_seed_storage(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "keyvault", "init", "--paper-only"])
+        assert ns.store_seed_for_hd is False
 
 
 class TestUpgradeFlagShape:

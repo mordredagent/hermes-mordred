@@ -124,8 +124,11 @@ production Secure-Enclave `_SecKeyBackend`.
 - `keyvault init` — generate a 24-word BIP39 Seed Phrase + seed-bound
   PoW, prompt for the Passphrase, display the Seed under a network
   blackout, and finalize once the operator confirms the verification
-  digest computed offline. Also provisions the audit-log wrapping key
-  so the encrypted-audit factory engages afterward.
+  digest computed offline. By default, the generated Seed is also
+  SE-encrypted at rest for HD wallet reuse across sessions; pass
+  `--paper-only` to keep the Seed strictly offline and never persist it.
+  Also provisions the audit-log wrapping key so the encrypted-audit
+  factory engages afterward.
 - `keyvault recover --blob <path>` — restore a keyvault from an
   `export_backup` blob: prompts for the Seed Phrase + Passphrase,
   recomputes the seed-bound PoW, and calls `api.import_backup`.

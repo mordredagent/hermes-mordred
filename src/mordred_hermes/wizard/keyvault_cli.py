@@ -244,7 +244,7 @@ def init_keyvault(
     surface: SeedDisplaySurface | None = None,
     audit_sink: AuditSink | None = None,
     display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
-    store_seed_for_hd: bool = False,
+    store_seed_for_hd: bool = True,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
 
@@ -257,11 +257,12 @@ def init_keyvault(
     5. ``display_seed`` — show the Seed under a network blackout for 60s.
     6. The operator computes the digest offline and transcribes it back.
     7. ``confirm_generate`` — finalize only if the digest matches.
-    8. If ``store_seed_for_hd`` (Option A): SE-encrypt the generated seed
+    8. If ``store_seed_for_hd``: SE-encrypt the generated seed
        (offline wrap, no prompt) so the HD wallet can derive Ethereum
        accounts later without re-entering the words. Best-effort — the
        keyvault is already durable, so a storage failure degrades to a note.
-       Default ``False`` keeps the seed paper-only (never persisted).
+       Default ``True`` makes encrypted seed storage the standard
+       operation. ``False`` keeps the seed paper-only (never persisted).
 
     ``backend`` / ``prompt_io`` / ``surface`` / ``display_fn`` default to
     the production implementations; tests inject fakes. Returns 0 on a
@@ -505,5 +506,5 @@ def cli_recover(args: argparse.Namespace) -> int:
 
 
 def cli_init(args: argparse.Namespace) -> int:
-    """argparse handler for ``keyvault init`` (``--store-seed-for-hd`` opt-in)."""
-    return init_keyvault(store_seed_for_hd=getattr(args, "store_seed_for_hd", False))
+    """argparse handler for ``keyvault init`` (encrypted seed storage by default)."""
+    return init_keyvault(store_seed_for_hd=getattr(args, "store_seed_for_hd", True))

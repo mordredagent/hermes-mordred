@@ -432,15 +432,15 @@ class TestInit:
         assert meta["keys"]
 
     def test_cli_init_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        called: dict[str, bool] = {}
+        captured: dict[str, Any] = {}
 
         def fake(**kwargs: Any) -> int:
-            called["yes"] = True
+            captured.update(kwargs)
             return 0
 
         monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
-        assert keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=False)) == 0
-        assert called["yes"]
+        assert keyvault_cli.cli_init(argparse.Namespace()) == 0
+        assert captured["store_seed_for_hd"] is True
 
     def test_cli_init_forwards_store_seed_for_hd_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}
@@ -452,6 +452,17 @@ class TestInit:
         monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
         keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=True))
         assert captured.get("store_seed_for_hd") is True
+
+    def test_cli_init_forwards_paper_only_opt_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake(**kwargs: Any) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(keyvault_cli, "init_keyvault", fake)
+        keyvault_cli.cli_init(argparse.Namespace(store_seed_for_hd=False))
+        assert captured.get("store_seed_for_hd") is False
 
     def test_init_provisions_audit_log_wrapping_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """init must also generate the audit-log wrapping key so the L465
@@ -516,8 +527,8 @@ class TestInit:
         assert addr == expected_addr
         assert path == "m/44'/60'/0'/0/0"
 
-    def test_init_default_does_not_store_seed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Default init (paper-only) must NOT persist the seed at rest."""
+    def test_init_default_stores_seed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Default init stores the seed SE-encrypted for later HD use."""
         import hashlib
 
         from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE
@@ -531,6 +542,28 @@ class TestInit:
             ),
             surface=FakeSurface(),
             display_fn=self._noop_display,
+        )
+        assert rc == 0
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        purpose_hash_hex = hashlib.sha256(_SEED_PURPOSE.encode()).digest()[:16].hex()
+        assert len(list((root / "ciphertexts").rglob(f"{purpose_hash_hex}/*.gcm"))) == 1
+
+    def test_init_paper_only_does_not_store_seed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Explicit paper-only init must NOT persist the seed at rest."""
+        import hashlib
+
+        from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+            store_seed_for_hd=False,
         )
         assert rc == 0
         root = _storage.resolve_keyvault_dir(tmp_path)
