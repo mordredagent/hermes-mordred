@@ -66,6 +66,9 @@ resolves as:
 
 ## Build & install
 
+Linux build prerequisites (the `tss-esapi` backend links libtss2 and runs
+bindgen): `libtss2-dev`, `clang`/`libclang-dev`, `pkg-config`.
+
 ```sh
 ./build.sh   # cargo build --release + install to ~/.local/bin
 ```
@@ -75,13 +78,14 @@ Point Python at it (if not on `PATH`):
 
 ## Status
 
-- **Phase 2a (this commit)** — the pure, host-agnostic layer: wire protocol,
-  SEC1 codec, the 32-byte ECDH-Z left-pad, the opaque blob store, and the neutral
-  error taxonomy, all `cargo test`-covered on any host (incl. macOS). The TPM
-  backend is not yet wired, so the binary currently answers every command with
-  the neutral `UNAVAILABLE` reason.
-- **Phase 2b (next, Linux only)** — `src/tpm.rs` behind
-  `#[cfg(target_os = "linux")]` using `tss-esapi`: deterministic ECC P-256
-  storage primary (`CreatePrimary`) + non-restricted decrypt child (`Create`,
-  `fixedTPM | fixedParent`), `ECDH_ZGen`, `FlushContext` per op, verified against
-  a `swtpm` emulator in CI.
+- **Phase 2a** — the pure, host-agnostic layer: wire protocol, SEC1 codec, the
+  32-byte ECDH-Z left-pad, the opaque blob store, and the neutral error
+  taxonomy, all `cargo test`-covered on any host (incl. macOS).
+- **Phase 2b (done, Linux only)** — `src/tpm.rs` behind
+  `#[cfg(target_os = "linux")]` using `tss-esapi`: a deterministic ECC P-256
+  storage primary (`CreatePrimary`) wraps a non-restricted decrypt child
+  (`Create`, `fixedTPM | fixedParent`); `ECDH_ZGen` runs the key agreement
+  on-chip and `FlushContext` releases transient handles per op. Verified against
+  a `swtpm` emulator (the `tpmkey-helper-tpm` CI job), including an ECDH-parity
+  test that matches a software P-256 (the `wrap.py` HKDF compatibility contract).
+  On non-Linux hosts the binary still answers every command with `UNAVAILABLE`.

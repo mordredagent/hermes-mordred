@@ -20,17 +20,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 
-# --- Phase 2b (Linux TPM backend) — NOT YET ADDED ---
-# The real TPM operations (CreatePrimary / Create / ECDH_ZGen / FlushContext)
-# will live in `src/tpm.rs` behind `#[cfg(target_os = "linux")]`. They require
-# `tss-esapi`, which links libtss2 and only builds on Linux:
-#
-#     [target.'cfg(target_os = "linux")'.dependencies]
-#     tss-esapi = "7"   # verify the exact API at 2b time (TCG TPM 2.0 Part 3)
-#
-# Keeping it out until then lets the pure-function layer below build and
-# `cargo test` on ANY host (incl. the macOS dev box); the binary reports the
-# neutral `UNAVAILABLE` reason at runtime until the backend is wired.
+# Phase 2b (Linux TPM backend). The real TPM operations (CreatePrimary /
+# Create / ECDH_ZGen / FlushContext) live in `src/tpm.rs` behind
+# `#[cfg(target_os = "linux")]`. tss-esapi links libtss2 and only builds on
+# Linux, so it is a target-gated dependency: the pure-function layer (and the
+# whole crate on macOS) still builds with no TPM toolchain present.
+[target.'cfg(target_os = "linux")'.dependencies]
+tss-esapi = "7"
+
+# Linux-only test deps: an independent software P-256 implementation used to
+# prove the TPM's ECDH shared secret matches a software ECDH (wrap.py HKDF
+# parity). Gated to Linux so the macOS dev host never pulls them.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+p256 = { version = "0.13", features = ["ecdh"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [profile.release]
 strip = true

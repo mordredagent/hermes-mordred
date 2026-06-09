@@ -24,6 +24,8 @@ pub mod ops;
 pub mod pad;
 pub mod sec1;
 pub mod store;
+#[cfg(target_os = "linux")]
+pub mod tpm;
 pub mod wire;
 
 use ops::KeyOps;

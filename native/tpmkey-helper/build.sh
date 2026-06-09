@@ -2,8 +2,9 @@
 # Build and install the mordred-hermes-tpmkey helper.
 #
 # Linux TPM 2.0 counterpart to native/sekey-helper/build.sh. Run on a Linux
-# host with a Rust toolchain (cargo). Phase 2b additionally needs libtss2-dev
-# (the tss-esapi backend); until it is wired the helper builds on any host and
+# host with a Rust toolchain (cargo) plus the tss-esapi build prerequisites:
+# libtss2-dev, clang/libclang-dev, pkg-config. The tss-esapi backend is gated
+# to cfg(target_os="linux"), so a non-Linux build still produces a helper that
 # answers every command with the neutral UNAVAILABLE reason.
 #
 # Idempotent: re-running rebuilds and re-installs.
