@@ -4,7 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mordred-hermes"
-version = "0.1.0a0"
+# Version is sourced dynamically from src/mordred_hermes/__about__.py (see
+# [tool.hatch.version] below) rather than hardcoded here. The single source
+# of truth lives inside the importable package so sdist->wheel builds — which
+# run in an isolated dir without the repo's docs tree — can still resolve it
+# (TODO 0.5 L64). Bump everything in lockstep via `tools/bump_version.py`.
+dynamic = ["version"]
 description = "Privacy-preserving plugin bundle for the Hermes agent (NousResearch/hermes-agent)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -116,6 +121,14 @@ Source = "https://github.com/InternetMaximalism/Mordred-Hermes"
 [tool.mordred]
 min-hermes-version = "0.11.0"
 
+# Dynamic version source. Hatchling's built-in regex source reads the
+# `__version__ = "..."` assignment from the file below. It must live under
+# src/ (shipped in both sdist and wheel) so a wheel built from the sdist —
+# where mordred-docs/ is absent — still resolves the version. See
+# src/mordred_hermes/__about__.py for why the canonical value lives there.
+[tool.hatch.version]
+path = "src/mordred_hermes/__about__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/mordred_hermes"]
 
@@ -145,7 +158,12 @@ packages = ["src/mordred_hermes"]
 "packaging/pth/mordred_hermes_config_decrypt.pth" = "mordred_hermes_config_decrypt.pth"
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native"]
+# /packaging/pth ships the config-decrypt .pth that the wheel force-includes
+# (above). Without it, a wheel built FROM the sdist — which is what
+# `python -m build` and release.yml do — fails with "Forced include not
+# found". The name-reservation stub elsewhere under /packaging is
+# intentionally NOT shipped (it is a separate distribution).
+include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native", "/packaging/pth"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -189,7 +207,10 @@ ignore = []
 [tool.mypy]
 strict = true
 python_version = "3.11"
-files = ["src/mordred_hermes"]
+# tools/ holds dev-only scripts (e.g. bump_version.py). Type-check them too so
+# a regression there is caught by the standard `mypy` run, not just an ad-hoc
+# invocation. tests/ stays out (large legacy surface, separate effort).
+files = ["src/mordred_hermes", "tools"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 
