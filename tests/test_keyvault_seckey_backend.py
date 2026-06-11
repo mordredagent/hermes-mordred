@@ -19,7 +19,12 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from mordred_hermes.keyvault import wrap
-from mordred_hermes.keyvault._exceptions import WrapError, WrapKeyNotFound, WrapNativeUnavailable
+from mordred_hermes.keyvault._exceptions import (
+    WrapError,
+    WrapKeyAlreadyExists,
+    WrapKeyNotFound,
+    WrapNativeUnavailable,
+)
 from mordred_hermes.keyvault._seckey_backend import (
     _PyobjcSecKeyOps,
     _SecKeyBackend,
@@ -29,12 +34,14 @@ from mordred_hermes.keyvault._seckey_errors import (
     _application_tag,
     _keychain_label,
     _OpsError,
+    _sw_application_tag,
     _translate_error,
     errSecAuthFailed,
     errSecAuthorizationCanceled,
     errSecDuplicateItem,
     errSecInteractionNotAllowed,
     errSecItemNotFound,
+    errSecMissingEntitlement,
     errSecUserCanceled,
 )
 from mordred_hermes.keyvault.wrap import NativeBackend, NativeBackendError
@@ -206,8 +213,33 @@ def test_generate_returns_sec1_uncompressed_public_key(backend: _SecKeyBackend) 
 
 
 def test_generate_duplicate_tag_raises_wrap_key_not_found(backend: _SecKeyBackend) -> None:
+    # Back-compat pin: WrapKeyAlreadyExists subclasses WrapKeyNotFound, so
+    # pre-existing `except WrapKeyNotFound` callers keep catching duplicates.
     backend.generate_enclave_key("k1")
     with pytest.raises(WrapKeyNotFound):
+        backend.generate_enclave_key("k1")
+
+
+def test_generate_duplicate_tag_raises_wrap_key_already_exists(backend: _SecKeyBackend) -> None:
+    """A duplicate tag is an 'already exists' condition, not a lookup miss —
+    it must surface as the dedicated :class:`WrapKeyAlreadyExists` (a
+    :class:`WrapKeyNotFound` subclass for back-compat) so callers can tell
+    the two apart without parsing the message."""
+    backend.generate_enclave_key("k1")
+    with pytest.raises(WrapKeyAlreadyExists):
+        backend.generate_enclave_key("k1")
+
+
+def test_generate_entitlement_fallback_duplicate_raises_wrap_key_already_exists(ops: _FakeOps) -> None:
+    """Same contract on the macOS entitlement-degradation path: when the SE
+    write is blocked (errSecMissingEntitlement) and the software namespace
+    already holds the key, ``_generate_software`` must also raise
+    :class:`WrapKeyAlreadyExists`."""
+    sw = _FakeOps()
+    backend = _SecKeyBackend(ops=ops, sw_ops=sw)
+    sw.create_keypair(_sw_application_tag("k1"), "preexisting software key")
+    ops.create_error = _OpsError(errSecMissingEntitlement, "OSStatus")
+    with pytest.raises(WrapKeyAlreadyExists):
         backend.generate_enclave_key("k1")
 
 

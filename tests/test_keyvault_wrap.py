@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
+from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists, WrapKeyNotFound
 from mordred_hermes.keyvault.wrap import NativeBackendError, NativeErrorCode
 
 AuditSink = Callable[[dict[str, Any]], None]
@@ -69,7 +69,7 @@ class FakeBackend:
     def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
         self.calls.append(("generate", key_id))
         if key_id in self._keys:
-            raise WrapKeyNotFound(f"key {key_id!r} already exists")
+            raise WrapKeyAlreadyExists(f"key {key_id!r} already exists")
         priv = ec.generate_private_key(ec.SECP256R1())
         self._keys[key_id] = priv
         return priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)

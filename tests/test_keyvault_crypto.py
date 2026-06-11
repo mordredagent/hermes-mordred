@@ -136,6 +136,18 @@ class TestAesGcmAuthenticatedFailures:
             # Strip the last byte → tag is now incomplete.
             crypto.decrypt(key, blob[:-1])
 
+    @pytest.mark.parametrize("short_blob", [b"", b"\x00" * 5, b"\x00" * 12, b"\x00" * 27])
+    def test_decrypt_blob_shorter_than_nonce_plus_tag_raises_invalid_tag(self, short_blob: bytes) -> None:
+        """A blob structurally too short for ``nonce(12) || tag(16)`` must
+        surface as :class:`InvalidTag` — the documented tamper/corruption
+        signal — not as a raw ``ValueError`` from AESGCM's nonce-size check.
+        Without an explicit guard the error type flips between the two
+        depending on how many bytes survived truncation (< 12 vs < 28)."""
+        from mordred_hermes.keyvault import crypto
+
+        with pytest.raises(InvalidTag):
+            crypto.decrypt(b"\x00" * 32, short_blob)
+
 
 class TestAesGcmKeyLengthValidation:
     @pytest.mark.parametrize("bad_key", [b"", b"\x00" * 1, b"\x00" * 15, b"\x00" * 31, b"\x00" * 33, b"\x00" * 64])

@@ -55,7 +55,7 @@ import sys
 from typing import Any, Final, Protocol
 
 from . import native
-from ._exceptions import WrapError, WrapKeyNotFound, WrapNativeUnavailable
+from ._exceptions import WrapError, WrapKeyAlreadyExists, WrapKeyNotFound, WrapNativeUnavailable
 
 # The Keychain/error foundation (constants, tag/label helpers, neutral failure
 # taxonomy) lives in ``_seckey_errors`` (leaf layer). Re-imported here for use by
@@ -620,11 +620,11 @@ class _SecKeyBackend:
             return self._ops.create_keypair(_application_tag(key_id), _keychain_label(key_id), unattended=resolved)
         except _OpsError as exc:
             if _is_reason(exc, OPS_EXISTS, errSecDuplicateItem):
-                # SPEC.md: an existing tag surfaces as WrapKeyNotFound so
-                # callers do not need to know the OSStatus. (The name is
-                # historical — "already exists" reuses the not-found
-                # class because both mean "cannot generate here".)
-                raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
+                # An existing tag surfaces as WrapKeyAlreadyExists — still a
+                # WrapKeyNotFound subclass, so callers written against the
+                # historical mapping ("already exists" reused the not-found
+                # class) keep catching it without knowing the OSStatus.
+                raise WrapKeyAlreadyExists(f"wrapping key {key_id!r} already exists in the Keychain") from exc
             if self._sw_ops is not None and exc.reason is None and exc.status == errSecMissingEntitlement:
                 # macOS only: unsigned Python cannot persist SE keys — fall
                 # back to a software P-256 key. A reason-carrying helper
@@ -643,7 +643,7 @@ class _SecKeyBackend:
             )
         except _OpsError as exc:
             if _is_reason(exc, OPS_EXISTS, errSecDuplicateItem):
-                raise WrapKeyNotFound(f"wrapping key {key_id!r} already exists in the Keychain") from exc
+                raise WrapKeyAlreadyExists(f"wrapping key {key_id!r} already exists in the Keychain") from exc
             raise WrapError(f"failed to generate wrapping key for {key_id!r}") from exc
 
     # ----- get public key -----

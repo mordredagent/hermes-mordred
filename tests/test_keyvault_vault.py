@@ -105,6 +105,29 @@ def test_reopen_persists_enrolled_files(tmp_path: Path, backend: FakeBackend, st
     reopened.close()
 
 
+def test_enroll_tolerates_lock_creation_race(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_ensure_lock``'s ``exists()`` pre-check can race a concurrent
+    process that creates ``.lock`` between the check and the O_EXCL open.
+    The loser must proceed to flock the winner's lock file, not crash with
+    ``FileExistsError``. Simulated by forcing the pre-check to report the
+    (actually present) lock file as missing."""
+    v = _init(tmp_path, backend, store)
+    real_exists = Path.exists
+
+    def fake_exists(self: Path, **kwargs: bool) -> bool:
+        if self.name == ".lock":
+            return False  # the racing loser's stale pre-check view
+        return real_exists(self, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    v.enroll_file(".env", b"X=1\n")  # must not raise FileExistsError
+    monkeypatch.undo()
+    assert v.read_file(".env") == b"X=1\n"
+    v.close()
+
+
 def test_re_enroll_updates_content(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
     v = _init(tmp_path, backend, store)
     v.enroll_file(".env", b"v1")

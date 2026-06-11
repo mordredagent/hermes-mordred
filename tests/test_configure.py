@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -494,3 +495,122 @@ class TestConfigureSummary:
         assert "strict" in out
         assert "codex" in out
         assert "network init" in out
+
+
+# -----------------------------------------------------------------------------
+# PromptToolkitIO — the production PromptIO impl, exercised with patched
+# prompt_toolkit entry points (no real TTY). The methods import prompt_toolkit
+# lazily at call time, so monkeypatching the module attributes (or poisoning
+# sys.modules for the ImportError branches) intercepts every call.
+# -----------------------------------------------------------------------------
+
+
+class _FakeDialog:
+    """Stand-in for the object ``radiolist_dialog`` returns; ``run`` yields
+    the scripted result (``None`` simulates the user cancelling)."""
+
+    def __init__(self, result: str | None) -> None:
+        self._result = result
+
+    def run(self) -> str | None:
+        return self._result
+
+
+class TestPromptToolkitIO:
+    def test_ask_choice_returns_dialog_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_radiolist_dialog(*, title: str, values: object, default: str) -> _FakeDialog:
+            captured.update(title=title, values=values, default=default)
+            return _FakeDialog("strict")
+
+        monkeypatch.setattr("prompt_toolkit.shortcuts.radiolist_dialog", fake_radiolist_dialog)
+        io = configure.PromptToolkitIO()
+        assert io.ask_choice("mode", ("strict", "lenient"), "lenient") == "strict"
+        assert captured["title"] == "mode"
+        assert captured["values"] == [("strict", "strict"), ("lenient", "lenient")]
+        assert captured["default"] == "lenient"
+
+    def test_ask_choice_cancelled_dialog_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "prompt_toolkit.shortcuts.radiolist_dialog",
+            lambda *, title, values, default: _FakeDialog(None),
+        )
+        io = configure.PromptToolkitIO()
+        assert io.ask_choice("mode", ("a", "b"), "b") == "b"
+
+    def test_ask_text_strips_and_echoes_default_in_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prompts: list[str] = []
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            prompts.append(message)
+            return "  answer  "
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        assert io.ask_text("Endpoint", default="http://x") == "answer"
+        assert prompts == ["Endpoint [http://x]: "]
+
+    def test_ask_text_empty_answer_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("prompt_toolkit.prompt", lambda message, **kw: "")
+        io = configure.PromptToolkitIO()
+        assert io.ask_text("Endpoint", default="http://x") == "http://x"
+
+    @pytest.mark.parametrize(
+        ("answer", "default", "expected"),
+        [
+            ("", True, True),  # empty input → default (Y/n)
+            ("", False, False),  # empty input → default (y/N)
+            ("y", False, True),
+            ("YES", False, True),  # case-folded
+            ("n", True, False),
+            ("bogus", True, False),  # anything non-affirmative is False
+        ],
+    )
+    def test_ask_bool_parses_answers(
+        self, monkeypatch: pytest.MonkeyPatch, answer: str, default: bool, expected: bool
+    ) -> None:
+        monkeypatch.setattr("prompt_toolkit.prompt", lambda message, **kw: answer)
+        io = configure.PromptToolkitIO()
+        assert io.ask_bool("Allow?", default) is expected
+
+    def test_ask_password_masks_input_and_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen_kwargs: dict[str, object] = {}
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            seen_kwargs.update(kwargs)
+            return ""
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        assert io.ask_password("Account number", default="keep-me") == "keep-me"
+        # The secret must never echo — is_password masks the input.
+        assert seen_kwargs.get("is_password") is True
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("ask_choice", ("label", ("a",), "a")),
+            ("ask_text", ("label",)),
+            ("ask_bool", ("label", True)),
+            ("ask_password", ("label",)),
+        ],
+    )
+    def test_methods_raise_runtime_error_without_prompt_toolkit(
+        self, monkeypatch: pytest.MonkeyPatch, method: str, args: tuple[object, ...]
+    ) -> None:
+        # None in sys.modules makes the lazy `from prompt_toolkit import ...`
+        # raise ImportError, which each method must translate to the
+        # actionable RuntimeError (install hint / --non-interactive escape).
+        monkeypatch.setitem(sys.modules, "prompt_toolkit", None)
+        monkeypatch.setitem(sys.modules, "prompt_toolkit.shortcuts", None)
+        io = configure.PromptToolkitIO()
+        with pytest.raises(RuntimeError, match="prompt_toolkit is required"):
+            getattr(io, method)(*args)
+
+
+def test_coerce_cloud_attempt_action_rejects_unknown_value() -> None:
+    """The Literal-narrowing guard fails loudly on a scripted bad answer
+    instead of letting an invalid action reach the PolicySnapshot."""
+    with pytest.raises(ValueError, match="invalid cloud_attempt_action"):
+        configure._coerce_cloud_attempt_action("sometimes")

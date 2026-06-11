@@ -44,7 +44,10 @@ class WrapError(Exception):
     - :class:`WrapAuthCancelled` — user denied the biometry / passcode
       prompt; paired with ``keyvault.unwrap_denied`` audit emit.
     - :class:`WrapKeyNotFound` — Keychain has no item for the given
-      ``key_id`` (key was revoked, deleted, or wrong device).
+      ``key_id`` (key was revoked, deleted, or wrong device). Has one
+      nested subclass: :class:`WrapKeyAlreadyExists` (duplicate
+      ``key_id`` at generation time — kept under ``WrapKeyNotFound``
+      for back-compat with callers that catch the historical mapping).
     """
 
 
@@ -127,4 +130,18 @@ class WrapKeyNotFound(WrapError):
     additional Keychain introspection, which is intentional: an
     attacker who can see the difference learns whether the user
     re-enrolled biometrics, a privacy leak.
+    """
+
+
+class WrapKeyAlreadyExists(WrapKeyNotFound):
+    """A wrapping key with this ``key_id`` already exists — generation refused.
+
+    Raised by ``generate_enclave_key`` when the Keychain tag is already
+    taken (the backend translates ``errSecDuplicateItem`` / a helper's
+    ``exists`` reason). Historically this condition was reported as plain
+    :class:`WrapKeyNotFound` on the rationale that both mean "cannot
+    generate here"; the dedicated subclass restores the semantic
+    distinction for new callers while remaining catchable by every
+    pre-existing ``except WrapKeyNotFound`` site (review follow-up,
+    2026-06-11).
     """

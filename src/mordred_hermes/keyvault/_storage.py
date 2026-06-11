@@ -163,12 +163,18 @@ def ensure_layout(root: Path) -> None:
 
     lock = root / ".lock"
     if not lock.exists():
-        fd = os.open(
-            lock,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            _FILE_MODE,
-        )
-        os.close(fd)
+        try:
+            fd = os.open(
+                lock,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                _FILE_MODE,
+            )
+            os.close(fd)
+        except FileExistsError:
+            # Lost the creation race to a concurrent ensure_layout — the
+            # winner's lock file serves both processes; _check_file_mode
+            # below validates it exactly as if we had created it.
+            pass
     _check_file_mode(lock)
 
     meta = root / "meta.json"
@@ -309,9 +315,29 @@ def keyvault_lock(root: Path) -> Iterator[None]:
     the flock serializes contention across both threads and processes
     even though each opens its own file descriptor — POSIX-ish advisory
     lock semantics.
+
+    The lock file is held to the same posture as every other keyvault
+    file: it must be a regular file at mode ``0o600`` (verified via
+    ``fstat`` on the open fd, mirroring :func:`safe_read`), or
+    :exc:`KeyvaultPermissionError` is raised before any flock attempt.
     """
-    fd = os.open(root / ".lock", os.O_RDWR | os.O_NOFOLLOW)
+    lock_path = root / ".lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
     try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise KeyvaultPermissionError(
+                errno.EINVAL,
+                "keyvault lock must be a regular file (not FIFO, device, directory)",
+                str(lock_path),
+            )
+        mode = stat.S_IMODE(st.st_mode)
+        if mode != _FILE_MODE:
+            raise KeyvaultPermissionError(
+                errno.EPERM,
+                f"keyvault lock file must be mode 0o{_FILE_MODE:o}, got 0o{mode:o}",
+                str(lock_path),
+            )
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield

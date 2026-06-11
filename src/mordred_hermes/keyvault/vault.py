@@ -130,8 +130,13 @@ def _ensure_dir(path: Path) -> None:
 def _ensure_lock(root: Path) -> None:
     lock = root / _LOCK_NAME
     if not lock.exists():
-        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _FILE_MODE)
-        os.close(fd)
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _FILE_MODE)
+            os.close(fd)
+        except FileExistsError:
+            # Lost the creation race to a concurrent writer — the winner's
+            # lock file serves both processes; keyvault_lock flocks it next.
+            pass
 
 
 def init_vault(

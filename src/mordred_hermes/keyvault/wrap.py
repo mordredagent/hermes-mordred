@@ -168,8 +168,10 @@ class NativeBackend(Protocol):
     def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
         """Create a new Enclave-backed P-256 keypair tagged with
         ``key_id`` and return the SEC1 uncompressed public key. Raises
-        :class:`WrapKeyNotFound` if a key with this id already exists
-        (the production backend translates ``errSecDuplicateItem``).
+        :class:`~mordred_hermes.keyvault._exceptions.WrapKeyAlreadyExists`
+        (a :class:`WrapKeyNotFound` subclass) if a key with this id
+        already exists (the production backend translates
+        ``errSecDuplicateItem``).
 
         ``unattended`` selects the key's authorization policy:
         ``False`` (or ``None`` → safe default) gates every ``enclave_ecdh``
@@ -386,10 +388,11 @@ def generate_wrapping_key(key_id: str, *, backend: NativeBackend, unattended: bo
     :func:`get_wrapping_key_public` round-trip (review LOW-3).
 
     The public key remains exportable; the private key never leaves the
-    Enclave. Raises :class:`WrapKeyNotFound` if a key with this id
-    already exists in the Keychain (backend translates
-    ``errSecDuplicateItem`` to this exception so callers do not need to
-    know the OSStatus).
+    Enclave. Raises
+    :class:`~mordred_hermes.keyvault._exceptions.WrapKeyAlreadyExists`
+    (a :class:`WrapKeyNotFound` subclass) if a key with this id already
+    exists in the Keychain (backend translates ``errSecDuplicateItem``
+    to this exception so callers do not need to know the OSStatus).
 
     ``unattended`` is forwarded to :meth:`NativeBackend.generate_enclave_key`
     to pick the key's authorization policy (interactive vs. prompt-free);

@@ -19,9 +19,11 @@ from __future__ import annotations
 
 from secrets import token_bytes
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 _NONCE_SIZE = 12
+_TAG_SIZE = 16
 
 
 def encrypt(key: bytes, plaintext: bytes, *, aad: bytes = b"") -> bytes:
@@ -38,6 +40,15 @@ def encrypt(key: bytes, plaintext: bytes, *, aad: bytes = b"") -> bytes:
 
 
 def decrypt(key: bytes, blob: bytes, *, aad: bytes = b"") -> bytes:
-    """Decrypt a blob produced by :func:`encrypt`. Raises ``InvalidTag`` on tamper."""
+    """Decrypt a blob produced by :func:`encrypt`. Raises ``InvalidTag`` on tamper.
+
+    A blob structurally too short for ``nonce(12) || tag(16)`` also raises
+    ``InvalidTag`` — without the explicit guard the error type would flip
+    between AESGCM's nonce-size ``ValueError`` (< 12 bytes survived) and
+    ``InvalidTag`` (12-27 bytes), making truncation corruption look like a
+    caller bug instead of the documented tamper signal.
+    """
+    if len(blob) < _NONCE_SIZE + _TAG_SIZE:
+        raise InvalidTag(f"blob too short for AES-GCM nonce + tag ({len(blob)} bytes)")
     nonce, ciphertext = blob[:_NONCE_SIZE], blob[_NONCE_SIZE:]
     return AESGCM(key).decrypt(nonce, ciphertext, aad)

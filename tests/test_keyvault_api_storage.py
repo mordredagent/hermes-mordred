@@ -116,6 +116,25 @@ class TestEnsureLayout:
         with pytest.raises(_storage.KeyvaultPermissionError):
             _storage.ensure_layout(root)
 
+    def test_lock_creation_race_is_tolerated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two processes racing the first ensure_layout: the loser's
+        ``exists()`` pre-check sees no ``.lock`` yet, then its O_EXCL open
+        hits ``FileExistsError`` because the winner created it in between.
+        The loser must treat that as success (the winner's lock is just as
+        good), not crash. Simulated by forcing the ``exists()`` pre-check
+        to report False while the lock file is actually present."""
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)  # .lock now exists on disk
+        real_exists = Path.exists
+
+        def fake_exists(self: Path, **kwargs: bool) -> bool:
+            if self.name == ".lock":
+                return False  # the racing loser's stale pre-check view
+            return real_exists(self, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", fake_exists)
+        _storage.ensure_layout(root)  # must not raise FileExistsError
+
 
 # ---------------------------- atomic_write ----------------------------
 
@@ -280,6 +299,17 @@ class TestKeyvaultLock:
         t1.join()
         t2.join()
         assert order == ["A-enter", "A-exit", "B-enter", "B-exit"]
+
+    def test_lock_with_wrong_mode_refused(self, tmp_path: Path) -> None:
+        """The lock file is part of the keyvault tree, so acquiring it must
+        enforce the same 0o600 posture ``safe_read`` applies — a loosened
+        lock file (e.g. chmod 0644 by a backup tool) is refused instead of
+        silently flock'd."""
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        os.chmod(root / ".lock", 0o644)  # too permissive
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_lock(root):
+            pass  # pragma: no cover — the lock must refuse before entry
 
 
 # ---------------------------- load_meta / save_meta ----------------------------
