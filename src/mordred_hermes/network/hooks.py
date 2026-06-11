@@ -133,7 +133,7 @@ def on_session_start(
     circuit identity.
 
     - ``off`` + clearnet default: skip - the user may manually switch
-      paths later via ``hermes mordred network use``.
+      paths later via ``hermes-mordred network use``.
     - Otherwise: call :func:`api.use` for the configured default.
       Strict-mode bring-up failure raises :class:`MordredPathBringupFailed`
       (BaseException) after emitting ``network.bringup_failed`` audit.
@@ -243,7 +243,7 @@ def pre_tool_call(
         )
     msg = (
         f"Mordred strict mode: active network path was dropped; refusing tool {tool_name!r}. "
-        "Re-bring-up via `hermes mordred network use <path>` or restart the session."
+        "Re-bring-up via `hermes-mordred network use <path>` or restart the session."
     )
     _LOG.error(msg)
     raise MordredPathDropped(msg)

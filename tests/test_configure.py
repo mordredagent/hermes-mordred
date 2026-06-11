@@ -322,18 +322,39 @@ def _patch_for_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, prompt_io
 
 
 class TestCliHandler:
-    def test_non_interactive_returns_exit_code_2(
+    def test_non_interactive_applies_flags_and_defaults(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """UX review 2026-06-11 Phase 4: --non-interactive used to refuse on
+        the first prompt unconditionally — a flag that could never succeed.
+        It is now flag-driven like `network init --non-interactive`."""
         _patch_for_cli(monkeypatch, tmp_path)
-        ns = argparse.Namespace(non_interactive=True)
+        ns = argparse.Namespace(non_interactive=True, policy="strict", harness="codex")
         rc = cli_handler(ns)
-        assert rc == 2
-        captured = capsys.readouterr()
-        assert "non-interactive" in captured.err.lower()
+        assert rc == 0
+        body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
+        assert body["policy"] == "strict"
+        out = capsys.readouterr().out
+        assert "strict" in out
+
+    def test_non_interactive_rerun_keeps_existing_settings(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A re-run with no flags must not clobber prior answers (mirrors
+        network init's seed-from-disk contract)."""
+        _patch_for_cli(monkeypatch, tmp_path)
+        first = argparse.Namespace(non_interactive=True, policy="strict", harness="codex")
+        assert cli_handler(first) == 0
+        rerun = argparse.Namespace(non_interactive=True)
+        assert cli_handler(rerun) == 0
+        body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
+        assert body["policy"] == "strict"
 
     def test_interactive_path_runs_end_to_end(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         scripted = _ScriptedPromptIO(answers=_core_answers(policy="off"))
@@ -495,6 +516,138 @@ class TestConfigureSummary:
         assert "strict" in out
         assert "codex" in out
         assert "network init" in out
+
+
+# -----------------------------------------------------------------------------
+# prompt_toolkit guidance (UX review 2026-06-11). The ImportError message used
+# to suggest "rerun with --non-interactive" — but configure --non-interactive
+# installs _RefusingPromptIO, which aborts on the first prompt, so that advice
+# could never succeed. The message must offer only the actionable fix.
+# -----------------------------------------------------------------------------
+
+
+class TestPromptToolkitGuidance:
+    def test_missing_prompt_toolkit_message_is_actionable(self) -> None:
+        msg = configure._PROMPT_TOOLKIT_REQUIRED
+        assert "pip install prompt_toolkit" in msg
+        assert "--non-interactive" not in msg
+        assert "hermes-mordred configure" in msg
+
+
+# -----------------------------------------------------------------------------
+# Phase 4 (UX review 2026-06-11): flag-driven non-interactive configure +
+# robust yes/no parsing.
+# -----------------------------------------------------------------------------
+
+
+class TestSnapshotFromArgs:
+    def test_flags_map_to_snapshot_fields(self) -> None:
+        ns = argparse.Namespace(
+            policy="strict",
+            allow_cloud_llm=True,
+            cloud_allowlist="anthropic, openai",
+            local_llm_endpoint="http://127.0.0.1:8080/v1",
+            local_llm_model_id="qwen3",
+            cloud_attempt_action="prompt-once",
+            harness="codex",
+        )
+        snapshot = configure.snapshot_from_args(ns).snapshot
+        assert snapshot.policy == "strict"
+        assert snapshot.allow_cloud_llm is True
+        assert snapshot.cloud_provider_allowlist == ("anthropic", "openai")
+        assert snapshot.local_llm_endpoint == "http://127.0.0.1:8080/v1"
+        assert snapshot.local_llm_model_id == "qwen3"
+        assert snapshot.cloud_attempt_action == "prompt-once"
+        assert snapshot.harness_primary == "codex"
+        assert snapshot.disable_ipv6 is True  # strict => IPv6 off (mirrors prompts)
+
+    def test_defaults_without_flags_match_prompt_defaults(self) -> None:
+        snapshot = configure.snapshot_from_args(argparse.Namespace()).snapshot
+        assert snapshot.policy == "lenient"
+        assert snapshot.allow_cloud_llm is False
+        assert snapshot.cloud_provider_allowlist == ()
+        assert snapshot.harness_primary == "none"
+        assert snapshot.disable_ipv6 is False
+
+    def test_existing_values_seed_unspecified_flags(self) -> None:
+        existing = {
+            "policy": "strict",
+            "allow_cloud_llm": True,
+            "cloud_provider_allowlist": ["anthropic"],
+            "local_llm_endpoint": "http://10.0.0.2:1234/v1",
+            "local_llm_model_id": "llama",
+            "cloud_attempt_action": "prompt-once",
+            "harness_primary": "cursor",
+        }
+        snapshot = configure.snapshot_from_args(argparse.Namespace(), existing=existing).snapshot
+        assert snapshot.policy == "strict"
+        assert snapshot.allow_cloud_llm is True
+        assert snapshot.cloud_provider_allowlist == ("anthropic",)
+        assert snapshot.local_llm_endpoint == "http://10.0.0.2:1234/v1"
+        assert snapshot.local_llm_model_id == "llama"
+        assert snapshot.cloud_attempt_action == "prompt-once"
+        assert snapshot.harness_primary == "cursor"
+
+    def test_flags_override_existing(self) -> None:
+        existing = {"policy": "strict"}
+        ns = argparse.Namespace(policy="off")
+        snapshot = configure.snapshot_from_args(ns, existing=existing).snapshot
+        assert snapshot.policy == "off"
+
+
+class TestParseBoolAnswer:
+    @pytest.mark.parametrize("answer", ["y", "yes", "true", "1", "on", "Y", "TRUE"])
+    def test_truthy_answers(self, answer: str) -> None:
+        assert configure._parse_bool_answer(answer, default=False) is True
+
+    @pytest.mark.parametrize("answer", ["n", "no", "false", "0", "off", "anything-else"])
+    def test_falsy_answers(self, answer: str) -> None:
+        assert configure._parse_bool_answer(answer, default=True) is False
+
+    @pytest.mark.parametrize("default", [True, False])
+    def test_empty_answer_returns_default(self, default: bool) -> None:
+        assert configure._parse_bool_answer("", default=default) is default
+
+
+class TestSnapshotFromArgsHardening:
+    """Code-review fixes (2026-06-12): hand-edited / downgraded policy.json
+    must not crash the non-interactive path."""
+
+    def test_corrupt_cloud_attempt_action_falls_back_to_default(self) -> None:
+        existing = {"cloud_attempt_action": "bogus-value"}
+        snapshot = configure.snapshot_from_args(argparse.Namespace(), existing=existing).snapshot
+        assert snapshot.cloud_attempt_action == "always-block"
+
+    def test_corrupt_policy_mode_falls_back_to_default(self) -> None:
+        existing = {"policy": "bogus-mode"}
+        snapshot = configure.snapshot_from_args(argparse.Namespace(), existing=existing).snapshot
+        assert snapshot.policy == "lenient"
+
+    def test_no_allow_cloud_llm_flag_overrides_existing_true(self) -> None:
+        ns = argparse.Namespace(allow_cloud_llm=False)  # --no-allow-cloud-llm
+        snapshot = configure.snapshot_from_args(ns, existing={"allow_cloud_llm": True}).snapshot
+        assert snapshot.allow_cloud_llm is False
+
+    def test_non_interactive_write_failure_reports_cleanly(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An unwritable policy dir must yield stderr + rc 1, not a traceback."""
+        _patch_for_cli(monkeypatch, tmp_path)
+
+        class _FailingWriter:
+            policy_json_path = tmp_path / "mordred" / "policy.json"
+            config_path = tmp_path / "config.yaml"
+
+            def write(self, snapshot: object) -> None:
+                raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(configure, "PolicyWriter", _FailingWriter)
+        rc = cli_handler(argparse.Namespace(non_interactive=True, policy="lenient"))
+        assert rc == 1
+        assert "read-only filesystem" in capsys.readouterr().err
 
 
 # -----------------------------------------------------------------------------

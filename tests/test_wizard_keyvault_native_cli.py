@@ -405,16 +405,20 @@ class TestEnableTPM:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # codex HIGH + MEDIUM-2: on Linux there is no software fallback (Phase 1
-        # fail-closed), and the 2a helper has no TPM backend yet, so the failure
-        # message must be honest — not the copied-from-enable-se "keeps using the
-        # software fallback" claim.
+        # fail-closed), so the failure message must be honest — not the
+        # copied-from-enable-se "keeps using the software fallback" claim.
+        # UX review 2026-06-11: the Phase 2b TPM backend has LANDED (#114), so
+        # the message must no longer call the failure "expected" pending Phase
+        # 2b — it must point at real TPM troubleshooting instead.
         self._patch_all_ok(monkeypatch, tmp_path)
         monkeypatch.setattr(keyvault_native_cli, "_verify_tpmkey_helper", lambda **_k: False, raising=False)
         keyvault_native_cli.enable_tpm(home=tmp_path)
         err = capsys.readouterr().err
         assert "keep using the software fallback" not in err
         assert "fails closed" in err
-        assert "Phase 2b" in err
+        assert "Phase 2b" not in err
+        assert "/dev/tpmrm0" in err
+        assert "hermes-mordred keyvault enable-tpm" in err
 
     def test_install_dir_threaded_to_build_and_verify(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # codex MEDIUM-1: --install-dir must reach BOTH the build (env) and the

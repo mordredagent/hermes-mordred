@@ -23,7 +23,9 @@ wrapper around :mod:`mordred_hermes.network.api` and the wizard writers.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,7 +66,7 @@ def handle_use(args: argparse.Namespace) -> int:
     """
     target = str(getattr(args, "path", ""))
     if target not in _VALID_PATHS:
-        print(f"error: unknown network path {target!r}; choose one of {_VALID_PATHS}")
+        print(f"error: unknown network path {target!r}; choose one of {_VALID_PATHS}", file=sys.stderr)
         return 2
 
     config_path = _resolve_config_path(args)
@@ -72,12 +74,12 @@ def handle_use(args: argparse.Namespace) -> int:
     try:
         _write_default_path_to_config(config_path, target)
     except OSError as e:
-        print(f"error: failed to write {config_path}: {e}")
-        return 3
+        print(f"error: failed to write {config_path}: {e}", file=sys.stderr)
+        return 1
 
     live = _runtime_registered()
     if not live:
-        print(f"set default_path = {target!r} in {config_path}. Change is deferred to the next `hermes` session.")
+        print(f"set default_path = {target} in {config_path}. Change is deferred to the next `hermes` session.")
         warning = _dependency_warning_for_configured_path(config_path, target)
         if warning:
             print(warning)
@@ -86,9 +88,9 @@ def handle_use(args: argparse.Namespace) -> int:
     try:
         api.use(target)  # type: ignore[arg-type]
     except MordredNetworkError as e:
-        print(f"error: api.use({target!r}) failed: {e}")
+        print(f"error: switching to {target} failed: {e}", file=sys.stderr)
         return 1
-    print(f"switched to {target!r} (also persisted to {config_path}).")
+    print(f"switched to {target} (also persisted to {config_path}).")
     return 0
 
 
@@ -100,21 +102,35 @@ def handle_status(args: argparse.Namespace) -> int:
     can tell whether the value they see is currently routing traffic.
     """
     config_path = _resolve_config_path(args)
+    as_json = bool(getattr(args, "json", False))
     if _runtime_registered():
         s = api.status()
+        if as_json:
+            body = {
+                "live": True,
+                "active_path": s.active_path,
+                "ready": s.ready,
+                "last_health": s.last_health,
+                "dropped": api.is_dropped(),
+            }
+            print(json.dumps(body, indent=2))
+            return 0
         ready_label = "ready" if s.ready else "not ready"
         last_health = "ok" if s.last_health else "FAILED"
-        print(f"active_path = {s.active_path!r}  state = {ready_label}  last_health = {last_health}")
+        print(f"active_path = {s.active_path}  state = {ready_label}  last_health = {last_health}")
         if api.is_dropped():
             print(
                 "  [warning] path was flagged as DROPPED by the liveness "
                 "worker. Strict-mode tool calls will refuse until the path "
-                "is re-bring-up'd via `hermes mordred network use <path>`."
+                "is re-bring-up'd via `hermes-mordred network use <path>`."
             )
         return 0
 
     configured = _read_default_path_from_config(config_path)
-    print(f"configured default_path = {configured!r}  (runtime not active in this process)")
+    if as_json:
+        print(json.dumps({"live": False, "configured_path": configured}, indent=2))
+        return 0
+    print(f"configured default_path = {configured}  (runtime not active in this process)")
     return 0
 
 

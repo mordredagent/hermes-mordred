@@ -300,3 +300,96 @@ class TestEnableTPMWiring:
         ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm"])
         assert dispatch(ns) == 7
         assert seen["args"] is ns
+
+
+# -----------------------------------------------------------------------------
+# Help information architecture (UX review 2026-06-11, Phase 3).
+# -----------------------------------------------------------------------------
+
+
+def _iter_help_strings(parser: argparse.ArgumentParser) -> list[str]:
+    """Every help / description / epilog string in the parser tree."""
+    collected: list[str] = [parser.description or "", parser.epilog or ""]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for choice_action in action._choices_actions:
+                collected.append(choice_action.help or "")
+            for sub in action.choices.values():
+                collected.extend(_iter_help_strings(sub))
+        else:
+            collected.append(action.help or "")
+    return collected
+
+
+class TestHelpHasNoInternalJargon:
+    """--help is the product's front door: spec-internal references like
+    "Story 1 / Story 1.5", section anchors, or roadmap ids mean nothing to
+    a user and crowd out the actual explanation."""
+
+    @pytest.mark.parametrize("jargon", ["Story 1", "§", "v2-F8", "L128"])
+    def test_no_jargon_anywhere_in_help_tree(self, jargon: str) -> None:
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        offenders = [text for text in _iter_help_strings(parser) if jargon in text]
+        assert not offenders, f"internal jargon {jargon!r} leaks into --help: {offenders}"
+
+
+class TestVersionFlag:
+    def test_version_prints_and_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.__about__ import __version__
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--version"])
+        assert excinfo.value.code == 0
+        assert __version__ in capsys.readouterr().out
+
+
+class TestQuickstartEpilog:
+    def test_top_level_help_carries_quickstart_and_group_guide(self) -> None:
+        """The epilog must orient a new user: the first-run order of
+        commands and how keyvault / vault / encryption relate."""
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), pytest.raises(SystemExit) as excinfo:
+            main(["--help"])
+        assert excinfo.value.code == 0
+        out = buf.getvalue()
+        assert "Quickstart" in out
+        assert "hermes-mordred configure" in out
+        assert "hermes-mordred status" in out
+        # The three storage-ish commands confuse users without a map:
+        # `encryption` is the recommended switch, `vault` the low-level store.
+        assert "encryption" in out
+
+
+class TestPolicyExitCodeDocumented:
+    def test_explain_and_dry_run_helps_mention_exit_2(self) -> None:
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        helps = " ".join(_iter_help_strings(parser))
+        assert "exit code 2" in helps
+
+
+class TestConfigureFlags:
+    """Phase 4: configure --non-interactive is flag-driven (like network init)."""
+
+    def test_configure_accepts_policy_flags(self) -> None:
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        ns = parser.parse_args(
+            [
+                "configure",
+                "--non-interactive",
+                "--policy",
+                "strict",
+                "--harness",
+                "codex",
+                "--cloud-allowlist",
+                "anthropic",
+            ]
+        )
+        assert ns.policy == "strict"
+        assert ns.harness == "codex"
+        assert ns.cloud_allowlist == "anthropic"

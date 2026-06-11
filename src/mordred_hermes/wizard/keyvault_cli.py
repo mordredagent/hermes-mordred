@@ -1,4 +1,4 @@
-"""``hermes mordred keyvault {list,verify-digest,recover,init}`` — keyvault CLI.
+"""``hermes-mordred keyvault {list,verify-digest,recover,init}`` — keyvault CLI.
 
 Phase 4 PR8 (``list`` / ``verify-digest``) + PR10 (``recover`` / ``init``).
 SPEC.md §4.2 / TODO.md §4.2.
@@ -63,10 +63,23 @@ def _resolve_root(home: Path | None) -> Path:
     return _storage.resolve_keyvault_dir(home if home is not None else _hermes_home())
 
 
-def list_keys(*, home: Path | None = None) -> int:
+def list_keys(*, home: Path | None = None, as_json: bool = False) -> int:
     """Print the keyvault's key ids. Returns 0 always (an empty vault is not an error)."""
+    import json
+
     meta = _storage.load_meta(_resolve_root(home))
     keys = meta["keys"]
+    if as_json:
+        rows = [
+            {
+                "key_id": keys[key_id_hash].get("key_id", "<unknown>"),
+                "key_id_hash": key_id_hash,
+                "created_at": keys[key_id_hash].get("created_at", "<unknown>"),
+            }
+            for key_id_hash in sorted(keys)
+        ]
+        print(json.dumps(rows, indent=2))
+        return 0
     if not keys:
         print("No keys in keyvault.")
         return 0
@@ -216,6 +229,74 @@ def recover(
     return 0
 
 
+#: Bounded retries at the verification-digest prompt (init_keyvault).
+_DIGEST_PROMPT_ATTEMPTS = 5
+
+# OS-specific go-offline steps + the matching offline-verification command.
+# Split per platform because the original macOS-only text (menu bar, BSD
+# `route get`) was wrong guidance on a Linux/TPM host (UX review 2026-06-11).
+_BLACKOUT_STEPS_DARWIN = (
+    "    1. Turn Wi-Fi OFF                 (menu bar → Wi-Fi → Off)\n"
+    "    2. Unplug Ethernet cables\n"
+    "    3. Turn Bluetooth OFF             (blocks PAN / tethering)\n"
+    "    4. Disable iPhone Personal Hotspot / USB tethering\n"
+    "    5. Stop any VPN or virtual NIC    (Tailscale, ZeroTier, …)\n"
+    "\n"
+    "  Verify you are offline before retrying:\n"
+    "\n"
+    "      route get 1.1.1.1\n"
+    "\n"
+    "  You are offline when the command prints:\n"
+    "      route: writing to routing socket: not in table\n"
+    "  If instead it shows an `interface:` line with a real NIC\n"
+    "  (e.g. `en0`, `en6`, `utun3`), that NIC is still routing —\n"
+    "  disable it and re-check before retrying.\n"
+)
+
+_BLACKOUT_STEPS_LINUX = (
+    "    1. Turn Wi-Fi and WWAN OFF        (nmcli radio all off)\n"
+    "    2. Unplug Ethernet cables\n"
+    "    3. Turn Bluetooth OFF             (blocks PAN / tethering)\n"
+    "    4. Disable USB / phone tethering\n"
+    "    5. Stop any VPN or virtual NIC    (Tailscale, ZeroTier, WireGuard, …)\n"
+    "\n"
+    "  Verify you are offline before retrying:\n"
+    "\n"
+    "      ip route get 1.1.1.1\n"
+    "\n"
+    "  You are offline when the command reports the network is\n"
+    "  unreachable. If instead it prints a route via a real device\n"
+    "  (e.g. `dev eth0`, `dev wlan0`), that interface is still\n"
+    "  routing — disable it and re-check before retrying.\n"
+)
+
+
+def _blackout_guidance(platform: str) -> str:
+    """The go-offline instructions shown when the network blackout check fails.
+
+    ``platform`` is ``sys.platform`` (``"darwin"`` / ``"linux"`` …); unknown
+    platforms get the Linux text, whose commands are the more portable set.
+    """
+    steps = _BLACKOUT_STEPS_DARWIN if platform == "darwin" else _BLACKOUT_STEPS_LINUX
+    return (
+        "\n"
+        "────────────────────────────────────────────────────────────\n"
+        "  Next step: go offline before the Seed Phrase is shown\n"
+        "────────────────────────────────────────────────────────────\n"
+        "\n"
+        "  This is the expected safety check, not an error. Mordred\n"
+        "  will only reveal your Seed Phrase when the host is fully\n"
+        "  air-gapped, so the seed cannot leak over any active link.\n"
+        "\n"
+        "  Please disconnect every network interface, then re-run\n"
+        "  `hermes-mordred keyvault init`:\n"
+        "\n" + steps + "\n"
+        "  Nothing has been written yet — your passphrase was not\n"
+        "  saved. Re-run after going offline to continue.\n"
+        "────────────────────────────────────────────────────────────\n"
+    )
+
+
 class TerminalSeedSurface:
     """A terminal :class:`SeedDisplaySurface` for ``keyvault init``.
 
@@ -288,7 +369,7 @@ def init_keyvault(
     if existing_meta.get("keys"):
         print(
             "Keyvault already initialised — v1 keyvault is single-key. To restore a "
-            "different key, use `hermes mordred keyvault recover`.",
+            "different key, use `hermes-mordred keyvault recover`.",
             file=sys.stderr,
         )
         return 1
@@ -366,40 +447,7 @@ def init_keyvault(
     try:
         show(handle, surface)
     except BlackoutNotAsserted:
-        print(
-            "\n"
-            "────────────────────────────────────────────────────────────\n"
-            "  Next step: go offline before the Seed Phrase is shown\n"
-            "────────────────────────────────────────────────────────────\n"
-            "\n"
-            "  This is the expected safety check, not an error. Mordred\n"
-            "  will only reveal your Seed Phrase when the host is fully\n"
-            "  air-gapped, so the seed cannot leak over any active link.\n"
-            "\n"
-            "  Please disconnect every network interface, then re-run\n"
-            "  `hermes-mordred keyvault init`:\n"
-            "\n"
-            "    1. Turn Wi-Fi OFF                 (menu bar → Wi-Fi → Off)\n"
-            "    2. Unplug Ethernet cables\n"
-            "    3. Turn Bluetooth OFF             (blocks PAN / tethering)\n"
-            "    4. Disable iPhone Personal Hotspot / USB tethering\n"
-            "    5. Stop any VPN or virtual NIC    (Tailscale, ZeroTier, …)\n"
-            "\n"
-            "  Verify you are offline before retrying:\n"
-            "\n"
-            "      route get 1.1.1.1\n"
-            "\n"
-            "  You are offline when the command prints:\n"
-            "      route: writing to routing socket: not in table\n"
-            "  If instead it shows an `interface:` line with a real NIC\n"
-            "  (e.g. `en0`, `en6`, `utun3`), that NIC is still routing —\n"
-            "  disable it and re-check before retrying.\n"
-            "\n"
-            "  Nothing has been written yet — your passphrase was not\n"
-            "  saved. Re-run after going offline to continue.\n"
-            "────────────────────────────────────────────────────────────\n",
-            file=sys.stderr,
-        )
+        print(_blackout_guidance(sys.platform), file=sys.stderr)
         return 1
     except SeedDisplayAborted as exc:
         print(f"Seed display aborted: screen capture detected ({exc.detector}).", file=sys.stderr)
@@ -408,11 +456,28 @@ def init_keyvault(
         print("Seed display window expired before the digest was confirmed.", file=sys.stderr)
         return 1
 
-    digest_hex = prompt_io.ask_text("Verification digest from your offline device (hex)")
-    try:
-        user_digest = bytes.fromhex(digest_hex.strip())
-    except ValueError:
-        print("That is not a valid hex digest — nothing was written.", file=sys.stderr)
+    # A typo at this prompt used to torch the whole ceremony (new seed, new
+    # 60s display, new offline digest). Re-prompt on non-hex input instead —
+    # bounded so scripted/non-tty runs cannot loop forever. A digest that IS
+    # valid hex but mismatches still aborts below: that means the seed or
+    # passphrase was mis-transcribed and the ceremony cannot be salvaged.
+    user_digest: bytes | None = None
+    for _ in range(_DIGEST_PROMPT_ATTEMPTS):
+        digest_hex = prompt_io.ask_text("Verification digest from your offline device (hex)")
+        try:
+            user_digest = bytes.fromhex(digest_hex.strip())
+            break
+        except ValueError:
+            print(
+                "That is not a valid hex digest — paste the 64-character hex string "
+                "printed by the offline tool and try again.",
+                file=sys.stderr,
+            )
+    if user_digest is None:
+        print(
+            f"No valid hex digest after {_DIGEST_PROMPT_ATTEMPTS} attempts — nothing was written.",
+            file=sys.stderr,
+        )
         return 1
 
     if backend is None:
@@ -426,7 +491,7 @@ def init_keyvault(
     except VerificationDigestMismatch:
         print(
             "Verification digest mismatch — the Seed or Passphrase was mis-transcribed. "
-            "Nothing was written; rerun `hermes mordred keyvault init`.",
+            "Nothing was written; rerun `hermes-mordred keyvault init`.",
             file=sys.stderr,
         )
         return 1
@@ -483,6 +548,10 @@ def init_keyvault(
             del mnemonic_for_hd
 
     print(f"Keyvault initialised. Key: {result.key_id}")
+    print(
+        "Next: `hermes-mordred encryption enable env` to encrypt secrets at rest, "
+        "or `hermes-mordred status` for an overview."
+    )
     return 0
 
 
@@ -492,9 +561,8 @@ def init_keyvault(
 
 
 def cli_list(args: argparse.Namespace) -> int:
-    """argparse handler for ``keyvault list`` (takes no options)."""
-    del args
-    return list_keys()
+    """argparse handler for ``keyvault list [--json]``."""
+    return list_keys(as_json=bool(getattr(args, "json", False)))
 
 
 def cli_verify_digest(args: argparse.Namespace) -> int:

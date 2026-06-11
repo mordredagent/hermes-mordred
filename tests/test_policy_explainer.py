@@ -348,3 +348,28 @@ class TestResolvePolicyMode:
         # User edits config.yaml directly -- explainer must reflect it
         config.write_text("plugins:\n  mordred_privacy_check:\n    policy: strict\n", encoding="utf-8")
         assert policy_explainer._resolve_policy_mode(config) == "strict"
+
+
+class TestGuidanceSpelling:
+    """UX review 2026-06-11: guidance must name the working CLI spelling."""
+
+    def test_missing_policy_points_at_working_configure_command(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = policy_explainer.show(policy_json_path=tmp_path / "absent" / "policy.json")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "hermes-mordred configure" in err
+
+    def test_skill_not_found_lists_paths_without_python_repr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = policy_explainer.explain(
+            "no-such-skill",
+            config_path=tmp_path / "config.yaml",
+            skills_dirs=(tmp_path / "a", tmp_path / "b"),
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "['" not in err  # no Python list repr in user output
+        assert str(tmp_path / "a") in err

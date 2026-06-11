@@ -212,7 +212,7 @@ def _refuse_cloud_not_allowlisted(
     msg = (
         f"Mordred strict mode: refusing session because {detail}. "
         "Switch to mordred-local, add the provider to cloud_provider_allowlist, "
-        "or rerun `hermes mordred configure` to lower the policy."
+        "or rerun `hermes-mordred configure` to lower the policy."
     )
     _LOG.error(msg)
     raise MordredSessionRefused(msg)

@@ -69,6 +69,41 @@ class UpgradeReport:
     story1_5_action: Story1_5Action
 
 
+#: Human phrases for the Story 1 (config.yaml) outcome shown by render_report.
+_STORY1_PHRASES: dict[Story1Action, str] = {
+    "noop": "already up to date",
+    "applied": "Mordred defaults applied",
+    "kept-existing": "kept existing settings",
+    "overwritten": "overwritten with Mordred defaults",
+}
+
+#: Human phrases for the Story 1.5 (OpenClaw) outcome shown by render_report.
+_STORY1_5_PHRASES: dict[Story1_5Action, str] = {
+    "noop": "not needed (no OpenClaw install detected)",
+    "migrated": "migrated from ~/.openclaw",
+    "skipped-marker": "already migrated (marker present)",
+}
+
+
+def render_report(report: UpgradeReport) -> str:
+    """User-facing summary printed after ``hermes-mordred upgrade``.
+
+    The CLI handler used to discard the report entirely, leaving the
+    command silent even after migrating ~/.openclaw (UX review
+    2026-06-11). Mirrors the configure/network-init summary style.
+    """
+    # .get with the raw action as fallback: a Story action added to the
+    # Literal but missed here must degrade to the raw token, not KeyError
+    # (review 2026-06-12).
+    return "\n".join(
+        [
+            "Upgrade summary:",
+            f"  config.yaml        : {_STORY1_PHRASES.get(report.story1_action, report.story1_action)}",
+            f"  OpenClaw migration : {_STORY1_5_PHRASES.get(report.story1_5_action, report.story1_5_action)}",
+        ]
+    )
+
+
 def _read_existing_section(config_path: Path) -> dict[str, Any] | None:
     """Read ``plugins.mordred_privacy_check`` from ``config.yaml``, or None.
 
@@ -140,11 +175,11 @@ def _resolve_story1(
     if options.policy_conflict is None:
         if options.non_interactive:
             raise SystemExit(
-                "hermes mordred upgrade: --non-interactive set but --policy-conflict "
+                "hermes-mordred upgrade: --non-interactive set but --policy-conflict "
                 "not specified; refusing to overwrite existing mordred section"
             )
         raise SystemExit(
-            "hermes mordred upgrade: existing config.yaml plugins.mordred_privacy_check "
+            "hermes-mordred upgrade: existing config.yaml plugins.mordred_privacy_check "
             "differs from the target snapshot. Re-run with one of "
             "--policy-conflict=keep-existing|overwrite|abort or --reset."
         )
@@ -155,7 +190,7 @@ def _resolve_story1(
         policy_writer.write(target_snapshot)
         return "overwritten"
     raise SystemExit(
-        "hermes mordred upgrade: --policy-conflict=abort set; existing mordred section differs from target -- aborting."
+        "hermes-mordred upgrade: --policy-conflict=abort set; existing mordred section differs from target -- aborting."
     )
 
 

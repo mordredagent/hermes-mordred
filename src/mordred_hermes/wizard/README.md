@@ -16,12 +16,26 @@ wiring (the gap is documented in `cli.py:main` docstring):
 - `hermes mordred <COMMAND>` — will start working once Hermes 0.12+ ships
   entry-point CLI wiring; no plugin code change needed.
 
-### `configure [--non-interactive]`
+### `status [--json]`
+
+At-a-glance dashboard: policy mode, network path (configured + live
+runtime state), keyvault (initialised / key count / hardware helper),
+and the four at-rest encryption targets. Side-effect-free — on-disk
+reads and PATH lookups only; never prompts, never touches the Secure
+Enclave or TPM.
+
+Implementation: `status_cli.py`.
+
+### `configure [--non-interactive] [--policy=...] [--harness=...] [...]`
 
 Run interactive Mordred setup. Writes `~/.hermes/config.yaml`
 (`plugins.mordred_*` sections, round-trip via ruamel.yaml) and
 `~/.hermes/mordred/policy.json` (the wizard-owned mirror).
-`--non-interactive` fails fast on any prompt (CI / scripted use).
+`--non-interactive` is flag-driven (no prompts): `--policy` /
+`--allow-cloud-llm` / `--cloud-allowlist` / `--local-llm-endpoint` /
+`--local-llm-model-id` / `--cloud-attempt-action` / `--harness`, each
+seeded from the existing policy.json + config.yaml so a bare re-run
+keeps prior answers.
 
 Implementation: `configure.py`.
 

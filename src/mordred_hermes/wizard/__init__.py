@@ -1,4 +1,4 @@
-"""mordred_wizard — ``hermes mordred …`` CLI surface.
+"""mordred_wizard — ``hermes-mordred …`` CLI surface.
 
 Phase 1.3 wires :func:`register` to Hermes's ``register_cli_command``.
 The full subcommand tree lives in :mod:`.cli`; each handler is filled in
@@ -20,6 +20,6 @@ def register(ctx: PluginContext) -> None:
             "Mordred wraps the Hermes agent with privacy-preserving "
             "policy enforcement (skill metadata gating, network-path "
             "control, local-LLM redirection, keyvault). Run "
-            "`hermes mordred configure` to start."
+            "`hermes-mordred configure` to start."
         ),
     )

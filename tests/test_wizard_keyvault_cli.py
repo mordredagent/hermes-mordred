@@ -450,16 +450,53 @@ class TestInit:
         assert "disconnect" in err or "network" in err
         assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
 
-    def test_bad_digest_hex_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_bad_digest_hex_exhausts_attempts_returns_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """UX review 2026-06-11 Phase 4: a typo must re-prompt, not torch the
+        whole ceremony — but persistent garbage still aborts (bounded)."""
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(texts=["not-hex-zz"], passwords=[self.PASSPHRASE, self.PASSPHRASE]),
+            prompt_io=ScriptedPromptIO(texts=["not-hex-zz"] * 5, passwords=[self.PASSPHRASE, self.PASSPHRASE]),
             surface=FakeSurface(),
             display_fn=self._noop_display,
         )
         assert rc == 1
         assert "hex" in capsys.readouterr().err.lower()
+        assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
+
+    def test_bad_digest_hex_then_valid_succeeds(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """One mistyped digest must not force a fresh 60-second seed ceremony."""
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=["not-hex-zz", self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        assert _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
+
+    def test_init_success_prints_next_step_hint(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Success must orient the user toward what the keyvault unlocks next."""
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Next:" in out
+        assert "hermes-mordred" in out
 
     def test_digest_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
@@ -663,3 +700,83 @@ class TestInit:
         )
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
+
+
+class TestGuidanceSpelling:
+    """UX review 2026-06-11: failure guidance must name the working CLI form.
+
+    Hermes 0.11 does not wire `hermes mordred ...`; pointing a user there
+    after a failed ceremony strands them (the broad guard lives in
+    test_ux_guidance_guard.py — these pin the two keyvault messages).
+    """
+
+    def test_reinit_guard_points_at_working_recover_command(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=["pp", "pp"]),
+            surface=FakeSurface(),
+            display_fn=lambda handle, surface: None,
+        )
+        assert rc == 1
+        assert "hermes-mordred keyvault recover" in capsys.readouterr().err
+
+
+class TestBlackoutGuidance:
+    """Phase 4: the go-offline instructions were macOS-only (menu bar,
+    `route get`) — wrong guidance on a Linux/TPM host."""
+
+    def test_darwin_guidance_uses_macos_steps(self) -> None:
+        text = keyvault_cli._blackout_guidance("darwin")
+        assert "Wi-Fi" in text
+        assert "route get 1.1.1.1" in text
+        assert "nmcli" not in text
+
+    def test_linux_guidance_uses_linux_steps(self) -> None:
+        text = keyvault_cli._blackout_guidance("linux")
+        assert "nmcli" in text
+        assert "ip route" in text
+        assert "menu bar" not in text
+
+    def test_both_explain_the_safety_check_and_rerun(self) -> None:
+        for platform in ("darwin", "linux"):
+            text = keyvault_cli._blackout_guidance(platform)
+            assert "hermes-mordred keyvault init" in text
+            assert "Nothing has been written" in text
+
+
+class TestListJson:
+    """Phase 5 (UX review 2026-06-11): read commands need --json for scripting."""
+
+    def test_list_json_carries_ids_and_timestamps(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        import json
+
+        _build_keyvault(tmp_path, {"default": b"\x11" * 32})
+        rc = keyvault_cli.list_keys(home=tmp_path, as_json=True)
+        assert rc == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body == [
+            {
+                "key_id": "default",
+                "key_id_hash": _key_id_hash("default"),
+                "created_at": "2026-05-16T00:00:00Z",
+            }
+        ]
+
+    def test_empty_keyvault_json_is_empty_array(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        import json
+
+        rc = keyvault_cli.list_keys(home=tmp_path, as_json=True)
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == []
+
+    def test_list_json_flag_is_wired(self) -> None:
+        from mordred_hermes.wizard import cli
+
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        cli._setup_subparser(parser)
+        ns = parser.parse_args(["keyvault", "list", "--json"])
+        assert ns.json is True

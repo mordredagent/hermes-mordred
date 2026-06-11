@@ -362,14 +362,16 @@ class TestStatus:
         """``cli_status(args)`` resolves ``--root`` and delegates to :func:`status`."""
         seen: dict[str, object] = {}
 
-        def _spy(*, root: Path, prompt_io: object = None) -> int:
+        def _spy(*, root: Path, prompt_io: object = None, as_json: bool = False) -> int:
             seen["root"] = root
+            seen["as_json"] = as_json
             return 0
 
         monkeypatch.setattr(vault_cli, "status", _spy)
         rc = vault_cli.cli_status(argparse.Namespace(root=str(tmp_path)))
         assert rc == 0
         assert seen["root"] == tmp_path
+        assert seen["as_json"] is False
 
     def test_tampered_manifest_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A manifest-body edit (no master) passes the recovery-digest check on
@@ -1182,3 +1184,26 @@ class TestOpenHotPath:
         opened = vault_cli._open_hot_path_or_report(tmp_path / "v", backend=FakeBackend(), store=_ReadRaisesStore())
         assert opened is None
         assert capsys.readouterr().err.strip() != ""
+
+
+class TestStatusJson:
+    """Phase 5 (UX review 2026-06-11): read commands need --json for scripting."""
+
+    def test_status_json_reports_generation_and_files(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        import json
+
+        _build_vault(tmp_path, files={".env": b"K=v\n", "config.yaml": b"a: 1\n"})
+        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE), as_json=True)
+        assert rc == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["generation"] == 2
+        assert sorted(body["files"]) == [".env", "config.yaml"]
+        assert body["read_only"] is True
+
+    def test_status_json_flag_is_wired(self) -> None:
+        from mordred_hermes.wizard import cli
+
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        cli._setup_subparser(parser)
+        ns = parser.parse_args(["vault", "status", "--json"])
+        assert ns.json is True

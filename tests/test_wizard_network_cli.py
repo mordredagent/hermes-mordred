@@ -488,3 +488,119 @@ plugins:
         assert section["default_path"] == "clearnet"
         assert section["tor_binary_path"] == "/opt/tor/bin/tor"
         assert section["tor_socks_port"] == 19050
+
+
+# --------------------------------------------------------------------------- #
+# Error channel + exit codes (UX review 2026-06-11). network_cli was the only #
+# wizard module printing errors to stdout (0 uses of stderr vs 22-24 in the   #
+# others), and used an ad hoc exit code 3 for a write failure.                #
+# --------------------------------------------------------------------------- #
+
+
+class TestUseErrorChannel:
+    def test_write_failure_reports_to_stderr_with_rc_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        def _boom(config_path: Path, default_path: str) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(network_cli, "_write_default_path_to_config", _boom)
+        args = _make_args(path="tor", config_path=tmp_path / "config.yaml")
+        rc = network_cli.handle_use(args)
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "disk full" in captured.err
+        assert captured.out == ""
+
+    def test_bringup_failure_reports_to_stderr(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.network import api
+        from mordred_hermes.wizard import network_cli
+
+        rt = _FakeRuntime()
+        rt.use_raises = BringupFailed("tor timeout")
+        api.set_runtime(rt)
+        args = _make_args(path="tor", config_path=tmp_path / "config.yaml")
+        rc = network_cli.handle_use(args)
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "tor timeout" in captured.err
+
+
+class TestOutputHasNoPythonRepr:
+    """UX review 2026-06-11 Phase 3: enum values and paths must not be
+    rendered through ``!r`` — users see Python quoting ('tor') leak into
+    what should be plain CLI output."""
+
+    def test_use_deferred_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        args = _make_args(path="tor", config_path=tmp_path / "config.yaml")
+        rc = network_cli.handle_use(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "'tor'" not in out
+        assert "tor" in out
+
+    def test_live_status_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.network import api
+        from mordred_hermes.wizard import network_cli
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        rt.use("tor")
+        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "'tor'" not in out
+        assert "tor" in out
+
+    def test_disk_status_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "'clearnet'" not in out
+        assert "clearnet" in out
+
+
+class TestStatusJson:
+    """Phase 5 (UX review 2026-06-11): read commands need --json for scripting."""
+
+    def test_live_status_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        import json
+
+        from mordred_hermes.network import api
+        from mordred_hermes.wizard import network_cli
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        rt.use("tor")
+        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml", json=True))
+        assert rc == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["live"] is True
+        assert body["active_path"] == "tor"
+        assert body["ready"] is True
+        assert body["dropped"] is False
+
+    def test_disk_status_json(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        import json
+
+        from mordred_hermes.wizard import network_cli
+
+        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml", json=True))
+        assert rc == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["live"] is False
+        assert body["configured_path"] == "clearnet"
+
+    def test_status_json_flag_is_wired(self) -> None:
+        from mordred_hermes.wizard import cli
+
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        cli._setup_subparser(parser)
+        ns = parser.parse_args(["network", "status", "--json"])
+        assert ns.json is True

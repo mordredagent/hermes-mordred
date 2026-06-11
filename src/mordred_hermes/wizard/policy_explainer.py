@@ -1,4 +1,4 @@
-"""``hermes mordred policy {show,explain,dry-run,reload}``.
+"""``hermes-mordred policy {show,explain,dry-run,reload}``.
 
 Read-only inspection helpers over Mordred policy state -- no file
 mutation other than the in-memory state reset performed by ``reload``.
@@ -61,7 +61,7 @@ def show(
     """Print the resolved Mordred policy. Exit code 0 on success, 1 if absent."""
     if not policy_json_path.exists():
         print(
-            f"No Mordred policy configured at {policy_json_path}.\nRun `hermes mordred configure` to create one.",
+            f"No Mordred policy configured at {policy_json_path}.\nRun `hermes-mordred configure` to create one.",
             file=sys.stderr,
         )
         return 1
@@ -135,8 +135,9 @@ def explain(
     policy_mode = _resolve_policy_mode(config_path)
     skill_md = _find_skill_md(skill_id, skills_dirs)
     if skill_md is None:
+        searched = ", ".join(str(p) for p in skills_dirs)
         print(
-            f"Skill {skill_id!r} not found in any of: {[str(p) for p in skills_dirs]}",
+            f"Skill {skill_id!r} not found in any of: {searched}",
             file=sys.stderr,
         )
         return 1

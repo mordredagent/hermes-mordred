@@ -674,9 +674,7 @@ class _FakeSecurity:
 
 
 @pytest.mark.parametrize("method", ["create_keypair", "probe"])
-def test_software_fallback_key_is_device_bound_not_syncable(
-    monkeypatch: pytest.MonkeyPatch, method: str
-) -> None:
+def test_software_fallback_key_is_device_bound_not_syncable(monkeypatch: pytest.MonkeyPatch, method: str) -> None:
     """Security review H2: the in-process software-fallback wrapping key
     must pin ``kSecAttrAccessibleWhenUnlockedThisDeviceOnly``. Without an
     explicit accessibility attribute the key defaults to

@@ -171,18 +171,29 @@ def _open_hot_path_or_report(
     return None
 
 
-def status(*, root: Path, prompt_io: PromptIO | None = None) -> int:
+def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = False) -> int:
     """Print a vault's generation and enrolled file names (cold path).
 
     Opens read-only via :func:`_open_cold_path`. Enrolled *names* are listed;
     file *contents* are never decrypted or printed. Returns 0 on a successful
     open, 1 on any fail-closed open error (reason already on stderr).
     """
+    import json
+
     opened = _open_cold_path(root, prompt_io=prompt_io)
     if opened is None:
         return 1
     try:
         names = sorted(opened.list_files())
+        if as_json:
+            body = {
+                "root": str(root),
+                "generation": opened.generation,
+                "files": names,
+                "read_only": True,
+            }
+            print(json.dumps(body, indent=2))
+            return 0
         print(f"Vault at {root}")
         print(f"  generation: {opened.generation}")
         print(f"  files: {len(names)}")
@@ -502,8 +513,11 @@ def cli_init(args: argparse.Namespace) -> int:
 
 
 def cli_status(args: argparse.Namespace) -> int:
-    """argparse handler for ``vault status [--root PATH]``."""
-    return status(root=_resolve_root(getattr(args, "root", None)))
+    """argparse handler for ``vault status [--root PATH] [--json]``."""
+    return status(
+        root=_resolve_root(getattr(args, "root", None)),
+        as_json=bool(getattr(args, "json", False)),
+    )
 
 
 def cli_cat(args: argparse.Namespace) -> int:

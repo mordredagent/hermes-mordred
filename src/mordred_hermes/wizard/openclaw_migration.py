@@ -133,12 +133,12 @@ def _migrate_audit(
 
     if overlap and options.audit_merge is None:
         raise SystemExit(
-            "hermes mordred upgrade: OpenClaw audit.log overlaps existing "
+            "hermes-mordred upgrade: OpenClaw audit.log overlaps existing "
             "Hermes audit.log timestamps. Re-run with one of "
             "--audit-merge=skip|append-all|abort."
         )
     if overlap and options.audit_merge == "abort":
-        raise SystemExit("hermes mordred upgrade: --audit-merge=abort and overlap detected -- aborting.")
+        raise SystemExit("hermes-mordred upgrade: --audit-merge=abort and overlap detected -- aborting.")
     if overlap and options.audit_merge == "skip":
         _LOG.info("audit migration: overlap detected, skip per --audit-merge=skip")
         # Marker still gets written so re-runs are noops
@@ -203,7 +203,7 @@ def _migrate_directory(src: Path, dest: Path, kind: str) -> bool:
             _LOG.info("%s already migrated (dest matches src byte-for-byte); skipping", kind)
             return False
         raise SystemExit(
-            f"hermes mordred upgrade: refusing to overwrite existing {kind} "
+            f"hermes-mordred upgrade: refusing to overwrite existing {kind} "
             f"at {dest} -- contents differ from {src}. "
             f"Move or remove the destination manually before re-running upgrade."
         )
@@ -268,18 +268,18 @@ def _migrate_policy(
             return False
         elif options.policy_conflict == "abort":
             raise SystemExit(
-                "hermes mordred upgrade: --policy-conflict=abort and OpenClaw "
+                "hermes-mordred upgrade: --policy-conflict=abort and OpenClaw "
                 "policy differs from existing config.yaml -- aborting."
             )
         elif options.policy_conflict is None:
             if options.non_interactive:
                 raise SystemExit(
-                    "hermes mordred upgrade: --non-interactive set but --policy-conflict "
+                    "hermes-mordred upgrade: --non-interactive set but --policy-conflict "
                     "not specified; refusing to overwrite existing mordred section "
                     "with OpenClaw migration."
                 )
             raise SystemExit(
-                "hermes mordred upgrade: OpenClaw policy differs from existing "
+                "hermes-mordred upgrade: OpenClaw policy differs from existing "
                 "config.yaml plugins.mordred_privacy_check. Re-run with one of "
                 "--policy-conflict=keep-existing|overwrite|abort or --reset."
             )

@@ -1,4 +1,4 @@
-"""``hermes mordred audit {tail,grep,decrypt,purge}`` -- audit log CLI.
+"""``hermes-mordred audit {tail,grep,decrypt,purge}`` -- audit log CLI.
 
 Wizard owns READS over ``~/.hermes/mordred/audit.log``; privacy_check
 remains the sole writer (PATHS.md). ``tail`` / ``grep`` read the Phase 1
@@ -105,7 +105,7 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
         if first_line[:1] != b"{" or _looks_like_mral_header(first_line):
             print(
                 f"Audit log at {log_path} appears encrypted or corrupted; "
-                "use `hermes mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log.",
+                "use `hermes-mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log.",
                 file=sys.stderr,
             )
             return None

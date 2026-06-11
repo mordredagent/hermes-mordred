@@ -236,3 +236,54 @@ class TestReport:
         # Action values are documented strings
         assert report.story1_action in {"noop", "applied", "kept-existing", "overwritten"}
         assert report.story1_5_action in {"noop", "migrated", "skipped-marker"}
+
+
+# -----------------------------------------------------------------------------
+# render_report -- `hermes-mordred upgrade` must say what it did. UX review
+# 2026-06-11: the CLI handler used to discard the report and print nothing,
+# leaving a migration command silent even after migrating ~/.openclaw.
+# -----------------------------------------------------------------------------
+
+
+class TestRenderReport:
+    @pytest.mark.parametrize(
+        ("action", "phrase"),
+        [
+            ("noop", "already up to date"),
+            ("applied", "applied"),
+            ("kept-existing", "kept existing"),
+            ("overwritten", "overwritten"),
+        ],
+    )
+    def test_story1_actions_render_human_phrases(self, action: str, phrase: str) -> None:
+        report = upgrade.UpgradeReport(story1_action=action, story1_5_action="noop")  # type: ignore[arg-type]
+        assert phrase in upgrade.render_report(report)
+
+    @pytest.mark.parametrize(
+        ("action", "phrase"),
+        [
+            ("noop", "no OpenClaw install"),
+            ("migrated", "migrated"),
+            ("skipped-marker", "already migrated"),
+        ],
+    )
+    def test_story1_5_actions_render_human_phrases(self, action: str, phrase: str) -> None:
+        report = upgrade.UpgradeReport(story1_action="noop", story1_5_action=action)  # type: ignore[arg-type]
+        assert phrase in upgrade.render_report(report)
+
+    def test_cli_handler_prints_summary(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The argparse handler must surface the report, not swallow it."""
+        import argparse
+
+        from mordred_hermes.wizard import cli
+
+        report = upgrade.UpgradeReport(story1_action="applied", story1_5_action="noop")
+        monkeypatch.setattr(upgrade, "run", lambda **_kwargs: report)
+        ns = argparse.Namespace(reset=False, non_interactive=False, audit_merge=None, policy_conflict=None)
+        rc = cli._handle_upgrade(ns)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "applied" in out
+        assert "OpenClaw" in out

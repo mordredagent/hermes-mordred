@@ -531,3 +531,18 @@ class TestDecrypt:
         monkeypatch.setattr(audit_cli, "decrypt", fake_decrypt)
         assert audit_cli.cli_decrypt(argparse.Namespace(date="2026-05-10")) == 0
         assert seen["date"] == "2026-05-10"
+
+
+class TestGuidanceSpelling:
+    """UX review 2026-06-11: the encrypted-log hint must name the working CLI form."""
+
+    def test_encrypted_log_hint_points_at_working_decrypt_command(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        log.write_bytes(b"\x00\x01encrypted-blob")
+        rc = audit_cli.tail(n=10, log_path=log)
+        assert rc == 1
+        assert "hermes-mordred audit decrypt" in capsys.readouterr().err

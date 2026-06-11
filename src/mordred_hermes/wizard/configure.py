@@ -26,9 +26,9 @@ import argparse
 import logging
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from .policy_writer import PolicySnapshot, PolicyWriter
 
@@ -93,6 +93,31 @@ class SubprocessSetupRunner:
         return completed.returncode
 
 
+#: ImportError guidance for every PromptToolkitIO method. Deliberately does
+#: NOT suggest ``--non-interactive``: that flag installs _RefusingPromptIO,
+#: which aborts on the first prompt, so it can never be a fix for a missing
+#: prompt_toolkit (UX review 2026-06-11).
+_PROMPT_TOOLKIT_REQUIRED = (
+    "prompt_toolkit is required for interactive `hermes-mordred configure`; install it via `pip install prompt_toolkit`"
+)
+
+#: Answers accepted as "yes" at a [y/N]-style prompt. Anything else that is
+#: non-empty is "no"; empty input keeps the default.
+_TRUTHY_ANSWERS = frozenset({"y", "yes", "true", "1", "on"})
+
+
+def _parse_bool_answer(answer: str, *, default: bool) -> bool:
+    """Interpret a yes/no prompt answer robustly (UX review 2026-06-11).
+
+    Users coming from config files type ``true`` / ``1`` / ``on``; treating
+    those as "no" silently inverted their intent.
+    """
+    normalized = answer.strip().lower()
+    if not normalized:
+        return default
+    return normalized in _TRUTHY_ANSWERS
+
+
 class PromptToolkitIO:
     """Default :class:`PromptIO` -- thin wrapper around ``prompt_toolkit``.
 
@@ -105,10 +130,7 @@ class PromptToolkitIO:
         try:
             from prompt_toolkit.shortcuts import radiolist_dialog
         except ImportError as e:
-            raise RuntimeError(
-                "prompt_toolkit is required for interactive `hermes mordred configure`; "
-                "rerun with --non-interactive or install via `pip install prompt_toolkit`"
-            ) from e
+            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         values = [(c, c) for c in choices]
         result: str | None = radiolist_dialog(title=label, values=values, default=default).run()
         return result if result is not None else default
@@ -117,7 +139,7 @@ class PromptToolkitIO:
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
-            raise RuntimeError("prompt_toolkit is required for interactive `hermes mordred configure`") from e
+            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         suffix = f" [{default}]" if default else ""
         answer = prompt(f"{label}{suffix}: ")
         return answer.strip() or default
@@ -126,12 +148,9 @@ class PromptToolkitIO:
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
-            raise RuntimeError("prompt_toolkit is required for interactive `hermes mordred configure`") from e
+            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         suffix = "[Y/n]" if default else "[y/N]"
-        answer = prompt(f"{label} {suffix}: ").strip().lower()
-        if not answer:
-            return default
-        return answer in ("y", "yes")
+        return _parse_bool_answer(prompt(f"{label} {suffix}: "), default=default)
 
     def ask_password(self, label: str, default: str = "") -> str:
         """Read a secret with shell-history-safe echoing.
@@ -143,7 +162,7 @@ class PromptToolkitIO:
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
-            raise RuntimeError("prompt_toolkit is required for interactive `hermes mordred configure`") from e
+            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         answer = prompt(f"{label}: ", is_password=True)
         return answer.strip() or default
 
@@ -326,27 +345,129 @@ def _render_configure_summary(snapshot: PolicySnapshot) -> str:
     )
 
 
+# -----------------------------------------------------------------------------
+# Non-interactive (flag-driven) configure — mirrors network init's
+# ``network_answers_from_args``: unspecified flags fall back to the existing
+# on-disk settings, then to the same defaults the prompts use, so a re-run
+# never clobbers prior answers (UX review 2026-06-11 Phase 4).
+# -----------------------------------------------------------------------------
+
+
+def _read_existing_policy_inputs(policy_writer: PolicyWriter) -> dict[str, object]:
+    """Best-effort read of the current settings for non-interactive seeding.
+
+    policy.json carries every snapshot field except ``harness_primary``,
+    which lives in config.yaml under ``plugins.mordred_llm_guard`` (the
+    same split the writers maintain). Any read/parse error collapses to
+    ``{}`` — the flags then fall back to the prompt defaults.
+    """
+    import json
+
+    existing: dict[str, object] = {}
+    try:
+        body = json.loads(policy_writer.policy_json_path.read_text(encoding="utf-8"))
+        if isinstance(body, dict):
+            existing.update(body)
+    except (OSError, ValueError):
+        pass
+
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        with policy_writer.config_path.open(encoding="utf-8") as f:
+            data = YAML(typ="safe", pure=True).load(f)
+        plugins = data.get("plugins") if isinstance(data, dict) else None
+        guard = plugins.get("mordred_llm_guard") if isinstance(plugins, dict) else None
+        if isinstance(guard, dict) and isinstance(guard.get("harness_primary"), str):
+            existing["harness_primary"] = guard["harness_primary"]
+    except (OSError, ValueError, YAMLError):
+        pass  # any unreadable config falls back to defaults
+    return existing
+
+
+def snapshot_from_args(
+    args: argparse.Namespace,
+    *,
+    existing: Mapping[str, Any] | None = None,
+) -> ConfigureResult:
+    """Build a :class:`PolicySnapshot` from CLI flags (no prompts).
+
+    Precedence per field: explicit flag > existing on-disk value > the
+    default the interactive prompt would offer. ``disable_ipv6`` mirrors
+    :func:`collect_answers`: derived from the resolved policy mode.
+    """
+    existing = existing or {}
+
+    def _seeded(flag: str, existing_key: str, fallback: object) -> object:
+        value = getattr(args, flag, None)
+        if value is not None:
+            return value
+        value = existing.get(existing_key)
+        return value if value is not None else fallback
+
+    # Existing values come from a hand-editable policy.json — sanitize the
+    # closed-set fields back to their defaults instead of crashing the
+    # non-interactive path on a corrupt or downgraded file (review 2026-06-12).
+    policy = str(_seeded("policy", "policy", "lenient"))
+    if policy not in ("strict", "lenient", "off"):
+        policy = "lenient"
+    allow_cloud_llm = bool(_seeded("allow_cloud_llm", "allow_cloud_llm", False))
+    raw_allowlist = _seeded("cloud_allowlist", "cloud_provider_allowlist", ())
+    if isinstance(raw_allowlist, str):
+        allowlist = tuple(p.strip() for p in raw_allowlist.split(",") if p.strip())
+    elif isinstance(raw_allowlist, (list, tuple)):
+        allowlist = tuple(str(p) for p in raw_allowlist)
+    else:
+        allowlist = ()
+    raw_action = str(_seeded("cloud_attempt_action", "cloud_attempt_action", "always-block"))
+    if raw_action not in ("always-block", "prompt-once"):
+        raw_action = "always-block"
+    cloud_attempt_action = _coerce_cloud_attempt_action(raw_action)
+
+    snapshot = PolicySnapshot(
+        policy=policy,
+        allow_cloud_llm=allow_cloud_llm,
+        cloud_provider_allowlist=allowlist,
+        local_llm_endpoint=str(_seeded("local_llm_endpoint", "local_llm_endpoint", "http://localhost:1234/v1")),
+        local_llm_model_id=str(_seeded("local_llm_model_id", "local_llm_model_id", "")),
+        cloud_attempt_action=cloud_attempt_action,
+        harness_primary=str(_seeded("harness", "harness_primary", "none")),
+        disable_ipv6=(policy == "strict"),
+    )
+    return ConfigureResult(snapshot=snapshot)
+
+
 def cli_handler(args: argparse.Namespace) -> int:
     """Adapter from argparse Namespace to :func:`run`. Wired in cli.py.
 
     Production behavior:
-    - ``--non-interactive``: use :class:`_RefusingPromptIO` -- Mordred prompts
-      abort because configure does not yet accept ``--policy=...`` flags to
-      pre-specify answers.
+    - ``--non-interactive``: flag-driven, no prompts — answers come from the
+      CLI flags, seeded from the existing policy.json / config.yaml (so a
+      bare re-run keeps prior settings).
     - Otherwise: real :class:`SubprocessSetupRunner` + :class:`PromptToolkitIO`,
       then a hint pointing the user at the on-demand network-privacy command.
     """
     non_interactive = bool(getattr(args, "non_interactive", False))
-    prompt_io: PromptIO = _RefusingPromptIO() if non_interactive else PromptToolkitIO()
-    try:
-        result = run(
-            setup_runner=SubprocessSetupRunner(),
-            prompt_io=prompt_io,
-            policy_writer=PolicyWriter(),
-            non_interactive=non_interactive,
-        )
-    except NonInteractiveAbort as e:
-        print(f"hermes mordred configure: {e}", file=sys.stderr)
-        return 2
+    if non_interactive:
+        setup_rc = SubprocessSetupRunner().run(non_interactive=True)
+        if setup_rc != 0:
+            _LOG.warning("`hermes setup` exited with code %d; continuing with Mordred flags anyway", setup_rc)
+        writer = PolicyWriter()
+        result = snapshot_from_args(args, existing=_read_existing_policy_inputs(writer))
+        try:
+            writer.write(result.snapshot)
+        except OSError as e:
+            print(f"hermes-mordred configure: failed to write policy: {e}", file=sys.stderr)
+            return 1
+        print(_render_configure_summary(result.snapshot))
+        return 0
+
+    result = run(
+        setup_runner=SubprocessSetupRunner(),
+        prompt_io=PromptToolkitIO(),
+        policy_writer=PolicyWriter(),
+        non_interactive=False,
+    )
     print(_render_configure_summary(result.snapshot))
     return 0

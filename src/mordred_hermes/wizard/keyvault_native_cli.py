@@ -331,9 +331,10 @@ def enable_tpm(
             "error: helper installed but the TPM probe did not succeed, so no "
             "hardware key is active. On Linux the keyvault fails closed (there is "
             "no software fallback off macOS), so keyvault operations needing a "
-            "hardware key error until a working helper is in place. Note: the "
-            "v2-OS2 Phase 2a helper has no TPM backend yet — that lands in Phase "
-            "2b — so this failure is expected until then.",
+            "hardware key error until a working helper is in place. Check that "
+            "this host exposes a TPM 2.0 device (/dev/tpmrm0 or /dev/tpm0) and "
+            "that your user may access it (commonly membership in the `tss` "
+            "group), then re-run `hermes-mordred keyvault enable-tpm`.",
             file=sys.stderr,
         )
         return 1

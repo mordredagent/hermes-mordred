@@ -32,6 +32,7 @@ def _setup_subparser(parser: argparse.ArgumentParser) -> None:
     """
     sub = parser.add_subparsers(dest="mordred_command", required=True, metavar="COMMAND")
 
+    _add_status(sub)
     _add_configure(sub)
     _add_upgrade(sub)
     _add_install(sub)
@@ -49,6 +50,15 @@ def _setup_subparser(parser: argparse.ArgumentParser) -> None:
 # -----------------------------------------------------------------------------
 
 
+def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "status",
+        help="Show Mordred state at a glance (policy / network / keyvault / encryption)",
+    )
+    p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    p.set_defaults(func=_handle_status)
+
+
 def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "configure",
@@ -57,7 +67,27 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Fail fast on any prompt (CI / scripted use)",
+        help="Apply from flags without prompting (CI / scripted use); unspecified flags keep existing settings",
+    )
+    p.add_argument("--policy", choices=["strict", "lenient", "off"], help="Mordred policy mode")
+    p.add_argument(
+        "--allow-cloud-llm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow cloud LLM providers (passes through provider override)",
+    )
+    p.add_argument("--cloud-allowlist", help="Cloud provider allowlist (comma-separated; empty = none)")
+    p.add_argument("--local-llm-endpoint", help="Local LLM endpoint URL")
+    p.add_argument("--local-llm-model-id", help="Local LLM model id")
+    p.add_argument(
+        "--cloud-attempt-action",
+        choices=["always-block", "prompt-once"],
+        help="On a cloud LLM attempt under strict mode",
+    )
+    p.add_argument(
+        "--harness",
+        choices=["none", "codex", "claude-cli", "cursor", "acp-claude", "acp-cline"],
+        help="Agent harness (strict mode refuses if a known harness is detected)",
     )
     p.set_defaults(func=_handle_configure)
 
@@ -65,7 +95,7 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
 def _add_upgrade(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "upgrade",
-        help="Idempotent migration (Story 1 / Story 1.5). Detects ~/.openclaw if present.",
+        help="Migrate an existing Hermes / OpenClaw install to Mordred (idempotent; detects ~/.openclaw)",
     )
     p.add_argument("--reset", action="store_true", help="Force overwrite on every conflict")
     p.add_argument(
@@ -104,6 +134,7 @@ def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p_use.set_defaults(func=_handle_network_use)
 
     p_status = nsub.add_parser("status", help="Show active path and liveness")
+    p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_status.set_defaults(func=_handle_network_status)
 
     p_init = nsub.add_parser(
@@ -140,11 +171,17 @@ def _add_policy(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p_show = psub.add_parser("show", help="Print resolved policy.json")
     p_show.set_defaults(func=_handle_policy_show)
 
-    p_explain = psub.add_parser("explain", help="Explain the install decision for a known skill id")
+    p_explain = psub.add_parser(
+        "explain",
+        help="Explain the install decision for a known skill id (exit code 2 when the decision is block)",
+    )
     p_explain.add_argument("skill_id")
     p_explain.set_defaults(func=_handle_policy_explain)
 
-    p_dry = psub.add_parser("dry-run", help="Evaluate install policy against a SKILL.md path without installing")
+    p_dry = psub.add_parser(
+        "dry-run",
+        help="Evaluate install policy against a SKILL.md path without installing (exit code 2 = would block)",
+    )
     p_dry.add_argument("skill_path")
     p_dry.set_defaults(func=_handle_policy_dry_run)
 
@@ -193,7 +230,9 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         help="Do not store the generated seed at rest; require the paper seed for later recovery/import.",
     )
     p_init.set_defaults(func=_handle_keyvault_init)
-    ksub.add_parser("list", help="List key IDs").set_defaults(func=_handle_keyvault_list)
+    p_list = ksub.add_parser("list", help="List key IDs")
+    p_list.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    p_list.set_defaults(func=_handle_keyvault_list)
     ksub.add_parser("verify-digest", help="Verify the keyvault digest").set_defaults(
         func=_handle_keyvault_verify_digest
     )
@@ -253,6 +292,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "--root",
         help="Vault root directory (default: <hermes home>/mordred/vault)",
     )
+    p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_status.set_defaults(func=_handle_vault_status)
 
     p_cat = vsub.add_parser(
@@ -299,7 +339,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
 
     p_enable_cfg = vsub.add_parser(
         "enable-config-decrypt",
-        help="Put config.yaml under the at-rest vault (transparent decrypt at Hermes startup, v2-F8)",
+        help="Put config.yaml under the at-rest vault (transparent decrypt at Hermes startup)",
     )
     p_enable_cfg.add_argument(
         "--root",
@@ -352,7 +392,7 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "plugins",
-        help="List Mordred plugins (closes the entry-point discovery gap, §0.5 L128)",
+        help="List discovered Mordred plugins",
     )
     psub = p.add_subparsers(dest="plugins_command", required=True, metavar="COMMAND")
     psub.add_parser("list", help="List discovered Mordred plugins").set_defaults(func=_handle_plugins_list)
@@ -362,6 +402,12 @@ def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 # Handlers — each delegates to its module (lazy-imported to keep CLI start fast).
 # Each handler accepts ``argparse.Namespace`` and returns an exit code (int).
 # -----------------------------------------------------------------------------
+
+
+def _handle_status(args: argparse.Namespace) -> int:
+    from . import status_cli
+
+    return status_cli.cli_status(args)
 
 
 def _handle_configure(args: argparse.Namespace) -> int:
@@ -380,7 +426,8 @@ def _handle_upgrade(args: argparse.Namespace) -> int:
         audit_merge=getattr(args, "audit_merge", None),
         policy_conflict=getattr(args, "policy_conflict", None),
     )
-    upgrade.run(options=options, policy_writer=PolicyWriter())
+    report = upgrade.run(options=options, policy_writer=PolicyWriter())
+    print(upgrade.render_report(report))
     return 0
 
 
@@ -579,7 +626,7 @@ def dispatch(args: argparse.Namespace) -> int:
     """
     func = getattr(args, "func", None)
     if func is None:
-        raise SystemExit("usage: hermes mordred <COMMAND> ... (no subcommand provided)")
+        raise SystemExit("usage: hermes-mordred <COMMAND> ... (no subcommand provided)")
     result: Any = func(args)
     return int(result) if isinstance(result, int) else 0
 
@@ -599,13 +646,32 @@ def main(argv: list[str] | None = None) -> int:
     Wired in ``pyproject.toml`` ``[project.scripts]`` as
     ``hermes-mordred = "mordred_hermes.wizard.cli:main"``.
     """
+    from ..__about__ import __version__
+
     parser = argparse.ArgumentParser(
         prog="hermes-mordred",
         description=(
             "Mordred privacy layer (standalone CLI). "
             "Same subcommand tree as `hermes mordred ...` once Hermes 0.12+ wires it."
         ),
+        epilog=(
+            "Quickstart (first run, in order):\n"
+            "  hermes-mordred configure              interactive setup (policy / LLM / harness)\n"
+            "  hermes-mordred network init           optional: Tor / VPN / clearnet privacy path\n"
+            "  hermes-mordred keyvault init          create the hardware-backed keyvault\n"
+            "  hermes-mordred encryption enable env  turn on at-rest encryption per target\n"
+            "  hermes-mordred status                 check the result at a glance\n"
+            "\n"
+            "Storage commands, from high- to low-level:\n"
+            "  encryption  the recommended on/off switch for at-rest encryption\n"
+            "              (env / config / memory / workspace)\n"
+            "  keyvault    hardware-backed key management (Secure Enclave / TPM)\n"
+            "  vault       the underlying encrypted file store (advanced; driven\n"
+            "              by `encryption` — rarely used directly)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     _setup_subparser(parser)
     ns = parser.parse_args(argv)
     return dispatch(ns)
