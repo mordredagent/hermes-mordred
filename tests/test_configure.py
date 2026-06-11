@@ -594,6 +594,15 @@ class TestSnapshotFromArgs:
         snapshot = configure.snapshot_from_args(ns, existing=existing).snapshot
         assert snapshot.policy == "off"
 
+    @pytest.mark.parametrize("raw", ["false", "true", "yes", 1])
+    def test_non_bool_allow_cloud_llm_from_policy_json_stays_false(self, raw: object) -> None:
+        """M2 (security review 2026-06-11): a hand-edited policy.json holding
+        ``"allow_cloud_llm": "false"`` must not truthy-coerce to enabled —
+        same sanitize treatment the closed-set fields above already get."""
+        existing = {"allow_cloud_llm": raw}
+        snapshot = configure.snapshot_from_args(argparse.Namespace(), existing=existing).snapshot
+        assert snapshot.allow_cloud_llm is False
+
 
 class TestParseBoolAnswer:
     @pytest.mark.parametrize("answer", ["y", "yes", "true", "1", "on", "Y", "TRUE"])

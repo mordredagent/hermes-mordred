@@ -19,6 +19,12 @@ path = "src/main.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
+# M4 (security review 2026-06-11): wipe our copies of the ECDH Z secret
+# (best-effort — tss-esapi-owned response buffers are out of our reach).
+zeroize = "1"
+# M4: O_NOFOLLOW on blob reads (the store layer is unix-only in practice;
+# it already uses std::os::unix unconditionally).
+libc = "0.2"
 
 # Phase 2b (Linux TPM backend). The real TPM operations (CreatePrimary /
 # Create / ECDH_ZGen / FlushContext) live in `src/tpm.rs` behind

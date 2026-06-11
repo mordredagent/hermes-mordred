@@ -246,3 +246,38 @@ plugins:
         non_existent = tmp_path / "nope.yaml"
         _runtime.ensure_state(config_path=non_existent, audit_path=tmp_path / "audit.log")
         assert hooks.pre_tool_call(tool_name="web_fetch") is None
+
+
+class TestAllowCloudLlmStrictBool:
+    """M2 (security review 2026-06-11): allow_cloud_llm must be a real bool.
+
+    ``bool(section.get(...))`` truthy-coerced YAML strings — a hand-edited
+    ``allow_cloud_llm: "false"`` silently *granted* cloud-LLM permission.
+    Only ``True`` (the bool) may enable it; anything else reads as False.
+    """
+
+    def _config(self, tmp_path: Path, raw: str) -> Path:
+        return _write_config(
+            tmp_path / "config.yaml",
+            f"""\
+plugins:
+  mordred_privacy_check:
+    policy: strict
+    allow_cloud_llm: {raw}
+""",
+        )
+
+    @pytest.mark.parametrize("raw", ['"false"', '"true"', '"yes"', "1"])
+    def test_non_bool_values_never_enable(self, raw: str, tmp_path: Path) -> None:
+        state = _runtime.ensure_state(
+            config_path=self._config(tmp_path, raw),
+            audit_path=tmp_path / "audit.log",
+        )
+        assert state.allow_cloud_llm is False
+
+    def test_real_bool_true_enables(self, tmp_path: Path) -> None:
+        state = _runtime.ensure_state(
+            config_path=self._config(tmp_path, "true"),
+            audit_path=tmp_path / "audit.log",
+        )
+        assert state.allow_cloud_llm is True

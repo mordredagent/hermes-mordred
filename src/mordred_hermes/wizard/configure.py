@@ -412,7 +412,11 @@ def snapshot_from_args(
     policy = str(_seeded("policy", "policy", "lenient"))
     if policy not in ("strict", "lenient", "off"):
         policy = "lenient"
-    allow_cloud_llm = bool(_seeded("allow_cloud_llm", "allow_cloud_llm", False))
+    # M2 (security review 2026-06-11): only a real bool may enable —
+    # ``bool(...)`` truthy-coerced a hand-edited ``"allow_cloud_llm": "false"``
+    # into a written ``allow_cloud_llm: true``.
+    raw_allow_cloud = _seeded("allow_cloud_llm", "allow_cloud_llm", False)
+    allow_cloud_llm = raw_allow_cloud if isinstance(raw_allow_cloud, bool) else False
     raw_allowlist = _seeded("cloud_allowlist", "cloud_provider_allowlist", ())
     if isinstance(raw_allowlist, str):
         allowlist = tuple(p.strip() for p in raw_allowlist.split(",") if p.strip())

@@ -327,7 +327,10 @@ def _coerce_snapshot(config: dict[str, Any]) -> PolicySnapshot:
     """
     raw_policy = config.get("policy", "lenient")
     policy = raw_policy if raw_policy in ("strict", "lenient", "off") else "lenient"
-    allow = bool(config.get("allow_cloud_llm", False))
+    # M2 (security review 2026-06-11): a foreign config's string "false"
+    # must not truthy-coerce into an enabled cloud-LLM grant.
+    raw_allow_flag = config.get("allow_cloud_llm", False)
+    allow = raw_allow_flag if isinstance(raw_allow_flag, bool) else False
     raw_allow = config.get("cloud_provider_allowlist") or []
     allowlist: tuple[str, ...] = (
         tuple(x for x in raw_allow if isinstance(x, str)) if isinstance(raw_allow, list) else ()

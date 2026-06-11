@@ -90,12 +90,28 @@ pub fn blob_path(dir: &Path, tag_hex: &str) -> PathBuf {
     dir.join(format!("{tag_hex}.bin"))
 }
 
+/// Refuse a store directory that is itself a symlink (M4, security review
+/// 2026-06-11; parity with the Python vault's lstat-based refusal): an
+/// offline-planted link must not redirect the 0700 chmod or the blob writes
+/// into an attacker-chosen directory. lstat-based — a link to a perfectly
+/// real directory is still refused.
+fn ensure_dir_not_symlink(dir: &Path) -> Result<(), StoreError> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Io(format!(
+            "refusing symlinked store dir: {}",
+            dir.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Write `blob` for `tag_hex`, refusing to overwrite an existing key.
 ///
 /// Creates `dir` (0700) if absent and opens the blob `O_CREAT | O_EXCL` (0600),
 /// so a pre-existing key surfaces as [`StoreError::Exists`] race-free.
 pub fn write_blob_excl(dir: &Path, tag_hex: &str, blob: &[u8]) -> Result<(), StoreError> {
     ensure_safe_tag(tag_hex)?;
+    ensure_dir_not_symlink(dir)?;
     fs::create_dir_all(dir).map_err(|e| StoreError::Io(e.to_string()))?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
         .map_err(|e| StoreError::Io(e.to_string()))?;
@@ -113,25 +129,45 @@ pub fn write_blob_excl(dir: &Path, tag_hex: &str, blob: &[u8]) -> Result<(), Sto
     file.write_all(blob)
         .map_err(|e| StoreError::Io(e.to_string()))?;
     // Pin the mode exactly (independent of the process umask), matching the
-    // Swift helper's explicit 0600 on the written blob.
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+    // Swift helper's explicit 0600 on the written blob. Handle-based (M4) so
+    // a racing path swap cannot redirect the chmod.
+    file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|e| StoreError::Io(e.to_string()))?;
     Ok(())
 }
 
 /// Read the blob for `tag_hex` (→ [`StoreError::NotFound`] when absent).
+///
+/// Opens `O_NOFOLLOW` (M4): a planted symlink at the blob path must not be
+/// followed out of the store — parity with the Python keyvault's
+/// `os.open(O_NOFOLLOW)` contract documented in `_storage.py`. `O_NOFOLLOW`
+/// only guards the final component, so the store dir itself gets the same
+/// lstat refusal as the write path.
 pub fn read_blob(dir: &Path, tag_hex: &str) -> Result<Vec<u8>, StoreError> {
+    use std::io::Read;
+
     ensure_safe_tag(tag_hex)?;
-    match fs::read(blob_path(dir, tag_hex)) {
-        Ok(bytes) => Ok(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(StoreError::NotFound),
-        Err(e) => Err(StoreError::Io(e.to_string())),
-    }
+    ensure_dir_not_symlink(dir)?;
+    let mut file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(blob_path(dir, tag_hex))
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(StoreError::NotFound),
+        Err(e) => return Err(StoreError::Io(e.to_string())),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    Ok(bytes)
 }
 
 /// Delete the blob for `tag_hex`, idempotently (a missing blob is success).
+/// Refuses a symlinked store dir like the read/write paths (M4).
 pub fn delete_blob(dir: &Path, tag_hex: &str) -> Result<(), StoreError> {
     ensure_safe_tag(tag_hex)?;
+    ensure_dir_not_symlink(dir)?;
     match fs::remove_file(blob_path(dir, tag_hex)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -254,6 +290,62 @@ mod tests {
                 "delete accepted unsafe tag {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn read_refuses_symlinked_blob() {
+        // Security review M4: a planted symlink at <store>/<tag>.bin must not
+        // let the helper read (and hand to the parent process) an arbitrary
+        // file from outside the store.
+        let tmp = TempDir::new("lnkread");
+        fs::create_dir_all(tmp.path()).unwrap();
+        let outside = tmp.path().join("outside.txt");
+        fs::write(&outside, b"not-a-blob").unwrap();
+        std::os::unix::fs::symlink(&outside, blob_path(tmp.path(), "lnk")).unwrap();
+        assert!(
+            matches!(read_blob(tmp.path(), "lnk"), Err(StoreError::Io(_))),
+            "read followed a symlinked blob"
+        );
+    }
+
+    #[test]
+    fn write_refuses_symlinked_store_dir() {
+        // Security review M4 (parity with the Python vault's lstat refusal):
+        // an offline-planted symlink at the store dir must not redirect the
+        // 0700 chmod and the blob write into an attacker-chosen directory.
+        let real = TempDir::new("lnkdir-real");
+        fs::create_dir_all(real.path()).unwrap();
+        let holder = TempDir::new("lnkdir-holder");
+        fs::create_dir_all(holder.path()).unwrap();
+        let link = holder.path().join("store");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        assert!(
+            matches!(write_blob_excl(&link, "ab", b"x"), Err(StoreError::Io(_))),
+            "write accepted a symlinked store dir"
+        );
+    }
+
+    #[test]
+    fn read_and_delete_refuse_symlinked_store_dir() {
+        // M4 review follow-up: O_NOFOLLOW only guards the final path
+        // component, so read/delete need the same lstat dir refusal as write.
+        let real = TempDir::new("lnkdir-rd-real");
+        fs::create_dir_all(real.path()).unwrap();
+        write_blob_excl(real.path(), "ab", b"x").unwrap();
+        let holder = TempDir::new("lnkdir-rd-holder");
+        fs::create_dir_all(holder.path()).unwrap();
+        let link = holder.path().join("store");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        assert!(
+            matches!(read_blob(&link, "ab"), Err(StoreError::Io(_))),
+            "read accepted a symlinked store dir"
+        );
+        assert!(
+            matches!(delete_blob(&link, "ab"), Err(StoreError::Io(_))),
+            "delete accepted a symlinked store dir"
+        );
+        // The real dir still works untouched.
+        assert_eq!(read_blob(real.path(), "ab").unwrap(), b"x".to_vec());
     }
 
     #[test]

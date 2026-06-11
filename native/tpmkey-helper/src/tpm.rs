@@ -253,16 +253,36 @@ fn public_to_sec1(public: &Public) -> Result<[u8; sec1::UNCOMPRESSED_LEN], OpErr
 
 // --- context ------------------------------------------------------------------
 
+/// M3 (security review 2026-06-11): may an env-provided TCTI be honoured?
+///
+/// Kernel device nodes (`device:...`) are OS-managed and always allowed — that
+/// keeps real operator overrides working. Everything else (swtpm/mssim socket
+/// transports, loadable TCTI modules) is reachable by any unprivileged local
+/// process that can bind a socket, so an attacker-controlled environment could
+/// redirect generate/ecdh to a spoofed TPM and observe or substitute the
+/// wrapped key material. Those transports need the explicit `MORDRED_TPM_TEST`
+/// opt-in (the CI/dev swtpm loop sets both variables).
+fn env_tcti_allowed(tcti: &TctiNameConf, test_gate: bool) -> bool {
+    matches!(tcti, TctiNameConf::Device(_)) || test_gate
+}
+
 /// Resolve which TPM to talk to.
 ///
-/// An explicit `TCTI` env wins (swtpm in CI/dev, or an operator override);
+/// An explicit `TCTI` env wins when [`env_tcti_allowed`] admits it (a device
+/// path, or anything under the `MORDRED_TPM_TEST` gate for swtpm in CI/dev);
 /// otherwise fall back to the system TPM, preferring the in-kernel resource
 /// manager (`/dev/tpmrm0`) over the raw device (`/dev/tpm0`). The fallback
 /// matters because `hermes mordred keyvault enable-tpm` probes with no `TCTI`
 /// set — without it a perfectly good hardware TPM would report `UNAVAILABLE`.
 fn resolve_tcti() -> Result<TctiNameConf, OpError> {
     if let Ok(tcti) = TctiNameConf::from_environment_variable() {
-        return Ok(tcti);
+        if env_tcti_allowed(&tcti, std::env::var("MORDRED_TPM_TEST").is_ok()) {
+            return Ok(tcti);
+        }
+        eprintln!(
+            "mordred-hermes-tpmkey: ignoring non-device TCTI from environment \
+             (socket TCTIs need MORDRED_TPM_TEST=1); falling back to the system TPM"
+        );
     }
     for path in ["/dev/tpmrm0", "/dev/tpm0"] {
         if Path::new(path).exists() {
@@ -522,6 +542,39 @@ mod tests {
         assert!(
             attrs.continue_session(),
             "session must persist across Load + ECDH_ZGen"
+        );
+    }
+
+    #[test]
+    fn env_socket_tcti_requires_test_gate() {
+        // Security review M3: an attacker-controlled TCTI env var must not be
+        // able to redirect generate/ecdh to a spoofed socket TPM — swtpm/mssim
+        // transports are plain TCP sockets any unprivileged local process can
+        // bind. They are honoured only under the explicit MORDRED_TPM_TEST
+        // gate (the CI/dev swtpm loop sets both). Kernel device nodes remain
+        // honoured ungated so real operator overrides keep working. This
+        // asserts the policy directly — no TPM required.
+        let device = TctiNameConf::from_str("device:/dev/tpmrm0").expect("device tcti parses");
+        let swtpm =
+            TctiNameConf::from_str("swtpm:host=127.0.0.1,port=2321").expect("swtpm tcti parses");
+        let mssim =
+            TctiNameConf::from_str("mssim:host=127.0.0.1,port=2321").expect("mssim tcti parses");
+
+        assert!(
+            env_tcti_allowed(&device, false),
+            "a device TCTI needs no gate"
+        );
+        assert!(
+            !env_tcti_allowed(&swtpm, false),
+            "an ungated swtpm TCTI must be ignored"
+        );
+        assert!(
+            !env_tcti_allowed(&mssim, false),
+            "an ungated mssim TCTI must be ignored"
+        );
+        assert!(
+            env_tcti_allowed(&swtpm, true),
+            "the CI/dev gate re-enables socket TCTIs"
         );
     }
 

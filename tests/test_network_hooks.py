@@ -430,6 +430,105 @@ class TestPreToolCall:
         assert result is None
 
 
+class TestPolicyReadFailClosed:
+    """M1 (security review 2026-06-11): a policy.json that EXISTS but cannot
+    be read or parsed must fail CLOSED (read as strict), not fall open to
+    "off" — corrupting the policy file must not disable strict enforcement.
+    A genuinely absent file still reads as "off" (fresh install).
+    """
+
+    def _dropped_runtime(self) -> None:
+        from mordred_hermes.network import api
+
+        rt = _FakeRuntime()
+        rt.dropped = True
+        api.set_runtime(rt)
+
+    def test_corrupt_json_dropped_refuses(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import hooks
+
+        self._dropped_runtime()
+        policy = tmp_path / "policy.json"
+        policy.write_text("{not json", encoding="utf-8")
+        with pytest.raises(MordredPathDropped):
+            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+
+    def test_unreadable_policy_path_dropped_refuses(self, tmp_path: Path) -> None:
+        """A directory at the policy path raises OSError on open()."""
+        from mordred_hermes.network import hooks
+
+        self._dropped_runtime()
+        policy = tmp_path / "policy.json"
+        policy.mkdir()
+        with pytest.raises(MordredPathDropped):
+            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+
+    def test_non_dict_root_dropped_refuses(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import hooks
+
+        self._dropped_runtime()
+        policy = tmp_path / "policy.json"
+        policy.write_text('["strict"]', encoding="utf-8")
+        with pytest.raises(MordredPathDropped):
+            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+
+    def test_invalid_mode_value_dropped_refuses(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import hooks
+
+        self._dropped_runtime()
+        policy = tmp_path / "policy.json"
+        policy.write_text('{"policy": "bogus"}', encoding="utf-8")
+        with pytest.raises(MordredPathDropped):
+            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+
+    def test_missing_file_still_defaults_off(self, tmp_path: Path) -> None:
+        """Fresh install: no policy.json at all keeps the historical "off"."""
+        from mordred_hermes.network import hooks
+
+        self._dropped_runtime()
+        result = hooks.pre_tool_call(
+            tool_name="web_fetch",
+            policy_json_path=tmp_path / "nope.json",
+            audit=_FakeAudit(),
+        )
+        assert result is None
+
+    def test_dangling_symlink_reads_as_absent(self, tmp_path: Path) -> None:
+        """A dangling symlink raises FileNotFoundError on open — equivalent
+        to deletion, so it keeps the fresh-install "off" (an attacker who can
+        plant the link could delete the file outright; nothing extra leaks)."""
+        from mordred_hermes.network import hooks
+
+        self._dropped_runtime()
+        policy = tmp_path / "policy.json"
+        policy.symlink_to(tmp_path / "gone.json")
+        result = hooks.pre_tool_call(
+            tool_name="web_fetch",
+            policy_json_path=policy,
+            audit=_FakeAudit(),
+        )
+        assert result is None
+
+    def test_corrupt_policy_session_start_uses_strict_bringup(self, tmp_path: Path) -> None:
+        """on_session_start reads the same file — corrupt must mean strict
+        bring-up semantics (failure refuses the session, no lenient fallback)."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use_raises = BringupFailed("tor timeout")
+        api.set_runtime(rt)
+        policy = tmp_path / "policy.json"
+        policy.write_text("{not json", encoding="utf-8")
+        config = _write_config(tmp_path, "tor")
+
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.on_session_start(
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
+
+
 # --------------------------------------------------------------------------- #
 # Bootstrap polling helper                                                    #
 # --------------------------------------------------------------------------- #

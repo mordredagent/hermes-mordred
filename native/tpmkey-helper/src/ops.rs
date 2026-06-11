@@ -1,5 +1,7 @@
 //! The [`KeyOps`] trait and the request dispatcher.
 
+use zeroize::Zeroize;
+
 use crate::errmap::OpError;
 use crate::wire::{Request, Response};
 
@@ -86,7 +88,15 @@ pub fn dispatch<O: KeyOps>(req: &Request, ops: &O) -> Response {
                 _ => return Response::request_error("missing or invalid peer_pub_hex"),
             };
             match ops.ecdh(tag, &peer) {
-                Ok(shared) => Response::Shared(hex::encode(shared)),
+                Ok(mut shared) => {
+                    // M4 (security review 2026-06-11): the Z point is the
+                    // key-wrapping secret — wipe our copy as soon as it has
+                    // been encoded. Borrowed slice: passing the Copy array by
+                    // value would hand encode() a second, unwipeable copy.
+                    let resp = Response::Shared(hex::encode(&shared[..]));
+                    shared.zeroize();
+                    resp
+                }
                 Err(e) => Response::from_op_error(e),
             }
         }

@@ -169,7 +169,18 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
         _LOG.warning("invalid policy %r in config; defaulting to lenient", raw_policy)
         policy_mode = "lenient"
 
-    allow_cloud_llm = bool(section.get("allow_cloud_llm", False))
+    # M2 (security review 2026-06-11): only the bool ``True`` may grant
+    # cloud-LLM permission. ``bool(...)`` truthy-coerced YAML strings, so a
+    # hand-edited ``allow_cloud_llm: "false"`` silently *enabled* cloud LLMs.
+    raw_allow_cloud = section.get("allow_cloud_llm", False)
+    if isinstance(raw_allow_cloud, bool):
+        allow_cloud_llm = raw_allow_cloud
+    else:
+        _LOG.warning(
+            "non-boolean allow_cloud_llm %r in config; defaulting to False",
+            raw_allow_cloud,
+        )
+        allow_cloud_llm = False
 
     raw_allowlist = section.get("cloud_provider_allowlist") or []
     allowlist: tuple[str, ...] = (

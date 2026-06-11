@@ -464,6 +464,32 @@ class TestPolicyTransform:
         assert "anthropic" in ytext
         assert "allow_cloud_llm: true" in ytext.lower()
 
+    def test_string_false_allow_cloud_llm_migrates_to_false(self, tmp_path: Path) -> None:
+        """M2 (security review 2026-06-11): a foreign OpenClaw config holding
+        ``"allow_cloud_llm": "false"`` (string) must not truthy-coerce to an
+        enabled cloud-LLM grant in the migrated config.yaml."""
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            openclaw_json={
+                "plugins": {
+                    "entries": {
+                        "mordred-privacy-check": {
+                            "id": "mordred-privacy-check",
+                            "config": {
+                                "policy": "strict",
+                                "allow_cloud_llm": "false",
+                            },
+                        }
+                    }
+                }
+            },
+        )
+        w = _writer(tmp_path)
+        openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
+        ytext = (tmp_path / "hermes" / "config.yaml").read_text(encoding="utf-8")
+        assert "allow_cloud_llm: false" in ytext.lower()
+
     def test_missing_openclaw_policy_section_is_handled(self, tmp_path: Path) -> None:
         base = tmp_path / "openclaw" / "mordred"
         _seed_openclaw(base, openclaw_json={"plugins": {"entries": {}}})

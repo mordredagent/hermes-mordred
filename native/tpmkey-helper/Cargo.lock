@@ -379,11 +379,13 @@ name = "mordred-hermes-tpmkey"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "libc",
  "p256",
  "rand_core",
  "serde",
  "serde_json",
  "tss-esapi",
+ "zeroize",
 ]
 
 [[package]]
