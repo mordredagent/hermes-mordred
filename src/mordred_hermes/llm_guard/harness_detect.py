@@ -72,6 +72,26 @@ class _AuditWriter(Protocol):
     def append(self, entry: dict[str, Any]) -> None: ...
 
 
+def _safe_audit_append(audit: _AuditWriter, entry: dict[str, Any]) -> None:
+    """Best-effort audit write that never fails the caller open.
+
+    Mirrors :func:`mordred_hermes.llm_guard.enforce._safe_audit_append`
+    (security review H1): the strict-mode refusal raises
+    :class:`MordredHarnessRefused` (``BaseException``-derived) so it
+    escapes Hermes' ``except Exception:`` filters at
+    ``hermes_cli/plugins.py`` and ``run_agent.py``. If the audit writer
+    itself raises a plain :class:`Exception` (disk full, broken NDJSON
+    path, permission denied) BEFORE the raise, Hermes would catch it and
+    continue the session — a fail-open bypass of harness detection. This
+    wrapper swallows audit-side failures so the refusal still fires; the
+    underlying error is logged for operators.
+    """
+    try:
+        audit.append(entry)
+    except Exception as e:
+        _LOG.error("audit append failed for entry %r: %s", entry, e)
+
+
 def check_harness_primary(
     *,
     policy_mode: str,
@@ -103,13 +123,16 @@ def check_harness_primary(
 
     decision = "block" if policy_mode == "strict" else "warn"
 
-    audit.append(
+    # Best-effort: a failing audit write must not stop the strict-mode
+    # refusal below from raising (security review H1).
+    _safe_audit_append(
+        audit,
         {
             "event": "on_session_start",
             "decision": decision,
             "reason": _REASON,
             "harness_primary": harness,
-        }
+        },
     )
 
     if decision == "block":

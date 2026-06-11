@@ -238,13 +238,27 @@ def test_query_reachability_flags_malformed_return(
 
 
 def test_os_reachability_probe_online(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(nf, "_query_reachability_flags", lambda: _REACHABLE)
+    monkeypatch.setattr(nf, "_query_reachability_flags", lambda *_a: _REACHABLE)
     assert nf._os_reachability_probe() is True
 
 
 def test_os_reachability_probe_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(nf, "_query_reachability_flags", lambda: 0)
+    monkeypatch.setattr(nf, "_query_reachability_flags", lambda *_a: 0)
     assert nf._os_reachability_probe() is False
+
+
+def test_os_reachability_probe_detects_ipv6_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Security review H3: a dual-stack host whose IPv4 is down but whose
+    IPv6 still routes is NOT isolated. The OS fallback must probe both
+    families and report reachable if EITHER routes — mirroring the
+    primary ``mordred_network`` probe."""
+
+    def _flags(host: bytes = b"1.1.1.1") -> int:
+        # IPv6 literal contains colons; only it is reachable here.
+        return _REACHABLE if b":" in host else 0
+
+    monkeypatch.setattr(nf, "_query_reachability_flags", _flags)
+    assert nf._os_reachability_probe() is True
 
 
 def test_os_reachability_probe_propagates_unavailable(
@@ -253,7 +267,7 @@ def test_os_reachability_probe_propagates_unavailable(
     """A probe that cannot run must NOT be coerced to ``False`` (that would
     let a seed display through on an un-probeable host)."""
 
-    def _raise() -> int:
+    def _raise(*_a: object) -> int:
         raise nf.NetworkFallbackUnavailable("no probe")
 
     monkeypatch.setattr(nf, "_query_reachability_flags", _raise)

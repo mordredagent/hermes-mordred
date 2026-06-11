@@ -405,6 +405,12 @@ class _SoftwareFallbackOps:
                     sec.kSecAttrIsPermanent: True,
                     sec.kSecAttrApplicationTag: tag,
                     sec.kSecAttrLabel: label,
+                    # Security review H2: pin device-binding. Without an
+                    # explicit accessibility class the key defaults to
+                    # kSecAttrAccessibleWhenUnlocked, which is iCloud-
+                    # syncable and migratable — a "device-bound" wrapping
+                    # key that is not actually device-bound.
+                    sec.kSecAttrAccessible: sec.kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                 },
             },
             None,
@@ -459,6 +465,10 @@ class _SoftwareFallbackOps:
                     sec.kSecAttrIsPermanent: True,
                     sec.kSecAttrApplicationTag: tag,
                     sec.kSecAttrLabel: "Mordred software capability probe",
+                    # Security review H2: same device-binding as the
+                    # persistent software key, so the throwaway probe key
+                    # is never iCloud-syncable either.
+                    sec.kSecAttrAccessible: sec.kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
                 },
             },
             None,

@@ -182,6 +182,39 @@ class ScriptedPromptIO:
         return self._password
 
 
+class _RecordingPromptIO:
+    """:class:`PromptIO` double that records every prompt as ``(kind, label)``.
+
+    Used to assert *which channel* a given field is collected through
+    (security review H5): the Seed Phrase must go through ``ask_password``
+    (masked), never ``ask_text`` (visible echo). Seed vs passphrase is
+    disambiguated by label substring so call order is not relied upon.
+    """
+
+    def __init__(self, *, seed: str = "", passphrase: str = "") -> None:
+        self._seed = seed
+        self._passphrase = passphrase
+        self.calls: list[tuple[str, str]] = []
+
+    def ask_choice(self, label: str, choices: Any, default: str) -> str:
+        self.calls.append(("choice", label))
+        return default
+
+    def ask_text(self, label: str, default: str = "") -> str:
+        self.calls.append(("text", label))
+        return default
+
+    def ask_bool(self, label: str, default: bool) -> bool:
+        self.calls.append(("bool", label))
+        return default
+
+    def ask_password(self, label: str, default: str = "") -> str:
+        self.calls.append(("password", label))
+        if "Seed" in label:
+            return self._seed
+        return self._passphrase
+
+
 class FakeSurface:
     """No-op :class:`~mordred_hermes.keyvault.seed_display.SeedDisplaySurface`."""
 
@@ -237,7 +270,7 @@ class TestRecover:
             blob_path=tmp_path / "nope.mrkv",
             home=tmp_path,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password=RECOVER_PASS),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
         )
         assert rc == 1
         assert "nope.mrkv" in capsys.readouterr().err
@@ -250,7 +283,7 @@ class TestRecover:
             blob_path=blob_file,
             home=tmp_path,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(text=bad_seed, password=RECOVER_PASS),
+            prompt_io=ScriptedPromptIO(passwords=[bad_seed, RECOVER_PASS]),
         )
         assert rc == 1
         assert "seed" in capsys.readouterr().err.lower()
@@ -262,7 +295,7 @@ class TestRecover:
             blob_path=blob_file,
             home=tmp_path,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password=RECOVER_PASS),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
         )
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
@@ -277,7 +310,7 @@ class TestRecover:
             blob_path=blob_file,
             home=home_b,
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password=RECOVER_PASS),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
         )
         assert rc == 0
         assert "recovered" in capsys.readouterr().out.lower()
@@ -295,7 +328,7 @@ class TestRecover:
             blob_path=blob_file,
             home=tmp_path / "b",
             backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(text=RECOVER_SEED, password="wrong passphrase"),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, "wrong passphrase"]),
         )
         assert rc == 1
         assert "mis-transcribed" in capsys.readouterr().err.lower()
@@ -310,6 +343,31 @@ class TestRecover:
         monkeypatch.setattr(keyvault_cli, "recover", fake)
         assert keyvault_cli.cli_recover(argparse.Namespace(blob="/tmp/x.mrkv")) == 0
         assert str(seen["blob_path"]) == "/tmp/x.mrkv"
+
+    def test_seed_phrase_is_entered_without_echo(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
+    ) -> None:
+        """Security review H5: the 24-word Seed Phrase is the root secret for
+        the whole keyvault. It must be collected through ``ask_password``
+        (masked, no terminal echo / scrollback), never ``ask_text``.
+        """
+        blob = _make_backup_blob(tmp_path / "a", FakeBackend())
+        blob_file = tmp_path / "backup.mrkv"
+        blob_file.write_bytes(blob)
+
+        recording = _RecordingPromptIO(seed=RECOVER_SEED, passphrase=RECOVER_PASS)
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path / "b",
+            backend=FakeBackend(),
+            prompt_io=recording,
+        )
+
+        assert rc == 0, "roundtrip must succeed with the seed entered via ask_password"
+        seed_labels_via_password = [lbl for kind, lbl in recording.calls if kind == "password" and "Seed" in lbl]
+        seed_labels_via_text = [lbl for kind, lbl in recording.calls if kind == "text" and "Seed" in lbl]
+        assert seed_labels_via_password, "Seed Phrase must be requested through ask_password (masked)"
+        assert not seed_labels_via_text, "Seed Phrase must never be requested through ask_text (visible echo)"
 
 
 # ---------------------------------------------------------------------------

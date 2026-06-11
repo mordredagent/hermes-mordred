@@ -647,6 +647,65 @@ def test_pyobjc_ops_create_attrs_do_not_request_data_protection_keychain(
     )
 
 
+class _FakeSecurity:
+    """Minimal ``Security`` stand-in that records attrs passed to
+    ``SecKeyCreateRandomKey`` (security review H2). All constants are
+    distinct sentinels so attribute identity is preserved in the captured
+    dict. ``SecKeyCreateRandomKey`` returns ``(None, None)`` so the caller
+    raises ``_OpsError`` *after* the attrs are captured (the same trick the
+    pyobjc attrs test uses)."""
+
+    kSecAttrKeyType = "kSecAttrKeyType"
+    kSecAttrKeyTypeECSECPrimeRandom = "kSecAttrKeyTypeECSECPrimeRandom"
+    kSecAttrKeySizeInBits = "kSecAttrKeySizeInBits"
+    kSecPrivateKeyAttrs = "kSecPrivateKeyAttrs"
+    kSecAttrIsPermanent = "kSecAttrIsPermanent"
+    kSecAttrApplicationTag = "kSecAttrApplicationTag"
+    kSecAttrLabel = "kSecAttrLabel"
+    kSecAttrAccessible = "kSecAttrAccessible"
+    kSecAttrAccessibleWhenUnlockedThisDeviceOnly = "kSecAttrAccessibleWhenUnlockedThisDeviceOnly"
+
+    def __init__(self) -> None:
+        self.captured_attrs: list[dict] = []
+
+    def SecKeyCreateRandomKey(self, attrs: dict, _err: Any) -> tuple[Any, Any]:
+        self.captured_attrs.append(attrs)
+        return None, None
+
+
+@pytest.mark.parametrize("method", ["create_keypair", "probe"])
+def test_software_fallback_key_is_device_bound_not_syncable(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Security review H2: the in-process software-fallback wrapping key
+    must pin ``kSecAttrAccessibleWhenUnlockedThisDeviceOnly``. Without an
+    explicit accessibility attribute the key defaults to
+    ``kSecAttrAccessibleWhenUnlocked``, which is iCloud-syncable and
+    migratable — defeating the device-binding the SE path enforces.
+    """
+    import contextlib
+
+    from mordred_hermes.keyvault._seckey_backend import _OpsError, _SoftwareFallbackOps
+
+    fake = _FakeSecurity()
+    sw = _SoftwareFallbackOps()
+    monkeypatch.setattr(sw, "_security", lambda: fake)
+
+    with contextlib.suppress(_OpsError):
+        if method == "create_keypair":
+            sw.create_keypair(_sw_application_tag("k1"), "test software key")
+        else:
+            sw.probe()
+
+    assert fake.captured_attrs, f"{method}: SecKeyCreateRandomKey was not called"
+    private_attrs = fake.captured_attrs[0][fake.kSecPrivateKeyAttrs]
+    assert fake.kSecAttrAccessible in private_attrs, (
+        f"{method}: software-fallback key must pin kSecAttrAccessible "
+        "(else it defaults to the iCloud-syncable kSecAttrAccessibleWhenUnlocked)"
+    )
+    assert private_attrs[fake.kSecAttrAccessible] == fake.kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+
+
 def test_pyobjc_bridge_keyerror_surfaces_as_wrap_error_through_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

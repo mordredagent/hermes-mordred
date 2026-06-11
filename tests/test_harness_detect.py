@@ -200,3 +200,46 @@ class TestInvalidPolicyMode:
         check_harness_primary(policy_mode="garbage", config_path=cfg, audit=audit)  # type: ignore[arg-type]
         assert audit.entries
         assert audit.entries[-1]["decision"] == "warn"
+
+
+# --------------------------------------------------------------------------- #
+# Audit fail-open guard (security review H1)                                  #
+# --------------------------------------------------------------------------- #
+
+
+class _RaisingAuditWriter:
+    """Audit writer whose ``append`` always raises a plain ``Exception``.
+
+    Simulates disk-full / broken-path / permission-denied at the audit
+    boundary. The strict-mode refusal must still fire: if the raw
+    ``Exception`` escaped, Hermes' ``except Exception:`` wrapper would
+    catch it and continue the session — a fail-open bypass.
+    """
+
+    def append(self, entry: dict[str, Any]) -> None:
+        raise RuntimeError("audit sink unavailable (disk full)")
+
+
+class TestAuditFailureDoesNotFailOpen:
+    def test_strict_refusal_fires_even_when_audit_append_raises(self, tmp_path: Path) -> None:
+        from mordred_hermes.llm_guard._exceptions import MordredHarnessRefused
+        from mordred_hermes.llm_guard.harness_detect import check_harness_primary
+
+        cfg = _write_config(tmp_path, harness_primary="codex")
+        audit = _RaisingAuditWriter()
+
+        # The audit write fails, but strict mode must STILL raise the
+        # BaseException-derived refusal — not let the plain RuntimeError
+        # propagate (which Hermes' except Exception would swallow).
+        with pytest.raises(MordredHarnessRefused):
+            check_harness_primary(policy_mode="strict", config_path=cfg, audit=audit)
+
+    def test_lenient_continues_when_audit_append_raises(self, tmp_path: Path) -> None:
+        from mordred_hermes.llm_guard.harness_detect import check_harness_primary
+
+        cfg = _write_config(tmp_path, harness_primary="codex")
+        audit = _RaisingAuditWriter()
+
+        # Lenient mode warns + continues; an audit failure must not turn a
+        # non-fatal warning into a crash.
+        check_harness_primary(policy_mode="lenient", config_path=cfg, audit=audit)

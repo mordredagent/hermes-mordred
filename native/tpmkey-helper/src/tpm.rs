@@ -31,15 +31,19 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use tss_esapi::{
-    attributes::ObjectAttributesBuilder,
+    attributes::{ObjectAttributesBuilder, SessionAttributes, SessionAttributesMask},
+    constants::SessionType,
+    handles::{KeyHandle, SessionHandle},
     interface_types::{
         algorithm::{HashingAlgorithm, PublicAlgorithm},
         ecc::EccCurve,
         resource_handles::Hierarchy,
+        session_handles::AuthSession,
     },
     structures::{
         EccParameter, EccPoint, EccScheme, HashScheme, KeyDerivationFunctionScheme, Private,
-        Public, PublicBuilder, PublicEccParametersBuilder, SymmetricDefinitionObject,
+        Public, PublicBuilder, PublicEccParametersBuilder, SymmetricDefinition,
+        SymmetricDefinitionObject,
     },
     tcti_ldr::DeviceConfig,
     traits::{Marshall, UnMarshall},
@@ -96,6 +100,47 @@ fn store_err(e: store::StoreError) -> OpError {
         store::StoreError::NotFound => OpError::not_found("no key for this tag"),
         store::StoreError::Io(msg) => OpError::unavailable(format!("key store: {msg}")),
     }
+}
+
+// --- TPM bus parameter encryption (security review H4) ------------------------
+
+/// Session attributes for an HMAC session that parameter-encrypts the first
+/// command AND response parameter. On the ECDH path the encrypted response is
+/// what matters: `ECDH_ZGen`'s output is the shared Z point, and without this
+/// it would travel the TPM bus (LPC/SPI) in cleartext where a bus analyser, a
+/// malicious hypervisor, or a co-process with `/dev/tpm0` access could lift the
+/// key-wrapping secret.
+fn encrypting_session_attrs() -> (SessionAttributes, SessionAttributesMask) {
+    SessionAttributes::builder()
+        .with_decrypt(true)
+        .with_encrypt(true)
+        .with_continue_session(true)
+        .build()
+}
+
+/// Start an HMAC session **salted** to `salt_key` (a restricted decryption key,
+/// here the storage primary) with AES-128-CFB parameter encryption, and apply
+/// the encrypt/decrypt attributes.
+///
+/// Salting is what makes the encryption meaningful against a *passive* bus
+/// observer: the session key is seeded from a salt encrypted to `salt_key`'s
+/// public area, so only the TPM (which holds the private half) can recover it.
+/// An unsalted/unbound session derives its key from the cleartext nonces alone
+/// and would give a sniffer everything needed to decrypt the parameters.
+fn start_encrypted_session(ctx: &mut Context, salt_key: KeyHandle) -> Result<AuthSession, OpError> {
+    let session = ctx
+        .start_auth_session(
+            Some(salt_key),
+            None,
+            None,
+            SessionType::Hmac,
+            SymmetricDefinition::AES_128_CFB,
+            HashingAlgorithm::Sha256,
+        )?
+        .ok_or_else(|| OpError::unavailable("TPM returned no auth session"))?;
+    let (attrs, mask) = encrypting_session_attrs();
+    ctx.tr_sess_set_attributes(session, attrs, mask)?;
+    Ok(session)
 }
 
 // --- TPM key templates --------------------------------------------------------
@@ -246,32 +291,49 @@ impl TpmOps {
 impl KeyOps for TpmOps {
     fn generate(&self, tag: &str, _label: &str, _unattended: bool) -> Result<Vec<u8>, OpError> {
         let mut ctx = open_context()?;
-        let (sec1_pub, blob) = ctx.execute_with_nullauth_session(
+
+        // Create the storage primary first; it is both the child's parent and
+        // the salt key for the encrypted session.
+        let primary = ctx.execute_with_nullauth_session(|ctx| {
+            ctx.create_primary(
+                Hierarchy::Owner,
+                primary_template()?,
+                None,
+                None,
+                None,
+                None,
+            )
+            .map_err(OpError::from)
+        })?;
+        let primary_handle = primary.key_handle;
+
+        // Create the child under a salted + encrypted session so its sensitive
+        // create parameters are parameter-encrypted on the bus (H4). The
+        // resulting out_private is additionally parent-wrapped by the TPM.
+        let session = match start_encrypted_session(&mut ctx, primary_handle) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ctx.flush_context(primary_handle.into());
+                return Err(e);
+            }
+        };
+
+        let created = ctx.execute_with_session(
+            Some(session),
             |ctx| -> Result<([u8; sec1::UNCOMPRESSED_LEN], Vec<u8>), OpError> {
-                let primary = ctx.create_primary(
-                    Hierarchy::Owner,
-                    primary_template()?,
-                    None,
-                    None,
-                    None,
-                    None,
-                )?;
-                let created = ctx.create(
-                    primary.key_handle,
-                    child_template()?,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                // Release the transient primary regardless of how `create` went.
-                let _ = ctx.flush_context(primary.key_handle.into());
-                let created = created?;
+                let created =
+                    ctx.create(primary_handle, child_template()?, None, None, None, None)?;
                 let sec1_pub = public_to_sec1(&created.out_public)?;
                 let blob = encode_blob(&created.out_public, &created.out_private)?;
                 Ok((sec1_pub, blob))
             },
-        )?;
+        );
+
+        // Release the transient session + primary regardless of how create went.
+        let _ = ctx.flush_context(SessionHandle::from(session).into());
+        let _ = ctx.flush_context(primary_handle.into());
+
+        let (sec1_pub, blob) = created?;
 
         // Persist last: `O_EXCL` turns a pre-existing tag into a race-free EXISTS,
         // and the just-created TPM child was never made persistent, so a refusal
@@ -302,53 +364,84 @@ impl KeyOps for TpmOps {
         );
 
         let mut ctx = open_context()?;
-        let z = ctx.execute_with_nullauth_session(|ctx| -> Result<[u8; 32], OpError> {
-            let primary = ctx.create_primary(
+
+        // The storage primary doubles as the salt key for the encrypted
+        // session, so it must be loaded before the session starts. Create it
+        // under a null (password) session first.
+        let primary = ctx.execute_with_nullauth_session(|ctx| {
+            ctx.create_primary(
                 Hierarchy::Owner,
                 primary_template()?,
                 None,
                 None,
                 None,
                 None,
-            )?;
-            let child = ctx.load(primary.key_handle, private.clone(), public.clone());
-            let child = match child {
-                Ok(child) => child,
-                Err(e) => {
-                    let _ = ctx.flush_context(primary.key_handle.into());
-                    return Err(e.into());
-                }
-            };
+            )
+            .map_err(OpError::from)
+        })?;
+        let primary_handle = primary.key_handle;
+
+        // Salted + AES-128-CFB-encrypted HMAC session so ECDH_ZGen's response
+        // (the shared Z point) is parameter-encrypted on the TPM bus (H4).
+        let session = match start_encrypted_session(&mut ctx, primary_handle) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ctx.flush_context(primary_handle.into());
+                return Err(e);
+            }
+        };
+
+        let z = ctx.execute_with_session(Some(session), |ctx| -> Result<[u8; 32], OpError> {
+            let child = ctx.load(primary_handle, private.clone(), public.clone())?;
             let shared = ctx.ecdh_z_gen(child, in_point);
             let _ = ctx.flush_context(child.into());
-            let _ = ctx.flush_context(primary.key_handle.into());
             let shared = shared?;
             pad::left_pad_32(shared.x().value())
                 .map_err(|_| OpError::unavailable("shared secret X coordinate too long"))
-        })?;
-        Ok(z)
+        });
+
+        let _ = ctx.flush_context(SessionHandle::from(session).into());
+        let _ = ctx.flush_context(primary_handle.into());
+        z
     }
 
     fn probe(&self) -> Result<(), OpError> {
         let mut ctx = open_context()?;
-        ctx.execute_with_nullauth_session(|ctx| -> Result<(), OpError> {
-            let primary = ctx.create_primary(
+        let primary = ctx.execute_with_nullauth_session(|ctx| {
+            ctx.create_primary(
                 Hierarchy::Owner,
                 primary_template()?,
                 None,
                 None,
                 None,
                 None,
-            )?;
-            // Exercise the *full* path the keyvault depends on — create the ECDH
-            // child, load it, and run ECDH_ZGen — so a TPM that supports the
-            // storage primary but not the non-restricted ECDH child / Load /
-            // ECDH_ZGen fails the probe instead of passing and breaking on the
-            // first real generate. Nothing is persisted (no blob is written).
-            let result = probe_ecdh_path(ctx, primary.key_handle);
-            let _ = ctx.flush_context(primary.key_handle.into());
-            result
-        })
+            )
+            .map_err(OpError::from)
+        })?;
+        let primary_handle = primary.key_handle;
+
+        // Probe the full path under the same encrypted session the real ECDH
+        // uses, so a TPM that cannot establish a salted/encrypted session fails
+        // the probe instead of passing and breaking on the first real ECDH (H4).
+        let session = match start_encrypted_session(&mut ctx, primary_handle) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ctx.flush_context(primary_handle.into());
+                return Err(e);
+            }
+        };
+
+        // Exercise the *full* path the keyvault depends on — create the ECDH
+        // child, load it, and run ECDH_ZGen — so a TPM that supports the storage
+        // primary but not the non-restricted ECDH child / Load / ECDH_ZGen fails
+        // the probe instead of breaking on the first real generate. Nothing is
+        // persisted (no blob is written).
+        let result =
+            ctx.execute_with_session(Some(session), |ctx| probe_ecdh_path(ctx, primary_handle));
+
+        let _ = ctx.flush_context(SessionHandle::from(session).into());
+        let _ = ctx.flush_context(primary_handle.into());
+        result
     }
 }
 
@@ -412,6 +505,24 @@ mod tests {
     /// A unique hex tag per logical key (the store filename stem).
     fn tag(s: &str) -> String {
         hex::encode(s.as_bytes())
+    }
+
+    #[test]
+    fn ecdh_session_requests_parameter_encryption() {
+        // Security review H4: the ECDH path must run under a session that
+        // parameter-encrypts BOTH directions so the shared Z point never
+        // crosses the TPM bus in cleartext. This asserts the session-attribute
+        // policy directly — no TPM required, so it runs on every CI leg.
+        let (attrs, _mask) = encrypting_session_attrs();
+        assert!(
+            attrs.encrypt(),
+            "session must encrypt response params (the ECDH Z point)"
+        );
+        assert!(attrs.decrypt(), "session must encrypt command params too");
+        assert!(
+            attrs.continue_session(),
+            "session must persist across Load + ECDH_ZGen"
+        );
     }
 
     #[test]

@@ -141,6 +141,58 @@ class TestBlackoutAssert:
         assert issubclass(BlackoutNotAsserted, MordredNetworkError)
 
 
+class TestDefaultProbe:
+    """``_default_probe`` must detect reachability over BOTH IPv4 and IPv6.
+
+    Security review H3: the probe gates the keyvault Seed-Phrase blackout.
+    An IPv4-only probe reports "isolated" on a dual-stack host whose IPv4
+    is down but whose IPv6 still routes — leaking the all-clear while the
+    host can egress over IPv6.
+    """
+
+    @staticmethod
+    def _family_aware_socket(monkeypatch: pytest.MonkeyPatch, *, v4_ok: bool, v6_ok: bool) -> None:
+        import socket as _socket
+
+        class _FakeSock:
+            def __init__(self, family: int) -> None:
+                self._family = family
+
+            def settimeout(self, _t: float) -> None:
+                return None
+
+            def connect(self, _addr: object) -> None:
+                ok = v4_ok if self._family == _socket.AF_INET else v6_ok
+                if not ok:
+                    raise OSError("simulated: no route for this family")
+
+            def close(self) -> None:
+                return None
+
+        def _fake_socket(family: int, _type: int) -> _FakeSock:
+            return _FakeSock(family)
+
+        monkeypatch.setattr(_socket, "socket", _fake_socket)
+
+    def test_reports_reachable_when_only_ipv6_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.network import api
+
+        self._family_aware_socket(monkeypatch, v4_ok=False, v6_ok=True)
+        assert api._default_probe() is True, "IPv6 egress must count as reachable"
+
+    def test_reports_reachable_when_only_ipv4_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.network import api
+
+        self._family_aware_socket(monkeypatch, v4_ok=True, v6_ok=False)
+        assert api._default_probe() is True
+
+    def test_reports_isolated_only_when_neither_family_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.network import api
+
+        self._family_aware_socket(monkeypatch, v4_ok=False, v6_ok=False)
+        assert api._default_probe() is False
+
+
 class TestRuntimeRegistration:
     def test_set_runtime_used_by_use(self) -> None:
         from mordred_hermes.network import api

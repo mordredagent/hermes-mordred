@@ -155,7 +155,10 @@ def recover(
         from .configure import PromptToolkitIO
 
         prompt_io = PromptToolkitIO()
-    seed_phrase = prompt_io.ask_text("24-word Seed Phrase")
+    # Security review H5: the Seed Phrase is the keyvault's root secret —
+    # collect it masked (ask_password), never with terminal echo
+    # (ask_text), so it does not land in scrollback or a shared TTY.
+    seed_phrase = prompt_io.ask_password("24-word Seed Phrase")
     passphrase = prompt_io.ask_password("Passphrase")
 
     # Validate the BIP39 checksum up front for a legible error. import_backup

@@ -100,9 +100,14 @@ _FLAG_CONNECTION_ON_DEMAND = 1 << 5
 _FLAG_IS_LOCAL_ADDRESS = 1 << 16
 _FLAG_IS_DIRECT = 1 << 17
 
-_PROBE_HOST = b"1.1.1.1"
-"""Reachability target. A numeric IP literal so the probe never triggers a
-DNS lookup (which would itself be observable network activity)."""
+_PROBE_HOST_V4 = b"1.1.1.1"
+_PROBE_HOST_V6 = b"2606:4700:4700::1111"
+_PROBE_HOST = _PROBE_HOST_V4  # backward-compat alias for the IPv4 target
+"""Reachability targets. Numeric IP literals (IPv4 + IPv6) so the probe
+never triggers a DNS lookup (which would itself be observable network
+activity). Both families are probed (security review H3): an IPv4-only
+probe would report "isolated" on a dual-stack host whose IPv4 is down
+but whose IPv6 still routes, leaking the all-clear to the Seed display."""
 
 
 def _interpret_reachability_flags(flags: int) -> bool:
@@ -133,8 +138,8 @@ def _import_systemconfiguration() -> Any:
     return importlib.import_module("SystemConfiguration")
 
 
-def _query_reachability_flags() -> int:
-    """Return the raw ``SCNetworkReachabilityGetFlags`` value for the probe host.
+def _query_reachability_flags(host: bytes = _PROBE_HOST_V4) -> int:
+    """Return the raw ``SCNetworkReachabilityGetFlags`` value for ``host``.
 
     Raises:
         NetworkFallbackUnavailable: On non-macOS hosts, when pyobjc is
@@ -166,9 +171,9 @@ def _query_reachability_flags() -> int:
     # ``ok, flags`` unpack, must NOT escape as a foreign exception type — the
     # contract above and blackout_assert's fail-closed catch depend on it.
     try:
-        target = sc.SCNetworkReachabilityCreateWithName(None, _PROBE_HOST)
+        target = sc.SCNetworkReachabilityCreateWithName(None, host)
         if target is None:
-            raise NetworkFallbackUnavailable(f"SCNetworkReachabilityCreateWithName returned NULL for {_PROBE_HOST!r}")
+            raise NetworkFallbackUnavailable(f"SCNetworkReachabilityCreateWithName returned NULL for {host!r}")
 
         ok, flags = sc.SCNetworkReachabilityGetFlags(target, None)
         if not ok:
@@ -185,12 +190,18 @@ def _query_reachability_flags() -> int:
 def _os_reachability_probe() -> bool:
     """Return ``True`` if the host has a usable network path (== online).
 
-    The default probe used by :func:`blackout_assert`. Raises
-    :class:`NetworkFallbackUnavailable` when the OS probe cannot run — the
-    exception is **not** swallowed into ``False`` because a coerced ``False``
-    would let a Seed display through on an un-probeable host.
+    The default probe used by :func:`blackout_assert`. Probes both IPv4
+    and IPv6 targets and reports reachable if EITHER routes (security
+    review H3) — an IPv4-only probe would miss live IPv6 egress on a
+    dual-stack host. Raises :class:`NetworkFallbackUnavailable` when the
+    OS probe cannot run — the exception is **not** swallowed into
+    ``False`` because a coerced ``False`` would let a Seed display
+    through on an un-probeable host.
     """
-    return _interpret_reachability_flags(_query_reachability_flags())
+    for host in (_PROBE_HOST_V4, _PROBE_HOST_V6):
+        if _interpret_reachability_flags(_query_reachability_flags(host)):
+            return True
+    return False
 
 
 def blackout_assert(*, probe: Callable[[], bool] | None = None) -> None:

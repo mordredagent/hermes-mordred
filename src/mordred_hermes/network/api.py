@@ -129,22 +129,35 @@ def _default_probe() -> bool:
     Returns ``True`` when ``socket.connect`` to a public IP succeeds —
     UDP ``connect`` is connection-less, so this measures routing
     reachability rather than performing an actual transmission. The
-    default target is Cloudflare's anycast resolver (1.1.1.1:53) since
-    it has no DNS leak even on captive portals.
+    targets are Cloudflare's anycast resolvers (IPv4 ``1.1.1.1`` and
+    IPv6 ``2606:4700:4700::1111``) on port 53; numeric literals so the
+    probe never triggers a DNS lookup, even on captive portals.
+
+    Both families are probed and ANY success counts as reachable
+    (security review H3): an IPv4-only probe reports "isolated" on a
+    dual-stack host whose IPv4 is down but whose IPv6 still routes,
+    which would leak the all-clear to the keyvault Seed-Phrase blackout
+    while the host can still egress over IPv6.
 
     PR1 ships this default; Phase 4 :mod:`keyvault.network_fallback` may
     swap it with an OS-API probe (TODO §4.1 L397).
     """
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    targets = (
+        (socket.AF_INET, ("1.1.1.1", 53)),
+        (socket.AF_INET6, ("2606:4700:4700::1111", 53)),
+    )
+    for family, addr in targets:
         try:
-            sock.settimeout(0.5)
-            sock.connect(("1.1.1.1", 53))
-        finally:
-            sock.close()
-    except OSError:
-        return False
-    return True
+            sock = socket.socket(family, socket.SOCK_DGRAM)
+            try:
+                sock.settimeout(0.5)
+                sock.connect(addr)
+            finally:
+                sock.close()
+        except OSError:
+            continue  # this family has no route; try the next
+        return True  # any family reachable ⇒ host is NOT isolated
+    return False
 
 
 def stop(*, runtime: Runtime | None = None) -> None:
