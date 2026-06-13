@@ -35,7 +35,7 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault import _storage
 
 if TYPE_CHECKING:
-    from ..keyvault.api import SeedDisplayHandle
+    from ..keyvault.api import GenerateResult, SeedDisplayHandle
     from ..keyvault.seed_display import SeedDisplaySurface
     from ..keyvault.wrap import AuditSink, NativeBackend
     from .configure import PromptIO
@@ -320,6 +320,237 @@ class TerminalSeedSurface:
         print("\033[2J\033[H", end="", flush=True)
 
 
+def _refuse_if_initialised(home: Path | None) -> int | None:
+    """Pre-init guard. Returns 1 (after printing to stderr) when the keyvault
+    meta is corrupt or already holds a key (v1 is single-key); None to proceed.
+    """
+    root = _storage.resolve_keyvault_dir(home)
+    try:
+        existing_meta = _storage.load_meta(root)
+    except _storage.KeyvaultCorruptError as exc:
+        print(
+            f"Keyvault meta.json is corrupt — repair or remove it before init: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if existing_meta.get("keys"):
+        print(
+            "Keyvault already initialised — v1 keyvault is single-key. To restore a "
+            "different key, use `hermes-mordred keyvault recover`.",
+            file=sys.stderr,
+        )
+        return 1
+    return None
+
+
+def _read_passphrase(prompt_io: PromptIO) -> str | None:
+    """Prompt for the passphrase twice. Returns it, or None (after printing) on a
+    mismatch or an empty entry.
+    """
+    passphrase = prompt_io.ask_password("Choose a Passphrase")
+    if passphrase != prompt_io.ask_password("Re-enter the Passphrase"):
+        print("Passphrases do not match — nothing was written.", file=sys.stderr)
+        return None
+    if not passphrase:
+        print("Passphrase must not be empty.", file=sys.stderr)
+        return None
+    return passphrase
+
+
+def _generate_seed_material(passphrase: str, *, store_seed_for_hd: bool) -> tuple[SeedDisplayHandle, bytes, str | None]:
+    """Generate the BIP39 seed + seed-bound PoW and compute the verification digest.
+
+    Returns ``(handle, pow_bytes, mnemonic_for_hd)``. The handle holds the seed in
+    a wipeable bytearray; ``mnemonic_for_hd`` is the seed string kept only when HD
+    storage is requested (else None). The plain seed/normalized copies are local to
+    this frame and released on return, shortening their in-memory exposure.
+    """
+    from ..keyvault import _bip39, api
+    from ..keyvault import pow as kvpow
+
+    seed_phrase = _bip39.generate_mnemonic()
+    normalized_seed = api._normalize_seed_phrase(seed_phrase)
+    pow_bytes = kvpow.compute_pow(normalized_seed, difficulty_bits=kvpow.POW_DIFFICULTY_BITS)
+    # expected_digest is intentionally discarded — the operator must recompute it
+    # independently on an offline device, which is the mis-transcription cross-check
+    # confirm_generate enforces.
+    handle, _expected_digest = api.prepare_generate(seed_phrase, passphrase, pow_bytes)
+    # HD mode (store_seed_for_hd, Option A) is the deliberate exception: the seed
+    # must survive to be SE-encrypted after the key is finalized, so we keep one
+    # reference until storage. Otherwise it is dropped when this frame returns so it
+    # is GC-eligible during the 60s display + digest prompt. CPython cannot zero an
+    # immutable str in place — this shortens the exposure window, it does not scrub
+    # the bytes; the handle's bytearray is the one wipeable copy.
+    return handle, pow_bytes, (seed_phrase if store_seed_for_hd else None)
+
+
+def _display_seed_or_refuse(
+    handle: SeedDisplayHandle,
+    pow_bytes: bytes,
+    *,
+    surface: SeedDisplaySurface | None,
+    display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None,
+) -> int | None:
+    """Show the offline-digest banner, then display the seed under a network
+    blackout. Returns 1 (after printing) if the blackout / capture / expiry guard
+    trips, or None on success.
+    """
+    from ..keyvault import seed_display
+    from ..keyvault.api import SeedDisplayExpired
+    from ..keyvault.network_fallback import BlackoutNotAsserted
+    from ..keyvault.seed_display import SeedDisplayAborted
+
+    if surface is None:
+        surface = TerminalSeedSurface()
+    show = display_fn if display_fn is not None else seed_display.display_seed
+    # The operator needs top4(PoW) to recompute the digest offline; it is derived
+    # from the (secret) seed but is itself only a 4-byte mask. The offline tool is
+    # `scripts/keyvault_offline_digest.py`; the recipe for preparing the second
+    # device is documented in `mordred-docs/mordred/setup.md` §"Offline verification
+    # digest".
+    surface.banner(
+        "\n"
+        "────────────────────────────────────────────────────────────\n"
+        "  Next: compute the verification digest on your OFFLINE device\n"
+        "────────────────────────────────────────────────────────────\n"
+        "\n"
+        "  On the second (air-gapped) device, run:\n"
+        "      python3 scripts/keyvault_offline_digest.py\n"
+        "\n"
+        "  It will ask for THREE values — transcribe them in this order:\n"
+        "\n"
+        "    [1] Seed Phrase     →  the 24 words shown below (60s only)\n"
+        "    [2] Passphrase      →  the passphrase you just chose\n"
+        f"    [3] top4(PoW) hex   →  {pow_bytes[:4].hex()}    ← copy this 8-char string verbatim\n"
+        "\n"
+        "  The script prints a 64-char digest. Re-enter it on THIS\n"
+        "  device at the `Verification digest ...` prompt below.\n"
+        "  (Recipe: mordred-docs/mordred/setup.md §Offline verification digest)\n"
+        "────────────────────────────────────────────────────────────"
+    )
+
+    try:
+        show(handle, surface)
+    except BlackoutNotAsserted:
+        print(_blackout_guidance(sys.platform), file=sys.stderr)
+        return 1
+    except SeedDisplayAborted as exc:
+        print(f"Seed display aborted: screen capture detected ({exc.detector}).", file=sys.stderr)
+        return 1
+    except SeedDisplayExpired:
+        print("Seed display window expired before the digest was confirmed.", file=sys.stderr)
+        return 1
+    return None
+
+
+def _prompt_for_digest(prompt_io: PromptIO) -> bytes | None:
+    """Bounded re-prompt for the operator's offline verification digest.
+
+    Re-prompts on non-hex input (a typo no longer torches the ceremony), capped at
+    ``_DIGEST_PROMPT_ATTEMPTS`` so scripted / non-tty runs cannot loop forever.
+    Returns the digest bytes, or None (after printing) once attempts are spent. A
+    valid-hex-but-mismatching digest still aborts later in confirm_generate.
+    """
+    for _ in range(_DIGEST_PROMPT_ATTEMPTS):
+        digest_hex = prompt_io.ask_text("Verification digest from your offline device (hex)")
+        try:
+            return bytes.fromhex(digest_hex.strip())
+        except ValueError:
+            print(
+                "That is not a valid hex digest — paste the 64-character hex string "
+                "printed by the offline tool and try again.",
+                file=sys.stderr,
+            )
+    print(
+        f"No valid hex digest after {_DIGEST_PROMPT_ATTEMPTS} attempts — nothing was written.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _confirm_or_refuse(
+    handle: SeedDisplayHandle,
+    user_digest: bytes,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None,
+) -> GenerateResult | None:
+    """Finalize the keyvault iff the offline digest matches. Returns the
+    GenerateResult, or None (after printing) on a digest mismatch, an Enclave wrap
+    error, or the re-init race guard.
+    """
+    from ..keyvault import api
+    from ..keyvault._exceptions import WrapError
+    from ..keyvault.digest import VerificationDigestMismatch
+
+    try:
+        return api.confirm_generate(handle, user_digest, backend=backend, audit_sink=audit_sink, home=home)
+    except VerificationDigestMismatch:
+        print(
+            "Verification digest mismatch — the Seed or Passphrase was mis-transcribed. "
+            "Nothing was written; rerun `hermes-mordred keyvault init`.",
+            file=sys.stderr,
+        )
+        return None
+    except WrapError as exc:
+        print(f"Keyvault init failed: Secure Enclave error — {exc}", file=sys.stderr)
+        return None
+    except RuntimeError as exc:
+        # confirm_generate's own re-init guard (a race with the pre-check).
+        print(f"Keyvault init refused: {exc}", file=sys.stderr)
+        return None
+
+
+def _provision_audit_log_key(backend: NativeBackend) -> None:
+    """Best-effort: provision the audit-log wrapping key so privacy_check's
+    encrypted-audit factory engages next session. A failure degrades to a printed
+    note — the keyvault is already durably initialised.
+    """
+    from ..keyvault._exceptions import WrapError
+    from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
+    from ..keyvault.wrap import generate_wrapping_key
+
+    try:
+        generate_wrapping_key(AUDIT_LOG_KEY_ID, backend=backend)
+    except WrapError as exc:
+        print(
+            f"note: audit-log wrapping key not provisioned ({exc}); the audit log "
+            "stays plaintext until the keyvault is repaired.",
+            file=sys.stderr,
+        )
+
+
+def _store_seed_for_hd_envelope(
+    key_id: str,
+    mnemonic: str,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None,
+) -> None:
+    """Best-effort HD on-ramp: SE-encrypt the just-generated seed so the HD wallet
+    can derive Ethereum accounts later. A storage failure degrades to a note.
+    """
+    # Storing is OFFLINE — store_seed_phrase wraps the DEK with the Enclave *public*
+    # key, so it never triggers an authorization prompt. We deliberately do NOT
+    # derive an account here: derivation unwraps (ECDH), which on an interactive
+    # wrapping key would force a Touch ID prompt at the very end of init. The catch
+    # is broad (Exception) because the keyvault is already durable; any storage
+    # failure must degrade to a note, not a traceback.
+    try:
+        from ..keyvault.ethereum import store_seed_phrase
+
+        seed_env_id = store_seed_phrase(key_id, mnemonic, backend=backend, audit_sink=audit_sink, home=home)
+        print(f"HD wallet enabled. Seed stored SE-encrypted (envelope {seed_env_id}).")
+    except Exception as exc:
+        print(
+            f"note: HD seed not stored ({exc!r}); the keyvault is still initialised, "
+            "but HD derivation is unavailable until the seed is stored.",
+            file=sys.stderr,
+        )
+
+
 def init_keyvault(
     *,
     home: Path | None = None,
@@ -354,130 +585,27 @@ def init_keyvault(
     mismatch, blackout failure, capture abort, expiry, digest mismatch,
     Enclave error).
     """
-    from ..keyvault import _bip39, api, seed_display
-    from ..keyvault import pow as kvpow
-
-    root = _storage.resolve_keyvault_dir(home)
-    try:
-        existing_meta = _storage.load_meta(root)
-    except _storage.KeyvaultCorruptError as exc:
-        print(
-            f"Keyvault meta.json is corrupt — repair or remove it before init: {exc}",
-            file=sys.stderr,
-        )
-        return 1
-    if existing_meta.get("keys"):
-        print(
-            "Keyvault already initialised — v1 keyvault is single-key. To restore a "
-            "different key, use `hermes-mordred keyvault recover`.",
-            file=sys.stderr,
-        )
-        return 1
+    guard = _refuse_if_initialised(home)
+    if guard is not None:
+        return guard
 
     if prompt_io is None:
         from .configure import PromptToolkitIO
 
         prompt_io = PromptToolkitIO()
-    passphrase = prompt_io.ask_password("Choose a Passphrase")
-    if passphrase != prompt_io.ask_password("Re-enter the Passphrase"):
-        print("Passphrases do not match — nothing was written.", file=sys.stderr)
-        return 1
-    if not passphrase:
-        print("Passphrase must not be empty.", file=sys.stderr)
+    passphrase = _read_passphrase(prompt_io)
+    if passphrase is None:
         return 1
 
-    # Generate the Seed Phrase and its seed-bound PoW (SPEC §"Proof-of-Work").
-    seed_phrase = _bip39.generate_mnemonic()
-    normalized_seed = api._normalize_seed_phrase(seed_phrase)
-    pow_bytes = kvpow.compute_pow(normalized_seed, difficulty_bits=kvpow.POW_DIFFICULTY_BITS)
-    # expected_digest is intentionally discarded — the operator must
-    # recompute it independently on an offline device, which is the
-    # mis-transcription cross-check confirm_generate enforces.
-    handle, _expected_digest = api.prepare_generate(seed_phrase, passphrase, pow_bytes)
-    # L2 (PR #39 review): the seed is now held in the handle's wipeable
-    # bytearray and the digest is computed; drop the CLI's str references
-    # so they are GC-eligible during the 60s seed-display window and the
-    # interactive digest prompt instead of pinned for the whole function.
-    # CPython cannot zero an immutable str in place — this shortens the
-    # exposure window, it does not scrub the bytes; the handle's bytearray
-    # is the one wipeable copy.
-    #
-    # HD mode (store_seed_for_hd, Option A) is the deliberate exception: the
-    # seed must survive to be SE-encrypted after the key is finalized, so we
-    # keep one reference until storage. The operator opted into at-rest seed
-    # storage, so the slightly longer in-memory exposure is inherent.
-    mnemonic_for_hd = seed_phrase if store_seed_for_hd else None
-    del seed_phrase, normalized_seed, passphrase
+    handle, pow_bytes, mnemonic_for_hd = _generate_seed_material(passphrase, store_seed_for_hd=store_seed_for_hd)
+    del passphrase
 
-    if surface is None:
-        surface = TerminalSeedSurface()
-    show = display_fn if display_fn is not None else seed_display.display_seed
-    # The operator needs top4(PoW) to recompute the digest offline; it is
-    # derived from the (secret) seed but is itself only a 4-byte mask.
-    # The offline tool is `scripts/keyvault_offline_digest.py`; the recipe
-    # for preparing the second device + running the tool is documented in
-    # `mordred-docs/mordred/setup.md` §"Offline verification digest".
-    surface.banner(
-        "\n"
-        "────────────────────────────────────────────────────────────\n"
-        "  Next: compute the verification digest on your OFFLINE device\n"
-        "────────────────────────────────────────────────────────────\n"
-        "\n"
-        "  On the second (air-gapped) device, run:\n"
-        "      python3 scripts/keyvault_offline_digest.py\n"
-        "\n"
-        "  It will ask for THREE values — transcribe them in this order:\n"
-        "\n"
-        "    [1] Seed Phrase     →  the 24 words shown below (60s only)\n"
-        "    [2] Passphrase      →  the passphrase you just chose\n"
-        f"    [3] top4(PoW) hex   →  {pow_bytes[:4].hex()}    ← copy this 8-char string verbatim\n"
-        "\n"
-        "  The script prints a 64-char digest. Re-enter it on THIS\n"
-        "  device at the `Verification digest ...` prompt below.\n"
-        "  (Recipe: mordred-docs/mordred/setup.md §Offline verification digest)\n"
-        "────────────────────────────────────────────────────────────"
-    )
+    refusal = _display_seed_or_refuse(handle, pow_bytes, surface=surface, display_fn=display_fn)
+    if refusal is not None:
+        return refusal
 
-    from ..keyvault._exceptions import WrapError
-    from ..keyvault.api import SeedDisplayExpired
-    from ..keyvault.digest import VerificationDigestMismatch
-    from ..keyvault.network_fallback import BlackoutNotAsserted
-    from ..keyvault.seed_display import SeedDisplayAborted
-
-    try:
-        show(handle, surface)
-    except BlackoutNotAsserted:
-        print(_blackout_guidance(sys.platform), file=sys.stderr)
-        return 1
-    except SeedDisplayAborted as exc:
-        print(f"Seed display aborted: screen capture detected ({exc.detector}).", file=sys.stderr)
-        return 1
-    except SeedDisplayExpired:
-        print("Seed display window expired before the digest was confirmed.", file=sys.stderr)
-        return 1
-
-    # A typo at this prompt used to torch the whole ceremony (new seed, new
-    # 60s display, new offline digest). Re-prompt on non-hex input instead —
-    # bounded so scripted/non-tty runs cannot loop forever. A digest that IS
-    # valid hex but mismatches still aborts below: that means the seed or
-    # passphrase was mis-transcribed and the ceremony cannot be salvaged.
-    user_digest: bytes | None = None
-    for _ in range(_DIGEST_PROMPT_ATTEMPTS):
-        digest_hex = prompt_io.ask_text("Verification digest from your offline device (hex)")
-        try:
-            user_digest = bytes.fromhex(digest_hex.strip())
-            break
-        except ValueError:
-            print(
-                "That is not a valid hex digest — paste the 64-character hex string "
-                "printed by the offline tool and try again.",
-                file=sys.stderr,
-            )
+    user_digest = _prompt_for_digest(prompt_io)
     if user_digest is None:
-        print(
-            f"No valid hex digest after {_DIGEST_PROMPT_ATTEMPTS} attempts — nothing was written.",
-            file=sys.stderr,
-        )
         return 1
 
     if backend is None:
@@ -486,66 +614,18 @@ def init_keyvault(
         backend = _SecKeyBackend()
     sink = audit_sink if audit_sink is not None else _stderr_audit_sink
 
-    try:
-        result = api.confirm_generate(handle, user_digest, backend=backend, audit_sink=sink, home=home)
-    except VerificationDigestMismatch:
-        print(
-            "Verification digest mismatch — the Seed or Passphrase was mis-transcribed. "
-            "Nothing was written; rerun `hermes-mordred keyvault init`.",
-            file=sys.stderr,
-        )
-        return 1
-    except WrapError as exc:
-        print(f"Keyvault init failed: Secure Enclave error — {exc}", file=sys.stderr)
-        return 1
-    except RuntimeError as exc:
-        # confirm_generate's own re-init guard (a race with the pre-check).
-        print(f"Keyvault init refused: {exc}", file=sys.stderr)
+    result = _confirm_or_refuse(handle, user_digest, backend=backend, audit_sink=sink, home=home)
+    if result is None:
         return 1
 
-    # L465: provision the audit-log wrapping key so privacy_check's
-    # encrypted-audit factory (privacy_check.audit.make_audit_writer)
-    # engages on the next session. Best-effort — the keyvault is already
-    # durably initialised; if this fails the audit log simply stays
-    # plaintext until repaired.
-    try:
-        from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
-        from ..keyvault.wrap import generate_wrapping_key
+    _provision_audit_log_key(backend)
 
-        generate_wrapping_key(AUDIT_LOG_KEY_ID, backend=backend)
-    except WrapError as exc:
-        print(
-            f"note: audit-log wrapping key not provisioned ({exc}); the audit log "
-            "stays plaintext until the keyvault is repaired.",
-            file=sys.stderr,
-        )
-
-    # HD mode (Option A): SE-encrypt the just-generated seed so the HD wallet
-    # can derive Ethereum accounts later without re-entering the 24 words. The
-    # keyvault is already durably initialised at this point, so a storage
-    # failure is surfaced as a note rather than failing the whole init.
+    # HD mode (Option A): SE-encrypt the just-generated seed so the HD wallet can
+    # derive Ethereum accounts later without re-entering the 24 words. Best-effort
+    # — the keyvault is already durably initialised at this point.
     if mnemonic_for_hd is not None:
-        # Storing is OFFLINE — store_seed_phrase wraps the DEK with the
-        # Enclave *public* key, so it never triggers an authorization prompt.
-        # We deliberately do NOT derive an account here: derivation unwraps
-        # (ECDH), which on an interactive wrapping key would force a Touch ID
-        # prompt at the very end of init. Derivation happens on demand later.
-        # The catch is broad (Exception) because the keyvault is already
-        # durable; any storage failure must degrade to a note, not a traceback.
-        try:
-            from ..keyvault.ethereum import store_seed_phrase
-
-            sink = audit_sink if audit_sink is not None else _stderr_audit_sink
-            seed_env_id = store_seed_phrase(result.key_id, mnemonic_for_hd, backend=backend, audit_sink=sink, home=home)
-            print(f"HD wallet enabled. Seed stored SE-encrypted (envelope {seed_env_id}).")
-        except Exception as exc:
-            print(
-                f"note: HD seed not stored ({exc!r}); the keyvault is still initialised, "
-                "but HD derivation is unavailable until the seed is stored.",
-                file=sys.stderr,
-            )
-        finally:
-            del mnemonic_for_hd
+        _store_seed_for_hd_envelope(result.key_id, mnemonic_for_hd, backend=backend, audit_sink=sink, home=home)
+        del mnemonic_for_hd
 
     print(f"Keyvault initialised. Key: {result.key_id}")
     print(

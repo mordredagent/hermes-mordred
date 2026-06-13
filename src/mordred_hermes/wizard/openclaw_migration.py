@@ -245,49 +245,81 @@ def _migrate_policy(
     except (OSError, json.JSONDecodeError) as e:
         _LOG.warning("could not read %s: %s", src, e)
         return False
-    plugins = body.get("plugins") if isinstance(body, dict) else None
-    entries = plugins.get("entries") if isinstance(plugins, dict) else None
-    if not isinstance(entries, dict):
-        return False
-    privacy = entries.get("mordred-privacy-check")
-    if not isinstance(privacy, dict):
-        return False
-    config = privacy.get("config")
-    if not isinstance(config, dict):
+
+    config = _extract_privacy_config(body)
+    if config is None:
         return False
 
     snapshot = _coerce_snapshot(config)
-
     # Apply --policy-conflict against the OpenClaw snapshot (P1-A).
-    existing = _read_existing_section(policy_writer.config_path)
-    want = snapshot.to_config_yaml_section()
-    if existing is not None and not _section_matches_dict(existing, want):
-        if options.reset:
-            pass  # fall through to write
-        elif options.policy_conflict == "keep-existing":
-            return False
-        elif options.policy_conflict == "abort":
-            raise SystemExit(
-                "hermes-mordred upgrade: --policy-conflict=abort and OpenClaw "
-                "policy differs from existing config.yaml -- aborting."
-            )
-        elif options.policy_conflict is None:
-            if options.non_interactive:
-                raise SystemExit(
-                    "hermes-mordred upgrade: --non-interactive set but --policy-conflict "
-                    "not specified; refusing to overwrite existing mordred section "
-                    "with OpenClaw migration."
-                )
-            raise SystemExit(
-                "hermes-mordred upgrade: OpenClaw policy differs from existing "
-                "config.yaml plugins.mordred_privacy_check. Re-run with one of "
-                "--policy-conflict=keep-existing|overwrite|abort or --reset."
-            )
-        # options.policy_conflict == "overwrite" or reset -> fall through to write.
+    if not _should_write_policy(policy_writer, snapshot, options):
+        return False
 
     # Write BOTH config.yaml and policy.json mirror (P2).
     policy_writer.write(snapshot)
     return True
+
+
+def _extract_privacy_config(body: object) -> dict[str, Any] | None:
+    """Pull ``plugins.entries.mordred-privacy-check.config`` out of openclaw.json.
+
+    Returns the config dict, or None if any level of the expected nesting is
+    absent or the wrong type (no recognisable section to migrate).
+    """
+    plugins = body.get("plugins") if isinstance(body, dict) else None
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    if not isinstance(entries, dict):
+        return None
+    privacy = entries.get("mordred-privacy-check")
+    if not isinstance(privacy, dict):
+        return None
+    config = privacy.get("config")
+    if not isinstance(config, dict):
+        return None
+    return config
+
+
+def _should_write_policy(
+    policy_writer: PolicyWriter,
+    snapshot: PolicySnapshot,
+    options: UpgradeOptions,
+) -> bool:
+    """Decide whether to write ``snapshot``, honoring ``options.policy_conflict``.
+
+    Returns True to proceed with the write, False to keep the existing section.
+    Raises ``SystemExit`` on an unresolved conflict (``abort``, or an
+    interactive prompt that a non-interactive run cannot satisfy).
+    """
+    existing = _read_existing_section(policy_writer.config_path)
+    if existing is None:
+        return True
+    want = snapshot.to_config_yaml_section()
+    if _section_matches_dict(existing, want):
+        return True
+    # Existing section differs from the OpenClaw-derived snapshot. --reset and
+    # --policy-conflict=overwrite both proceed to write (reset takes precedence,
+    # matching the original elif order).
+    if options.reset or options.policy_conflict == "overwrite":
+        return True
+    if options.policy_conflict == "keep-existing":
+        return False
+    if options.policy_conflict == "abort":
+        raise SystemExit(
+            "hermes-mordred upgrade: --policy-conflict=abort and OpenClaw "
+            "policy differs from existing config.yaml -- aborting."
+        )
+    # options.policy_conflict is None
+    if options.non_interactive:
+        raise SystemExit(
+            "hermes-mordred upgrade: --non-interactive set but --policy-conflict "
+            "not specified; refusing to overwrite existing mordred section "
+            "with OpenClaw migration."
+        )
+    raise SystemExit(
+        "hermes-mordred upgrade: OpenClaw policy differs from existing "
+        "config.yaml plugins.mordred_privacy_check. Re-run with one of "
+        "--policy-conflict=keep-existing|overwrite|abort or --reset."
+    )
 
 
 def _read_existing_section(config_path: Path) -> dict[str, Any] | None:

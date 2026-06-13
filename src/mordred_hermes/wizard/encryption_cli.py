@@ -328,32 +328,39 @@ def _dispatch(verb: str, target: str) -> int:
     root = resolve_root(None)
     platform = sys.platform
 
-    if target == "env":
-        if verb == "enable":
-            return env_decrypt_cli.enable(home=home, root=root, platform=platform)
-        if verb == "disable":
-            return env_decrypt_cli.disable(home=home, root=root)
-        return env_decrypt_cli.purge(home=home, root=root)
-    if target == "config":
-        if verb == "enable":
-            return config_decrypt_cli.enable(home=home, root=root)
-        if verb == "disable":
-            return config_decrypt_cli.disable(home=home, root=root)
-        return config_decrypt_cli.purge(home=home, root=root)
-    if target == "memory":
-        if verb == "enable":
-            return memory_cli.enable(home=home, root=root)
-        if verb == "disable":
-            return memory_cli.disable(home=home)
-        return memory_cli.purge(home=home, root=root)
+    # target -> {verb: action}. enable/disable are explicit; the CLI adapters
+    # only ever pass enable/disable/purge, and any non-enable/disable verb
+    # resolves to the target's purge (preserves the original if-chain's
+    # fall-through). workspace stays lazily imported (macOS-only path).
+    routes: dict[str, dict[str, Callable[[], int]]] = {
+        "env": {
+            "enable": lambda: env_decrypt_cli.enable(home=home, root=root, platform=platform),
+            "disable": lambda: env_decrypt_cli.disable(home=home, root=root),
+            "purge": lambda: env_decrypt_cli.purge(home=home, root=root),
+        },
+        "config": {
+            "enable": lambda: config_decrypt_cli.enable(home=home, root=root),
+            "disable": lambda: config_decrypt_cli.disable(home=home, root=root),
+            "purge": lambda: config_decrypt_cli.purge(home=home, root=root),
+        },
+        "memory": {
+            "enable": lambda: memory_cli.enable(home=home, root=root),
+            "disable": lambda: memory_cli.disable(home=home),
+            "purge": lambda: memory_cli.purge(home=home, root=root),
+        },
+    }
+    if target in routes:
+        actions = routes[target]
+        return (actions.get(verb) or actions["purge"])()
     if target == "workspace":
         from . import workspace_cli
 
-        if verb == "enable":
-            return workspace_cli.cli_enable()
-        if verb == "disable":
-            return workspace_cli.cli_disable()
-        return workspace_cli.cli_purge()
+        ws: dict[str, Callable[[], int]] = {
+            "enable": workspace_cli.cli_enable,
+            "disable": workspace_cli.cli_disable,
+            "purge": workspace_cli.cli_purge,
+        }
+        return (ws.get(verb) or ws["purge"])()
 
     print(f"encryption {verb} {target}: not available in this build.", file=sys.stderr)
     return 2

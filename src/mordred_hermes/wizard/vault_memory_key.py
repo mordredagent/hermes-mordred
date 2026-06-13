@@ -23,6 +23,7 @@ from .vault_cli import _open_hot_path_or_report, _resolve_root
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
+    from ..keyvault.vault import OpenVault
     from ..keyvault.wrap import NativeBackend
 
 _MEMORY_KEY_ENV = "HERMES_MEMORY_KEY"
@@ -211,22 +212,9 @@ def set_memory_key(
         return 1
 
     try:
-        if ".env" in opened.list_files():
-            try:
-                existing = opened.read_file(".env").decode("utf-8")
-            except UnicodeDecodeError:
-                print(
-                    f"the enrolled .env at {root} is not valid UTF-8 — cannot merge {_MEMORY_KEY_ENV}.",
-                    file=sys.stderr,
-                )
-                return 1
-            except (vault.VaultError, OSError) as exc:
-                # OSError covers _storage.KeyvaultPermissionError (bad mode / symlink /
-                # I/O) so a read failure fails closed with rc 1, like open / enroll.
-                print(f"cannot read the enrolled .env at {root}: {exc}", file=sys.stderr)
-                return 1
-        else:
-            existing = ""
+        existing = _read_enrolled_env(opened, root)
+        if existing is None:
+            return 1
 
         # Decide off the *effective* (dotenv last-wins) value — exactly what the
         # runtime shim keys memory on — so we never silently switch the key Hermes
@@ -274,12 +262,7 @@ def set_memory_key(
             print(f"cannot store {_MEMORY_KEY_ENV}: {exc}", file=sys.stderr)
             return 1
 
-        if adopted is not None:
-            verb = "Adopted the existing"
-        elif orphan_risk:
-            verb = "Rotated"
-        else:
-            verb = "Stored"
+        verb = _store_verb_label(adopted=adopted, orphan_risk=orphan_risk)
         print(f"{verb} {_MEMORY_KEY_ENV} in the vault .env at {root} (now at generation {generation}).")
         if orphan_risk:
             # Rotation replaces a *usable* key, orphaning memories encrypted under it
@@ -296,6 +279,38 @@ def set_memory_key(
         return 0
     finally:
         opened.close()
+
+
+def _read_enrolled_env(opened: OpenVault, root: Path) -> str | None:
+    """Return the enrolled ``.env`` text (``""`` when absent), or ``None`` on a
+    read failure (the reason is printed to stderr; the caller fails closed).
+    """
+    from ..keyvault import vault
+
+    if ".env" not in opened.list_files():
+        return ""
+    try:
+        return opened.read_file(".env").decode("utf-8")
+    except UnicodeDecodeError:
+        print(
+            f"the enrolled .env at {root} is not valid UTF-8 — cannot merge {_MEMORY_KEY_ENV}.",
+            file=sys.stderr,
+        )
+        return None
+    except (vault.VaultError, OSError) as exc:
+        # OSError covers _storage.KeyvaultPermissionError (bad mode / symlink /
+        # I/O) so a read failure fails closed with rc 1, like open / enroll.
+        print(f"cannot read the enrolled .env at {root}: {exc}", file=sys.stderr)
+        return None
+
+
+def _store_verb_label(*, adopted: str | None, orphan_risk: bool) -> str:
+    """Past-tense verb for the success line: adopt an existing key, rotate, or store."""
+    if adopted is not None:
+        return "Adopted the existing"
+    if orphan_risk:
+        return "Rotated"
+    return "Stored"
 
 
 def cli_set_memory_key(args: argparse.Namespace) -> int:
