@@ -21,7 +21,7 @@ def tor_install_guidance(*, tor_binary: str = "tor") -> str:
         "macOS: `brew install tor`; Debian/Ubuntu: `sudo apt-get install tor`. "
         f"If Tor is already installed elsewhere, rerun "
         f"`hermes-mordred network init --path tor --tor-binary /path/to/tor` "
-        f"(current setting: {tor_binary!r})."
+        f"(current setting: `{tor_binary}`)."
     )
 
 

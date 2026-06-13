@@ -105,9 +105,7 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     # values like ``[]`` / ``{}``.
     if isinstance(mode, str) and mode in _VALID_MODES:
         return mode
-    _LOG.error(
-        "invalid policy %r in %s; failing closed to strict", mode, policy_json_path
-    )
+    _LOG.error("invalid policy %r in %s; failing closed to strict", mode, policy_json_path)
     return "strict"
 
 

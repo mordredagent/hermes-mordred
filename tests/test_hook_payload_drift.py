@@ -23,9 +23,7 @@ REPO_ROOT = MORDRED_HERMES_ROOT.parent
 
 
 def _load_tool():
-    spec = importlib.util.spec_from_file_location(
-        "check_hook_payload_drift", TOOLS_DIR / "check_hook_payload_drift.py"
-    )
+    spec = importlib.util.spec_from_file_location("check_hook_payload_drift", TOOLS_DIR / "check_hook_payload_drift.py")
     module = importlib.util.module_from_spec(spec)
     # dataclasses resolves ``cls.__module__`` through sys.modules at class
     # creation time — register before exec or the @dataclass decorator fails.
@@ -229,9 +227,7 @@ class TestVendoredHermesCanary:
         upstream — if this fails, either upstream truly drifted (sync brought
         the drift in) or the contract/excludes need updating."""
         contract = {
-            k: v
-            for k, v in json.loads(CONTRACT_PATH.read_text(encoding="utf-8")).items()
-            if not k.startswith("_")
+            k: v for k, v in json.loads(CONTRACT_PATH.read_text(encoding="utf-8")).items() if not k.startswith("_")
         }
         sites = drift.extract_hook_payload_fields(REPO_ROOT)
         assert sites, "no invoke_hook dispatch sites found in the vendored Hermes tree"
