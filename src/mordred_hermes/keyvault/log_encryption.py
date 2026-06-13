@@ -359,6 +359,91 @@ class EncryptedWriter:
                 child.unlink(missing_ok=True)
 
 
+def _unwrap_log_dek(
+    path: Path,
+    header_bytes: bytes,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+) -> bytes:
+    """Validate the ``MRAL`` header line and unwrap the audit-log DEK.
+
+    Raises:
+        AuditLogDecryptError: The header line is not valid JSON, is not a
+            recognised ``MRAL`` header, is missing the ``key_id`` / ``wdek``
+            fields, or carries an unwrappable DEK.
+        WrapAuthCancelled / WrapKeyNotFound: Propagated from the unwrap so
+            the CLI can handle a denied prompt and a missing key distinctly
+            from a corrupt file.
+    """
+    try:
+        header = json.loads(header_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise AuditLogDecryptError(f"{path}: header line is not valid JSON") from e
+    if (
+        not isinstance(header, dict)
+        or header.get("fmt") != MAGIC.decode("ascii")
+        or header.get("ver") != FORMAT_VERSION
+    ):
+        raise AuditLogDecryptError(
+            f"{path}: not a {MAGIC.decode('ascii')} v{FORMAT_VERSION} encrypted audit log "
+            "(a pre-Phase-4 plaintext log is read with `audit tail`, not `audit decrypt`)"
+        )
+    key_id = header.get("key_id")
+    wdek_b64 = header.get("wdek")
+    if not isinstance(key_id, str) or not isinstance(wdek_b64, str):
+        raise AuditLogDecryptError(f"{path}: header is missing the key_id / wdek fields")
+    try:
+        wrapped = base64.b64decode(wdek_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise AuditLogDecryptError(f"{path}: header wdek is not valid base64") from e
+
+    try:
+        return unwrap_dek(wrapped, key_id, audit_sink=audit_sink, backend=backend)
+    except (WrapAuthCancelled, WrapKeyNotFound):
+        # Propagate unwrapped — the CLI handles a denied prompt and a
+        # missing key distinctly from a corrupt file.
+        raise
+    except WrapError as e:
+        raise AuditLogDecryptError(f"{path}: cannot unwrap the audit-log DEK") from e
+
+
+def _decode_log_entries(
+    path: Path,
+    lines: list[bytes],
+    dek: bytes,
+    aad: bytes,
+) -> list[dict[str, Any]]:
+    """Decode every entry line (oldest first) under the unwrapped DEK.
+
+    ``lines`` is the whole file split on newlines; the header (``lines[0]``)
+    is skipped. Raises :class:`AuditLogDecryptError` on any entry that fails
+    to base64-decode, authenticate, or parse as a JSON object.
+    """
+    out: list[dict[str, Any]] = []
+    for n, line in enumerate(lines[1:], start=2):
+        if not line:
+            continue
+        try:
+            blob = base64.b64decode(line, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise AuditLogDecryptError(f"{path}: line {n} is not valid base64") from e
+        try:
+            plaintext = _aes_decrypt(dek, blob, aad=aad)
+        except InvalidTag as e:
+            raise AuditLogDecryptError(
+                f"{path}: line {n} failed authentication — tampered, truncated, or spliced from another file"
+            ) from e
+        try:
+            entry = json.loads(plaintext)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise AuditLogDecryptError(f"{path}: line {n} decrypted to invalid JSON") from e
+        if not isinstance(entry, dict):
+            raise AuditLogDecryptError(f"{path}: line {n} decrypted to a non-object JSON value")
+        out.append(entry)
+    return out
+
+
 def decrypt_log_file(
     path: Path,
     *,
@@ -396,60 +481,9 @@ def decrypt_log_file(
         raise AuditLogDecryptError(f"{path}: empty audit log file")
 
     header_bytes = lines[0]
-    try:
-        header = json.loads(header_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise AuditLogDecryptError(f"{path}: header line is not valid JSON") from e
-    if (
-        not isinstance(header, dict)
-        or header.get("fmt") != MAGIC.decode("ascii")
-        or header.get("ver") != FORMAT_VERSION
-    ):
-        raise AuditLogDecryptError(
-            f"{path}: not a {MAGIC.decode('ascii')} v{FORMAT_VERSION} encrypted audit log "
-            "(a pre-Phase-4 plaintext log is read with `audit tail`, not `audit decrypt`)"
-        )
-    key_id = header.get("key_id")
-    wdek_b64 = header.get("wdek")
-    if not isinstance(key_id, str) or not isinstance(wdek_b64, str):
-        raise AuditLogDecryptError(f"{path}: header is missing the key_id / wdek fields")
-    try:
-        wrapped = base64.b64decode(wdek_b64, validate=True)
-    except (binascii.Error, ValueError) as e:
-        raise AuditLogDecryptError(f"{path}: header wdek is not valid base64") from e
-
-    try:
-        dek = unwrap_dek(wrapped, key_id, audit_sink=audit_sink, backend=backend)
-    except (WrapAuthCancelled, WrapKeyNotFound):
-        # Propagate unwrapped — the CLI handles a denied prompt and a
-        # missing key distinctly from a corrupt file.
-        raise
-    except WrapError as e:
-        raise AuditLogDecryptError(f"{path}: cannot unwrap the audit-log DEK") from e
-
+    dek = _unwrap_log_dek(path, header_bytes, backend=backend, audit_sink=audit_sink)
     aad = _entry_aad(header_bytes)
-    out: list[dict[str, Any]] = []
-    for n, line in enumerate(lines[1:], start=2):
-        if not line:
-            continue
-        try:
-            blob = base64.b64decode(line, validate=True)
-        except (binascii.Error, ValueError) as e:
-            raise AuditLogDecryptError(f"{path}: line {n} is not valid base64") from e
-        try:
-            plaintext = _aes_decrypt(dek, blob, aad=aad)
-        except InvalidTag as e:
-            raise AuditLogDecryptError(
-                f"{path}: line {n} failed authentication — tampered, truncated, or spliced from another file"
-            ) from e
-        try:
-            entry = json.loads(plaintext)
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise AuditLogDecryptError(f"{path}: line {n} decrypted to invalid JSON") from e
-        if not isinstance(entry, dict):
-            raise AuditLogDecryptError(f"{path}: line {n} decrypted to a non-object JSON value")
-        out.append(entry)
-    return out
+    return _decode_log_entries(path, lines, dek, aad)
 
 
 if TYPE_CHECKING:  # pragma: no cover - mypy-only Writer Protocol conformance

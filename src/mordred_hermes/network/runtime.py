@@ -451,55 +451,61 @@ class Runtime:
         if target == "clearnet":
             return _ActiveHandle("clearnet", clearnet_mod.start())
         if target == "tor":
-            port = self._config.tor_socks_port or self._tor_pick_port()
-            control_port = port + 1
-            torrc = tor_mod.render_torrc(
+            return self._bring_up_tor()
+        # target == "vpn"
+        return self._bring_up_vpn()
+
+    def _bring_up_tor(self) -> _ActiveHandle:
+        port = self._config.tor_socks_port or self._tor_pick_port()
+        control_port = port + 1
+        torrc = tor_mod.render_torrc(
+            socks_port=port,
+            control_port=control_port,
+            data_dir=self._config.tor_data_dir,
+        )
+        try:
+            proc = self._tor_start(binary=self._config.tor_binary, torrc=torrc)
+        except OSError as spawn_err:
+            # Codex round 3 P1 (2026-05-14): ``subprocess.Popen`` raises
+            # :class:`FileNotFoundError` / :class:`PermissionError`
+            # (both ``OSError``) when the binary is absent or not
+            # executable. Translate to :class:`BringupFailed` so the
+            # strict-mode escalation in :meth:`_switch` fires and the
+            # hooks layer can raise :class:`MordredPathBringupFailed`
+            # — otherwise Hermes' ``invoke_hook`` would swallow the
+            # OSError as an ordinary :class:`Exception` and strict
+            # mode would fail open.
+            raise BringupFailed(
+                f"tor binary {self._config.tor_binary!r} could not be spawned: {spawn_err}. "
+                f"{tor_install_guidance(tor_binary=self._config.tor_binary)}"
+            ) from spawn_err
+        try:
+            self._tor_wait(proc)
+        except BringupFailed:
+            # Half-started process must not leak even when bring-up fails.
+            try:
+                self._tor_stop(
+                    tor_mod.TorHandle(
+                        process=proc,
+                        socks_port=port,
+                        control_port=control_port,
+                        data_dir=self._config.tor_data_dir,
+                    )
+                )
+            except Exception as cleanup_err:
+                _LOG.warning("tor cleanup after bring-up failure: %s", cleanup_err)
+            raise
+        return _ActiveHandle(
+            "tor",
+            tor_mod.TorHandle(
+                process=proc,
                 socks_port=port,
                 control_port=control_port,
                 data_dir=self._config.tor_data_dir,
-            )
-            try:
-                proc = self._tor_start(binary=self._config.tor_binary, torrc=torrc)
-            except OSError as spawn_err:
-                # Codex round 3 P1 (2026-05-14): ``subprocess.Popen`` raises
-                # :class:`FileNotFoundError` / :class:`PermissionError`
-                # (both ``OSError``) when the binary is absent or not
-                # executable. Translate to :class:`BringupFailed` so the
-                # strict-mode escalation in :meth:`_switch` fires and the
-                # hooks layer can raise :class:`MordredPathBringupFailed`
-                # — otherwise Hermes' ``invoke_hook`` would swallow the
-                # OSError as an ordinary :class:`Exception` and strict
-                # mode would fail open.
-                raise BringupFailed(
-                    f"tor binary {self._config.tor_binary!r} could not be spawned: {spawn_err}. "
-                    f"{tor_install_guidance(tor_binary=self._config.tor_binary)}"
-                ) from spawn_err
-            try:
-                self._tor_wait(proc)
-            except BringupFailed:
-                # Half-started process must not leak even when bring-up fails.
-                try:
-                    self._tor_stop(
-                        tor_mod.TorHandle(
-                            process=proc,
-                            socks_port=port,
-                            control_port=control_port,
-                            data_dir=self._config.tor_data_dir,
-                        )
-                    )
-                except Exception as cleanup_err:
-                    _LOG.warning("tor cleanup after bring-up failure: %s", cleanup_err)
-                raise
-            return _ActiveHandle(
-                "tor",
-                tor_mod.TorHandle(
-                    process=proc,
-                    socks_port=port,
-                    control_port=control_port,
-                    data_dir=self._config.tor_data_dir,
-                ),
-            )
-        # target == "vpn"
+            ),
+        )
+
+    def _bring_up_vpn(self) -> _ActiveHandle:
         # Codex round 4 P1 (2026-05-14): symmetric to the Tor OSError
         # wrap (r3-P1). Mullvad CLI invocations can raise OSError
         # (binary missing, daemon socket permission, etc.). The strict

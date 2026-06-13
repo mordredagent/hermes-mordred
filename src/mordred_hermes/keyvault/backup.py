@@ -212,23 +212,15 @@ def export(secret: bytes, passphrase: str, *, verification_digest: bytes) -> byt
     return header + aes_blob
 
 
-def parse_header(blob: bytes) -> ParsedHeader:
-    """Validate and unpack the 70-byte header. Does NO KDF and NO AES
-    decryption — that's :func:`decrypt_body`'s job.
+def _parse_kdf_cost_params(blob: bytes, version: int) -> tuple[int, int, int]:
+    """Parse, DOS-guard, and canonical-profile-check the Argon2 cost fields.
 
-    Raises :class:`BackupCorrupt` for structurally invalid blobs.
+    Reads the m/t/p-cost fields from ``blob[6:18]`` (big-endian uint32),
+    rejects out-of-bounds values BEFORE any KDF runs, and — for a v1 blob —
+    enforces the canonical ``(46 MiB, 1, 1)`` profile.
+
+    Raises :class:`BackupCorrupt` on any violation.
     """
-    if len(blob) < HEADER_LEN:
-        raise BackupCorrupt(f"blob too short to contain {HEADER_LEN}-byte header (got {len(blob)})")
-    magic = blob[0:4]
-    if magic != MAGIC:
-        raise BackupCorrupt(f"bad magic: expected {MAGIC!r}, got {magic!r}")
-    version = blob[4]
-    if version != VERSION:
-        raise BackupCorrupt(f"unknown version {version} (only {VERSION} is supported)")
-    kdf_id = blob[5]
-    if kdf_id != KDF_ID_ARGON2ID:
-        raise BackupCorrupt(f"unknown kdf_id {kdf_id} (only {KDF_ID_ARGON2ID} = Argon2id is supported)")
     m_cost = int.from_bytes(blob[6:10], "big")
     t_cost = int.from_bytes(blob[10:14], "big")
     p_cost = int.from_bytes(blob[14:18], "big")
@@ -260,6 +252,27 @@ def parse_header(blob: bytes) -> ParsedHeader:
     # verification digest.
     if version == VERSION:
         _assert_canonical_kdf_profile_v1(m_cost=m_cost, t_cost=t_cost, p_cost=p_cost)
+    return m_cost, t_cost, p_cost
+
+
+def parse_header(blob: bytes) -> ParsedHeader:
+    """Validate and unpack the 70-byte header. Does NO KDF and NO AES
+    decryption — that's :func:`decrypt_body`'s job.
+
+    Raises :class:`BackupCorrupt` for structurally invalid blobs.
+    """
+    if len(blob) < HEADER_LEN:
+        raise BackupCorrupt(f"blob too short to contain {HEADER_LEN}-byte header (got {len(blob)})")
+    magic = blob[0:4]
+    if magic != MAGIC:
+        raise BackupCorrupt(f"bad magic: expected {MAGIC!r}, got {magic!r}")
+    version = blob[4]
+    if version != VERSION:
+        raise BackupCorrupt(f"unknown version {version} (only {VERSION} is supported)")
+    kdf_id = blob[5]
+    if kdf_id != KDF_ID_ARGON2ID:
+        raise BackupCorrupt(f"unknown kdf_id {kdf_id} (only {KDF_ID_ARGON2ID} = Argon2id is supported)")
+    m_cost, t_cost, p_cost = _parse_kdf_cost_params(blob, version)
     salt = blob[18:34]
     verification_digest = blob[34:66]
     aes_blob_len = int.from_bytes(blob[66:70], "big")

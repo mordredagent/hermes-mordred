@@ -369,6 +369,92 @@ def export_backup(
     return out
 
 
+def _parse_import_manifest(manifest_json: bytes) -> tuple[str, list[dict[str, str]]]:
+    """Parse and shape-validate the AES-GCM-authenticated import manifest.
+
+    The manifest was just authenticated, so its contents are trusted; only
+    the version gate and the field shapes are enforced. A malformed field
+    must fail closed as :class:`BackupCorrupt` BEFORE the caller generates a
+    destination Enclave key — otherwise a raw KeyError/TypeError would
+    generate and then roll back a phantom Enclave key (security review
+    finding).
+
+    Returns ``(imported_key_id, envelopes)``.
+    """
+    manifest = json.loads(manifest_json)
+    if not isinstance(manifest, dict) or manifest.get("version") != _MANIFEST_VERSION:
+        raise BackupCorrupt("unsupported or malformed backup manifest")
+    imported_key_id = manifest.get("key_id")
+    if not isinstance(imported_key_id, str) or not imported_key_id:
+        raise BackupCorrupt("backup manifest missing or invalid 'key_id'")
+    envelopes_raw = manifest.get("envelopes")
+    if not isinstance(envelopes_raw, list):
+        raise BackupCorrupt("backup manifest missing or invalid 'envelopes'")
+    envelopes: list[dict[str, str]] = envelopes_raw
+    return imported_key_id, envelopes
+
+
+def _rebuild_envelope(
+    entry: dict[str, str],
+    *,
+    root: Path,
+    new_key_id_hash: bytes,
+    new_key_id_hash_hex: str,
+    imported_key_id: str,
+    backend: NativeBackend,
+) -> None:
+    """Rebuild one manifest envelope against THIS device's Enclave key.
+
+    Decrypts the portable ciphertext under its ``manifest_aad``, re-wraps the
+    DEK against the new Enclave key, reconstructs the MREN envelope bound to
+    this device's AAD, and atomically writes it under
+    ``ciphertexts/<kid>/<purpose>/<envelope_id>.gcm``.
+    """
+    _validate_envelope_id(entry["envelope_id"])
+    purpose_hash = bytes.fromhex(entry["purpose_hash_hex"])
+    manifest_aes_blob = base64.b64decode(entry["manifest_aes_blob_b64"])
+    dek = bytes.fromhex(entry["dek_hex"])
+    try:
+        manifest_aad = _MANIFEST_MAGIC + new_key_id_hash + purpose_hash
+        plaintext = crypto.decrypt(dek, manifest_aes_blob, aad=manifest_aad)
+        new_wrapped_dek = wrap.wrap_dek(dek, imported_key_id, backend=backend)
+        envelope_bytes = _encode_envelope_from_hashes(dek, plaintext, new_key_id_hash, purpose_hash, new_wrapped_dek)
+    finally:
+        del dek
+    key_dir = root / "ciphertexts" / new_key_id_hash_hex
+    purpose_dir = key_dir / purpose_hash.hex()
+    _ensure_managed_subdir(key_dir)
+    _ensure_managed_subdir(purpose_dir)
+    _storage.atomic_write(purpose_dir / f"{entry['envelope_id']}.gcm", envelope_bytes)
+
+
+def _rollback_import(
+    root: Path,
+    *,
+    new_key_id_hash_hex: str,
+    commit_path: Path,
+    imported_key_id: str,
+    backend: NativeBackend,
+) -> None:
+    """Best-effort rollback of a failed :func:`import_backup`.
+
+    Each step is independently suppressed so the ORIGINAL failure always
+    propagates via the caller's bare ``raise``. Removes the ciphertext tree
+    and the commit digest, deletes the destination Enclave key, and drops the
+    ``meta.json`` row if it landed.
+    """
+    with contextlib.suppress(Exception):
+        shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        commit_path.unlink(missing_ok=True)
+    with contextlib.suppress(Exception):
+        backend.delete_enclave_key(imported_key_id)
+    with contextlib.suppress(Exception):
+        repaired = _storage.load_meta(root)
+        if repaired["keys"].pop(new_key_id_hash_hex, None) is not None:
+            _storage.save_meta(root, repaired)
+
+
 def import_backup(
     blob: bytes,
     passphrase: str,
@@ -427,22 +513,9 @@ def import_backup(
         audit_sink=audit_sink,
     )
 
-    # 5. Parse + validate the manifest. It was just AES-GCM-authenticated,
-    #    so the contents are trusted; only the version gate is enforced.
-    manifest = json.loads(manifest_json)
-    if not isinstance(manifest, dict) or manifest.get("version") != _MANIFEST_VERSION:
-        raise BackupCorrupt("unsupported or malformed backup manifest")
-    # Validate the authenticated manifest's shape BEFORE generating the
-    # destination Enclave key (below): a malformed field must fail closed as
-    # BackupCorrupt, not raise a raw KeyError/TypeError that generates and
-    # then rolls back a phantom Enclave key (security review finding).
-    imported_key_id = manifest.get("key_id")
-    if not isinstance(imported_key_id, str) or not imported_key_id:
-        raise BackupCorrupt("backup manifest missing or invalid 'key_id'")
-    envelopes_raw = manifest.get("envelopes")
-    if not isinstance(envelopes_raw, list):
-        raise BackupCorrupt("backup manifest missing or invalid 'envelopes'")
-    envelopes: list[dict[str, str]] = envelopes_raw
+    # 5. Parse + shape-validate the authenticated manifest BEFORE generating
+    #    the destination Enclave key (below).
+    imported_key_id, envelopes = _parse_import_manifest(manifest_json)
 
     root = _storage.resolve_keyvault_dir(home)
     _storage.ensure_layout(root)
@@ -459,24 +532,14 @@ def import_backup(
         with _storage.keyvault_lock(root):
             # 7. Rebuild every envelope against this device's Enclave key.
             for entry in envelopes:
-                _validate_envelope_id(entry["envelope_id"])
-                purpose_hash = bytes.fromhex(entry["purpose_hash_hex"])
-                manifest_aes_blob = base64.b64decode(entry["manifest_aes_blob_b64"])
-                dek = bytes.fromhex(entry["dek_hex"])
-                try:
-                    manifest_aad = _MANIFEST_MAGIC + new_key_id_hash + purpose_hash
-                    plaintext = crypto.decrypt(dek, manifest_aes_blob, aad=manifest_aad)
-                    new_wrapped_dek = wrap.wrap_dek(dek, imported_key_id, backend=backend)
-                    envelope_bytes = _encode_envelope_from_hashes(
-                        dek, plaintext, new_key_id_hash, purpose_hash, new_wrapped_dek
-                    )
-                finally:
-                    del dek
-                key_dir = root / "ciphertexts" / new_key_id_hash_hex
-                purpose_dir = key_dir / purpose_hash.hex()
-                _ensure_managed_subdir(key_dir)
-                _ensure_managed_subdir(purpose_dir)
-                _storage.atomic_write(purpose_dir / f"{entry['envelope_id']}.gcm", envelope_bytes)
+                _rebuild_envelope(
+                    entry,
+                    root=root,
+                    new_key_id_hash=new_key_id_hash,
+                    new_key_id_hash_hex=new_key_id_hash_hex,
+                    imported_key_id=imported_key_id,
+                    backend=backend,
+                )
 
             # 8. Commit digest FIRST, meta.json row LAST — meta.json is the
             #    transaction commit point (mirrors confirm_generate).
@@ -488,19 +551,16 @@ def import_backup(
             }
             _storage.save_meta(root, meta)
     except BaseException:
-        # Rollback — best-effort, each step independently suppressed so the
-        # ORIGINAL failure always propagates via the bare ``raise``.
-        # ``BaseException`` so a KeyboardInterrupt mid-import still cleans up.
-        with contextlib.suppress(Exception):
-            shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
-        with contextlib.suppress(OSError):
-            commit_path.unlink(missing_ok=True)
-        with contextlib.suppress(Exception):
-            backend.delete_enclave_key(imported_key_id)
-        with contextlib.suppress(Exception):
-            repaired = _storage.load_meta(root)
-            if repaired["keys"].pop(new_key_id_hash_hex, None) is not None:
-                _storage.save_meta(root, repaired)
+        # Rollback — best-effort; the ORIGINAL failure always propagates via
+        # the bare ``raise``. ``BaseException`` so a KeyboardInterrupt
+        # mid-import still cleans up.
+        _rollback_import(
+            root,
+            new_key_id_hash_hex=new_key_id_hash_hex,
+            commit_path=commit_path,
+            imported_key_id=imported_key_id,
+            backend=backend,
+        )
         raise
 
     return imported_key_id
