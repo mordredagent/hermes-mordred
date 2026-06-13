@@ -196,10 +196,30 @@ target-version = "py311"
 
 [tool.ruff.lint]
 # E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade,
-# SIM: simplify, RUF: ruff-specific. Keep narrow at Phase 0; expand as
-# real plugin code lands.
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# SIM: simplify, RUF: ruff-specific. C901 + PLR0912/PLR0915 are the
+# function-complexity caps (cyclomatic complexity / branches / statements).
+# They were enabled (Tier C) once the Tier A + Tier B refactors brought every
+# hotspot under threshold, so the gate now prevents silent regression.
+# PLR0913 (too-many-args) is deliberately NOT enabled — the crypto signers
+# take intentional keyword-only params, which is good design, not a smell.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "C901", "PLR0912", "PLR0915"]
 ignore = []
+
+# Explicit complexity thresholds. These equal ruff's current defaults and are
+# pinned here so a future ruff default change can't silently loosen the gate.
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+
+[tool.ruff.lint.per-file-ignores]
+# Complexity caps target production-code maintainability. Test functions are
+# intentionally long (arrange-act-assert across many cases) and splitting them
+# hurts readability, so tests are exempt from the complexity rules ONLY — all
+# other lint rules still apply to tests.
+"tests/**" = ["C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.format]
 # Defaults are intentional: double quotes, trailing commas auto, LF.
