@@ -42,6 +42,7 @@ __all__ = [
     "cli_init",
     "cli_migrate",
     "cli_status",
+    "ensure_initialised",
     "init",
     "migrate",
     "status",
@@ -323,6 +324,48 @@ def init(
     print("  At-rest protection uses this device's key store (Secure Enclave when available, else a software key).")
     print("  Keep your recovery passphrase safe — it is the only way to open this vault if the device is lost.")
     return 0
+
+
+def ensure_initialised(
+    *,
+    root: Path,
+    prompt_io: PromptIO | None = None,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Create the vault if it is missing; no-op (return 0) if it already exists.
+
+    The high-level ``encryption enable`` path *drives* the vault (USAGE §4, "the
+    three storage layers"): a first enable on a fresh install creates the vault
+    inline — prompting once for a recovery passphrase via :func:`init` — instead
+    of failing with a "run ``vault init``" error. An already-initialised vault is
+    left untouched, so repeat enables never re-prompt.
+
+    Returns 0 when the vault exists (or was just created), 1 on a create failure
+    (passphrase mismatch / empty, Secure-Enclave / Keychain error) or when the
+    vault state cannot be determined (fail-closed, mirroring :func:`init`).
+    """
+    from ..keyvault import anchor
+
+    if store is None:
+        from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+        store = KeychainAnchorStore()
+
+    anchor_label = _vault_identity(root)
+    try:
+        if store.read(anchor_label) is not None:
+            return 0  # vault already initialised — nothing to do
+    except (anchor.AnchorError, OSError) as exc:
+        # Fail-closed: we cannot prove the vault is absent, so do not risk
+        # clobbering one with a fresh init (matches the guard in `init`).
+        print(f"Cannot determine vault state at {root}: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"No vault yet at {root} — creating one (this is where `encryption` stores secrets at rest).")
+    # `store` is already resolved above, so `init` reuses this instance rather than
+    # opening a second Keychain connection — keep the resolution before delegating.
+    return init(root=root, prompt_io=prompt_io, backend=backend, store=store)
 
 
 def add(

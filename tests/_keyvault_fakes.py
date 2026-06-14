@@ -88,3 +88,29 @@ class FakeAnchorStore:
     def delete(self, label: str) -> None:
         self.calls.append(("delete", label))
         self._items.pop(label, None)
+
+
+class FixedPassphrasePromptIO:
+    """Minimal :class:`~mordred_hermes.wizard.configure.PromptIO` for vault-create
+    tests — returns the same passphrase for every ``ask_password`` (benign
+    defaults for text / choice prompts), so no TTY is touched.
+
+    ``vault_cli.init`` asks for the passphrase twice and requires a match, so a
+    fixed non-empty value confirms cleanly; ``""`` drives the empty-passphrase
+    refusal path. ``password_calls`` lets a test assert the create path was (or
+    was not) reached.
+    """
+
+    def __init__(self, passphrase: str) -> None:
+        self.passphrase = passphrase
+        self.password_calls = 0
+
+    def ask_choice(self, label: str, choices: object, default: str) -> str:
+        return default
+
+    def ask_text(self, label: str, default: str = "") -> str:
+        return default
+
+    def ask_password(self, label: str) -> str:
+        self.password_calls += 1
+        return self.passphrase

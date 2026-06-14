@@ -31,6 +31,7 @@ from ..keyvault._config_bootstrap import _marker_path
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
+    from .configure import PromptIO
 
 __all__ = ["cli_disable", "cli_enable", "disable", "enable"]
 
@@ -48,13 +49,17 @@ def enable(
     root: Path,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    prompt_io: PromptIO | None = None,
 ) -> int:
     """Enroll ``<home>/config.yaml`` into the vault and write the opt-in marker.
 
-    Returns 0 on success, 1 when there is no config.yaml to protect or the enroll
-    fails (uninitialised / unverifiable vault, device key-store error). The marker
-    is written only after a clean enroll, so a failure never marks config.yaml as
-    vault-managed without a vault copy behind it.
+    If no vault exists yet, one is created first (prompting once for a recovery
+    passphrase) — ``encryption enable`` drives the vault, so a fresh install need
+    not run ``vault init`` by hand. Returns 0 on success, 1 when there is no
+    config.yaml to protect, the vault cannot be created, or the enroll fails
+    (unverifiable vault, device key-store error). The marker is written only after
+    a clean enroll, so a failure never marks config.yaml as vault-managed without
+    a vault copy behind it.
     """
     from . import vault_cli
 
@@ -62,6 +67,10 @@ def enable(
     if not config_path.is_file():
         print(f"no config.yaml at {config_path} — nothing to protect.", file=sys.stderr)
         return 1
+
+    rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    if rc != 0:
+        return rc  # could not create the vault (reason already printed)
 
     rc = vault_cli.add(root=root, name=_CONFIG_NAME, source=config_path, backend=backend, store=store)
     if rc != 0:

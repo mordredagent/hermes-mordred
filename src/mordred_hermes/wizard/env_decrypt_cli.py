@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
+    from .configure import PromptIO
 
 __all__ = ["disable", "enable", "purge"]
 
@@ -122,13 +123,17 @@ def enable(
     platform: str,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    prompt_io: PromptIO | None = None,
 ) -> int:
     """Enroll ``<home>/.env`` into the vault and turn runtime injection on.
 
-    Returns 0 on success, 1 when there is no ``.env`` to protect or the enroll
-    fails (uninitialised / unverifiable vault, device key-store error). On macOS
-    the plaintext is removed only after a clean enroll, so a failure never strands
-    the operator without a readable ``.env``.
+    If no vault exists yet, one is created first (prompting once for a recovery
+    passphrase) — ``encryption enable`` drives the vault, so a fresh install need
+    not run ``vault init`` by hand. Returns 0 on success, 1 when there is no
+    ``.env`` to protect, the vault cannot be created, or the enroll fails
+    (unverifiable vault, device key-store error). On macOS the plaintext is
+    removed only after a clean enroll, so a failure never strands the operator
+    without a readable ``.env``.
     """
     from . import vault_cli
 
@@ -136,6 +141,10 @@ def enable(
     if not env_path.is_file():
         print(f"no .env at {env_path} — nothing to protect.", file=sys.stderr)
         return 1
+
+    rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    if rc != 0:
+        return rc  # could not create the vault (reason already printed)
 
     rc = vault_cli.add(root=root, name=_ENV_NAME, source=env_path, backend=backend, store=store)
     if rc != 0:

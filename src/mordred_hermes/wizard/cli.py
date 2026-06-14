@@ -678,7 +678,7 @@ def main(argv: list[str] | None = None) -> int:
             "  hermes-mordred configure              interactive setup (policy / LLM / harness)\n"
             "  hermes-mordred network init           optional: Tor / VPN / clearnet privacy path\n"
             "  hermes-mordred keyvault init          create the hardware-backed keyvault\n"
-            "  hermes-mordred encryption enable env  turn on at-rest encryption per target\n"
+            "  hermes-mordred encryption enable env  turn on at-rest encryption (first run creates the vault)\n"
             "  hermes-mordred status                 check the result at a glance\n"
             "\n"
             "Storage commands, from high- to low-level:\n"

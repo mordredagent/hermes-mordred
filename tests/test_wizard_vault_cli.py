@@ -28,7 +28,7 @@ from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault._storage import KeyvaultPermissionError
 from mordred_hermes.wizard import vault_cli, vault_memory_key
 
-from ._keyvault_fakes import FakeAnchorStore, FakeBackend
+from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 
 class _ReadRaisesStore(FakeAnchorStore):
@@ -218,6 +218,66 @@ class TestInit:
         rc = vault_cli.cli_init(argparse.Namespace(root=str(tmp_path)))
         assert rc == 0
         assert seen["root"] == tmp_path
+
+
+class TestEnsureInitialised:
+    """`ensure_initialised` — the create-the-vault-on-first-`encryption enable` path."""
+
+    def test_noop_when_vault_already_exists(self, tmp_path: Path) -> None:
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        assert (
+            vault_cli.init(
+                root=root, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]), backend=backend, store=store
+            )
+            == 0
+        )
+        # An existing vault is left untouched and never re-prompts: an empty
+        # password queue would IndexError if `init` were (wrongly) re-entered.
+        rc = vault_cli.ensure_initialised(root=root, prompt_io=_PromptIO(passwords=[]), backend=backend, store=store)
+        assert rc == 0
+
+    def test_creates_vault_when_missing(self, tmp_path: Path) -> None:
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        rc = vault_cli.ensure_initialised(
+            root=root, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]), backend=backend, store=store
+        )
+        assert rc == 0
+        vault.recover_vault(root, _PASSPHRASE).close()  # a real cold-path-recoverable vault now exists
+
+    def test_prompts_only_once_across_repeated_calls(self, tmp_path: Path) -> None:
+        """`encryption enable all` fans out over targets — the vault must be created
+        (and the passphrase asked) on the first call only; a second call with the
+        same store is a silent no-op that never re-prompts."""
+        root = tmp_path / "v"
+        backend, store = FakeBackend(), FakeAnchorStore()
+        prompt = FixedPassphrasePromptIO(_PASSPHRASE)
+        assert vault_cli.ensure_initialised(root=root, prompt_io=prompt, backend=backend, store=store) == 0
+        assert vault_cli.ensure_initialised(root=root, prompt_io=prompt, backend=backend, store=store) == 0
+        # 2 = the first call's confirm-twice; the second call must not prompt again.
+        assert prompt.password_calls == 2
+
+    def test_empty_passphrase_returns_1_and_writes_nothing(self, tmp_path: Path) -> None:
+        root = tmp_path / "v"
+        rc = vault_cli.ensure_initialised(
+            root=root, prompt_io=_PromptIO(passwords=["", ""]), backend=FakeBackend(), store=FakeAnchorStore()
+        )
+        assert rc == 1
+        with pytest.raises(vault.VaultError):  # nothing was written
+            vault.recover_vault(root, "")
+
+    def test_fail_closed_when_anchor_read_errors(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """A transient Keychain read failure must not be read as 'no vault' and
+        clobber a possibly-existing one — ensure returns 1 and creates nothing."""
+        rc = vault_cli.ensure_initialised(
+            root=tmp_path / "v",
+            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
+            backend=FakeBackend(),
+            store=_ReadRaisesStore(),
+        )
+        assert rc == 1
+        assert "determine vault state" in capsys.readouterr().err.lower()
 
 
 class TestAdd:

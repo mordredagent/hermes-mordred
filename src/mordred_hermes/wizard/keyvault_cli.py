@@ -632,7 +632,8 @@ def init_keyvault(
 
     print(f"Keyvault initialised. Key: {result.key_id}")
     print(
-        "Next: `hermes-mordred encryption enable env` to encrypt secrets at rest, "
+        "Next: `hermes-mordred encryption enable env` to encrypt secrets at rest "
+        "(the first enable creates the vault and asks once for a recovery passphrase), "
         "or `hermes-mordred status` for an overview."
     )
     return 0

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
+    from .configure import PromptIO
 
 __all__ = ["disable", "enable", "purge"]
 
@@ -150,14 +151,21 @@ def enable(
     root: Path,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    prompt_io: PromptIO | None = None,
 ) -> int:
     """Ensure the memory key in the vault and turn the config flag on.
 
-    Returns 0 on success, 1 on an uninitialised / unverifiable vault, a device
-    key-store error (propagated from :func:`set_memory_key`), or an unexpected
-    config.yaml shape.
+    If no vault exists yet, one is created first (prompting once for a recovery
+    passphrase) — ``encryption enable`` drives the vault, so a fresh install need
+    not run ``vault init`` by hand. Returns 0 on success, 1 when the vault cannot
+    be created or opened, a device key-store error (propagated from
+    :func:`set_memory_key`), or an unexpected config.yaml shape.
     """
-    from . import vault_memory_key
+    from . import vault_cli, vault_memory_key
+
+    rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    if rc != 0:
+        return rc  # could not create the vault (reason already printed)
 
     rc = vault_memory_key.set_memory_key(root=root, rotate=False, backend=backend, store=store)
     if rc != 0:

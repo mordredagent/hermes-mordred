@@ -32,7 +32,7 @@ from mordred_hermes.keyvault import _identity, _runtime_env, vault
 from mordred_hermes.keyvault._runtime_env import _env_optout_marker_path
 from mordred_hermes.wizard import env_decrypt_cli
 
-from ._keyvault_fakes import FakeAnchorStore, FakeBackend
+from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
 _ENV_A = b"ANTHROPIC_API_KEY=sk-secret\n"
@@ -92,6 +92,45 @@ class TestEnable:
         rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
         assert rc == 1
         assert _vault_env(root, backend, store) is None
+
+    def test_auto_creates_vault_when_missing(self, tmp_path: Path) -> None:
+        """A first enable with no vault creates it inline (prompting once for a
+        passphrase), then enrolls — no manual ``vault init`` needed."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        (home / ".env").write_bytes(_ENV_A)
+
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="linux",
+            backend=backend,
+            store=store,
+            prompt_io=FixedPassphrasePromptIO(_PASSPHRASE),
+        )
+        assert rc == 0
+        assert _vault_env(root, backend, store) == _ENV_A  # vault created + .env enrolled
+
+    def test_auto_creates_vault_then_removes_plaintext_on_macos(self, tmp_path: Path) -> None:
+        """macOS path: a first enable with no vault creates it inline, enrolls
+        `.env`, then removes the plaintext (the runtime injects from the vault)."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        (home / ".env").write_bytes(_ENV_A)
+
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            prompt_io=FixedPassphrasePromptIO(_PASSPHRASE),
+        )
+        assert rc == 0
+        assert _vault_env(root, backend, store) == _ENV_A
+        assert not (home / ".env").exists()  # plaintext removed after a clean enroll
 
     def test_keeps_plaintext_if_disk_diverges_from_vault(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

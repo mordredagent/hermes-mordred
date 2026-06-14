@@ -28,7 +28,7 @@ from mordred_hermes.keyvault import _identity, vault
 from mordred_hermes.wizard import memory_cli
 from mordred_hermes.wizard.vault_memory_key import _MEMORY_KEY_ENV, _is_valid_memory_key
 
-from ._keyvault_fakes import FakeAnchorStore, FakeBackend
+from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
 
@@ -97,11 +97,33 @@ class TestEnable:
         assert data["foo"] == "bar"
         assert data["memory"]["encryption"]["enabled"] is True
 
-    def test_uninitialised_vault_is_error(self, tmp_path: Path) -> None:
+    def test_missing_vault_is_auto_created_then_key_set(self, tmp_path: Path) -> None:
+        """A first memory enable on a fresh install creates the vault inline
+        (prompting once), seals the key, and sets the flag — no manual init."""
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
         (home / "config.yaml").write_text("model: x\n", encoding="utf-8")
-        rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore())
+        backend, store = FakeBackend(), FakeAnchorStore()
+
+        rc = memory_cli.enable(
+            home=home, root=root, backend=backend, store=store, prompt_io=FixedPassphrasePromptIO(_PASSPHRASE)
+        )
+        assert rc == 0
+        assert _MEMORY_KEY_ENV in _vault_env_text(root, backend, store)
+        assert _raw_flag(home) is True
+
+    def test_vault_create_refused_is_error(self, tmp_path: Path) -> None:
+        """An empty passphrase refuses the vault create: enable fails."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        (home / "config.yaml").write_text("model: x\n", encoding="utf-8")
+        rc = memory_cli.enable(
+            home=home,
+            root=root,
+            backend=FakeBackend(),
+            store=FakeAnchorStore(),
+            prompt_io=FixedPassphrasePromptIO(""),
+        )
         assert rc == 1
 
 

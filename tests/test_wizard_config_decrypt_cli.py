@@ -19,7 +19,7 @@ from mordred_hermes.keyvault import _identity, vault
 from mordred_hermes.keyvault._config_bootstrap import _marker_path
 from mordred_hermes.wizard import config_decrypt_cli
 
-from ._keyvault_fakes import FakeAnchorStore, FakeBackend
+from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
 _CONFIG = b"model: gpt-x\napi_key: should-stay-encrypted\n"
@@ -63,12 +63,35 @@ class TestEnable:
         assert rc == 1
         assert not _marker_path(home).exists()
 
-    def test_uninitialised_vault_is_error_and_no_marker(self, tmp_path: Path) -> None:
+    def test_missing_vault_is_auto_created_then_enrolled(self, tmp_path: Path) -> None:
+        """A first enable on a fresh install creates the vault inline (prompting
+        once for a passphrase), then enrolls — no manual ``vault init`` needed."""
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
         (home / "config.yaml").write_bytes(_CONFIG)
-        # vault never initialised → enroll must fail and the marker must NOT be written
-        rc = config_decrypt_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore())
+        backend, store = FakeBackend(), FakeAnchorStore()
+
+        rc = config_decrypt_cli.enable(
+            home=home, root=root, backend=backend, store=store, prompt_io=FixedPassphrasePromptIO(_PASSPHRASE)
+        )
+        assert rc == 0
+        assert _marker_path(home).exists()
+        assert _read_vault_config(root, backend, store) == _CONFIG
+
+    def test_vault_create_refused_leaves_no_marker(self, tmp_path: Path) -> None:
+        """An empty passphrase refuses the vault create: nothing is enrolled and
+        config.yaml is never marked vault-managed (fail-closed)."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        (home / "config.yaml").write_bytes(_CONFIG)
+
+        rc = config_decrypt_cli.enable(
+            home=home,
+            root=root,
+            backend=FakeBackend(),
+            store=FakeAnchorStore(),
+            prompt_io=FixedPassphrasePromptIO(""),
+        )
         assert rc == 1
         assert not _marker_path(home).exists()
 
