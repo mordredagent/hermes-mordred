@@ -327,3 +327,164 @@ class TestCliDispatch:
 
         assert cli.main(["encryption", "purge", "memory", "--yes"]) == 0
         assert called["n"] == 1
+
+
+# -----------------------------------------------------------------------------
+# `all` pseudo-target — best-effort fan-out over every target, workspace gated.
+# -----------------------------------------------------------------------------
+class TestCliDispatchAll:
+    def _patch_home(self, monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+        monkeypatch.setattr(encryption_cli, "_hermes_home", lambda: home)
+
+    def _spy_engines(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        verb: str,
+        *,
+        rc_for: dict[str, int] | None = None,
+    ) -> dict[str, int]:
+        """Replace every per-target engine ``verb`` with a counting spy.
+
+        Returns a dict mapping target -> call count (a target absent from the
+        dict was never invoked). ``rc_for`` overrides the exit code a given
+        target's spy returns (default 0). The spies are silent so stdout
+        assertions see only the ``all`` summary block.
+        """
+        from mordred_hermes.wizard import config_decrypt_cli, env_decrypt_cli, memory_cli, workspace_cli
+
+        rc_for = rc_for or {}
+        calls: dict[str, int] = {}
+
+        def make(name: str) -> object:
+            def _spy(*_a: object, **_k: object) -> int:
+                calls[name] = calls.get(name, 0) + 1
+                return rc_for.get(name, 0)
+
+            return _spy
+
+        monkeypatch.setattr(env_decrypt_cli, verb, make("env"))
+        monkeypatch.setattr(config_decrypt_cli, verb, make("config"))
+        monkeypatch.setattr(memory_cli, verb, make("memory"))
+        # workspace dispatch goes through the cli_<verb> wrappers, not <verb>.
+        monkeypatch.setattr(workspace_cli, f"cli_{verb}", make("workspace"))
+        return calls
+
+    def test_enable_all_runs_core_and_workspace_on_macos(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "enable")
+        rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: True)
+        assert rc == 0
+        assert calls == {"env": 1, "config": 1, "memory": 1, "workspace": 1}
+
+    def test_enable_all_skips_workspace_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "enable")
+        rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
+        assert rc == 0
+        assert calls == {"env": 1, "config": 1, "memory": 1}  # workspace skipped, not failed
+
+    def test_enable_all_skips_workspace_when_tooling_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "enable")
+        rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: False)
+        assert rc == 0
+        assert "workspace" not in calls
+        assert calls["env"] == 1
+
+    def test_all_continues_past_failure_and_reports_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "enable", rc_for={"memory": 1})
+        rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
+        assert rc == 1  # a target failed
+        assert calls == {"env": 1, "config": 1, "memory": 1}  # every core target still attempted
+
+    def test_enable_all_prints_contiguous_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_home(monkeypatch, tmp_path / "home")
+        self._spy_engines(monkeypatch, "enable")  # silent spies → output is only the summary
+        encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        # Header + one line per target + a trailing, indented totals line — together.
+        assert "encryption enable all:" in lines
+        assert any("workspace" in ln and "skipped" in ln for ln in lines)
+        assert "  3 ok, 0 failed, 1 skipped" in lines  # indented roll-up (not the old prefixed form)
+
+    def test_enable_all_via_cli_accepts_all_choice(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard import cli
+
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "enable")
+        monkeypatch.setattr(encryption_cli, "_workspace_eligible", lambda *_a, **_k: (False, "test"))
+        assert cli.main(["encryption", "enable", "all"]) == 0
+        assert calls == {"env": 1, "config": 1, "memory": 1}
+
+    def test_purge_all_requires_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard import cli
+
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "purge")
+        monkeypatch.setattr(encryption_cli, "_workspace_eligible", lambda *_a, **_k: (False, "test"))
+        assert cli.main(["encryption", "purge", "all"]) != 0  # gate refuses
+        assert calls == {}  # never reached the engines
+
+    def test_purge_all_with_yes_dispatches(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard import cli
+
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "purge")
+        monkeypatch.setattr(encryption_cli, "_workspace_eligible", lambda *_a, **_k: (False, "test"))
+        assert cli.main(["encryption", "purge", "all", "--yes"]) == 0
+        assert calls == {"env": 1, "config": 1, "memory": 1}
+
+
+# -----------------------------------------------------------------------------
+# `_workspace_eligible` — the workspace gate for `all` (M1: direct unit coverage)
+# -----------------------------------------------------------------------------
+class TestWorkspaceEligible:
+    def test_non_macos_never_eligible(self) -> None:
+        ok, reason = encryption_cli._workspace_eligible("enable", platform="linux", on_path=lambda _n: True)
+        assert ok is False
+        assert "macOS" in reason
+
+    def test_enable_eligible_with_tooling(self) -> None:
+        ok, _ = encryption_cli._workspace_eligible("enable", platform="darwin", on_path=lambda _n: True)
+        assert ok is True
+
+    def test_enable_skipped_without_tooling(self) -> None:
+        ok, reason = encryption_cli._workspace_eligible("enable", platform="darwin", on_path=lambda _n: False)
+        assert ok is False
+        assert "tooling" in reason
+
+    def test_purge_eligible_when_volume_set_up(self, tmp_path: Path) -> None:
+        image = tmp_path / "claude-private.sparsebundle"
+        image.write_text("x")
+        blob = tmp_path / "passphrase.wrapped"
+        blob.write_text("y")
+        ws = encryption_cli.WorkspacePaths(image=image, blob=blob, mount=tmp_path / "mnt")
+        # on_path is irrelevant for purge — only on-disk artifacts decide eligibility.
+        ok, _ = encryption_cli._workspace_eligible("purge", platform="darwin", on_path=lambda _n: False, workspace=ws)
+        assert ok is True
+
+    def test_purge_skipped_when_not_set_up(self, tmp_path: Path) -> None:
+        ws = encryption_cli.WorkspacePaths(
+            image=tmp_path / "absent.sparsebundle",
+            blob=tmp_path / "absent.wrapped",
+            mount=tmp_path / "mnt",
+        )
+        ok, reason = encryption_cli._workspace_eligible("purge", platform="darwin", on_path=lambda _n: True, workspace=ws)
+        assert ok is False
+        assert "not set up" in reason
+
+
+def test_all_core_targets_derived_from_targets() -> None:
+    """L1: ``_ALL_CORE_TARGETS`` is the leading slice of ``TARGETS`` (no drift)."""
+    assert encryption_cli.TARGETS[-1] == "workspace"
+    assert encryption_cli._ALL_CORE_TARGETS == ("env", "config", "memory")
+    assert encryption_cli._ALL_CORE_TARGETS == encryption_cli.TARGETS[:-1]

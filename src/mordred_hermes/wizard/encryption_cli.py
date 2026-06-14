@@ -366,21 +366,138 @@ def _dispatch(verb: str, target: str) -> int:
     return 2
 
 
+# -----------------------------------------------------------------------------
+# `all` pseudo-target — best-effort fan-out of one verb over every target.
+# -----------------------------------------------------------------------------
+#: Targets an ``all`` fan-out always attempts, in order. Derived from ``TARGETS``
+#: (its leading entries) so the two never drift; ``workspace`` is the trailing
+#: entry and is handled separately (eligibility-gated) because it is macOS-only
+#: and its ``enable`` drives a heavyweight external setup.
+_ALL_CORE_TARGETS: tuple[str, ...] = TARGETS[:-1]
+
+
+def _default_on_path() -> Callable[[str], bool]:
+    """Production ``on_path``: is a helper binary resolvable on ``$PATH``?"""
+    import shutil
+
+    return lambda name: shutil.which(name) is not None
+
+
+def _workspace_eligible(
+    verb: str,
+    *,
+    platform: str,
+    on_path: Callable[[str], bool],
+    workspace: WorkspacePaths | None = None,
+) -> tuple[bool, str]:
+    """Decide whether an ``all`` fan-out should touch the workspace target.
+
+    Skipping (rather than failing) keeps ``all`` best-effort: the workspace is
+    macOS-only and its ``enable`` builds + mounts an external volume, so a Linux
+    host or a Mac without the tooling is reported *skipped*, not failed.
+
+    - non-macOS → never eligible.
+    - ``enable`` on macOS → eligible only when both helper binaries are present
+      (otherwise ``enable`` would just error — tell the user to set it up first).
+    - ``disable`` / ``purge`` on macOS → eligible only when the volume is already
+      set up (image + wrapped passphrase on disk); else there is nothing to do.
+    """
+    if platform != _DARWIN:
+        return False, "macOS only"
+    if verb == "enable":
+        if on_path("claude-private") and on_path("claude-vault-key"):
+            return True, ""
+        return False, "workspace tooling not installed — run `encryption enable workspace` to set it up"
+    ws = workspace if workspace is not None else _default_workspace_paths()
+    if ws.image.exists() and ws.blob.exists():
+        return True, ""
+    return False, "workspace not set up"
+
+
+def _run_target(verb: str, target: str) -> tuple[str, int]:
+    """Dispatch one target for an ``all`` fan-out; return ``(status_label, exit_code)``.
+
+    The engine streams its own detail to stdout here; the caller emits the
+    one-line per-target status afterwards as a single contiguous summary block.
+    """
+    rc = _dispatch(verb, target)
+    return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
+
+
+def _print_all_summary(verb: str, outcomes: list[tuple[str, str]], *, failed: int, skipped: int) -> None:
+    """Print the contiguous result block after all per-target engine output."""
+    print(f"encryption {verb} all:")
+    for target, status in outcomes:
+        print(f"  {target.ljust(9)} {status}")
+    ok = len(outcomes) - failed - skipped
+    print(f"  {ok} ok, {failed} failed, {skipped} skipped")
+
+
+def _dispatch_all(
+    verb: str,
+    *,
+    platform: str | None = None,
+    on_path: Callable[[str], bool] | None = None,
+) -> int:
+    """Fan ``verb`` out over every target, best-effort. Returns an exit code.
+
+    Core vault targets (env / config / memory) are always attempted; workspace
+    is eligibility-gated (see :func:`_workspace_eligible`) and a skip never
+    counts as a failure. Every target runs even if an earlier one failed; the
+    exit code is non-zero iff at least one *attempted* target failed. Per-target
+    engine output streams inline; the ok/FAILED/skipped roll-up prints once at
+    the end as a single block (see :func:`_print_all_summary`).
+    """
+    platform = sys.platform if platform is None else platform
+    on_path = _default_on_path() if on_path is None else on_path
+
+    outcomes: list[tuple[str, str]] = []
+    failed = 0
+    for target in _ALL_CORE_TARGETS:
+        status, rc = _run_target(verb, target)
+        outcomes.append((target, status))
+        failed += rc != 0
+
+    eligible, reason = _workspace_eligible(verb, platform=platform, on_path=on_path)
+    if eligible:
+        status, rc = _run_target(verb, "workspace")
+        outcomes.append(("workspace", status))
+        failed += rc != 0
+        skipped = 0
+    else:
+        outcomes.append(("workspace", f"skipped ({reason})"))
+        skipped = 1
+
+    _print_all_summary(verb, outcomes, failed=failed, skipped=skipped)
+    return 1 if failed else 0
+
+
 def cli_enable(args: argparse.Namespace) -> int:
+    if args.target == "all":
+        return _dispatch_all("enable")
     return _dispatch("enable", args.target)
 
 
 def cli_disable(args: argparse.Namespace) -> int:
+    if args.target == "all":
+        return _dispatch_all("disable")
     return _dispatch("disable", args.target)
 
 
 def cli_purge(args: argparse.Namespace) -> int:
     """``encryption purge <target> --yes`` — destructive; refuse without --yes."""
     if not bool(getattr(args, "yes", False)):
+        scope = (
+            "ALL encrypted copies (env, config, memory, workspace)"
+            if args.target == "all"
+            else "the encrypted copy"
+        )
         print(
-            f"encryption purge {args.target} is destructive (removes the encrypted copy). "
+            f"encryption purge {args.target} is destructive (removes {scope}). "
             "Re-run with --yes to confirm.",
             file=sys.stderr,
         )
         return 2
+    if args.target == "all":
+        return _dispatch_all("purge")
     return _dispatch("purge", args.target)

@@ -361,7 +361,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
 def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser(
         "encryption",
-        help="Unified at-rest encryption toggle (env / config / memory / workspace)",
+        help="Unified at-rest encryption toggle (env / config / memory / workspace / all)",
     )
     esub = p.add_subparsers(dest="encryption_command", required=True, metavar="COMMAND")
 
@@ -370,8 +370,9 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_status.set_defaults(func=_handle_encryption_status)
 
     # enable / disable / purge over all four targets (workspace is macOS-only and
-    # gated at runtime; status reports all four).
-    _toggle_targets = ["env", "config", "memory", "workspace"]
+    # gated at runtime; status reports all four). The `all` pseudo-target fans the
+    # verb out over every target, best-effort (workspace skipped when ineligible).
+    _toggle_targets = ["env", "config", "memory", "workspace", "all"]
 
     p_enable = esub.add_parser("enable", help="Turn on at-rest encryption for a target")
     p_enable.add_argument("target", choices=_toggle_targets)
