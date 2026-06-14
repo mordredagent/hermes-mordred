@@ -12,7 +12,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
-- ``keyvault {init,list,verify-digest,recover,enable-se,enable-tpm}`` — keyvault management
+- ``keyvault {init,list,verify-digest,recover,reset,enable-se,enable-tpm}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — list discovered Mordred plugins
 """
@@ -239,6 +239,18 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_recover = ksub.add_parser("recover", help="Restore from a backup blob")
     p_recover.add_argument("--blob", required=True)
     p_recover.set_defaults(func=_handle_keyvault_recover)
+    p_reset = ksub.add_parser(
+        "reset",
+        help="Destroy all key material and remove the keyvault (irreversible)",
+    )
+    p_reset.add_argument(
+        "-y",
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="Skip the interactive confirmation (for scripted / non-interactive use).",
+    )
+    p_reset.set_defaults(func=_handle_keyvault_reset)
     p_enable_se = ksub.add_parser(
         "enable-se",
         help="Build + install the hardware Secure Enclave helper (ad-hoc signed; no Apple Developer account)",
@@ -526,6 +538,12 @@ def _handle_keyvault_recover(args: argparse.Namespace) -> int:
     from . import keyvault_cli
 
     return keyvault_cli.cli_recover(args)
+
+
+def _handle_keyvault_reset(args: argparse.Namespace) -> int:
+    from . import keyvault_cli
+
+    return keyvault_cli.cli_reset(args)
 
 
 def _handle_keyvault_enable_se(args: argparse.Namespace) -> int:

@@ -26,6 +26,7 @@ itself remains the sole writer (PATHS.md).
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -45,10 +46,12 @@ __all__ = [
     "cli_init",
     "cli_list",
     "cli_recover",
+    "cli_reset",
     "cli_verify_digest",
     "init_keyvault",
     "list_keys",
     "recover",
+    "reset_keyvault",
     "verify_digest",
 ]
 
@@ -659,3 +662,125 @@ def cli_recover(args: argparse.Namespace) -> int:
 def cli_init(args: argparse.Namespace) -> int:
     """argparse handler for ``keyvault init`` (encrypted seed storage by default)."""
     return init_keyvault(store_seed_for_hd=getattr(args, "store_seed_for_hd", True))
+
+
+def cli_reset(args: argparse.Namespace) -> int:
+    """argparse handler for ``keyvault reset [--yes]``."""
+    return reset_keyvault(assume_yes=bool(getattr(args, "assume_yes", False)))
+
+
+# -----------------------------------------------------------------------------
+# keyvault reset — destroy all key material (irreversible).
+# -----------------------------------------------------------------------------
+
+#: Phrase the operator must type to confirm an interactive reset.
+_RESET_CONFIRM_PHRASE = "reset"
+
+
+def _collect_reset_key_ids(root: Path) -> list[str]:
+    """Every ``key_id`` whose Secure-Enclave wrapping key ``reset`` must delete.
+
+    The on-disk ``meta.json`` rows are authoritative for the keys actually
+    written, but a corrupt or missing meta must not strand SE material — so the
+    well-known default key and the audit-log wrapping key are always included.
+    ``delete_wrapping_key`` is idempotent, so over-listing is harmless.
+    """
+    from ..keyvault.api import _DEFAULT_KEY_ID
+    from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+    ids = {_DEFAULT_KEY_ID, AUDIT_LOG_KEY_ID}
+    try:
+        meta = _storage.load_meta(root)
+    except _storage.KeyvaultCorruptError:
+        return sorted(ids)
+    for row in meta.get("keys", {}).values():
+        key_id = row.get("key_id")
+        if isinstance(key_id, str):
+            ids.add(key_id)
+    return sorted(ids)
+
+
+def _confirm_reset(prompt_io: PromptIO, key_ids: list[str]) -> bool:
+    """Show the irreversible-destruction warning and require the operator to type
+    the confirmation phrase. Returns True only on an exact (stripped) match.
+    """
+    print(
+        "\n"
+        "WARNING: keyvault reset DESTROYS all key material — this cannot be undone.\n"
+        "  The only way back is `keyvault recover` with your 24-word Seed Phrase,\n"
+        "  Passphrase and backup blob. Without them, any wallet or secret derived\n"
+        "  from this keyvault is lost permanently.\n"
+        f"  Keys to destroy: {', '.join(key_ids)}\n",
+        file=sys.stderr,
+    )
+    answer = prompt_io.ask_text(f"Type {_RESET_CONFIRM_PHRASE!r} to confirm")
+    return answer.strip() == _RESET_CONFIRM_PHRASE
+
+
+def _delete_wrapping_keys(key_ids: list[str], *, backend: NativeBackend | None) -> None:
+    """Best-effort delete of each Secure-Enclave wrapping key. A failure degrades
+    to a printed note — the on-disk removal is the authoritative destruction.
+    """
+    from ..keyvault import wrap
+    from ..keyvault._exceptions import WrapError
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    for key_id in key_ids:
+        try:
+            wrap.delete_wrapping_key(key_id, backend=backend)
+        except WrapError as exc:
+            print(
+                f"note: could not delete Secure Enclave key {key_id!r} ({exc}); "
+                "remove it manually via Keychain Access if it lingers.",
+                file=sys.stderr,
+            )
+
+
+def reset_keyvault(
+    *,
+    home: Path | None = None,
+    backend: NativeBackend | None = None,
+    prompt_io: PromptIO | None = None,
+    assume_yes: bool = False,
+) -> int:
+    """Destroy the keyvault: delete every Secure-Enclave wrapping key and remove
+    the on-disk keyvault directory. Irreversible.
+
+    Returns 0 once the keyvault is gone (or was already absent), 1 if the operator
+    declines the confirmation. ``assume_yes`` skips the interactive prompt for
+    scripted use; tests inject ``prompt_io`` / ``backend``.
+    """
+    root = _resolve_root(home)
+    if not root.exists():
+        print("No keyvault found — nothing to reset.", file=sys.stderr)
+        return 0
+
+    key_ids = _collect_reset_key_ids(root)
+    if not assume_yes:
+        if prompt_io is None:
+            from .configure import PromptToolkitIO
+
+            prompt_io = PromptToolkitIO()
+        if not _confirm_reset(prompt_io, key_ids):
+            print("Reset aborted — nothing was deleted.", file=sys.stderr)
+            return 1
+
+    _delete_wrapping_keys(key_ids, backend=backend)
+    try:
+        shutil.rmtree(root)
+    except OSError as exc:
+        # The Secure-Enclave keys are already deleted, so the keyvault is
+        # unrecoverable regardless — but report honestly rather than emit a
+        # traceback, and point the operator at the leftover directory.
+        print(
+            f"Secure Enclave keys deleted, but the keyvault directory could not be "
+            f"removed ({exc}); remove {root} manually.",
+            file=sys.stderr,
+        )
+        return 1
+    print("Keyvault reset — all key material destroyed.")
+    print("Run `hermes-mordred keyvault init` to create a new key.")
+    return 0

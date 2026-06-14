@@ -130,7 +130,7 @@ Secure-Enclave `NativeBackend`, no `cryptography`.
 
 Implementation: `keyvault_cli.py`.
 
-### `keyvault {init,recover}`
+### `keyvault {init,recover,reset}`
 
 Backend-coupled keyvault commands (Phase 4 PR10) — they build the
 production Secure-Enclave `_SecKeyBackend`.
@@ -146,6 +146,13 @@ production Secure-Enclave `_SecKeyBackend`.
 - `keyvault recover --blob <path>` — restore a keyvault from an
   `export_backup` blob: prompts for the Seed Phrase + Passphrase,
   recomputes the seed-bound PoW, and calls `api.import_backup`.
+- `keyvault reset` — **irreversibly** destroy all key material: delete
+  every Secure-Enclave wrapping key (each `meta.json` key plus the
+  well-known default + audit-log ids) and remove the on-disk keyvault
+  directory. The interactive path requires the operator to type a
+  confirmation phrase; `--yes` skips it for scripted use. Recovery is
+  only possible afterward via `keyvault recover` with the backed-up Seed
+  Phrase, Passphrase and blob.
 
 Exit codes: `0` (done), `1` (any refusal — see the command's stderr).
 
