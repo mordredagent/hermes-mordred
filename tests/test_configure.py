@@ -63,6 +63,11 @@ class _ScriptedPromptIO:
     def ask_bool(self, label: str, default: bool) -> bool:
         return bool(self._pop("bool", label, default))
 
+    def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
+        val = self._pop("multi", label, default)
+        assert isinstance(val, (list, tuple)), f"ask_multi expects a sequence answer, got {val!r}"
+        return tuple(str(v) for v in val)
+
     def ask_password(self, label: str, default: str = "") -> str:
         """Same FIFO contract as ask_text but kind tag distinguishes for
         diagnostics so a future test can confirm the wizard used password
@@ -88,20 +93,26 @@ def _writer(tmp_path: Path) -> PolicyWriter:
     )
 
 
-# The seven core prompts collected by ``configure`` after the network split.
-# Order: policy, allow_cloud_llm, allowlist, local endpoint, local model,
-# cloud attempt action, agent harness.
+# The core prompts collected by ``configure`` after the network split.
+# Order: policy, allow_cloud_llm, [allowlist], local endpoint, local model,
+# cloud attempt action, agent harness. The allowlist prompt (a checkbox
+# multi-select) is ONLY asked when ``allow_cloud`` is True, so the scripted
+# FIFO must omit its answer otherwise -- mirroring ``collect_answers``.
 def _core_answers(
     *,
     policy: str = "lenient",
     allow_cloud: bool = False,
-    allowlist: str = "",
+    allowlist: Sequence[str] = (),
     endpoint: str = "http://x/v1",
     model: str = "",
     cloud_attempt: str = "always-block",
     harness: str = "none",
 ) -> list[object]:
-    return [policy, allow_cloud, allowlist, endpoint, model, cloud_attempt, harness]
+    answers: list[object] = [policy, allow_cloud]
+    if allow_cloud:
+        answers.append(tuple(allowlist))
+    answers += [endpoint, model, cloud_attempt, harness]
+    return answers
 
 
 # -----------------------------------------------------------------------------
@@ -115,7 +126,7 @@ class TestCollectAnswers:
             answers=_core_answers(
                 policy="strict",
                 allow_cloud=True,
-                allowlist="anthropic,openai",
+                allowlist=("anthropic", "openai"),
                 endpoint="http://example/v1",
                 model="llama-3",
                 cloud_attempt="prompt-once",
@@ -142,21 +153,34 @@ class TestCollectAnswers:
         assert result.snapshot.cloud_provider_allowlist == ()
         assert result.snapshot.harness_primary == "none"
 
-    def test_csv_whitespace_stripped(self) -> None:
-        prompts = _ScriptedPromptIO(answers=_core_answers(policy="off", allowlist="  anthropic ,  openai  ,"))
+    def test_multi_select_allowlist_stored_verbatim(self) -> None:
+        """The checkbox selection is persisted as-is (no parsing)."""
+        prompts = _ScriptedPromptIO(
+            answers=_core_answers(policy="off", allow_cloud=True, allowlist=("anthropic", "openai"))
+        )
         result = collect_answers(prompts)
         assert result.snapshot.cloud_provider_allowlist == ("anthropic", "openai")
 
+    def test_allowlist_prompt_skipped_when_cloud_disallowed(self) -> None:
+        """``allow_cloud=No`` must NOT ask the allowlist (UX request 2026-06-14)."""
+        prompts = _ScriptedPromptIO(answers=_core_answers(allow_cloud=False))
+        result = collect_answers(prompts)
+        labels = [label for _, label, _ in prompts.seen]
+        assert "Cloud provider allowlist (select which providers to permit)" not in labels
+        assert len(labels) == 6, "exactly six prompts when cloud is disallowed (no allowlist)"
+        assert result.snapshot.cloud_provider_allowlist == ()
+
     def test_prompt_order_is_stable_and_jargon_free(self) -> None:
         """Order matters for snapshot tests; lock it explicitly. The labels
-        must also carry no internal ``(Phase N)`` jargon (user request)."""
-        prompts = _ScriptedPromptIO(answers=_core_answers())
+        must also carry no internal ``(Phase N)`` jargon (user request). Uses
+        ``allow_cloud=True`` so the (now gated) allowlist prompt is exercised."""
+        prompts = _ScriptedPromptIO(answers=_core_answers(allow_cloud=True, allowlist=("anthropic",)))
         collect_answers(prompts)
         labels = [label for _, label, _ in prompts.seen]
         assert labels == [
             "Mordred policy mode",
             "Allow cloud LLM providers (passes through provider override)?",
-            "Cloud provider allowlist (comma-separated; empty = none)",
+            "Cloud provider allowlist (select which providers to permit)",
             "Local LLM endpoint URL",
             "Local LLM model id",
             "On cloud LLM attempt under strict mode",
@@ -176,7 +200,8 @@ class TestRun:
         prompts = _ScriptedPromptIO(
             answers=_core_answers(
                 policy="strict",
-                allowlist="anthropic",
+                allow_cloud=True,
+                allowlist=("anthropic",),
                 endpoint="http://x/v1",
                 model="qwen",
                 cloud_attempt="prompt-once",
@@ -192,7 +217,7 @@ class TestRun:
         body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
         assert body == {
             "policy": "strict",
-            "allow_cloud_llm": False,
+            "allow_cloud_llm": True,
             "cloud_provider_allowlist": ["anthropic"],
             "audit_log_path": None,
             "local_llm_endpoint": "http://x/v1",
@@ -668,13 +693,14 @@ class TestSnapshotFromArgsHardening:
 
 
 class _FakeDialog:
-    """Stand-in for the object ``radiolist_dialog`` returns; ``run`` yields
-    the scripted result (``None`` simulates the user cancelling)."""
+    """Stand-in for the object ``radiolist_dialog`` / ``checkboxlist_dialog``
+    returns; ``run`` yields the scripted result (``None`` simulates the user
+    cancelling). ``result`` is a str for radio, a list for checkbox."""
 
-    def __init__(self, result: str | None) -> None:
+    def __init__(self, result: object) -> None:
         self._result = result
 
-    def run(self) -> str | None:
+    def run(self) -> object:
         return self._result
 
 
@@ -736,6 +762,28 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         assert io.ask_bool("Allow?", default) is expected
 
+    def test_ask_multi_returns_selected_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_checkboxlist_dialog(*, title: str, values: object, default_values: object) -> _FakeDialog:
+            captured.update(title=title, values=values, default_values=default_values)
+            return _FakeDialog(["anthropic", "openai"])
+
+        monkeypatch.setattr("prompt_toolkit.shortcuts.checkboxlist_dialog", fake_checkboxlist_dialog)
+        io = configure.PromptToolkitIO()
+        assert io.ask_multi("Allowlist", ("anthropic", "openai", "gemini"), ()) == ("anthropic", "openai")
+        assert captured["title"] == "Allowlist"
+        assert captured["values"] == [("anthropic", "anthropic"), ("openai", "openai"), ("gemini", "gemini")]
+        assert captured["default_values"] == []
+
+    def test_ask_multi_cancelled_returns_empty_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "prompt_toolkit.shortcuts.checkboxlist_dialog",
+            lambda *, title, values, default_values: _FakeDialog(None),
+        )
+        io = configure.PromptToolkitIO()
+        assert io.ask_multi("Allowlist", ("anthropic",), ()) == ()
+
     def test_ask_password_masks_input_and_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen_kwargs: dict[str, object] = {}
 
@@ -755,6 +803,7 @@ class TestPromptToolkitIO:
             ("ask_choice", ("label", ("a",), "a")),
             ("ask_text", ("label",)),
             ("ask_bool", ("label", True)),
+            ("ask_multi", ("label", ("a", "b"))),
             ("ask_password", ("label",)),
         ],
     )
@@ -776,3 +825,22 @@ def test_coerce_cloud_attempt_action_rejects_unknown_value() -> None:
     instead of letting an invalid action reach the PolicySnapshot."""
     with pytest.raises(ValueError, match="invalid cloud_attempt_action"):
         configure._coerce_cloud_attempt_action("sometimes")
+
+
+class TestSelectableCloudProviders:
+    """The allowlist checkbox is sourced from the network flagger's canonical
+    registry so the wizard never drifts from the transport-compat layer."""
+
+    def test_excludes_localhost_provider(self) -> None:
+        assert "mordred-local" not in configure._SELECTABLE_CLOUD_PROVIDERS
+
+    def test_includes_known_cloud_providers(self) -> None:
+        providers = configure._SELECTABLE_CLOUD_PROVIDERS
+        assert "anthropic" in providers
+        assert "openai" in providers
+
+    def test_matches_known_providers_minus_localhost(self) -> None:
+        from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
+
+        expected = tuple(name for name, e in KNOWN_PROVIDERS.items() if not e.localhost_only)
+        assert expected == configure._SELECTABLE_CLOUD_PROVIDERS

@@ -28,11 +28,22 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
+
+from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
 from .policy_writer import PolicySnapshot, PolicyWriter
 
 _LOG = logging.getLogger("mordred.wizard.configure")
+
+#: Cloud providers offered as checkbox choices for the allowlist prompt.
+#: Sourced from the network flagger's canonical registry so the wizard and the
+#: transport-compat layer never drift. Localhost-only providers
+#: (``mordred-local``) are excluded -- a local endpoint is never a *cloud*
+#: allowlist entry.
+_SELECTABLE_CLOUD_PROVIDERS: Final[tuple[str, ...]] = tuple(
+    name for name, entry in KNOWN_PROVIDERS.items() if not entry.localhost_only
+)
 
 
 # -----------------------------------------------------------------------------
@@ -62,6 +73,7 @@ class PromptIO(Protocol):
     def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str: ...
     def ask_text(self, label: str, default: str = "") -> str: ...
     def ask_bool(self, label: str, default: bool) -> bool: ...
+    def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]: ...
     def ask_password(self, label: str, default: str = "") -> str: ...
 
 
@@ -152,6 +164,27 @@ class PromptToolkitIO:
         suffix = "[Y/n]" if default else "[y/N]"
         return _parse_bool_answer(prompt(f"{label} {suffix}: "), default=default)
 
+    def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
+        """Multi-select via ``checkboxlist_dialog``.
+
+        Returns the chosen subset (empty tuple if the user selects nothing
+        or cancels). Like :meth:`ask_choice`'s ``radiolist_dialog`` it renders
+        in SSH / Docker / TTY-without-tput, and replaces the old free-text
+        comma-separated entry so users pick from known providers instead of
+        guessing names (UX request 2026-06-14).
+        """
+        try:
+            from prompt_toolkit.shortcuts import checkboxlist_dialog
+        except ImportError as e:
+            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
+        values = [(c, c) for c in choices]
+        result: list[str] | None = checkboxlist_dialog(
+            title=label,
+            values=values,
+            default_values=list(default),
+        ).run()
+        return tuple(result) if result is not None else ()
+
     def ask_password(self, label: str, default: str = "") -> str:
         """Read a secret with shell-history-safe echoing.
 
@@ -194,6 +227,9 @@ class _RefusingPromptIO:
     def ask_bool(self, label: str, default: bool) -> bool:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
+    def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
+        raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
+
     def ask_password(self, label: str, default: str = "") -> str:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
@@ -226,11 +262,19 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         label="Allow cloud LLM providers (passes through provider override)?",
         default=False,
     )
-    cloud_csv = prompt_io.ask_text(
-        label="Cloud provider allowlist (comma-separated; empty = none)",
-        default="",
-    )
-    cloud_provider_allowlist = tuple(p.strip() for p in cloud_csv.split(",") if p.strip())
+    # Only ask *which* providers to permit when cloud is actually allowed. An
+    # allowlist is meaningless under "no cloud", and it has no effect at all
+    # outside strict mode (see ``llm_guard.enforce``), so skipping it keeps the
+    # common local-only flow short (UX request 2026-06-14). The choices come
+    # from a checkbox so users pick known provider ids instead of typing them.
+    if allow_cloud_llm:
+        cloud_provider_allowlist = prompt_io.ask_multi(
+            label="Cloud provider allowlist (select which providers to permit)",
+            choices=_SELECTABLE_CLOUD_PROVIDERS,
+            default=(),
+        )
+    else:
+        cloud_provider_allowlist = ()
 
     local_llm_endpoint = prompt_io.ask_text(
         label="Local LLM endpoint URL",
