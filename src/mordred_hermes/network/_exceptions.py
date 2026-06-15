@@ -55,6 +55,16 @@ class UnknownPath(MordredNetworkError):
     """Path name is not one of ``tor`` / ``vpn`` / ``clearnet``."""
 
 
+class UnknownVpnProvider(MordredNetworkError):
+    """Configured ``vpn_provider`` name is not a registered provider.
+
+    Raised by :func:`mordred_hermes.network.vpn_providers.build_provider`
+    when ``plugins.mordred_network.vpn_provider`` names a provider the
+    registry does not know. Recoverable: the wizard / CLI surfaces the
+    list of known providers so the operator can fix the config.
+    """
+
+
 class BlackoutNotAsserted(MordredNetworkError):
     """Network reachable when ``api.blackout_assert`` required isolation.
 

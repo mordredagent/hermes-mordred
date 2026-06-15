@@ -51,7 +51,7 @@ from .api import NetworkStatus
 from .guidance import tor_install_guidance
 from .paths import clearnet as clearnet_mod
 from .paths import tor as tor_mod
-from .paths import vpn as vpn_mod
+from .vpn_providers import VpnProvider, build_provider
 
 _LOG = logging.getLogger("mordred.network.runtime")
 
@@ -98,6 +98,11 @@ class RuntimeConfig:
     tor_binary: str = "tor"
     tor_socks_port: int = 0  # 0 = ask the picker; non-zero = pin
     tor_data_dir: Path = field(default_factory=lambda: Path("~/.hermes/mordred/tor-data").expanduser())
+    vpn_provider: str = "mullvad"  # selects the provider behind the "vpn" path
+    wireguard_config_path: str | None = None  # for vpn_provider="wireguard"
+    custom_up_cmd: tuple[str, ...] = ()  # for vpn_provider="custom"
+    custom_down_cmd: tuple[str, ...] = ()
+    custom_health_cmd: tuple[str, ...] | None = None
     mullvad_region: str = "auto"
     disable_ipv6: bool = True
     no_proxy_extra: tuple[str, ...] = ()
@@ -167,11 +172,7 @@ class Runtime:
         tor_wait_for_bootstrap: Callable[..., None] | None = None,
         tor_stop: Callable[..., None] | None = None,
         tor_health: Callable[..., bool] | None = None,
-        vpn_detect_cli: Callable[..., str] | None = None,
-        vpn_bring_up: Callable[..., Any] | None = None,
-        vpn_wait_connected: Callable[..., None] | None = None,
-        vpn_disconnect: Callable[..., None] | None = None,
-        vpn_health: Callable[..., bool] | None = None,
+        vpn_provider: VpnProvider | None = None,
     ) -> None:
         self._config = config or RuntimeConfig()
         self._audit = audit
@@ -185,11 +186,20 @@ class Runtime:
         self._tor_wait = tor_wait_for_bootstrap or tor_mod.wait_for_bootstrap
         self._tor_stop = tor_stop or tor_mod.stop
         self._tor_health = tor_health or tor_mod.health
-        self._vpn_detect = vpn_detect_cli or vpn_mod.detect_cli
-        self._vpn_bring_up = vpn_bring_up or vpn_mod.bring_up
-        self._vpn_wait = vpn_wait_connected or vpn_mod.wait_connected
-        self._vpn_disconnect = vpn_disconnect or vpn_mod.disconnect
-        self._vpn_health = vpn_health or vpn_mod.health
+        # The "vpn" path delegates to a selectable provider (Mullvad by
+        # default). Production constructs the runtime without a provider,
+        # so it is resolved from config here; tests inject a fake.
+        self._vpn_provider: VpnProvider = (
+            vpn_provider
+            if vpn_provider is not None
+            else build_provider(
+                self._config.vpn_provider,
+                wireguard_config_path=self._config.wireguard_config_path,
+                custom_up_cmd=self._config.custom_up_cmd,
+                custom_down_cmd=self._config.custom_down_cmd,
+                custom_health_cmd=self._config.custom_health_cmd,
+            )
+        )
 
         self._lock = threading.RLock()
         self._state: State = State.IDLE
@@ -282,7 +292,7 @@ class Runtime:
         if handle_snapshot.path == "tor":
             healthy = self._tor_health(h)
         elif handle_snapshot.path == "vpn":
-            healthy = self._vpn_health(h)
+            healthy = self._vpn_provider.health(h)
         else:
             healthy = clearnet_mod.health(h)
 
@@ -506,6 +516,22 @@ class Runtime:
         )
 
     def _bring_up_vpn(self) -> _ActiveHandle:
+        # Fail-closed kill-switch gate (design §6): strict mode demands a
+        # provider that can guarantee a verifiable kill-switch / in-tunnel
+        # DNS. A provider without that capability (a bring-your-own
+        # WireGuard config, an opaque vendor CLI) is refused here BEFORE
+        # any tunnel is brought up, rather than running strict traffic
+        # without leak protection. lenient / off skip this gate, so any
+        # VPN is usable for normal sessions — only the strict guarantee is
+        # reserved for Mullvad-grade providers. Raising BringupFailed lets
+        # the _switch strict path escalate to MordredPathBringupFailed.
+        provider = self._vpn_provider
+        if self._config.policy_mode == "strict" and not provider.capabilities.killswitch:
+            raise BringupFailed(
+                f"vpn provider {provider.name!r} cannot guarantee a kill-switch, "
+                "which strict mode requires. Use a kill-switch-capable provider "
+                "(e.g. mullvad), or set policy to lenient/off to use this provider."
+            )
         # Codex round 4 P1 (2026-05-14): symmetric to the Tor OSError
         # wrap (r3-P1). Mullvad CLI invocations can raise OSError
         # (binary missing, daemon socket permission, etc.). The strict
@@ -513,45 +539,45 @@ class Runtime:
         # bare OSError would be swallowed by Hermes' invoke_hook and
         # strict mode would fail open.
         try:
-            cli_path = self._vpn_detect()
+            cli_path = self._vpn_provider.detect_cli()
         except OSError as detect_err:
-            raise BringupFailed(f"mullvad CLI detect failed: {detect_err}") from detect_err
+            raise BringupFailed(f"vpn provider detect failed: {detect_err}") from detect_err
         try:
-            vpn_handle = self._vpn_bring_up(
+            vpn_handle = self._vpn_provider.bring_up(
                 cli_path=cli_path,
                 region=self._config.mullvad_region,
                 policy_mode=self._config.policy_mode,
             )
         except OSError as bring_err:
-            raise BringupFailed(f"mullvad bring-up failed: {bring_err}") from bring_err
+            raise BringupFailed(f"vpn provider bring-up failed: {bring_err}") from bring_err
         # Codex r8-P1-B (2026-05-14): preserve the user's pre-existing
         # lockdown setting on cleanup; only clear what WE applied.
         # ``MullvadHandle.lockdown_applied_by_us`` records whether we
         # flipped it so we never strip security posture the user
-        # established before Mordred ran. Mullvad CLI 2026.2 dropped
-        # the separate ``always-require-vpn`` rollback path (now
-        # subsumed by ``lockdown-mode``).
-        preserve_on_cleanup = not vpn_handle.lockdown_applied_by_us
+        # established before Mordred ran. ``getattr`` keeps this generic
+        # for providers whose handle has no lockdown concept (WireGuard,
+        # custom) — they default to "preserve" (a no-op for them).
+        preserve_on_cleanup = not getattr(vpn_handle, "lockdown_applied_by_us", False)
         try:
-            self._vpn_wait(cli_path=cli_path)
+            self._vpn_provider.wait_connected(cli_path=cli_path)
         except BringupFailed:
             try:
-                self._vpn_disconnect(
+                self._vpn_provider.disconnect(
                     vpn_handle,
                     preserve_lockdown=preserve_on_cleanup,
                 )
             except Exception as cleanup_err:
-                _LOG.warning("mullvad cleanup after wait failure: %s", cleanup_err)
+                _LOG.warning("vpn cleanup after wait failure: %s", cleanup_err)
             raise
         except OSError as wait_err:
             try:
-                self._vpn_disconnect(
+                self._vpn_provider.disconnect(
                     vpn_handle,
                     preserve_lockdown=preserve_on_cleanup,
                 )
             except Exception as cleanup_err:
-                _LOG.warning("mullvad cleanup after wait OSError: %s", cleanup_err)
-            raise BringupFailed(f"mullvad wait failed: {wait_err}") from wait_err
+                _LOG.warning("vpn cleanup after wait OSError: %s", cleanup_err)
+            raise BringupFailed(f"vpn provider wait failed: {wait_err}") from wait_err
         return _ActiveHandle("vpn", vpn_handle)
 
     def _teardown_current(self) -> None:
@@ -563,7 +589,7 @@ class Runtime:
                 self._tor_stop(h)
             elif self._handle.path == "vpn":
                 preserve = self._config.policy_mode == "strict"
-                self._vpn_disconnect(h, preserve_lockdown=preserve)
+                self._vpn_provider.disconnect(h, preserve_lockdown=preserve)
             else:
                 clearnet_mod.stop(h)
         except Exception as e:

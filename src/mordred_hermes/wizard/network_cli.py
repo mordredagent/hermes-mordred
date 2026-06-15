@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shlex
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -85,6 +86,59 @@ _MULLVAD_RELAY_DESCRIPTION: Final[str] = (
 _MULLVAD_KILLSWITCH_DESCRIPTION: Final[str] = (
     "VPN route only — lockdown mode: block all traffic if the VPN drops, so your real IP can't leak."
 )
+
+#: Provider selector shown when the `vpn` route is in play. Mullvad is the
+#: recommended default (strict-capable); wireguard / custom let you use any
+#: other VPN (off / lenient only — see QUICKSTART "Using a different VPN").
+_VPN_PROVIDER_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "mullvad": "Recommended. Paid Mullvad account; the only provider allowed in strict mode.",
+    "wireguard": "Any VPN with a WireGuard `.conf` (Proton VPN, IVPN, self-hosted). off/lenient only.",
+    "custom": "Any VPN driven by its own CLI (ExpressVPN, NordVPN). off/lenient only.",
+}
+_VPN_PROVIDER_DESCRIPTION: Final[str] = (
+    "VPN route only — which VPN to use. `mullvad` (recommended) or `wireguard` / `custom` for any other VPN."
+)
+_WIREGUARD_CONFIG_DESCRIPTION: Final[str] = (
+    "wireguard provider only — path to your WireGuard `.conf` (exported from Proton VPN, IVPN, etc.)."
+)
+_CUSTOM_UP_DESCRIPTION: Final[str] = (
+    "custom provider only — command that connects the VPN, e.g. `expressvpn connect` or `nordvpn connect`."
+)
+_CUSTOM_DOWN_DESCRIPTION: Final[str] = (
+    "custom provider only — command that disconnects the VPN, e.g. `expressvpn disconnect`."
+)
+_CUSTOM_HEALTH_DESCRIPTION: Final[str] = (
+    "custom provider only — optional command that reports tunnel status, e.g. `expressvpn status` (blank = none)."
+)
+
+
+def _split_cmd(raw: str) -> tuple[str, ...]:
+    """Parse a command string into an argv tuple (shell-style, no exec).
+
+    ``shlex.split`` only tokenises (handles quotes/spaces); it never runs a
+    shell, so this is purely how the operator's typed command becomes the
+    argv list the custom provider executes without ``shell=True``.
+    """
+    try:
+        return tuple(shlex.split(raw.strip()))
+    except ValueError:
+        # Unbalanced quotes etc. — fall back to a naive split so a typo
+        # doesn't abort the whole `network init` session.
+        return tuple(raw.split())
+
+
+def _join_cmd(value: object) -> str:
+    """Render a stored argv list back to an editable command string."""
+    if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
+        return shlex.join(value)
+    return ""
+
+
+def _seed_cmd(value: object) -> tuple[str, ...]:
+    """Coerce a stored YAML argv list to a tuple (else empty)."""
+    if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
+        return tuple(value)
+    return ()
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +323,13 @@ class NetworkAnswers:
     mullvad_account_id_env: str  # always ``MORDRED_MULLVAD_ACCOUNT``
     mullvad_relay_country: str  # "auto" | 2-letter code
     mullvad_killswitch: bool
+    # Pluggable VPN provider behind the `vpn` route. Defaults keep older
+    # callers / configs on Mullvad unchanged.
+    vpn_provider: str = "mullvad"  # "mullvad" | "wireguard" | "custom"
+    wireguard_config_path: str = ""  # vpn_provider="wireguard"
+    custom_up_cmd: tuple[str, ...] = ()  # vpn_provider="custom"
+    custom_down_cmd: tuple[str, ...] = ()
+    custom_health_cmd: tuple[str, ...] = ()
 
     def to_config_yaml_section(self) -> dict[str, object]:
         """The body merged into ``plugins.mordred_network`` in config.yaml.
@@ -276,15 +337,28 @@ class NetworkAnswers:
         Key remap: ``default_network_path`` becomes ``default_path`` on disk so
         the network reader (``mordred_hermes.network`` /
         :func:`_read_default_path_from_config`) keeps working unchanged.
+
+        Provider-specific keys are emitted only when set, so a Mullvad config
+        stays free of empty wireguard/custom entries.
         """
-        return {
+        section: dict[str, object] = {
             "default_path": self.default_network_path,
             "tor_binary_path": self.tor_binary_path,
             "tor_socks_port": self.tor_socks_port,
             "mullvad_account_id_env": self.mullvad_account_id_env,
             "mullvad_relay_country": self.mullvad_relay_country,
             "mullvad_killswitch": self.mullvad_killswitch,
+            "vpn_provider": self.vpn_provider,
         }
+        if self.wireguard_config_path:
+            section["wireguard_config_path"] = self.wireguard_config_path
+        if self.custom_up_cmd:
+            section["custom_up_cmd"] = list(self.custom_up_cmd)
+        if self.custom_down_cmd:
+            section["custom_down_cmd"] = list(self.custom_down_cmd)
+        if self.custom_health_cmd:
+            section["custom_health_cmd"] = list(self.custom_health_cmd)
+        return section
 
 
 def _coerce_tor_socks_port(raw: str) -> int:
@@ -356,6 +430,57 @@ class NetworkInitInputs:
     _mullvad_account_secret: str = field(default="", repr=False)
 
 
+def _collect_vpn_provider(
+    prompt_io: PromptIO, *, existing: Mapping[str, Any]
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Ask which VPN provider to use plus its provider-specific settings.
+
+    Asked after the Mullvad prompts so the Mullvad-only prompt order the
+    older wizard tests rely on is unchanged; the wireguard / custom prompts
+    appear only when that provider is selected. Returns
+    ``(vpn_provider, wireguard_config_path, up, down, health)``.
+    """
+    vpn_provider = prompt_io.ask_choice(
+        label="VPN provider",
+        choices=("mullvad", "wireguard", "custom"),
+        default=str(existing.get("vpn_provider") or "mullvad"),
+        descriptions=_VPN_PROVIDER_DESCRIPTIONS,
+    )
+    wireguard_config_path = ""
+    custom_up: tuple[str, ...] = ()
+    custom_down: tuple[str, ...] = ()
+    custom_health: tuple[str, ...] = ()
+    if vpn_provider == "wireguard":
+        wireguard_config_path = prompt_io.ask_text(
+            label="WireGuard config path",
+            default=str(existing.get("wireguard_config_path") or ""),
+            description=_WIREGUARD_CONFIG_DESCRIPTION,
+        ).strip()
+    elif vpn_provider == "custom":
+        custom_up = _split_cmd(
+            prompt_io.ask_text(
+                label="VPN up command",
+                default=_join_cmd(existing.get("custom_up_cmd")),
+                description=_CUSTOM_UP_DESCRIPTION,
+            )
+        )
+        custom_down = _split_cmd(
+            prompt_io.ask_text(
+                label="VPN down command",
+                default=_join_cmd(existing.get("custom_down_cmd")),
+                description=_CUSTOM_DOWN_DESCRIPTION,
+            )
+        )
+        custom_health = _split_cmd(
+            prompt_io.ask_text(
+                label="VPN health command",
+                default=_join_cmd(existing.get("custom_health_cmd")),
+                description=_CUSTOM_HEALTH_DESCRIPTION,
+            )
+        )
+    return vpn_provider, wireguard_config_path, custom_up, custom_down, custom_health
+
+
 def collect_network_answers(
     prompt_io: PromptIO,
     *,
@@ -418,6 +543,9 @@ def collect_network_answers(
         default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
         description=_MULLVAD_KILLSWITCH_DESCRIPTION,
     )
+    vpn_provider, wireguard_config_path, custom_up, custom_down, custom_health = _collect_vpn_provider(
+        prompt_io, existing=existing
+    )
 
     network_answers = NetworkAnswers(
         default_network_path=default_network_path,
@@ -426,6 +554,11 @@ def collect_network_answers(
         mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
         mullvad_relay_country=mullvad_relay_country,
         mullvad_killswitch=mullvad_killswitch,
+        vpn_provider=vpn_provider,
+        wireguard_config_path=wireguard_config_path,
+        custom_up_cmd=custom_up,
+        custom_down_cmd=custom_down,
+        custom_health_cmd=custom_health,
     )
     return NetworkInitInputs(
         network_answers=network_answers,
@@ -469,6 +602,11 @@ def network_answers_from_args(
         else _coerce_seed_bool(existing.get("mullvad_killswitch", False))
     )
 
+    # The provider selection has no CLI flags yet; a non-interactive re-run
+    # preserves whatever the interactive wizard / config.yaml already set.
+    vpn_provider = str(existing.get("vpn_provider") or "mullvad")
+    wireguard_config_path = str(existing.get("wireguard_config_path") or "")
+
     network_answers = NetworkAnswers(
         default_network_path=path,
         tor_binary_path=tor_binary_path,
@@ -476,6 +614,11 @@ def network_answers_from_args(
         mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
         mullvad_relay_country=mullvad_relay_country,
         mullvad_killswitch=mullvad_killswitch,
+        vpn_provider=vpn_provider,
+        wireguard_config_path=wireguard_config_path,
+        custom_up_cmd=_seed_cmd(existing.get("custom_up_cmd")),
+        custom_down_cmd=_seed_cmd(existing.get("custom_down_cmd")),
+        custom_health_cmd=_seed_cmd(existing.get("custom_health_cmd")),
     )
     return NetworkInitInputs(network_answers=network_answers, _mullvad_account_secret="")
 

@@ -839,6 +839,78 @@ class TestRegisterLoadsWizardNetworkSettings:
         assert runtime._config.mullvad_region == "auto"  # type: ignore[attr-defined]
 
 
+class TestRegisterLoadsVpnProvider:
+    """The pluggable-VPN config keys (vpn_provider + provider-specific
+    settings) persisted under ``plugins.mordred_network`` must reach
+    RuntimeConfig, or selecting a non-Mullvad VPN in config.yaml would be
+    silently ignored at runtime.
+    """
+
+    def _register(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_body: str) -> Any:
+        from mordred_hermes import network as net_pkg
+        from mordred_hermes.network import api
+
+        policy = _write_policy(tmp_path, "off")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(config_body, encoding="utf-8")
+        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._build_audit_writer.cache_clear()
+        net_pkg.register(_FakeCtx())
+        runtime = api._RUNTIME
+        assert runtime is not None
+        return runtime
+
+    def test_reads_wireguard_provider_and_config_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        runtime = self._register(
+            tmp_path,
+            monkeypatch,
+            "plugins:\n"
+            "  mordred_network:\n"
+            "    default_path: vpn\n"
+            "    vpn_provider: wireguard\n"
+            "    wireguard_config_path: /etc/wireguard/wg0.conf\n",
+        )
+        assert runtime._config.vpn_provider == "wireguard"  # type: ignore[attr-defined]
+        assert runtime._config.wireguard_config_path == "/etc/wireguard/wg0.conf"  # type: ignore[attr-defined]
+
+    def test_reads_custom_provider_and_commands(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        runtime = self._register(
+            tmp_path,
+            monkeypatch,
+            "plugins:\n"
+            "  mordred_network:\n"
+            "    default_path: vpn\n"
+            "    vpn_provider: custom\n"
+            "    custom_up_cmd: [expressvpn, connect]\n"
+            "    custom_down_cmd: [expressvpn, disconnect]\n"
+            "    custom_health_cmd: [expressvpn, status]\n",
+        )
+        assert runtime._config.vpn_provider == "custom"  # type: ignore[attr-defined]
+        assert runtime._config.custom_up_cmd == ("expressvpn", "connect")  # type: ignore[attr-defined]
+        assert runtime._config.custom_down_cmd == ("expressvpn", "disconnect")  # type: ignore[attr-defined]
+        assert runtime._config.custom_health_cmd == ("expressvpn", "status")  # type: ignore[attr-defined]
+
+    def test_missing_vpn_provider_defaults_to_mullvad(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        runtime = self._register(
+            tmp_path,
+            monkeypatch,
+            "plugins:\n  mordred_network:\n    default_path: vpn\n",
+        )
+        assert runtime._config.vpn_provider == "mullvad"  # type: ignore[attr-defined]
+
+    def test_invalid_vpn_provider_falls_back_to_mullvad(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An unknown provider name must NOT crash register() via
+        # build_provider -> UnknownVpnProvider; it falls back to mullvad.
+        runtime = self._register(
+            tmp_path,
+            monkeypatch,
+            "plugins:\n  mordred_network:\n    vpn_provider: nope-vpn\n",
+        )
+        assert runtime._config.vpn_provider == "mullvad"  # type: ignore[attr-defined]
+
+
 class TestRegisterLoadsDisableIPv6FromDisk:
     """Phase 3 PR3a Task #2: ``disable_ipv6`` schema in ``policy.json``.
 

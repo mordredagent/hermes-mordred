@@ -472,6 +472,7 @@ class TestNetworkAnswersToConfigYamlSection:
             "mullvad_account_id_env": "MORDRED_MULLVAD_ACCOUNT",
             "mullvad_relay_country": "jp",
             "mullvad_killswitch": True,
+            "vpn_provider": "mullvad",
         }
 
 

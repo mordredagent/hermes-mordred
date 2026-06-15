@@ -149,7 +149,7 @@ def _writer(tmp_path: Path) -> PolicyWriter:
 
 # Full six-prompt answer set: path, tor binary, tor port, mullvad secret,
 # relay country, killswitch.
-_ANSWERS_FULL: list[object] = ["vpn", "/usr/bin/tor", "9150", "MULL-secret-99", "jp", True]
+_ANSWERS_FULL: list[object] = ["vpn", "/usr/bin/tor", "9150", "MULL-secret-99", "jp", True, "mullvad"]
 
 
 # --------------------------------------------------------------------------- #
@@ -181,28 +181,28 @@ class TestCollectNetworkAnswers:
         assert inputs._mullvad_account_secret == "MULL-secret-99"
 
     def test_tor_socks_port_coerced_to_int(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9150", "", "auto", False])
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9150", "", "auto", False, "mullvad"])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.tor_socks_port == 9150
         assert isinstance(inputs.network_answers.tor_socks_port, int)
 
     def test_invalid_tor_socks_port_falls_back_to_default(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "not-a-port", "", "auto", False])
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "not-a-port", "", "auto", False, "mullvad"])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.tor_socks_port == 9050
 
     def test_out_of_range_tor_socks_port_falls_back_to_default(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "70000", "", "auto", False])
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "70000", "", "auto", False, "mullvad"])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.tor_socks_port == 9050
 
     def test_invalid_relay_country_falls_back_to_auto(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "unitedstates", False])
+        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "unitedstates", False, "mullvad"])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.mullvad_relay_country == "auto"
 
     def test_2letter_relay_country_lowercased(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "JP", False])
+        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "JP", False, "mullvad"])
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.mullvad_relay_country == "jp"
 
@@ -210,18 +210,18 @@ class TestCollectNetworkAnswers:
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_FULL))
         collect_network_answers(prompts)
         labels = [label for _, label, _ in prompts.seen]
-        assert len(labels) == 6
+        assert len(labels) == 7
         for label in labels:
             assert "Phase" not in label, f"user-facing label leaks internal jargon: {label!r}"
 
     def test_prompt_secret_false_skips_password_prompt(self) -> None:
-        # Only five answers: no Mullvad password slot is consumed when secret prompt is off.
-        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9050", "auto", False])
+        # Six answers: no Mullvad password slot is consumed when secret prompt is off.
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9050", "auto", False, "mullvad"])
         inputs = collect_network_answers(prompts, prompt_secret=False)
         assert inputs._mullvad_account_secret == ""
         kinds = [k for k, _, _ in prompts.seen]
         assert "password" not in kinds
-        assert len(kinds) == 5
+        assert len(kinds) == 6
 
     def test_every_prompt_carries_an_explanation(self) -> None:
         """UX request 2026-06-15: each ``network init`` prompt must explain
@@ -304,7 +304,7 @@ class TestNetworkInitInputsRedactsSecret:
     ``repr``/``str`` (tracebacks, --showlocals, debuggers call repr)."""
 
     def test_repr_does_not_contain_secret(self) -> None:
-        prompts = _ScriptedPromptIO(answers=["vpn", "/usr/bin/tor", "9050", "DO-NOT-LEAK-XYZ", "auto", True])
+        prompts = _ScriptedPromptIO(answers=["vpn", "/usr/bin/tor", "9050", "DO-NOT-LEAK-XYZ", "auto", True, "mullvad"])
         inputs = collect_network_answers(prompts)
         assert "DO-NOT-LEAK-XYZ" not in repr(inputs)
         assert "DO-NOT-LEAK-XYZ" not in str(inputs)
@@ -327,6 +327,11 @@ class TestNetworkAnswersDataclass:
             "mullvad_account_id_env",
             "mullvad_relay_country",
             "mullvad_killswitch",
+            "vpn_provider",
+            "wireguard_config_path",
+            "custom_up_cmd",
+            "custom_down_cmd",
+            "custom_health_cmd",
         }
 
     def test_to_config_yaml_section_shape(self) -> None:
@@ -345,6 +350,7 @@ class TestNetworkAnswersDataclass:
             "mullvad_account_id_env": "MORDRED_MULLVAD_ACCOUNT",
             "mullvad_relay_country": "jp",
             "mullvad_killswitch": True,
+            "vpn_provider": "mullvad",
         }
 
     def test_is_frozen(self) -> None:
@@ -457,7 +463,7 @@ class TestRunInitRoutesSecret:
     def test_blank_secret_does_not_touch_env_writer(self, tmp_path: Path) -> None:
         """Re-run safety: a blank Mullvad answer keeps the existing secret
         instead of stripping the .env line (Codex review 2026-06-05)."""
-        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "auto", False])
+        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "auto", False, "mullvad"])
         env_w = _SpyEnvFileWriter()
         run_init(
             prompt_io=prompts,
@@ -472,7 +478,7 @@ class TestRunInitRoutesSecret:
     def test_blank_secret_preserves_existing_env_line(self, tmp_path: Path) -> None:
         env_path = tmp_path / ".env"
         env_path.write_text("MORDRED_MULLVAD_ACCOUNT=OLD-SECRET-KEEP\n", encoding="utf-8")
-        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "auto", False])
+        prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "", "auto", False, "mullvad"])
         run_init(
             prompt_io=prompts,
             policy_writer=_writer(tmp_path),
@@ -767,7 +773,7 @@ class TestHandleInit:
         ``.env`` / credentials paths resolved from a patched HERMES_BASE."""
         from mordred_hermes.wizard import network_cli as nc
 
-        scripted = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9050", "MULL-xyz", "jp", True])
+        scripted = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "9050", "MULL-xyz", "jp", True, "mullvad"])
         monkeypatch.setattr(nc, "PromptToolkitIO", lambda: scripted)
         monkeypatch.setattr(nc, "HERMES_BASE", tmp_path)
 
@@ -785,3 +791,38 @@ class TestHandleInit:
         assert "MORDRED_MULLVAD_ACCOUNT=MULL-xyz" in (tmp_path / ".env").read_text(encoding="utf-8")
         assert (tmp_path / "mordred" / "credentials" / "network.json").exists()
         assert "default path" in capsys.readouterr().out.lower()
+
+
+class TestCollectVpnProvider:
+    """The VPN provider selector + provider-specific prompts (Phase 5):
+    Mullvad stays the default; wireguard / custom let any VPN be used.
+    """
+
+    def test_wireguard_selection_collects_config_path(self) -> None:
+        answers = ["vpn", "/usr/bin/tor", "9050", "", "auto", False, "wireguard", "/etc/wireguard/wg0.conf"]
+        na = collect_network_answers(_ScriptedPromptIO(answers=answers)).network_answers
+        assert na.vpn_provider == "wireguard"
+        assert na.wireguard_config_path == "/etc/wireguard/wg0.conf"
+        section = na.to_config_yaml_section()
+        assert section["vpn_provider"] == "wireguard"
+        assert section["wireguard_config_path"] == "/etc/wireguard/wg0.conf"
+
+    def test_custom_selection_collects_commands_as_argv(self) -> None:
+        answers = [
+            "vpn", "/usr/bin/tor", "9050", "", "auto", False,
+            "custom", "expressvpn connect", "expressvpn disconnect", "expressvpn status",
+        ]
+        na = collect_network_answers(_ScriptedPromptIO(answers=answers)).network_answers
+        assert na.vpn_provider == "custom"
+        assert na.custom_up_cmd == ("expressvpn", "connect")
+        assert na.custom_down_cmd == ("expressvpn", "disconnect")
+        assert na.custom_health_cmd == ("expressvpn", "status")
+        # Persisted as YAML lists.
+        assert na.to_config_yaml_section()["custom_up_cmd"] == ["expressvpn", "connect"]
+
+    def test_mullvad_default_omits_provider_specific_keys(self) -> None:
+        na = collect_network_answers(_ScriptedPromptIO(answers=list(_ANSWERS_FULL))).network_answers
+        section = na.to_config_yaml_section()
+        assert section["vpn_provider"] == "mullvad"
+        assert "wireguard_config_path" not in section
+        assert "custom_up_cmd" not in section

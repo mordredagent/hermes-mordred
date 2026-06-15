@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 from .._home import HERMES_BASE
 from . import api, hooks
 from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
+from .vpn_providers import known_providers
 
 if TYPE_CHECKING:
     from ..privacy_check.audit import NDJSONWriter
@@ -128,6 +129,11 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
         tor_binary=_resolve_tor_binary(network),
         tor_socks_port=_resolve_tor_socks_port(network),
         tor_data_dir=HERMES_BASE / "mordred" / "tor-data",
+        vpn_provider=_resolve_vpn_provider(network),
+        wireguard_config_path=_resolve_wireguard_config_path(network),
+        custom_up_cmd=_resolve_custom_cmd(network, "custom_up_cmd"),
+        custom_down_cmd=_resolve_custom_cmd(network, "custom_down_cmd"),
+        custom_health_cmd=_resolve_custom_health_cmd(network),
         mullvad_region=_resolve_mullvad_region(network),
         disable_ipv6=disable_ipv6,
     )
@@ -277,6 +283,47 @@ def _resolve_mullvad_region(network: dict[str, Any]) -> str:
     if isinstance(value, str) and value:
         return value
     return "auto"
+
+
+def _resolve_vpn_provider(network: dict[str, Any]) -> str:
+    """Derive ``RuntimeConfig.vpn_provider`` from ``vpn_provider``.
+
+    Validated against the registered provider names so an unknown value
+    (typo, future provider on an old build) falls back to ``mullvad``
+    instead of crashing plugin registration when ``Runtime`` resolves the
+    provider via ``build_provider`` (which raises ``UnknownVpnProvider``).
+    """
+    value = network.get("vpn_provider", "mullvad")
+    if isinstance(value, str) and value in known_providers():
+        return value
+    return "mullvad"
+
+
+def _resolve_wireguard_config_path(network: dict[str, Any]) -> str | None:
+    """Derive ``RuntimeConfig.wireguard_config_path`` (vpn_provider=wireguard)."""
+    value = network.get("wireguard_config_path")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _resolve_custom_cmd(network: dict[str, Any], key: str) -> tuple[str, ...]:
+    """Derive a custom-provider argv tuple from a YAML list of strings.
+
+    Non-list values, or lists with non-string elements, collapse to an
+    empty tuple so a malformed entry surfaces as a clear "no up command
+    configured" bring-up error rather than a confusing exec failure.
+    """
+    value = network.get(key)
+    if isinstance(value, list) and all(isinstance(x, str) for x in value):
+        return tuple(value)
+    return ()
+
+
+def _resolve_custom_health_cmd(network: dict[str, Any]) -> tuple[str, ...] | None:
+    """Derive ``RuntimeConfig.custom_health_cmd`` (None when unset/empty)."""
+    cmd = _resolve_custom_cmd(network, "custom_health_cmd")
+    return cmd or None
 
 
 def _read_default_path(config_path: Path) -> str:

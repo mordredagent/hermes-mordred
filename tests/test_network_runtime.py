@@ -38,6 +38,7 @@ from mordred_hermes.network._exceptions import (
 )
 from mordred_hermes.network.paths import tor as tor_mod
 from mordred_hermes.network.paths import vpn as vpn_mod
+from mordred_hermes.network.vpn_providers import VpnCapabilities
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
@@ -129,6 +130,12 @@ class _VpnFakes:
     wait_calls: list[dict[str, Any]] = field(default_factory=list)
     disconnect_calls: list[dict[str, Any]] = field(default_factory=list)
     health_return: bool = True
+    killswitch: bool = True  # drives capabilities.killswitch (Phase 2 strict gate)
+    name: str = "fake-vpn"
+
+    @property
+    def capabilities(self) -> VpnCapabilities:
+        return VpnCapabilities(killswitch=self.killswitch, dns_leak_safe=True)
 
     def detect_cli(self, **_: Any) -> str:
         if self.detect_raises is not None:
@@ -204,11 +211,7 @@ def _make_runtime(
         tor_wait_for_bootstrap=tor.wait_for_bootstrap,
         tor_stop=tor.stop,
         tor_health=tor.health,
-        vpn_detect_cli=vpn.detect_cli,
-        vpn_bring_up=vpn.bring_up,
-        vpn_wait_connected=vpn.wait_connected,
-        vpn_disconnect=vpn.disconnect,
-        vpn_health=vpn.health,
+        vpn_provider=vpn,
     )
 
 
@@ -399,6 +402,47 @@ class TestVpnUse:
         rt.use("vpn")
         assert "HTTPS_PROXY" not in env
         assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+        rt.stop()
+
+
+class TestStrictKillswitchGate:
+    """Fail-closed strict mode (approved design §6): a provider that
+    cannot guarantee a verifiable kill-switch is refused under ``strict``
+    policy rather than running without leak protection. ``lenient`` / ``off``
+    allow it — a third-party VPN is fine for normal use, just not for the
+    strict-privacy guarantee that only Mullvad-grade providers satisfy.
+    """
+
+    def test_strict_refuses_provider_without_killswitch(self) -> None:
+        vpn = _VpnFakes(killswitch=False)
+        rt = _make_runtime(vpn_fakes=vpn, policy_mode="strict")
+        with pytest.raises(BringupFailed):
+            rt.use("vpn")
+        # The tunnel must never have been brought up — we refuse first.
+        assert vpn.bring_up_calls == []
+        rt.stop()
+
+    def test_strict_allows_provider_with_killswitch(self) -> None:
+        vpn = _VpnFakes(killswitch=True)
+        rt = _make_runtime(vpn_fakes=vpn, policy_mode="strict")
+        rt.use("vpn")
+        assert len(vpn.bring_up_calls) == 1
+        rt.stop()
+
+    def test_lenient_allows_provider_without_killswitch(self) -> None:
+        vpn = _VpnFakes(killswitch=False)
+        rt = _make_runtime(vpn_fakes=vpn, policy_mode="lenient")
+        rt.use("vpn")
+        assert len(vpn.bring_up_calls) == 1
+        s = rt.status()
+        assert s.active_path == "vpn"
+        rt.stop()
+
+    def test_off_allows_provider_without_killswitch(self) -> None:
+        vpn = _VpnFakes(killswitch=False)
+        rt = _make_runtime(vpn_fakes=vpn, policy_mode="off")
+        rt.use("vpn")
+        assert len(vpn.bring_up_calls) == 1
         rt.stop()
 
 
