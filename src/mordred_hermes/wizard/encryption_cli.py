@@ -488,13 +488,10 @@ def cli_purge(args: argparse.Namespace) -> int:
     """``encryption purge <target> --yes`` — destructive; refuse without --yes."""
     if not bool(getattr(args, "yes", False)):
         scope = (
-            "ALL encrypted copies (env, config, memory, workspace)"
-            if args.target == "all"
-            else "the encrypted copy"
+            "ALL encrypted copies (env, config, memory, workspace)" if args.target == "all" else "the encrypted copy"
         )
         print(
-            f"encryption purge {args.target} is destructive (removes {scope}). "
-            "Re-run with --yes to confirm.",
+            f"encryption purge {args.target} is destructive (removes {scope}). Re-run with --yes to confirm.",
             file=sys.stderr,
         )
         return 2
