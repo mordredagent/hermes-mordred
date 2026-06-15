@@ -59,7 +59,9 @@ class TestSelfTest:
     def test_self_test_exits_zero(self) -> None:
         """``--self-test`` validates SPEC fixed vector and exits 0."""
         result = _run("", "--self-test")
-        assert result.returncode == 0, f"--self-test failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        assert result.returncode == 0, (
+            f"--self-test failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
 
     def test_self_test_mentions_spec_digest(self) -> None:
         """Self-test output reports the SPEC digest hex so an operator
@@ -74,7 +76,9 @@ class TestInteractiveDigest:
         script must print the canonical 32-byte digest hex."""
         stdin = f"{SPEC_SEED}\n{SPEC_PASS}\n{SPEC_POW[:4].hex()}\n"
         result = _run(stdin)
-        assert result.returncode == 0, f"interactive run failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        assert result.returncode == 0, (
+            f"interactive run failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
         assert SPEC_DIGEST.hex() in result.stdout
 
     def test_matches_in_repo_compute_digest(self) -> None:
@@ -183,6 +187,57 @@ class TestOfflinePortability:
         offenders = [m for m in imports if m.split(".", 1)[0] in forbidden]
         assert not offenders, (
             f"scripts/keyvault_offline_digest.py imports {offenders!r} — breaks the stdlib + blake3 invariant"
+        )
+
+
+class TestBlake3Bootstrap:
+    """When ``blake3`` is absent the script must guide the operator instead
+    of dumping a bare ``ModuleNotFoundError``: on a dev checkout it re-execs
+    under the bundled venv so the command ``keyvault init`` prints
+    (``python3 scripts/keyvault_offline_digest.py``) just works; on an
+    air-gapped device it falls through to an install hint.
+
+    These are static source checks (same philosophy as
+    :class:`TestOfflinePortability`): the test environment always has
+    blake3, so the ImportError branch can't be exercised at runtime here.
+    """
+
+    def _source(self) -> str:
+        return _SCRIPT.read_text(encoding="utf-8")
+
+    def test_import_error_is_handled(self) -> None:
+        assert "except ImportError" in self._source()
+
+    def test_reexec_under_bundled_venv_with_loop_guard(self) -> None:
+        src = self._source()
+        assert "os.execv" in src
+        assert ".venv" in src and "mordred-hermes" in src
+        assert "_KV_OFFLINE_REEXEC" in src  # guards against an infinite re-exec loop
+
+    def test_install_hint_mentions_both_paths(self) -> None:
+        src = self._source()
+        assert "pip install blake3" in src  # bare offline device
+        assert "mordred-hermes/.venv/bin/python" in src  # this dev checkout
+
+    def test_reexec_uses_only_stdlib(self) -> None:
+        """The bootstrap must not pull in a third-party package — the
+        offline-portability invariant (stdlib + blake3) still holds."""
+        import ast
+
+        tree = ast.parse(self._source())
+        modules: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                modules.append(node.module or "")
+        third_party = [
+            m
+            for m in modules
+            if m.split(".", 1)[0] not in {*sys.stdlib_module_names, "blake3"}
+        ]
+        assert not third_party, (
+            f"bootstrap introduced non-stdlib import(s): {third_party!r}"
         )
 
 
