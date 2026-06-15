@@ -53,9 +53,17 @@ def is_mullvad_cli_available() -> bool:
 def dependency_warning(path: str, *, tor_binary: str = "tor") -> str | None:
     """Return a warning for a selected path whose external dependency is absent."""
     if path == "tor" and not is_tor_binary_available(tor_binary):
-        return f"[warning] Tor is not available yet. {tor_install_guidance(tor_binary=tor_binary)}"
+        return (
+            "[warning] The `tor` route is selected, but Tor is not available yet, "
+            "so it cannot carry traffic — your connection stays on the current route "
+            f"until you install it. {tor_install_guidance(tor_binary=tor_binary)}"
+        )
     if path == "vpn" and not is_mullvad_cli_available():
-        return f"[warning] Mullvad CLI is not available yet. {mullvad_install_guidance()}"
+        return (
+            "[warning] The `vpn` route is selected, but the Mullvad CLI is not available yet, "
+            "so it cannot carry traffic — your connection stays on the current route "
+            f"until you install it. {mullvad_install_guidance()}"
+        )
     return None
 
 

@@ -114,7 +114,8 @@ def handle_use(args: argparse.Namespace) -> int:
 
     live = _runtime_registered()
     if not live:
-        print(f"set default_path = {target} in {config_path}. Change is deferred to the next `hermes` session.")
+        print(f"Route set to `{target}` (saved to {config_path}).")
+        print("It takes effect on the next `hermes` session; the process running now keeps its current route.")
         warning = _dependency_warning_for_configured_path(config_path, target)
         if warning:
             print(warning)
@@ -125,7 +126,7 @@ def handle_use(args: argparse.Namespace) -> int:
     except MordredNetworkError as e:
         print(f"error: switching to {target} failed: {e}", file=sys.stderr)
         return 1
-    print(f"switched to {target} (also persisted to {config_path}).")
+    print(f"Route switched to `{target}` now (also saved to {config_path}).")
     return 0
 
 

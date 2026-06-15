@@ -270,7 +270,9 @@ class TestNetworkUseStandalone:
 
         assert config.exists()
         out = capsys.readouterr().out
-        assert "next session" in out.lower() or "deferred" in out.lower()
+        # The message must communicate the change applies on the next session
+        # (not the running process), without the old confusing "deferred" wording.
+        assert "next" in out.lower() and "session" in out.lower()
 
     def test_no_runtime_tor_missing_prints_install_guidance(
         self,
