@@ -156,6 +156,11 @@ def _import_quartz() -> Any:
 # is polled tightly across the 60s display window, so without this guard
 # the operator's terminal is flooded with the same warning during init.
 _QUARTZ_IMPORT_WARNED = False
+# Same once-per-process guard for the probe-call path: a Quartz binding
+# that does not expose ``CGScreenIsBeingCaptured`` (raises AttributeError),
+# or any pyobjc-bridge error, would otherwise re-warn on every poll across
+# the 60s window — the noise the operator sees as a wall of identical lines.
+_CAPTURE_PROBE_WARNED = False
 
 
 def _default_capture_probe() -> str | None:
@@ -192,8 +197,21 @@ def _default_capture_probe() -> str | None:
         # via CGGetActiveDisplayList is a v2 hardening option.
         captured = bool(quartz.CGScreenIsBeingCaptured(quartz.CGMainDisplayID()))
     except Exception as exc:
-        # Best-effort: a bridge error must not crash the display flow.
-        _LOG.warning("CGScreenIsBeingCaptured probe failed: %s: %s", type(exc).__name__, exc)
+        # Best-effort: a bridge error (incl. a Quartz build that lacks the
+        # CGScreenIsBeingCaptured symbol) must not crash the display flow.
+        # Warn once per process — the probe is polled every ~0.5s across the
+        # 60s window, so an un-guarded warning floods the terminal.
+        global _CAPTURE_PROBE_WARNED
+        if not _CAPTURE_PROBE_WARNED:
+            _LOG.warning(
+                "screen-capture detection is unavailable on this system; "
+                "continuing without it (best-effort only, M5). The seed is "
+                "still protected by the on-screen warning banner and the 60s "
+                "auto-clear. Underlying probe error: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            _CAPTURE_PROBE_WARNED = True
         return None
 
     return _DETECTOR_SCREEN_CAPTURE if captured else None

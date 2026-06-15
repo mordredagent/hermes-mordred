@@ -442,6 +442,45 @@ def test_default_probe_swallows_bridge_errors(monkeypatch: pytest.MonkeyPatch) -
     assert sd._default_capture_probe() is None  # best-effort
 
 
+def test_default_probe_handles_missing_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Quartz build that does not expose ``CGScreenIsBeingCaptured`` fails open.
+
+    Real-world case the operator hit: pyobjc imports fine, but attribute
+    access on the symbol raises ``AttributeError``. The probe must still
+    return ``None`` rather than crash the seed-display flow.
+    """
+
+    class _QuartzMissingSymbol:
+        def CGMainDisplayID(self) -> int:
+            return 1
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sd, "_import_quartz", lambda: _QuartzMissingSymbol())
+    monkeypatch.setattr(sd, "_CAPTURE_PROBE_WARNED", False)
+    assert sd._default_capture_probe() is None  # best-effort: fail open
+
+
+def test_default_probe_bridge_error_warns_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The probe-failure warning fires once per process, not once per poll.
+
+    The probe is polled every ~0.5s across the 60s seed window; an
+    un-guarded warning floods the operator's terminal with identical lines
+    (the ``CGScreenIsBeingCaptured probe failed`` wall the operator saw).
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(sd, "_import_quartz", lambda: _FakeQuartz(captured=False, raises=True))
+    monkeypatch.setattr(sd, "_CAPTURE_PROBE_WARNED", False)
+
+    with caplog.at_level("WARNING", logger="mordred.keyvault.seed_display"):
+        for _ in range(5):
+            assert sd._default_capture_probe() is None  # best-effort: fail open
+
+    probe_warnings = [r for r in caplog.records if "screen-capture detection is unavailable" in r.getMessage()]
+    assert len(probe_warnings) == 1
+
+
 def test_module_imports_without_quartz() -> None:
     """The module must import on any platform — Quartz is call-time lazy."""
     import importlib
