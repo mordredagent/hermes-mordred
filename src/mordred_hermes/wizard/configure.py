@@ -28,11 +28,16 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
 from .policy_writer import PolicySnapshot, PolicyWriter
+
+if TYPE_CHECKING:
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+    from prompt_toolkit.widgets import CheckboxList, RadioList
 
 _LOG = logging.getLogger("mordred.wizard.configure")
 
@@ -43,6 +48,40 @@ _LOG = logging.getLogger("mordred.wizard.configure")
 #: allowlist entry.
 _SELECTABLE_CLOUD_PROVIDERS: Final[tuple[str, ...]] = tuple(
     name for name, entry in KNOWN_PROVIDERS.items() if not entry.localhost_only
+)
+
+#: One-line description shown inline next to each policy mode in the
+#: ``configure`` radio dialog (UX request 2026-06-15: the bare strict/lenient/off
+#: labels gave no hint of what each mode does). Copy mirrors the policy-mode
+#: table in ``mordred-docs/mordred/QUICKSTART.md`` so the TUI and the docs never
+#: drift. A mode missing here simply renders without a description.
+_POLICY_MODE_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "strict": "Blocks cloud LLMs, disables IPv6, refuses known AI harnesses",
+    "lenient": "Guards active but stay out of your way (recommended)",
+    "off": "Disables all guards entirely",
+}
+
+#: One-line description shown inline next to each cloud-attempt action in the
+#: ``configure`` radio dialog (UX request 2026-06-15, mirroring the policy-mode
+#: descriptions above). ``prompt-once`` is a reserved value -- enforcement is
+#: refuse-only today, so it behaves like ``always-block`` -- and the copy says
+#: so to keep users from expecting an interactive prompt that does not yet
+#: exist. Mirrors the Q6 note in ``mordred-docs/mordred/QUICKSTART.md`` so the
+#: TUI and the docs never drift.
+_CLOUD_ATTEMPT_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "always-block": "Silently refuse the cloud call every time (recommended)",
+    "prompt-once": "Reserved — currently behaves like always-block",
+}
+
+#: Help text shown above the cloud-LLM yes/no prompt. The bare question gave no
+#: hint about the privacy trade-off or what answering yes leads to (UX request
+#: 2026-06-15, sibling of the policy-mode inline descriptions above). It replaces
+#: the old jargon suffix "(passes through provider override)", which named an
+#: implementation detail instead of the choice the user is actually making.
+_CLOUD_LLM_PROMPT_DESCRIPTION: Final[str] = (
+    "Cloud providers (e.g. OpenAI, Anthropic) run models on their own servers, so "
+    "your prompts leave this machine. Choose No to stay fully local and private, or "
+    "Yes to also permit cloud models — you'll pick which providers on the next screen."
 )
 
 
@@ -70,9 +109,16 @@ class PromptIO(Protocol):
     :mod:`mordred_hermes.wizard.network_cli`.
     """
 
-    def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str: ...
+    def ask_choice(
+        self,
+        label: str,
+        choices: Sequence[str],
+        default: str,
+        *,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> str: ...
     def ask_text(self, label: str, default: str = "") -> str: ...
-    def ask_bool(self, label: str, default: bool) -> bool: ...
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool: ...
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]: ...
     def ask_password(self, label: str, default: str = "") -> str: ...
 
@@ -130,21 +176,174 @@ def _parse_bool_answer(answer: str, *, default: bool) -> bool:
     return normalized in _TRUTHY_ANSWERS
 
 
+def _choice_label(choice: str, descriptions: Mapping[str, str] | None) -> str:
+    """Build the displayed radio label for ``choice``.
+
+    With no description the label is just the bare value; otherwise it becomes
+    ``"<choice> — <description>"`` so the explanation sits inline next to the
+    button. The returned *value* of the list widget is always
+    ``values[i][0]`` (the bare ``choice``), so this affects display only --
+    callers and persisted answers keep the bare ``"strict"`` / ``"lenient"`` /
+    ``"off"`` string.
+    """
+    description = (descriptions or {}).get(choice)
+    return f"{choice} — {description}" if description else choice
+
+
+def _choice_values(choices: Sequence[str], descriptions: Mapping[str, str] | None) -> list[tuple[str, str]]:
+    """Map ``choices`` to ``(value, label)`` pairs for the radio dialog.
+
+    The first element (the dialog's returned value) stays the bare choice; only
+    the second (the displayed label) carries any inline description.
+    """
+    return [(c, _choice_label(c, descriptions)) for c in choices]
+
+
+#: Shown above the single-select list so keyboard users discover they need no
+#: mouse (UX request 2026-06-15: the bare dialog forced a click to reach Ok).
+#: Arrows pick a row, Enter confirms it, and Tab still reaches Ok / Cancel.
+_CHOICE_NAV_HINT: Final[str] = "↑/↓ choose · Enter confirm · Tab → Ok / Cancel"
+
+#: Same idea for the multi-select list, where Space (not Enter) toggles rows so
+#: Enter is free to confirm the whole set (UX request 2026-06-15).
+_MULTICHOICE_NAV_HINT: Final[str] = "↑/↓ move · Space toggle · Enter confirm · Tab → Ok / Cancel"
+
+
+def _build_list_app(
+    *,
+    title: str,
+    hint: str,
+    values: list[tuple[str, str]],
+    multiple: bool,
+    default: str | None = None,
+    default_values: Sequence[str] = (),
+) -> Application[Any]:
+    """Build a centered list dialog (radio or checkbox) as an ``Application``.
+
+    Mirrors prompt_toolkit's ``radiolist_dialog`` / ``checkboxlist_dialog`` but
+    adds keyboard affordances and drops the default full-screen blue backdrop
+    for the terminal's own background (UX request 2026-06-15 — the bare dialogs
+    forced a mouse click to reach Ok and flashed a meaningless blue screen):
+
+    * single-select (``multiple=False``): ``select_on_focus`` makes the
+      highlighted row the live value and Enter confirms it; and
+    * multi-select (``multiple=True``): Space toggles rows and Enter confirms
+      the whole set.
+
+    In both cases the eager Enter binding is filtered to the list, so Enter on a
+    focused Ok / Cancel button keeps its native meaning, Tab / Shift-Tab still
+    move focus to the buttons, and the mouse still works. Lazy-imports
+    prompt_toolkit (see :class:`PromptToolkitIO`).
+    """
+    try:
+        from prompt_toolkit.application import Application, get_app
+        from prompt_toolkit.filters import has_focus
+        from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+        from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
+        from prompt_toolkit.key_binding.defaults import load_key_bindings
+        from prompt_toolkit.layout import HSplit, Layout
+        from prompt_toolkit.styles import Style
+        from prompt_toolkit.widgets import Button, CheckboxList, Dialog, Label, RadioList
+    except ImportError as e:
+        raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
+
+    body: CheckboxList[str] | RadioList[str]
+    if multiple:
+        checkbox: CheckboxList[str] = CheckboxList(values=values, default_values=list(default_values))
+        body = checkbox
+
+        def _confirm() -> None:
+            get_app().exit(result=list(checkbox.current_values))
+    else:
+        radio: RadioList[str] = RadioList(values=values, default=default, select_on_focus=True)
+        body = radio
+
+        def _confirm() -> None:
+            get_app().exit(result=radio.current_value)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit([Label(text=hint, dont_extend_height=True), body], padding=1),
+        buttons=[
+            Button(text="Ok", handler=_confirm),
+            Button(text="Cancel", handler=lambda: get_app().exit()),
+        ],
+        with_background=True,
+    )
+
+    bindings = KeyBindings()
+    bindings.add("tab")(focus_next)
+    bindings.add("s-tab")(focus_previous)
+
+    @bindings.add("enter", eager=True, filter=has_focus(body.window))
+    def _confirm_on_enter(event: KeyPressEvent) -> None:
+        _confirm()
+
+    # ``class:dialog`` (the full-screen backdrop) defaults to a solid blue; paint
+    # it with the terminal's own background so the dialog floats cleanly instead
+    # of flashing a blue screen. The framed body keeps its own styling.
+    app: Application[Any] = Application(
+        layout=Layout(dialog),
+        key_bindings=merge_key_bindings([load_key_bindings(), bindings]),
+        mouse_support=True,
+        full_screen=True,
+        style=Style.from_dict({"dialog": "bg:default"}),
+    )
+    return app
+
+
+def _build_choice_app(
+    *, title: str, values: list[tuple[str, str]], default: str, hint: str = _CHOICE_NAV_HINT
+) -> Application[str | None]:
+    """Single-select dialog (see :func:`_build_list_app`). Returns the chosen
+    value, or ``None`` when the user cancels."""
+    app: Application[str | None] = _build_list_app(
+        title=title, hint=hint, values=values, multiple=False, default=default
+    )
+    return app
+
+
+def _build_multichoice_app(
+    *,
+    title: str,
+    values: list[tuple[str, str]],
+    default_values: Sequence[str],
+    hint: str = _MULTICHOICE_NAV_HINT,
+) -> Application[list[str] | None]:
+    """Multi-select dialog (see :func:`_build_list_app`). Returns the chosen
+    values, or ``None`` when the user cancels."""
+    app: Application[list[str] | None] = _build_list_app(
+        title=title, hint=hint, values=values, multiple=True, default_values=default_values
+    )
+    return app
+
+
 class PromptToolkitIO:
     """Default :class:`PromptIO` -- thin wrapper around ``prompt_toolkit``.
 
     Lazy-imports prompt_toolkit so that the test impl never has to install
-    it. ``radiolist_dialog`` is used for choices because it renders well in
-    SSH / Docker / TTY-without-tput environments.
+    it. Single- and multi-select prompts use the custom dialog builders
+    (:func:`_build_choice_app` / :func:`_build_multichoice_app`) instead of
+    prompt_toolkit's ``radiolist_dialog`` / ``checkboxlist_dialog`` shortcuts,
+    gaining keyboard-confirm affordances and dropping the blue backdrop while
+    still rendering well in SSH / Docker / TTY-without-tput environments.
     """
 
-    def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str:
-        try:
-            from prompt_toolkit.shortcuts import radiolist_dialog
-        except ImportError as e:
-            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
-        values = [(c, c) for c in choices]
-        result: str | None = radiolist_dialog(title=label, values=values, default=default).run()
+    def ask_choice(
+        self,
+        label: str,
+        choices: Sequence[str],
+        default: str,
+        *,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> str:
+        app = _build_choice_app(
+            title=label,
+            values=_choice_values(choices, descriptions),
+            default=default,
+            hint=_CHOICE_NAV_HINT,
+        )
+        result: str | None = app.run()
         return result if result is not None else default
 
     def ask_text(self, label: str, default: str = "") -> str:
@@ -156,33 +355,35 @@ class PromptToolkitIO:
         answer = prompt(f"{label}{suffix}: ")
         return answer.strip() or default
 
-    def ask_bool(self, label: str, default: bool) -> bool:
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
             raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         suffix = "[Y/n]" if default else "[y/N]"
-        return _parse_bool_answer(prompt(f"{label} {suffix}: "), default=default)
+        # An optional help line renders above the question so the [y/N] line
+        # stays short while still explaining the trade-off (mirrors the inline
+        # descriptions on ``ask_choice``). The captured answer is parsed from
+        # the final line regardless, so this is display-only.
+        question = f"{label} {suffix}: "
+        message = f"{description}\n{question}" if description else question
+        return _parse_bool_answer(prompt(message), default=default)
 
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
-        """Multi-select via ``checkboxlist_dialog``.
+        """Multi-select dialog.
 
-        Returns the chosen subset (empty tuple if the user selects nothing
-        or cancels). Like :meth:`ask_choice`'s ``radiolist_dialog`` it renders
-        in SSH / Docker / TTY-without-tput, and replaces the old free-text
-        comma-separated entry so users pick from known providers instead of
-        guessing names (UX request 2026-06-14).
+        Returns the chosen subset (empty tuple if the user selects nothing or
+        cancels). Space toggles rows and Enter confirms the set; arrows move and
+        Tab reaches Ok / Cancel (see :func:`_build_list_app`). Replaces the old
+        free-text comma-separated entry so users pick from known providers
+        instead of guessing names (UX request 2026-06-14).
         """
-        try:
-            from prompt_toolkit.shortcuts import checkboxlist_dialog
-        except ImportError as e:
-            raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
-        values = [(c, c) for c in choices]
-        result: list[str] | None = checkboxlist_dialog(
+        app = _build_multichoice_app(
             title=label,
-            values=values,
-            default_values=list(default),
-        ).run()
+            values=_choice_values(choices, None),
+            default_values=default,
+        )
+        result: list[str] | None = app.run()
         return tuple(result) if result is not None else ()
 
     def ask_password(self, label: str, default: str = "") -> str:
@@ -218,13 +419,20 @@ class _RefusingPromptIO:
     prompt-driven commands do not yet support.
     """
 
-    def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str:
+    def ask_choice(
+        self,
+        label: str,
+        choices: Sequence[str],
+        default: str,
+        *,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> str:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
     def ask_text(self, label: str, default: str = "") -> str:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
-    def ask_bool(self, label: str, default: bool) -> bool:
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
@@ -257,10 +465,12 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         label="Mordred policy mode",
         choices=("strict", "lenient", "off"),
         default="lenient",
+        descriptions=_POLICY_MODE_DESCRIPTIONS,
     )
     allow_cloud_llm = prompt_io.ask_bool(
-        label="Allow cloud LLM providers (passes through provider override)?",
+        label="Allow cloud LLM providers?",
         default=False,
+        description=_CLOUD_LLM_PROMPT_DESCRIPTION,
     )
     # Only ask *which* providers to permit when cloud is actually allowed. An
     # allowlist is meaningless under "no cloud", and it has no effect at all
@@ -288,6 +498,7 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         label="On cloud LLM attempt under strict mode",
         choices=("always-block", "prompt-once"),
         default="always-block",
+        descriptions=_CLOUD_ATTEMPT_DESCRIPTIONS,
     )
     cloud_attempt_action = _coerce_cloud_attempt_action(cloud_attempt_action_raw)
 
@@ -371,7 +582,7 @@ def _render_configure_summary(snapshot: PolicySnapshot) -> str:
     """A structured recap printed after a successful ``configure``.
 
     Shown once all prompts complete (so it survives the full-screen
-    ``radiolist_dialog`` prompts, which clear the terminal). Echoes the
+    dialog prompts, which clear the terminal). Echoes the
     resolved choices and points the user at the on-demand network-privacy
     command, which first-run setup deliberately does not cover.
     """

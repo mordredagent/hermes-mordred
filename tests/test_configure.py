@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,13 +55,20 @@ class _ScriptedPromptIO:
         self.seen.append((kind, label, a))
         return a
 
-    def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str:
+    def ask_choice(
+        self,
+        label: str,
+        choices: Sequence[str],
+        default: str,
+        *,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> str:
         return str(self._pop("choice", label, default))
 
     def ask_text(self, label: str, default: str = "") -> str:
         return str(self._pop("text", label, default))
 
-    def ask_bool(self, label: str, default: bool) -> bool:
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
         return bool(self._pop("bool", label, default))
 
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
@@ -179,7 +187,7 @@ class TestCollectAnswers:
         labels = [label for _, label, _ in prompts.seen]
         assert labels == [
             "Mordred policy mode",
-            "Allow cloud LLM providers (passes through provider override)?",
+            "Allow cloud LLM providers?",
             "Cloud provider allowlist (select which providers to permit)",
             "Local LLM endpoint URL",
             "Local LLM model id",
@@ -692,10 +700,10 @@ class TestSnapshotFromArgsHardening:
 # -----------------------------------------------------------------------------
 
 
-class _FakeDialog:
-    """Stand-in for the object ``radiolist_dialog`` / ``checkboxlist_dialog``
-    returns; ``run`` yields the scripted result (``None`` simulates the user
-    cancelling). ``result`` is a str for radio, a list for checkbox."""
+class _FakeApp:
+    """Stand-in for the ``Application`` built by ``configure._build_choice_app``
+    / ``_build_multichoice_app``; ``run`` yields the scripted result (``None``
+    simulates Cancel)."""
 
     def __init__(self, result: object) -> None:
         self._result = result
@@ -704,15 +712,66 @@ class _FakeDialog:
         return self._result
 
 
+def test_choice_values_renders_inline_descriptions() -> None:
+    # Pure mapping: the value (first element) stays the bare choice; only the
+    # label (second) gains an inline "<value> — <desc>" when a description
+    # exists. A choice with no description renders bare.
+    values = configure._choice_values(
+        ("strict", "lenient", "off"),
+        {"strict": "Blocks cloud LLMs", "lenient": "Stays out of your way"},
+    )
+    assert values == [
+        ("strict", "strict — Blocks cloud LLMs"),
+        ("lenient", "lenient — Stays out of your way"),
+        ("off", "off"),
+    ]
+
+
+def test_choice_values_without_descriptions_are_bare() -> None:
+    assert configure._choice_values(("a", "b"), None) == [("a", "a"), ("b", "b")]
+
+
+def _drive_dialog(app: object, keys: str) -> object:
+    """Run a real dialog ``Application`` loop against piped keypresses.
+
+    ``DummyOutput`` swallows the rendering. A SIGALRM watchdog turns a regressed
+    binding (which would otherwise block waiting for more input) into a fast,
+    distinctive failure value instead of a hung test.
+    """
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    prev = signal.signal(signal.SIGALRM, lambda *_: app.exit(result="<timeout>"))
+    signal.setitimer(signal.ITIMER_REAL, 10)
+    try:
+        with create_pipe_input() as inp:
+            app.input = inp
+            app.output = DummyOutput()
+            inp.send_text(keys)
+            return app.run()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, prev)
+
+
+def _drive_choice_app(values: list[tuple[str, str]], default: str, keys: str) -> object:
+    return _drive_dialog(configure._build_choice_app(title="t", values=values, default=default, hint="h"), keys)
+
+
+def _drive_multichoice_app(values: list[tuple[str, str]], default_values: list[str], keys: str) -> object:
+    app = configure._build_multichoice_app(title="t", values=values, default_values=default_values, hint="h")
+    return _drive_dialog(app, keys)
+
+
 class TestPromptToolkitIO:
     def test_ask_choice_returns_dialog_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, object] = {}
 
-        def fake_radiolist_dialog(*, title: str, values: object, default: str) -> _FakeDialog:
-            captured.update(title=title, values=values, default=default)
-            return _FakeDialog("strict")
+        def fake_build(*, title: str, values: object, default: str, hint: str) -> _FakeApp:
+            captured.update(title=title, values=values, default=default, hint=hint)
+            return _FakeApp("strict")
 
-        monkeypatch.setattr("prompt_toolkit.shortcuts.radiolist_dialog", fake_radiolist_dialog)
+        monkeypatch.setattr(configure, "_build_choice_app", fake_build)
         io = configure.PromptToolkitIO()
         assert io.ask_choice("mode", ("strict", "lenient"), "lenient") == "strict"
         assert captured["title"] == "mode"
@@ -720,12 +779,133 @@ class TestPromptToolkitIO:
         assert captured["default"] == "lenient"
 
     def test_ask_choice_cancelled_dialog_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "prompt_toolkit.shortcuts.radiolist_dialog",
-            lambda *, title, values, default: _FakeDialog(None),
-        )
+        monkeypatch.setattr(configure, "_build_choice_app", lambda **kw: _FakeApp(None))
         io = configure.PromptToolkitIO()
         assert io.ask_choice("mode", ("a", "b"), "b") == "b"
+
+    def test_ask_choice_forwards_inline_descriptions_to_builder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The decorated labels reach the dialog builder while the returned value
+        # stays the bare choice -- callers and persisted answers are unaffected.
+        captured: dict[str, object] = {}
+
+        def fake_build(*, title: str, values: object, default: str, hint: str) -> _FakeApp:
+            captured["values"] = values
+            return _FakeApp("strict")
+
+        monkeypatch.setattr(configure, "_build_choice_app", fake_build)
+        io = configure.PromptToolkitIO()
+        result = io.ask_choice(
+            "Mordred policy mode",
+            ("strict", "lenient", "off"),
+            "lenient",
+            descriptions={"strict": "Blocks cloud LLMs", "lenient": "Stays out of your way"},
+        )
+        assert result == "strict"
+        assert captured["values"] == [
+            ("strict", "strict — Blocks cloud LLMs"),
+            ("lenient", "lenient — Stays out of your way"),
+            ("off", "off"),
+        ]
+
+    def test_build_choice_app_constructs_keyboard_friendly_dialog(self) -> None:
+        # Construction needs no TTY, so exercising the real builder here covers
+        # it (the run/cancel tests stub it out). Asserts the dialog is a usable
+        # Application with the live-selection radio + key bindings that back the
+        # arrows/Enter/Tab navigation.
+        from prompt_toolkit.application import Application
+
+        app = configure._build_choice_app(
+            title="Mordred policy mode",
+            values=[("strict", "strict — x"), ("lenient", "lenient — y")],
+            default="lenient",
+            hint="hint",
+        )
+        assert isinstance(app, Application)
+        assert app.key_bindings is not None
+
+    @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM watchdog (POSIX)")
+    @pytest.mark.parametrize(
+        ("keys", "expected"),
+        [
+            ("\r", "lenient"),  # Enter alone confirms the default-highlighted row
+            ("\x1b[B\r", "off"),  # Down arrow moves the live selection, Enter confirms
+            ("\x1b[A\r", "strict"),  # Up arrow moves the live selection, Enter confirms
+        ],
+    )
+    def test_choice_dialog_enter_confirms_highlighted_value(self, keys: str, expected: str) -> None:
+        # The whole point of the custom dialog: arrows move the selection and a
+        # single Enter confirms it -- no Tab/click to the Ok button required.
+        result = _drive_choice_app(
+            [("strict", "strict — x"), ("lenient", "lenient — y"), ("off", "off")],
+            "lenient",
+            keys,
+        )
+        assert result == expected
+
+    def test_build_multichoice_app_constructs_keyboard_friendly_dialog(self) -> None:
+        # Construction needs no TTY; exercising the real builder covers the
+        # checkbox path of _build_list_app (the run/cancel tests stub it out).
+        from prompt_toolkit.application import Application
+
+        app = configure._build_multichoice_app(
+            title="Cloud provider allowlist",
+            values=[("anthropic", "anthropic"), ("openai", "openai")],
+            default_values=("anthropic",),
+            hint="hint",
+        )
+        assert isinstance(app, Application)
+        assert app.key_bindings is not None
+
+    @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM watchdog (POSIX)")
+    def test_multichoice_dialog_space_toggles_and_enter_confirms(self) -> None:
+        # Checkbox semantics: Space toggles the highlighted row, Enter confirms
+        # the whole set -- no Tab/click to Ok. Start with anthropic preselected,
+        # move down to openai, toggle it on, then confirm.
+        result = _drive_multichoice_app(
+            [("anthropic", "anthropic"), ("openai", "openai"), ("gemini", "gemini")],
+            ["anthropic"],
+            "\x1b[B \r",  # Down → openai, Space → toggle on, Enter → confirm
+        )
+        assert result == ["anthropic", "openai"]
+
+    def test_collect_answers_passes_policy_descriptions(self) -> None:
+        # The policy-mode and cloud-attempt prompts are wired with their
+        # canonical descriptions; the agent-harness prompt has none. Assert all
+        # three: both described prompts carry their constant, and the bare
+        # sibling stays None.
+        seen: dict[str, Mapping[str, str] | None] = {}
+
+        class _RecordingIO(_ScriptedPromptIO):
+            def ask_choice(
+                self,
+                label: str,
+                choices: Sequence[str],
+                default: str,
+                *,
+                descriptions: Mapping[str, str] | None = None,
+            ) -> str:
+                seen[label] = descriptions
+                return str(self._pop("choice", label, default))
+
+        configure.collect_answers(_RecordingIO(answers=_core_answers()))
+        assert seen["Mordred policy mode"] == configure._POLICY_MODE_DESCRIPTIONS
+        assert seen["On cloud LLM attempt under strict mode"] == configure._CLOUD_ATTEMPT_DESCRIPTIONS
+        # The agent-harness prompt carries no inline descriptions, proving they
+        # are wired per-prompt rather than applied to every choice dialog.
+        assert seen["Agent harness (strict mode refuses if a known harness is detected)"] is None
+
+    def test_collect_answers_passes_cloud_llm_description(self) -> None:
+        # The cloud-LLM yes/no prompt is wired with the canonical help text so
+        # the bare [y/N] question is preceded by a plain-language explanation.
+        seen: dict[str, str | None] = {}
+
+        class _RecordingIO(_ScriptedPromptIO):
+            def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+                seen[label] = description
+                return bool(self._pop("bool", label, default))
+
+        configure.collect_answers(_RecordingIO(answers=_core_answers()))
+        assert seen["Allow cloud LLM providers?"] == configure._CLOUD_LLM_PROMPT_DESCRIPTION
 
     def test_ask_text_strips_and_echoes_default_in_label(self, monkeypatch: pytest.MonkeyPatch) -> None:
         prompts: list[str] = []
@@ -762,25 +942,49 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         assert io.ask_bool("Allow?", default) is expected
 
+    def test_ask_bool_renders_description_above_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The optional help line prints on its own line above the [y/N] question
+        # so the prompt guides without bloating the question itself.
+        messages: list[str] = []
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            messages.append(message)
+            return "y"
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        assert io.ask_bool("Allow?", False, description="Cloud sends your prompts away.") is True
+        assert messages == ["Cloud sends your prompts away.\nAllow? [y/N]: "]
+
+    def test_ask_bool_without_description_stays_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No description → the question line is unchanged (regression guard).
+        messages: list[str] = []
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            messages.append(message)
+            return ""
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        assert io.ask_bool("Allow?", True) is True
+        assert messages == ["Allow? [Y/n]: "]
+
     def test_ask_multi_returns_selected_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, object] = {}
 
-        def fake_checkboxlist_dialog(*, title: str, values: object, default_values: object) -> _FakeDialog:
+        def fake_build(*, title: str, values: object, default_values: object) -> _FakeApp:
             captured.update(title=title, values=values, default_values=default_values)
-            return _FakeDialog(["anthropic", "openai"])
+            return _FakeApp(["anthropic", "openai"])
 
-        monkeypatch.setattr("prompt_toolkit.shortcuts.checkboxlist_dialog", fake_checkboxlist_dialog)
+        monkeypatch.setattr(configure, "_build_multichoice_app", fake_build)
         io = configure.PromptToolkitIO()
         assert io.ask_multi("Allowlist", ("anthropic", "openai", "gemini"), ()) == ("anthropic", "openai")
         assert captured["title"] == "Allowlist"
         assert captured["values"] == [("anthropic", "anthropic"), ("openai", "openai"), ("gemini", "gemini")]
-        assert captured["default_values"] == []
+        assert captured["default_values"] == ()
 
     def test_ask_multi_cancelled_returns_empty_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "prompt_toolkit.shortcuts.checkboxlist_dialog",
-            lambda *, title, values, default_values: _FakeDialog(None),
-        )
+        monkeypatch.setattr(configure, "_build_multichoice_app", lambda **kw: _FakeApp(None))
         io = configure.PromptToolkitIO()
         assert io.ask_multi("Allowlist", ("anthropic",), ()) == ()
 
@@ -813,8 +1017,12 @@ class TestPromptToolkitIO:
         # None in sys.modules makes the lazy `from prompt_toolkit import ...`
         # raise ImportError, which each method must translate to the
         # actionable RuntimeError (install hint / --non-interactive escape).
-        monkeypatch.setitem(sys.modules, "prompt_toolkit", None)
-        monkeypatch.setitem(sys.modules, "prompt_toolkit.shortcuts", None)
+        # Poison the package AND every already-imported submodule: a cached
+        # submodule (e.g. prompt_toolkit.application) would otherwise satisfy a
+        # `from prompt_toolkit.X import ...` even with the parent poisoned, so
+        # this faithfully simulates prompt_toolkit being absent.
+        for mod in [m for m in sys.modules if m == "prompt_toolkit" or m.startswith("prompt_toolkit.")]:
+            monkeypatch.setitem(sys.modules, mod, None)
         io = configure.PromptToolkitIO()
         with pytest.raises(RuntimeError, match="prompt_toolkit is required"):
             getattr(io, method)(*args)
