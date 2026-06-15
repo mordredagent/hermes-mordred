@@ -868,6 +868,37 @@ class TestPromptToolkitIO:
         )
         assert result == ["anthropic", "openai"]
 
+    @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM watchdog (POSIX)")
+    def test_choice_dialog_ctrl_c_aborts(self) -> None:
+        # Ctrl-C must raise KeyboardInterrupt (abort the whole flow), matching the
+        # surrounding prompt() text prompts -- NOT silently return the default and
+        # march on through the remaining prompts.
+        with pytest.raises(KeyboardInterrupt):
+            _drive_choice_app([("strict", "strict"), ("lenient", "lenient")], "lenient", "\x03")
+
+    @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs SIGALRM watchdog (POSIX)")
+    def test_multichoice_dialog_ctrl_c_aborts(self) -> None:
+        # Same abort contract on the checkbox picker -- Ctrl-C raises rather than
+        # confirming whatever happens to be toggled.
+        with pytest.raises(KeyboardInterrupt):
+            _drive_multichoice_app([("anthropic", "anthropic"), ("openai", "openai")], ["anthropic"], "\x03")
+
+    def test_echo_selection_prints_question_and_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # After the picker erases itself, ask_choice/ask_multi echo a one-line
+        # record so the transcript still shows what was answered. Capture the
+        # FormattedText (print_formatted_text writes via a cached output that
+        # bypasses capsys/capfd) and flatten it to plain text.
+        captured: dict[str, str] = {}
+
+        def fake_print(formatted: object, **kwargs: object) -> None:
+            captured["text"] = "".join(text for _, text in formatted)
+
+        monkeypatch.setattr("prompt_toolkit.print_formatted_text", fake_print)
+        configure._echo_selection("Network privacy path", "clearnet")
+        assert "Network privacy path" in captured["text"]
+        assert "clearnet" in captured["text"]
+        assert captured["text"].lstrip().startswith("?")
+
     def test_collect_answers_passes_policy_descriptions(self) -> None:
         # The policy-mode and cloud-attempt prompts are wired with their
         # canonical descriptions; the agent-harness prompt has none. Assert all
