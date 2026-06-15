@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -480,6 +481,49 @@ class TestInit:
         )
         assert rc == 0
         assert _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
+
+    def test_init_explains_before_passphrase_prompt(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """UX review 2026-06-15: init must orient the operator — what the
+        command does and what the Passphrase is for — before the prompt."""
+
+        class _ErrSnapshotPromptIO(ScriptedPromptIO):
+            """Records the stderr already emitted at the first ask_password."""
+
+            def __init__(self, capfix: pytest.CaptureFixture[str], **kw: Any) -> None:
+                super().__init__(**kw)
+                self._capfix = capfix
+                self.err_at_first_password: str | None = None
+
+            def ask_password(self, label: str, default: str = "") -> str:
+                if self.err_at_first_password is None:
+                    # readouterr() drains the buffer, so re-emit what we read to
+                    # keep the rest of the run's capture intact for later asserts.
+                    captured = self._capfix.readouterr()
+                    self.err_at_first_password = captured.err
+                    print(captured.out, end="")
+                    print(captured.err, end="", file=sys.stderr)
+                return super().ask_password(label, default)
+
+        prompt_io = _ErrSnapshotPromptIO(
+            capsys,
+            texts=[self._expected_digest().hex()],
+            passwords=[self.PASSPHRASE, self.PASSPHRASE],
+        )
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=prompt_io,
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        intro = prompt_io.err_at_first_password or ""
+        # The explanation precedes the very first passphrase prompt.
+        assert "keyvault init" in intro
+        assert "Passphrase" in intro
+        # Names the consequence so the operator does not pick a throwaway.
+        assert "never stored" in intro
+        assert "recover" in intro.lower()
 
     def test_init_success_prints_next_step_hint(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Success must orient the user toward what the keyvault unlocks next."""

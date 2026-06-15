@@ -346,6 +346,39 @@ def _refuse_if_initialised(home: Path | None) -> int | None:
     return None
 
 
+def _intro_banner() -> str:
+    """The orientation shown before the first Passphrase prompt.
+
+    UX review 2026-06-15: ``keyvault init`` opened straight onto a bare
+    ``Choose a Passphrase:`` prompt — the operator had no idea what the
+    command does or what that passphrase is for. This explains the
+    ceremony, names the Passphrase's role, and warns it is never stored
+    *before* anything is typed.
+    """
+    return (
+        "\n"
+        "────────────────────────────────────────────────────────────\n"
+        "  keyvault init — set up your encrypted keyvault\n"
+        "────────────────────────────────────────────────────────────\n"
+        "\n"
+        "  This creates a new keyvault on this device. In the next\n"
+        "  steps you will:\n"
+        "\n"
+        "    1. Choose a Passphrase (below)\n"
+        "    2. Write down a 24-word Seed Phrase shown on screen\n"
+        "    3. Verify it on a second, OFFLINE device\n"
+        "\n"
+        "  The Passphrase below, combined with the Seed Phrase,\n"
+        "  protects your keyvault. You will need BOTH (plus a backup\n"
+        "  blob) to recover it on another device.\n"
+        "\n"
+        "  It is never stored anywhere — if you lose it, the keyvault\n"
+        "  cannot be recovered. Choose something strong you can keep.\n"
+        "  Nothing is written to disk until every step completes.\n"
+        "────────────────────────────────────────────────────────────"
+    )
+
+
 def _read_passphrase(prompt_io: PromptIO) -> str | None:
     """Prompt for the passphrase twice. Returns it, or None (after printing) on a
     mismatch or an empty entry.
@@ -596,6 +629,9 @@ def init_keyvault(
         from .configure import PromptToolkitIO
 
         prompt_io = PromptToolkitIO()
+    # Orient the operator before the bare passphrase prompt: what this
+    # command does and what the Passphrase protects (UX review 2026-06-15).
+    print(_intro_banner(), file=sys.stderr)
     passphrase = _read_passphrase(prompt_io)
     if passphrase is None:
         return 1
