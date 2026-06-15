@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from ..__about__ import __version__ as _PACKAGE_VERSION
 from .._home import HERMES_BASE
 
 DEFAULT_CONFIG_PATH = HERMES_BASE / "config.yaml"
@@ -55,7 +56,10 @@ def _print_from_manager(mgr: _ManagerLike) -> int:
         return 0
     for p in plugins:
         enabled = "enabled" if p.get("enabled") else "disabled"
-        version = p.get("version") or "?"
+        # Hermes' entry-point discovery leaves `version` empty (it never reads
+        # the plugin.yaml for pip/entry-point plugins), so backfill with the
+        # mordred-hermes package version — every Mordred plugin ships from it.
+        version = p.get("version") or _PACKAGE_VERSION
         print(f"{p['key']:30s}  {version:10s}  {enabled}")
     return 0
 
@@ -91,7 +95,7 @@ def _print_from_yaml_fallback(config_path: Path) -> int:
         print("No Mordred plugins discovered.")
         return 0
     for name in mordred:
-        print(f"{name:30s}  ?           enabled")
+        print(f"{name:30s}  {_PACKAGE_VERSION:10s}  enabled")
     return 0
 
 

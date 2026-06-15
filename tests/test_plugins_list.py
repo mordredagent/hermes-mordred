@@ -70,6 +70,30 @@ class TestRunFromManager:
         out = capsys.readouterr().out
         assert "no mordred plugins" in out.lower()
 
+    def test_backfills_package_version_when_manager_omits_it(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Hermes' entry-point discovery returns an empty (or absent) version;
+        # the wizard must backfill the mordred-hermes package version, not "?".
+        from mordred_hermes.__about__ import __version__
+
+        mgr = _FakeManager(
+            [
+                {"key": "mordred_keyvault", "enabled": True, "version": ""},
+                {"key": "mordred_network", "enabled": True},  # no version key
+            ]
+        )
+        monkeypatch.setattr(plugins_list, "_get_manager", lambda: mgr)
+
+        rc = plugins_list.run()
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "?" not in out
+        assert out.count(__version__) == 2
+
 
 class TestYAMLFallback:
     def test_falls_back_to_yaml_when_manager_unavailable(
@@ -98,6 +122,31 @@ class TestYAMLFallback:
         assert "other_plugin" not in out
         # Fallback path should leave a breadcrumb so users notice degraded mode.
         assert "fallback" in out.lower() or "config.yaml" in out
+
+    def test_fallback_shows_package_version_not_placeholder(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.__about__ import __version__
+
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            "plugins:\n  enabled:\n    - mordred_privacy_check\n",
+            encoding="utf-8",
+        )
+
+        def raise_import() -> Any:
+            raise ImportError("hermes_cli.plugins not available")
+
+        monkeypatch.setattr(plugins_list, "_get_manager", raise_import)
+
+        rc = plugins_list.run(config_path=config)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert __version__ in out
 
     def test_fallback_with_missing_config_yaml_returns_0_with_message(
         self,
