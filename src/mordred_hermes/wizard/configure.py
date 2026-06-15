@@ -117,10 +117,10 @@ class PromptIO(Protocol):
         *,
         descriptions: Mapping[str, str] | None = None,
     ) -> str: ...
-    def ask_text(self, label: str, default: str = "") -> str: ...
+    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str: ...
     def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool: ...
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]: ...
-    def ask_password(self, label: str, default: str = "") -> str: ...
+    def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str: ...
 
 
 # -----------------------------------------------------------------------------
@@ -346,13 +346,19 @@ class PromptToolkitIO:
         result: str | None = app.run()
         return result if result is not None else default
 
-    def ask_text(self, label: str, default: str = "") -> str:
+    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
             raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         suffix = f" [{default}]" if default else ""
-        answer = prompt(f"{label}{suffix}: ")
+        # An optional help line renders above the question (mirrors the inline
+        # descriptions on ``ask_bool`` / ``ask_choice``) so the label stays short
+        # while still explaining what the setting is for. Display-only: the
+        # answer is read from the question line regardless.
+        question = f"{label}{suffix}: "
+        message = f"{description}\n{question}" if description else question
+        answer = prompt(message)
         return answer.strip() or default
 
     def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
@@ -386,18 +392,22 @@ class PromptToolkitIO:
         result: list[str] | None = app.run()
         return tuple(result) if result is not None else ()
 
-    def ask_password(self, label: str, default: str = "") -> str:
+    def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str:
         """Read a secret with shell-history-safe echoing.
 
         ``is_password=True`` masks the input. Empty input → ``default`` so
         a user who already has the secret set elsewhere can decline to
-        re-enter it.
+        re-enter it. An optional ``description`` renders as a help line above
+        the prompt (mirrors ``ask_text`` / ``ask_bool``); ``is_password`` masks
+        only the typed secret, never the help text or the label.
         """
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
             raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
-        answer = prompt(f"{label}: ", is_password=True)
+        question = f"{label}: "
+        message = f"{description}\n{question}" if description else question
+        answer = prompt(message, is_password=True)
         return answer.strip() or default
 
 
@@ -429,7 +439,7 @@ class _RefusingPromptIO:
     ) -> str:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
-    def ask_text(self, label: str, default: str = "") -> str:
+    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
     def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
@@ -438,7 +448,7 @@ class _RefusingPromptIO:
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
-    def ask_password(self, label: str, default: str = "") -> str:
+    def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str:
         raise NonInteractiveAbort(f"--non-interactive set but prompt required: {label!r}")
 
 

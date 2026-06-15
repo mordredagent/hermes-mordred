@@ -31,6 +31,13 @@ import pytest
 from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
 from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 from mordred_hermes.wizard.network_cli import (
+    _MULLVAD_ACCOUNT_DESCRIPTION,
+    _MULLVAD_KILLSWITCH_DESCRIPTION,
+    _MULLVAD_RELAY_DESCRIPTION,
+    _NETWORK_PATH_DESCRIPTIONS,
+    _TOR_BINARY_DESCRIPTION,
+    _TOR_SOCKS_PORT_DESCRIPTION,
+    _VALID_PATHS,
     NetworkAnswers,
     collect_network_answers,
     handle_init,
@@ -45,45 +52,67 @@ from mordred_hermes.wizard.policy_writer import PolicyWriter
 
 @dataclass
 class _ScriptedPromptIO:
-    """Pops a pre-recorded answer per call; records (kind, label, default)."""
+    """Pops a pre-recorded answer per call; records (kind, label, default).
+
+    ``help_by_label`` captures the inline ``descriptions`` (choice) or the
+    ``description`` help line (text/bool/password) passed alongside each prompt,
+    so tests can assert ``network init`` now explains every prompt (UX request
+    2026-06-15) without coupling to the dialog rendering.
+    """
 
     answers: list[object]
     seen: list[tuple[str, str, object]] = field(default_factory=list)
+    help_by_label: dict[str, object] = field(default_factory=dict)
 
-    def _pop(self, kind: str, label: str, default: object) -> object:
+    def _pop(self, kind: str, label: str, default: object, help_text: object = None) -> object:
         if not self.answers:
             raise AssertionError(f"_ScriptedPromptIO ran out of answers at {kind}({label!r})")
         a = self.answers.pop(0)
         self.seen.append((kind, label, default))
+        self.help_by_label[label] = help_text
         return a
 
-    def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str:
-        return str(self._pop("choice", label, default))
+    def ask_choice(
+        self,
+        label: str,
+        choices: Sequence[str],
+        default: str,
+        *,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> str:
+        return str(self._pop("choice", label, default, descriptions))
 
-    def ask_text(self, label: str, default: str = "") -> str:
-        return str(self._pop("text", label, default))
+    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
+        return str(self._pop("text", label, default, description))
 
-    def ask_bool(self, label: str, default: bool) -> bool:
-        return bool(self._pop("bool", label, default))
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+        return bool(self._pop("bool", label, default, description))
 
-    def ask_password(self, label: str, default: str = "") -> str:
-        return str(self._pop("password", label, default))
+    def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str:
+        return str(self._pop("password", label, default, description))
 
 
 @dataclass
 class _DefaultEchoPromptIO:
     """Returns the supplied default for every prompt (simulates pressing Enter)."""
 
-    def ask_choice(self, label: str, choices: Sequence[str], default: str) -> str:
+    def ask_choice(
+        self,
+        label: str,
+        choices: Sequence[str],
+        default: str,
+        *,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> str:
         return default
 
-    def ask_text(self, label: str, default: str = "") -> str:
+    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
         return default
 
-    def ask_bool(self, label: str, default: bool) -> bool:
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
         return default
 
-    def ask_password(self, label: str, default: str = "") -> str:
+    def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str:
         return default
 
 
@@ -193,6 +222,42 @@ class TestCollectNetworkAnswers:
         kinds = [k for k, _, _ in prompts.seen]
         assert "password" not in kinds
         assert len(kinds) == 5
+
+    def test_every_prompt_carries_an_explanation(self) -> None:
+        """UX request 2026-06-15: each ``network init`` prompt must explain
+        itself — what the setting does and which route it applies to — the way
+        keyvault init and the configure policy-mode dialog already do."""
+        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_FULL))
+        collect_network_answers(prompts)
+        help_by_label = prompts.help_by_label
+
+        # The privacy-path radio carries an inline description for every route.
+        path_desc = help_by_label["Network privacy path"]
+        assert path_desc == _NETWORK_PATH_DESCRIPTIONS
+        # Parity with the source of truth: a route added to _VALID_PATHS without
+        # a description would render bare in the dialog — fail here instead.
+        assert set(_NETWORK_PATH_DESCRIPTIONS) == set(_VALID_PATHS)
+
+        # The five plain-text / secret / yes-no prompts each get a help line.
+        assert help_by_label["Tor binary path"] == _TOR_BINARY_DESCRIPTION
+        assert help_by_label["Tor SOCKS port"] == _TOR_SOCKS_PORT_DESCRIPTION
+        assert (
+            help_by_label["Mullvad account number (blank = keep current; stored in ~/.hermes/.env)"]
+            == _MULLVAD_ACCOUNT_DESCRIPTION
+        )
+        assert help_by_label["Mullvad relay country (`auto` or 2-letter code)"] == _MULLVAD_RELAY_DESCRIPTION
+        assert help_by_label["Mullvad killswitch (lockdown-mode)"] == _MULLVAD_KILLSWITCH_DESCRIPTION
+
+        # Regression guard: no prompt is left bare.
+        assert all(help_by_label.values()), f"a network-init prompt has no explanation: {help_by_label}"
+
+    def test_route_only_prompts_name_their_route(self) -> None:
+        """Each Tor/Mullvad help line names the route it matters for, so a
+        clearnet user knows every one of these can be Enter'd straight through."""
+        for desc in (_TOR_BINARY_DESCRIPTION, _TOR_SOCKS_PORT_DESCRIPTION):
+            assert "Tor route only" in desc
+        for desc in (_MULLVAD_ACCOUNT_DESCRIPTION, _MULLVAD_RELAY_DESCRIPTION, _MULLVAD_KILLSWITCH_DESCRIPTION):
+            assert "VPN route only" in desc
 
 
 class TestCollectNetworkAnswersSeedsDefaults:

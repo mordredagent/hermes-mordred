@@ -52,6 +52,41 @@ DEFAULT_TOR_SOCKS_PORT: Final[int] = 9050
 MULLVAD_ACCOUNT_ENV_VAR_NAME: Final[str] = "MORDRED_MULLVAD_ACCOUNT"
 
 
+#: Inline descriptions shown next to each route in the ``network init``
+#: privacy-path radio dialog (rendered as ``<route> — <description>`` by
+#: ``PromptToolkitIO``). Before this each prompt opened as a bare label with no
+#: hint of what it does (UX request 2026-06-15); these orient the operator the
+#: same way the keyvault-init intro and the ``configure`` policy-mode
+#: descriptions do. Copy condenses the "What each route is" section of
+#: ``mordred-docs/mordred/QUICKSTART.md`` so the wizard and the docs never drift.
+_NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "tor": "Anonymity via the Tor network — slowest; needs `tor` installed",
+    "vpn": "IP privacy via Mullvad VPN — faster; needs a paid Mullvad account",
+    "clearnet": "Direct connection — no anonymity, fastest (the default)",
+}
+
+#: Help line printed above each plain-text / secret / yes-no ``network init``
+#: prompt (UX request 2026-06-15). Every setting only matters for a single
+#: route, so each line names its route up front — a clearnet user can press
+#: Enter straight through. Mirrors the per-prompt Tor / VPN tables in
+#: ``mordred-docs/mordred/QUICKSTART.md``.
+_TOR_BINARY_DESCRIPTION: Final[str] = (
+    "Tor route only — where the `tor` program is. Leave as `tor` if it's on your PATH."
+)
+_TOR_SOCKS_PORT_DESCRIPTION: Final[str] = (
+    "Tor route only — local port Tor's SOCKS proxy listens on. Standard is 9050; rarely changed."
+)
+_MULLVAD_ACCOUNT_DESCRIPTION: Final[str] = (
+    "VPN route only — your Mullvad account number (Mullvad is a paid VPN service)."
+)
+_MULLVAD_RELAY_DESCRIPTION: Final[str] = (
+    "VPN route only — `auto`, or a 2-letter country code (e.g. `se`) to pin the VPN exit country."
+)
+_MULLVAD_KILLSWITCH_DESCRIPTION: Final[str] = (
+    "VPN route only — lockdown mode: block all traffic if the VPN drops, so your real IP can't leak."
+)
+
+
 # --------------------------------------------------------------------------- #
 # Public handlers                                                             #
 # --------------------------------------------------------------------------- #
@@ -345,15 +380,18 @@ def collect_network_answers(
         label="Network privacy path",
         choices=_VALID_PATHS,
         default=seeded_path,
+        descriptions=_NETWORK_PATH_DESCRIPTIONS,
     )
     tor_binary_path = prompt_io.ask_text(
         label="Tor binary path",
         default=str(existing.get("tor_binary_path") or "tor"),
+        description=_TOR_BINARY_DESCRIPTION,
     )
     tor_socks_port = _coerce_tor_socks_port(
         prompt_io.ask_text(
             label="Tor SOCKS port",
             default=str(existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT),
+            description=_TOR_SOCKS_PORT_DESCRIPTION,
         )
     )
     # Blank = keep the current secret (re-run safe). The label says so. When the
@@ -363,6 +401,7 @@ def collect_network_answers(
         mullvad_account_secret = prompt_io.ask_password(
             label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
             default="",
+            description=_MULLVAD_ACCOUNT_DESCRIPTION,
         )
     else:
         mullvad_account_secret = ""
@@ -370,11 +409,13 @@ def collect_network_answers(
         prompt_io.ask_text(
             label="Mullvad relay country (`auto` or 2-letter code)",
             default=str(existing.get("mullvad_relay_country") or "auto"),
+            description=_MULLVAD_RELAY_DESCRIPTION,
         )
     )
     mullvad_killswitch = prompt_io.ask_bool(
         label="Mullvad killswitch (lockdown-mode)",
         default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
+        description=_MULLVAD_KILLSWITCH_DESCRIPTION,
     )
 
     network_answers = NetworkAnswers(

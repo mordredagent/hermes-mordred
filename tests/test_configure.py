@@ -924,6 +924,33 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         assert io.ask_text("Endpoint", default="http://x") == "http://x"
 
+    def test_ask_text_renders_description_above_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The optional help line prints on its own line above the question so the
+        # label stays short (mirrors ``ask_bool``); the answer parses unchanged.
+        messages: list[str] = []
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            messages.append(message)
+            return "answer"
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        assert io.ask_text("Tor binary path", default="tor", description="Where the tor program is.") == "answer"
+        assert messages == ["Where the tor program is.\nTor binary path [tor]: "]
+
+    def test_ask_text_without_description_stays_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # No description → the question line is unchanged (regression guard).
+        messages: list[str] = []
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            messages.append(message)
+            return ""
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        assert io.ask_text("Endpoint", default="http://x") == "http://x"
+        assert messages == ["Endpoint [http://x]: "]
+
     @pytest.mark.parametrize(
         ("answer", "default", "expected"),
         [
@@ -1000,6 +1027,23 @@ class TestPromptToolkitIO:
         assert io.ask_password("Account number", default="keep-me") == "keep-me"
         # The secret must never echo — is_password masks the input.
         assert seen_kwargs.get("is_password") is True
+
+    def test_ask_password_renders_description_above_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The help line prints above the masked prompt; is_password masks only the
+        # typed secret, never the help text or label (mirrors ``ask_text``).
+        captured: dict[str, object] = {}
+
+        def fake_prompt(message: str, **kwargs: object) -> str:
+            captured["message"] = message
+            captured.update(kwargs)
+            return "secret-1"
+
+        monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
+        io = configure.PromptToolkitIO()
+        result = io.ask_password("Mullvad account number", description="VPN route only — your account number.")
+        assert result == "secret-1"
+        assert captured["message"] == "VPN route only — your account number.\nMullvad account number: "
+        assert captured.get("is_password") is True
 
     @pytest.mark.parametrize(
         ("method", "args"),
