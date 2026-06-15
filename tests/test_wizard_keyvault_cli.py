@@ -392,6 +392,15 @@ class TestInit:
     def _patches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(kvpow, "POW_DIFFICULTY_BITS", 4)
         monkeypatch.setattr(_bip39, "generate_mnemonic", lambda: self.FIXED_SEED)
+        # init now pre-checks the air-gap before the passphrase prompt. Default
+        # the resolved probe to "offline" so the flow tests below exercise their
+        # own concern, not the host's live network. The online-refusal path is
+        # covered explicitly by test_online_refuses_before_passphrase_prompt,
+        # which injects its own raising blackout_assert.
+        monkeypatch.setattr(
+            "mordred_hermes.keyvault.network_fallback.resolve_blackout_assert",
+            lambda: lambda **_kw: None,
+        )
 
     def _expected_digest(self) -> bytes:
         norm_seed = api._normalize_seed_phrase(self.FIXED_SEED)
@@ -449,6 +458,30 @@ class TestInit:
         assert rc == 1
         err = capsys.readouterr().err.lower()
         assert "disconnect" in err or "network" in err
+        assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
+
+    def test_online_refuses_before_passphrase_prompt(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """UX review 2026-06-15: an online host must be told to go offline
+        *before* the passphrase is requested, so no entry is wasted. The late
+        blackout gate in display_seed stays the real security precondition."""
+
+        def online(**_kw: Any) -> None:
+            raise BlackoutNotAsserted("host is still reachable")
+
+        recording = _RecordingPromptIO(passphrase=self.PASSPHRASE)
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=recording,
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+            blackout_assert=online,
+        )
+        assert rc == 1
+        # The air-gap check fired before any prompt — no wasted passphrase entry.
+        assert recording.calls == []
+        err = capsys.readouterr().err.lower()
+        assert "go offline" in err
         assert not _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))["keys"]
 
     def test_bad_digest_hex_exhausts_attempts_returns_1(

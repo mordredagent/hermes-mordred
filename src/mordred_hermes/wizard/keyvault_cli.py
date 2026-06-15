@@ -274,18 +274,32 @@ _BLACKOUT_STEPS_LINUX = (
 )
 
 
-def _blackout_guidance(platform: str) -> str:
+def _blackout_guidance(platform: str, *, before_passphrase: bool = False) -> str:
     """The go-offline instructions shown when the network blackout check fails.
 
     ``platform`` is ``sys.platform`` (``"darwin"`` / ``"linux"`` …); unknown
     platforms get the Linux text, whose commands are the more portable set.
+
+    ``before_passphrase`` tailors the header and the closing reassurance to
+    where in the ceremony the check tripped. The early pre-check fires before
+    anything is typed, so "your passphrase was not saved" would be misleading;
+    the late gate (inside ``display_seed``) fires after the passphrase prompt.
     """
     steps = _BLACKOUT_STEPS_DARWIN if platform == "darwin" else _BLACKOUT_STEPS_LINUX
+    if before_passphrase:
+        header = "  Go offline before you start keyvault init\n"
+        closing = "  Nothing has been entered or written yet. Re-run after\n  going offline to begin.\n"
+    else:
+        header = "  Next step: go offline before the Seed Phrase is shown\n"
+        closing = (
+            "  Nothing has been written yet — your passphrase was not\n"
+            "  saved. Re-run after going offline to continue.\n"
+        )
     return (
         "\n"
         "────────────────────────────────────────────────────────────\n"
-        "  Next step: go offline before the Seed Phrase is shown\n"
-        "────────────────────────────────────────────────────────────\n"
+        + header
+        + "────────────────────────────────────────────────────────────\n"
         "\n"
         "  This is the expected safety check, not an error. Mordred\n"
         "  will only reveal your Seed Phrase when the host is fully\n"
@@ -293,11 +307,31 @@ def _blackout_guidance(platform: str) -> str:
         "\n"
         "  Please disconnect every network interface, then re-run\n"
         "  `hermes-mordred keyvault init`:\n"
-        "\n" + steps + "\n"
-        "  Nothing has been written yet — your passphrase was not\n"
-        "  saved. Re-run after going offline to continue.\n"
-        "────────────────────────────────────────────────────────────\n"
+        "\n" + steps + "\n" + closing + "────────────────────────────────────────────────────────────\n"
     )
+
+
+def _precheck_blackout_or_refuse(blackout_assert: Callable[..., None] | None) -> int | None:
+    """Early air-gap pre-check, run before the passphrase prompt.
+
+    The real security gate is the ``blackout_assert`` inside ``display_seed``
+    (defense in depth); this earlier copy only fails *fast* so an online
+    operator is told to go offline before typing a passphrase that the late
+    gate would otherwise discard (UX review 2026-06-15: the host was probed
+    only after the passphrase had been entered twice). On the rare race where
+    the link returns between this check and the seed display, the late gate
+    still refuses. Returns 1 (after printing) when the host is reachable, else
+    None.
+    """
+    from ..keyvault.network_fallback import BlackoutNotAsserted, resolve_blackout_assert
+
+    assert_fn = blackout_assert if blackout_assert is not None else resolve_blackout_assert()
+    try:
+        assert_fn()
+    except BlackoutNotAsserted:
+        print(_blackout_guidance(sys.platform, before_passphrase=True), file=sys.stderr)
+        return 1
+    return None
 
 
 class TerminalSeedSurface:
@@ -595,6 +629,7 @@ def init_keyvault(
     surface: SeedDisplaySurface | None = None,
     audit_sink: AuditSink | None = None,
     display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
+    blackout_assert: Callable[..., None] | None = None,
     store_seed_for_hd: bool = True,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
@@ -602,6 +637,10 @@ def init_keyvault(
     Flow (SPEC.md §"``keyvault init`` flow"):
 
     1. Re-init guard — v1 keyvault is single-key.
+    1a. Air-gap pre-check — refuse fast if the host is online, *before* the
+        passphrase prompt, so an online operator is not asked to type a
+        passphrase that the late blackout gate would discard. ``display_seed``
+        re-asserts isolation as the real gate (defense in depth).
     2. Prompt for the Passphrase twice (hidden, must match, non-empty).
     3. Generate a 24-word BIP39 Seed Phrase + the seed-bound PoW.
     4. ``prepare_generate`` — compute the verification digest in memory.
@@ -615,15 +654,22 @@ def init_keyvault(
        Default ``True`` makes encrypted seed storage the standard
        operation. ``False`` keeps the seed paper-only (never persisted).
 
-    ``backend`` / ``prompt_io`` / ``surface`` / ``display_fn`` default to
-    the production implementations; tests inject fakes. Returns 0 on a
-    finalized keyvault, 1 on any refusal (already initialised, passphrase
-    mismatch, blackout failure, capture abort, expiry, digest mismatch,
-    Enclave error).
+    ``backend`` / ``prompt_io`` / ``surface`` / ``display_fn`` /
+    ``blackout_assert`` default to the production implementations; tests
+    inject fakes. Returns 0 on a finalized keyvault, 1 on any refusal
+    (already initialised, online host at the pre-check, passphrase mismatch,
+    blackout failure, capture abort, expiry, digest mismatch, Enclave error).
     """
     guard = _refuse_if_initialised(home)
     if guard is not None:
         return guard
+
+    # Fail fast if the host is still online — before the operator types a
+    # passphrase the late blackout gate would otherwise discard (UX review
+    # 2026-06-15). display_seed re-asserts isolation as the real gate.
+    refusal = _precheck_blackout_or_refuse(blackout_assert)
+    if refusal is not None:
+        return refusal
 
     if prompt_io is None:
         from .configure import PromptToolkitIO
