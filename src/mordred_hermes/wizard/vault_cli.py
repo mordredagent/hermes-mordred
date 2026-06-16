@@ -291,6 +291,16 @@ def init(
         from .configure import PromptToolkitIO
 
         prompt_io = PromptToolkitIO()
+    # Teach the two-key model at creation time — the single most confusing point
+    # for newcomers (vault has ONE master key opened two ways): the device key is
+    # the everyday opener; the passphrase is the cold-path backup, not something
+    # typed day to day. Saying so up front pre-empts "do I type this every time?"
+    # and "is the passphrase the only key?".
+    print("This vault can be opened two ways:")
+    print("  • this device          — automatically, no typing (Secure Enclave, or a software key if unavailable)")
+    print("  • a recovery passphrase — your backup, used only if this device is lost or replaced")
+    print("Next you'll set the recovery passphrase. You will NOT need to type it day to day.")
+    print()
     passphrase = prompt_io.ask_password("Choose a vault recovery passphrase")
     if not passphrase:
         print("Passphrase must not be empty — nothing was written.", file=sys.stderr)
@@ -321,8 +331,11 @@ def init(
         del passphrase
 
     print(f"Vault initialised at {root}.")
-    print("  At-rest protection uses this device's key store (Secure Enclave when available, else a software key).")
-    print("  Keep your recovery passphrase safe — it is the only way to open this vault if the device is lost.")
+    print("  Day to day: this device opens the vault automatically — you won't be asked for the passphrase.")
+    print(
+        "  If this device is lost: the recovery passphrase is the ONLY way back in — "
+        "store it safely (e.g. a password manager)."
+    )
     return 0
 
 

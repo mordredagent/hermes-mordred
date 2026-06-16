@@ -207,6 +207,24 @@ class TestInit:
         assert "vault" in out
         assert "passphrase" in out or "recovery" in out
 
+    def test_output_teaches_the_two_key_model(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Newcomers conflate the device key with the recovery passphrase. The
+        creation output must state the two-key model so the mental model lands at
+        the moment of creation, not buried in docs."""
+        vault_cli.init(
+            root=tmp_path,
+            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
+            backend=FakeBackend(),
+            store=FakeAnchorStore(),
+        )
+        out = capsys.readouterr().out.lower()
+        # both opening paths are named
+        assert "two ways" in out
+        assert "this device" in out
+        # the passphrase is framed as the backup, not the everyday key
+        assert "day to day" in out
+        assert "lost" in out
+
     def test_cli_init_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, object] = {}
 
