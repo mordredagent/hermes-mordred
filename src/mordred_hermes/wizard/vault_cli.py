@@ -383,6 +383,32 @@ def ensure_initialised(
     return init(root=root, prompt_io=prompt_io, backend=backend, store=store)
 
 
+def _build_device_auth(
+    backend: NativeBackend | None, store: AnchorStore | None
+) -> tuple[NativeBackend | None, AnchorStore | None]:
+    """Construct the SE backend + keychain store for the device rotation path.
+
+    Tolerant by design: off-macOS the SE backend / keychain modules don't import,
+    so a failure returns ``(None, None)`` and the caller falls through to the
+    passphrase (cold) path instead of crashing before it. Injected values
+    (tests / callers that already have them) are returned unchanged.
+    """
+    if backend is not None and store is not None:
+        return backend, store
+    try:
+        if backend is None:
+            from ..keyvault._seckey_backend import _SecKeyBackend
+
+            backend = _SecKeyBackend()
+        if store is None:
+            from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+            store = KeychainAnchorStore()
+    except ImportError:
+        return None, None
+    return backend, store
+
+
 def change_passphrase(
     *,
     root: Path,
@@ -417,14 +443,9 @@ def change_passphrase(
         )
         return 1
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
+    # Off-macOS the SE backend / keychain don't import; _build_device_auth returns
+    # (None, None) then, and we fall through to the passphrase path below.
+    device_backend, device_store = _build_device_auth(backend, store)
     if prompt_io is None:
         from .configure import PromptToolkitIO
 
@@ -439,14 +460,17 @@ def change_passphrase(
         return 1
 
     try:
-        # Device-key path first — no need to know the old passphrase.
+        # Device-key path first — no need to know the old passphrase. With no
+        # usable device backend/store (off-macOS), route straight to the cold path.
+        if device_backend is None or device_store is None:
+            raise WrapError("no usable device key on this host")
         vault.change_passphrase(
             root,
             new_passphrase=new_passphrase,
             old_passphrase=None,
             key_id=key_id,
-            backend=backend,
-            store=store,
+            backend=device_backend,
+            store=device_store,
             anchor_label=anchor_label,
         )
     except (anchor.AnchorError, WrapError):
@@ -460,8 +484,8 @@ def change_passphrase(
                 new_passphrase=new_passphrase,
                 old_passphrase=old_passphrase,
                 key_id=key_id,
-                backend=backend,
-                store=store,
+                backend=device_backend,
+                store=device_store,
                 anchor_label=anchor_label,
             )
         except (vault.VaultError, recovery.RecoveryDigestMismatch, InvalidTag, ValueError, OSError) as exc:
