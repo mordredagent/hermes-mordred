@@ -358,6 +358,11 @@ def change_passphrase(
             *old_passphrase* (or a substituted manifest ``wmk``).
     """
     root = Path(root)
+    # keyvault_lock opens .lock without O_CREAT, so it must already exist. Mirror
+    # init_vault / enroll_file and materialize it first: a vault whose .lock was
+    # dropped (manual cleanup, or a backup that skipped the dotfile) would
+    # otherwise fail the rotation with an uncaught FileNotFoundError.
+    _ensure_lock(root)
     with keyvault_lock(root):
         try:
             recovery_blob = safe_read(root / _RECOVERY_NAME)

@@ -464,12 +464,16 @@ def change_passphrase(
                 store=store,
                 anchor_label=anchor_label,
             )
-        except (vault.VaultError, recovery.RecoveryDigestMismatch, InvalidTag, ValueError) as exc:
+        except (vault.VaultError, recovery.RecoveryDigestMismatch, InvalidTag, ValueError, OSError) as exc:
             print(f"Could not change the passphrase: {exc}", file=sys.stderr)
             return 1
         finally:
             del old_passphrase
-    except (vault.VaultError, ValueError) as exc:
+    except (vault.VaultError, ValueError, OSError) as exc:
+        # OSError covers a disk failure in the atomic sidecar write and a
+        # wrong-mode .lock (KeyvaultPermissionError) — surface as a clean exit 1,
+        # not a traceback. (AnchorError / WrapError are handled above as the
+        # device-unavailable fallback, so they never reach here.)
         print(f"Could not change the passphrase: {exc}", file=sys.stderr)
         return 1
     finally:
