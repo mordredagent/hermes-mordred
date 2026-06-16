@@ -439,6 +439,20 @@ def _echo_selection(label: str, value: str) -> None:
     )
 
 
+def _emit_prompt_help(description: str) -> None:
+    """Print a text prompt's help line once, on its own line above the prompt.
+
+    The help text is emitted here — before ``prompt()`` is invoked — rather than
+    folded into the ``prompt()`` message as a leading ``f"{description}\\n"`` line.
+    prompt_toolkit repaints its prompt message when the line is accepted, and a
+    multi-line message is repainted in full, so the help text appeared twice in
+    the scrollback. Keeping the ``prompt()`` message single-line and printing the
+    help separately renders it exactly once (UX request 2026-06-16). ``flush``
+    guarantees it lands before ``prompt()`` takes over the terminal.
+    """
+    print(description, flush=True)
+
+
 class PromptToolkitIO:
     """Default :class:`PromptIO` -- thin wrapper around ``prompt_toolkit``.
 
@@ -477,13 +491,14 @@ class PromptToolkitIO:
         except ImportError as e:
             raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         suffix = f" [{default}]" if default else ""
-        # An optional help line renders above the question (mirrors the inline
-        # descriptions on ``ask_bool`` / ``ask_choice``) so the label stays short
-        # while still explaining what the setting is for. Display-only: the
-        # answer is read from the question line regardless.
-        question = f"{label}{suffix}: "
-        message = f"{description}\n{question}" if description else question
-        answer = prompt(message)
+        # An optional help line prints above the question (mirrors ``ask_bool`` /
+        # ``ask_choice``) so the label stays short while still explaining the
+        # setting. It is emitted separately rather than folded into the prompt()
+        # message: a multi-line prompt is repainted in full on accept, which
+        # doubled the help text in the scrollback (see :func:`_emit_prompt_help`).
+        if description:
+            _emit_prompt_help(description)
+        answer = prompt(f"{label}{suffix}: ")
         return answer.strip() or default
 
     def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
@@ -492,13 +507,11 @@ class PromptToolkitIO:
         except ImportError as e:
             raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
         suffix = "[Y/n]" if default else "[y/N]"
-        # An optional help line renders above the question so the [y/N] line
-        # stays short while still explaining the trade-off (mirrors the inline
-        # descriptions on ``ask_choice``). The captured answer is parsed from
-        # the final line regardless, so this is display-only.
-        question = f"{label} {suffix}: "
-        message = f"{description}\n{question}" if description else question
-        return _parse_bool_answer(prompt(message), default=default)
+        # Optional help line above the [y/N] question, printed separately so the
+        # prompt stays single-line (see :func:`_emit_prompt_help`).
+        if description:
+            _emit_prompt_help(description)
+        return _parse_bool_answer(prompt(f"{label} {suffix}: "), default=default)
 
     def ask_multi(self, label: str, choices: Sequence[str], default: Sequence[str] = ()) -> tuple[str, ...]:
         """Inline multi-select picker.
@@ -524,7 +537,7 @@ class PromptToolkitIO:
 
         ``is_password=True`` masks the input. Empty input → ``default`` so
         a user who already has the secret set elsewhere can decline to
-        re-enter it. An optional ``description`` renders as a help line above
+        re-enter it. An optional ``description`` prints as a help line above
         the prompt (mirrors ``ask_text`` / ``ask_bool``); ``is_password`` masks
         only the typed secret, never the help text or the label.
         """
@@ -532,9 +545,11 @@ class PromptToolkitIO:
             from prompt_toolkit import prompt
         except ImportError as e:
             raise RuntimeError(_PROMPT_TOOLKIT_REQUIRED) from e
-        question = f"{label}: "
-        message = f"{description}\n{question}" if description else question
-        answer = prompt(message, is_password=True)
+        # Help line printed separately so the masked prompt stays single-line
+        # (see :func:`_emit_prompt_help`).
+        if description:
+            _emit_prompt_help(description)
+        answer = prompt(f"{label}: ", is_password=True)
         return answer.strip() or default
 
 

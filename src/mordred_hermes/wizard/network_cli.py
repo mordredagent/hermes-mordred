@@ -69,7 +69,10 @@ _NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
 #: Help line printed above each plain-text / secret / yes-no ``network init``
 #: prompt (UX request 2026-06-15). Every setting only matters for a single
 #: route, so each line names its route up front — a clearnet user can press
-#: Enter straight through. Mirrors the per-prompt Tor / VPN tables in
+#: Enter straight through. The three Mullvad lines now surface only when the
+#: Mullvad VPN provider is selected (the provider question is asked first), so
+#: a WireGuard / custom-VPN user is never prompted for a Mullvad account number
+#: (UX request 2026-06-16). Mirrors the per-prompt Tor / VPN tables in
 #: ``mordred-docs/mordred/QUICKSTART.md``.
 _TOR_BINARY_DESCRIPTION: Final[str] = (
     "Tor route only — where the `tor` program is. Leave as `tor` if it's on your PATH."
@@ -77,8 +80,10 @@ _TOR_BINARY_DESCRIPTION: Final[str] = (
 _TOR_SOCKS_PORT_DESCRIPTION: Final[str] = (
     "Tor route only — local port Tor's SOCKS proxy listens on. Standard is 9050; rarely changed."
 )
+# The label already says "Mullvad account number", so the help line carries the
+# context the label can't (paid service, where it lands) instead of restating it.
 _MULLVAD_ACCOUNT_DESCRIPTION: Final[str] = (
-    "VPN route only — your Mullvad account number (Mullvad is a paid VPN service)."
+    "VPN route only — Mullvad is a paid subscription VPN; the number is saved to ~/.hermes/.env (mode 0600)."
 )
 _MULLVAD_RELAY_DESCRIPTION: Final[str] = (
     "VPN route only — `auto`, or a 2-letter country code (e.g. `se`) to pin the VPN exit country."
@@ -430,15 +435,38 @@ class NetworkInitInputs:
     _mullvad_account_secret: str = field(default="", repr=False)
 
 
-def _collect_vpn_provider(
-    prompt_io: PromptIO, *, existing: Mapping[str, Any]
-) -> tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Ask which VPN provider to use plus its provider-specific settings.
+@dataclass(frozen=True, slots=True)
+class _VpnSettings:
+    """Outputs of :func:`_collect_vpn_settings`: the provider choice plus the
+    settings of whichever provider was picked.
 
-    Asked after the Mullvad prompts so the Mullvad-only prompt order the
-    older wizard tests rely on is unchanged; the wireguard / custom prompts
-    appear only when that provider is selected. Returns
-    ``(vpn_provider, wireguard_config_path, up, down, health)``.
+    When a non-Mullvad provider is selected the Mullvad relay/killswitch carry
+    the existing on-disk values (not the static defaults), so switching
+    providers on a re-run never silently wipes a saved Mullvad config.
+    """
+
+    vpn_provider: str
+    mullvad_account_secret: str
+    mullvad_relay_country: str
+    mullvad_killswitch: bool
+    wireguard_config_path: str
+    custom_up: tuple[str, ...]
+    custom_down: tuple[str, ...]
+    custom_health: tuple[str, ...]
+
+
+def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], prompt_secret: bool) -> _VpnSettings:
+    """Ask which VPN provider to use, then only that provider's settings.
+
+    The provider question is asked first so the Mullvad account / relay /
+    killswitch prompts can be gated on ``vpn_provider == "mullvad"`` — a
+    WireGuard or custom-VPN user is never prompted for a Mullvad account number
+    (UX request 2026-06-16, now that any VPN may be used). wireguard / custom
+    each surface their own prompts instead.
+
+    Non-Mullvad providers leave the Mullvad relay/killswitch at their existing
+    on-disk values so a re-run that switches providers preserves a saved Mullvad
+    config; ``mullvad_account_secret`` stays ``""`` (blank = keep current).
     """
     vpn_provider = prompt_io.ask_choice(
         label="VPN provider",
@@ -446,11 +474,39 @@ def _collect_vpn_provider(
         default=str(existing.get("vpn_provider") or "mullvad"),
         descriptions=_VPN_PROVIDER_DESCRIPTIONS,
     )
+
+    mullvad_account_secret = ""
+    # Preserve any saved Mullvad config when the chosen provider isn't Mullvad.
+    mullvad_relay_country = _coerce_mullvad_relay_country(str(existing.get("mullvad_relay_country") or "auto"))
+    mullvad_killswitch = _coerce_seed_bool(existing.get("mullvad_killswitch", False))
     wireguard_config_path = ""
     custom_up: tuple[str, ...] = ()
     custom_down: tuple[str, ...] = ()
     custom_health: tuple[str, ...] = ()
-    if vpn_provider == "wireguard":
+
+    if vpn_provider == "mullvad":
+        # Blank = keep the current secret (re-run safe). The label says so. When
+        # the caller has already decided to clear the secret (``--clear-mullvad``),
+        # skip the prompt entirely.
+        if prompt_secret:
+            mullvad_account_secret = prompt_io.ask_password(
+                label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
+                default="",
+                description=_MULLVAD_ACCOUNT_DESCRIPTION,
+            )
+        mullvad_relay_country = _coerce_mullvad_relay_country(
+            prompt_io.ask_text(
+                label="Mullvad relay country (`auto` or 2-letter code)",
+                default=str(existing.get("mullvad_relay_country") or "auto"),
+                description=_MULLVAD_RELAY_DESCRIPTION,
+            )
+        )
+        mullvad_killswitch = prompt_io.ask_bool(
+            label="Mullvad killswitch (lockdown-mode)",
+            default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
+            description=_MULLVAD_KILLSWITCH_DESCRIPTION,
+        )
+    elif vpn_provider == "wireguard":
         wireguard_config_path = prompt_io.ask_text(
             label="WireGuard config path",
             default=str(existing.get("wireguard_config_path") or ""),
@@ -478,7 +534,17 @@ def _collect_vpn_provider(
                 description=_CUSTOM_HEALTH_DESCRIPTION,
             )
         )
-    return vpn_provider, wireguard_config_path, custom_up, custom_down, custom_health
+
+    return _VpnSettings(
+        vpn_provider=vpn_provider,
+        mullvad_account_secret=mullvad_account_secret,
+        mullvad_relay_country=mullvad_relay_country,
+        mullvad_killswitch=mullvad_killswitch,
+        wireguard_config_path=wireguard_config_path,
+        custom_up=custom_up,
+        custom_down=custom_down,
+        custom_health=custom_health,
+    )
 
 
 def collect_network_answers(
@@ -487,7 +553,13 @@ def collect_network_answers(
     existing: Mapping[str, Any] | None = None,
     prompt_secret: bool = True,
 ) -> NetworkInitInputs:
-    """Run the six network-privacy prompts, seeding defaults from ``existing``.
+    """Run the network-privacy prompts, seeding defaults from ``existing``.
+
+    Prompt order: privacy path → Tor binary → Tor SOCKS port → VPN provider →
+    the selected provider's settings. Asking the provider before the Mullvad
+    prompts lets them be gated on ``vpn_provider == "mullvad"``, so a WireGuard
+    or custom-VPN user is never asked for a Mullvad account number (UX request
+    2026-06-16).
 
     ``existing`` is the current ``plugins.mordred_network`` body (see
     :func:`_read_existing_network_section`). Seeding each prompt's default from
@@ -520,49 +592,24 @@ def collect_network_answers(
             description=_TOR_SOCKS_PORT_DESCRIPTION,
         )
     )
-    # Blank = keep the current secret (re-run safe). The label says so. When the
-    # caller has already decided to clear the secret (``--clear-mullvad``), skip
-    # the prompt entirely.
-    if prompt_secret:
-        mullvad_account_secret = prompt_io.ask_password(
-            label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
-            default="",
-            description=_MULLVAD_ACCOUNT_DESCRIPTION,
-        )
-    else:
-        mullvad_account_secret = ""
-    mullvad_relay_country = _coerce_mullvad_relay_country(
-        prompt_io.ask_text(
-            label="Mullvad relay country (`auto` or 2-letter code)",
-            default=str(existing.get("mullvad_relay_country") or "auto"),
-            description=_MULLVAD_RELAY_DESCRIPTION,
-        )
-    )
-    mullvad_killswitch = prompt_io.ask_bool(
-        label="Mullvad killswitch (lockdown-mode)",
-        default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
-        description=_MULLVAD_KILLSWITCH_DESCRIPTION,
-    )
-    vpn_provider, wireguard_config_path, custom_up, custom_down, custom_health = _collect_vpn_provider(
-        prompt_io, existing=existing
-    )
+    vpn = _collect_vpn_settings(prompt_io, existing=existing, prompt_secret=prompt_secret)
 
     network_answers = NetworkAnswers(
         default_network_path=default_network_path,
         tor_binary_path=tor_binary_path,
         tor_socks_port=tor_socks_port,
         mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
-        mullvad_relay_country=mullvad_relay_country,
-        mullvad_killswitch=mullvad_killswitch,
-        vpn_provider=vpn_provider,
-        wireguard_config_path=wireguard_config_path,
-        custom_up_cmd=custom_up,
-        custom_down_cmd=custom_down,
-        custom_health_cmd=custom_health,
+        mullvad_relay_country=vpn.mullvad_relay_country,
+        mullvad_killswitch=vpn.mullvad_killswitch,
+        vpn_provider=vpn.vpn_provider,
+        wireguard_config_path=vpn.wireguard_config_path,
+        custom_up_cmd=vpn.custom_up,
+        custom_down_cmd=vpn.custom_down,
+        custom_health_cmd=vpn.custom_health,
     )
     return NetworkInitInputs(
         network_answers=network_answers,
-        _mullvad_account_secret=mullvad_account_secret,
+        _mullvad_account_secret=vpn.mullvad_account_secret,
     )
 
 

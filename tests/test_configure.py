@@ -955,9 +955,12 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         assert io.ask_text("Endpoint", default="http://x") == "http://x"
 
-    def test_ask_text_renders_description_above_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The optional help line prints on its own line above the question so the
-        # label stays short (mirrors ``ask_bool``); the answer parses unchanged.
+    def test_ask_text_prints_description_above_a_bare_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The help line prints once, on its own, ABOVE a single-line prompt — it
+        # is no longer folded into the prompt() message (prompt_toolkit repaints a
+        # multi-line message in full, doubling it in the scrollback). UX 2026-06-16.
         messages: list[str] = []
 
         def fake_prompt(message: str, **kwargs: object) -> str:
@@ -967,7 +970,10 @@ class TestPromptToolkitIO:
         monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
         io = configure.PromptToolkitIO()
         assert io.ask_text("Tor binary path", default="tor", description="Where the tor program is.") == "answer"
-        assert messages == ["Where the tor program is.\nTor binary path [tor]: "]
+        # The prompt message is bare — no description, no embedded newline.
+        assert messages == ["Tor binary path [tor]: "]
+        # The help text was emitted separately, exactly once.
+        assert capsys.readouterr().out == "Where the tor program is.\n"
 
     def test_ask_text_without_description_stays_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # No description → the question line is unchanged (regression guard).
@@ -1000,9 +1006,11 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         assert io.ask_bool("Allow?", default) is expected
 
-    def test_ask_bool_renders_description_above_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The optional help line prints on its own line above the [y/N] question
-        # so the prompt guides without bloating the question itself.
+    def test_ask_bool_prints_description_above_a_bare_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The help line prints separately above the [y/N] prompt; the prompt
+        # message itself stays single-line.
         messages: list[str] = []
 
         def fake_prompt(message: str, **kwargs: object) -> str:
@@ -1012,7 +1020,8 @@ class TestPromptToolkitIO:
         monkeypatch.setattr("prompt_toolkit.prompt", fake_prompt)
         io = configure.PromptToolkitIO()
         assert io.ask_bool("Allow?", False, description="Cloud sends your prompts away.") is True
-        assert messages == ["Cloud sends your prompts away.\nAllow? [y/N]: "]
+        assert messages == ["Allow? [y/N]: "]
+        assert capsys.readouterr().out == "Cloud sends your prompts away.\n"
 
     def test_ask_bool_without_description_stays_bare(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # No description → the question line is unchanged (regression guard).
@@ -1059,9 +1068,11 @@ class TestPromptToolkitIO:
         # The secret must never echo — is_password masks the input.
         assert seen_kwargs.get("is_password") is True
 
-    def test_ask_password_renders_description_above_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The help line prints above the masked prompt; is_password masks only the
-        # typed secret, never the help text or label (mirrors ``ask_text``).
+    def test_ask_password_prints_description_above_a_bare_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The help line prints separately above the masked prompt; is_password
+        # masks only the typed secret, never the help text or label.
         captured: dict[str, object] = {}
 
         def fake_prompt(message: str, **kwargs: object) -> str:
@@ -1073,8 +1084,10 @@ class TestPromptToolkitIO:
         io = configure.PromptToolkitIO()
         result = io.ask_password("Mullvad account number", description="VPN route only — your account number.")
         assert result == "secret-1"
-        assert captured["message"] == "VPN route only — your account number.\nMullvad account number: "
+        # Bare, single-line prompt message; the help text printed separately.
+        assert captured["message"] == "Mullvad account number: "
         assert captured.get("is_password") is True
+        assert capsys.readouterr().out == "VPN route only — your account number.\n"
 
     @pytest.mark.parametrize(
         ("method", "args"),
