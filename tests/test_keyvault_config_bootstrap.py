@@ -323,3 +323,32 @@ class TestRecoveryHint:
         installs."""
         assert "hermes-mordred vault disable-config-decrypt" in _config_bootstrap._RECOVERY_HINT
         assert "hermes mordred " not in _config_bootstrap._RECOVERY_HINT
+
+
+class TestConfigHookInstalled:
+    """``config_hook_installed`` detects the force-included startup ``.pth`` in the
+    interpreter's site-packages, so ``encryption status`` / ``enable`` can tell
+    the operator whether their runtime will actually seal config.yaml (rather than
+    only whether the opt-in marker is set)."""
+
+    _PTH = "mordred_hermes_config_decrypt.pth"
+
+    def test_present_pth_that_wires_bootstrap_is_detected(self, tmp_path: Path) -> None:
+        (tmp_path / self._PTH).write_text(
+            "__import__('mordred_hermes._pth_bootstrap', fromlist=['run']).run()\n", encoding="utf-8"
+        )
+        assert _config_bootstrap.config_hook_installed(site_dirs=[str(tmp_path)]) is True
+
+    def test_absent_pth_is_not_detected(self, tmp_path: Path) -> None:
+        assert _config_bootstrap.config_hook_installed(site_dirs=[str(tmp_path)]) is False
+
+    def test_same_named_pth_without_bootstrap_is_not_a_false_positive(self, tmp_path: Path) -> None:
+        (tmp_path / self._PTH).write_text("import os  # unrelated .pth\n", encoding="utf-8")
+        assert _config_bootstrap.config_hook_installed(site_dirs=[str(tmp_path)]) is False
+
+    def test_scans_every_site_dir(self, tmp_path: Path) -> None:
+        empty, has = tmp_path / "a", tmp_path / "b"
+        empty.mkdir()
+        has.mkdir()
+        (has / self._PTH).write_text("__import__('mordred_hermes._pth_bootstrap')\n", encoding="utf-8")
+        assert _config_bootstrap.config_hook_installed(site_dirs=[str(empty), str(has)]) is True

@@ -102,13 +102,25 @@ class TestConfigStatus:
         assert st.target == "config"
         assert st.configured is False
 
-    def test_marker_present_active_on_macos(self, tmp_path: Path) -> None:
+    def test_marker_present_with_hook_active_on_macos(self, tmp_path: Path) -> None:
         marker = _marker_path(tmp_path)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("vault-managed\n", encoding="utf-8")
-        st = encryption_cli.config_status(home=tmp_path, platform="darwin")
+        st = encryption_cli.config_status(home=tmp_path, platform="darwin", hook_installed=True)
         assert st.configured is True
         assert st.active is True
+        assert "hook installed" in st.detail
+
+    def test_marker_present_no_hook_inactive_on_macos(self, tmp_path: Path) -> None:
+        # Marker set but the decrypt .pth hook absent: nothing reseals, so the
+        # plaintext stays on disk — configured but NOT active, and the detail says so.
+        marker = _marker_path(tmp_path)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("vault-managed\n", encoding="utf-8")
+        st = encryption_cli.config_status(home=tmp_path, platform="darwin", hook_installed=False)
+        assert st.configured is True
+        assert st.active is False
+        assert "NOT installed" in st.detail
 
     def test_marker_present_inactive_off_macos(self, tmp_path: Path) -> None:
         marker = _marker_path(tmp_path)
@@ -369,9 +381,7 @@ class TestCliDispatchAll:
         monkeypatch.setattr(workspace_cli, f"cli_{verb}", make("workspace"))
         return calls
 
-    def test_enable_all_runs_core_and_workspace_on_macos(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_enable_all_runs_core_and_workspace_on_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: True)
@@ -478,7 +488,9 @@ class TestWorkspaceEligible:
             blob=tmp_path / "absent.wrapped",
             mount=tmp_path / "mnt",
         )
-        ok, reason = encryption_cli._workspace_eligible("purge", platform="darwin", on_path=lambda _n: True, workspace=ws)
+        ok, reason = encryption_cli._workspace_eligible(
+            "purge", platform="darwin", on_path=lambda _n: True, workspace=ws
+        )
         assert ok is False
         assert "not set up" in reason
 

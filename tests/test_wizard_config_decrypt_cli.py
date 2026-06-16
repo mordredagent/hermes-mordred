@@ -52,6 +52,38 @@ class TestEnable:
         assert _marker_path(home).exists()
         assert _read_vault_config(root, backend, store) == _CONFIG
 
+    def test_enable_message_confirms_when_hook_installed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # enable runs via the same interpreter whose startup would seal config.yaml,
+        # so it reports whether THIS runtime's decrypt hook is present (UX 2026-06-17).
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / "config.yaml").write_bytes(_CONFIG)
+        monkeypatch.setattr(config_decrypt_cli, "config_hook_installed", lambda: True)
+
+        assert config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store) == 0
+        out = capsys.readouterr().out
+        assert "decrypt hook is installed" in out
+        assert "NOT installed" not in out
+
+    def test_enable_message_warns_when_hook_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / "config.yaml").write_bytes(_CONFIG)
+        monkeypatch.setattr(config_decrypt_cli, "config_hook_installed", lambda: False)
+
+        assert config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store) == 0
+        out = capsys.readouterr().out
+        assert "NOT installed" in out
+        assert "(re)installing the mordred-hermes" in out
+
     def test_missing_config_is_error_and_no_marker(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()

@@ -38,19 +38,22 @@ module imports on any platform, matching ``_runtime_env.py``.
 from __future__ import annotations
 
 import atexit
+import contextlib
+import site
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home
 from ._identity import default_vault_root, vault_identity
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Sequence
 
     from .anchor import AnchorStore
     from .wrap import NativeBackend
 
-__all__ = ["install_config_decrypt", "materialize_config", "reseal_config"]
+__all__ = ["config_hook_installed", "install_config_decrypt", "materialize_config", "reseal_config"]
 
 _CONFIG_NAME = "config.yaml"
 # Opt-in marker: its presence puts config.yaml on the vault-managed lifecycle.
@@ -67,6 +70,48 @@ _RECOVERY_HINT = "to recover, run: MORDRED_CONFIG_DECRYPT=0 hermes-mordred vault
 def _marker_path(home: Path) -> Path:
     """The opt-in marker path for a Hermes home: ``<home>/mordred/config-vault.marker``."""
     return home.joinpath(*_MARKER_SUBPATH)
+
+
+#: The startup ``.pth`` the wheel force-includes at the site-packages root (see
+#: ``packaging/pth/`` + ``pyproject.toml``). Its presence is what makes a Hermes
+#: interpreter run the materialize/reseal lifecycle.
+_PTH_HOOK_FILENAME = "mordred_hermes_config_decrypt.pth"
+
+
+def _interpreter_site_dirs() -> list[str]:
+    """site-packages directories for the *current* interpreter (best-effort)."""
+    dirs: list[str] = []
+    # Some embedded / older virtualenv interpreters omit getsitepackages().
+    with contextlib.suppress(AttributeError):
+        dirs.extend(site.getsitepackages())
+    user = site.getusersitepackages()
+    if isinstance(user, str):
+        dirs.append(user)
+    return dirs
+
+
+def config_hook_installed(*, site_dirs: Sequence[str] | None = None) -> bool:
+    """Whether the config.yaml decrypt ``.pth`` hook is installed for THIS interpreter.
+
+    Scans the interpreter's site-packages for the force-included
+    :data:`_PTH_HOOK_FILENAME` and confirms it actually wires the bootstrap (a
+    same-named file that does not reference ``_pth_bootstrap`` does not count).
+
+    ``encryption enable`` / ``status`` run via the same ``hermes-mordred``
+    interpreter whose startup would materialize/reseal ``config.yaml``, so this
+    answers the real question — *will my runtime actually seal config.yaml?* —
+    rather than merely *is the opt-in marker set?*. ``site_dirs`` is injectable
+    for tests; production resolves it from the live interpreter.
+    """
+    dirs = list(site_dirs) if site_dirs is not None else _interpreter_site_dirs()
+    for d in dirs:
+        candidate = Path(d) / _PTH_HOOK_FILENAME
+        try:
+            if candidate.is_file() and "_pth_bootstrap" in candidate.read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _resolve_backend_store(

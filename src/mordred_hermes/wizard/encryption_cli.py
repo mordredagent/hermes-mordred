@@ -41,6 +41,7 @@ from pathlib import Path
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._config_bootstrap import _marker_path as _config_marker_path
+from ..keyvault._config_bootstrap import config_hook_installed
 from ..keyvault._identity import resolve_root
 from ..keyvault._runtime_env import _env_optout_marker_path
 
@@ -173,11 +174,25 @@ def env_status(*, root: Path, home: Path, platform: str) -> TargetStatus:
     return TargetStatus("env", configured, active, detail)
 
 
-def config_status(*, home: Path, platform: str) -> TargetStatus:
+def config_status(*, home: Path, platform: str, hook_installed: bool | None = None) -> TargetStatus:
+    """Resolve the ``config`` target's status.
+
+    On macOS the data is enrolled, but it is only *effectively* sealed when the
+    startup ``.pth`` hook is installed in this runtime — without it the plaintext
+    ``config.yaml`` just stays on disk. ``active`` reflects that (the opt-in
+    marker alone used to read as "active" even with no hook). ``hook_installed``
+    is injectable for tests; production detects it from the live interpreter.
+    """
     configured = _config_marker_path(home).exists()
-    active = configured and platform == _DARWIN
-    detail = "vault-managed; " + _os_note(active, platform) if configured else "not vault-managed"
-    return TargetStatus("config", configured, active, detail)
+    if not configured:
+        return TargetStatus("config", False, False, "not vault-managed")
+    if platform != _DARWIN:
+        return TargetStatus("config", True, False, "vault-managed; " + _os_note(False, platform))
+    hook = config_hook_installed() if hook_installed is None else hook_installed
+    if hook:
+        return TargetStatus("config", True, True, "vault-managed; decrypt hook installed (sealed on Hermes exit)")
+    detail = "vault-managed; decrypt hook NOT installed — plaintext stays on disk (reinstall the mordred-hermes wheel)"
+    return TargetStatus("config", True, False, detail)
 
 
 def memory_status(*, home: Path, platform: str) -> TargetStatus:

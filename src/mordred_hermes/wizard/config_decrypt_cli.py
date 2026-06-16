@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
-from ..keyvault._config_bootstrap import _marker_path
+from ..keyvault._config_bootstrap import _marker_path, config_hook_installed
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -80,11 +80,18 @@ def enable(
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("vault-managed\n", encoding="utf-8")
     print(f"config.yaml is now vault-managed (marker {marker}).")
-    print(
-        "  The startup hook materializes it on each Hermes run and reseals (removes the\n"
-        "  plaintext) on exit. Install the hook by (re)installing the mordred-hermes wheel;\n"
-        "  until then the plaintext config.yaml stays on disk."
-    )
+    if config_hook_installed():
+        print(
+            "  The decrypt hook is installed here: each Hermes run materializes config.yaml\n"
+            "  and reseals it (removes the plaintext) on exit. The marker is now set, so the\n"
+            "  next `hermes` / `hermes-mordred` run seals the current plaintext on exit."
+        )
+    else:
+        print(
+            "  ⚠ The decrypt hook is NOT installed in this environment, so the plaintext\n"
+            "  config.yaml stays on disk. Install it by (re)installing the mordred-hermes\n"
+            "  wheel (it ships the startup .pth hook); until then nothing reseals it."
+        )
     return 0
 
 
