@@ -37,8 +37,10 @@ if TYPE_CHECKING:
 __all__ = [
     "add",
     "cat",
+    "change_passphrase",
     "cli_add",
     "cli_cat",
+    "cli_change_passphrase",
     "cli_init",
     "cli_migrate",
     "cli_status",
@@ -381,6 +383,104 @@ def ensure_initialised(
     return init(root=root, prompt_io=prompt_io, backend=backend, store=store)
 
 
+def change_passphrase(
+    *,
+    root: Path,
+    prompt_io: PromptIO | None = None,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Change the vault's recovery passphrase, keeping the master key unchanged.
+
+    Tries the device key first — no old passphrase needed, the everyday "I forgot
+    the passphrase but this machine still works" path. If the device key / anchor
+    is unavailable (non-macOS, or a vault copied here), falls back to asking for
+    the current passphrase. Only the recovery sidecar is rewritten; no enrolled
+    file is re-encrypted and the device-key open is unaffected.
+
+    Returns 0 on success, 1 on any failure (no vault, empty / mismatched new
+    passphrase, wrong current passphrase, or an unrecoverable device error).
+    """
+    from cryptography.exceptions import InvalidTag
+
+    from ..keyvault import anchor, recovery, vault
+    from ..keyvault._exceptions import WrapError
+
+    key_id = anchor_label = _vault_identity(root)
+
+    # The recovery sidecar is the one file we rewrite; its absence means there is
+    # no vault to rotate. Do NOT create one here (unlike `encryption enable`).
+    if not (root / "recovery.mrkv").exists():
+        print(
+            f"No vault at {root} — nothing to rotate. Run `encryption enable env` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if backend is None:
+        from ..keyvault._seckey_backend import _SecKeyBackend
+
+        backend = _SecKeyBackend()
+    if store is None:
+        from ..keyvault._anchor_keychain import KeychainAnchorStore
+
+        store = KeychainAnchorStore()
+    if prompt_io is None:
+        from .configure import PromptToolkitIO
+
+        prompt_io = PromptToolkitIO()
+
+    new_passphrase = prompt_io.ask_password("Choose a NEW recovery passphrase")
+    if not new_passphrase:
+        print("Passphrase must not be empty — nothing was changed.", file=sys.stderr)
+        return 1
+    if new_passphrase != prompt_io.ask_password("Re-enter the new passphrase"):
+        print("Passphrases do not match — nothing was changed.", file=sys.stderr)
+        return 1
+
+    try:
+        # Device-key path first — no need to know the old passphrase.
+        vault.change_passphrase(
+            root,
+            new_passphrase=new_passphrase,
+            old_passphrase=None,
+            key_id=key_id,
+            backend=backend,
+            store=store,
+            anchor_label=anchor_label,
+        )
+    except (anchor.AnchorError, WrapError):
+        # Device key / anchor unusable here — fall back to the cold path, which is
+        # authorized by the current passphrase instead.
+        print("This device's key can't authorize the change here — enter your CURRENT passphrase to continue.")
+        old_passphrase = prompt_io.ask_password("Current recovery passphrase")
+        try:
+            vault.change_passphrase(
+                root,
+                new_passphrase=new_passphrase,
+                old_passphrase=old_passphrase,
+                key_id=key_id,
+                backend=backend,
+                store=store,
+                anchor_label=anchor_label,
+            )
+        except (vault.VaultError, recovery.RecoveryDigestMismatch, InvalidTag, ValueError) as exc:
+            print(f"Could not change the passphrase: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            del old_passphrase
+    except (vault.VaultError, ValueError) as exc:
+        print(f"Could not change the passphrase: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        del new_passphrase
+
+    print("Recovery passphrase changed.")
+    print("  Your device key is unchanged — day-to-day automatic opening still works exactly as before.")
+    print("  Only the backup passphrase changed. Store the new one safely (e.g. a password manager).")
+    return 0
+
+
 def add(
     *,
     root: Path,
@@ -566,6 +666,12 @@ def cli_migrate(args: argparse.Namespace) -> int:
 def cli_init(args: argparse.Namespace) -> int:
     """argparse handler for ``vault init [--root PATH]``."""
     return init(root=_resolve_root(getattr(args, "root", None)))
+
+
+def cli_change_passphrase(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault change-passphrase [--root PATH]`` (and its
+    ``encryption change-passphrase`` alias)."""
+    return change_passphrase(root=_resolve_root(getattr(args, "root", None)))
 
 
 def cli_status(args: argparse.Namespace) -> int:

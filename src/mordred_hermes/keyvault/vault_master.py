@@ -107,3 +107,60 @@ def open_passphrase(recovery_blob: bytes, passphrase: str, *, wmk: bytes) -> Mas
         # Best-effort: MasterKey copied the bytes into its own bytearray, so
         # drop our reference (mirrors seal()). Immutable bytes cannot be zeroed.
         del master_bytes
+
+
+def _noop_audit(_entry: dict[str, object]) -> None:
+    """Discard sink for the device unwrap during a passphrase rotation.
+
+    Mirrors :func:`mordred_hermes.keyvault.kek.open_master_key`, which also
+    unwraps prompt-free with no audit sink by default. Auditing the rotation
+    itself is a possible follow-up.
+    """
+
+
+def rewrap_from_device(*, key_id: str, new_passphrase: str, backend: NativeBackend, wmk: bytes) -> bytes:
+    """Re-seal the EXISTING master under *new_passphrase*, authorized by the device key.
+
+    Rotates the recovery passphrase without any old passphrase: the Secure-Enclave
+    (or software) wrapping key for ``key_id`` unwraps the master, which is then
+    re-exported under *new_passphrase*. The master, ``wmk``, and every enrolled
+    file are unchanged — the caller replaces only the recovery sidecar. The new
+    blob keeps the same ``SHA-256(wmk)`` verification digest (``wmk`` is unchanged),
+    so :func:`open_passphrase` still binds it correctly. The master bytes never
+    leave this function.
+
+    Raises:
+        ValueError: *new_passphrase* is empty (recovery would be unprotected).
+        WrapKeyNotFound / WrapError: the device wrapping key is unavailable.
+    """
+    if not new_passphrase:
+        raise ValueError("vault recovery passphrase must not be empty")
+    master_bytes = wrap.unwrap_dek(wmk, key_id, audit_sink=_noop_audit, backend=backend)
+    try:
+        return backup.export(master_bytes, new_passphrase, verification_digest=_recovery_digest(wmk))
+    finally:
+        del master_bytes
+
+
+def rewrap_from_passphrase(recovery_blob: bytes, old_passphrase: str, new_passphrase: str, *, wmk: bytes) -> bytes:
+    """Re-seal the EXISTING master under *new_passphrase*, authorized by *old_passphrase*.
+
+    The device-independent counterpart of :func:`rewrap_from_device` — for a
+    non-macOS host or a vault copied to another machine, where the wrapping key
+    is gone. Opens the current recovery blob with *old_passphrase* (same
+    verify-before-decrypt ``SHA-256(wmk)`` digest as :func:`open_passphrase`) and
+    re-exports under *new_passphrase*. The master bytes never leave this function.
+
+    Raises:
+        ValueError: *new_passphrase* is empty.
+        recovery.RecoveryDigestMismatch: *recovery_blob* is paired with a
+            different ``wmk`` (substituted manifest) — raised before the KDF cost.
+        cryptography.exceptions.InvalidTag: *old_passphrase* is wrong.
+    """
+    if not new_passphrase:
+        raise ValueError("vault recovery passphrase must not be empty")
+    master_bytes = recovery.import_backup(recovery_blob, old_passphrase, recomputed_digest=_recovery_digest(wmk))
+    try:
+        return backup.export(master_bytes, new_passphrase, verification_digest=_recovery_digest(wmk))
+    finally:
+        del master_bytes

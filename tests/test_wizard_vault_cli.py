@@ -1285,3 +1285,164 @@ class TestStatusJson:
         cli._setup_subparser(parser)
         ns = parser.parse_args(["vault", "status", "--json"])
         assert ns.json is True
+
+
+_NEW_PASSPHRASE = "a brand new passphrase 2026"
+
+
+def _build_at_cli_identity(
+    root: Path, backend: FakeBackend, store: FakeAnchorStore, *, files: dict[str, bytes] | None = None
+) -> None:
+    """Build a real vault whose identity matches what the CLI derives from ``root``.
+
+    ``vault_cli.change_passphrase`` derives key_id/anchor_label via
+    ``_vault_identity(root)``; the fixed-id ``_build_vault`` helper would not
+    match, so the device-key path needs this root-derived build (same ``backend``
+    + ``store`` instances must be reused so the wrapping key and anchor persist).
+    """
+    ident = vault_cli._vault_identity(root)
+    backend.generate_enclave_key(ident)
+    opened = vault.init_vault(
+        root, key_id=ident, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=ident
+    )
+    try:
+        for name, plaintext in (files or {}).items():
+            opened.enroll_file(name, plaintext)
+    finally:
+        opened.close()
+
+
+class TestChangePassphrase:
+    """`vault change-passphrase` — rotate the recovery passphrase, master unchanged."""
+
+    def test_device_path_rotates_keeps_files_and_invalidates_old(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from cryptography.exceptions import InvalidTag
+
+        backend, store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, backend, store, files={".env": b"SECRET=1\n"})
+
+        rc = vault_cli.change_passphrase(
+            root=root,
+            prompt_io=_PromptIO(passwords=[_NEW_PASSPHRASE, _NEW_PASSPHRASE]),
+            backend=backend,
+            store=store,
+        )
+        assert rc == 0
+
+        # The new passphrase opens the vault and the enrolled file is intact —
+        # proof the master (and every blob) is unchanged, only the sidecar.
+        opened = vault.recover_vault(root, _NEW_PASSPHRASE)
+        try:
+            assert opened.read_file(".env") == b"SECRET=1\n"
+        finally:
+            opened.close()
+
+        # The old passphrase no longer opens it.
+        with pytest.raises(InvalidTag):
+            vault.recover_vault(root, _PASSPHRASE)
+
+    def test_cold_path_rotation_with_old_passphrase(self, tmp_path: Path) -> None:
+        from cryptography.exceptions import InvalidTag
+
+        backend, store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, backend, store, files={".env": b"A=1\n"})
+        ident = vault_cli._vault_identity(root)
+
+        # Cold path: authorized by the current passphrase, device key unused.
+        vault.change_passphrase(
+            root,
+            new_passphrase=_NEW_PASSPHRASE,
+            old_passphrase=_PASSPHRASE,
+            key_id=ident,
+            anchor_label=ident,
+        )
+        opened = vault.recover_vault(root, _NEW_PASSPHRASE)
+        try:
+            assert opened.read_file(".env") == b"A=1\n"
+        finally:
+            opened.close()
+        with pytest.raises(InvalidTag):
+            vault.recover_vault(root, _PASSPHRASE)
+
+    def test_cold_path_wrong_old_passphrase_raises_and_keeps_sidecar(self, tmp_path: Path) -> None:
+        from cryptography.exceptions import InvalidTag
+
+        backend, store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, backend, store)
+        ident = vault_cli._vault_identity(root)
+        with pytest.raises(InvalidTag):
+            vault.change_passphrase(
+                root,
+                new_passphrase=_NEW_PASSPHRASE,
+                old_passphrase="the wrong current passphrase",
+                key_id=ident,
+                anchor_label=ident,
+            )
+        # The sidecar was not rewritten: the original passphrase still opens it.
+        vault.recover_vault(root, _PASSPHRASE).close()
+
+    def test_cli_falls_back_to_old_passphrase_when_device_unavailable(self, tmp_path: Path) -> None:
+        backend, store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, backend, store, files={".env": b"Z=9\n"})
+
+        # A store whose read raises makes the device path fail, forcing the CLI
+        # fallback; the prompt then supplies the new passphrase twice, then the current one.
+        rc = vault_cli.change_passphrase(
+            root=root,
+            prompt_io=_PromptIO(passwords=[_NEW_PASSPHRASE, _NEW_PASSPHRASE, _PASSPHRASE]),
+            backend=backend,
+            store=_ReadRaisesStore(),
+        )
+        assert rc == 0
+        opened = vault.recover_vault(root, _NEW_PASSPHRASE)
+        try:
+            assert opened.read_file(".env") == b"Z=9\n"
+        finally:
+            opened.close()
+
+    def test_cli_empty_new_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        backend, store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, backend, store)
+        rc = vault_cli.change_passphrase(
+            root=root, prompt_io=_PromptIO(passwords=["", ""]), backend=backend, store=store
+        )
+        assert rc == 1
+        assert "empty" in capsys.readouterr().err.lower()
+        vault.recover_vault(root, _PASSPHRASE).close()  # original passphrase still valid
+
+    def test_cli_mismatch_new_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        backend, store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, backend, store)
+        rc = vault_cli.change_passphrase(
+            root=root, prompt_io=_PromptIO(passwords=["alpha", "beta"]), backend=backend, store=store
+        )
+        assert rc == 1
+        assert "match" in capsys.readouterr().err.lower()
+        vault.recover_vault(root, _PASSPHRASE).close()
+
+    def test_cli_no_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = vault_cli.change_passphrase(
+            root=tmp_path / "nope",
+            prompt_io=_PromptIO(passwords=[_NEW_PASSPHRASE, _NEW_PASSPHRASE]),
+            backend=FakeBackend(),
+            store=FakeAnchorStore(),
+        )
+        assert rc == 1
+        assert "no vault" in capsys.readouterr().err.lower()
+
+    def test_subcommands_are_wired_under_vault_and_encryption(self) -> None:
+        from mordred_hermes.wizard import cli
+
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        cli._setup_subparser(parser)
+        for argv in (["vault", "change-passphrase"], ["encryption", "change-passphrase"]):
+            ns = parser.parse_args(argv)
+            assert ns.func.__name__ == "_handle_vault_change_passphrase"

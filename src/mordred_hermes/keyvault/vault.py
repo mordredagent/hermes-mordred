@@ -316,6 +316,88 @@ def recover_vault(root: Path, passphrase: str) -> OpenVault:
     )
 
 
+def change_passphrase(
+    root: Path,
+    *,
+    new_passphrase: str,
+    old_passphrase: str | None = None,
+    key_id: str,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    anchor_label: str,
+) -> None:
+    """Rotate the recovery passphrase WITHOUT changing the master key.
+
+    Re-seals the existing master under *new_passphrase* and atomically replaces
+    the recovery sidecar (``recovery.mrkv``). The device key (``wmk``), the
+    manifest, the generation, the anchor, and every enrolled file are untouched —
+    only the cold-path sidecar changes, so no file is re-encrypted and the
+    everyday device-key open is unaffected.
+
+    Authorization:
+
+    - **default (``old_passphrase is None``)** — the device wrapping key
+      authorizes the rotation (the "forgot the passphrase but this machine still
+      works" path). The anchor is verified first (freshness pin) before the
+      trusted ``wmk`` is unwrapped. Requires ``backend`` and ``store``.
+    - **``old_passphrase`` given** — the rotation is authorized by the current
+      recovery blob instead (device-independent / a vault copied here); the newest
+      on-disk manifest supplies the ``wmk`` (mirroring :func:`recover_vault`), and
+      ``backend`` / ``store`` are unused.
+
+    The whole read-rewrap-write runs under the vault lock so a concurrent enroll
+    cannot interleave. ``atomic_write`` replaces the sidecar by temp+rename, so a
+    crash leaves the previous (still-valid) blob in place.
+
+    Raises:
+        VaultError: no vault / manifest / recovery sidecar at ``root``, or the
+            device path was requested without a backend + store.
+        ValueError: *new_passphrase* is empty.
+        AnchorError: device-path freshness pin failed (missing / mismatched).
+        recovery.RecoveryDigestMismatch / cryptography InvalidTag: wrong
+            *old_passphrase* (or a substituted manifest ``wmk``).
+    """
+    root = Path(root)
+    with keyvault_lock(root):
+        try:
+            recovery_blob = safe_read(root / _RECOVERY_NAME)
+        except FileNotFoundError as e:
+            raise VaultError("recovery sidecar (recovery.mrkv) is missing — not a vault, or it is corrupt") from e
+
+        if old_passphrase is None:
+            # Device-key path: pin-check the anchor, then trust the manifest wmk.
+            if backend is None or store is None:
+                raise VaultError("device-key rotation requires a backend and an anchor store")
+            record = anchor.read_anchor(store, anchor_label)
+            try:
+                blob = safe_read(_manifest_path(root, record.generation))
+            except FileNotFoundError as e:
+                raise VaultError(
+                    f"authoritative manifest for generation {record.generation} is missing — vault is corrupt"
+                ) from e
+            untrusted = manifest.parse_unverified(blob)
+            anchor.verify_anchor(store, anchor_label, wmk=untrusted.wmk, generation=untrusted.generation)
+            new_recovery = vault_master.rewrap_from_device(
+                key_id=key_id, new_passphrase=new_passphrase, backend=backend, wmk=untrusted.wmk
+            )
+        else:
+            # Cold path: the sidecar's SHA-256(wmk) digest binds it to the real
+            # wmk, so the newest manifest (no anchor to name it) supplies it.
+            generation = _latest_manifest_generation(root)
+            if generation is None:
+                raise VaultError("no manifest found at this root — not a vault, or all manifests are missing")
+            try:
+                blob = safe_read(_manifest_path(root, generation))
+            except FileNotFoundError as e:
+                raise VaultError(f"manifest for generation {generation} vanished — cannot rotate") from e
+            untrusted = manifest.parse_unverified(blob)
+            new_recovery = vault_master.rewrap_from_passphrase(
+                recovery_blob, old_passphrase, new_passphrase, wmk=untrusted.wmk
+            )
+
+        atomic_write(root / _RECOVERY_NAME, new_recovery)
+
+
 class OpenVault:
     """A live handle to an opened vault.
 

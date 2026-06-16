@@ -284,6 +284,16 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_init.set_defaults(func=_handle_vault_init)
 
+    p_change_pp = vsub.add_parser(
+        "change-passphrase",
+        help="Change the vault's recovery passphrase (master key and enrolled files unchanged)",
+    )
+    p_change_pp.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
+
     p_add = vsub.add_parser(
         "add",
         help="Encrypt a file into the vault under a logical name",
@@ -400,6 +410,18 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_purge.add_argument("target", choices=_toggle_targets)
     p_purge.add_argument("-y", "--yes", action="store_true", help="Confirm the destructive purge")
     p_purge.set_defaults(func=_handle_encryption_purge)
+
+    # The recovery passphrase is born during `encryption enable`, so users look
+    # for its rotation here too. Alias the vault-level command for discoverability.
+    p_change_pp = esub.add_parser(
+        "change-passphrase",
+        help="Change the vault's recovery passphrase (alias of `vault change-passphrase`)",
+    )
+    p_change_pp.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
 
 def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -562,6 +584,12 @@ def _handle_vault_init(args: argparse.Namespace) -> int:
     from . import vault_cli
 
     return vault_cli.cli_init(args)
+
+
+def _handle_vault_change_passphrase(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_change_passphrase(args)
 
 
 def _handle_vault_add(args: argparse.Namespace) -> int:
