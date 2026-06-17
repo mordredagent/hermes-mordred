@@ -1498,3 +1498,99 @@ class TestChangePassphrase:
             assert opened.read_file(".env") == b"K=v\n"
         finally:
             opened.close()
+
+
+class TestRecover:
+    """`vault recover` — cold-open via passphrase AND re-key onto THIS device.
+
+    Models migrating a vault dir to a new machine: it is built at the CLI
+    identity with one backend+store (the 'old machine'), then ``recover`` runs
+    with a FRESH backend+store (the 'new machine' — no wrapping key, no anchor).
+    A successful recover restores the writable device hot path on the new host.
+    """
+
+    def test_happy_path_restores_hot_path(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        old_backend, old_store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, old_backend, old_store, files={".env": b"SECRET=1\n"})
+
+        # The new machine: nothing provisioned yet.
+        new_backend, new_store = FakeBackend(), FakeAnchorStore()
+        rc = vault_cli.recover(
+            root=root,
+            prompt_io=_PromptIO(password=_PASSPHRASE),
+            backend=new_backend,
+            store=new_store,
+        )
+        assert rc == 0
+        assert "re-keyed" in capsys.readouterr().out.lower()
+
+        # The hot path is restored: a plain device-key open (new backend + the
+        # freshly flipped anchor) works and can enroll a new file.
+        ident = vault_cli._vault_identity(root)
+        opened = vault.open_vault(root, key_id=ident, backend=new_backend, store=new_store, anchor_label=ident)
+        try:
+            assert opened.read_file(".env") == b"SECRET=1\n"
+            opened.enroll_file("config.yaml", b"a: 1\n")  # commit works → no longer read-only
+            assert opened.read_file("config.yaml") == b"a: 1\n"
+        finally:
+            opened.close()
+
+    def test_wrong_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        old_backend, old_store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, old_backend, old_store, files={".env": b"SECRET=1\n"})
+
+        new_backend, new_store = FakeBackend(), FakeAnchorStore()
+        rc = vault_cli.recover(
+            root=root,
+            prompt_io=_PromptIO(password="not the passphrase"),
+            backend=new_backend,
+            store=new_store,
+        )
+        assert rc == 1
+        assert "passphrase" in capsys.readouterr().err.lower()
+        # No anchor was flipped on the new machine — nothing committed.
+        assert new_store.read(vault_cli._vault_identity(root)) is None
+
+    def test_no_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = vault_cli.recover(
+            root=tmp_path / "empty",
+            prompt_io=_PromptIO(password=_PASSPHRASE),
+            backend=FakeBackend(),
+            store=FakeAnchorStore(),
+        )
+        assert rc == 1
+        assert capsys.readouterr().err.strip() != ""
+
+    def test_tampered_manifest_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """A manifest-body edit fails the MAC under the recovered master → fail closed."""
+        old_backend, old_store = FakeBackend(), FakeAnchorStore()
+        root = tmp_path / "vault"
+        _build_at_cli_identity(root, old_backend, old_store, files={".env": b"value"})
+        mpath = root / "manifest.1.mvmf"
+        body, _, b64tag = mpath.read_bytes().partition(b"\n")
+        raw = bytearray(base64.b64decode(b64tag))
+        raw[-1] ^= 0x01
+        mpath.write_bytes(body + b"\n" + base64.b64encode(bytes(raw)))
+
+        rc = vault_cli.recover(
+            root=root,
+            prompt_io=_PromptIO(password=_PASSPHRASE),
+            backend=FakeBackend(),
+            store=FakeAnchorStore(),
+        )
+        assert rc == 1
+        assert capsys.readouterr().err.strip() != ""
+
+    def test_cli_recover_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: dict[str, object] = {}
+
+        def _spy(*, root: Path, prompt_io: object = None, backend: object = None, store: object = None) -> int:
+            seen["root"] = root
+            return 0
+
+        monkeypatch.setattr(vault_cli, "recover", _spy)
+        rc = vault_cli.cli_recover(argparse.Namespace(root=str(tmp_path)))
+        assert rc == 0
+        assert seen["root"] == tmp_path

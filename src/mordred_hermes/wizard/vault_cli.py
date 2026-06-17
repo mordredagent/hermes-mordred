@@ -43,10 +43,12 @@ __all__ = [
     "cli_change_passphrase",
     "cli_init",
     "cli_migrate",
+    "cli_recover",
     "cli_status",
     "ensure_initialised",
     "init",
     "migrate",
+    "recover",
     "status",
 ]
 
@@ -509,6 +511,100 @@ def change_passphrase(
     return 0
 
 
+def recover(
+    *,
+    root: Path,
+    prompt_io: PromptIO | None = None,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Re-key a vault copied to THIS machine onto its device, restoring the hot path.
+
+    The encryption-vault counterpart of ``keyvault recover``. A vault directory
+    copied from another machine has lost the original Secure-Enclave wrapping key
+    and the device-bound anchor, so ``vault status`` / ``cat`` open it read-only
+    (cold path). This command cold-opens it via the recovery passphrase and
+    re-wraps the SAME master under a fresh wrapping key on this device — writing a
+    new manifest generation and flipping a new anchor — so the everyday writable
+    device hot path works locally again. The master and every enrolled file are
+    unchanged; only the device binding (``wmk`` + anchor) and the recovery sidecar
+    are renewed.
+
+    ``backend`` / ``store`` / ``prompt_io`` default to the production
+    implementations (built tolerantly via :func:`_build_device_auth`); tests
+    inject fakes. Returns 0 on success, 1 on any fail-closed error (no vault, a
+    wrong passphrase, a tampered manifest / sidecar, or a Secure-Enclave /
+    Keychain failure) with a reason printed to stderr.
+    """
+    from cryptography.exceptions import InvalidTag
+
+    from ..keyvault import anchor, backup, manifest, recovery, vault
+    from ..keyvault._exceptions import WrapError
+
+    key_id = anchor_label = _vault_identity(root)
+
+    # Re-keying needs a usable device backend + anchor store to bind onto. Off
+    # macOS these don't import; _build_device_auth returns (None, None) then, and
+    # we fail closed (there is no device to re-key onto).
+    device_backend, device_store = _build_device_auth(backend, store)
+    if device_backend is None or device_store is None:
+        print(
+            f"Cannot re-key the vault at {root}: no usable device key on this host (Secure Enclave / TPM unavailable).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if prompt_io is None:
+        from .configure import PromptToolkitIO
+
+        prompt_io = PromptToolkitIO()
+    passphrase = prompt_io.ask_password("Vault recovery passphrase")
+
+    try:
+        opened = vault.recover_to_device(
+            root,
+            passphrase,
+            backend=device_backend,
+            store=device_store,
+            key_id=key_id,
+            anchor_label=anchor_label,
+        )
+    except vault.VaultError as exc:
+        print(f"Not a recoverable vault at {root}: {exc}", file=sys.stderr)
+        return 1
+    except recovery.RecoveryDigestMismatch:
+        print(
+            "Vault rejected: the recovery sidecar does not match the manifest (substituted wmk / tampering).",
+            file=sys.stderr,
+        )
+        return 1
+    except manifest.ManifestError:
+        print("Vault rejected: the manifest failed authentication (tampering).", file=sys.stderr)
+        return 1
+    except backup.BackupCorrupt as exc:
+        print(f"Vault rejected: the recovery sidecar is corrupt — {exc}", file=sys.stderr)
+        return 1
+    except InvalidTag:
+        print("Wrong passphrase — vault not re-keyed.", file=sys.stderr)
+        return 1
+    except (anchor.AnchorError, WrapError) as exc:
+        print(f"Could not re-key the vault at {root}: device key / anchor error — {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"Could not re-key the vault at {root}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        # CPython cannot zero an immutable str in place; dropping the reference
+        # shortens the exposure window, it does not scrub the bytes.
+        del passphrase
+    opened.close()
+
+    print(f"Vault re-keyed onto this device; hot path restored at {root}.")
+    print("  Day to day: this device now opens the vault automatically — no passphrase needed.")
+    print("  Your recovery passphrase is unchanged; keep it safe for the next machine.")
+    return 0
+
+
 def add(
     *,
     root: Path,
@@ -700,6 +796,11 @@ def cli_change_passphrase(args: argparse.Namespace) -> int:
     """argparse handler for ``vault change-passphrase [--root PATH]`` (and its
     ``encryption change-passphrase`` alias)."""
     return change_passphrase(root=_resolve_root(getattr(args, "root", None)))
+
+
+def cli_recover(args: argparse.Namespace) -> int:
+    """argparse handler for ``vault recover [--root PATH]``."""
+    return recover(root=_resolve_root(getattr(args, "root", None)))
 
 
 def cli_status(args: argparse.Namespace) -> int:

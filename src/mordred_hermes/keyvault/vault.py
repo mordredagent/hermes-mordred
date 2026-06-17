@@ -316,6 +316,120 @@ def recover_vault(root: Path, passphrase: str) -> OpenVault:
     )
 
 
+def recover_to_device(
+    root: Path,
+    passphrase: str,
+    *,
+    backend: NativeBackend,
+    store: AnchorStore,
+    key_id: str,
+    anchor_label: str,
+) -> OpenVault:
+    """Cold-open a vault via its passphrase AND re-key it onto THIS device.
+
+    The migrate-to-a-new-machine command. A vault directory copied to a new host
+    has lost both the original Secure-Enclave wrapping key and the device-bound
+    anchor, so :func:`recover_vault` can only open it READ-ONLY (no anchor to
+    commit against). This restores the writable hot path locally:
+
+    1. pick the newest ``manifest.<gen>.mvmf`` on disk (no anchor names it, like
+       :func:`recover_vault`) and ``parse_unverified`` it for the old ``wmk`` +
+       generation,
+    2. :func:`vault_master.reseal_onto_device` — open the master from the
+       recovery sidecar under *passphrase* (verify-before-decrypt against
+       ``SHA-256(old_wmk)``), re-wrap the SAME master under a fresh wrapping key
+       for ``key_id`` on this device, and re-mint the recovery sidecar against
+       the new ``wmk``,
+    3. re-encode the manifest under the (unchanged) master with the new ``wmk``
+       at a new generation, carrying the SAME enrolled files,
+    4. **persist the new manifest generation + the re-bound recovery sidecar
+       BEFORE flipping the anchor** — the anchor flip is the single commit point,
+       so a crash before it leaves the old generation authoritative (and the
+       vault still cold-recoverable via the unchanged old sidecar... — see note),
+    5. :func:`anchor.write_anchor` makes the new generation authoritative (the
+       device-bind),
+    6. garbage-collect the superseded generation (best-effort, post-commit,
+       mirroring :meth:`OpenVault._gc`).
+
+    The whole sequence runs under the vault lock so a concurrent writer cannot
+    interleave. Crash-safety note: because the master is unchanged, the re-encoded
+    manifest at the new generation authenticates identically; the only header
+    change is ``wmk``. The recovery sidecar is rewritten in step 4 — written
+    last among the on-disk files but still before the anchor — so a crash between
+    the sidecar rewrite and the anchor flip leaves the (new) sidecar bound to the
+    new ``wmk`` while the anchor still pins the old generation's old ``wmk``;
+    re-running ``recover`` simply re-keys again from the old manifest, which is
+    still present until GC. The returned vault is fully device-anchored, so
+    :meth:`OpenVault.enroll_file` works immediately.
+
+    Raises:
+        VaultError: no manifest / recovery sidecar at ``root``.
+        recovery.RecoveryDigestMismatch: the manifest's ``wmk`` was substituted.
+        cryptography.exceptions.InvalidTag: wrong *passphrase*.
+        ManifestError: the manifest failed authentication under the recovered master.
+        WrapError: the new device wrapping key could not be generated / used.
+    """
+    root = Path(root)
+    _ensure_lock(root)
+    with keyvault_lock(root):
+        generation = _latest_manifest_generation(root)
+        if generation is None:
+            raise VaultError("no manifest found at this root — not a vault, or all manifests are missing")
+        try:
+            blob = safe_read(_manifest_path(root, generation))
+        except FileNotFoundError as e:
+            raise VaultError(f"manifest for generation {generation} vanished — cannot re-key this vault") from e
+        untrusted = manifest.parse_unverified(blob)
+
+        try:
+            recovery_blob = safe_read(root / _RECOVERY_NAME)
+        except FileNotFoundError as e:
+            raise VaultError("recovery sidecar (recovery.mrkv) is missing — cannot re-key this vault") from e
+
+        # Open the master under the passphrase + verify the manifest under it, so
+        # we re-encode only an authenticated file set (never a forged manifest).
+        master = vault_master.open_passphrase(recovery_blob, passphrase, wmk=untrusted.wmk)
+        try:
+            verified = manifest.decode(blob, master)
+        except BaseException:
+            master.close()
+            raise
+
+        try:
+            # Re-key: re-wrap the SAME master under this device's (fresh) key and
+            # re-bind the recovery sidecar to the new wmk.
+            sealed = vault_master.reseal_onto_device(
+                recovery_blob, passphrase, old_wmk=untrusted.wmk, key_id=key_id, backend=backend
+            )
+            new_generation = verified.generation + 1
+            new_manifest = manifest.VaultManifest(
+                key_id=key_id, wmk=sealed.wmk, files=dict(verified.files), generation=new_generation
+            )
+            # ---- write the new generation + the re-bound sidecar BEFORE the commit ----
+            atomic_write(_manifest_path(root, new_generation), manifest.encode(new_manifest, master))
+            atomic_write(root / _RECOVERY_NAME, sealed.recovery)
+            # ---- commit: the anchor flip makes the new generation authoritative ----
+            anchor.write_anchor(store, anchor_label, wmk=sealed.wmk, generation=new_generation)
+        except BaseException:
+            master.close()
+            raise
+
+        opened = OpenVault(
+            root=root,
+            key_id=key_id,
+            master=master,
+            manifest_=new_manifest,
+            store=store,
+            anchor_label=anchor_label,
+            wmk=sealed.wmk,
+        )
+        # GC the superseded generation last (post-commit, best-effort), mirroring
+        # enroll_file / change_passphrase. Reuses the live handle's _gc so the
+        # current-manifest blob set is the keep-set.
+        opened._gc(superseded_generation=generation)
+        return opened
+
+
 def change_passphrase(
     root: Path,
     *,

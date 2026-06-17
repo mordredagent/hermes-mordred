@@ -28,11 +28,13 @@ image), NOT a same-uid attacker on a running machine.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import secrets
 from dataclasses import dataclass
 
 from . import backup, recovery, wrap
+from ._exceptions import WrapKeyAlreadyExists
 from .kek import MasterKey
 from .wrap import DEK_LEN, NativeBackend
 
@@ -140,6 +142,65 @@ def rewrap_from_device(*, key_id: str, new_passphrase: str, backend: NativeBacke
         return backup.export(master_bytes, new_passphrase, verification_digest=_recovery_digest(wmk))
     finally:
         del master_bytes
+
+
+def reseal_onto_device(
+    recovery_blob: bytes,
+    passphrase: str,
+    *,
+    old_wmk: bytes,
+    key_id: str,
+    backend: NativeBackend,
+) -> SealedMaster:
+    """Re-bind the EXISTING master onto THIS machine's device key (re-key on recovery).
+
+    The cold-path counterpart of pairing :func:`open_passphrase` with a fresh
+    :func:`seal`: for a vault copied to a new machine, the Secure-Enclave
+    wrapping key AND the device-bound anchor are gone, so the master can only be
+    reached through the passphrase recovery blob. This opens that blob under
+    *passphrase* (verify-before-decrypt against ``SHA-256(old_wmk)``, exactly as
+    :func:`open_passphrase`), then re-wraps the SAME master under a freshly
+    generated wrapping key for ``key_id`` on this device — restoring the SE hot
+    path locally without ever changing the master, so every enrolled file still
+    decrypts.
+
+    Critically, the recovery sidecar is **re-minted against the new wmk**: the
+    blob's baked-in verification digest is ``SHA-256(wmk)``, so a sidecar left
+    bound to ``old_wmk`` would be rejected by :func:`open_passphrase` /
+    :func:`recover_vault` once the manifest carries ``new_wmk``. The returned
+    :class:`SealedMaster` therefore carries both the new ``wmk`` (for the
+    manifest header + file headers) and the re-bound ``recovery`` sidecar.
+
+    The wrapping key for ``key_id`` is generated here if absent; a key left over
+    from an earlier crashed re-key is reused (``WrapKeyAlreadyExists`` is
+    swallowed) rather than treated as an error. The master bytes are dropped in a
+    ``finally`` (mirroring :func:`seal`); CPython cannot zero immutable
+    ``bytes``, so this shortens the exposure window rather than scrubbing it.
+
+    Raises:
+        ValueError: *passphrase* is empty (recovery would be unprotected).
+        recovery.RecoveryDigestMismatch: *recovery_blob* is paired with a
+            different ``old_wmk`` (substituted manifest) — raised before the KDF.
+        cryptography.exceptions.InvalidTag: *passphrase* is wrong.
+        WrapError: the new device wrapping key could not be generated / used.
+    """
+    if not passphrase:
+        raise ValueError("vault recovery passphrase must not be empty")
+    master_bytes = recovery.import_backup(
+        recovery_blob,
+        passphrase,
+        recomputed_digest=_recovery_digest(old_wmk),
+    )
+    try:
+        # Provision the device wrapping key for this machine if it is missing; a
+        # key surviving an earlier crashed re-key is reused, not an error.
+        with contextlib.suppress(WrapKeyAlreadyExists):
+            wrap.generate_wrapping_key(key_id, backend=backend)
+        new_wmk = wrap.wrap_dek(master_bytes, key_id, backend=backend)
+        new_recovery = backup.export(master_bytes, passphrase, verification_digest=_recovery_digest(new_wmk))
+    finally:
+        del master_bytes
+    return SealedMaster(wmk=new_wmk, recovery=new_recovery)
 
 
 def rewrap_from_passphrase(recovery_blob: bytes, old_passphrase: str, new_passphrase: str, *, wmk: bytes) -> bytes:

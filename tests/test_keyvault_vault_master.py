@@ -92,3 +92,96 @@ def test_recovery_bound_to_wmk(backend: FakeBackend) -> None:
 def test_empty_passphrase_rejected(backend: FakeBackend) -> None:
     with pytest.raises(ValueError, match="passphrase"):
         vault_master.seal(key_id=_KEY_ID, passphrase="", backend=backend)
+
+
+# ---------------------------------------------------------------------------
+# reseal_onto_device — cold-open via passphrase, then re-bind onto THIS device
+# ---------------------------------------------------------------------------
+#
+# The counterpart of ``open_passphrase`` + a fresh ``seal``: a vault copied to a
+# new machine is opened from the recovery blob under the OLD wmk, then re-wrapped
+# under a fresh device wrapping key so the SE hot path works on the new machine.
+# The recovery sidecar is re-bound to the NEW wmk (its baked-in SHA-256(wmk)
+# digest must follow the new wmk, else cold recovery on the new machine would
+# reject it). The master itself is unchanged, so every enrolled file still
+# decrypts under it.
+
+
+def _new_device_backend() -> FakeBackend:
+    """A fresh FakeBackend with the wrapping key provisioned — the 'new machine'."""
+    b = FakeBackend()
+    b.generate_enclave_key(_KEY_ID)
+    return b
+
+
+def test_reseal_changes_wmk(backend: FakeBackend) -> None:
+    """Re-keying onto a (fresh) device produces a different wmk than the old one."""
+    sealed, _master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    new_device = _new_device_backend()
+    resealed = vault_master.reseal_onto_device(
+        sealed.recovery, _PASS, old_wmk=sealed.wmk, key_id=_KEY_ID, backend=new_device
+    )
+    assert resealed.wmk != sealed.wmk
+
+
+def test_reseal_preserves_master(backend: FakeBackend) -> None:
+    """The master is UNCHANGED — a file sealed before re-keying still decodes
+    under the new wmk's SE unwrap and under the new recovery blob."""
+    sealed, master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    blob = file_container.encode(master, b"payload", key_id=_KEY_ID, wmk=sealed.wmk, name=".env")
+
+    new_device = _new_device_backend()
+    resealed = vault_master.reseal_onto_device(
+        sealed.recovery, _PASS, old_wmk=sealed.wmk, key_id=_KEY_ID, backend=new_device
+    )
+    # SE hot path on the new device unwraps the new wmk to the same master.
+    se_master = kek.open_master_key(resealed.wmk, _KEY_ID, backend=new_device)
+    assert file_container.decode(blob, se_master, name=".env") == b"payload"
+    # Cold path on the new device: the re-bound recovery blob opens against the NEW wmk.
+    pp_master = vault_master.open_passphrase(resealed.recovery, _PASS, wmk=resealed.wmk)
+    assert file_container.decode(blob, pp_master, name=".env") == b"payload"
+
+
+def test_reseal_recovery_rebound_to_new_wmk(backend: FakeBackend) -> None:
+    """The new recovery blob verifies against the NEW wmk and is REJECTED against
+    the OLD wmk — its verification digest now tracks the new device binding."""
+    sealed, _master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    new_device = _new_device_backend()
+    resealed = vault_master.reseal_onto_device(
+        sealed.recovery, _PASS, old_wmk=sealed.wmk, key_id=_KEY_ID, backend=new_device
+    )
+    # Verifies against the new wmk.
+    vault_master.open_passphrase(resealed.recovery, _PASS, wmk=resealed.wmk).close()
+    # Rejected against the old wmk (verify-before-decrypt fires before Argon2).
+    with pytest.raises(RecoveryDigestMismatch):
+        vault_master.open_passphrase(resealed.recovery, _PASS, wmk=sealed.wmk)
+
+
+def test_reseal_wrong_passphrase_rejected(backend: FakeBackend) -> None:
+    """A correct old_wmk (digest passes) but wrong passphrase fails the AES-GCM tag."""
+    sealed, _master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    new_device = _new_device_backend()
+    with pytest.raises(InvalidTag):
+        vault_master.reseal_onto_device(
+            sealed.recovery, "wrong-passphrase", old_wmk=sealed.wmk, key_id=_KEY_ID, backend=new_device
+        )
+
+
+def test_reseal_old_wmk_substitution_rejected(backend: FakeBackend) -> None:
+    """A recovery blob paired with a different old_wmk is rejected before the
+    Argon2 cost (the sidecar's SHA-256(wmk) digest binds it to the real wmk)."""
+    sealed_a, _a = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    sealed_b, _b = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    new_device = _new_device_backend()
+    with pytest.raises(RecoveryDigestMismatch):
+        vault_master.reseal_onto_device(
+            sealed_a.recovery, _PASS, old_wmk=sealed_b.wmk, key_id=_KEY_ID, backend=new_device
+        )
+
+
+def test_reseal_empty_passphrase_rejected(backend: FakeBackend) -> None:
+    sealed, _master = vault_master.seal(key_id=_KEY_ID, passphrase=_PASS, backend=backend)
+    with pytest.raises(ValueError, match="passphrase"):
+        vault_master.reseal_onto_device(
+            sealed.recovery, "", old_wmk=sealed.wmk, key_id=_KEY_ID, backend=_new_device_backend()
+        )

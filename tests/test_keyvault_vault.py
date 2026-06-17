@@ -604,3 +604,156 @@ def test_unenroll_stale_handle_raises(tmp_path: Path, backend: FakeBackend, stor
     with pytest.raises(vault.VaultError):
         a.unenroll_file(".env")  # handle `a` is now stale
     a.close()
+
+
+# ---------------------------------------------------------------------------
+# recover_to_device — cold-open via passphrase AND re-key onto a NEW machine
+# ---------------------------------------------------------------------------
+#
+# The migrate-to-a-new-machine path: the vault dir is copied to a new host where
+# the original SE wrapping key and device-bound anchor are gone. recover_vault
+# alone yields a READ-ONLY handle (no anchor to commit against). recover_to_device
+# cold-opens via the passphrase, re-wraps the SAME master under a fresh device key
+# on this machine, writes a new manifest generation carrying the new wmk + the
+# same enrolled files, re-binds the recovery sidecar, then flips a fresh anchor —
+# restoring the writable hot path. A "new machine" is modelled by a fresh
+# FakeBackend (new wrapping key) + a fresh FakeAnchorStore (no anchor).
+
+
+def _fresh_machine() -> tuple[FakeBackend, FakeAnchorStore]:
+    """A 'new machine' with NO wrapping key and NO anchor yet (recover provisions both)."""
+    return FakeBackend(), FakeAnchorStore()
+
+
+def test_recover_to_device_restores_hot_path(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    """After re-keying, the vault opens on the device hot path and enroll/read work."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"ANTHROPIC_API_KEY=sk-secret\n")
+    v.close()
+
+    new_backend, new_store = _fresh_machine()
+    rekeyed = vault.recover_to_device(
+        tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+    )
+    try:
+        # The recovered files are intact under the new device binding.
+        assert rekeyed.read_file(".env") == b"ANTHROPIC_API_KEY=sk-secret\n"
+        # And the hot path now COMMITS — enroll succeeds (no longer read-only).
+        rekeyed.enroll_file("config.yaml", b"a: 1\n")
+        assert rekeyed.read_file("config.yaml") == b"a: 1\n"
+    finally:
+        rekeyed.close()
+
+
+def test_recover_to_device_reopenable_on_new_machine(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    """The re-keyed vault re-opens via the standard device hot path (open_vault)."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"v1")
+    v.enroll_file("config.yaml", b"cfg")  # gen 2 on the source machine
+    v.close()
+
+    new_backend, new_store = _fresh_machine()
+    vault.recover_to_device(
+        tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+    ).close()
+
+    # A plain open_vault on the new machine (device key + the freshly flipped
+    # anchor) opens it, with the same enrolled files.
+    reopened = vault.open_vault(tmp_path, key_id=_KEY_ID, backend=new_backend, store=new_store, anchor_label=_LABEL)
+    try:
+        assert sorted(reopened.list_files()) == [".env", "config.yaml"]
+        assert reopened.read_file(".env") == b"v1"
+        assert reopened.read_file("config.yaml") == b"cfg"
+    finally:
+        reopened.close()
+
+
+def test_recover_to_device_changes_wmk_and_anchor(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    """Re-keying mints a new wmk and a NEW generation; the new anchor pins them."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"value")  # gen 1
+    old_gen = v.generation
+    v.close()
+    old_wmk = manifest.parse_unverified((tmp_path / f"manifest.{old_gen}.mvmf").read_bytes()).wmk
+
+    new_backend, new_store = _fresh_machine()
+    rekeyed = vault.recover_to_device(
+        tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+    )
+    new_gen = rekeyed.generation
+    rekeyed.close()
+
+    assert new_gen == old_gen + 1  # a new generation was written
+    new_manifest = manifest.parse_unverified((tmp_path / f"manifest.{new_gen}.mvmf").read_bytes())
+    assert new_manifest.wmk != old_wmk  # re-wrapped under the new device key
+    # The freshly flipped anchor pins the new wmk + the new generation.
+    anchor.verify_anchor(new_store, _LABEL, wmk=new_manifest.wmk, generation=new_gen)
+
+
+def test_recover_to_device_rebinds_recovery_sidecar(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    """The recovery sidecar is re-bound to the new wmk, so plain cold recovery on
+    the new machine still works after the re-key."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"value")
+    v.close()
+
+    new_backend, new_store = _fresh_machine()
+    vault.recover_to_device(
+        tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+    ).close()
+
+    # The cold path (no backend / no anchor) still opens — sidecar tracks the new wmk.
+    rv = vault.recover_vault(tmp_path, _PASSPHRASE)
+    try:
+        assert rv.read_file(".env") == b"value"
+    finally:
+        rv.close()
+
+
+def test_recover_to_device_wrong_passphrase_raises(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"value")
+    v.close()
+    new_backend, new_store = _fresh_machine()
+    with pytest.raises(InvalidTag):
+        vault.recover_to_device(
+            tmp_path, "wrong passphrase", backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+        )
+
+
+def test_recover_to_device_no_vault_raises(tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
+    new_backend, new_store = _fresh_machine()
+    with pytest.raises(vault.VaultError):
+        vault.recover_to_device(
+            tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+        )
+
+
+def test_recover_to_device_wmk_substitution_raises(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    """A substituted-wmk manifest is rejected by the sidecar's SHA-256(wmk) digest
+    before any re-key happens — fail closed, no anchor written."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"value")  # gen 1
+    v.close()
+
+    from mordred_hermes.keyvault import kek
+
+    wmk_evil = kek.seal_master_key(_KEY_ID, backend=backend)
+    master_evil = kek.open_master_key(wmk_evil, _KEY_ID, backend=backend)
+    forged = manifest.encode(manifest.VaultManifest(key_id=_KEY_ID, wmk=wmk_evil, files={}, generation=1), master_evil)
+    (tmp_path / "manifest.1.mvmf").write_bytes(forged)
+
+    new_backend, new_store = _fresh_machine()
+    with pytest.raises(recovery.RecoveryDigestMismatch):
+        vault.recover_to_device(
+            tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+        )
+    assert new_store.read(_LABEL) is None  # no anchor flipped on rejection

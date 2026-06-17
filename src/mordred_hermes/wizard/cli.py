@@ -294,6 +294,16 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
+    p_recover = vsub.add_parser(
+        "recover",
+        help="Re-key a vault copied to this machine onto its Secure Enclave (restores the writable hot path)",
+    )
+    p_recover.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+    p_recover.set_defaults(func=_handle_vault_recover)
+
     p_add = vsub.add_parser(
         "add",
         help="Encrypt a file into the vault under a logical name",
@@ -590,6 +600,12 @@ def _handle_vault_change_passphrase(args: argparse.Namespace) -> int:
     from . import vault_cli
 
     return vault_cli.cli_change_passphrase(args)
+
+
+def _handle_vault_recover(args: argparse.Namespace) -> int:
+    from . import vault_cli
+
+    return vault_cli.cli_recover(args)
 
 
 def _handle_vault_add(args: argparse.Namespace) -> int:
