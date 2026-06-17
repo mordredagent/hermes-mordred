@@ -29,7 +29,14 @@ from pathlib import Path
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
-from .encryption_cli import TargetStatus, WorkspacePaths, _default_workspace_paths, collect_status
+from .encryption_cli import (
+    STATUS_LEGEND_BODY,
+    TargetStatus,
+    WorkspacePaths,
+    _default_workspace_paths,
+    collect_status,
+    status_mark,
+)
 
 __all__ = [
     "StatusReport",
@@ -186,9 +193,12 @@ def render_text(report: StatusReport) -> str:
         "  encryption  :",
     ]
     width = max((len(s.target) for s in report.encryption), default=0)
-    for s in report.encryption:
-        mark = "on " if s.configured else "off"
-        lines.append(f"    {s.target.ljust(width)}  [{mark}]  {s.detail}")
+    marks = [status_mark(s) for s in report.encryption]
+    mark_w = max((len(m) for m in marks), default=0)
+    for s, mark in zip(report.encryption, marks, strict=True):
+        lines.append(f"    {s.target.ljust(width)}  [{mark.ljust(mark_w)}]  {s.detail}")
+    if "paused" in marks:
+        lines.append(f"    legend: {STATUS_LEGEND_BODY}")
     return "\n".join(lines)
 
 

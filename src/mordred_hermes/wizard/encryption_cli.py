@@ -168,7 +168,7 @@ def env_status(*, root: Path, home: Path, platform: str) -> TargetStatus:
     if not enrolled:
         detail = "not enrolled"
     elif opted_out:
-        detail = "enrolled but disabled (opt-out marker present)"
+        detail = "disabled — encrypted copy kept; re-enable: encryption enable env"
     else:
         detail = _os_note(active, platform)
     return TargetStatus("env", configured, active, detail)
@@ -234,9 +234,9 @@ def workspace_status(
     elif not configured:
         detail = "tools installed; volume not set up" if tools_installed else "not installed"
     elif mounted:
-        detail = "set up; currently mounted (mid-session — not sealed)"
+        detail = "unlocked & mounted — in use, not sealed"
     else:
-        detail = "set up; sealed when idle"
+        detail = "sealed at rest — protected, not mounted"
     return TargetStatus("workspace", configured, active, detail)
 
 
@@ -276,12 +276,42 @@ def render_json(statuses: list[TargetStatus]) -> str:
     return json.dumps([s.to_dict() for s in statuses], indent=2)
 
 
+#: Human-readable meaning of the three status marks. Shown as a legend under the
+#: target list (both renderers) only when a ``paused`` row is present, so the
+#: ``paused`` state is never cryptic and an all-on/off list stays uncluttered.
+STATUS_LEGEND_BODY = "on = protecting now | paused = set up but off, data kept | off = not set up"
+
+
+def status_mark(status: TargetStatus) -> str:
+    """One-word state for the on/off column, keyed on *effective protection*.
+
+    Reflects whether the target is protecting data **right now** (``active``),
+    not merely whether it is set up (``configured``) — the prior
+    ``configured``-based marker made a disabled-but-still-enrolled ``env`` read
+    as ``on``, which is misleading:
+
+    - ``on``     — active: encrypting / protecting on this OS right now.
+    - ``paused`` — configured but not active (turned off, or inactive on this
+      OS). The encrypted copy is kept, so ``enable`` restores it without
+      re-enrolling.
+    - ``off``    — not configured: nothing is set up for this target.
+    """
+    if status.active:
+        return "on"
+    return "paused" if status.configured else "off"
+
+
 def render_text(statuses: list[TargetStatus]) -> str:
-    width = max(len(s.target) for s in statuses)
+    name_w = max(len(s.target) for s in statuses)
+    marks = [status_mark(s) for s in statuses]
+    # Pad marks to the widest present. With no ``paused`` row the width stays 3
+    # (``on``/``off``), so an all-on/off list renders byte-identically to before.
+    mark_w = max(len(m) for m in marks)
     lines = ["Mordred at-rest encryption:"]
-    for s in statuses:
-        mark = "on " if s.configured else "off"
-        lines.append(f"  {s.target.ljust(width)}  [{mark}]  {s.detail}")
+    for s, mark in zip(statuses, marks, strict=True):
+        lines.append(f"  {s.target.ljust(name_w)}  [{mark.ljust(mark_w)}]  {s.detail}")
+    if "paused" in marks:
+        lines.append(f"  legend: {STATUS_LEGEND_BODY}")
     return "\n".join(lines)
 
 

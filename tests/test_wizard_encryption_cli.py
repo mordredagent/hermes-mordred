@@ -255,6 +255,36 @@ class TestRender:
         for target in encryption_cli.TARGETS:
             assert target in text
 
+    def test_status_mark_reflects_active_not_just_configured(self) -> None:
+        on = encryption_cli.TargetStatus("env", configured=True, active=True, detail="active")
+        paused = encryption_cli.TargetStatus("env", configured=True, active=False, detail="disabled")
+        off = encryption_cli.TargetStatus("env", configured=False, active=False, detail="not enrolled")
+        assert encryption_cli.status_mark(on) == "on"
+        # configured but not active -> 'paused', NOT 'on' (the misleading old behavior)
+        assert encryption_cli.status_mark(paused) == "paused"
+        assert encryption_cli.status_mark(off) == "off"
+
+    def test_render_text_marks_disabled_target_paused_with_legend(self) -> None:
+        statuses = [
+            encryption_cli.TargetStatus("env", configured=True, active=False, detail="disabled"),
+            encryption_cli.TargetStatus("config", configured=False, active=False, detail="not vault-managed"),
+        ]
+        text = encryption_cli.render_text(statuses)
+        assert "[paused]" in text  # the disabled-but-enrolled target reads paused
+        assert "legend:" in text  # legend explains 'paused' whenever it appears
+
+    def test_render_text_unchanged_when_nothing_paused(self) -> None:
+        # No paused row -> marks stay width 3 (on/off) and no legend, so existing
+        # docs/tests that show `[on ]` / `[off]` keep rendering identically.
+        statuses = [
+            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
+            encryption_cli.TargetStatus("config", configured=False, active=False, detail="not vault-managed"),
+        ]
+        text = encryption_cli.render_text(statuses)
+        assert "[on ]" in text
+        assert "[off]" in text
+        assert "legend:" not in text
+
 
 # -----------------------------------------------------------------------------
 # CLI wiring — `encryption status` parses and runs end to end (non-prompting)
