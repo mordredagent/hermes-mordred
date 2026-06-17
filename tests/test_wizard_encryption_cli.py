@@ -285,6 +285,56 @@ class TestRender:
         assert "[off]" in text
         assert "legend:" not in text
 
+    def test_workspace_mark_is_sealed_when_set_up_and_unmounted(self) -> None:
+        # The workspace is encrypted at rest whenever it is set up and sealed,
+        # so `disable` (= seal) must NOT read as the others' `on`/`off`.
+        sealed = encryption_cli.TargetStatus(
+            "workspace", configured=True, active=True, detail="sealed at rest", mounted=False
+        )
+        assert encryption_cli.status_mark(sealed) == "sealed"
+
+    def test_workspace_mark_is_open_when_mounted(self) -> None:
+        mounted = encryption_cli.TargetStatus(
+            "workspace", configured=True, active=True, detail="unlocked & mounted", mounted=True
+        )
+        assert encryption_cli.status_mark(mounted) == "open"
+
+    def test_workspace_mark_is_off_when_not_set_up_or_off_os(self) -> None:
+        not_set_up = encryption_cli.TargetStatus("workspace", configured=False, active=False, detail="not installed")
+        off_os = encryption_cli.TargetStatus("workspace", configured=True, active=False, detail="macOS only")
+        assert encryption_cli.status_mark(not_set_up) == "off"
+        assert encryption_cli.status_mark(off_os) == "off"
+
+    def test_render_text_explains_workspace_marks_below(self) -> None:
+        # The exact shape of `encryption disable all`: env paused, workspace
+        # sealed. The sealed workspace must read `[sealed]`, not the others'
+        # `on`, and the explanation line must be rendered below.
+        statuses = [
+            encryption_cli.TargetStatus("env", configured=True, active=False, detail="disabled"),
+            encryption_cli.TargetStatus(
+                "workspace", configured=True, active=True, detail="sealed at rest", mounted=False
+            ),
+        ]
+        text = encryption_cli.render_text(statuses)
+        assert "[sealed]" in text  # sealed, not the misleading `on`
+        assert "workspace:" in text  # the explanation line is rendered below
+        assert encryption_cli.WORKSPACE_LEGEND_BODY in text
+
+    def test_to_dict_serializes_mounted_only_for_workspace(self) -> None:
+        # `mounted` is a workspace-only rendering hint: it appears in JSON for an
+        # active workspace (so consumers can tell sealed from open) and is absent
+        # for the core targets and for an off workspace (where it is `None`).
+        env = encryption_cli.TargetStatus("env", configured=True, active=True, detail="active")
+        assert "mounted" not in env.to_dict()
+
+        sealed = encryption_cli.TargetStatus(
+            "workspace", configured=True, active=True, detail="sealed at rest", mounted=False
+        )
+        assert sealed.to_dict()["mounted"] is False
+
+        off = encryption_cli.TargetStatus("workspace", configured=False, active=False, detail="not installed")
+        assert "mounted" not in off.to_dict()
+
 
 # -----------------------------------------------------------------------------
 # CLI wiring — `encryption status` parses and runs end to end (non-prompting)
@@ -529,4 +579,4 @@ def test_all_core_targets_derived_from_targets() -> None:
     """L1: ``_ALL_CORE_TARGETS`` is the leading slice of ``TARGETS`` (no drift)."""
     assert encryption_cli.TARGETS[-1] == "workspace"
     assert encryption_cli._ALL_CORE_TARGETS == ("env", "config", "memory")
-    assert encryption_cli._ALL_CORE_TARGETS == encryption_cli.TARGETS[:-1]
+    assert encryption_cli.TARGETS[:-1] == encryption_cli._ALL_CORE_TARGETS

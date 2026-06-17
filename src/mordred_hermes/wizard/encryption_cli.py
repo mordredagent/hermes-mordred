@@ -74,20 +74,29 @@ class TargetStatus:
     - ``configured``: the toggle is on (enrolled / marker present / flag true /
       workspace artifacts on disk), independent of the current OS.
     - ``active``: it is *effectively* protecting data on **this** OS right now.
+    - ``mounted``: workspace-only rendering hint — ``True`` when the encrypted
+      volume is mounted (open / in use), ``False`` when sealed at rest,
+      ``None`` for the non-workspace targets. The workspace is encrypted at
+      rest whenever it exists and is *unmounted*, so this sealed-vs-open axis,
+      not ``on/paused/off``, is what :func:`status_mark` keys on for it.
     """
 
     target: str
     configured: bool
     active: bool
     detail: str
+    mounted: bool | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        out: dict[str, object] = {
             "target": self.target,
             "configured": self.configured,
             "active": self.active,
             "detail": self.detail,
         }
+        if self.mounted is not None:
+            out["mounted"] = self.mounted
+        return out
 
 
 @dataclass(frozen=True)
@@ -237,7 +246,9 @@ def workspace_status(
         detail = "unlocked & mounted — in use, not sealed"
     else:
         detail = "sealed at rest — protected, not mounted"
-    return TargetStatus("workspace", configured, active, detail)
+    # `mounted` only carries meaning once the volume is set up on this OS;
+    # otherwise the mark is plain `off` and the sealed/open distinction is moot.
+    return TargetStatus("workspace", configured, active, detail, mounted=mounted if active else None)
 
 
 def _is_mountpoint(path: Path) -> bool:
@@ -276,10 +287,16 @@ def render_json(statuses: list[TargetStatus]) -> str:
     return json.dumps([s.to_dict() for s in statuses], indent=2)
 
 
-#: Human-readable meaning of the three status marks. Shown as a legend under the
-#: target list (both renderers) only when a ``paused`` row is present, so the
-#: ``paused`` state is never cryptic and an all-on/off list stays uncluttered.
+#: Human-readable meaning of the env/config/memory marks. Shown as a legend
+#: under the target list (both renderers) only when a ``paused`` row is present,
+#: so the ``paused`` state is never cryptic and an all-on/off list stays clean.
 STATUS_LEGEND_BODY = "on = protecting now | paused = set up but off, data kept | off = not set up"
+
+#: Meaning of the workspace-only marks. The workspace runs on a different axis:
+#: its volume is encrypted at rest *whenever it is set up and unmounted*, so it
+#: never reports ``on``/``paused``. Shown only when a ``sealed`` / ``open`` row
+#: is present (see :func:`_workspace_mark`).
+WORKSPACE_LEGEND_BODY = "sealed = encrypted & locked at rest | open = mounted, in use | off = not set up here"
 
 
 def status_mark(status: TargetStatus) -> str:
@@ -295,10 +312,33 @@ def status_mark(status: TargetStatus) -> str:
       OS). The encrypted copy is kept, so ``enable`` restores it without
       re-enrolling.
     - ``off``    — not configured: nothing is set up for this target.
+
+    The ``workspace`` target is special-cased onto its own sealed/open/off
+    vocabulary by :func:`_workspace_mark`.
     """
+    if status.target == "workspace":
+        return _workspace_mark(status)
     if status.active:
         return "on"
     return "paused" if status.configured else "off"
+
+
+def _workspace_mark(status: TargetStatus) -> str:
+    """Workspace mark, keyed on its sealed-vs-mounted axis — not on/paused/off.
+
+    The encrypted volume is protected at rest *whenever it exists and is
+    unmounted*, so ``disable`` (which seals it) is the workspace's **most**
+    protected state, not its off state. Reusing ``on`` made a freshly-sealed
+    workspace read as if ``disable`` had been ignored, which is exactly the
+    confusion this avoids:
+
+    - ``sealed`` — set up and unmounted: encrypted & locked at rest (protected).
+    - ``open``   — mounted: unlocked and in use this session (not sealed).
+    - ``off``    — not set up here (no volume on disk, or not macOS).
+    """
+    if not status.active:
+        return "off"
+    return "open" if status.mounted else "sealed"
 
 
 def render_text(statuses: list[TargetStatus]) -> str:
@@ -312,6 +352,8 @@ def render_text(statuses: list[TargetStatus]) -> str:
         lines.append(f"  {s.target.ljust(name_w)}  [{mark.ljust(mark_w)}]  {s.detail}")
     if "paused" in marks:
         lines.append(f"  legend: {STATUS_LEGEND_BODY}")
+    if "sealed" in marks or "open" in marks:
+        lines.append(f"  workspace: {WORKSPACE_LEGEND_BODY}")
     return "\n".join(lines)
 
 

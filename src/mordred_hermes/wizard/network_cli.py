@@ -62,7 +62,7 @@ MULLVAD_ACCOUNT_ENV_VAR_NAME: Final[str] = "MORDRED_MULLVAD_ACCOUNT"
 #: ``mordred-docs/mordred/QUICKSTART.md`` so the wizard and the docs never drift.
 _NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "tor": "Anonymity via the Tor network — slowest; needs `tor` installed",
-    "vpn": "IP privacy via Mullvad VPN — faster; needs a paid Mullvad account",
+    "vpn": "IP privacy via any VPN — faster; Mullvad recommended (paid)",
     "clearnet": "Direct connection — no anonymity, fastest (the default)",
 }
 

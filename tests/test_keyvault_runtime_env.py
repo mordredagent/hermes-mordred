@@ -201,6 +201,10 @@ class TestInstallVaultEnvDecrypt:
 
     def test_delegates_on_darwin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_runtime_env.sys, "platform", "darwin")
+        # Isolate from the real ~/.hermes: the opt-out marker check reads
+        # `_hermes_home()`, so without this a developer who has run
+        # `encryption disable env` (marker present) would see this short-circuit.
+        monkeypatch.setattr(_runtime_env, "_hermes_home", lambda: tmp_path)
         monkeypatch.setattr(_runtime_env, "default_vault_root", lambda: tmp_path / "v")
         seen: dict[str, object] = {}
 

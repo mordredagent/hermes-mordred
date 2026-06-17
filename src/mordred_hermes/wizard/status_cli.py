@@ -31,6 +31,7 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from .encryption_cli import (
     STATUS_LEGEND_BODY,
+    WORKSPACE_LEGEND_BODY,
     TargetStatus,
     WorkspacePaths,
     _default_workspace_paths,
@@ -199,6 +200,8 @@ def render_text(report: StatusReport) -> str:
         lines.append(f"    {s.target.ljust(width)}  [{mark.ljust(mark_w)}]  {s.detail}")
     if "paused" in marks:
         lines.append(f"    legend: {STATUS_LEGEND_BODY}")
+    if "sealed" in marks or "open" in marks:
+        lines.append(f"    workspace: {WORKSPACE_LEGEND_BODY}")
     return "\n".join(lines)
 
 

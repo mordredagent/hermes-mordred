@@ -22,7 +22,7 @@ import pytest
 
 from mordred_hermes.keyvault import _storage
 from mordred_hermes.wizard import status_cli
-from mordred_hermes.wizard.encryption_cli import WorkspacePaths
+from mordred_hermes.wizard.encryption_cli import WORKSPACE_LEGEND_BODY, TargetStatus, WorkspacePaths
 
 
 def _key_id_hash(key_id: str) -> str:
@@ -145,6 +145,28 @@ class TestRendering:
         assert "keyvault" in out
         for target in ("env", "config", "memory", "workspace"):
             assert target in out
+
+    def test_sealed_workspace_renders_sealed_with_explanation(self) -> None:
+        # A sealed workspace must read `[sealed]` (not the others' `on`) and the
+        # dashboard must print the workspace explanation line below the targets.
+        report = status_cli.StatusReport(
+            policy_mode="lenient",
+            network_configured_path="clearnet",
+            network_live=False,
+            network_active_path=None,
+            network_ready=None,
+            keyvault_initialized=False,
+            keyvault_key_count=0,
+            keyvault_helper_installed=False,
+            keyvault_detail="not initialised",
+            encryption=[
+                TargetStatus("env", configured=True, active=False, detail="disabled"),
+                TargetStatus("workspace", configured=True, active=True, detail="sealed at rest", mounted=False),
+            ],
+        )
+        text = status_cli.render_text(report)
+        assert "[sealed]" in text
+        assert WORKSPACE_LEGEND_BODY in text
 
     def test_json_is_machine_readable(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = status_cli.status(
