@@ -857,3 +857,27 @@ class TestListJson:
         cli._setup_subparser(parser)
         ns = parser.parse_args(["keyvault", "list", "--json"])
         assert ns.json is True
+
+
+class TestTerminalSeedSurface:
+    """``keyvault init`` seed rendering: the numbered paper list PLUS a single
+    copyable line, so transcribing into the offline digest script is not a
+    24-line hand-retype (the common drop-off point)."""
+
+    _SEED = "swing wasp snack lottery surface rhythm family head aware theme border traffic royal torch truck"
+
+    def test_show_renders_numbered_list_and_one_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        keyvault_cli.TerminalSeedSurface().show(self._SEED)
+        out = capsys.readouterr().out
+
+        # The paper backup: every word numbered, one per line.
+        words = self._SEED.split()
+        for index, word in enumerate(words, start=1):
+            assert f"{index:2}. {word}" in out
+
+        # The one-line form: all words on a single space-separated line, in
+        # order — the BIP39 mnemonic the offline digest script accepts verbatim.
+        assert "one line (for the offline verification digest):" in out
+        assert " ".join(words) in out
+        # The joined line is on a single physical line (no stray newline split).
+        assert any(" ".join(words) in line for line in out.splitlines())

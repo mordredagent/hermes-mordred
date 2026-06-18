@@ -349,6 +349,15 @@ class TerminalSeedSurface:
         print("\n=== SEED PHRASE — transcribe onto paper now ===")
         for index, word in enumerate(words, start=1):
             print(f"  {index:2}. {word}")
+        # One-line form of the SAME words. The numbered list is the paper
+        # backup; this space-separated line is the BIP39-standard mnemonic the
+        # offline digest script accepts verbatim. Re-typing 24 words one per
+        # line into that script by hand is error-prone and a common drop-off
+        # point, so we surface a single copyable line for the verification step.
+        # It carries no new exposure (the words are already on screen) and is
+        # wiped by the same 60s auto-clear / screen-clear as the list above.
+        print("\n  one line (for the offline verification digest):")
+        print(f"    {' '.join(words)}")
         print("=== END SEED PHRASE ===\n")
 
     def clear(self) -> None:
