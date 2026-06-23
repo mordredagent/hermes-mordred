@@ -146,6 +146,41 @@ class TestRendering:
         for target in ("env", "config", "memory", "workspace"):
             assert target in out
 
+    def test_status_wiring_no_ansi_when_not_a_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # capsys' stdout is not a tty, so the live should_color gate must yield
+        # plain text — guards the dashboard colour wiring.
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        rc = status_cli.status(
+            home=tmp_path,
+            root=_storage.resolve_keyvault_dir(tmp_path),
+            platform="darwin",
+            workspace=_workspace(tmp_path),
+            on_path=lambda name: False,
+            helper_finder=lambda platform: None,
+        )
+        assert rc == 0
+        assert "\033" not in capsys.readouterr().out
+
+    def test_status_wiring_colours_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # FORCE_COLOR drives colour through the same wiring even off a tty.
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        rc = status_cli.status(
+            home=tmp_path,
+            root=_storage.resolve_keyvault_dir(tmp_path),
+            platform="darwin",
+            workspace=_workspace(tmp_path),
+            on_path=lambda name: False,
+            helper_finder=lambda platform: None,
+        )
+        assert rc == 0
+        assert "\033[" in capsys.readouterr().out
+
     def test_sealed_workspace_renders_sealed_with_explanation(self) -> None:
         # A sealed workspace must read `[sealed]` (not the others' `on`) and the
         # dashboard must print the workspace explanation line below the targets.
@@ -167,6 +202,31 @@ class TestRendering:
         text = status_cli.render_text(report)
         assert "[sealed]" in text
         assert WORKSPACE_LEGEND_BODY in text
+
+    def _sample_report(self) -> status_cli.StatusReport:
+        return status_cli.StatusReport(
+            policy_mode="strict",
+            network_configured_path="tor",
+            network_live=True,
+            network_active_path="tor",
+            network_ready=True,
+            keyvault_initialized=True,
+            keyvault_key_count=2,
+            keyvault_helper_installed=True,
+            keyvault_detail="2 keys",
+            encryption=[
+                TargetStatus("env", configured=True, active=True, detail="active"),
+                TargetStatus("config", configured=True, active=False, detail="disabled"),
+            ],
+        )
+
+    def test_render_text_default_has_no_ansi(self) -> None:
+        assert "\033" not in status_cli.render_text(self._sample_report())
+
+    def test_render_text_color_emits_ansi(self) -> None:
+        text = status_cli.render_text(self._sample_report(), color=True)
+        assert "\033[" in text  # styled
+        assert "\033[1m" in text  # the dashboard heading is bold
 
     def test_json_is_machine_readable(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = status_cli.status(

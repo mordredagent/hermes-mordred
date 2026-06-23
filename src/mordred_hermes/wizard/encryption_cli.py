@@ -44,6 +44,7 @@ from ..keyvault._config_bootstrap import _marker_path as _config_marker_path
 from ..keyvault._config_bootstrap import config_hook_installed
 from ..keyvault._identity import resolve_root
 from ..keyvault._runtime_env import _env_optout_marker_path
+from . import _term
 
 __all__ = [
     "TARGETS",
@@ -57,6 +58,8 @@ __all__ = [
     "render_json",
     "render_text",
     "status",
+    "status_mark",
+    "style_mark",
     "workspace_status",
 ]
 
@@ -341,19 +344,47 @@ def _workspace_mark(status: TargetStatus) -> str:
     return "open" if status.mounted else "sealed"
 
 
-def render_text(statuses: list[TargetStatus]) -> str:
+#: Mark word -> the :mod:`_term` styler that colours it. Shared with
+#: ``status_cli`` so the dashboard and the encryption screen colour a mark the
+#: same way. ``on``/``sealed`` are protected (green), ``paused`` needs attention
+#: (yellow), ``open`` is in-use (cyan), ``off`` is de-emphasised (dim).
+_MARK_STYLE: dict[str, Callable[..., str]] = {
+    "on": _term.success,
+    "sealed": _term.success,
+    "paused": _term.warn,
+    "open": _term.info,
+    "off": _term.dim,
+}
+
+
+def style_mark(mark_word: str, text: str, *, enabled: bool) -> str:
+    """Colour *text* by the state *mark_word* names, leaving it unchanged when
+    colour is off or the word is unknown.
+
+    *text* is the display cell (often padded), kept separate from the lookup
+    *mark_word* so callers can pad first and still colour by state — column
+    alignment is preserved because ANSI codes have zero display width.
+    """
+    if not enabled:
+        return text
+    styler = _MARK_STYLE.get(mark_word)
+    return styler(text, enabled=True) if styler is not None else text
+
+
+def render_text(statuses: list[TargetStatus], *, color: bool = False) -> str:
     name_w = max(len(s.target) for s in statuses)
     marks = [status_mark(s) for s in statuses]
     # Pad marks to the widest present. With no ``paused`` row the width stays 3
     # (``on``/``off``), so an all-on/off list renders byte-identically to before.
     mark_w = max(len(m) for m in marks)
-    lines = ["Mordred at-rest encryption:"]
+    lines = [_term.heading("Mordred at-rest encryption:", enabled=color)]
     for s, mark in zip(statuses, marks, strict=True):
-        lines.append(f"  {s.target.ljust(name_w)}  [{mark.ljust(mark_w)}]  {s.detail}")
+        cell = style_mark(mark, mark.ljust(mark_w), enabled=color)
+        lines.append(f"  {s.target.ljust(name_w)}  [{cell}]  {s.detail}")
     if "paused" in marks:
-        lines.append(f"  legend: {STATUS_LEGEND_BODY}")
+        lines.append(_term.hint(f"  legend: {STATUS_LEGEND_BODY}", enabled=color))
     if "sealed" in marks or "open" in marks:
-        lines.append(f"  workspace: {WORKSPACE_LEGEND_BODY}")
+        lines.append(_term.hint(f"  workspace: {WORKSPACE_LEGEND_BODY}", enabled=color))
     return "\n".join(lines)
 
 
@@ -384,7 +415,10 @@ def status(
 ) -> int:
     """Print the state of all four targets. Always returns 0 (read-only)."""
     statuses = collect_status(home=home, root=root, platform=platform, workspace=workspace, on_path=on_path)
-    print(render_json(statuses) if as_json else render_text(statuses))
+    if as_json:
+        print(render_json(statuses))
+    else:
+        print(render_text(statuses, color=_term.should_color(sys.stdout)))
     return 0
 
 

@@ -337,6 +337,74 @@ class TestRender:
 
 
 # -----------------------------------------------------------------------------
+# Colour — opt-in styling; plain output stays byte-identical (above tests assert it)
+# -----------------------------------------------------------------------------
+class TestColor:
+    def test_style_mark_colours_by_state(self) -> None:
+        assert "\033[32m" in encryption_cli.style_mark("on", "on", enabled=True)  # green
+        assert "\033[32m" in encryption_cli.style_mark("sealed", "sealed", enabled=True)  # green
+        assert "\033[33m" in encryption_cli.style_mark("paused", "paused", enabled=True)  # yellow
+        assert "\033[36m" in encryption_cli.style_mark("open", "open", enabled=True)  # cyan
+        assert "\033[2m" in encryption_cli.style_mark("off", "off", enabled=True)  # dim
+
+    def test_style_mark_plain_when_disabled(self) -> None:
+        # The padded cell passes through unchanged so column alignment is preserved.
+        assert encryption_cli.style_mark("on", "on ", enabled=False) == "on "
+
+    def test_style_mark_unknown_word_passes_through(self) -> None:
+        assert encryption_cli.style_mark("mystery", "mystery", enabled=True) == "mystery"
+
+    def test_render_text_default_has_no_ansi(self) -> None:
+        statuses = [
+            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
+            encryption_cli.TargetStatus("config", configured=True, active=False, detail="disabled"),
+        ]
+        assert "\033" not in encryption_cli.render_text(statuses)
+
+    def test_render_text_color_emits_ansi_and_keeps_words(self) -> None:
+        statuses = [
+            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
+            encryption_cli.TargetStatus("config", configured=True, active=False, detail="disabled"),
+        ]
+        text = encryption_cli.render_text(statuses, color=True)
+        assert "\033[" in text  # styled
+        assert "\033[1m" in text  # heading is bold
+        assert "on" in text and "paused" in text  # mark words still present
+
+    def _run_status(self, tmp_path: Path) -> int:
+        return encryption_cli.status(
+            home=tmp_path,
+            root=tmp_path / "v",
+            platform="linux",
+            workspace=encryption_cli.WorkspacePaths(
+                image=tmp_path / "img.sparsebundle",
+                blob=tmp_path / "pp.wrapped",
+                mount=tmp_path / "mnt",
+            ),
+            on_path=lambda _name: False,
+        )
+
+    def test_status_wiring_no_ansi_when_not_a_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The capsys stdout is not a tty, so the live should_color gate in status()
+        # must yield plain text — guards the `encryption status` colour wiring.
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        assert self._run_status(tmp_path) == 0
+        assert "\033" not in capsys.readouterr().out
+
+    def test_status_wiring_colours_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # FORCE_COLOR drives colour through the same wiring even off a tty.
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        assert self._run_status(tmp_path) == 0
+        assert "\033[" in capsys.readouterr().out
+
+
+# -----------------------------------------------------------------------------
 # CLI wiring — `encryption status` parses and runs end to end (non-prompting)
 # -----------------------------------------------------------------------------
 class TestCliWiring:

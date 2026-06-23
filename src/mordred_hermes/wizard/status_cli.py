@@ -29,6 +29,7 @@ from pathlib import Path
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
+from . import _term
 from .encryption_cli import (
     STATUS_LEGEND_BODY,
     WORKSPACE_LEGEND_BODY,
@@ -37,6 +38,7 @@ from .encryption_cli import (
     _default_workspace_paths,
     collect_status,
     status_mark,
+    style_mark,
 )
 
 __all__ = [
@@ -175,7 +177,7 @@ def collect(
     )
 
 
-def render_text(report: StatusReport) -> str:
+def render_text(report: StatusReport, *, color: bool = False) -> str:
     if report.network_live:
         ready = "ready" if report.network_ready else "not ready"
         network = f"{report.network_active_path} (live, {ready})"
@@ -187,7 +189,7 @@ def render_text(report: StatusReport) -> str:
     else:
         keyvault = f"{report.keyvault_detail} ({helper})"
     lines = [
-        "Mordred status:",
+        _term.heading("Mordred status:", enabled=color),
         f"  policy mode : {report.policy_mode}",
         f"  network     : {network}",
         f"  keyvault    : {keyvault}",
@@ -197,11 +199,12 @@ def render_text(report: StatusReport) -> str:
     marks = [status_mark(s) for s in report.encryption]
     mark_w = max((len(m) for m in marks), default=0)
     for s, mark in zip(report.encryption, marks, strict=True):
-        lines.append(f"    {s.target.ljust(width)}  [{mark.ljust(mark_w)}]  {s.detail}")
+        cell = style_mark(mark, mark.ljust(mark_w), enabled=color)
+        lines.append(f"    {s.target.ljust(width)}  [{cell}]  {s.detail}")
     if "paused" in marks:
-        lines.append(f"    legend: {STATUS_LEGEND_BODY}")
+        lines.append(_term.hint(f"    legend: {STATUS_LEGEND_BODY}", enabled=color))
     if "sealed" in marks or "open" in marks:
-        lines.append(f"    workspace: {WORKSPACE_LEGEND_BODY}")
+        lines.append(_term.hint(f"    workspace: {WORKSPACE_LEGEND_BODY}", enabled=color))
     return "\n".join(lines)
 
 
@@ -228,7 +231,10 @@ def status(
         on_path=on_path,
         helper_finder=helper_finder,
     )
-    print(render_json(report) if as_json else render_text(report))
+    if as_json:
+        print(render_json(report))
+    else:
+        print(render_text(report, color=_term.should_color(sys.stdout)))
     return 0
 
 
