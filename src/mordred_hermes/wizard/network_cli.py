@@ -36,6 +36,7 @@ from .._home import HERMES_BASE
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from ..network.guidance import dependency_warning
+from . import _term
 from .configure import (
     PromptIO,
     PromptToolkitIO,
@@ -160,7 +161,7 @@ def handle_use(args: argparse.Namespace) -> int:
     """
     target = str(getattr(args, "path", ""))
     if target not in _VALID_PATHS:
-        print(f"error: unknown network path {target!r}; choose one of {_VALID_PATHS}", file=sys.stderr)
+        _term.emit_error(f"unknown network path {target!r}; choose one of {_VALID_PATHS}")
         return 2
 
     config_path = _resolve_config_path(args)
@@ -168,7 +169,7 @@ def handle_use(args: argparse.Namespace) -> int:
     try:
         _write_default_path_to_config(config_path, target)
     except OSError as e:
-        print(f"error: failed to write {config_path}: {e}", file=sys.stderr)
+        _term.emit_error(f"failed to write {config_path}: {e}")
         return 1
 
     live = _runtime_registered()
@@ -177,13 +178,15 @@ def handle_use(args: argparse.Namespace) -> int:
         print("It takes effect on the next `hermes` session; the process running now keeps its current route.")
         warning = _dependency_warning_for_configured_path(config_path, target)
         if warning:
-            print(warning)
+            # Stays on stdout (it follows the route-set success lines), but reads
+            # as a warning: styled yellow on a tty, byte-identical off it.
+            print(_term.warn(warning, enabled=_term.should_color(sys.stdout)))
         return 0
 
     try:
         api.use(target)  # type: ignore[arg-type]
     except MordredNetworkError as e:
-        print(f"error: switching to {target} failed: {e}", file=sys.stderr)
+        _term.emit_error(f"switching to {target} failed: {e}")
         return 1
     print(f"Route switched to `{target}` now (also saved to {config_path}).")
     return 0

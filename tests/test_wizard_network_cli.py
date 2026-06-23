@@ -606,3 +606,54 @@ class TestStatusJson:
         cli._setup_subparser(parser)
         ns = parser.parse_args(["network", "status", "--json"])
         assert ns.json is True
+
+
+class TestErrorColour:
+    """`network use` errors route through _term.emit_error: red on a tty, plain off it."""
+
+    def test_unknown_path_error_is_red_when_forced(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        rc = network_cli.handle_use(argparse.Namespace(path="bogus"))
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "\033[31m" in err  # red `error:` label
+        assert "unknown network path" in err
+
+    def test_unknown_path_error_plain_and_prefixed_off_tty(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Off a tty the output stays byte-identical to the old manual `error:` print.
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        from mordred_hermes.wizard import network_cli
+
+        rc = network_cli.handle_use(argparse.Namespace(path="bogus"))
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error: unknown network path")
+        assert "\033" not in err
+
+    def test_dependency_warning_is_styled_yellow_on_a_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The post-set dependency advisory stays on stdout (intentional — it
+        # follows the route-set success lines; existing tests assert it there)
+        # but now reads as a warning: yellow on a tty.
+        from mordred_hermes.wizard import network_cli
+
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.setattr(network_cli, "_runtime_registered", lambda: False)
+        monkeypatch.setattr(
+            network_cli, "_dependency_warning_for_configured_path", lambda *a, **k: "tor is not installed"
+        )
+        rc = network_cli.handle_use(_make_args(config_path=tmp_path / "config.yaml", path="tor"))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "tor is not installed" in out
+        assert "\033[33m" in out  # styled yellow when colour is on

@@ -10,13 +10,14 @@ stub-targeted test with a real behavioural test.
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.wizard import keyvault_native_cli, register
+from mordred_hermes.wizard import keyvault_native_cli, register, status_cli
 from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 
 
@@ -167,13 +168,41 @@ class TestMainStandaloneEntry:
         assert "upgrade" in out
         assert "policy" in out
 
-    def test_no_args_shows_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_no_args_prints_friendly_help(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Bare `hermes-mordred` is a discovery moment, not an error: print the
+        # quickstart help and exit 0 instead of an argparse usage error.
+        rc = main([])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Quickstart" in out
+        assert "configure" in out
+
+    def test_help_lists_no_color_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
-            main([])
-        # argparse exits with code 2 on missing required subcommand
-        assert exc.value.code == 2
-        err = capsys.readouterr().err
-        assert "COMMAND" in err or "required" in err.lower()
+            main(["--help"])
+        assert exc.value.code == 0
+        assert "--no-color" in capsys.readouterr().out
+
+    def test_no_color_flag_sets_no_color_env(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # `--no-color` disables colour by flipping the env var the shared
+        # should_color() gate already respects; monkeypatch restores it on teardown.
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        rc = main(["--no-color"])  # no subcommand -> prints help, returns 0
+        assert rc == 0
+        assert os.environ.get("NO_COLOR") == "1"
+
+    def test_no_color_flag_applies_with_a_subcommand(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The flag must take effect before dispatch so the command's renderer
+        # sees NO_COLOR. Stub the status handler so no real ~/.hermes is touched.
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setattr(status_cli, "cli_status", lambda args: 0)
+        rc = main(["--no-color", "status"])
+        assert rc == 0
+        assert os.environ.get("NO_COLOR") == "1"
 
     def test_unknown_subcommand_argparse_exits_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:

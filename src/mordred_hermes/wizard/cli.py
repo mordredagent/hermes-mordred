@@ -20,17 +20,22 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 from __future__ import annotations
 
 import argparse
+import os
 from typing import Any
 
 
-def _setup_subparser(parser: argparse.ArgumentParser) -> None:
+def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
     """Build the full ``hermes mordred`` subcommand tree.
 
     Hermes calls this once at CLI initialisation with the top-level
     ``mordred`` subparser. We add ``mordred_command`` dest and per-command
     sub-subparsers, each wired via ``set_defaults(func=<handler>)``.
+
+    ``required`` defaults to ``True`` (Hermes' contract: a subcommand must be
+    given). The standalone ``main`` passes ``required=False`` so a bare
+    ``hermes-mordred`` can greet with the quickstart help instead of erroring.
     """
-    sub = parser.add_subparsers(dest="mordred_command", required=True, metavar="COMMAND")
+    sub = parser.add_subparsers(dest="mordred_command", required=required, metavar="COMMAND")
 
     _add_status(sub)
     _add_configure(sub)
@@ -735,6 +740,21 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    _setup_subparser(parser)
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable coloured output (equivalent to setting NO_COLOR=1)",
+    )
+    # Standalone: a bare `hermes-mordred` is a discovery moment, so the subcommand
+    # is optional here and we print the quickstart help below. Hermes keeps it
+    # required via the default.
+    _setup_subparser(parser, required=False)
     ns = parser.parse_args(argv)
+    if getattr(ns, "no_color", False):
+        # Flip the env var the shared `_term.should_color()` gate already honours,
+        # so the flag reaches every command's renderer without threading a param.
+        os.environ["NO_COLOR"] = "1"
+    if getattr(ns, "mordred_command", None) is None:
+        parser.print_help()
+        return 0
     return dispatch(ns)
