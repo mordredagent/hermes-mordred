@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..keyvault import _storage
+from . import _term
 
 if TYPE_CHECKING:
     from ..keyvault.api import GenerateResult, SeedDisplayHandle
@@ -185,16 +186,12 @@ def _refuse_if_initialised(home: Path | None) -> int | None:
     try:
         existing_meta = _storage.load_meta(root)
     except _storage.KeyvaultCorruptError as exc:
-        print(
-            f"Keyvault meta.json is corrupt — repair or remove it before init: {exc}",
-            file=sys.stderr,
-        )
+        _term.emit_error(f"Keyvault meta.json is corrupt — repair or remove it before init: {exc}")
         return 1
     if existing_meta.get("keys"):
-        print(
+        _term.emit_error(
             "Keyvault already initialised — v1 keyvault is single-key. To restore a "
-            "different key, use `hermes-mordred keyvault recover`.",
-            file=sys.stderr,
+            "different key, use `hermes-mordred keyvault recover`."
         )
         return 1
     return None
@@ -239,10 +236,10 @@ def _read_passphrase(prompt_io: PromptIO) -> str | None:
     """
     passphrase = prompt_io.ask_password("Choose a Passphrase")
     if passphrase != prompt_io.ask_password("Re-enter the Passphrase"):
-        print("Passphrases do not match — nothing was written.", file=sys.stderr)
+        _term.emit_error("Passphrases do not match — nothing was written.")
         return None
     if not passphrase:
-        print("Passphrase must not be empty.", file=sys.stderr)
+        _term.emit_error("Passphrase must not be empty.")
         return None
     return passphrase
 
@@ -325,10 +322,10 @@ def _display_seed_or_refuse(
         print(_blackout_guidance(sys.platform), file=sys.stderr)
         return 1
     except SeedDisplayAborted as exc:
-        print(f"Seed display aborted: screen capture detected ({exc.detector}).", file=sys.stderr)
+        _term.emit_error(f"Seed display aborted: screen capture detected ({exc.detector}).")
         return 1
     except SeedDisplayExpired:
-        print("Seed display window expired before the digest was confirmed.", file=sys.stderr)
+        _term.emit_error("Seed display window expired before the digest was confirmed.")
         return 1
     return None
 
@@ -346,15 +343,11 @@ def _prompt_for_digest(prompt_io: PromptIO) -> bytes | None:
         try:
             return bytes.fromhex(digest_hex.strip())
         except ValueError:
-            print(
+            _term.emit_error(
                 "That is not a valid hex digest — paste the 64-character hex string "
-                "printed by the offline tool and try again.",
-                file=sys.stderr,
+                "printed by the offline tool and try again."
             )
-    print(
-        f"No valid hex digest after {_DIGEST_PROMPT_ATTEMPTS} attempts — nothing was written.",
-        file=sys.stderr,
-    )
+    _term.emit_error(f"No valid hex digest after {_DIGEST_PROMPT_ATTEMPTS} attempts — nothing was written.")
     return None
 
 
@@ -377,18 +370,17 @@ def _confirm_or_refuse(
     try:
         return api.confirm_generate(handle, user_digest, backend=backend, audit_sink=audit_sink, home=home)
     except VerificationDigestMismatch:
-        print(
+        _term.emit_error(
             "Verification digest mismatch — the Seed or Passphrase was mis-transcribed. "
-            "Nothing was written; rerun `hermes-mordred keyvault init`.",
-            file=sys.stderr,
+            "Nothing was written; rerun `hermes-mordred keyvault init`."
         )
         return None
     except WrapError as exc:
-        print(f"Keyvault init failed: Secure Enclave error — {exc}", file=sys.stderr)
+        _term.emit_error(f"Keyvault init failed: Secure Enclave error — {exc}")
         return None
     except RuntimeError as exc:
         # confirm_generate's own re-init guard (a race with the pre-check).
-        print(f"Keyvault init refused: {exc}", file=sys.stderr)
+        _term.emit_error(f"Keyvault init refused: {exc}")
         return None
 
 

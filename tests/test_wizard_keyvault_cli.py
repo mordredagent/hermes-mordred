@@ -881,3 +881,45 @@ class TestTerminalSeedSurface:
         assert " ".join(words) in out
         # The joined line is on a single physical line (no stray newline split).
         assert any(" ".join(words) in line for line in out.splitlines())
+
+
+class TestErrorColour:
+    """Keyvault errors route through ``_term.emit_error``: red ``error:`` on a tty, plain off it.
+
+    Mirrors the network / vault reproducers (PR #159 / #164). Uses the no-prompt
+    unreadable-backup-blob path — the read fails before any prompt is consulted,
+    so no scripted seed/passphrase interaction is needed for the assertion.
+    """
+
+    def test_recover_error_is_red_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        rc = keyvault_cli.recover(
+            blob_path=tmp_path / "nope.mrkv",
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "\033[31m" in err  # red `error:` label
+        assert "nope.mrkv" in err
+
+    def test_recover_error_plain_and_prefixed_off_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Off a tty the output is plain, now carrying the shared `error:` prefix.
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        rc = keyvault_cli.recover(
+            blob_path=tmp_path / "nope.mrkv",
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error: cannot read backup blob")
+        assert "\033" not in err

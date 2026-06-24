@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _storage
+from . import _term
 from ._keyvault_init import (
     TerminalSeedSurface,
     _stderr_audit_sink,
@@ -113,7 +114,7 @@ def verify_digest(*, home: Path | None = None) -> int:
     meta = _storage.load_meta(root)
     keys = meta["keys"]
     if not keys:
-        print("No keys to verify in keyvault.", file=sys.stderr)
+        _term.emit_error("No keys to verify in keyvault.")
         return 1
 
     rc = 0
@@ -124,7 +125,7 @@ def verify_digest(*, home: Path | None = None) -> int:
         try:
             digest = _storage.safe_read(commit)
         except OSError as exc:
-            print(f"  {key_id}  (hash {key_id_hash}): digest unavailable — {exc}", file=sys.stderr)
+            _term.emit_error(f"  {key_id}  (hash {key_id_hash}): digest unavailable — {exc}")
             rc = 1
             continue
         print(f"  {key_id}  (hash {key_id_hash}): {digest.hex()}")
@@ -156,7 +157,7 @@ def recover(
     try:
         blob = blob_path.read_bytes()
     except OSError as exc:
-        print(f"cannot read backup blob {blob_path}: {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot read backup blob {blob_path}: {exc}")
         return 1
 
     from ..keyvault import _bip39, api
@@ -178,7 +179,7 @@ def recover(
     try:
         _bip39.mnemonic_to_entropy(normalized_seed)
     except ValueError as exc:
-        print(f"Seed Phrase rejected: {exc}", file=sys.stderr)
+        _term.emit_error(f"Seed Phrase rejected: {exc}")
         return 1
 
     # PoW is a deterministic function of the normalized seed (SPEC
@@ -207,17 +208,16 @@ def recover(
             home=home,
         )
     except RecoveryDigestMismatch:
-        print(
+        _term.emit_error(
             "Recovery rejected: the verification digest does not match — the Seed "
-            "Phrase or Passphrase was mis-transcribed.",
-            file=sys.stderr,
+            "Phrase or Passphrase was mis-transcribed."
         )
         return 1
     except BackupCorrupt as exc:
-        print(f"Recovery rejected: backup blob is corrupt — {exc}", file=sys.stderr)
+        _term.emit_error(f"Recovery rejected: backup blob is corrupt — {exc}")
         return 1
     except WrapError as exc:
-        print(f"Recovery failed: Secure Enclave error — {exc}", file=sys.stderr)
+        _term.emit_error(f"Recovery failed: Secure Enclave error — {exc}")
         return 1
     # L2 (PR #39 review): import_backup has consumed the seed/passphrase;
     # drop the str references (CPython cannot zero an immutable str in
@@ -364,10 +364,9 @@ def reset_keyvault(
         # The Secure-Enclave keys are already deleted, so the keyvault is
         # unrecoverable regardless — but report honestly rather than emit a
         # traceback, and point the operator at the leftover directory.
-        print(
+        _term.emit_error(
             f"Secure Enclave keys deleted, but the keyvault directory could not be "
-            f"removed ({exc}); remove {root} manually.",
-            file=sys.stderr,
+            f"removed ({exc}); remove {root} manually."
         )
         return 1
     print("Keyvault reset — all key material destroyed.")
