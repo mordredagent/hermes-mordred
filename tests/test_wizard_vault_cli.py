@@ -1594,3 +1594,39 @@ class TestRecover:
         rc = vault_cli.cli_recover(argparse.Namespace(root=str(tmp_path)))
         assert rc == 0
         assert seen["root"] == tmp_path
+
+
+class TestErrorColour:
+    """Vault errors route through ``_term.emit_error``: red ``error:`` on a tty, plain off it.
+
+    Mirrors the network-CLI reproducer (PR #159). Uses the no-prompt
+    ``migrate``-to-uninitialised-vault path so the assertion needs no passphrase
+    PromptIO — the failing open prints its reason via ``_term`` either way.
+    """
+
+    def test_open_error_is_red_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        src = tmp_path / ".env"
+        src.write_bytes(b"K=v\n")
+        rc = vault_cli.migrate(root=tmp_path / "v", sources=[src], backend=FakeBackend(), store=FakeAnchorStore())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "\033[31m" in err  # red `error:` label
+        assert "init" in err.lower()
+
+    def test_open_error_plain_and_prefixed_off_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Off a tty the output is plain, now carrying the shared `error:` prefix.
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        src = tmp_path / ".env"
+        src.write_bytes(b"K=v\n")
+        rc = vault_cli.migrate(root=tmp_path / "v", sources=[src], backend=FakeBackend(), store=FakeAnchorStore())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error: no vault at")
+        assert "\033" not in err

@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import _term
 from ._vault_open import _display_name, _open_cold_path, _open_hot_path_or_report
 
 if TYPE_CHECKING:
@@ -81,7 +82,7 @@ def cat(*, root: Path, name: str, prompt_io: PromptIO | None = None) -> int:
     try:
         data = opened.read_file(name)
     except vault.VaultError as exc:
-        print(f"cannot read {name!r}: {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot read {name!r}: {exc}")
         return 1
     finally:
         opened.close()
@@ -93,7 +94,7 @@ def cat(*, root: Path, name: str, prompt_io: PromptIO | None = None) -> int:
         # Downstream closed early (e.g. `vault cat … | head`); not an error.
         return 0
     except OSError as exc:
-        print(f"failed writing {name!r} to stdout: {exc}", file=sys.stderr)
+        _term.emit_error(f"failed writing {name!r} to stdout: {exc}")
         return 1
     return 0
 
@@ -126,7 +127,7 @@ def add(
     try:
         plaintext = source.read_bytes()
     except OSError as exc:
-        print(f"cannot read source file {source}: {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot read source file {source}: {exc}")
         return 1
 
     opened = _open_hot_path_or_report(root, backend=backend, store=store)
@@ -137,7 +138,7 @@ def add(
         opened.enroll_file(name, plaintext)
         generation = opened.generation
     except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-        print(f"cannot add {name!r}: {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot add {name!r}: {exc}")
         return 1
     finally:
         opened.close()
@@ -186,10 +187,9 @@ def migrate(
     for source in sources:
         name = source.name
         if name in by_name:
-            print(
+            _term.emit_error(
                 f"refusing to migrate: {name!r} maps to more than one source "
-                f"({by_name[name]}, {source}) — migrate them under distinct names.",
-                file=sys.stderr,
+                f"({by_name[name]}, {source}) — migrate them under distinct names."
             )
             return 1
         by_name[name] = source
@@ -201,7 +201,7 @@ def migrate(
         try:
             plaintexts.append((name, source.read_bytes()))
         except OSError as exc:
-            print(f"cannot read source file {source}: {exc}", file=sys.stderr)
+            _term.emit_error(f"cannot read source file {source}: {exc}")
             return 1
 
     from ..keyvault import anchor, vault
@@ -223,10 +223,7 @@ def migrate(
         # anywhere in the try — even after the loop — still fails closed with a
         # message rather than an IndexError traceback.
         failed = plaintexts[enrolled][0] if enrolled < len(plaintexts) else "<unknown>"
-        print(
-            f"cannot migrate {failed!r} ({enrolled} of {len(plaintexts)} already enrolled): {exc}",
-            file=sys.stderr,
-        )
+        _term.emit_error(f"cannot migrate {failed!r} ({enrolled} of {len(plaintexts)} already enrolled): {exc}")
         return 1
     finally:
         opened.close()

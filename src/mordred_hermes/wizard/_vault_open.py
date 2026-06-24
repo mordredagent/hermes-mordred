@@ -21,11 +21,11 @@ names (``_resolve_root`` / ``_open_hot_path_or_report`` / ``_vault_identity``).
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..keyvault import _identity
+from . import _term
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -90,25 +90,24 @@ def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | No
     try:
         return vault.recover_vault(root, passphrase)
     except vault.VaultError as exc:
-        print(f"Not a recoverable vault at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"Not a recoverable vault at {root}: {exc}")
         return None
     except recovery.RecoveryDigestMismatch:
-        print(
-            "Vault rejected: the recovery sidecar does not match the manifest (substituted wmk / tampering).",
-            file=sys.stderr,
+        _term.emit_error(
+            "Vault rejected: the recovery sidecar does not match the manifest (substituted wmk / tampering)."
         )
         return None
     except manifest.ManifestError:
-        print("Vault rejected: the manifest failed authentication (tampering).", file=sys.stderr)
+        _term.emit_error("Vault rejected: the manifest failed authentication (tampering).")
         return None
     except backup.BackupCorrupt as exc:
-        print(f"Vault rejected: the recovery sidecar is corrupt — {exc}", file=sys.stderr)
+        _term.emit_error(f"Vault rejected: the recovery sidecar is corrupt — {exc}")
         return None
     except InvalidTag:
-        print("Wrong passphrase — vault not opened.", file=sys.stderr)
+        _term.emit_error("Wrong passphrase — vault not opened.")
         return None
     except OSError as exc:
-        print(f"Cannot read vault at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"Cannot read vault at {root}: {exc}")
         return None
     finally:
         # CPython cannot zero an immutable str in place; dropping the reference
@@ -145,15 +144,15 @@ def _open_hot_path_or_report(
     try:
         return vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
     except anchor.AnchorMissing:
-        print(f"no vault at {root} — run `vault init` first.", file=sys.stderr)
+        _term.emit_error(f"no vault at {root} — run `vault init` first.")
     except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
         # A freshness-pin mismatch is the anchor's whole purpose — surface it as
         # possible tampering / rollback, not a generic open failure.
-        print(f"vault freshness check failed at {root} (possible tampering): {exc}", file=sys.stderr)
+        _term.emit_error(f"vault freshness check failed at {root} (possible tampering): {exc}")
     except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
-        print(f"cannot open vault at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot open vault at {root}: {exc}")
     except WrapError as exc:
-        print(f"cannot open vault at {root}: device key store error — {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot open vault at {root}: device key store error — {exc}")
     return None
 
 

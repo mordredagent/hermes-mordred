@@ -19,10 +19,10 @@ imports stay function-local so this module imports on any platform.
 from __future__ import annotations
 
 import contextlib
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import _term
 from ._vault_open import _build_device_auth, _vault_identity
 
 if TYPE_CHECKING:
@@ -72,10 +72,10 @@ def init(
     try:
         already_initialised = store.read(anchor_label) is not None
     except (anchor.AnchorError, OSError) as exc:
-        print(f"Cannot determine vault state at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"Cannot determine vault state at {root}: {exc}")
         return 1
     if already_initialised:
-        print(f"A vault is already initialised at {root} — refusing to clobber it.", file=sys.stderr)
+        _term.emit_error(f"A vault is already initialised at {root} — refusing to clobber it.")
         return 1
 
     if prompt_io is None:
@@ -94,10 +94,10 @@ def init(
     print()
     passphrase = prompt_io.ask_password("Choose a vault recovery passphrase")
     if not passphrase:
-        print("Passphrase must not be empty — nothing was written.", file=sys.stderr)
+        _term.emit_error("Passphrase must not be empty — nothing was written.")
         return 1
     if passphrase != prompt_io.ask_password("Re-enter the passphrase"):
-        print("Passphrases do not match — nothing was written.", file=sys.stderr)
+        _term.emit_error("Passphrases do not match — nothing was written.")
         return 1
 
     try:
@@ -113,10 +113,10 @@ def init(
             pass
     except vault.VaultError as exc:
         # A concurrent init won the anchor race after our pre-check.
-        print(f"Vault init refused: {exc}", file=sys.stderr)
+        _term.emit_error(f"Vault init refused: {exc}")
         return 1
     except (anchor.AnchorError, WrapError, OSError) as exc:
-        print(f"Vault init failed: device key store / anchor error — {exc}", file=sys.stderr)
+        _term.emit_error(f"Vault init failed: device key store / anchor error — {exc}")
         return 1
     finally:
         del passphrase
@@ -163,7 +163,7 @@ def ensure_initialised(
     except (anchor.AnchorError, OSError) as exc:
         # Fail-closed: we cannot prove the vault is absent, so do not risk
         # clobbering one with a fresh init (matches the guard in `init`).
-        print(f"Cannot determine vault state at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"Cannot determine vault state at {root}: {exc}")
         return 1
 
     print(f"No vault yet at {root} — creating one (this is where `encryption` stores secrets at rest).")
@@ -200,10 +200,7 @@ def change_passphrase(
     # The recovery sidecar is the one file we rewrite; its absence means there is
     # no vault to rotate. Do NOT create one here (unlike `encryption enable`).
     if not (root / "recovery.mrkv").exists():
-        print(
-            f"No vault at {root} — nothing to rotate. Run `encryption enable env` first.",
-            file=sys.stderr,
-        )
+        _term.emit_error(f"No vault at {root} — nothing to rotate. Run `encryption enable env` first.")
         return 1
 
     # Off-macOS the SE backend / keychain don't import; _build_device_auth returns
@@ -216,10 +213,10 @@ def change_passphrase(
 
     new_passphrase = prompt_io.ask_password("Choose a NEW recovery passphrase")
     if not new_passphrase:
-        print("Passphrase must not be empty — nothing was changed.", file=sys.stderr)
+        _term.emit_error("Passphrase must not be empty — nothing was changed.")
         return 1
     if new_passphrase != prompt_io.ask_password("Re-enter the new passphrase"):
-        print("Passphrases do not match — nothing was changed.", file=sys.stderr)
+        _term.emit_error("Passphrases do not match — nothing was changed.")
         return 1
 
     try:
@@ -252,7 +249,7 @@ def change_passphrase(
                 anchor_label=anchor_label,
             )
         except (vault.VaultError, recovery.RecoveryDigestMismatch, InvalidTag, ValueError, OSError) as exc:
-            print(f"Could not change the passphrase: {exc}", file=sys.stderr)
+            _term.emit_error(f"Could not change the passphrase: {exc}")
             return 1
         finally:
             del old_passphrase
@@ -261,7 +258,7 @@ def change_passphrase(
         # wrong-mode .lock (KeyvaultPermissionError) — surface as a clean exit 1,
         # not a traceback. (AnchorError / WrapError are handled above as the
         # device-unavailable fallback, so they never reach here.)
-        print(f"Could not change the passphrase: {exc}", file=sys.stderr)
+        _term.emit_error(f"Could not change the passphrase: {exc}")
         return 1
     finally:
         del new_passphrase
@@ -309,9 +306,8 @@ def recover(
     # we fail closed (there is no device to re-key onto).
     device_backend, device_store = _build_device_auth(backend, store)
     if device_backend is None or device_store is None:
-        print(
-            f"Cannot re-key the vault at {root}: no usable device key on this host (Secure Enclave / TPM unavailable).",
-            file=sys.stderr,
+        _term.emit_error(
+            f"Cannot re-key the vault at {root}: no usable device key on this host (Secure Enclave / TPM unavailable)."
         )
         return 1
 
@@ -331,28 +327,27 @@ def recover(
             anchor_label=anchor_label,
         )
     except vault.VaultError as exc:
-        print(f"Not a recoverable vault at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"Not a recoverable vault at {root}: {exc}")
         return 1
     except recovery.RecoveryDigestMismatch:
-        print(
-            "Vault rejected: the recovery sidecar does not match the manifest (substituted wmk / tampering).",
-            file=sys.stderr,
+        _term.emit_error(
+            "Vault rejected: the recovery sidecar does not match the manifest (substituted wmk / tampering)."
         )
         return 1
     except manifest.ManifestError:
-        print("Vault rejected: the manifest failed authentication (tampering).", file=sys.stderr)
+        _term.emit_error("Vault rejected: the manifest failed authentication (tampering).")
         return 1
     except backup.BackupCorrupt as exc:
-        print(f"Vault rejected: the recovery sidecar is corrupt — {exc}", file=sys.stderr)
+        _term.emit_error(f"Vault rejected: the recovery sidecar is corrupt — {exc}")
         return 1
     except InvalidTag:
-        print("Wrong passphrase — vault not re-keyed.", file=sys.stderr)
+        _term.emit_error("Wrong passphrase — vault not re-keyed.")
         return 1
     except (anchor.AnchorError, WrapError) as exc:
-        print(f"Could not re-key the vault at {root}: device key / anchor error — {exc}", file=sys.stderr)
+        _term.emit_error(f"Could not re-key the vault at {root}: device key / anchor error — {exc}")
         return 1
     except OSError as exc:
-        print(f"Could not re-key the vault at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"Could not re-key the vault at {root}: {exc}")
         return 1
     finally:
         # CPython cannot zero an immutable str in place; dropping the reference

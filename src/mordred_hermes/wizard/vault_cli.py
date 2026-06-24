@@ -25,11 +25,11 @@ this module imports on any platform, matching ``keyvault_cli.py``.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _identity as _identity  # re-exported: tests patch vault_cli._identity._hermes_home
+from . import _term
 from ._vault_entries import (
     add,
     cat,
@@ -104,10 +104,9 @@ def cli_migrate(args: argparse.Namespace) -> int:
     explicit = [Path(s) for s in (getattr(args, "source", None) or [])]
     sources = explicit if explicit else _default_migrate_sources()
     if not sources:
-        print(
+        _term.emit_error(
             "Nothing to migrate: no .env or config.yaml under the Hermes home. "
-            "Pass file paths explicitly to migrate other files.",
-            file=sys.stderr,
+            "Pass file paths explicitly to migrate other files."
         )
         return 1
     return migrate(root=_resolve_root(getattr(args, "root", None)), sources=sources)
