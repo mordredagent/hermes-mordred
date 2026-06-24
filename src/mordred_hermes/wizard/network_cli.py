@@ -16,6 +16,12 @@ Responsibilities:
    ``configure`` so first-run setup stays short; re-runnable (seeds prompt
    defaults from disk; a blank Mullvad answer keeps the current secret).
 
+The :class:`NetworkAnswers` data model and the input coercions live in
+:mod:`mordred_hermes.wizard._network_answers`; the interactive answer
+collection lives in :mod:`mordred_hermes.wizard._network_init`. Both are
+re-exported here so existing ``from .network_cli import NetworkAnswers`` /
+``collect_network_answers`` callers keep working unchanged.
+
 The CLI itself does not write audit entries - it is a thin user-facing
 wrapper around :mod:`mordred_hermes.network.api` and the wizard writers.
 """
@@ -25,18 +31,42 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shlex
 import sys
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from .._home import HERMES_BASE
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from ..network.guidance import dependency_warning
 from . import _term
+from ._network_answers import (
+    _VALID_PATHS,
+    NetworkAnswers,
+    NetworkInitInputs,
+)
+from ._network_init import (
+    _MULLVAD_ACCOUNT_DESCRIPTION as _MULLVAD_ACCOUNT_DESCRIPTION,
+)
+from ._network_init import (
+    _MULLVAD_KILLSWITCH_DESCRIPTION as _MULLVAD_KILLSWITCH_DESCRIPTION,
+)
+from ._network_init import (
+    _MULLVAD_RELAY_DESCRIPTION as _MULLVAD_RELAY_DESCRIPTION,
+)
+from ._network_init import (
+    _NETWORK_PATH_DESCRIPTIONS as _NETWORK_PATH_DESCRIPTIONS,
+)
+from ._network_init import (
+    _TOR_BINARY_DESCRIPTION as _TOR_BINARY_DESCRIPTION,
+)
+from ._network_init import (
+    _TOR_SOCKS_PORT_DESCRIPTION as _TOR_SOCKS_PORT_DESCRIPTION,
+)
+from ._network_init import (
+    collect_network_answers,
+    network_answers_from_args,
+)
 from .configure import (
     PromptIO,
     PromptToolkitIO,
@@ -48,103 +78,6 @@ from .policy_writer import PolicyWriter
 _LOG = logging.getLogger("mordred.wizard.network_cli")
 
 DEFAULT_CONFIG_PATH: Path = HERMES_BASE / "config.yaml"
-_VALID_PATHS = ("tor", "vpn", "clearnet")
-
-DEFAULT_TOR_SOCKS_PORT: Final[int] = 9050
-MULLVAD_ACCOUNT_ENV_VAR_NAME: Final[str] = "MORDRED_MULLVAD_ACCOUNT"
-
-
-#: Inline descriptions shown next to each route in the ``network init``
-#: privacy-path radio dialog (rendered as ``<route> — <description>`` by
-#: ``PromptToolkitIO``). Before this each prompt opened as a bare label with no
-#: hint of what it does (UX request 2026-06-15); these orient the operator the
-#: same way the keyvault-init intro and the ``configure`` policy-mode
-#: descriptions do. Copy condenses the "What each route is" section of
-#: ``mordred-docs/mordred/QUICKSTART.md`` so the wizard and the docs never drift.
-_NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
-    "tor": "Anonymity via the Tor network — slowest; needs `tor` installed",
-    "vpn": "IP privacy via any VPN — faster; Mullvad recommended (paid)",
-    "clearnet": "Direct connection — no anonymity, fastest (the default)",
-}
-
-#: Help line printed above each plain-text / secret / yes-no ``network init``
-#: prompt (UX request 2026-06-15). Every setting only matters for a single
-#: route, so each line names its route up front — a clearnet user can press
-#: Enter straight through. The three Mullvad lines now surface only when the
-#: Mullvad VPN provider is selected (the provider question is asked first), so
-#: a WireGuard / custom-VPN user is never prompted for a Mullvad account number
-#: (UX request 2026-06-16). Mirrors the per-prompt Tor / VPN tables in
-#: ``mordred-docs/mordred/QUICKSTART.md``.
-_TOR_BINARY_DESCRIPTION: Final[str] = (
-    "Tor route only — where the `tor` program is. Leave as `tor` if it's on your PATH."
-)
-_TOR_SOCKS_PORT_DESCRIPTION: Final[str] = (
-    "Tor route only — local port Tor's SOCKS proxy listens on. Standard is 9050; rarely changed."
-)
-# The label already says "Mullvad account number", so the help line carries the
-# context the label can't (paid service, where it lands) instead of restating it.
-_MULLVAD_ACCOUNT_DESCRIPTION: Final[str] = (
-    "VPN route only — Mullvad is a paid subscription VPN; the number is saved to ~/.hermes/.env (mode 0600)."
-)
-_MULLVAD_RELAY_DESCRIPTION: Final[str] = (
-    "VPN route only — `auto`, or a 2-letter country code (e.g. `se`) to pin the VPN exit country."
-)
-_MULLVAD_KILLSWITCH_DESCRIPTION: Final[str] = (
-    "VPN route only — lockdown mode: block all traffic if the VPN drops, so your real IP can't leak."
-)
-
-#: Provider selector shown when the `vpn` route is in play. Mullvad is the
-#: recommended default (strict-capable); wireguard / custom let you use any
-#: other VPN (off / lenient only — see QUICKSTART "Using a different VPN").
-_VPN_PROVIDER_DESCRIPTIONS: Final[Mapping[str, str]] = {
-    "mullvad": "Recommended. Paid Mullvad account; the only provider allowed in strict mode.",
-    "wireguard": "Any VPN with a WireGuard `.conf` (Proton VPN, IVPN, self-hosted). off/lenient only.",
-    "custom": "Any VPN driven by its own CLI (ExpressVPN, NordVPN). off/lenient only.",
-}
-_VPN_PROVIDER_DESCRIPTION: Final[str] = (
-    "VPN route only — which VPN to use. `mullvad` (recommended) or `wireguard` / `custom` for any other VPN."
-)
-_WIREGUARD_CONFIG_DESCRIPTION: Final[str] = (
-    "wireguard provider only — path to your WireGuard `.conf` (exported from Proton VPN, IVPN, etc.)."
-)
-_CUSTOM_UP_DESCRIPTION: Final[str] = (
-    "custom provider only — command that connects the VPN, e.g. `expressvpn connect` or `nordvpn connect`."
-)
-_CUSTOM_DOWN_DESCRIPTION: Final[str] = (
-    "custom provider only — command that disconnects the VPN, e.g. `expressvpn disconnect`."
-)
-_CUSTOM_HEALTH_DESCRIPTION: Final[str] = (
-    "custom provider only — optional command that reports tunnel status, e.g. `expressvpn status` (blank = none)."
-)
-
-
-def _split_cmd(raw: str) -> tuple[str, ...]:
-    """Parse a command string into an argv tuple (shell-style, no exec).
-
-    ``shlex.split`` only tokenises (handles quotes/spaces); it never runs a
-    shell, so this is purely how the operator's typed command becomes the
-    argv list the custom provider executes without ``shell=True``.
-    """
-    try:
-        return tuple(shlex.split(raw.strip()))
-    except ValueError:
-        # Unbalanced quotes etc. — fall back to a naive split so a typo
-        # doesn't abort the whole `network init` session.
-        return tuple(raw.split())
-
-
-def _join_cmd(value: object) -> str:
-    """Render a stored argv list back to an editable command string."""
-    if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
-        return shlex.join(value)
-    return ""
-
-
-def _seed_cmd(value: object) -> tuple[str, ...]:
-    """Coerce a stored YAML argv list to a tuple (else empty)."""
-    if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
-        return tuple(value)
-    return ()
 
 
 # --------------------------------------------------------------------------- #
@@ -311,366 +244,6 @@ def _dependency_warning_for_configured_path(config_path: Path, target: str) -> s
 # --------------------------------------------------------------------------- #
 # network init -- on-demand network privacy setup (formerly in `configure`)   #
 # --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True, slots=True)
-class NetworkAnswers:
-    """The six wizard outputs that drive network path management.
-
-    The Mullvad account *value* never appears here -- only the env-var
-    REFERENCE. The actual secret flows through the :class:`EnvFileWriter`
-    which writes it to ``~/.hermes/.env`` at mode 0600.
-
-    :meth:`to_config_yaml_section` returns the body merged into
-    ``plugins.mordred_network`` in ``config.yaml``.
-    """
-
-    default_network_path: str  # "tor" | "vpn" | "clearnet"
-    tor_binary_path: str  # filesystem path or shell-resolvable name
-    tor_socks_port: int
-    mullvad_account_id_env: str  # always ``MORDRED_MULLVAD_ACCOUNT``
-    mullvad_relay_country: str  # "auto" | 2-letter code
-    mullvad_killswitch: bool
-    # Pluggable VPN provider behind the `vpn` route. Defaults keep older
-    # callers / configs on Mullvad unchanged.
-    vpn_provider: str = "mullvad"  # "mullvad" | "wireguard" | "custom"
-    wireguard_config_path: str = ""  # vpn_provider="wireguard"
-    custom_up_cmd: tuple[str, ...] = ()  # vpn_provider="custom"
-    custom_down_cmd: tuple[str, ...] = ()
-    custom_health_cmd: tuple[str, ...] = ()
-
-    def to_config_yaml_section(self) -> dict[str, object]:
-        """The body merged into ``plugins.mordred_network`` in config.yaml.
-
-        Key remap: ``default_network_path`` becomes ``default_path`` on disk so
-        the network reader (``mordred_hermes.network`` /
-        :func:`_read_default_path_from_config`) keeps working unchanged.
-
-        Provider-specific keys are emitted only when set, so a Mullvad config
-        stays free of empty wireguard/custom entries.
-        """
-        section: dict[str, object] = {
-            "default_path": self.default_network_path,
-            "tor_binary_path": self.tor_binary_path,
-            "tor_socks_port": self.tor_socks_port,
-            "mullvad_account_id_env": self.mullvad_account_id_env,
-            "mullvad_relay_country": self.mullvad_relay_country,
-            "mullvad_killswitch": self.mullvad_killswitch,
-            "vpn_provider": self.vpn_provider,
-        }
-        if self.wireguard_config_path:
-            section["wireguard_config_path"] = self.wireguard_config_path
-        if self.custom_up_cmd:
-            section["custom_up_cmd"] = list(self.custom_up_cmd)
-        if self.custom_down_cmd:
-            section["custom_down_cmd"] = list(self.custom_down_cmd)
-        if self.custom_health_cmd:
-            section["custom_health_cmd"] = list(self.custom_health_cmd)
-        return section
-
-
-def _coerce_tor_socks_port(raw: str) -> int:
-    """Parse a port string; fall back to the default 9050 on garbage input.
-
-    Hard-aborting on bad input would force the user to abandon a whole
-    ``network init`` session for a typo. A WARN log + safe-default lets them
-    re-run and fix it.
-    """
-    try:
-        port = int(raw)
-    except ValueError:
-        _LOG.warning("Invalid Tor SOCKS port %r; falling back to default %d", raw, DEFAULT_TOR_SOCKS_PORT)
-        return DEFAULT_TOR_SOCKS_PORT
-    if port <= 0 or port > 65535:
-        _LOG.warning("Tor SOCKS port %d out of range; falling back to default %d", port, DEFAULT_TOR_SOCKS_PORT)
-        return DEFAULT_TOR_SOCKS_PORT
-    return port
-
-
-def _coerce_mullvad_relay_country(raw: str) -> str:
-    """Normalize the Mullvad relay-country answer to ``"auto"`` or a 2-letter
-    lowercase ISO code.
-
-    The Mullvad CLI accepts ``relay set location <code>`` only for 2-letter
-    codes (or the sentinel ``"any"`` / ``"auto"``). Free-text typos like
-    ``"unitedstates"`` would silently flow into config and only surface at
-    bring-up time. Like :func:`_coerce_tor_socks_port`, garbage falls back to
-    the safe default (``"auto"``) with a WARN rather than aborting.
-    """
-    stripped = raw.strip()
-    if not stripped or stripped.lower() == "auto":
-        return "auto"
-    if len(stripped) == 2 and stripped.isalpha():
-        return stripped.lower()
-    _LOG.warning(
-        "Invalid Mullvad relay country %r; expected 'auto' or 2-letter ISO code; falling back to 'auto'",
-        raw,
-    )
-    return "auto"
-
-
-def _coerce_seed_bool(value: object) -> bool:
-    """Interpret a yes/no prompt seed default robustly.
-
-    config.yaml written by Mordred stores a real YAML bool, but a hand-edited
-    quoted value like ``"false"`` would otherwise pass ``bool("false") is True``
-    and flip the killswitch default on a re-run. Treat the common string forms
-    explicitly (Codex review 2026-06-05).
-    """
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("true", "1", "yes", "on")
-
-
-@dataclass(frozen=True, slots=True)
-class NetworkInitInputs:
-    """Transient carrier from :func:`collect_network_answers` to :func:`run_init`.
-
-    Holds the env-var-only :class:`NetworkAnswers` plus the raw Mullvad secret
-    on a ``repr=False`` field. Mirrors the redaction contract that
-    ``configure.ConfigureResult`` used: ``repr``/``str`` (called implicitly by
-    tracebacks, ``pytest --showlocals``, loggers, debuggers) must never emit
-    the plaintext account number. The secret is routed to the
-    :class:`EnvFileWriter` by ``run_init`` and otherwise discarded.
-    """
-
-    network_answers: NetworkAnswers
-    _mullvad_account_secret: str = field(default="", repr=False)
-
-
-@dataclass(frozen=True, slots=True)
-class _VpnSettings:
-    """Outputs of :func:`_collect_vpn_settings`: the provider choice plus the
-    settings of whichever provider was picked.
-
-    When a non-Mullvad provider is selected the Mullvad relay/killswitch carry
-    the existing on-disk values (not the static defaults), so switching
-    providers on a re-run never silently wipes a saved Mullvad config.
-    """
-
-    vpn_provider: str
-    mullvad_account_secret: str
-    mullvad_relay_country: str
-    mullvad_killswitch: bool
-    wireguard_config_path: str
-    custom_up: tuple[str, ...]
-    custom_down: tuple[str, ...]
-    custom_health: tuple[str, ...]
-
-
-def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], prompt_secret: bool) -> _VpnSettings:
-    """Ask which VPN provider to use, then only that provider's settings.
-
-    The provider question is asked first so the Mullvad account / relay /
-    killswitch prompts can be gated on ``vpn_provider == "mullvad"`` — a
-    WireGuard or custom-VPN user is never prompted for a Mullvad account number
-    (UX request 2026-06-16, now that any VPN may be used). wireguard / custom
-    each surface their own prompts instead.
-
-    Non-Mullvad providers leave the Mullvad relay/killswitch at their existing
-    on-disk values so a re-run that switches providers preserves a saved Mullvad
-    config; ``mullvad_account_secret`` stays ``""`` (blank = keep current).
-    """
-    vpn_provider = prompt_io.ask_choice(
-        label="VPN provider",
-        choices=("mullvad", "wireguard", "custom"),
-        default=str(existing.get("vpn_provider") or "mullvad"),
-        descriptions=_VPN_PROVIDER_DESCRIPTIONS,
-    )
-
-    mullvad_account_secret = ""
-    # Preserve any saved Mullvad config when the chosen provider isn't Mullvad.
-    mullvad_relay_country = _coerce_mullvad_relay_country(str(existing.get("mullvad_relay_country") or "auto"))
-    mullvad_killswitch = _coerce_seed_bool(existing.get("mullvad_killswitch", False))
-    wireguard_config_path = ""
-    custom_up: tuple[str, ...] = ()
-    custom_down: tuple[str, ...] = ()
-    custom_health: tuple[str, ...] = ()
-
-    if vpn_provider == "mullvad":
-        # Blank = keep the current secret (re-run safe). The label says so. When
-        # the caller has already decided to clear the secret (``--clear-mullvad``),
-        # skip the prompt entirely.
-        if prompt_secret:
-            mullvad_account_secret = prompt_io.ask_password(
-                label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
-                default="",
-                description=_MULLVAD_ACCOUNT_DESCRIPTION,
-            )
-        mullvad_relay_country = _coerce_mullvad_relay_country(
-            prompt_io.ask_text(
-                label="Mullvad relay country (`auto` or 2-letter code)",
-                default=str(existing.get("mullvad_relay_country") or "auto"),
-                description=_MULLVAD_RELAY_DESCRIPTION,
-            )
-        )
-        mullvad_killswitch = prompt_io.ask_bool(
-            label="Mullvad killswitch (lockdown-mode)",
-            default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
-            description=_MULLVAD_KILLSWITCH_DESCRIPTION,
-        )
-    elif vpn_provider == "wireguard":
-        wireguard_config_path = prompt_io.ask_text(
-            label="WireGuard config path",
-            default=str(existing.get("wireguard_config_path") or ""),
-            description=_WIREGUARD_CONFIG_DESCRIPTION,
-        ).strip()
-    elif vpn_provider == "custom":
-        custom_up = _split_cmd(
-            prompt_io.ask_text(
-                label="VPN up command",
-                default=_join_cmd(existing.get("custom_up_cmd")),
-                description=_CUSTOM_UP_DESCRIPTION,
-            )
-        )
-        custom_down = _split_cmd(
-            prompt_io.ask_text(
-                label="VPN down command",
-                default=_join_cmd(existing.get("custom_down_cmd")),
-                description=_CUSTOM_DOWN_DESCRIPTION,
-            )
-        )
-        custom_health = _split_cmd(
-            prompt_io.ask_text(
-                label="VPN health command",
-                default=_join_cmd(existing.get("custom_health_cmd")),
-                description=_CUSTOM_HEALTH_DESCRIPTION,
-            )
-        )
-
-    return _VpnSettings(
-        vpn_provider=vpn_provider,
-        mullvad_account_secret=mullvad_account_secret,
-        mullvad_relay_country=mullvad_relay_country,
-        mullvad_killswitch=mullvad_killswitch,
-        wireguard_config_path=wireguard_config_path,
-        custom_up=custom_up,
-        custom_down=custom_down,
-        custom_health=custom_health,
-    )
-
-
-def collect_network_answers(
-    prompt_io: PromptIO,
-    *,
-    existing: Mapping[str, Any] | None = None,
-    prompt_secret: bool = True,
-) -> NetworkInitInputs:
-    """Run the network-privacy prompts, seeding defaults from ``existing``.
-
-    Prompt order: privacy path → Tor binary → Tor SOCKS port → VPN provider →
-    the selected provider's settings. Asking the provider before the Mullvad
-    prompts lets them be gated on ``vpn_provider == "mullvad"``, so a WireGuard
-    or custom-VPN user is never asked for a Mullvad account number (UX request
-    2026-06-16).
-
-    ``existing`` is the current ``plugins.mordred_network`` body (see
-    :func:`_read_existing_network_section`). Seeding each prompt's default from
-    it makes a re-run of ``network init`` non-destructive: pressing Enter on
-    every prompt keeps the on-disk value. A blank Mullvad answer is preserved
-    as ``""`` so :func:`run_init` can leave any existing ``.env`` secret intact
-    instead of stripping it.
-    """
-    existing = existing or {}
-
-    seeded_path = existing.get("default_path")
-    if not (isinstance(seeded_path, str) and seeded_path in _VALID_PATHS):
-        seeded_path = "clearnet"
-
-    default_network_path = prompt_io.ask_choice(
-        label="Network privacy path",
-        choices=_VALID_PATHS,
-        default=seeded_path,
-        descriptions=_NETWORK_PATH_DESCRIPTIONS,
-    )
-    tor_binary_path = prompt_io.ask_text(
-        label="Tor binary path",
-        default=str(existing.get("tor_binary_path") or "tor"),
-        description=_TOR_BINARY_DESCRIPTION,
-    )
-    tor_socks_port = _coerce_tor_socks_port(
-        prompt_io.ask_text(
-            label="Tor SOCKS port",
-            default=str(existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT),
-            description=_TOR_SOCKS_PORT_DESCRIPTION,
-        )
-    )
-    vpn = _collect_vpn_settings(prompt_io, existing=existing, prompt_secret=prompt_secret)
-
-    network_answers = NetworkAnswers(
-        default_network_path=default_network_path,
-        tor_binary_path=tor_binary_path,
-        tor_socks_port=tor_socks_port,
-        mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
-        mullvad_relay_country=vpn.mullvad_relay_country,
-        mullvad_killswitch=vpn.mullvad_killswitch,
-        vpn_provider=vpn.vpn_provider,
-        wireguard_config_path=vpn.wireguard_config_path,
-        custom_up_cmd=vpn.custom_up,
-        custom_down_cmd=vpn.custom_down,
-        custom_health_cmd=vpn.custom_health,
-    )
-    return NetworkInitInputs(
-        network_answers=network_answers,
-        _mullvad_account_secret=vpn.mullvad_account_secret,
-    )
-
-
-def network_answers_from_args(
-    args: argparse.Namespace,
-    *,
-    existing: Mapping[str, Any] | None = None,
-) -> NetworkInitInputs:
-    """Build :class:`NetworkInitInputs` from non-interactive CLI flags.
-
-    Unspecified flags fall back to the existing on-disk section, then to the
-    safe static defaults. The Mullvad secret is never taken from a flag (it
-    would leak via ``ps`` / shell history): non-interactive runs keep the
-    existing secret (or clear it via ``--clear-mullvad``), so the carrier
-    secret is always ``""``.
-    """
-    existing = existing or {}
-
-    path = getattr(args, "path", None) or existing.get("default_path") or "clearnet"
-    if not (isinstance(path, str) and path in _VALID_PATHS):
-        path = "clearnet"
-
-    tor_binary_path = getattr(args, "tor_binary", None) or str(existing.get("tor_binary_path") or "tor")
-
-    port_arg = getattr(args, "tor_socks_port", None)
-    port_seed = port_arg if port_arg is not None else (existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT)
-    tor_socks_port = _coerce_tor_socks_port(str(port_seed))
-
-    relay_arg = getattr(args, "mullvad_relay", None)
-    relay_seed = relay_arg if relay_arg is not None else (existing.get("mullvad_relay_country") or "auto")
-    mullvad_relay_country = _coerce_mullvad_relay_country(str(relay_seed))
-
-    killswitch_arg = getattr(args, "mullvad_killswitch", None)
-    mullvad_killswitch = (
-        killswitch_arg
-        if isinstance(killswitch_arg, bool)
-        else _coerce_seed_bool(existing.get("mullvad_killswitch", False))
-    )
-
-    # The provider selection has no CLI flags yet; a non-interactive re-run
-    # preserves whatever the interactive wizard / config.yaml already set.
-    vpn_provider = str(existing.get("vpn_provider") or "mullvad")
-    wireguard_config_path = str(existing.get("wireguard_config_path") or "")
-
-    network_answers = NetworkAnswers(
-        default_network_path=path,
-        tor_binary_path=tor_binary_path,
-        tor_socks_port=tor_socks_port,
-        mullvad_account_id_env=MULLVAD_ACCOUNT_ENV_VAR_NAME,
-        mullvad_relay_country=mullvad_relay_country,
-        mullvad_killswitch=mullvad_killswitch,
-        vpn_provider=vpn_provider,
-        wireguard_config_path=wireguard_config_path,
-        custom_up_cmd=_seed_cmd(existing.get("custom_up_cmd")),
-        custom_down_cmd=_seed_cmd(existing.get("custom_down_cmd")),
-        custom_health_cmd=_seed_cmd(existing.get("custom_health_cmd")),
-    )
-    return NetworkInitInputs(network_answers=network_answers, _mullvad_account_secret="")
 
 
 def run_init(
