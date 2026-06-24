@@ -14,8 +14,9 @@ The argparse adapters (``cli_enable_*``) are wired in :mod:`cli`.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
+
+from . import _term
 
 __all__ = [
     "cli_enable_se",
@@ -140,37 +141,33 @@ def enable_se(
 
     reason = _se_platform_reason()
     if reason is not None:
-        print(f"error: {reason}", file=sys.stderr)
+        _term.emit_error(reason)
         return 1
 
     missing = _missing_build_tools()
     if missing:
-        print(
-            f"error: missing build tool(s): {', '.join(missing)}. "
-            "Install the Xcode command-line tools first (xcode-select --install).",
-            file=sys.stderr,
+        _term.emit_error(
+            f"missing build tool(s): {', '.join(missing)}. "
+            "Install the Xcode command-line tools first (xcode-select --install)."
         )
         return 1
 
     src = _locate_sekey_source()
     if src is None:
-        print(
-            "error: could not locate the sekey-helper sources (native/sekey-helper). "
-            "Build from a source checkout of mordred-hermes.",
-            file=sys.stderr,
+        _term.emit_error(
+            "could not locate the sekey-helper sources (native/sekey-helper). "
+            "Build from a source checkout of mordred-hermes."
         )
         return 1
 
     rc, output = _run_sekey_build(src, install_dir=install_dir, unattended=unattended)
     if rc != 0:
-        print(f"error: sekey-helper build failed:\n{output}", file=sys.stderr)
+        _term.emit_error(f"sekey-helper build failed:\n{output}")
         return 1
 
     if not _verify_sekey_helper(install_dir=install_dir):
-        print(
-            "error: helper installed but the Secure Enclave probe failed; "
-            "the keyvault will keep using the software fallback.",
-            file=sys.stderr,
+        _term.emit_error(
+            "helper installed but the Secure Enclave probe failed; the keyvault will keep using the software fallback."
         )
         return 1
 
@@ -300,42 +297,38 @@ def enable_tpm(
 
     reason = _tpm_platform_reason()
     if reason is not None:
-        print(f"error: {reason}", file=sys.stderr)
+        _term.emit_error(reason)
         return 1
 
     missing = _missing_tpm_build_tools()
     if missing:
-        print(
-            f"error: missing build tool(s): {', '.join(missing)}. "
-            "Install the Rust toolchain first (https://rustup.rs).",
-            file=sys.stderr,
+        _term.emit_error(
+            f"missing build tool(s): {', '.join(missing)}. Install the Rust toolchain first (https://rustup.rs)."
         )
         return 1
 
     src = _locate_tpmkey_source()
     if src is None:
-        print(
-            "error: could not locate the tpmkey-helper sources (native/tpmkey-helper). "
-            "Build from a source checkout of mordred-hermes.",
-            file=sys.stderr,
+        _term.emit_error(
+            "could not locate the tpmkey-helper sources (native/tpmkey-helper). "
+            "Build from a source checkout of mordred-hermes."
         )
         return 1
 
     rc, output = _run_tpmkey_build(src, install_dir=install_dir)
     if rc != 0:
-        print(f"error: tpmkey-helper build failed:\n{output}", file=sys.stderr)
+        _term.emit_error(f"tpmkey-helper build failed:\n{output}")
         return 1
 
     if not _verify_tpmkey_helper(install_dir=install_dir):
-        print(
-            "error: helper installed but the TPM probe did not succeed, so no "
+        _term.emit_error(
+            "helper installed but the TPM probe did not succeed, so no "
             "hardware key is active. On Linux the keyvault fails closed (there is "
             "no software fallback off macOS), so keyvault operations needing a "
             "hardware key error until a working helper is in place. Check that "
             "this host exposes a TPM 2.0 device (/dev/tpmrm0 or /dev/tpm0) and "
             "that your user may access it (commonly membership in the `tss` "
-            "group), then re-run `hermes-mordred keyvault enable-tpm`.",
-            file=sys.stderr,
+            "group), then re-run `hermes-mordred keyvault enable-tpm`."
         )
         return 1
 

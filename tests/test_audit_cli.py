@@ -546,3 +546,34 @@ class TestGuidanceSpelling:
         rc = audit_cli.tail(n=10, log_path=log)
         assert rc == 1
         assert "hermes-mordred audit decrypt" in capsys.readouterr().err
+
+
+class TestErrorColour:
+    """Audit-CLI errors route through ``_term.emit_error``: red ``error:`` on a tty, plain off it.
+
+    Mirrors the network / vault / keyvault reproducers (PR #159 / #164 / #165).
+    Uses the no-setup invalid-regex path (the pattern is compiled before any log
+    is read), so the assertion needs no seeded log.
+    """
+
+    def test_grep_error_is_red_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        rc = audit_cli.grep(pattern="[unterminated", log_path=tmp_path / "audit.log")
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "\033[31m" in err  # red `error:` label
+        assert "invalid regex" in err
+
+    def test_grep_error_plain_and_prefixed_off_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        rc = audit_cli.grep(pattern="[unterminated", log_path=tmp_path / "audit.log")
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error: invalid regex")
+        assert "\033" not in err

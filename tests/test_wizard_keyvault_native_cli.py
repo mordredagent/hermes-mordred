@@ -540,3 +540,42 @@ class TestEnableTPMSeams:
         monkeypatch.setattr("mordred_hermes.keyvault._seckey_helper._HelperSecKeyOps", _Ops)
         assert keyvault_native_cli._verify_tpmkey_helper(install_dir=tmp_path) is True
         assert seen["binary"] == str(binary)
+
+
+class TestErrorColour:
+    """enable-se errors route through ``_term.emit_error``: red ``error:`` on a tty, plain off it.
+
+    Mirrors the network / vault / keyvault reproducers (PR #159 / #164 / #165).
+    These commands used to write a manual ``error:`` prefix; emit_error re-adds
+    it, so plain output stays byte-identical while a tty now gets colour.
+    """
+
+    def test_enable_se_error_is_red_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.setattr(
+            keyvault_native_cli, "_se_platform_reason", lambda: "Secure Enclave requires macOS on Apple Silicon"
+        )
+        rc = keyvault_native_cli.enable_se(home=tmp_path)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "\033[31m" in err  # red `error:` label
+        assert "Secure Enclave requires macOS" in err
+
+    def test_enable_se_error_plain_and_prefixed_off_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Off a tty the output is plain, carrying the shared `error:` prefix that
+        # emit_error supplies in place of the old hand-written one.
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setattr(
+            keyvault_native_cli, "_se_platform_reason", lambda: "Secure Enclave requires macOS on Apple Silicon"
+        )
+        rc = keyvault_native_cli.enable_se(home=tmp_path)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error: Secure Enclave requires macOS")
+        assert "\033" not in err

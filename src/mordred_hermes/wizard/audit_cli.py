@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..privacy_check._runtime import get_active_audit_path
+from . import _term
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
 if TYPE_CHECKING:
@@ -92,7 +93,7 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
     The caller surfaces the appropriate stderr message + exit code.
     """
     if not log_path.exists():
-        print(f"No audit log at {log_path}", file=sys.stderr)
+        _term.emit_error(f"No audit log at {log_path}")
         return None
     raw = log_path.read_bytes()
     if raw:
@@ -103,10 +104,9 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
         # so the byte check alone would wave it through (see
         # _looks_like_mral_header).
         if first_line[:1] != b"{" or _looks_like_mral_header(first_line):
-            print(
+            _term.emit_error(
                 f"Audit log at {log_path} appears encrypted or corrupted; "
-                "use `hermes-mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log.",
-                file=sys.stderr,
+                "use `hermes-mordred audit decrypt --date YYYY-MM-DD` to read an encrypted log."
             )
             return None
     text = raw.decode("utf-8", errors="replace")
@@ -155,7 +155,7 @@ def grep(*, pattern: str, log_path: Path | None = None) -> int:
     try:
         regex = re.compile(pattern)
     except re.error as e:
-        print(f"invalid regex {pattern!r}: {e}", file=sys.stderr)
+        _term.emit_error(f"invalid regex {pattern!r}: {e}")
         return 2
     resolved = log_path if log_path is not None else _resolve_active_audit_path()
     lines_iter = _iter_lines(resolved)
@@ -189,7 +189,7 @@ def purge(*, before: str, audit_dir: Path | None = None) -> int:
     try:
         cutoff = datetime.strptime(before, "%Y-%m-%d").date()
     except ValueError:
-        print(f"invalid --before date {before!r}: expected YYYY-MM-DD", file=sys.stderr)
+        _term.emit_error(f"invalid --before date {before!r}: expected YYYY-MM-DD")
         return 2
 
     directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
@@ -208,7 +208,7 @@ def purge(*, before: str, audit_dir: Path | None = None) -> int:
                 try:
                     child.unlink()
                 except OSError as exc:
-                    print(f"could not purge {child.name}: {exc}", file=sys.stderr)
+                    _term.emit_error(f"could not purge {child.name}: {exc}")
                     continue
                 print(f"purged {child.name}")
                 deleted += 1
@@ -280,13 +280,13 @@ def decrypt(
     try:
         target = datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
-        print(f"invalid --date {date!r}: expected YYYY-MM-DD", file=sys.stderr)
+        _term.emit_error(f"invalid --date {date!r}: expected YYYY-MM-DD")
         return 2
 
     directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
     targets = _resolve_decrypt_targets(directory, target)
     if not targets:
-        print(f"No audit log file found for {date} under {directory}", file=sys.stderr)
+        _term.emit_error(f"No audit log file found for {date} under {directory}")
         return 1
 
     from ..keyvault import log_encryption
@@ -303,16 +303,13 @@ def decrypt(
         try:
             entries = log_encryption.decrypt_log_file(path, backend=backend, audit_sink=sink)
         except WrapAuthCancelled:
-            print(f"{path.name}: Secure Enclave authorization was cancelled", file=sys.stderr)
+            _term.emit_error(f"{path.name}: Secure Enclave authorization was cancelled")
             return 1
         except WrapKeyNotFound:
-            print(
-                f"{path.name}: audit-log wrapping key not found — is the keyvault initialized?",
-                file=sys.stderr,
-            )
+            _term.emit_error(f"{path.name}: audit-log wrapping key not found — is the keyvault initialized?")
             return 1
         except log_encryption.AuditLogDecryptError as exc:
-            print(f"{path.name}: {exc}", file=sys.stderr)
+            _term.emit_error(f"{path.name}: {exc}")
             rc = 1
             continue
         plural = "entry" if len(entries) == 1 else "entries"
