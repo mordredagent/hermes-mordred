@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from .._home import HERMES_BASE
+from .._provider_identity import canonicalize_provider
 from . import enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._typing import PluginContext
@@ -158,7 +159,10 @@ def _on_pre_api_request_enforce(**kwargs: Any) -> None:
     enforce remains as best-effort early refusal based on disk state.
     """
     provider = kwargs.get("provider")
-    active_provider = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
+    # Canonicalize aliases (e.g. ``claude`` → ``anthropic``) so the runtime
+    # provider matches the strict-mode allowlist / transport registry keys,
+    # not the raw Hermes alias the user happened to configure.
+    active_provider = canonicalize_provider(provider) if isinstance(provider, str) and provider.strip() else None
     # Codex review P2 round 7: the runtime ``base_url`` is what the
     # outbound call will actually use; in long-lived processes it can
     # diverge from policy.json's ``local_llm_endpoint`` mirror after a
@@ -201,8 +205,9 @@ def _resolve_active_provider(*, auth_json_path: Path, config_path: Path) -> str 
     """
     configured = _read_config_model_provider(config_path)
     if configured:
-        return configured
-    return _read_auth_active_provider(auth_json_path)
+        return canonicalize_provider(configured)
+    resolved = _read_auth_active_provider(auth_json_path)
+    return canonicalize_provider(resolved) if resolved else None
 
 
 def _read_auth_active_provider(auth_json_path: Path) -> str | None:

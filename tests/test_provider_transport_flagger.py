@@ -151,6 +151,62 @@ class TestUnknown:
         assert flags[0].provider == "custom-llm"
         assert flags[0].severity in {"warning", "abort"}
 
+    def test_alias_resolves_to_canonical_entry(self) -> None:
+        """An aliased provider id resolves to its canonical registry entry
+        instead of being flagged as 'unknown provider' (PR-A alias norm)."""
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        # aws → bedrock (socks5h-incompatible): real transport flag, not "unknown".
+        aws_flags = ptf.evaluate(active_path="tor", providers=("aws",), policy_mode="strict")
+        bedrock_flags = ptf.evaluate(active_path="tor", providers=("bedrock",), policy_mode="strict")
+        assert aws_flags == bedrock_flags
+        assert aws_flags  # bedrock lacks socks5h support → at least one flag
+        assert all("unknown provider" not in f.reason for f in aws_flags)
+
+        # claude → anthropic (socks5h-clean): no flag at all, and never "unknown".
+        claude_flags = ptf.evaluate(active_path="tor", providers=("claude",), policy_mode="strict")
+        assert claude_flags == []
+
+
+class TestRegistrySync:
+    """PR-B: the eight Hermes 0.14 cloud providers synced into KNOWN_PROVIDERS."""
+
+    _NEW = ("openrouter", "nous", "deepseek", "xai", "zai", "novita", "minimax", "alibaba")
+
+    @pytest.mark.parametrize("slug", _NEW)
+    def test_entry_present_with_unverified_httpx_baseline(self, slug: str) -> None:
+        from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
+
+        entry = KNOWN_PROVIDERS[slug]
+        assert entry.respects_proxy is True
+        assert entry.respects_socks5h is True  # httpx env-trusting baseline
+        assert entry.unverified_baseline is True  # not yet packet-capture verified
+
+    @pytest.mark.parametrize("slug", _NEW)
+    def test_new_provider_is_selectable_in_wizard(self, slug: str) -> None:
+        from mordred_hermes.wizard import configure
+
+        assert slug in configure._SELECTABLE_CLOUD_PROVIDERS
+
+    def test_known_provider_slugs_are_real_hermes_ids(self) -> None:
+        """Every non-localhost registry slug must be a provider id Hermes
+        actually recognises — guarding against typos in the synced slugs and
+        accidental stale entries. ``vertex`` is explicitly retained despite
+        being absent from Hermes 0.14 (kept for back-compat / plugin-provided
+        endpoints). Skips if the upstream registry can't be imported."""
+        from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
+
+        try:
+            from hermes_cli.models import _PROVIDER_MODELS, CANONICAL_PROVIDERS
+        except (ImportError, AttributeError):  # pragma: no cover - upstream moved
+            pytest.skip("hermes_cli.models provider registry not importable")
+
+        recognised = {p.slug for p in CANONICAL_PROVIDERS} | set(_PROVIDER_MODELS)
+        retained_non_hermes = {"vertex"}
+        mordred_cloud = {name for name, e in KNOWN_PROVIDERS.items() if not e.localhost_only}
+        unrecognised = mordred_cloud - recognised - retained_non_hermes
+        assert not unrecognised, f"registry slugs not known to Hermes: {unrecognised}"
+
 
 class TestOverrides:
     def test_override_can_add_new_provider(self) -> None:

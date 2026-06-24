@@ -42,6 +42,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from .._provider_identity import canonicalize_provider
 from .proxy_env import ActivePath
 
 PolicyMode = Literal["strict", "lenient", "off"]
@@ -155,6 +156,81 @@ KNOWN_PROVIDERS: Final[Mapping[str, ProviderEntry]] = {
         # by test_provider_transport.py. unverified_baseline stays True.
         respects_ipv6_proxy=False,
     ),
+    # --- Hermes 0.14 cloud providers synced from CANONICAL_PROVIDERS (PR-B) ---
+    # All eight are OpenAI-compatible HTTP APIs reached through the env-trusting
+    # httpx / openai client, the same transport path empirically verified for
+    # the ``openai`` / ``anthropic`` entries above — so ``respects_proxy`` and
+    # ``respects_socks5h`` are seeded ``True`` with HIGH confidence. They are
+    # NOT yet packet-capture verified, so ``unverified_baseline`` stays ``True``
+    # and the lower-confidence IPv6-routing dimension is seeded conservatively
+    # (``respects_ipv6_proxy=False``) — under strict mode ``disable_ipv6`` masks
+    # it; under lenient it surfaces an honest "unverified IPv6" warning until a
+    # real capture flips the entry (mirrors the bedrock/vertex stance). The
+    # slugs match Hermes' canonical ids (asserted by the drift test).
+    "openrouter": ProviderEntry(
+        name="openrouter",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "nous": ProviderEntry(
+        name="nous",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "deepseek": ProviderEntry(
+        name="deepseek",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "xai": ProviderEntry(
+        name="xai",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "zai": ProviderEntry(
+        name="zai",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "novita": ProviderEntry(
+        name="novita",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "minimax": ProviderEntry(
+        name="minimax",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
+    "alibaba": ProviderEntry(
+        name="alibaba",
+        transport="httpx",
+        respects_proxy=True,
+        respects_socks5h=True,
+        transport_class="http",
+        respects_ipv6_proxy=False,
+    ),
 }
 
 
@@ -179,7 +255,10 @@ def evaluate(
     catalog = _resolve_catalog(overrides)
     flags: list[Flag] = []
     for provider in providers:
-        entry = catalog.get(provider)
+        # Resolve Hermes aliases (``claude`` → ``anthropic`` …) to the
+        # canonical registry key before lookup; the original id is preserved
+        # in the unknown-provider Flag below for an accurate message.
+        entry = catalog.get(canonicalize_provider(provider))
         if entry is None:
             flags.append(
                 Flag(

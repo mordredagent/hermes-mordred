@@ -332,6 +332,32 @@ class TestResolveActiveProvider:
 
         assert _resolve_active_provider(auth_json_path=auth, config_path=cfg) == "anthropic"
 
+    def test_config_alias_resolves_to_canonical(self, tmp_path: object) -> None:
+        """``model.provider: claude`` must resolve to canonical ``anthropic`` so
+        the strict gate / flagger key off the registry slug, not the alias."""
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _resolve_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        cfg = Path(str(tmp_path)) / "config.yaml"
+        self._write_config(cfg, "claude")
+
+        assert _resolve_active_provider(auth_json_path=auth, config_path=cfg) == "anthropic"
+
+    def test_auth_alias_resolves_to_canonical(self, tmp_path: object) -> None:
+        """An aliased ``auth.json active_provider`` (``google``) resolves to ``gemini``."""
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _resolve_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        cfg = Path(str(tmp_path)) / "config.yaml"
+        self._write_auth(auth, "google")
+        self._write_config(cfg, "auto")  # force the auth.json fallback path
+
+        assert _resolve_active_provider(auth_json_path=auth, config_path=cfg) == "gemini"
+
 
 class TestRegisterIsIdempotent:
     def test_double_call_safe(self) -> None:
