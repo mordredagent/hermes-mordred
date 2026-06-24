@@ -115,6 +115,23 @@ code, bringing the total to 27:
   exception's type + message; never key material). The clean
   "keyvault never initialized" path stays silent — that is the baseline,
   not a downgrade.
+
+prompt-once step-0 freeze (2026-06-24) adds 2 ``policy.strict.cloud_prompted_*``
+codes, bringing the total to 29. Both have a same-PR emit site in
+:func:`mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (POLICY.md
+scope rule condition (a)):
+
+- ``policy.strict.cloud_prompted_allow`` — ``cloud_attempt_action: prompt-once``
+  and the operator approved a one-time call to a non-allowlisted cloud
+  provider at an interactive terminal. Decision ``allow``. Fields:
+  ``event="pre_api_request"``, ``provider_id``. Emitted once per provider
+  (the verdict is cached for the process), so cached re-allows stay silent.
+- ``policy.strict.cloud_prompted_deny`` — same precondition, but the operator
+  declined OR no interactive terminal was available (fail-closed). Decision
+  ``block``, paired with the existing ``cloud_not_allowlisted`` +
+  ``session_refused`` action pair. Fields: ``event="pre_api_request"``,
+  ``provider_id``, and ``prompt_unavailable: true`` when the deny was the
+  no-terminal fallback rather than an explicit decline.
 """
 
 from typing import Literal
@@ -125,6 +142,8 @@ ReasonCode = Literal[
     "policy.strict.unconditional_override",
     "policy.strict.cloud_not_allowlisted",
     "policy.strict.cloud_allowlisted",
+    "policy.strict.cloud_prompted_allow",
+    "policy.strict.cloud_prompted_deny",
     "policy.lenient.unknown_metadata_warning",
     "mordred.degraded.disable_unprotected",
     "mordred.degraded.no_origin_skill",

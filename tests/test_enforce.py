@@ -850,3 +850,45 @@ class TestCheckRuntimeProvider:
 
         # Allow paths stay silent in runtime check.
         assert audit.entries == []
+
+
+# --------------------------------------------------------------------------- #
+# cloud_attempt_action reader — failure-closed coercion                       #
+# --------------------------------------------------------------------------- #
+
+
+class TestCloudAttemptActionReader:
+    """``_read_policy_settings`` parses ``cloud_attempt_action`` from policy.json.
+
+    Mirrors the ``allow_cloud_llm`` failure-closed coercion (``enforce.py``
+    Codex P2): only the exact JSON string ``"prompt-once"`` selects the
+    prompt path; everything else — missing, unknown, or non-string — falls
+    back to the safe default ``"always-block"``.
+    """
+
+    def _settings(self, tmp_path: Path, value: object | None) -> Any:
+        body: dict[str, Any] = {"policy": "strict"}
+        if value is not None:
+            body["cloud_attempt_action"] = value
+        path = tmp_path / "policy.json"
+        path.write_text(json.dumps(body), encoding="utf-8")
+        return enforce._read_policy_settings(path)
+
+    def test_prompt_once_is_parsed(self, tmp_path: Path) -> None:
+        assert self._settings(tmp_path, "prompt-once").cloud_attempt_action == "prompt-once"
+
+    def test_always_block_explicit(self, tmp_path: Path) -> None:
+        assert self._settings(tmp_path, "always-block").cloud_attempt_action == "always-block"
+
+    def test_missing_defaults_to_always_block(self, tmp_path: Path) -> None:
+        assert self._settings(tmp_path, None).cloud_attempt_action == "always-block"
+
+    def test_unknown_value_defaults_to_always_block(self, tmp_path: Path) -> None:
+        assert self._settings(tmp_path, "ask-every-time").cloud_attempt_action == "always-block"
+
+    def test_non_string_defaults_to_always_block(self, tmp_path: Path) -> None:
+        assert self._settings(tmp_path, 123).cloud_attempt_action == "always-block"
+
+    def test_missing_policy_json_defaults_to_always_block(self, tmp_path: Path) -> None:
+        settings = enforce._read_policy_settings(tmp_path / "absent.json")
+        assert settings.cloud_attempt_action == "always-block"

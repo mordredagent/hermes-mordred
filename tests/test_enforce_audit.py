@@ -246,6 +246,8 @@ class TestFrozenEnumMembership:
         {
             "policy.strict.cloud_allowlisted",
             "policy.strict.cloud_not_allowlisted",
+            "policy.strict.cloud_prompted_allow",
+            "policy.strict.cloud_prompted_deny",
             "policy.strict.session_refused",
             "policy.strict.unconditional_override",
             "mordred.degraded.no_resolved_provider",
@@ -312,3 +314,24 @@ class TestFrozenEnumMembership:
         emitted = {e["reason"] for e in audit.entries}
         unknown = emitted - self._FROZEN_REASONS
         assert not unknown, f"unfrozen reasons emitted: {sorted(unknown)}"
+
+
+# --------------------------------------------------------------------------- #
+# prompt-once reasons must be members of the frozen ReasonCode Literal         #
+# --------------------------------------------------------------------------- #
+
+
+class TestPromptedReasonsFrozen:
+    def test_prompted_reasons_are_in_reasoncode_literal(self) -> None:
+        """The two prompt-once decision reasons emitted by
+        :func:`enforce._resolve_cloud_attempt` must be frozen in
+        ``_audit_reasons.ReasonCode`` (POLICY.md scope rule: codes with a
+        same-PR emit site).
+        """
+        from typing import get_args
+
+        from mordred_hermes.privacy_check import _audit_reasons
+
+        frozen = set(get_args(_audit_reasons.ReasonCode))
+        assert "policy.strict.cloud_prompted_allow" in frozen
+        assert "policy.strict.cloud_prompted_deny" in frozen

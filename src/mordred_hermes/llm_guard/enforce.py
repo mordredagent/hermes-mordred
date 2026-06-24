@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Literal, Protocol, TypeAlias
 
 from . import health
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
@@ -27,12 +28,28 @@ from .local_adapter import LOCAL_PROVIDER_NAME
 
 _LOG = logging.getLogger("mordred.llm_guard.enforce")
 
+# What strict mode does when a non-allowlisted cloud provider is reached.
+# Mirrors the wizard's ``PolicySnapshot.cloud_attempt_action`` Literal
+# (``wizard/policy_writer.py``). ``always-block`` is the safe default;
+# ``prompt-once`` asks the operator once per provider at an interactive
+# terminal (see :func:`_resolve_cloud_attempt`).
+CloudAttemptAction: TypeAlias = Literal["always-block", "prompt-once"]
+
+# Interactive verdict for a single non-allowlisted cloud attempt under
+# ``prompt-once``. ``True`` allow, ``False`` deny, ``None`` no interactive
+# terminal (caller fails closed). Injected like ``health_probe`` so tests
+# never touch a real TTY.
+PromptFn: TypeAlias = Callable[[str], bool | None]
+
 # Audit reasons — POLICY.md §Audit log reason enum (frozen 12 codes).
 _REASON_CLOUD_ALLOWLISTED: Final = "policy.strict.cloud_allowlisted"
 _REASON_CLOUD_NOT_ALLOWLISTED: Final = "policy.strict.cloud_not_allowlisted"
 _REASON_SESSION_REFUSED: Final = "policy.strict.session_refused"
 _REASON_UNCONDITIONAL_OVERRIDE: Final = "policy.strict.unconditional_override"
 _REASON_NO_RESOLVED_PROVIDER: Final = "mordred.degraded.no_resolved_provider"
+# prompt-once decision records (POLICY.md — emitted by _resolve_cloud_attempt).
+_REASON_CLOUD_PROMPTED_ALLOW: Final = "policy.strict.cloud_prompted_allow"
+_REASON_CLOUD_PROMPTED_DENY: Final = "policy.strict.cloud_prompted_deny"
 
 # Canonical name of the local provider — re-exported from local_adapter so
 # this module and the profile constructor share a single source of truth.
@@ -41,6 +58,12 @@ _LOCAL_PROVIDER_NAME: Final = LOCAL_PROVIDER_NAME
 # One-shot flag for the degraded "no provider info" path (POLICY.md row 6).
 # Module-level state — tests reset via :func:`_reset_state`.
 _no_resolved_provider_emitted = False
+
+# prompt-once decisions, keyed by normalized provider id, cached for the
+# life of the process so the operator is asked at most once per provider.
+# ``None`` verdicts (no terminal) are deliberately NOT cached. Tests reset
+# via :func:`_reset_state`.
+_cloud_prompt_decisions: dict[str, bool] = {}
 
 
 class _AuditWriter(Protocol):
@@ -285,6 +308,95 @@ def _reset_state() -> None:
     """Reset module-level one-shot flags. Tests call between scenarios."""
     global _no_resolved_provider_emitted
     _no_resolved_provider_emitted = False
+    _cloud_prompt_decisions.clear()
+
+
+def _default_prompt(provider_id: str) -> bool | None:
+    """Ask the operator once whether to allow a one-time cloud call.
+
+    Returns ``None`` when there is no interactive terminal — stdin OR
+    stdout is not a TTY (the headless / harness / CI case) or input hits
+    EOF / interrupt — so :func:`_resolve_cloud_attempt` fails closed to a
+    block. Only an explicit ``y`` / ``yes`` allows; anything else denies.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        answer = input(f"Mordred strict mode: allow one-time cloud call to {provider_id!r}? [y/N] ")
+    except (EOFError, KeyboardInterrupt, ValueError):
+        # EOF / Ctrl-C, or ValueError("I/O operation on closed file") when a
+        # harness closed fd 0 rather than sending EOF. All fail closed — never
+        # let the exception escape to Hermes' ``except Exception`` (fail-open).
+        return None
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _resolve_cloud_attempt(
+    *,
+    action: CloudAttemptAction,
+    provider_id: str,
+    audit: _AuditWriter,
+    prompt_fn: PromptFn,
+) -> bool:
+    """Decide a non-allowlisted cloud attempt under strict mode.
+
+    Returns ``True`` to allow the call (caller returns early), ``False`` to
+    refuse it (caller falls through to :func:`_refuse_cloud_not_allowlisted`).
+
+    ``always-block`` always refuses without prompting. ``prompt-once`` asks
+    the operator once per provider (caching the verdict for the process) and
+    records the decision via audit. An unavailable terminal fails closed and
+    is not cached, so a later interactive call can still ask.
+    """
+    if action != "prompt-once":
+        return False
+
+    cached = _cloud_prompt_decisions.get(provider_id)
+    if cached is not None:
+        # Already asked this provider this session — stay silent. A cached deny
+        # still gets audited downstream by _refuse_cloud_not_allowlisted
+        # (cloud_not_allowlisted + session_refused) on every call; only the
+        # one-time cloud_prompted_deny decision record is not repeated.
+        return cached
+
+    verdict = prompt_fn(provider_id)
+    if verdict is True:
+        _cloud_prompt_decisions[provider_id] = True
+        _safe_audit_append(
+            audit,
+            {
+                "event": "pre_api_request",
+                "decision": "allow",
+                "reason": _REASON_CLOUD_PROMPTED_ALLOW,
+                "provider_id": provider_id,
+            },
+        )
+        return True
+    if verdict is False:
+        _cloud_prompt_decisions[provider_id] = False
+        _safe_audit_append(
+            audit,
+            {
+                "event": "pre_api_request",
+                "decision": "block",
+                "reason": _REASON_CLOUD_PROMPTED_DENY,
+                "provider_id": provider_id,
+            },
+        )
+        return False
+    # verdict is None — no interactive terminal. Fail closed; do NOT cache so
+    # a later call from a real terminal can still prompt.
+    _safe_audit_append(
+        audit,
+        {
+            "event": "pre_api_request",
+            "decision": "block",
+            "reason": _REASON_CLOUD_PROMPTED_DENY,
+            "provider_id": provider_id,
+            "prompt_unavailable": True,
+        },
+    )
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -295,7 +407,7 @@ def _reset_state() -> None:
 class _PolicySettings:
     """Subset of ``policy.json`` consumed by enforce."""
 
-    __slots__ = ("allow_cloud_llm", "cloud_allowlist", "local_endpoint")
+    __slots__ = ("allow_cloud_llm", "cloud_allowlist", "cloud_attempt_action", "local_endpoint")
 
     def __init__(
         self,
@@ -303,10 +415,12 @@ class _PolicySettings:
         allow_cloud_llm: bool,
         cloud_allowlist: frozenset[str],
         local_endpoint: str,
+        cloud_attempt_action: CloudAttemptAction = "always-block",
     ) -> None:
         self.allow_cloud_llm = allow_cloud_llm
         self.cloud_allowlist = cloud_allowlist
         self.local_endpoint = local_endpoint
+        self.cloud_attempt_action = cloud_attempt_action
 
 
 _DEFAULT_LOCAL_ENDPOINT: Final = "http://localhost:1234/v1"
@@ -357,10 +471,18 @@ def _read_policy_settings(policy_json_path: Path) -> _PolicySettings:
     )
     raw_endpoint = data.get("local_llm_endpoint")
     local_endpoint = raw_endpoint if isinstance(raw_endpoint, str) and raw_endpoint else _DEFAULT_LOCAL_ENDPOINT
+    # Only the exact string ``"prompt-once"`` opts into the prompt path;
+    # missing / unknown / non-string values fall back to the safe default
+    # ``"always-block"`` (failure-closed, mirroring the allow_cloud_llm
+    # ``is True`` coercion above).
+    cloud_attempt_action: CloudAttemptAction = (
+        "prompt-once" if data.get("cloud_attempt_action") == "prompt-once" else "always-block"
+    )
     return _PolicySettings(
         allow_cloud_llm=allow_cloud_llm,
         cloud_allowlist=cloud_allowlist,
         local_endpoint=local_endpoint,
+        cloud_attempt_action=cloud_attempt_action,
     )
 
 
@@ -372,6 +494,7 @@ def check_runtime_provider(
     audit: _AuditWriter,
     health_probe: Callable[[str], None] | None = None,
     runtime_base_url: str | None = None,
+    prompt_fn: PromptFn | None = None,
 ) -> None:
     """Per-request runtime enforcement (Codex review P1 round 3 + P2 round 4).
 
@@ -434,6 +557,16 @@ def check_runtime_provider(
         )
         return
     if active_provider in settings.cloud_allowlist and settings.allow_cloud_llm:
+        return
+    # Non-allowlisted cloud under strict mode. ``always-block`` (default)
+    # refuses; ``prompt-once`` asks the operator once per provider via an
+    # interactive terminal, failing closed to a refuse when none is present.
+    if _resolve_cloud_attempt(
+        action=settings.cloud_attempt_action,
+        provider_id=active_provider,
+        audit=audit,
+        prompt_fn=prompt_fn or _default_prompt,
+    ):
         return
     _refuse_cloud_not_allowlisted(
         audit=audit,

@@ -26,7 +26,7 @@ Skill metadata enforcement and audit logging.
 | `_keyvault_probe.keyvault_initialized(home=None)` | Backend-free probe: True when the Mordred keyvault holds ≥1 key. Reads `meta.json` only; lazily imports `keyvault._storage`. |
 | `audit.NDJSONWriter(path=...)` | Single-writer audit logger. Implements the frozen `Writer` Protocol (Phase 4 swaps to `EncryptedWriter`). |
 | `install_wrapper.run(*, skill_path, policy_mode, audit, runner=..., keyvault_probe=...)` | Policy-gated wrapper for `hermes skills install <skill>`. `keyvault_probe` is consulted only for skills declaring `requires_keyvault: true`. |
-| `_audit_reasons.ReasonCode` | Frozen `Literal` of the 26 audit reason codes (see `mordred-docs/mordred/POLICY.md`). |
+| `_audit_reasons.ReasonCode` | Frozen `Literal` of the 29 audit reason codes (see `mordred-docs/mordred/POLICY.md`). |
 | `_runtime.poison(reason)` / `is_poisoned()` | Defense-in-depth poison flag — every subsequent `pre_tool_call` blocks. |
 
 ### Configuration (under `plugins.mordred_privacy_check` in `~/.hermes/config.yaml`)

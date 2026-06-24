@@ -929,6 +929,14 @@ class TestPromptToolkitIO:
             == configure._HARNESS_DESCRIPTIONS
         )
 
+    def test_prompt_once_description_reflects_live_enforcement(self) -> None:
+        # prompt-once is no longer a reserved no-op: enforce now asks once per
+        # provider at an interactive terminal (llm_guard.enforce). The inline
+        # description must stop claiming it is reserved / behaves like always-block.
+        desc = configure._CLOUD_ATTEMPT_DESCRIPTIONS["prompt-once"]
+        assert "reserved" not in desc.lower()
+        assert "once" in desc.lower()
+
     def test_collect_answers_passes_cloud_llm_description(self) -> None:
         # The cloud-LLM yes/no prompt is wired with the canonical help text so
         # the bare [y/N] question is preceded by a plain-language explanation.

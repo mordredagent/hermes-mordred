@@ -82,14 +82,15 @@ _POLICY_MODE_DESCRIPTIONS: Final[Mapping[str, str]] = {
 
 #: One-line description shown inline next to each cloud-attempt action in the
 #: ``configure`` radio dialog (UX request 2026-06-15, mirroring the policy-mode
-#: descriptions above). ``prompt-once`` is a reserved value -- enforcement is
-#: refuse-only today, so it behaves like ``always-block`` -- and the copy says
-#: so to keep users from expecting an interactive prompt that does not yet
-#: exist. Mirrors the Q6 note in ``mordred-docs/mordred/QUICKSTART.md`` so the
-#: TUI and the docs never drift.
+#: descriptions above). ``prompt-once`` now has live enforcement in
+#: ``llm_guard.enforce._resolve_cloud_attempt``: under strict mode a
+#: non-allowlisted cloud attempt asks the operator once per provider at an
+#: interactive terminal, failing closed to a block when no terminal is present
+#: (the headless / harness / CI case). Mirrors the Q6 note in
+#: ``mordred-docs/mordred/USAGE.md`` so the TUI and the docs never drift.
 _CLOUD_ATTEMPT_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "always-block": "Silently refuse the cloud call every time (recommended)",
-    "prompt-once": "Reserved — currently behaves like always-block",
+    "prompt-once": "Ask once per provider at a terminal; blocks if non-interactive",
 }
 
 #: One-line description shown inline next to each agent-harness choice in the
