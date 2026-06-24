@@ -30,13 +30,13 @@ from __future__ import annotations
 import argparse
 import logging
 import subprocess
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
 
 from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
+from . import _term
 from ._prompt_io import (
     _CHOICE_NAV_HINT,
     _PROMPT_TOOLKIT_REQUIRED,
@@ -527,7 +527,7 @@ def cli_handler(args: argparse.Namespace) -> int:
         try:
             writer.write(result.snapshot)
         except OSError as e:
-            print(f"hermes-mordred configure: failed to write policy: {e}", file=sys.stderr)
+            _term.emit_error(f"hermes-mordred configure: failed to write policy: {e}")
             return 1
         print(_render_configure_summary(result.snapshot))
         return 0

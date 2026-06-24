@@ -373,3 +373,34 @@ class TestGuidanceSpelling:
         err = capsys.readouterr().err
         assert "['" not in err  # no Python list repr in user output
         assert str(tmp_path / "a") in err
+
+
+class TestErrorColour:
+    """Wizard tail-cluster errors route through ``_term.emit_error``: red ``error:`` on a tty, plain off it.
+
+    Mirrors the network / vault / keyvault / native+audit reproducers
+    (PR #159 / #164 / #165 / #166). Uses ``policy show`` against a missing
+    policy.json — a no-setup error path representative of this PR's modules.
+    """
+
+    def test_show_error_is_red_when_forced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        rc = policy_explainer.show(policy_json_path=tmp_path / "missing.json")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "\033[31m" in err  # red `error:` label
+        assert "No Mordred policy configured" in err
+
+    def test_show_error_plain_and_prefixed_off_tty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("FORCE_COLOR", raising=False)
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        rc = policy_explainer.show(policy_json_path=tmp_path / "missing.json")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error: No Mordred policy configured")
+        assert "\033" not in err

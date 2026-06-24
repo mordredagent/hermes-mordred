@@ -22,10 +22,10 @@ Heavy imports stay function-local so this module imports on any platform.
 
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING
 
 from ..keyvault._runtime_env import _env_optout_marker_path
+from . import _term
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,10 +105,9 @@ def _restore_plaintext(
 
     if env_path.exists():
         if env_path.read_bytes() != vault_bytes:
-            print(
-                f"warning: .env drift — the on-disk {env_path} differs from the vault copy; "
-                "keeping the on-disk one (not overwriting).",
-                file=sys.stderr,
+            _term.emit_warn(
+                f".env drift — the on-disk {env_path} differs from the vault copy; "
+                "keeping the on-disk one (not overwriting)."
             )
         return 0
 
@@ -139,7 +138,7 @@ def enable(
 
     env_path = home / _ENV_NAME
     if not env_path.is_file():
-        print(f"no .env at {env_path} — nothing to protect.", file=sys.stderr)
+        _term.emit_error(f"no .env at {env_path} — nothing to protect.")
         return 1
 
     rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
@@ -163,19 +162,17 @@ def enable(
         except OSError:
             current = None
         if enrolled is None or current != enrolled:
-            print(
-                "warning: .env was enrolled but the on-disk copy no longer matches the vault "
-                "(changed during enable?) — leaving the plaintext in place; re-run enable.",
-                file=sys.stderr,
+            _term.emit_warn(
+                ".env was enrolled but the on-disk copy no longer matches the vault "
+                "(changed during enable?) — leaving the plaintext in place; re-run enable."
             )
             return 0
         try:
             env_path.unlink()
         except OSError as exc:
-            print(
-                f"warning: .env enrolled but the plaintext at {env_path} could not be removed: {exc} "
-                "— remove it by hand (it is still readable at rest).",
-                file=sys.stderr,
+            _term.emit_warn(
+                f".env enrolled but the plaintext at {env_path} could not be removed: {exc} "
+                "— remove it by hand (it is still readable at rest)."
             )
             return 0
         print(".env is now vault-managed; the plaintext was removed (the runtime injects it at startup).")
@@ -240,14 +237,13 @@ def purge(
                 elif env_path.read_bytes() != vault_bytes:
                     backup = home / ".env.vault-purged"
                     _storage.atomic_write(backup, vault_bytes)
-                    print(
-                        f"warning: on-disk .env differs from the vault copy — saved the vault copy to {backup} "
-                        "before purging (nothing is lost).",
-                        file=sys.stderr,
+                    _term.emit_warn(
+                        f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
+                        "before purging (nothing is lost)."
                     )
                 opened.unenroll_file(_ENV_NAME)
         except (vault.VaultError, anchor.AnchorError, OSError) as exc:
-            print(f"cannot purge .env from the vault: {exc}", file=sys.stderr)
+            _term.emit_error(f"cannot purge .env from the vault: {exc}")
             return 1
         finally:
             opened.close()

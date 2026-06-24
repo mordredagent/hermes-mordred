@@ -483,7 +483,7 @@ def _dispatch(verb: str, target: str) -> int:
         }
         return (ws.get(verb) or ws["purge"])()
 
-    print(f"encryption {verb} {target}: not available in this build.", file=sys.stderr)
+    _term.emit_error(f"encryption {verb} {target}: not available in this build.")
     return 2
 
 
@@ -611,9 +611,8 @@ def cli_purge(args: argparse.Namespace) -> int:
         scope = (
             "ALL encrypted copies (env, config, memory, workspace)" if args.target == "all" else "the encrypted copy"
         )
-        print(
-            f"encryption purge {args.target} is destructive (removes {scope}). Re-run with --yes to confirm.",
-            file=sys.stderr,
+        _term.emit_error(
+            f"encryption purge {args.target} is destructive (removes {scope}). Re-run with --yes to confirm."
         )
         return 2
     if args.target == "all":

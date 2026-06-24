@@ -21,12 +21,12 @@ matching the other wizard CLI modules.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._config_bootstrap import _marker_path, config_hook_installed
+from . import _term
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -65,7 +65,7 @@ def enable(
 
     config_path = home / _CONFIG_NAME
     if not config_path.is_file():
-        print(f"no config.yaml at {config_path} — nothing to protect.", file=sys.stderr)
+        _term.emit_error(f"no config.yaml at {config_path} — nothing to protect.")
         return 1
 
     rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
@@ -170,7 +170,7 @@ def purge(
                     _storage.atomic_write(config_path, opened.read_file(_CONFIG_NAME))  # recover BEFORE dropping
                 opened.unenroll_file(_CONFIG_NAME)
         except (vault.VaultError, anchor.AnchorError, OSError) as exc:
-            print(f"cannot purge config.yaml from the vault: {exc}", file=sys.stderr)
+            _term.emit_error(f"cannot purge config.yaml from the vault: {exc}")
             return 1
         finally:
             opened.close()
@@ -178,10 +178,9 @@ def purge(
         # Managed (marker) but no vault to recover from and no plaintext on disk:
         # dropping the marker here would silently convert a fail-closed managed
         # state into "boot on defaults". Refuse and surface the anomaly instead.
-        print(
+        _term.emit_error(
             "cannot purge: config.yaml is vault-managed but neither a plaintext copy nor a vault is present "
-            "— recover the vault first, or remove the marker by hand to fall back to defaults.",
-            file=sys.stderr,
+            "— recover the vault first, or remove the marker by hand to fall back to defaults."
         )
         return 1
 

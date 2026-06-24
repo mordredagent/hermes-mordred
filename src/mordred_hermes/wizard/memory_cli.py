@@ -29,6 +29,7 @@ import io
 import sys
 from typing import TYPE_CHECKING
 
+from . import _term
 from .vault_memory_key import _MEMORY_KEY_ENV
 
 if TYPE_CHECKING:
@@ -67,7 +68,7 @@ def _set_encryption_flag(home: Path, *, enabled: bool) -> int:
         if data is None:
             data = CommentedMap()
         elif not isinstance(data, dict):
-            print(f"{path} is not a YAML mapping — refusing to edit it.", file=sys.stderr)
+            _term.emit_error(f"{path} is not a YAML mapping — refusing to edit it.")
             return 1
     else:
         data = CommentedMap()
@@ -80,14 +81,14 @@ def _set_encryption_flag(home: Path, *, enabled: bool) -> int:
         memory = CommentedMap()
         data["memory"] = memory
     elif not isinstance(memory, dict):
-        print(f"{path}: 'memory' is not a mapping — refusing to edit it.", file=sys.stderr)
+        _term.emit_error(f"{path}: 'memory' is not a mapping — refusing to edit it.")
         return 1
     encryption = memory.get("encryption")
     if encryption is None:
         encryption = CommentedMap()
         memory["encryption"] = encryption
     elif not isinstance(encryption, dict):
-        print(f"{path}: 'memory.encryption' is not a mapping — refusing to edit it.", file=sys.stderr)
+        _term.emit_error(f"{path}: 'memory.encryption' is not a mapping — refusing to edit it.")
         return 1
     encryption["enabled"] = enabled
 
@@ -188,11 +189,10 @@ def disable(*, home: Path) -> int:
     if rc != 0:
         return rc
     if _has_encrypted_memories(home):
-        print(
-            "warning: agent-memory encryption disabled, but ~/.hermes/memories/*.md are still encrypted — "
+        _term.emit_warn(
+            "agent-memory encryption disabled, but ~/.hermes/memories/*.md are still encrypted — "
             "they cannot be read until you re-enable it (the key is kept in the vault). To remove encryption "
-            "for good, use 'encryption purge memory'.",
-            file=sys.stderr,
+            "for good, use 'encryption purge memory'."
         )
     print("agent-memory encryption disabled (config flag off; the key is kept in the vault for re-enable).")
     return 0
@@ -227,7 +227,7 @@ def purge(
                 stripped = _strip_memory_key(opened.read_file(".env").decode("utf-8"))
                 opened.enroll_file(".env", stripped.encode("utf-8"))
         except (vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
-            print(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}", file=sys.stderr)
+            _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
             return 1
         finally:
             opened.close()

@@ -32,6 +32,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import _term
+
 __all__ = ["WorkspaceEnv", "cli_disable", "cli_enable", "cli_purge", "disable", "enable", "purge"]
 
 _DARWIN = "darwin"
@@ -56,10 +58,9 @@ def _is_set_up(env: WorkspaceEnv) -> bool:
 
 def _not_macos(platform: str, verb: str) -> bool:
     if platform != _DARWIN:
-        print(
+        _term.emit_error(
             f"encryption {verb} workspace: macOS only — the Claude workspace volume uses the Secure "
-            "Enclave / APFS, which are not available on this OS.",
-            file=sys.stderr,
+            "Enclave / APFS, which are not available on this OS."
         )
         return True
     return False
@@ -83,10 +84,9 @@ def enable(
         print(f"Claude workspace already set up ({env.image}); nothing to do.")
         return 0
     if not tool_on_path(_SETUP_BIN):
-        print(
+        _term.emit_error(
             f"{_SETUP_BIN!r} is not on PATH — the Claude workspace tool (claude-private) is not installed. "
-            "Install it (see ~/.local/share/claude-private), then re-run.",
-            file=sys.stderr,
+            "Install it (see ~/.local/share/claude-private), then re-run."
         )
         return 1
     return run([_SETUP_BIN])
@@ -114,7 +114,7 @@ def disable(
         return 0
     rc = run([_DETACH, "detach", str(env.mount)])
     if rc != 0:
-        print(f"failed to detach {env.mount} (rc {rc}) — it may still be mounted.", file=sys.stderr)
+        _term.emit_error(f"failed to detach {env.mount} (rc {rc}) — it may still be mounted.")
         return rc
     print(f"Claude workspace sealed (detached {env.mount}).")
     return 0
@@ -139,28 +139,25 @@ def purge(
         print("Claude workspace is not set up — nothing to purge.")
         return 0
     if is_mounted(env.mount):
-        print(
+        _term.emit_error(
             f"refusing to purge: the Claude workspace is mounted at {env.mount} (mid-session). "
-            "Seal it first (`encryption disable workspace`), then retry.",
-            file=sys.stderr,
+            "Seal it first (`encryption disable workspace`), then retry."
         )
         return 1
 
-    print(
-        "WARNING: removing the encrypted Claude workspace and ALL its contents (transcripts, settings, "
+    _term.emit_warn(
+        "removing the encrypted Claude workspace and ALL its contents (transcripts, settings, "
         "history). This does NOT export them first — if you need that data, cancel, run `claude-private`, "
-        "and copy it out, then retry.",
-        file=sys.stderr,
+        "and copy it out, then retry."
     )
     image_gone = _remove_path(env.image)
     keydir_gone = _remove_path(env.keydir)
     if not (image_gone and keydir_gone):
         # Never claim a destructive op succeeded when it did not — a residual
         # encrypted volume the operator believes is gone is worse than a clear error.
-        print(
+        _term.emit_error(
             f"failed to fully remove the Claude workspace (image removed={image_gone}, "
-            f"keydir removed={keydir_gone}) — remove the leftovers by hand: {env.image}, {env.keydir}.",
-            file=sys.stderr,
+            f"keydir removed={keydir_gone}) — remove the leftovers by hand: {env.image}, {env.keydir}."
         )
         return 1
     print(f"Claude workspace purged ({env.image} and {env.keydir} removed).")

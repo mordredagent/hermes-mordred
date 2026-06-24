@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
+from . import _term
 from .vault_cli import _open_hot_path_or_report, _resolve_root
 
 if TYPE_CHECKING:
@@ -234,12 +234,11 @@ def set_memory_key(
         # cannot know which key encrypted existing memories, so refuse rather than
         # guess — and never regenerate, which would orphan recoverable data.
         if not rotate and _any_valid_memory_key(existing):
-            print(
+            _term.emit_error(
                 f"the vault .env at {root} has a {_MEMORY_KEY_ENV} whose effective (last) value is not a "
                 f"usable 32-byte key, but an earlier assignment is. Refusing to guess which key encrypted "
                 f"existing memories: fix the .env by hand, or pass --rotate to replace it (which orphans "
-                f"memories encrypted under the old key).",
-                file=sys.stderr,
+                f"memories encrypted under the old key)."
             )
             return 1
 
@@ -259,7 +258,7 @@ def set_memory_key(
             opened.enroll_file(".env", new_text.encode("utf-8"))
             generation = opened.generation
         except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-            print(f"cannot store {_MEMORY_KEY_ENV}: {exc}", file=sys.stderr)
+            _term.emit_error(f"cannot store {_MEMORY_KEY_ENV}: {exc}")
             return 1
 
         verb = _store_verb_label(adopted=adopted, orphan_risk=orphan_risk)
@@ -269,11 +268,10 @@ def set_memory_key(
             # (upstream has no auto re-key), so AES-GCM decryption of existing files
             # fails on the next run. Warn loudly — re-keying / clearing is the
             # operator's job. (Replacing an absent/invalid key encrypted nothing.)
-            print(
-                "warning: rotated the memory key. Agent-memory files already encrypted under the previous "
+            _term.emit_warn(
+                "rotated the memory key. Agent-memory files already encrypted under the previous "
                 "key (~/.hermes/memories/*.md) can no longer be decrypted — re-encrypt or clear them before "
-                "the next run.",
-                file=sys.stderr,
+                "the next run."
             )
         _print_memory_config_hint()
         return 0
@@ -292,15 +290,12 @@ def _read_enrolled_env(opened: OpenVault, root: Path) -> str | None:
     try:
         return opened.read_file(".env").decode("utf-8")
     except UnicodeDecodeError:
-        print(
-            f"the enrolled .env at {root} is not valid UTF-8 — cannot merge {_MEMORY_KEY_ENV}.",
-            file=sys.stderr,
-        )
+        _term.emit_error(f"the enrolled .env at {root} is not valid UTF-8 — cannot merge {_MEMORY_KEY_ENV}.")
         return None
     except (vault.VaultError, OSError) as exc:
         # OSError covers _storage.KeyvaultPermissionError (bad mode / symlink /
         # I/O) so a read failure fails closed with rc 1, like open / enroll.
-        print(f"cannot read the enrolled .env at {root}: {exc}", file=sys.stderr)
+        _term.emit_error(f"cannot read the enrolled .env at {root}: {exc}")
         return None
 
 

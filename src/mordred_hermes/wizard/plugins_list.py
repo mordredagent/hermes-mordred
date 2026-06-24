@@ -14,12 +14,12 @@ or test environments).
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 from ..__about__ import __version__ as _PACKAGE_VERSION
 from .._home import HERMES_BASE
+from . import _term
 
 DEFAULT_CONFIG_PATH = HERMES_BASE / "config.yaml"
 
@@ -77,7 +77,7 @@ def _print_from_yaml_fallback(config_path: Path) -> int:
         with config_path.open(encoding="utf-8") as f:
             data = yaml.load(f)
     except Exception as e:
-        print(f"Failed to read {config_path}: {e}", file=sys.stderr)
+        _term.emit_error(f"Failed to read {config_path}: {e}")
         return 0
     if not isinstance(data, dict):
         print("No Mordred plugins discovered.")

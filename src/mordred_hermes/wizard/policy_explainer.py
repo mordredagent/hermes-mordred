@@ -30,6 +30,7 @@ from ..privacy_check._runtime import (
 )
 from ..privacy_check.policy import PolicyMode, evaluate_install
 from ..privacy_check.skill_frontmatter import SkillMetadataError, parse
+from . import _term
 from ._runtime import DEFAULT_POLICY_JSON_PATH
 
 _LOG = logging.getLogger("mordred.wizard.policy_explainer")
@@ -60,15 +61,14 @@ def show(
 ) -> int:
     """Print the resolved Mordred policy. Exit code 0 on success, 1 if absent."""
     if not policy_json_path.exists():
-        print(
-            f"No Mordred policy configured at {policy_json_path}.\nRun `hermes-mordred configure` to create one.",
-            file=sys.stderr,
+        _term.emit_error(
+            f"No Mordred policy configured at {policy_json_path}.\nRun `hermes-mordred configure` to create one."
         )
         return 1
     try:
         body = json.loads(policy_json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        print(f"Failed to read {policy_json_path}: {e}", file=sys.stderr)
+        _term.emit_error(f"Failed to read {policy_json_path}: {e}")
         return 1
     print(json.dumps(body, indent=2, sort_keys=False), file=out)
     return 0
@@ -136,10 +136,7 @@ def explain(
     skill_md = _find_skill_md(skill_id, skills_dirs)
     if skill_md is None:
         searched = ", ".join(str(p) for p in skills_dirs)
-        print(
-            f"Skill {skill_id!r} not found in any of: {searched}",
-            file=sys.stderr,
-        )
+        _term.emit_error(f"Skill {skill_id!r} not found in any of: {searched}")
         return 1
     return _print_decision(skill_md, policy_mode, out=out)
 
@@ -158,7 +155,7 @@ def dry_run(
     """
     skill_md = skill_path if skill_path.is_file() else skill_path / "SKILL.md"
     if not skill_md.exists():
-        print(f"SKILL.md not found at {skill_md}", file=sys.stderr)
+        _term.emit_error(f"SKILL.md not found at {skill_md}")
         return 1
     policy_mode = _resolve_policy_mode(config_path)
     return _print_decision(skill_md, policy_mode, out=out, dry_run_label=True)
@@ -174,7 +171,7 @@ def _print_decision(
     try:
         meta = parse(skill_md_path)
     except SkillMetadataError as e:
-        print(f"Malformed SKILL.md: {e}", file=sys.stderr)
+        _term.emit_error(f"Malformed SKILL.md: {e}")
         return 1
     # The keyvault-initialized probe is consulted only when the skill opts
     # in via ``requires_keyvault: true`` (TODO.md §4.1); otherwise the
@@ -187,7 +184,7 @@ def _print_decision(
         try:
             vault_ready = keyvault_initialized()
         except KeyvaultProbeError as e:
-            print(f"warning: {e}; treating keyvault as uninitialized", file=sys.stderr)
+            _term.emit_warn(f"{e}; treating keyvault as uninitialized")
             vault_ready = False
     outcome = evaluate_install(
         policy_mode=policy_mode,
@@ -225,10 +222,9 @@ def reload(*, out: Any = sys.stdout) -> int:
     reload_state()
     print("Mordred privacy_check policy state reloaded.", file=out)
     if poisoned:
-        print(
-            "Warning: this process is poisoned (sibling-disable detected at startup); "
-            "reload does not clear the poison flag. Restart your Hermes session.",
-            file=sys.stderr,
+        _term.emit_warn(
+            "this process is poisoned (sibling-disable detected at startup); "
+            "reload does not clear the poison flag. Restart your Hermes session."
         )
     return 0
 
