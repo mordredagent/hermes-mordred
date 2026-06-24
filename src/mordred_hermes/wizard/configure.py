@@ -92,6 +92,24 @@ _CLOUD_ATTEMPT_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "prompt-once": "Reserved — currently behaves like always-block",
 }
 
+#: One-line description shown inline next to each agent-harness choice in the
+#: ``configure`` radio dialog (UX request 2026-06-24: the bare ``acp-claude`` /
+#: ``acp-cline`` labels are protocol identifiers with no hint that they mean
+#: "driven by an editor/IDE over ACP" -- no user could tell them apart from the
+#: terminal ``claude-cli``). The copy makes the terminal-vs-editor distinction
+#: explicit so the user can pick the option matching their real setup. Keys
+#: mirror the ``choices`` tuple below and the regex allowlist in
+#: ``harness_detect._HARNESS_PATTERNS``; a choice missing here renders without a
+#: description.
+_HARNESS_DESCRIPTIONS: Final[Mapping[str, str]] = {
+    "none": "Not driven by an external AI harness (recommended)",
+    "codex": "OpenAI Codex CLI (terminal)",
+    "claude-cli": "Claude Code in your terminal (the `claude` command)",
+    "cursor": "Cursor editor",
+    "acp-claude": "Claude driven by an editor/IDE over ACP (e.g. Zed)",
+    "acp-cline": "Cline driven by an editor/IDE over ACP (e.g. Zed)",
+}
+
 #: Help text shown above the cloud-LLM yes/no prompt. The bare question gave no
 #: hint about the privacy trade-off or what answering yes leads to (UX request
 #: 2026-06-15, sibling of the policy-mode inline descriptions above). It replaces
@@ -321,6 +339,7 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         label="Agent harness (strict mode refuses if a known harness is detected)",
         choices=("none", "codex", "claude-cli", "cursor", "acp-claude", "acp-cline"),
         default="none",
+        descriptions=_HARNESS_DESCRIPTIONS,
     )
 
     snapshot = PolicySnapshot(

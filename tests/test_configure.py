@@ -900,10 +900,10 @@ class TestPromptToolkitIO:
         assert captured["text"].lstrip().startswith("?")
 
     def test_collect_answers_passes_policy_descriptions(self) -> None:
-        # The policy-mode and cloud-attempt prompts are wired with their
-        # canonical descriptions; the agent-harness prompt has none. Assert all
-        # three: both described prompts carry their constant, and the bare
-        # sibling stays None.
+        # The policy-mode, cloud-attempt, and agent-harness prompts are each
+        # wired with their own canonical descriptions. Asserting all three carry
+        # a *distinct* constant proves the descriptions are wired per-prompt
+        # rather than applied globally to every choice dialog.
         seen: dict[str, Mapping[str, str] | None] = {}
 
         class _RecordingIO(_ScriptedPromptIO):
@@ -921,9 +921,13 @@ class TestPromptToolkitIO:
         configure.collect_answers(_RecordingIO(answers=_core_answers()))
         assert seen["Mordred policy mode"] == configure._POLICY_MODE_DESCRIPTIONS
         assert seen["On cloud LLM attempt under strict mode"] == configure._CLOUD_ATTEMPT_DESCRIPTIONS
-        # The agent-harness prompt carries no inline descriptions, proving they
-        # are wired per-prompt rather than applied to every choice dialog.
-        assert seen["Agent harness (strict mode refuses if a known harness is detected)"] is None
+        # The agent-harness prompt now carries its own descriptions so the bare
+        # ``acp-claude`` / ``acp-cline`` labels read as editor/IDE-driven rather
+        # than as opaque protocol identifiers (UX request 2026-06-24).
+        assert (
+            seen["Agent harness (strict mode refuses if a known harness is detected)"]
+            == configure._HARNESS_DESCRIPTIONS
+        )
 
     def test_collect_answers_passes_cloud_llm_description(self) -> None:
         # The cloud-LLM yes/no prompt is wired with the canonical help text so
