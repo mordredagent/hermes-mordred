@@ -238,7 +238,19 @@ def _dependency_warning_for_configured_path(config_path: Path, target: str) -> s
     network = _read_existing_network_section(config_path)
     raw_tor_binary = network.get("tor_binary_path")
     tor_binary = raw_tor_binary if isinstance(raw_tor_binary, str) and raw_tor_binary else "tor"
-    return dependency_warning(target, tor_binary=tor_binary)
+    raw_provider = network.get("vpn_provider")
+    vpn_provider = raw_provider if isinstance(raw_provider, str) and raw_provider else "mullvad"
+    raw_up = network.get("custom_up_cmd")
+    custom_up_cmd = tuple(raw_up) if isinstance(raw_up, list) and all(isinstance(x, str) for x in raw_up) else ()
+    raw_wg = network.get("wireguard_config_path")
+    wireguard_config_path = raw_wg if isinstance(raw_wg, str) else ""
+    return dependency_warning(
+        target,
+        tor_binary=tor_binary,
+        vpn_provider=vpn_provider,
+        custom_up_cmd=custom_up_cmd,
+        wireguard_config_path=wireguard_config_path,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -395,6 +407,37 @@ def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
     return dict(section)
 
 
+def _join_cmd_or(cmd: tuple[str, ...], empty: str) -> str:
+    """Render an argv tuple as a space-joined line, or a placeholder when empty."""
+    return " ".join(cmd) if cmd else empty
+
+
+def _provider_summary_lines(na: NetworkAnswers, *, killswitch: str, account: str) -> list[str]:
+    """Provider-specific lines for the init summary.
+
+    Only the selected provider's settings are echoed: a custom/wireguard provider
+    shows its own command/config and drops the Mullvad relay/account lines that do
+    not apply to it.
+    """
+    if na.vpn_provider == "custom":
+        return [
+            "  vpn provider       : custom",
+            f"  vpn up command     : {_join_cmd_or(na.custom_up_cmd, '(unset)')}",
+            f"  vpn down command   : {_join_cmd_or(na.custom_down_cmd, '(unset)')}",
+            f"  vpn health command : {_join_cmd_or(na.custom_health_cmd, '(none)')}",
+        ]
+    if na.vpn_provider == "wireguard":
+        return [
+            "  vpn provider       : wireguard",
+            f"  wireguard config   : {na.wireguard_config_path or '(unset)'}",
+        ]
+    return [
+        f"  mullvad relay      : {na.mullvad_relay_country}",
+        f"  mullvad killswitch : {killswitch}",
+        f"  mullvad account    : {account}",
+    ]
+
+
 def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: bool = False) -> str:
     """User-facing confirmation printed after a successful ``network init``.
 
@@ -414,13 +457,17 @@ def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: b
         f"  default path       : {na.default_network_path}",
         f"  tor binary         : {na.tor_binary_path}",
         f"  tor socks port     : {na.tor_socks_port}",
-        f"  mullvad relay      : {na.mullvad_relay_country}",
-        f"  mullvad killswitch : {killswitch}",
-        f"  mullvad account    : {account}",
+        *_provider_summary_lines(na, killswitch=killswitch, account=account),
     ]
     if na.default_network_path == "clearnet":
         lines.append("  note: clearnet = no anonymising layer; re-run and pick tor/vpn to enable privacy.")
-    warning = dependency_warning(na.default_network_path, tor_binary=na.tor_binary_path)
+    warning = dependency_warning(
+        na.default_network_path,
+        tor_binary=na.tor_binary_path,
+        vpn_provider=na.vpn_provider,
+        custom_up_cmd=na.custom_up_cmd,
+        wireguard_config_path=na.wireguard_config_path,
+    )
     if warning:
         lines.append(f"  {warning}")
     lines.append("  Applied at the next `hermes` session, or `hermes-mordred network use <path>` to switch now.")

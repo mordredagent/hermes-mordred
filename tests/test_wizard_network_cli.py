@@ -413,6 +413,110 @@ class TestNetworkInitGuidance:
         assert "Mullvad CLI is not available yet" in summary
         assert "mullvad account login" in summary
 
+    def test_init_summary_custom_provider_does_not_warn_about_mullvad(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A custom-provider (e.g. ExpressVPN) user must never be told to
+        install Mullvad — the warning must be about *their* CLI."""
+        from mordred_hermes.wizard import network_cli
+
+        # Custom CLI resolves on PATH → the vpn route is ready, no warning.
+        monkeypatch.setattr(
+            "mordred_hermes.network.guidance.shutil.which",
+            lambda _name: "/usr/local/bin/expressvpnctl",
+        )
+        summary = network_cli._init_summary(
+            network_cli.NetworkAnswers(
+                default_network_path="vpn",
+                tor_binary_path="tor",
+                tor_socks_port=9050,
+                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=False,
+                vpn_provider="custom",
+                custom_up_cmd=("expressvpnctl", "connect", "smart"),
+                custom_down_cmd=("expressvpnctl", "disconnect"),
+                custom_health_cmd=("expressvpnctl", "get", "connectionstate"),
+            ),
+            secret_written=False,
+        )
+        assert "Mullvad" not in summary
+
+    def test_init_summary_custom_provider_missing_cli_warns_about_custom(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
+        summary = network_cli._init_summary(
+            network_cli.NetworkAnswers(
+                default_network_path="vpn",
+                tor_binary_path="tor",
+                tor_socks_port=9050,
+                mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=False,
+                vpn_provider="custom",
+                custom_up_cmd=("expressvpnctl", "connect", "smart"),
+            ),
+            secret_written=False,
+        )
+        assert "Mullvad" not in summary
+        assert "expressvpnctl" in summary
+
+
+class TestDependencyWarningProviderAware:
+    """``dependency_warning`` must reflect the configured ``vpn_provider`` so a
+    non-Mullvad VPN user is not misled into installing Mullvad."""
+
+    def test_vpn_custom_available_no_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.network import guidance
+
+        monkeypatch.setattr(
+            "mordred_hermes.network.guidance.shutil.which",
+            lambda _name: "/usr/local/bin/expressvpnctl",
+        )
+        warning = guidance.dependency_warning(
+            "vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect")
+        )
+        assert warning is None
+
+    def test_vpn_custom_missing_names_custom_cli_not_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.network import guidance
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
+        warning = guidance.dependency_warning(
+            "vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect")
+        )
+        assert warning is not None
+        assert "Mullvad" not in warning
+        assert "expressvpnctl" in warning
+
+    def test_vpn_mullvad_still_warns_about_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.network import guidance
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
+        warning = guidance.dependency_warning("vpn", vpn_provider="mullvad")
+        assert warning is not None
+        assert "Mullvad CLI is not available yet" in warning
+
+    def test_vpn_wireguard_missing_names_wireguard_not_mullvad(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from mordred_hermes.network import guidance
+
+        monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
+        warning = guidance.dependency_warning(
+            "vpn",
+            vpn_provider="wireguard",
+            wireguard_config_path=str(tmp_path / "missing.conf"),
+        )
+        assert warning is not None
+        assert "Mullvad" not in warning
+
 
 # --------------------------------------------------------------------------- #
 # network use - merge preservation (Phase 3 PR3a, review-L4 fix)              #

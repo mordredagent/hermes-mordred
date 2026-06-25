@@ -574,6 +574,37 @@ class TestInitSummary:
         out = _init_summary(self._na(), secret_written=False, secret_cleared=True)
         assert "cleared" in out.lower()
 
+    def test_summary_shows_custom_provider_and_commands(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A custom-provider summary echoes the provider + its up/down/health
+        commands, and drops the Mullvad relay/account lines that don't apply."""
+        from mordred_hermes.wizard.network_cli import _init_summary
+
+        # Custom CLI resolves so the summary carries no dependency warning.
+        monkeypatch.setattr(
+            "mordred_hermes.network.guidance.shutil.which",
+            lambda _name: "/usr/local/bin/expressvpnctl",
+        )
+        na = NetworkAnswers(
+            default_network_path="vpn",
+            tor_binary_path="/usr/bin/tor",
+            tor_socks_port=9150,
+            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
+            mullvad_relay_country="jp",
+            mullvad_killswitch=True,
+            vpn_provider="custom",
+            custom_up_cmd=("expressvpnctl", "connect", "smart"),
+            custom_down_cmd=("expressvpnctl", "disconnect"),
+            custom_health_cmd=("expressvpnctl", "get", "connectionstate"),
+        )
+        out = _init_summary(na, secret_written=False)
+        assert "custom" in out
+        assert "expressvpnctl connect smart" in out
+        assert "expressvpnctl disconnect" in out
+        assert "expressvpnctl get connectionstate" in out
+        # Mullvad-specific detail lines must not appear for a custom provider.
+        assert "mullvad relay" not in out.lower()
+        assert "mullvad account" not in out.lower()
+
     def test_run_init_prints_resolved_settings(self, tmp_path: Path) -> None:
         """End-to-end: run_init's printed summary reflects the saved path."""
         import io
