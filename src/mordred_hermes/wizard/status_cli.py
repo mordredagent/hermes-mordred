@@ -31,6 +31,7 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from . import _term
 from .encryption_cli import (
+    EXPOSED_LEGEND_BODY,
     STATUS_LEGEND_BODY,
     WORKSPACE_LEGEND_BODY,
     TargetStatus,
@@ -201,6 +202,8 @@ def render_text(report: StatusReport, *, color: bool = False) -> str:
     for s, mark in zip(report.encryption, marks, strict=True):
         cell = style_mark(mark, mark.ljust(mark_w), enabled=color)
         lines.append(f"    {s.target.ljust(width)}  [{cell}]  {s.detail}")
+    if "exposed" in marks:
+        lines.append(_term.hint(f"    alert: {EXPOSED_LEGEND_BODY}", enabled=color))
     if "paused" in marks:
         lines.append(_term.hint(f"    legend: {STATUS_LEGEND_BODY}", enabled=color))
     if "sealed" in marks or "open" in marks:

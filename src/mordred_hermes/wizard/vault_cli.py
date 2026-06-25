@@ -13,7 +13,7 @@ the command functions, which are split across sibling modules —
 * :mod:`mordred_hermes.wizard._vault_lifecycle` — ``init`` / ``ensure_initialised``
   / ``change_passphrase`` / ``recover``.
 * :mod:`mordred_hermes.wizard._vault_entries` — ``status`` / ``cat`` / ``add`` /
-  ``migrate``.
+  ``add_and_verify`` / ``migrate``.
 
 All of those are re-exported here so existing ``from .vault_cli import …``
 callers (and tests that patch ``vault_cli.<name>``) keep working unchanged.
@@ -32,6 +32,7 @@ from ..keyvault import _identity as _identity  # re-exported: tests patch vault_
 from . import _term
 from ._vault_entries import (
     add,
+    add_and_verify,
     cat,
     migrate,
     status,
@@ -52,6 +53,7 @@ from ._vault_open import (
 
 __all__ = [
     "add",
+    "add_and_verify",
     "cat",
     "change_passphrase",
     "cli_add",

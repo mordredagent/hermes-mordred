@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
     from .configure import PromptIO
 
-__all__ = ["disable", "enable", "purge"]
+__all__ = ["disable", "enable", "purge", "reseal"]
 
 _ENV_NAME = ".env"
 
@@ -44,12 +44,71 @@ def _vault_present(root: Path) -> bool:
     return any(root.glob("manifest.*.mvmf"))
 
 
+def _env_enrolled(root: Path) -> bool:
+    """Whether ``.env`` is enrolled per the manifest — cheap, no device unlock.
+
+    Reads the newest manifest's *unverified* plaintext body (the ``files`` keys
+    are operational metadata, not secret), so the drift / reseal decision needs
+    neither the master key nor a passphrase. Mirrors
+    :func:`...wizard.encryption_cli._enrolled_names` but scoped to ``.env``.
+    """
+    from ..keyvault import manifest, vault
+
+    try:
+        generation = vault._latest_manifest_generation(root)
+        if generation is None:
+            return False
+        blob = vault._manifest_path(root, generation).read_bytes()
+        return _ENV_NAME in manifest.parse_unverified(blob).files
+    except (OSError, manifest.ManifestError):
+        return False
+
+
+def _merge_env_text(base_text: str, overrides: dict[str, str]) -> str:
+    """Apply ``overrides`` onto ``base_text``, set-or-append, preserving the rest.
+
+    ``base_text`` is the vault's authoritative ``.env`` (the full set of enrolled
+    secrets); ``overrides`` are the keys a host write just set on disk. Each
+    override replaces its key in place (keeping the base file's comments, order,
+    and untouched lines) or is appended if new. Keys present only in ``base_text``
+    are **kept** — a host write after the seal produces a *partial* file, so a key
+    missing from ``overrides`` means "untouched", never "delete". Mirrors the
+    host's own set-or-append in ``hermes_cli.config.save_env_value``.
+    """
+    lines = base_text.splitlines(keepends=True)
+    remaining = dict(overrides)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in remaining:
+            lines[i] = f"{key}={remaining.pop(key)}\n"
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    for key, value in remaining.items():
+        lines.append(f"{key}={value}\n")
+    return "".join(lines)
+
+
+def _write_optout_marker(home: Path) -> None:
+    marker = _env_optout_marker_path(home)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("opt-out\n", encoding="utf-8")
+
+
 def _read_vault_env(
     root: Path,
     backend: NativeBackend | None,
     store: AnchorStore | None,
 ) -> bytes | None:
-    """The enrolled ``.env`` bytes, or ``None`` if the vault has none / cannot open."""
+    """The enrolled ``.env`` bytes, or ``None`` if the vault has none / cannot open.
+
+    A read-only hot-path open (one device-key unlock). Used by :func:`reseal` to
+    fetch the authoritative vault copy as the merge base; the simpler
+    :func:`enable` path reads its verify copy back through ``add_and_verify``'s
+    single open instead.
+    """
     from . import vault_cli
 
     opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
@@ -59,12 +118,6 @@ def _read_vault_env(
         return opened.read_file(_ENV_NAME) if _ENV_NAME in opened.list_files() else None
     finally:
         opened.close()
-
-
-def _write_optout_marker(home: Path) -> None:
-    marker = _env_optout_marker_path(home)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("opt-out\n", encoding="utf-8")
 
 
 def _restore_plaintext(
@@ -115,6 +168,104 @@ def _restore_plaintext(
     return 0
 
 
+def reseal(
+    *,
+    home: Path,
+    root: Path,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> int:
+    """Reconcile a plaintext ``.env`` that reappeared while the vault still seals it.
+
+    The sealed state (``.env`` enrolled, injection ON, macOS) must hold **no**
+    plaintext ``.env``. When a host write puts one back (e.g.
+    ``hermes_cli.config.save_env_value`` after ``enable`` removed the plaintext),
+    that file is *partial*: the host starts from an empty file because the sealed
+    plaintext was deleted, so it carries only the just-written keys. Adopting it
+    wholesale would drop every other enrolled secret — so this **merges** the
+    on-disk keys onto the vault copy (the authoritative base), re-enrolls the
+    merged result, and removes the plaintext.
+
+    For the macOS sealed state only — callers gate on platform. A no-op (returns
+    0) when there is no plaintext, ``.env`` is not enrolled, or the env target is
+    in the reversible *disabled* state (opt-out marker present: the on-disk
+    plaintext is then the intentional live copy, not drift). Returns 1 when the
+    vault is present but cannot be opened, or the merged re-enroll cannot be
+    verified — the plaintext is kept so no secret is stranded.
+    """
+    from ..keyvault import _storage
+    from . import vault_cli
+
+    env_path = home / _ENV_NAME
+    if not env_path.is_file():
+        return 0  # no stray plaintext → nothing to reconcile
+    if _env_optout_marker_path(home).exists():
+        return 0  # disabled state: the plaintext is the live copy, not drift
+    if not _env_enrolled(root):
+        return 0  # not vault-managed → first-time enable handles enrollment
+
+    base = _read_vault_env(root, backend, store)
+    if base is None:
+        _term.emit_error(
+            ".env is enrolled but the vault copy could not be read to reseal a stray plaintext "
+            "— leaving the plaintext in place (run `encryption status`)."
+        )
+        return 1
+
+    try:
+        disk_text = env_path.read_text(encoding="utf-8")
+        base_text = base.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        _term.emit_warn(f"cannot reseal .env (unreadable / non-UTF-8): {exc} — leaving the plaintext in place.")
+        return 0
+
+    from io import StringIO
+
+    from dotenv import dotenv_values
+
+    overrides = {k: v for k, v in dotenv_values(stream=StringIO(disk_text), interpolate=False).items() if v is not None}
+    merged = _merge_env_text(base_text, overrides).encode("utf-8")
+
+    if merged == base:
+        # The stray plaintext added / changed nothing the vault does not already
+        # hold — just drop the redundant on-disk copy; the vault is unchanged.
+        env_path.unlink(missing_ok=True)
+        print(".env: removed a redundant plaintext copy (the vault copy already held these values).")
+        return 0
+
+    # Enroll the merged result from a fresh 0o600 temp file rather than
+    # overwriting the stray plaintext in place: the stray may be loose-mode (a
+    # host write that did not tighten perms), which `atomic_write` would refuse,
+    # and writing through it would also destroy it before the enroll is verified.
+    reseal_tmp = home / ".env.reseal.tmp"
+    reseal_tmp.unlink(missing_ok=True)  # clear any stale temp from a prior crash
+    try:
+        _storage.atomic_write(reseal_tmp, merged)
+        rc, enrolled = vault_cli.add_and_verify(
+            root=root, name=_ENV_NAME, source=reseal_tmp, backend=backend, store=store
+        )
+    finally:
+        reseal_tmp.unlink(missing_ok=True)
+    if rc != 0:
+        return rc  # add_and_verify printed the reason; the stray plaintext is kept
+    if enrolled != merged:
+        _term.emit_warn(
+            ".env was merged + enrolled but the vault read-back does not match (changed during reseal?) "
+            "— leaving the plaintext in place; re-run enable."
+        )
+        return 0
+    try:
+        env_path.unlink()
+    except OSError as exc:
+        _term.emit_warn(
+            f".env merged into the vault but the plaintext at {env_path} could not be removed: {exc} "
+            "— remove it by hand (it is still readable at rest)."
+        )
+        return 0
+    print(".env resealed: merged the new value(s) into the vault and removed the plaintext.")
+    return 0
+
+
 def enable(
     *,
     home: Path,
@@ -141,26 +292,38 @@ def enable(
         _term.emit_error(f"no .env at {env_path} — nothing to protect.")
         return 1
 
+    # Drift reconciliation: the vault already manages .env, injection is ON (no
+    # opt-out marker), and we are on macOS, yet a plaintext is on disk. That means
+    # a host write slipped a *partial* .env past the seal — re-enrolling it
+    # wholesale here would drop every other enrolled secret, so merge instead.
+    if platform == "darwin" and not _env_optout_marker_path(home).exists() and _env_enrolled(root):
+        return reseal(home=home, root=root, backend=backend, store=store)
+
     rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
     if rc != 0:
         return rc  # could not create the vault (reason already printed)
 
-    rc = vault_cli.add(root=root, name=_ENV_NAME, source=env_path, backend=backend, store=store)
+    # Enroll and read the enrolled copy back through the *same* vault open, so the
+    # device key (Secure Enclave / Touch ID) is unlocked once for both — the
+    # pre-delete verify below no longer costs a second prompt.
+    rc, enrolled = vault_cli.add_and_verify(root=root, name=_ENV_NAME, source=env_path, backend=backend, store=store)
     if rc != 0:
-        return rc  # vault_cli.add already printed the reason
+        return rc  # vault_cli.add_and_verify already printed the reason
 
     _env_optout_marker_path(home).unlink(missing_ok=True)  # injection ON
 
     if platform == "darwin":
         # Only remove the plaintext if it provably matches the enrolled copy: a
-        # concurrent edit between add()'s read and now must NOT be deleted
-        # unvaulted, and an unlink failure must NOT be reported as success while
-        # the plaintext remains at rest.
-        enrolled = _read_vault_env(root, backend, store)
+        # concurrent edit between add_and_verify()'s read and now must NOT be
+        # deleted unvaulted, and an unlink failure must NOT be reported as success
+        # while the plaintext remains at rest.
         try:
             current: bytes | None = env_path.read_bytes()
         except OSError:
             current = None
+        # `enrolled` is bytes whenever add_and_verify returned rc==0, so the None
+        # check is a defensive belt-and-suspenders: if that contract ever loosens,
+        # fail safe and keep the plaintext rather than delete it unverified.
         if enrolled is None or current != enrolled:
             _term.emit_warn(
                 ".env was enrolled but the on-disk copy no longer matches the vault "

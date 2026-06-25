@@ -95,6 +95,39 @@ class TestEnvStatus:
         assert st.active is False  # but injection is suppressed by the opt-out marker
         assert "disabled" in st.detail.lower()
 
+    def test_plaintext_present_while_active_is_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A plaintext .env on disk while sealed (active, no opt-out, macOS) is drift:
+        a host write slipped a partial plaintext past the seal — surface it loudly."""
+        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".env").write_text("FOO=bar\n", encoding="utf-8")
+        st = encryption_cli.env_status(root=tmp_path / "v", home=home, platform="darwin")
+        assert st.active is True
+        assert st.drift is True
+        assert encryption_cli.status_mark(st) == "exposed"
+        assert "plaintext" in st.detail.lower()
+        assert st.to_dict()["drift"] is True
+
+    def test_plaintext_off_macos_is_not_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Off macOS the plaintext is kept intentionally (inactive), so it is not drift."""
+        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".env").write_text("FOO=bar\n", encoding="utf-8")
+        st = encryption_cli.env_status(root=tmp_path / "v", home=home, platform="linux")
+        assert st.drift is False
+        assert encryption_cli.status_mark(st) != "exposed"
+
+    def test_no_plaintext_while_active_is_clean(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sealed with no plaintext on disk is the healthy state — `on`, not `exposed`."""
+        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
+        home = tmp_path / "home"
+        home.mkdir()
+        st = encryption_cli.env_status(root=tmp_path / "v", home=home, platform="darwin")
+        assert st.drift is False
+        assert encryption_cli.status_mark(st) == "on"
+
 
 class TestConfigStatus:
     def test_marker_absent(self, tmp_path: Path) -> None:

@@ -89,6 +89,7 @@ class TargetStatus:
     active: bool
     detail: str
     mounted: bool | None = None
+    drift: bool = False
 
     def to_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -99,6 +100,8 @@ class TargetStatus:
         }
         if self.mounted is not None:
             out["mounted"] = self.mounted
+        if self.drift:
+            out["drift"] = self.drift
         return out
 
 
@@ -177,13 +180,20 @@ def env_status(*, root: Path, home: Path, platform: str) -> TargetStatus:
     # The runtime shim skips injection when the opt-out marker is present, so an
     # enrolled-but-opted-out target is NOT active even on macOS.
     active = enrolled and not opted_out and platform == _DARWIN
+    # Drift: the sealed state (active) removed the plaintext, so a plaintext on
+    # disk means a host write slipped one past the seal — a secret is exposed at
+    # rest and the file is partial (it loses the other enrolled keys until
+    # resealed). A plaintext is expected (not drift) when opted-out or off-macOS.
+    drift = active and (home / ".env").exists()
     if not enrolled:
         detail = "not enrolled"
     elif opted_out:
         detail = "disabled — encrypted copy kept; re-enable: encryption enable env"
+    elif drift:
+        detail = "plaintext .env present at rest while vault-managed — reseal with: encryption enable env"
     else:
         detail = _os_note(active, platform)
-    return TargetStatus("env", configured, active, detail)
+    return TargetStatus("env", configured, active, detail, drift=drift)
 
 
 def config_status(*, home: Path, platform: str, hook_installed: bool | None = None) -> TargetStatus:
@@ -301,6 +311,12 @@ STATUS_LEGEND_BODY = "on = protecting now | paused = set up but off, data kept |
 #: is present (see :func:`_workspace_mark`).
 WORKSPACE_LEGEND_BODY = "sealed = encrypted & locked at rest | open = mounted, in use | off = not set up here"
 
+#: Meaning of the env-only ``exposed`` mark. Shown only when an ``exposed`` row is
+#: present (drift): the target is vault-managed but a plaintext copy is on disk at
+#: rest — a host write slipped past the seal. ``encryption enable env`` merges it
+#: back into the vault and removes the plaintext.
+EXPOSED_LEGEND_BODY = "exposed = vault-managed but a plaintext copy is on disk at rest — reseal: encryption enable env"
+
 
 def status_mark(status: TargetStatus) -> str:
     """One-word state for the on/off column, keyed on *effective protection*.
@@ -321,6 +337,8 @@ def status_mark(status: TargetStatus) -> str:
     """
     if status.target == "workspace":
         return _workspace_mark(status)
+    if status.drift:
+        return "exposed"
     if status.active:
         return "on"
     return "paused" if status.configured else "off"
@@ -354,6 +372,7 @@ _MARK_STYLE: dict[str, Callable[..., str]] = {
     "paused": _term.warn,
     "open": _term.info,
     "off": _term.dim,
+    "exposed": _term.error,
 }
 
 
@@ -381,6 +400,8 @@ def render_text(statuses: list[TargetStatus], *, color: bool = False) -> str:
     for s, mark in zip(statuses, marks, strict=True):
         cell = style_mark(mark, mark.ljust(mark_w), enabled=color)
         lines.append(f"  {s.target.ljust(name_w)}  [{cell}]  {s.detail}")
+    if "exposed" in marks:
+        lines.append(_term.hint(f"  alert: {EXPOSED_LEGEND_BODY}", enabled=color))
     if "paused" in marks:
         lines.append(_term.hint(f"  legend: {STATUS_LEGEND_BODY}", enabled=color))
     if "sealed" in marks or "open" in marks:

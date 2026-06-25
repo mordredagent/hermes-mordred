@@ -7,6 +7,9 @@ as opposed to creating or re-keying it (those live in
 * :func:`status` -- list a vault's generation + enrolled names (cold path, read-only).
 * :func:`cat` -- write one enrolled file's decrypted bytes to stdout (cold path).
 * :func:`add` -- enroll one plaintext file (hot path, device key).
+* :func:`add_and_verify` -- :func:`add` plus read the enrolled copy back through the
+  same open (one device-key unlock) for callers that must verify before deleting
+  the plaintext.
 * :func:`migrate` -- batch-enroll several plaintext files in one open (hot path).
 
 They share the open / display helpers in
@@ -99,6 +102,48 @@ def cat(*, root: Path, name: str, prompt_io: PromptIO | None = None) -> int:
     return 0
 
 
+def _enroll_one(
+    *,
+    root: Path,
+    name: str,
+    plaintext: bytes,
+    backend: NativeBackend | None,
+    store: AnchorStore | None,
+    read_back: bool,
+) -> tuple[int, int | None, bytes | None]:
+    """Open the vault hot path once, enroll ``plaintext`` under ``name``, and close.
+
+    A **single** device-key unlock (the Secure Enclave / software-fallback ECDH —
+    one Touch ID prompt) covers the whole open: the enroll and, when ``read_back``
+    is set, reading the freshly enrolled bytes back through the *same* handle. The
+    read-back is the vault's decrypted copy of ``name`` (proof the enroll
+    round-trips), which a caller that must delete the plaintext can compare against
+    the on-disk file without forcing a second unlock.
+
+    Returns ``(rc, generation, read_back_bytes)``. On ``rc != 0`` the generation
+    and bytes are ``None`` (the reason is already on stderr); ``read_back_bytes``
+    is ``None`` whenever ``read_back`` is false.
+    """
+    from ..keyvault import anchor, vault
+    from ..keyvault._exceptions import WrapError
+
+    opened = _open_hot_path_or_report(root, backend=backend, store=store)
+    if opened is None:
+        return 1, None, None
+
+    try:
+        opened.enroll_file(name, plaintext)
+        generation = opened.generation
+        enrolled = opened.read_file(name) if read_back else None
+    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        _term.emit_error(f"cannot add {name!r}: {exc}")
+        return 1, None, None
+    finally:
+        opened.close()
+
+    return 0, generation, enrolled
+
+
 def add(
     *,
     root: Path,
@@ -121,30 +166,54 @@ def add(
     inject fakes. Returns 0 on success, 1 on an uninitialised / unverifiable
     vault, an unreadable source, or a device key-store error.
     """
-    from ..keyvault import anchor, vault
-    from ..keyvault._exceptions import WrapError
-
     try:
         plaintext = source.read_bytes()
     except OSError as exc:
         _term.emit_error(f"cannot read source file {source}: {exc}")
         return 1
 
-    opened = _open_hot_path_or_report(root, backend=backend, store=store)
-    if opened is None:
-        return 1
-
-    try:
-        opened.enroll_file(name, plaintext)
-        generation = opened.generation
-    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-        _term.emit_error(f"cannot add {name!r}: {exc}")
-        return 1
-    finally:
-        opened.close()
+    rc, generation, _ = _enroll_one(
+        root=root, name=name, plaintext=plaintext, backend=backend, store=store, read_back=False
+    )
+    if rc != 0:
+        return rc
 
     print(f"Added {name!r} to the vault at {root} (now at generation {generation}).")
     return 0
+
+
+def add_and_verify(
+    *,
+    root: Path,
+    name: str,
+    source: Path,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> tuple[int, bytes | None]:
+    """:func:`add`, plus the vault's decrypted copy of ``name`` read back in the
+    *same* open — one device-key unlock (one Touch ID) for both enroll and verify.
+
+    For callers that remove the plaintext after enrolling (the ``.env`` at-rest
+    toggle): the returned bytes are what the vault decrypts ``name`` to, so the
+    caller can confirm the still-on-disk plaintext matches the enrolled copy before
+    deleting it — the pre-delete safety check that previously cost a second vault
+    open (a second Touch ID). Returns ``(rc, enrolled_bytes)``; on ``rc != 0`` the
+    bytes are ``None`` (reason already on stderr).
+    """
+    try:
+        plaintext = source.read_bytes()
+    except OSError as exc:
+        _term.emit_error(f"cannot read source file {source}: {exc}")
+        return 1, None
+
+    rc, generation, enrolled = _enroll_one(
+        root=root, name=name, plaintext=plaintext, backend=backend, store=store, read_back=True
+    )
+    if rc != 0:
+        return rc, None
+
+    print(f"Added {name!r} to the vault at {root} (now at generation {generation}).")
+    return 0, enrolled
 
 
 def migrate(

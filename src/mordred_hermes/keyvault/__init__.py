@@ -19,7 +19,20 @@ def register(ctx: Any) -> None:
     vault instead of plaintext on disk. Fail-closed — a present-but-unverifiable
     vault raises rather than starting with unverified secret provisioning. A no-op
     where no vault is set up or off macOS.
+
+    Also installs the write-side guard: it wraps the host ``.env`` writer so a
+    ``hermes config set`` / setup write made while the env target is sealed is
+    resealed back into the vault (merged, not clobbered) instead of leaving a
+    partial plaintext at rest. Best-effort and fail-open — it must never break
+    startup or a host config write (unlike the fail-closed read shim above).
     """
     from ._runtime_env import install_vault_env_decrypt
 
     install_vault_env_decrypt()
+
+    try:
+        from ._env_write_guard import install_env_write_guard
+
+        install_env_write_guard()
+    except Exception:
+        pass

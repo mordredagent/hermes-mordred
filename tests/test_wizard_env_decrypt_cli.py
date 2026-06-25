@@ -136,18 +136,62 @@ class TestEnable:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """macOS enable must not delete a plaintext that does not match the enrolled bytes."""
+        from mordred_hermes.wizard import vault_cli
+
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
         backend, store = FakeBackend(), FakeAnchorStore()
         _init_empty_vault(root, backend, store)
         (home / ".env").write_bytes(_ENV_A)
         # simulate the enrolled copy differing from what is on disk at unlink time
-        monkeypatch.setattr(env_decrypt_cli, "_read_vault_env", lambda *_a, **_k: _ENV_B)
+        monkeypatch.setattr(vault_cli, "add_and_verify", lambda **_k: (0, _ENV_B))
 
         rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
         assert rc == 0
         assert (home / ".env").read_bytes() == _ENV_A  # plaintext NOT deleted
         assert "leaving the plaintext" in capsys.readouterr().err.lower()
+
+    def test_keeps_plaintext_if_disk_unreadable_at_verify(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """If the on-disk .env cannot be re-read at verify time (current -> None),
+        enable must not proceed to unlink — it warns and fails safe (return 0)."""
+        from mordred_hermes.wizard import vault_cli
+
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+
+        # the enroll "succeeds" but the plaintext vanishes before the verify read,
+        # so env_path.read_bytes() raises and `current` becomes None.
+        def _enroll_then_remove_plaintext(**_k: object) -> tuple[int, bytes]:
+            (home / ".env").unlink()
+            return 0, _ENV_A
+
+        monkeypatch.setattr(vault_cli, "add_and_verify", _enroll_then_remove_plaintext)
+
+        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+        assert rc == 0
+        assert "leaving the plaintext" in capsys.readouterr().err.lower()
+
+    def test_enable_unlocks_the_enclave_once(self, tmp_path: Path) -> None:
+        """enable() must open the vault — one Secure-Enclave unlock, i.e. one Touch ID
+        prompt — exactly once: the enroll and the pre-delete verify share a single open."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+
+        before = sum(1 for call in backend.calls if call[0] == "ecdh")
+        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+        after = sum(1 for call in backend.calls if call[0] == "ecdh")
+
+        assert rc == 0
+        assert not (home / ".env").exists()  # plaintext removed after the verified enroll
+        assert after - before == 1  # a single device-key unlock for enroll + verify
 
     def test_clears_optout_marker(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
@@ -284,3 +328,110 @@ class TestRuntimeOptOut:
 
         assert _runtime_env.install_vault_env_decrypt(environ={}) == 3
         assert called["inject"] is True
+
+
+# -----------------------------------------------------------------------------
+# reseal — reconcile a plaintext that reappeared while the vault still seals .env
+# -----------------------------------------------------------------------------
+_ENV_MULTI = b"A=1\nB=2\n"
+
+
+def _seal(root: Path, home: Path, backend: FakeBackend, store: FakeAnchorStore, content: bytes) -> None:
+    """Enroll ``content`` and reach the sealed macOS state (plaintext removed)."""
+    _init_empty_vault(root, backend, store)
+    (home / ".env").write_bytes(content)
+    env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+    assert not (home / ".env").exists()  # sealed
+
+
+class TestReseal:
+    def test_merges_partial_write_without_losing_secrets(self, tmp_path: Path) -> None:
+        """The core fix: a host write past the seal is a *partial* file; reseal must
+        MERGE it onto the vault copy, never adopt it wholesale (which would drop the
+        other enrolled secrets)."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, _ENV_MULTI)
+        # host writes only the just-set key (it started from an empty file)
+        (home / ".env").write_bytes(b"C=3\n")
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert not (home / ".env").exists()  # plaintext removed again
+        assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"  # A and B survived
+
+    def test_overrides_existing_key(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, _ENV_MULTI)
+        (home / ".env").write_bytes(b"A=9\n")  # operator updated an existing key
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert _vault_env(root, backend, store) == b"A=9\nB=2\n"  # A updated in place, B kept
+        assert not (home / ".env").exists()
+
+    def test_redundant_plaintext_is_just_removed(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, b"A=1\n")
+        (home / ".env").write_bytes(b"A=1\n")  # identical to the vault copy
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert not (home / ".env").exists()
+        assert _vault_env(root, backend, store) == b"A=1\n"  # unchanged
+
+    def test_noop_when_no_plaintext(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, b"A=1\n")  # sealed, no plaintext on disk
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert not (home / ".env").exists()  # not recreated
+        assert _vault_env(root, backend, store) == b"A=1\n"
+
+    def test_keeps_plaintext_when_opted_out(self, tmp_path: Path) -> None:
+        """In the reversible *disabled* state the on-disk plaintext is the intentional
+        live copy — reseal must not merge it away."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, b"A=1\n")
+        env_decrypt_cli.disable(home=home, root=root, backend=backend, store=store)  # opt-out marker + plaintext
+        (home / ".env").write_bytes(b"B=2\n")  # operator edits the disabled-state plaintext
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert (home / ".env").read_bytes() == b"B=2\n"  # untouched
+        assert _vault_env(root, backend, store) == b"A=1\n"  # vault unchanged
+
+    def test_noop_when_not_enrolled(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        (home / ".env").write_bytes(b"A=1\n")  # plaintext but no vault / not enrolled
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore())
+        assert rc == 0
+        assert (home / ".env").read_bytes() == b"A=1\n"  # left alone
+
+
+class TestEnableReconcilesDrift:
+    def test_enable_merges_on_drift_instead_of_clobbering(self, tmp_path: Path) -> None:
+        """Running ``enable`` while drifted must reconcile via merge, not re-enroll the
+        partial plaintext wholesale (the old footgun that dropped secrets)."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, _ENV_MULTI)
+        (home / ".env").write_bytes(b"C=3\n")  # partial plaintext slipped past the seal
+
+        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+        assert rc == 0
+        assert not (home / ".env").exists()
+        assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"  # merged, nothing lost
