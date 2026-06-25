@@ -171,6 +171,16 @@ class TerminalSeedSurface:
         print("\n  one line (for the offline verification digest):")
         print(f"    {' '.join(words)}")
         print("=== END SEED PHRASE ===\n")
+        # Actionable next step. Gated on an interactive TTY because the ENTER
+        # early-dismiss it advertises is itself TTY-only (see
+        # seed_display._default_dismiss_probe). Off a TTY the window just runs
+        # out its 60s timer, so the prompt would be misleading.
+        if sys.stdin.isatty():
+            print(
+                "  When you have written down all 24 words AND can re-type them on\n"
+                "  your offline device, press ENTER to clear the seed now and move on\n"
+                "  to the verification-digest prompt. (It clears on its own after 60s.)"
+            )
 
     def clear(self) -> None:
         # ANSI clear-screen + cursor-home. Best-effort: harmless on a

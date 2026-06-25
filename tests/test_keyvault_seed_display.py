@@ -487,3 +487,140 @@ def test_module_imports_without_quartz() -> None:
 
     importlib.reload(sd)
     assert hasattr(sd, "display_seed")
+
+
+# ---------------------------------------------------------------------------
+# Early dismiss — operator presses ENTER to clear the seed before the 60s timer
+# ---------------------------------------------------------------------------
+
+
+def test_dismiss_probe_breaks_window_early() -> None:
+    """A dismiss probe that fires mid-window clears the seed before the TTL."""
+    surface = FakeSurface()
+    clock = FakeClock()
+    state = {"n": 0}
+
+    def dismiss() -> bool:
+        state["n"] += 1
+        return state["n"] >= 2  # press ENTER on the 2nd poll
+
+    start = clock.now()
+    sd.display_seed(
+        _handle(),
+        surface,
+        blackout_assert=_ok_blackout,
+        capture_probe=_no_capture,
+        dismiss_probe=dismiss,
+        ttl_seconds=60.0,
+        poll_interval=0.5,
+        clock=clock.now,
+        sleep=clock.sleep,
+    )
+    assert ("show", _SEED) in surface.calls
+    assert surface.ops[-1] == "clear"
+    # Exited well before the 60s timer would have elapsed.
+    assert clock.now() - start < 60.0
+
+
+def test_dismiss_is_a_clean_completion_no_audit() -> None:
+    """An early dismiss is a clean exit, not an abort — no audit entry."""
+    surface = FakeSurface()
+    clock = FakeClock()
+    entries: list[dict[str, Any]] = []
+    sd.display_seed(
+        _handle(),
+        surface,
+        blackout_assert=_ok_blackout,
+        capture_probe=_no_capture,
+        dismiss_probe=lambda: True,
+        audit_sink=entries.append,
+        ttl_seconds=60.0,
+        clock=clock.now,
+        sleep=clock.sleep,
+    )
+    assert entries == []
+    assert ("show", _SEED) in surface.calls
+    assert surface.ops[-1] == "clear"
+
+
+def test_capture_takes_precedence_over_dismiss() -> None:
+    """Capture AND dismiss both pending → the capture aborts (security first)."""
+    surface = FakeSurface()
+    clock = FakeClock()
+    entries: list[dict[str, Any]] = []
+    with pytest.raises(sd.SeedDisplayAborted):
+        sd.display_seed(
+            _handle(),
+            surface,
+            blackout_assert=_ok_blackout,
+            capture_probe=lambda: "cg_screen_is_being_captured",
+            dismiss_probe=lambda: True,
+            audit_sink=entries.append,
+            ttl_seconds=60.0,
+            clock=clock.now,
+            sleep=clock.sleep,
+        )
+    # The abort path ran (audit emitted), not the silent early-dismiss break.
+    assert entries[0]["reason"] == "keyvault.seed_display_aborted_screenshot"
+
+
+def test_default_dismiss_returns_false_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-interactive stdin → no early dismiss, and stdin is never drained."""
+
+    class _NotATty:
+        def isatty(self) -> bool:
+            return False
+
+        def readline(self) -> str:  # pragma: no cover - must NOT be called
+            raise AssertionError("scripted stdin must never be drained")
+
+    monkeypatch.setattr(sys, "stdin", _NotATty())
+    assert sd._default_dismiss_probe() is False
+
+
+def test_default_dismiss_true_on_pending_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An interactive TTY with a pending line → True, and the line is drained."""
+    drained = {"n": 0}
+
+    class _TtyStdin:
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self) -> str:
+            drained["n"] += 1
+            return "\n"
+
+    fake_stdin = _TtyStdin()
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+    monkeypatch.setattr(sd.select, "select", lambda r, w, e, t: ([fake_stdin], [], []))
+    assert sd._default_dismiss_probe() is True
+    assert drained["n"] == 1  # the pending ENTER was drained, not left for the digest prompt
+
+
+def test_default_dismiss_false_when_nothing_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _TtyStdin:
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self) -> str:  # pragma: no cover - must NOT be called
+            raise AssertionError("must not drain when nothing is pending")
+
+    monkeypatch.setattr(sys, "stdin", _TtyStdin())
+    monkeypatch.setattr(sd.select, "select", lambda r, w, e, t: ([], [], []))
+    assert sd._default_dismiss_probe() is False
+
+
+def test_default_dismiss_fails_open_on_select_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows: select() rejects stdin → fail open (False), never raise."""
+
+    class _TtyStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _TtyStdin())
+
+    def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise OSError("select on stdin unsupported on this platform")
+
+    monkeypatch.setattr(sd.select, "select", _boom)
+    assert sd._default_dismiss_probe() is False

@@ -22,7 +22,9 @@ seed phrase on screen exactly once:
 5. **60s monotonic timer** — the display window is bounded by
    ``time.monotonic()`` (wall-clock tamper resistant). The capture probe
    is polled across the window; a detected capture clears the surface
-   immediately and aborts.
+   immediately and aborts. On an interactive TTY the operator may press
+   ENTER to clear the seed early and advance to the digest prompt; the
+   timer is only an upper bound, so this merely *shortens* the exposure.
 6. **Auto-clear** — the surface is cleared on every exit path (timer
    elapsed, capture abort, or any exception).
 
@@ -49,6 +51,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import logging
+import select
 import sys
 import time
 from collections.abc import Callable
@@ -85,7 +88,9 @@ SEED_DISPLAY_BANNER = (
     "    (Loom / Zoom share / OBS / VNC / Screen Sharing). Screen-recording\n"
     "    detection is out of scope; only screenshots are detected, and only\n"
     "    on a best-effort basis (M5).\n"
-    "  - The seed clears automatically after 60 seconds."
+    "  - The seed clears automatically after 60 seconds — or press ENTER\n"
+    "    once you have written all 24 words down to clear it now and go\n"
+    "    straight to the verification-digest step."
 )
 """M4 / M5 pre-display warning banner."""
 
@@ -95,6 +100,11 @@ BlackoutAssert = Callable[..., None]
 
 # Returns the detector name when a screen capture is in progress, else None.
 CaptureProbe = Callable[[], "str | None"]
+
+# Returns True when the operator has asked to clear the seed early (pressed
+# ENTER once the words are written down); False to keep waiting out the timer.
+# Polled once per capture-poll iteration, after the capture probe.
+DismissProbe = Callable[[], bool]
 
 # Audit sink — matches the POLICY.md §Audit entry shape contract.
 AuditSink = Callable[[dict[str, Any]], None]
@@ -217,6 +227,38 @@ def _default_capture_probe() -> str | None:
     return _DETECTOR_SCREEN_CAPTURE if captured else None
 
 
+def _default_dismiss_probe() -> bool:
+    """Non-blocking check for an operator early-dismiss keypress (TTY only).
+
+    Returns ``True`` once the operator has pressed ENTER — a line is pending on
+    ``stdin`` — to clear the seed early and go straight to the digest prompt.
+    Returns ``False`` while nothing is pending.
+
+    Returns ``False`` immediately when ``stdin`` is **not** an interactive TTY:
+    a piped / scripted run may already hold the queued digest line on ``stdin``,
+    and draining it here would corrupt the later digest prompt. Non-interactive
+    runs therefore keep the original behaviour exactly — they wait out the full
+    60s timer.
+
+    Fails **open** (like the capture probe, the opposite of the blackout
+    assert): any platform / bridge error — e.g. Windows, where ``select`` does
+    not accept ``stdin`` — returns ``False``. A probe failure can only cost the
+    operator the early-exit convenience, never the security timer.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return False
+        ready, _writable, _errored = select.select([sys.stdin], [], [], 0)
+        if not ready:
+            return False
+        # A line is pending (a cooked TTY makes select fire only after ENTER).
+        # Drain it so it cannot bleed into the digest prompt that follows.
+        sys.stdin.readline()
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def _emit_abort(audit_sink: AuditSink | None, *, detector: str) -> Exception | None:
     """Best-effort emit of the ``keyvault.seed_display_aborted_screenshot`` entry.
 
@@ -261,6 +303,7 @@ def display_seed(
     *,
     blackout_assert: BlackoutAssert | None = None,
     capture_probe: CaptureProbe | None = None,
+    dismiss_probe: DismissProbe | None = None,
     audit_sink: AuditSink | None = None,
     ttl_seconds: float = DEFAULT_TTL_SECONDS,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
@@ -279,6 +322,13 @@ def display_seed(
             ``BlackoutNotAsserted`` when the host is reachable.
         capture_probe: Screenshot-capture probe. Defaults to
             :func:`_default_capture_probe`.
+        dismiss_probe: Early-dismiss probe — returns ``True`` once the operator
+            has pressed ENTER to clear the seed before the timer elapses and
+            advance to the digest prompt. Defaults to
+            :func:`_default_dismiss_probe` (interactive TTY only; always
+            ``False`` off a TTY, so scripted runs are unchanged). The ``ttl``
+            timer remains the upper bound: a dismiss only ever *shortens* the
+            on-screen exposure.
         audit_sink: Sink for the abort audit entry.
         ttl_seconds: Display-window length (default 60s).
         poll_interval: Seconds between capture probes.
@@ -307,6 +357,7 @@ def display_seed(
 
         blackout_assert = resolve_blackout_assert()
     probe: CaptureProbe = capture_probe if capture_probe is not None else _default_capture_probe
+    dismiss: DismissProbe = dismiss_probe if dismiss_probe is not None else _default_dismiss_probe
 
     # 1. Network blackout — hard precondition, fails closed.
     blackout_assert()
@@ -331,7 +382,12 @@ def display_seed(
     seed = handle.consume()
 
     # 5. Display + monotonic 60s timer with capture polling. ``finally``
-    #    guarantees the surface is cleared on every exit path.
+    #    guarantees the surface is cleared on every exit path. The operator may
+    #    also press ENTER to clear the seed early (once it is written down) and
+    #    go straight to the digest prompt — ``dismiss`` is polled AFTER the
+    #    capture probe so a capture detected in the same iteration still wins
+    #    (security over convenience). The timer stays the upper bound, and a
+    #    non-interactive run (where ``dismiss`` is always False) is unchanged.
     try:
         surface.show(seed)
         deadline = clock() + ttl_seconds
@@ -343,5 +399,10 @@ def display_seed(
                 # seed must leave the screen before anything else).
                 surface.clear()
                 _abort(audit_sink, detector=detector)
+            if dismiss():
+                # Operator wrote the words down and pressed ENTER — stop holding
+                # the seed on screen. A clean early exit, not an abort (no audit
+                # entry); the ``finally`` clears the surface.
+                break
     finally:
         surface.clear()

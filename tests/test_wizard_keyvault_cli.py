@@ -882,6 +882,27 @@ class TestTerminalSeedSurface:
         # The joined line is on a single physical line (no stray newline split).
         assert any(" ".join(words) in line for line in out.splitlines())
 
+    def test_show_prints_enter_to_continue_hint_on_tty(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On an interactive TTY the operator is told they can press ENTER to
+        clear the seed early and move on (the early-dismiss UX)."""
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        keyvault_cli.TerminalSeedSurface().show(self._SEED)
+        out = capsys.readouterr().out
+        assert "press ENTER" in out
+        assert "verification-digest prompt" in out
+
+    def test_show_omits_enter_hint_off_tty(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Off a TTY the ENTER hint is suppressed — early-dismiss is TTY-only,
+        so advertising it on a piped/scripted run would mislead."""
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+        keyvault_cli.TerminalSeedSurface().show(self._SEED)
+        out = capsys.readouterr().out
+        assert "press ENTER" not in out
+
 
 class TestErrorColour:
     """Keyvault errors route through ``_term.emit_error``: red ``error:`` on a tty, plain off it.
