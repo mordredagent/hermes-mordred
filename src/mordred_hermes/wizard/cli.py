@@ -418,6 +418,12 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_enable = esub.add_parser("enable", help="Turn on at-rest encryption for a target")
     p_enable.add_argument("target", choices=_toggle_targets)
     p_enable.add_argument("--non-interactive", action="store_true", help="Apply without prompting (CI / scripted use)")
+    p_enable.add_argument(
+        "--force-runtime-unverified",
+        action="store_true",
+        help="(env, macOS) seal .env even when the `hermes` runtime can't be verified to "
+        "decrypt it — advanced; secrets stay unreadable until that runtime has mordred",
+    )
     p_enable.set_defaults(func=_handle_encryption_enable)
 
     p_disable = esub.add_parser("disable", help="Turn off encryption for a target (reversible; keeps the vault copy)")

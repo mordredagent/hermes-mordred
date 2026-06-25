@@ -468,7 +468,7 @@ def cli_status(args: argparse.Namespace) -> int:
 # The encryption surface always uses the default vault root (a custom --root would
 # not be seen by the macOS startup shims, which read default_vault_root()).
 # -----------------------------------------------------------------------------
-def _dispatch(verb: str, target: str) -> int:
+def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False) -> int:
     from . import config_decrypt_cli, env_decrypt_cli, memory_cli
 
     home = _hermes_home()
@@ -479,9 +479,13 @@ def _dispatch(verb: str, target: str) -> int:
     # only ever pass enable/disable/purge, and any non-enable/disable verb
     # resolves to the target's purge (preserves the original if-chain's
     # fall-through). workspace stays lazily imported (macOS-only path).
+    # ``force_runtime_unverified`` reaches only the env enable (the destructive,
+    # runtime-gated path); every other route ignores it.
     routes: dict[str, dict[str, Callable[[], int]]] = {
         "env": {
-            "enable": lambda: env_decrypt_cli.enable(home=home, root=root, platform=platform),
+            "enable": lambda: env_decrypt_cli.enable(
+                home=home, root=root, platform=platform, force_runtime_unverified=force_runtime_unverified
+            ),
             "disable": lambda: env_decrypt_cli.disable(home=home, root=root),
             "purge": lambda: env_decrypt_cli.purge(home=home, root=root),
         },
@@ -561,13 +565,13 @@ def _workspace_eligible(
     return False, "workspace not set up"
 
 
-def _run_target(verb: str, target: str) -> tuple[str, int]:
+def _run_target(verb: str, target: str, *, force_runtime_unverified: bool = False) -> tuple[str, int]:
     """Dispatch one target for an ``all`` fan-out; return ``(status_label, exit_code)``.
 
     The engine streams its own detail to stdout here; the caller emits the
     one-line per-target status afterwards as a single contiguous summary block.
     """
-    rc = _dispatch(verb, target)
+    rc = _dispatch(verb, target, force_runtime_unverified=force_runtime_unverified)
     return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
 
 
@@ -585,6 +589,7 @@ def _dispatch_all(
     *,
     platform: str | None = None,
     on_path: Callable[[str], bool] | None = None,
+    force_runtime_unverified: bool = False,
 ) -> int:
     """Fan ``verb`` out over every target, best-effort. Returns an exit code.
 
@@ -594,6 +599,10 @@ def _dispatch_all(
     exit code is non-zero iff at least one *attempted* target failed. Per-target
     engine output streams inline; the ok/FAILED/skipped roll-up prints once at
     the end as a single block (see :func:`_print_all_summary`).
+
+    ``force_runtime_unverified`` is forwarded to every target's dispatch but only
+    affects the env enable (the runtime-gated, destructive path); see
+    :func:`_dispatch`.
     """
     platform = sys.platform if platform is None else platform
     on_path = _default_on_path() if on_path is None else on_path
@@ -601,13 +610,13 @@ def _dispatch_all(
     outcomes: list[tuple[str, str]] = []
     failed = 0
     for target in _ALL_CORE_TARGETS:
-        status, rc = _run_target(verb, target)
+        status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified)
         outcomes.append((target, status))
         failed += rc != 0
 
     eligible, reason = _workspace_eligible(verb, platform=platform, on_path=on_path)
     if eligible:
-        status, rc = _run_target(verb, "workspace")
+        status, rc = _run_target(verb, "workspace", force_runtime_unverified=force_runtime_unverified)
         outcomes.append(("workspace", status))
         failed += rc != 0
         skipped = 0
@@ -620,9 +629,10 @@ def _dispatch_all(
 
 
 def cli_enable(args: argparse.Namespace) -> int:
+    force = bool(getattr(args, "force_runtime_unverified", False))
     if args.target == "all":
-        return _dispatch_all("enable")
-    return _dispatch("enable", args.target)
+        return _dispatch_all("enable", force_runtime_unverified=force)
+    return _dispatch("enable", args.target, force_runtime_unverified=force)
 
 
 def cli_disable(args: argparse.Namespace) -> int:

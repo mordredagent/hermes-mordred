@@ -22,6 +22,7 @@ Heavy imports stay function-local so this module imports on any platform.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..keyvault._runtime_env import _env_optout_marker_path
@@ -38,6 +39,51 @@ if TYPE_CHECKING:
 __all__ = ["disable", "enable", "purge", "reseal"]
 
 _ENV_NAME = ".env"
+
+#: Runtime-injection probe signature: called ``probe(home=...)`` -> ``(ok, detail)``.
+#: Injected into :func:`enable` so tests can fake the runtime check (matching the
+#: ``backend=`` / ``store=`` injection style); production uses
+#: :func:`_default_runtime_probe`.
+RuntimeProbe = Callable[..., "tuple[bool, str]"]
+
+
+def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
+    """Production runtime probe: can the interpreter that runs ``hermes`` decrypt
+    a sealed ``.env``? Imported lazily so this module stays import-light."""
+    from ..keyvault._runtime_probe import runtime_env_injection_available
+
+    return runtime_env_injection_available(home=home)
+
+
+def _runtime_gate(
+    *,
+    home: Path,
+    platform: str,
+    runtime_probe: RuntimeProbe | None,
+    force_runtime_unverified: bool,
+) -> int:
+    """Fail-closed macOS gate for the destructive seal.
+
+    Returns 1 (after printing actionable guidance) when the interpreter that runs
+    ``hermes`` cannot inject a sealed ``.env`` at startup, else 0. A no-op (0) off
+    macOS — the plaintext is kept there anyway — and when
+    ``force_runtime_unverified`` is set.
+    """
+    if platform != "darwin" or force_runtime_unverified:
+        return 0
+    ok, detail = (runtime_probe or _default_runtime_probe)(home=home)
+    if ok:
+        return 0
+    _term.emit_error(
+        "refusing to vault-seal .env — " + detail + ".\n"
+        "  A sealed .env is injected at startup only by the mordred plugin in the\n"
+        "  interpreter that runs `hermes`. Install it there, e.g.:\n"
+        "    VIRTUAL_ENV=<that venv> uv pip install 'mordred-hermes[macos]'\n"
+        "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"
+        "  unreadable until the runtime has mordred), pass --force-runtime-unverified."
+    )
+    return 1
+
 
 #: Legacy reseal temp file. Older ``reseal`` builds staged the merged ``.env``
 #: through this 0o600 file before enrolling; the current :func:`reseal` enrolls the
@@ -299,6 +345,8 @@ def enable(
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
     prompt_io: PromptIO | None = None,
+    runtime_probe: RuntimeProbe | None = None,
+    force_runtime_unverified: bool = False,
 ) -> int:
     """Enroll ``<home>/.env`` into the vault and turn runtime injection on.
 
@@ -309,6 +357,13 @@ def enable(
     (unverifiable vault, device key-store error). On macOS the plaintext is
     removed only after a clean enroll, so a failure never strands the operator
     without a readable ``.env``.
+
+    On macOS the seal is **fail-closed on the runtime**: before any destructive
+    step it probes the interpreter that actually runs ``hermes`` (see
+    :mod:`...keyvault._runtime_probe`) and refuses (rc 1) when that runtime lacks
+    the mordred injection shim — otherwise the deleted plaintext would be
+    undecryptable at startup. ``runtime_probe`` is injectable for tests;
+    ``force_runtime_unverified`` bypasses the check (advanced; seals anyway).
     """
     from . import vault_cli
 
@@ -321,6 +376,19 @@ def enable(
     if not env_path.is_file():
         _term.emit_error(f"no .env at {env_path} — nothing to protect.")
         return 1
+
+    # Fail-closed runtime check (macOS only): sealing deletes the plaintext and
+    # relies on the startup shim to re-inject it — but that shim runs only if the
+    # interpreter that actually runs `hermes` has mordred installed. The dev venv
+    # driving this command is often NOT that runtime, and the managed runtime venv
+    # is recreated (dropping the non-PyPI mordred) on every `hermes` self-update.
+    # Gating here — before the reseal branch and the enroll/delete below — covers
+    # every destructive path. Off macOS the plaintext is kept anyway, so no gate.
+    gate = _runtime_gate(
+        home=home, platform=platform, runtime_probe=runtime_probe, force_runtime_unverified=force_runtime_unverified
+    )
+    if gate != 0:
+        return gate
 
     # Drift reconciliation: the vault already manages .env, injection is ON (no
     # opt-out marker), and we are on macOS, yet a plaintext is on disk. That means

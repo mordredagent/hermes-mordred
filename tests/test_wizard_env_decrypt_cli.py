@@ -53,6 +53,17 @@ def _vault_env(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> byte
         return opened.read_file(".env") if ".env" in opened.list_files() else None
 
 
+@pytest.fixture(autouse=True)
+def _runtime_injection_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the macOS runtime probe to *available* for the existing enable
+    tests, which exercise the enroll/delete logic rather than the runtime gate.
+
+    The gate itself is covered by :class:`TestRuntimeGate`, which injects its own
+    ``runtime_probe=`` and so is unaffected by this default.
+    """
+    monkeypatch.setattr(env_decrypt_cli, "_default_runtime_probe", lambda *, home: (True, "ok"))
+
+
 # -----------------------------------------------------------------------------
 # enable
 # -----------------------------------------------------------------------------
@@ -489,3 +500,105 @@ class TestEnableReconcilesDrift:
         rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
         assert rc == 0
         assert not (home / ".env.reseal.tmp").exists()  # swept
+
+
+# -----------------------------------------------------------------------------
+# runtime gate — refuse to seal .env when the `hermes` runtime cannot decrypt it
+# -----------------------------------------------------------------------------
+def _boom_probe(*, home: Path) -> tuple[bool, str]:
+    raise AssertionError("runtime probe must not be consulted on this path")
+
+
+class TestRuntimeGate:
+    """macOS fail-closed gate: sealing deletes the plaintext, so it must first
+    prove the interpreter that runs ``hermes`` can re-inject it at startup. When
+    it cannot, ``enable`` refuses and leaves every byte of state untouched.
+    """
+
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+        return root, home, backend, store
+
+    def test_refuses_and_keeps_state_when_runtime_cannot_inject(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=lambda *, home: (False, "mordred_keyvault plugin not registered"),
+        )
+        assert rc == 1
+        assert (home / ".env").read_bytes() == _ENV_A  # plaintext untouched
+        assert _vault_env(root, backend, store) is None  # nothing enrolled
+        assert not _env_optout_marker_path(home).exists()  # marker untouched
+        out = capsys.readouterr()
+        assert "refusing to vault-seal .env" in (out.err + out.out)
+
+    def test_force_bypasses_the_gate(self, tmp_path: Path) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=_boom_probe,  # must not be consulted under force
+            force_runtime_unverified=True,
+        )
+        assert rc == 0
+        assert _vault_env(root, backend, store) == _ENV_A  # enrolled
+        assert not (home / ".env").exists()  # sealed despite an unverified runtime
+
+    def test_gate_not_applied_off_macos(self, tmp_path: Path) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="linux",
+            backend=backend,
+            store=store,
+            runtime_probe=_boom_probe,  # off macOS the gate never runs
+        )
+        assert rc == 0
+        assert _vault_env(root, backend, store) == _ENV_A  # enrolled
+        assert (home / ".env").read_bytes() == _ENV_A  # plaintext kept off macOS
+
+    def test_drift_reseal_path_is_also_gated(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        # Enrolled + injection ON + a stray plaintext on macOS routes enable() to
+        # the drift/reseal branch, which also deletes the plaintext. The gate sits
+        # before that branch, so a regressed runtime must block reseal too.
+        root, home, backend, store = self._setup(tmp_path)
+        assert (
+            env_decrypt_cli.enable(
+                home=home,
+                root=root,
+                platform="darwin",
+                backend=backend,
+                store=store,
+                runtime_probe=lambda *, home: (True, "ok"),
+            )
+            == 0
+        )
+        assert not (home / ".env").exists()  # cleanly sealed first
+
+        (home / ".env").write_bytes(_ENV_B)  # a host write drops a partial plaintext back (drift)
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=lambda *, home: (False, "mordred dropped from the runtime"),
+        )
+        assert rc == 1
+        assert (home / ".env").read_bytes() == _ENV_B  # drift plaintext kept, not deleted by reseal
+        out = capsys.readouterr()
+        assert "refusing to vault-seal .env" in (out.err + out.out)
