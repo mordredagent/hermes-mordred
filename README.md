@@ -16,7 +16,7 @@ Active alpha (`0.1.0a0`). The five entry-point plugins are implemented beyond
 the original Phase 0 scaffold; the default unit suite is intended to stay
 hermetic, while hardware- and network-mutating checks remain opt-in.
 
-See `../mordred-docs/mordred/` for SPEC, PLAN, TODO, PATHS, MIGRATION, UPSTREAM, CI.
+See `../mordred-docs/dev/` for SPEC, PLAN, TODO, PATHS, MIGRATION, UPSTREAM, CI.
 
 ## Validation
 

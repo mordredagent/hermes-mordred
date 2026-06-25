@@ -413,9 +413,7 @@ class TestNetworkInitGuidance:
         assert "Mullvad CLI is not available yet" in summary
         assert "mullvad account login" in summary
 
-    def test_init_summary_custom_provider_does_not_warn_about_mullvad(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_init_summary_custom_provider_does_not_warn_about_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A custom-provider (e.g. ExpressVPN) user must never be told to
         install Mullvad — the warning must be about *their* CLI."""
         from mordred_hermes.wizard import network_cli
@@ -442,9 +440,7 @@ class TestNetworkInitGuidance:
         )
         assert "Mullvad" not in summary
 
-    def test_init_summary_custom_provider_missing_cli_warns_about_custom(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_init_summary_custom_provider_missing_cli_warns_about_custom(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import network_cli
 
         monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
@@ -477,9 +473,7 @@ class TestDependencyWarningProviderAware:
             "mordred_hermes.network.guidance.shutil.which",
             lambda _name: "/usr/local/bin/expressvpnctl",
         )
-        warning = guidance.dependency_warning(
-            "vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect")
-        )
+        warning = guidance.dependency_warning("vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect"))
         assert warning is None
 
     def test_vpn_custom_missing_names_custom_cli_not_mullvad(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -487,9 +481,7 @@ class TestDependencyWarningProviderAware:
 
         monkeypatch.setattr("mordred_hermes.network.guidance.shutil.which", lambda _name: None)
         monkeypatch.setattr("pathlib.Path.exists", lambda _self: False)
-        warning = guidance.dependency_warning(
-            "vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect")
-        )
+        warning = guidance.dependency_warning("vpn", vpn_provider="custom", custom_up_cmd=("expressvpnctl", "connect"))
         assert warning is not None
         assert "Mullvad" not in warning
         assert "expressvpnctl" in warning

@@ -4,8 +4,8 @@
 privacy configuration, migration, install gating, audit log inspection,
 and plugin discovery.
 
-See also: `mordred-docs/mordred/SPEC.md` §Plugin: `mordred_wizard`,
-`mordred-docs/mordred/PATHS.md`, `mordred-docs/mordred/POLICY.md`.
+See also: `mordred-docs/dev/SPEC.md` §Plugin: `mordred_wizard`,
+`mordred-docs/dev/PATHS.md`, `mordred-docs/dev/POLICY.md`.
 
 ## Subcommand reference
 
@@ -158,7 +158,7 @@ Exit codes: `0` (done), `1` (any refusal — see the command's stderr).
 
 Implementation: `keyvault_cli.py`.
 
-## Owned filesystem paths (see `mordred-docs/mordred/PATHS.md`)
+## Owned filesystem paths (see `mordred-docs/dev/PATHS.md`)
 
 | Path | Mode | Notes |
 |---|---|---|

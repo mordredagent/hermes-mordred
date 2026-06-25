@@ -19,5 +19,5 @@ The publish path is `.github/workflows/release.yml`:
 - `mode=reserve` — builds and uploads **this stub** (run once, TestPyPI then PyPI).
 - `mode=release` — builds and uploads the **real** `mordred-hermes/` package.
 
-See `mordred-docs/mordred/CI.md` § `release.yml` for the operator runbook
+See `mordred-docs/dev/CI.md` § `release.yml` for the operator runbook
 (PyPI Trusted Publishing / pending-publisher setup).

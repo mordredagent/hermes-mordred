@@ -52,7 +52,7 @@ def test_harness_refused_propagates_past_exception_wrapper() -> None:
     """Simulate Hermes ``invoke_hook`` ``except Exception:`` wrapper.
 
     Mirrors the propagation contract documented in
-    ``mordred-docs/mordred/HOOK_PAYLOADS.md`` §1 and the privacy_check
+    ``mordred-docs/dev/HOOK_PAYLOADS.md`` §1 and the privacy_check
     hook handler reasoning in
     ``mordred-hermes/src/mordred_hermes/privacy_check/hooks.py:10-14``.
     """

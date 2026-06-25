@@ -114,37 +114,27 @@ def extract_hook_payload_fields(
                 DispatchSite(
                     file=str(rel),
                     line=node.lineno,
-                    fields=frozenset(
-                        kw.arg for kw in node.keywords if kw.arg is not None
-                    ),
+                    fields=frozenset(kw.arg for kw in node.keywords if kw.arg is not None),
                     has_dynamic_kwargs=any(kw.arg is None for kw in node.keywords),
                 )
             )
     return sites
 
 
-def compare(
-    contract: dict[str, list[str]], sites: dict[str, list[DispatchSite]]
-) -> list[str]:
+def compare(contract: dict[str, list[str]], sites: dict[str, list[DispatchSite]]) -> list[str]:
     """Drift messages for every contract violation (empty list = no drift)."""
     drift: list[str] = []
     for hook in sorted(contract):
         hook_sites = sites.get(hook, [])
         if not hook_sites:
-            drift.append(
-                f"{hook}: no invoke_hook dispatch site found — core may have "
-                "stopped firing this hook"
-            )
+            drift.append(f"{hook}: no invoke_hook dispatch site found — core may have stopped firing this hook")
             continue
         for site in hook_sites:
             if site.has_dynamic_kwargs:
                 continue
             missing = sorted(set(contract[hook]) - set(site.fields))
             if missing:
-                drift.append(
-                    f"{hook}: {site.file}:{site.line} missing payload "
-                    f"field(s): {', '.join(missing)}"
-                )
+                drift.append(f"{hook}: {site.file}:{site.line} missing payload field(s): {', '.join(missing)}")
     return drift
 
 
@@ -182,10 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {entry}")
         return 1
     scanned = sum(len(v) for v in sites.values())
-    print(
-        f"hook payload contract satisfied "
-        f"({len(contract)} hooks, {scanned} dispatch sites scanned)"
-    )
+    print(f"hook payload contract satisfied ({len(contract)} hooks, {scanned} dispatch sites scanned)")
     return 0
 
 

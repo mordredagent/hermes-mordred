@@ -38,7 +38,7 @@ def bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, P
     about.parent.mkdir(parents=True)
     about.write_text('__version__ = "0.1.0a0"\n', encoding="utf-8")
 
-    doc = tmp_path / "mordred-docs" / "mordred" / "VERSION"
+    doc = tmp_path / "mordred-docs" / "dev" / "VERSION"
     doc.parent.mkdir(parents=True)
     doc.write_text("0.1.0a0\n", encoding="utf-8")
 

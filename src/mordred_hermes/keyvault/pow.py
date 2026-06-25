@@ -1,7 +1,7 @@
 """mordred_keyvault.pow — Proof-of-Work artifact for ``keyvault init``.
 
 Canonical algorithm frozen in
-``mordred-docs/mordred/SPEC.md §"Proof-of-Work (PoW) algorithm"``::
+``mordred-docs/dev/SPEC.md §"Proof-of-Work (PoW) algorithm"``::
 
     H                    := BLAKE3 (32-byte digest mode; unkeyed)
     POW_PREFIX           := b"MRPOW\\x01"

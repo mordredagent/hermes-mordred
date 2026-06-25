@@ -72,7 +72,7 @@ _SELECTABLE_CLOUD_PROVIDERS: Final[tuple[str, ...]] = tuple(
 #: One-line description shown inline next to each policy mode in the
 #: ``configure`` radio dialog (UX request 2026-06-15: the bare strict/lenient/off
 #: labels gave no hint of what each mode does). Copy mirrors the policy-mode
-#: table in ``mordred-docs/mordred/QUICKSTART.md`` so the TUI and the docs never
+#: table in ``mordred-docs/user/QUICKSTART.md`` so the TUI and the docs never
 #: drift. A mode missing here simply renders without a description.
 _POLICY_MODE_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "strict": "Blocks cloud LLMs, disables IPv6, refuses known AI harnesses",
@@ -87,7 +87,7 @@ _POLICY_MODE_DESCRIPTIONS: Final[Mapping[str, str]] = {
 #: non-allowlisted cloud attempt asks the operator once per provider at an
 #: interactive terminal, failing closed to a block when no terminal is present
 #: (the headless / harness / CI case). Mirrors the Q6 note in
-#: ``mordred-docs/mordred/USAGE.md`` so the TUI and the docs never drift.
+#: ``mordred-docs/user/USAGE.md`` so the TUI and the docs never drift.
 _CLOUD_ATTEMPT_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "always-block": "Silently refuse the cloud call every time (recommended)",
     "prompt-once": "Ask once per provider at a terminal; blocks if non-interactive",

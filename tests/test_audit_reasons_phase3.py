@@ -1,6 +1,6 @@
 """Phase 3 step-0 freeze of ``network.*`` audit reason codes.
 
-Per ``mordred-docs/mordred/TODO.md`` L13:
+Per ``mordred-docs/dev/TODO.md`` L13:
 
     "Phase 3/4 codes (``network.*``, ``keyvault.*``) are intentionally NOT
     included [in the Phase 1 12-code freeze] — each phase's step-0 freeze

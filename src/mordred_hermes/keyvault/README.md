@@ -2,7 +2,7 @@
 
 Secure Enclave-backed key management. macOS Apple Silicon **or T2 Intel** (`pip install mordred-hermes[macos]`). Capability is determined by a runtime probe rather than chip-class checking — `is_secure_enclave_available()` returns False on Linux / Windows without ever loading pyobjc (codex review MEDIUM-1).
 
-## Owned filesystem paths (see `mordred-docs/mordred/PATHS.md`)
+## Owned filesystem paths (see `mordred-docs/dev/PATHS.md`)
 
 - `~/.hermes/mordred/keyvault/` — wrapped DEKs, backup blobs, digest cache (Phase 4 owner; sole writer + reader)
 
@@ -89,6 +89,6 @@ The secret is **never materialized** on digest mismatch — asserted by explosiv
 
 ## See also
 
-- `mordred-docs/mordred/SPEC.md` §Plugin: `mordred_keyvault` — key hierarchy, digest algorithm canonical form, Seed display security caveats (M4 / M5); §Backup wire format versioning (PR2); §Wrap wire format & algorithm (PR3) for the full byte layout, algorithm steps, and `kSec*` access-control attributes
-- `mordred-docs/mordred/POLICY.md` §Phase 4 step-0 freeze (PR2) — `keyvault.recovery_digest_mismatch` and `keyvault.seed_display_aborted_screenshot`; §Phase 4 PR3 step-0 freeze — `keyvault.unwrap_authorized` and `keyvault.unwrap_denied`
-- `mordred-docs/mordred/TODO.md` §4.1 — implementation checklist
+- `mordred-docs/dev/SPEC.md` §Plugin: `mordred_keyvault` — key hierarchy, digest algorithm canonical form, Seed display security caveats (M4 / M5); §Backup wire format versioning (PR2); §Wrap wire format & algorithm (PR3) for the full byte layout, algorithm steps, and `kSec*` access-control attributes
+- `mordred-docs/dev/POLICY.md` §Phase 4 step-0 freeze (PR2) — `keyvault.recovery_digest_mismatch` and `keyvault.seed_display_aborted_screenshot`; §Phase 4 PR3 step-0 freeze — `keyvault.unwrap_authorized` and `keyvault.unwrap_denied`
+- `mordred-docs/dev/TODO.md` §4.1 — implementation checklist

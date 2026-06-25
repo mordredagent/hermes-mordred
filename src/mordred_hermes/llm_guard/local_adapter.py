@@ -6,7 +6,7 @@ talks to the configured ``base_url`` directly — we don't ship a separate
 streaming wrapper (Codex review H1 / Phase 2 PR1 prep: ``ProviderProfile``
 is purely declarative and Hermes core owns the streaming pipeline; the
 historical ``wrap_stream_fn`` / ``auth`` / ``discovery`` SPI list in
-``mordred-docs/mordred/PLAN.md`` L299 is stale against Hermes v0.11.0).
+``mordred-docs/dev/PLAN.md`` L299 is stale against Hermes v0.11.0).
 
 Registration is **explicit** (Codex B1). ``register_mordred_local()`` is
 called from ``llm_guard/__init__.py`` inside ``register(ctx)``; the upstream

@@ -36,7 +36,7 @@ non-allowlisted cloud providers out under strict policy.
 - **Per-turn `pre_llm_call` override** — HOOK_PAYLOADS.md §5 confirms
   this is structurally impossible in Hermes v0.11.0.
 
-## Owned filesystem paths (see `mordred-docs/mordred/PATHS.md`)
+## Owned filesystem paths (see `mordred-docs/dev/PATHS.md`)
 
 - `~/.hermes/mordred/policy.json` — reader (`local_llm_endpoint`,
   `local_llm_model_id`, `cloud_attempt_action`, `policy`,
@@ -51,8 +51,8 @@ non-allowlisted cloud providers out under strict policy.
 
 ## Cross-references
 
-- `mordred-docs/mordred/SPEC.md` §`Plugin: mordred_llm_guard` / §Story 4
-- `mordred-docs/mordred/PLAN.md` §"Phase 2 — LLM Enforcement"
-- `mordred-docs/mordred/HOOK_PAYLOADS.md` §5 (pre_llm_call constraints)
-- `mordred-docs/mordred/POLICY.md` §Audit log reason enum (frozen)
-- `mordred-docs/mordred/TODO.md` §Phase 2 PR1 prep findings
+- `mordred-docs/dev/SPEC.md` §`Plugin: mordred_llm_guard` / §Story 4
+- `mordred-docs/dev/PLAN.md` §"Phase 2 — LLM Enforcement"
+- `mordred-docs/dev/HOOK_PAYLOADS.md` §5 (pre_llm_call constraints)
+- `mordred-docs/dev/POLICY.md` §Audit log reason enum (frozen)
+- `mordred-docs/dev/TODO.md` §Phase 2 PR1 prep findings

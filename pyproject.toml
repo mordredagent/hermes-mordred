@@ -115,7 +115,7 @@ mordred_wizard = "mordred_hermes.wizard"
 hermes-mordred = "mordred_hermes.wizard.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/InternetMaximalism/Mordred-Hermes/tree/main/mordred-docs/mordred"
+Documentation = "https://github.com/InternetMaximalism/Mordred-Hermes/tree/main/mordred-docs/dev"
 Source = "https://github.com/InternetMaximalism/Mordred-Hermes"
 
 [tool.mordred]

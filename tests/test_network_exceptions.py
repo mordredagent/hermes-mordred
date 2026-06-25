@@ -12,7 +12,7 @@ Phase 2 PR1 (Codex review H2):
   ``on_session_start`` and the liveness worker / ``pre_tool_call`` hook
   respectively. They must escape the ``except Exception:`` filter inside
   ``hermes_cli.plugins.invoke_hook`` (see
-  ``mordred-docs/mordred/HOOK_PAYLOADS.md`` §1) so strict-mode network
+  ``mordred-docs/dev/HOOK_PAYLOADS.md`` §1) so strict-mode network
   refusals actually abort the session. They are *not* :class:`SystemExit`
   subclasses so cleanup-style ``except SystemExit:`` blocks do not mistake
   a strict-mode refusal for an ordinary CLI exit.

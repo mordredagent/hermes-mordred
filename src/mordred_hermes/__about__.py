@@ -3,7 +3,7 @@
 # Hatchling reads ``__version__`` from this file at build time
 # (``[tool.hatch.version] path`` in pyproject.toml), so the version is NOT
 # hardcoded in pyproject. This file lives INSIDE the importable package —
-# not in the docs tree (mordred-docs/mordred/VERSION) — because a
+# not in the docs tree (mordred-docs/dev/VERSION) — because a
 # sdist->wheel build runs in an isolated directory that does not contain
 # anything outside mordred-hermes/. Reading the docs-tree VERSION marker at
 # build time would therefore break (TODO 0.5 L64). Keeping the canonical

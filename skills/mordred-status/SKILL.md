@@ -50,7 +50,7 @@ the exact command and tell them to run it themselves in their shell:
 ## Why
 
 These rules preserve the "domain separation" principle in
-`mordred-docs/mordred/HARNESS_PRIVACY.md`: a recording agent may watch Mordred's
+`mordred-docs/dev/HARNESS_PRIVACY.md`: a recording agent may watch Mordred's
 on/off state, but secrets (recovery passphrase, `.env` contents, decrypted audit)
 and control actions must stay on the operator's shell, outside the transcript.
 
