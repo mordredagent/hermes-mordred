@@ -31,13 +31,14 @@ from __future__ import annotations
 import contextlib
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .._home import hermes_home as _hermes_home
 from ._identity import default_vault_root
 from ._runtime_env import _env_optout_marker_path
 
-__all__ = ["install_env_write_guard"]
+__all__ = ["install_env_write_guard", "reseal_stray_env_if_present"]
 
 #: Attribute stamped on the wrapper so a second install is a no-op (idempotent).
 _WRAPPED_FLAG = "_mordred_env_reseal_wrapped"
@@ -113,30 +114,70 @@ def install_env_write_guard(
     return True
 
 
-def _reseal_quietly() -> None:
-    """Reconcile a sealed-state plaintext drift; never raise into the host write.
+def reseal_stray_env_if_present(
+    *,
+    home: Path | None = None,
+    platform: str | None = None,
+) -> bool:
+    """Heal a stray plaintext ``~/.hermes/.env`` by resealing it into the vault.
 
-    Cheap pre-checks (opt-out marker, plaintext presence) keep the common case —
-    nothing to do — off the vault hot path entirely. :func:`...reseal` repeats the
-    authoritative checks and does the merge + re-enroll + plaintext removal.
+    The *proactive* twin of :func:`install_env_write_guard`'s post-write reconcile:
+    the write guard only catches drift created *through the host writer*, whereas
+    this catches a plaintext simply *present on disk* — left by another path (e.g.
+    ``gateway setup``) or from before the guard was installed. Wired onto the
+    ``on_session_start`` / ``on_session_end`` plugin hooks by
+    :func:`mordred_hermes.keyvault.register`.
+
+    macOS only: off macOS the runtime read shim is a no-op, so removing the
+    plaintext would strand the secrets — gate and bail. Also a no-op in the
+    reversible *disabled* state (opt-out marker present: the on-disk plaintext is
+    the intentional live copy, not drift) and when there is no plaintext at all —
+    those cheap pre-checks keep the common case off the vault hot path, so no
+    spurious device unlock (Touch ID) on every session.
+
+    Returns ``True`` only when a plaintext ``.env`` existed before this call and is
+    gone afterwards (an actual reseal). ``reseal`` returns ``0`` for both clean
+    no-ops *and* success and keeps the plaintext in every non-clean case, so
+    "did we reseal?" is "is the plaintext now gone?", not the return code. ``False``
+    for every no-op or a reseal that failed / kept the plaintext. Never raises.
+
+    ``home`` / ``platform`` are injectable for tests; in production they default to
+    the live Hermes home and ``sys.platform``.
     """
-    home = _hermes_home()
+    platform = sys.platform if platform is None else platform
+    if platform != "darwin":
+        return False
+    home = _hermes_home() if home is None else home
     if _env_optout_marker_path(home).exists():
-        return  # disabled state: the plaintext is the intentional live copy
-    if not (home / ".env").is_file():
-        return  # no stray plaintext → nothing to reseal
+        return False  # disabled state: the plaintext is the intentional live copy
+    env_path = home / ".env"
+    if not env_path.is_file():
+        return False  # no stray plaintext → nothing to reseal
 
     try:
         from ..wizard import env_decrypt_cli
 
         env_decrypt_cli.reseal(home=home, root=default_vault_root())
     except Exception as exc:
-        # The host write succeeded; surface a stranded plaintext rather than
-        # crashing the caller, and let `encryption status` flag it as exposed.
+        # Surface a stranded plaintext rather than crashing the session boundary,
+        # and let `encryption status` flag it as exposed.
         with contextlib.suppress(Exception):
             from ..wizard import _term
 
             _term.emit_warn(
-                f"could not reseal .env into the vault after a config write: {exc} — a plaintext copy "
+                f"could not reseal .env into the vault at a session boundary: {exc} — a plaintext copy "
                 "may remain at rest; run `hermes-mordred encryption enable env`."
             )
+        return False
+
+    return not env_path.is_file()
+
+
+def _reseal_quietly() -> None:
+    """The write-guard's post-write ``reconcile`` callback.
+
+    Delegates to :func:`reseal_stray_env_if_present`. The write path is already
+    macOS-gated by :func:`install_env_write_guard`, so the helper's platform check
+    is a redundant safety net here; the helper never raises into the host write.
+    """
+    reseal_stray_env_if_present()

@@ -12,7 +12,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
-- ``keyvault {init,list,verify-digest,recover,reset,enable-se,enable-tpm}`` — keyvault management
+- ``keyvault {init,list,verify-digest,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — list discovered Mordred plugins
 """
@@ -273,6 +273,10 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     p_enable_tpm.add_argument("--install-dir", help="Install directory for the helper (default: ~/.local/bin)")
     p_enable_tpm.set_defaults(func=_handle_keyvault_enable_tpm)
+
+    from . import keyvault_eth_cli
+
+    keyvault_eth_cli.add_eth_subparsers(ksub)
 
 
 def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
