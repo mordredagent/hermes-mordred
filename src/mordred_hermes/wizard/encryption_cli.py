@@ -184,13 +184,18 @@ def env_status(*, root: Path, home: Path, platform: str) -> TargetStatus:
     # disk means a host write slipped one past the seal — a secret is exposed at
     # rest and the file is partial (it loses the other enrolled keys until
     # resealed). A plaintext is expected (not drift) when opted-out or off-macOS.
-    drift = active and (home / ".env").exists()
+    # Also catch a reseal temp stranded by a crash — a 0o600 plaintext at rest the
+    # plain ".env" check would miss; treat it as the same exposed/drift state.
+    from .env_decrypt_cli import _RESEAL_TMP_NAME
+
+    stray_plaintext = (home / ".env").exists() or (home / _RESEAL_TMP_NAME).exists()
+    drift = active and stray_plaintext
     if not enrolled:
         detail = "not enrolled"
     elif opted_out:
         detail = "disabled — encrypted copy kept; re-enable: encryption enable env"
     elif drift:
-        detail = "plaintext .env present at rest while vault-managed — reseal with: encryption enable env"
+        detail = "a plaintext .env copy is on disk at rest while vault-managed — reseal with: encryption enable env"
     else:
         detail = _os_note(active, platform)
     return TargetStatus("env", configured, active, detail, drift=drift)

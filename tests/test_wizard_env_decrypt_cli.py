@@ -420,6 +420,27 @@ class TestReseal:
         assert rc == 0
         assert (home / ".env").read_bytes() == b"A=1\n"  # left alone
 
+    def test_merge_preserves_values_with_special_chars(self, tmp_path: Path) -> None:
+        """A host write of a value with a space + '#' (or an escaped newline) must
+        survive the merge intact — bare re-emission would truncate it at the inline
+        comment / line break and silently corrupt the secret."""
+        from io import StringIO
+
+        from dotenv import dotenv_values
+
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, b"A=1\n")
+        (home / ".env").write_bytes(b'B="hello # world"\nC="line1\\nline2"\n')
+
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        assert rc == 0
+        assert not (home / ".env").exists()
+        enrolled = _vault_env(root, backend, store).decode("utf-8")
+        vals = dotenv_values(stream=StringIO(enrolled), interpolate=False)
+        assert vals == {"A": "1", "B": "hello # world", "C": "line1\nline2"}
+
 
 class TestEnableReconcilesDrift:
     def test_enable_merges_on_drift_instead_of_clobbering(self, tmp_path: Path) -> None:
@@ -435,3 +456,17 @@ class TestEnableReconcilesDrift:
         assert rc == 0
         assert not (home / ".env").exists()
         assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"  # merged, nothing lost
+
+    def test_enable_sweeps_stale_reseal_temp(self, tmp_path: Path) -> None:
+        """A reseal temp stranded by a prior crash (a plaintext at rest) is swept by
+        the next ``enable``, so the documented remedy actually clears the exposure."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+        (home / ".env.reseal.tmp").write_bytes(b"stale\n")  # leftover from a crash
+
+        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+        assert rc == 0
+        assert not (home / ".env.reseal.tmp").exists()  # swept

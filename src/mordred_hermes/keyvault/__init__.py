@@ -34,5 +34,7 @@ def register(ctx: Any) -> None:
         from ._env_write_guard import install_env_write_guard
 
         install_env_write_guard()
-    except Exception:
-        pass
+    except Exception:  # fail-open: never break startup — but leave a debug breadcrumb
+        import logging
+
+        logging.getLogger(__name__).debug("env write guard not installed", exc_info=True)

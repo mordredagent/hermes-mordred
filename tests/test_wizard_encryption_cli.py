@@ -128,6 +128,18 @@ class TestEnvStatus:
         assert st.drift is False
         assert encryption_cli.status_mark(st) == "on"
 
+    def test_stray_reseal_temp_is_drift(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A reseal temp stranded by a crash is a plaintext at rest the plain ".env"
+        check would miss — env_status must still flag it as exposed."""
+        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".env.reseal.tmp").write_text("FOO=bar\n", encoding="utf-8")  # only the temp, no .env
+        st = encryption_cli.env_status(root=tmp_path / "v", home=home, platform="darwin")
+        assert st.drift is True
+        assert encryption_cli.status_mark(st) == "exposed"
+        assert st.to_dict()["drift"] is True
+
 
 class TestConfigStatus:
     def test_marker_absent(self, tmp_path: Path) -> None:
