@@ -81,6 +81,24 @@ class TestEnable:
         assert not (home / ".env").exists()  # no plaintext at rest on macOS
         assert not _env_optout_marker_path(home).exists()  # injection ON
 
+    def test_already_sealed_reenable_is_noop_success(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        # Re-running enable when env is already sealed (enrolled, injection ON, no
+        # plaintext) must succeed as a no-op, not error "nothing to protect".
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+        assert env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store) == 0
+        assert not (home / ".env").exists()  # sealed: no plaintext to re-enroll
+
+        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+        assert rc == 0  # idempotent, not exit 1
+        assert _vault_env(root, backend, store) == _ENV_A  # still enrolled, unchanged
+        out = capsys.readouterr()
+        assert "already vault-managed" in (out.out + out.err)
+        assert "nothing to protect" not in (out.out + out.err)
+
     def test_keeps_plaintext_off_macos(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()

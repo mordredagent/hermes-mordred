@@ -85,6 +85,21 @@ def _runtime_gate(
     return 1
 
 
+def _handle_missing_plaintext(root: Path, home: Path, env_path: Path) -> int:
+    """Resolve ``enable`` when there is no plaintext ``<home>/.env`` to enroll.
+
+    Returns 0 — a success **no-op** — when env is already in the sealed steady
+    state (enrolled, injection ON, no plaintext at rest): re-running ``enable env``
+    (or ``enable all``) must not report "nothing to protect" for something that is
+    in fact already enabled. Otherwise returns 1 (genuinely nothing to protect).
+    """
+    if _env_enrolled(root) and not _env_optout_marker_path(home).exists():
+        print(".env is already vault-managed and sealed (no plaintext at rest); nothing to do.")
+        return 0
+    _term.emit_error(f"no .env at {env_path} — nothing to protect.")
+    return 1
+
+
 #: Legacy reseal temp file. Older ``reseal`` builds staged the merged ``.env``
 #: through this 0o600 file before enrolling; the current :func:`reseal` enrolls the
 #: merged bytes through a single vault open and never creates it. Kept so the
@@ -374,8 +389,7 @@ def enable(
 
     env_path = home / _ENV_NAME
     if not env_path.is_file():
-        _term.emit_error(f"no .env at {env_path} — nothing to protect.")
-        return 1
+        return _handle_missing_plaintext(root, home, env_path)
 
     # Fail-closed runtime check (macOS only): sealing deletes the plaintext and
     # relies on the startup shim to re-inject it — but that shim runs only if the
