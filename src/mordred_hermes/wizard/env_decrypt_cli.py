@@ -74,11 +74,16 @@ def _runtime_gate(
     ok, detail = (runtime_probe or _default_runtime_probe)(home=home)
     if ok:
         return 0
+    from ..keyvault._runtime_probe import discover_runtime_python
+
+    runtime_python = discover_runtime_python(home=home) or (home / "hermes-agent" / "venv" / "bin" / "python3")
     _term.emit_error(
         "refusing to vault-seal .env — " + detail + ".\n"
         "  A sealed .env is injected at startup only by the mordred plugin in the\n"
-        "  interpreter that runs `hermes`. Install it there, e.g.:\n"
-        "    VIRTUAL_ENV=<that venv> uv pip install 'mordred-hermes[macos]'\n"
+        "  interpreter that runs `hermes`. mordred-hermes is not published to an\n"
+        "  index — install it into that runtime from your local checkout instead\n"
+        "  (run from the repo root):\n"
+        f"    uv pip install --python {runtime_python} -e './mordred-hermes[macos]'\n"
         "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"
         "  unreadable until the runtime has mordred), pass --force-runtime-unverified."
     )
