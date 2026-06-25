@@ -778,6 +778,43 @@ class TestInit:
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
 
+    def test_init_audit_lines_distinguish_started_from_completed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The two ``keyvault.init`` / ``decision=allow`` audit lines must be
+        distinguishable. They share event + decision and only differ by
+        ``reason``; the default stderr sink now appends it so an operator can
+        tell the durability-barrier emit from the completion emit.
+        """
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "[audit] keyvault.init decision=allow (keyvault.init_started)" in err
+        assert "[audit] keyvault.init decision=allow (keyvault.init_completed)" in err
+
+
+class TestStderrAuditSink:
+    """The default ``init`` / ``recover`` audit sink (``_stderr_audit_sink``)."""
+
+    def test_appends_reason_when_present(self, capsys: pytest.CaptureFixture[str]) -> None:
+        keyvault_cli._stderr_audit_sink(
+            {"event": "keyvault.init", "decision": "allow", "reason": "keyvault.init_started"}
+        )
+        assert capsys.readouterr().err.strip() == "[audit] keyvault.init decision=allow (keyvault.init_started)"
+
+    def test_omits_suffix_when_reason_absent(self, capsys: pytest.CaptureFixture[str]) -> None:
+        keyvault_cli._stderr_audit_sink({"event": "keyvault.import_backup", "decision": "allow"})
+        assert capsys.readouterr().err.strip() == "[audit] keyvault.import_backup decision=allow"
+
 
 class TestGuidanceSpelling:
     """UX review 2026-06-11: failure guidance must name the working CLI form.

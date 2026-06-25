@@ -38,10 +38,18 @@ def _stderr_audit_sink(entry: dict[str, Any]) -> None:
     encrypted audit log to append to yet. The recovery-digest-mismatch
     and DEK-unwrap decisions ``import_backup`` records are shown to the
     operator instead. Persisted recovery auditing is a v2 follow-up.
+
+    The ``reason`` is appended when present so distinct lifecycle entries
+    that share an ``event`` + ``decision`` are distinguishable: a normal
+    ``keyvault init`` emits ``keyvault.init`` / ``decision=allow`` twice —
+    once for ``keyvault.init_started`` (the durability barrier) and once
+    for ``keyvault.init_completed`` — which otherwise print identically.
     """
     event = entry.get("event", "?")
     decision = entry.get("decision", "?")
-    print(f"[audit] {event} decision={decision}", file=sys.stderr)
+    reason = entry.get("reason")
+    suffix = f" ({reason})" if reason else ""
+    print(f"[audit] {event} decision={decision}{suffix}", file=sys.stderr)
 
 
 #: Bounded retries at the verification-digest prompt (init_keyvault).
