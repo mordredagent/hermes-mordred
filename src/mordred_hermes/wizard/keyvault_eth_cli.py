@@ -31,8 +31,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..keyvault import _storage
-from ..keyvault._envelope_codec import _hash_id
 from ..keyvault._exceptions import WrapError
 from . import _term
 from ._keyvault_init import _stderr_audit_sink
@@ -76,19 +74,15 @@ def _resolve_sink(audit_sink: AuditSink | None) -> AuditSink:
 
 
 def _list_seed_envelope_ids(key_id: str, home: Path | None) -> list[str]:
-    """Return the ``envelope_id``s of every stored HD seed for ``key_id``.
+    """Stored HD seed ``envelope_id``s — delegates to the ethereum layer.
 
-    Enumerates ``ciphertexts/<key_id_hash>/<seed_purpose_hash>/*.gcm`` — the
-    same layout :func:`mordred_hermes.keyvault._secret_ops.encrypt` writes —
-    and returns the sorted ``.gcm`` stems (each is an ``envelope_id``).
+    The on-disk ciphertext layout is owned by
+    :func:`mordred_hermes.keyvault.ethereum.list_seed_envelope_ids`; the
+    wizard does not reconstruct the path formula itself.
     """
-    from ..keyvault.ethereum import _SEED_PURPOSE
+    from ..keyvault.ethereum import list_seed_envelope_ids
 
-    root = _storage.resolve_keyvault_dir(home)
-    seed_dir = root / "ciphertexts" / _hash_id(key_id).hex() / _hash_id(_SEED_PURPOSE).hex()
-    if not seed_dir.is_dir():
-        return []
-    return sorted(path.stem for path in seed_dir.glob("*.gcm"))
+    return list_seed_envelope_ids(key_id, home=home)
 
 
 def _resolve_seed_envelope_id(key_id: str, seed_envelope_id: str | None, home: Path | None) -> str | None:
@@ -183,6 +177,11 @@ def eth_derive(
     prints the address + path. Decryption of the seed triggers Enclave
     authorization (Touch ID / passcode) unless the wrapping key is
     unattended. Returns 0 on success; 1 on a resolution or Enclave error.
+
+    The optional BIP-39 passphrase ("25th word") is not exposed at this CLI
+    surface — derivation always uses an empty passphrase. A seed that was
+    protected by a 25th word must be derived through the Python API
+    (:func:`mordred_hermes.keyvault.ethereum.derive_ethereum_key`).
     """
     backend = _resolve_backend(backend)
     sink = _resolve_sink(audit_sink)
@@ -303,8 +302,16 @@ def add_eth_subparsers(ksub: argparse._SubParsersAction[argparse.ArgumentParser]
     p_new.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_new.set_defaults(func=cli_eth_new)
 
-    p_derive = esub.add_parser("derive", help="Derive a BIP-44 HD account from the stored seed")
-    p_derive.add_argument("--index", type=int, default=0, help="Account index (default: 0)")
+    p_derive = esub.add_parser(
+        "derive",
+        help="Derive a BIP-44 HD account from the stored seed",
+        description=(
+            "Derive m/44'/60'/account'/change/index from the stored seed. The "
+            'BIP-39 passphrase ("25th word") is not supported here — derivation '
+            "always uses an empty passphrase."
+        ),
+    )
+    p_derive.add_argument("--index", type=int, default=0, help="BIP-44 address index (default: 0)")
     p_derive.add_argument("--account", type=int, default=0, help="BIP-44 account level (default: 0)")
     p_derive.add_argument("--change", type=int, default=0, help="BIP-44 change level (default: 0)")
     p_derive.add_argument(

@@ -315,6 +315,28 @@ def store_seed_phrase(
         del seed_bytes
 
 
+def list_seed_envelope_ids(key_id: str, *, home: Path | None = None) -> list[str]:
+    """Return the ``envelope_id``s of every stored HD seed for ``key_id``.
+
+    Enumerates the ``bip39.seed.v1`` ciphertext directory written by
+    :func:`store_seed_phrase` and returns the sorted ``.gcm`` stems (each is
+    an ``envelope_id`` accepted by :func:`derive_ethereum_key`). Returns an
+    empty list when no seed is stored.
+
+    This lives in the ethereum module — alongside the ``_SEED_PURPOSE`` it
+    keys on — so the on-disk layout formula stays owned by one layer rather
+    than reconstructed by the wizard CLI.
+    """
+    from . import _storage
+    from ._envelope_codec import _hash_id
+
+    root = _storage.resolve_keyvault_dir(home)
+    seed_dir = root / "ciphertexts" / _hash_id(key_id).hex() / _hash_id(_SEED_PURPOSE).hex()
+    if not seed_dir.is_dir():
+        return []
+    return sorted(path.stem for path in seed_dir.glob("*.gcm"))
+
+
 def derive_ethereum_key(
     key_id: str,
     seed_envelope_id: str,

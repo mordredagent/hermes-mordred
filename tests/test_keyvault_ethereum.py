@@ -293,3 +293,34 @@ def test_derive_rejects_negative_index(tmp_path: Path) -> None:
     seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
     with pytest.raises(ValueError):
         derive_ethereum_key("default", seed_env, -1, **kw)
+
+
+# ---------------------------------------------------------------------------
+# list_seed_envelope_ids — HD seed discovery (owns the ciphertext layout so
+# the wizard CLI does not have to reach into _envelope_codec)
+# ---------------------------------------------------------------------------
+
+
+def test_list_seed_envelope_ids_empty_when_no_seed(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import list_seed_envelope_ids
+
+    assert list_seed_envelope_ids("default", home=tmp_path) == []
+
+
+def test_list_seed_envelope_ids_returns_every_stored_seed(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import list_seed_envelope_ids, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    id1 = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    id2 = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+
+    assert list_seed_envelope_ids("default", home=tmp_path) == sorted([id1, id2])
+
+
+def test_list_seed_envelope_ids_is_scoped_to_key_id(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import list_seed_envelope_ids, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+
+    assert list_seed_envelope_ids("other-key", home=tmp_path) == []
