@@ -1,7 +1,7 @@
 """Custom-command VPN provider — the "any VPN" escape hatch.
 
 Drives user-configured up / down / health commands so a VPN that ships
-only its own CLI (ExpressVPN's ``expressvpn connect``, NordVPN's
+only its own CLI (ExpressVPN's ``expressvpnctl connect``, NordVPN's
 ``nordvpn connect``, Surfshark, …) can be used without a dedicated
 provider module.
 
@@ -68,7 +68,7 @@ class CustomCommandProvider:
         if not self._up_cmd:
             raise BringupFailed(
                 "custom vpn provider selected but no up command configured; "
-                "set plugins.mordred_network.custom_up_cmd (e.g. [expressvpn, connect])."
+                "set plugins.mordred_network.custom_up_cmd (e.g. [expressvpnctl, connect])."
             )
         binary = self._up_cmd[0]
         resolved = which(binary)

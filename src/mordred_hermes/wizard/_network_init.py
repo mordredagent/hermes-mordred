@@ -88,13 +88,13 @@ _WIREGUARD_CONFIG_DESCRIPTION: Final[str] = (
     "wireguard provider only — path to your WireGuard `.conf` (exported from Proton VPN, IVPN, etc.)."
 )
 _CUSTOM_UP_DESCRIPTION: Final[str] = (
-    "custom provider only — command that connects the VPN, e.g. `expressvpn connect` or `nordvpn connect`."
+    "custom provider only — command that connects the VPN, e.g. `expressvpnctl connect` or `nordvpn connect`."
 )
 _CUSTOM_DOWN_DESCRIPTION: Final[str] = (
-    "custom provider only — command that disconnects the VPN, e.g. `expressvpn disconnect`."
+    "custom provider only — command that disconnects the VPN, e.g. `expressvpnctl disconnect` or `nordvpn disconnect`."
 )
 _CUSTOM_HEALTH_DESCRIPTION: Final[str] = (
-    "custom provider only — optional command that reports tunnel status, e.g. `expressvpn status` (blank = none)."
+    "custom provider only — optional command that reports tunnel status, e.g. `nordvpn status` (blank = none)."
 )
 
 
