@@ -441,6 +441,25 @@ class TestReseal:
         vals = dotenv_values(stream=StringIO(enrolled), interpolate=False)
         assert vals == {"A": "1", "B": "hello # world", "C": "line1\nline2"}
 
+    def test_reseal_unlocks_the_enclave_once(self, tmp_path: Path) -> None:
+        """reseal must open the vault — one Secure-Enclave unlock (one Touch ID) —
+        exactly once: read-base, enroll-merged, and the verify read-back all share a
+        single open (guards against a regression back to a two-open reseal)."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, _ENV_MULTI)
+        (home / ".env").write_bytes(b"C=3\n")  # partial plaintext slipped past the seal
+
+        before = sum(1 for call in backend.calls if call[0] == "ecdh")
+        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        after = sum(1 for call in backend.calls if call[0] == "ecdh")
+
+        assert rc == 0
+        assert after - before == 1  # one device-key unlock for read-base + enroll + verify
+        assert not (home / ".env").exists()
+        assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"
+
 
 class TestEnableReconcilesDrift:
     def test_enable_merges_on_drift_instead_of_clobbering(self, tmp_path: Path) -> None:
