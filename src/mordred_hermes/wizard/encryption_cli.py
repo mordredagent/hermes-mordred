@@ -479,8 +479,8 @@ def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False)
     # only ever pass enable/disable/purge, and any non-enable/disable verb
     # resolves to the target's purge (preserves the original if-chain's
     # fall-through). workspace stays lazily imported (macOS-only path).
-    # ``force_runtime_unverified`` reaches only the env enable (the destructive,
-    # runtime-gated path); every other route ignores it.
+    # ``force_runtime_unverified`` reaches the env and config enables (the
+    # runtime-gated seals); every other route ignores it.
     routes: dict[str, dict[str, Callable[[], int]]] = {
         "env": {
             "enable": lambda: env_decrypt_cli.enable(
@@ -490,7 +490,9 @@ def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False)
             "purge": lambda: env_decrypt_cli.purge(home=home, root=root),
         },
         "config": {
-            "enable": lambda: config_decrypt_cli.enable(home=home, root=root),
+            "enable": lambda: config_decrypt_cli.enable(
+                home=home, root=root, platform=platform, force_runtime_unverified=force_runtime_unverified
+            ),
             "disable": lambda: config_decrypt_cli.disable(home=home, root=root),
             "purge": lambda: config_decrypt_cli.purge(home=home, root=root),
         },
@@ -601,7 +603,7 @@ def _dispatch_all(
     the end as a single block (see :func:`_print_all_summary`).
 
     ``force_runtime_unverified`` is forwarded to every target's dispatch but only
-    affects the env enable (the runtime-gated, destructive path); see
+    affects the env and config enables (the runtime-gated seals); see
     :func:`_dispatch`.
     """
     platform = sys.platform if platform is None else platform

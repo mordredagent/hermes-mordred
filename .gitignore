@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+.dmypy.json
 .ruff_cache/
 build/
 dist/

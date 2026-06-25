@@ -23,6 +23,7 @@ import pytest
 from mordred_hermes.keyvault._runtime_probe import (
     RUNTIME_PYTHON_ENV,
     discover_runtime_python,
+    runtime_config_decrypt_available,
     runtime_env_injection_available,
 )
 
@@ -207,3 +208,65 @@ class TestRuntimeInjectionAvailable:
         runtime_env_injection_available(home=tmp_path, runtime_python=Path("/any/python"))
         assert "PYTHONPATH" not in captured["env"]
         assert "PYTHONHOME" not in captured["env"]
+
+
+# -----------------------------------------------------------------------------
+# runtime_config_decrypt_available — the config.yaml analogue of the env probe
+# -----------------------------------------------------------------------------
+class TestRuntimeConfigDecryptAvailable:
+    def test_none_python_is_unavailable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(RUNTIME_PYTHON_ENV, raising=False)
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        ok, detail = runtime_config_decrypt_available(home=tmp_path)
+        assert ok is False
+        assert "could not locate" in detail
+
+    def test_oserror_when_interpreter_missing(self, tmp_path: Path) -> None:
+        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=tmp_path / "ghost-python")
+        assert ok is False
+        assert "could not run" in detail
+
+    def test_returncode_zero_maps_to_available(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
+        assert ok is True
+        assert "can decrypt a sealed config.yaml" in detail
+
+    def test_nonzero_returncode_reports_stderr(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args=[], returncode=21, stdout="", stderr=".pth hook not installed")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
+        assert ok is False
+        assert ".pth hook not installed" in detail
+
+    def test_timeout_is_unavailable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd="python", timeout=1.0)
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
+        assert ok is False
+        assert "timed out" in detail
+
+    def test_neutralizes_hook_and_strips_pythonpath(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The probe must (a) strip a stray PYTHONPATH/PYTHONHOME like the env probe
+        # and (b) set MORDRED_CONFIG_DECRYPT=0 so the .pth startup hook cannot fire
+        # a vault open / Touch ID prompt while we are merely probing capability.
+        monkeypatch.setenv("PYTHONPATH", "/leak/src")
+        monkeypatch.setenv("PYTHONHOME", "/leak/home")
+        captured: dict[str, dict[str, str]] = {}
+
+        def _fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured["env"] = dict(kwargs["env"])  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
+        assert "PYTHONPATH" not in captured["env"]
+        assert "PYTHONHOME" not in captured["env"]
+        assert captured["env"].get("MORDRED_CONFIG_DECRYPT") == "0"

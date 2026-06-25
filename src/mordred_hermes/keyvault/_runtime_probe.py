@@ -28,7 +28,7 @@ from pathlib import Path
 
 from .._home import hermes_home as _hermes_home
 
-__all__ = ["discover_runtime_python", "runtime_env_injection_available"]
+__all__ = ["discover_runtime_python", "runtime_config_decrypt_available", "runtime_env_injection_available"]
 
 #: Env override: operator points us at the exact interpreter that runs ``hermes``.
 RUNTIME_PYTHON_ENV = "MORDRED_HERMES_RUNTIME_PYTHON"
@@ -70,6 +70,35 @@ try:
 except Exception as exc:  # noqa: BLE001 - any failure means the shim won't run
     sys.stderr.write(repr(exc))
     sys.exit(13)
+sys.exit(0)
+"""
+
+# The config.yaml analogue of ``_PROBE_SRC``. Unlike ``.env`` (an entry-point
+# plugin Hermes calls at startup), ``config.yaml`` is materialized by a ``.pth``
+# startup hook (``mordred_hermes_config_decrypt.pth`` -> ``_pth_bootstrap`` ->
+# ``install_config_decrypt`` -> ``materialize_config``). So the probe must prove
+# the hook is INSTALLED in this runtime's site-packages (else it never fires at
+# boot) AND that the materialize hot-path imports resolve. The probe runs with
+# ``MORDRED_CONFIG_DECRYPT=0`` (see caller), so the ``.pth`` is neutralized for the
+# probe process itself and cannot open the vault / prompt Touch ID here.
+_CONFIG_PROBE_SRC = """
+import sys
+try:
+    from mordred_hermes.keyvault._config_bootstrap import config_hook_installed
+    if not config_hook_installed():
+        sys.stderr.write("config-decrypt .pth startup hook not installed in this runtime")
+        sys.exit(21)
+    # The exact hot-path imports the .pth hook performs at boot. Importing them
+    # here catches a partial install (mordred present but its crypto / pyobjc deps
+    # missing), not just a total absence.
+    import mordred_hermes._pth_bootstrap  # the .pth target module
+    from mordred_hermes.keyvault import _config_bootstrap  # materialize / reseal
+    from mordred_hermes.keyvault import _storage, vault  # AES-GCM vault (cryptography / blake3 / argon2)
+    from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend  # device key (pyobjc Security)
+    from mordred_hermes.keyvault._anchor_keychain import KeychainAnchorStore  # anchor store
+except Exception as exc:  # noqa: BLE001 - any failure means the hook won't decrypt
+    sys.stderr.write(repr(exc))
+    sys.exit(22)
 sys.exit(0)
 """
 
@@ -221,6 +250,59 @@ def discover_runtime_python(home: Path | None = None, explicit: str | Path | Non
     return None
 
 
+def _resolve_runtime_python(home: Path | None, runtime_python: Path | None) -> tuple[Path | None, str]:
+    """Resolve the interpreter to probe, or ``(None, detail)`` when none is found.
+
+    Shared by both capability probes: an explicit ``runtime_python`` wins, else
+    :func:`discover_runtime_python` resolves it from ``home``.
+    """
+    home = _hermes_home() if home is None else home
+    python = runtime_python if runtime_python is not None else discover_runtime_python(home=home)
+    if python is None:
+        return None, (
+            "could not locate the interpreter that runs `hermes` "
+            "(looked for <home>/hermes-agent/venv and `hermes` on PATH); "
+            f"set {RUNTIME_PYTHON_ENV} to point at it"
+        )
+    return python, ""
+
+
+def _run_runtime_probe(
+    python: Path,
+    probe_src: str,
+    *,
+    timeout: float,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str] | None, str]:
+    """Run ``probe_src`` in ``python`` with a sanitized env.
+
+    Returns ``(proc, error_detail)``: ``proc`` is ``None`` on a launch failure
+    (``error_detail`` set), else the completed process (``error_detail`` empty).
+    ``PYTHONPATH`` / ``PYTHONHOME`` are stripped so the probe sees exactly what the
+    host's ``hermes`` wrapper sees (it ``unset``s both) — a stray ``PYTHONPATH``
+    must not make a runtime look capable when it is not. ``extra_env`` is overlaid
+    last (e.g. a hook-disable flag). Any timeout / OSError is a fail-closed miss.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    if extra_env:
+        env.update(extra_env)
+    try:
+        # `python` is a resolved interpreter path (not user shell input); shell=False.
+        proc = subprocess.run(
+            [str(python), "-c", probe_src],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"probing the hermes runtime ({python}) timed out after {timeout:g}s"
+    except OSError as exc:
+        return None, f"could not run the hermes runtime ({python}): {exc}"
+    return proc, ""
+
+
 def runtime_env_injection_available(
     *,
     home: Path | None = None,
@@ -232,40 +314,50 @@ def runtime_env_injection_available(
     Returns ``(ok, detail)``. ``ok`` is ``True`` only when the runtime
     interpreter has the ``mordred_keyvault`` plugin registered *and* the shim's
     hot-path imports resolve there. ``detail`` is a human-readable reason for the
-    caller's fail-closed message.
-
-    The probe subprocess runs with ``PYTHONPATH`` / ``PYTHONHOME`` stripped, so it
-    sees exactly what the host's ``hermes`` wrapper sees (it ``unset``s both) — a
-    stray ``PYTHONPATH`` must not make a runtime look capable when it is not. Any
-    launch error, timeout, or non-zero exit is reported as **unavailable**
-    (fail-closed): we never claim capability we could not prove.
+    caller's fail-closed message. Any launch error, timeout, or non-zero exit is
+    reported as **unavailable** (fail-closed): we never claim capability we could
+    not prove.
     """
-    home = _hermes_home() if home is None else home
-    python = runtime_python if runtime_python is not None else discover_runtime_python(home=home)
+    python, locate_err = _resolve_runtime_python(home, runtime_python)
     if python is None:
-        return False, (
-            "could not locate the interpreter that runs `hermes` "
-            "(looked for <home>/hermes-agent/venv and `hermes` on PATH); "
-            f"set {RUNTIME_PYTHON_ENV} to point at it"
-        )
-
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
-    try:
-        # `python` is a resolved interpreter path (not user shell input); shell=False.
-        proc = subprocess.run(
-            [str(python), "-c", _PROBE_SRC],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"probing the hermes runtime ({python}) timed out after {timeout:g}s"
-    except OSError as exc:
-        return False, f"could not run the hermes runtime ({python}): {exc}"
-
+        return False, locate_err
+    proc, run_err = _run_runtime_probe(python, _PROBE_SRC, timeout=timeout)
+    if proc is None:
+        return False, run_err
     if proc.returncode == 0:
         return True, f"hermes runtime ({python}) can inject a sealed .env"
     reason = (proc.stderr or proc.stdout or "unknown error").strip()
     return False, f"the hermes runtime ({python}) cannot decrypt a sealed .env: {reason}"
+
+
+def runtime_config_decrypt_available(
+    *,
+    home: Path | None = None,
+    runtime_python: Path | None = None,
+    timeout: float = _PROBE_TIMEOUT_S,
+) -> tuple[bool, str]:
+    """Whether the Hermes runtime can decrypt a sealed ``config.yaml`` at startup.
+
+    The ``config.yaml`` analogue of :func:`runtime_env_injection_available`. ``ok``
+    is ``True`` only when the runtime interpreter has the config-decrypt ``.pth``
+    startup hook installed *and* the materialize hot-path imports resolve there.
+
+    The probe runs with ``MORDRED_CONFIG_DECRYPT=0`` so the ``.pth`` hook is
+    neutralized for the probe process itself — it cannot open the vault or prompt
+    for Touch ID while we merely check capability (the explicit
+    ``config_hook_installed()`` + import checks do the verification). Same
+    ``PYTHONPATH`` / ``PYTHONHOME`` stripping and fail-closed semantics as the env
+    probe.
+    """
+    python, locate_err = _resolve_runtime_python(home, runtime_python)
+    if python is None:
+        return False, locate_err
+    proc, run_err = _run_runtime_probe(
+        python, _CONFIG_PROBE_SRC, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"}
+    )
+    if proc is None:
+        return False, run_err
+    if proc.returncode == 0:
+        return True, f"hermes runtime ({python}) can decrypt a sealed config.yaml"
+    reason = (proc.stderr or proc.stdout or "unknown error").strip()
+    return False, f"the hermes runtime ({python}) cannot decrypt a sealed config.yaml: {reason}"

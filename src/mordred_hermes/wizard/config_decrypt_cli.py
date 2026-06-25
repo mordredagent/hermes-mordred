@@ -21,6 +21,8 @@ matching the other wizard CLI modules.
 from __future__ import annotations
 
 import argparse
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +39,55 @@ __all__ = ["cli_disable", "cli_enable", "disable", "enable"]
 
 _CONFIG_NAME = "config.yaml"
 
+#: Runtime-decrypt probe signature: called ``probe(home=...)`` -> ``(ok, detail)``.
+#: Injected into :func:`enable` so tests can fake the runtime check (matching the
+#: ``backend=`` / ``store=`` injection style); production uses
+#: :func:`_default_runtime_probe`.
+RuntimeProbe = Callable[..., "tuple[bool, str]"]
+
+
+def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
+    """Production runtime probe: can the interpreter that runs ``hermes`` decrypt
+    a sealed ``config.yaml``? Imported lazily so this module stays import-light."""
+    from ..keyvault._runtime_probe import runtime_config_decrypt_available
+
+    return runtime_config_decrypt_available(home=home)
+
+
+def _runtime_gate(
+    *,
+    home: Path,
+    platform: str,
+    runtime_probe: RuntimeProbe | None,
+    force_runtime_unverified: bool,
+) -> int:
+    """Fail-closed macOS gate for arming the config.yaml seal.
+
+    Returns 1 (after printing actionable guidance) when the interpreter that runs
+    ``hermes`` cannot materialize a sealed ``config.yaml`` at startup, else 0. A
+    no-op (0) off macOS — the plaintext is kept there anyway — and when
+    ``force_runtime_unverified`` is set. Mirrors ``env_decrypt_cli._runtime_gate``.
+    """
+    if platform != "darwin" or force_runtime_unverified:
+        return 0
+    ok, detail = (runtime_probe or _default_runtime_probe)(home=home)
+    if ok:
+        return 0
+    from ..keyvault._runtime_probe import discover_runtime_python
+
+    runtime_python = discover_runtime_python(home=home) or (home / "hermes-agent" / "venv" / "bin" / "python3")
+    _term.emit_error(
+        "refusing to vault-seal config.yaml — " + detail + ".\n"
+        "  A sealed config.yaml is materialized at startup only by the mordred .pth\n"
+        "  hook in the interpreter that runs `hermes`. mordred-hermes is not published\n"
+        "  to an index — install it into that runtime from your local checkout instead\n"
+        "  (run from the repo root):\n"
+        f"    uv pip install --python {runtime_python} -e './mordred-hermes[macos]'\n"
+        "  then re-run `encryption enable config`. To seal anyway (config stays\n"
+        "  unreadable until the runtime has the hook), pass --force-runtime-unverified."
+    )
+    return 1
+
 
 def _default_root(home: Path) -> Path:
     """The vault root for a home: ``<home>/mordred/vault`` (matches ``_identity``)."""
@@ -47,9 +98,12 @@ def enable(
     *,
     home: Path,
     root: Path,
+    platform: str,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
     prompt_io: PromptIO | None = None,
+    runtime_probe: RuntimeProbe | None = None,
+    force_runtime_unverified: bool = False,
 ) -> int:
     """Enroll ``<home>/config.yaml`` into the vault and write the opt-in marker.
 
@@ -60,6 +114,14 @@ def enable(
     (unverifiable vault, device key-store error). The marker is written only after
     a clean enroll, so a failure never marks config.yaml as vault-managed without
     a vault copy behind it.
+
+    On macOS the seal is **fail-closed on the runtime**: before enrolling/marking
+    it probes the interpreter that actually runs ``hermes`` (see
+    :mod:`...keyvault._runtime_probe`) and refuses (rc 1) when that runtime lacks
+    the config-decrypt ``.pth`` hook — otherwise the marker would arm reseal-on-exit
+    and strand Hermes with a config it cannot materialize at startup.
+    ``runtime_probe`` is injectable for tests; ``force_runtime_unverified``
+    bypasses the check (advanced; arms the seal anyway).
     """
     from . import vault_cli
 
@@ -67,6 +129,18 @@ def enable(
     if not config_path.is_file():
         _term.emit_error(f"no config.yaml at {config_path} — nothing to protect.")
         return 1
+
+    # Fail-closed runtime check (macOS only): writing the marker arms reseal-on-exit,
+    # which removes the plaintext config.yaml. That only round-trips if the
+    # interpreter that runs `hermes` has the config-decrypt .pth hook — the dev venv
+    # driving this command is often NOT that runtime, and the managed runtime venv is
+    # recreated (dropping the non-PyPI mordred) on every `hermes` self-update. Off
+    # macOS the plaintext is kept anyway, so no gate. Mirrors env_decrypt_cli.enable.
+    gate = _runtime_gate(
+        home=home, platform=platform, runtime_probe=runtime_probe, force_runtime_unverified=force_runtime_unverified
+    )
+    if gate != 0:
+        return gate
 
     rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
     if rc != 0:
@@ -202,7 +276,12 @@ def _resolve_root(home: Path, root_arg: str | None) -> Path:
 def cli_enable(args: argparse.Namespace) -> int:
     """argparse handler for ``vault enable-config-decrypt [--root PATH]``."""
     home = _hermes_home()
-    return enable(home=home, root=_resolve_root(home, getattr(args, "root", None)))
+    return enable(
+        home=home,
+        root=_resolve_root(home, getattr(args, "root", None)),
+        platform=sys.platform,
+        force_runtime_unverified=bool(getattr(args, "force_runtime_unverified", False)),
+    )
 
 
 def cli_disable(args: argparse.Namespace) -> int:

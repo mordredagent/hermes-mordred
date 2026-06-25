@@ -421,8 +421,9 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_enable.add_argument(
         "--force-runtime-unverified",
         action="store_true",
-        help="(env, macOS) seal .env even when the `hermes` runtime can't be verified to "
-        "decrypt it — advanced; secrets stay unreadable until that runtime has mordred",
+        help="(env/config, macOS) seal .env / config.yaml even when the `hermes` runtime "
+        "can't be verified to decrypt it — advanced; data stays unreadable until that "
+        "runtime has mordred",
     )
     p_enable.set_defaults(func=_handle_encryption_enable)
 

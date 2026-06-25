@@ -47,7 +47,7 @@ class TestEnable:
         _init_empty_vault(root, backend, store)
         (home / "config.yaml").write_bytes(_CONFIG)
 
-        rc = config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        rc = config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         assert rc == 0
         assert _marker_path(home).exists()
         assert _read_vault_config(root, backend, store) == _CONFIG
@@ -64,7 +64,7 @@ class TestEnable:
         (home / "config.yaml").write_bytes(_CONFIG)
         monkeypatch.setattr(config_decrypt_cli, "config_hook_installed", lambda: True)
 
-        assert config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store) == 0
+        assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
         out = capsys.readouterr().out
         assert "decrypt hook is installed" in out
         assert "NOT installed" not in out
@@ -79,7 +79,7 @@ class TestEnable:
         (home / "config.yaml").write_bytes(_CONFIG)
         monkeypatch.setattr(config_decrypt_cli, "config_hook_installed", lambda: False)
 
-        assert config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store) == 0
+        assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
         out = capsys.readouterr().out
         assert "NOT installed" in out
         assert "(re)installing the mordred-hermes" in out
@@ -91,7 +91,7 @@ class TestEnable:
         _init_empty_vault(root, backend, store)
         # no config.yaml on disk
 
-        rc = config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        rc = config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         assert rc == 1
         assert not _marker_path(home).exists()
 
@@ -104,7 +104,12 @@ class TestEnable:
         backend, store = FakeBackend(), FakeAnchorStore()
 
         rc = config_decrypt_cli.enable(
-            home=home, root=root, backend=backend, store=store, prompt_io=FixedPassphrasePromptIO(_PASSPHRASE)
+            home=home,
+            root=root,
+            platform="linux",
+            backend=backend,
+            store=store,
+            prompt_io=FixedPassphrasePromptIO(_PASSPHRASE),
         )
         assert rc == 0
         assert _marker_path(home).exists()
@@ -120,6 +125,7 @@ class TestEnable:
         rc = config_decrypt_cli.enable(
             home=home,
             root=root,
+            platform="linux",
             backend=FakeBackend(),
             store=FakeAnchorStore(),
             prompt_io=FixedPassphrasePromptIO(""),
@@ -135,7 +141,7 @@ class TestDisable:
         backend, store = FakeBackend(), FakeAnchorStore()
         _init_empty_vault(root, backend, store)
         (home / "config.yaml").write_bytes(_CONFIG)
-        config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
 
         rc = config_decrypt_cli.disable(home=home, root=root, backend=backend, store=store)
         assert rc == 0
@@ -149,7 +155,7 @@ class TestDisable:
         backend, store = FakeBackend(), FakeAnchorStore()
         _init_empty_vault(root, backend, store)
         (home / "config.yaml").write_bytes(_CONFIG)
-        config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         (home / "config.yaml").unlink()  # simulate a sealed (reseal-on-exit) state
 
         rc = config_decrypt_cli.disable(home=home, root=root, backend=backend, store=store)
@@ -196,7 +202,7 @@ class TestPurge:
         backend, store = FakeBackend(), FakeAnchorStore()
         _init_empty_vault(root, backend, store)
         (home / "config.yaml").write_bytes(_CONFIG)
-        config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
 
         rc = config_decrypt_cli.purge(home=home, root=root, backend=backend, store=store)
         assert rc == 0
@@ -211,7 +217,7 @@ class TestPurge:
         backend, store = FakeBackend(), FakeAnchorStore()
         _init_empty_vault(root, backend, store)
         (home / "config.yaml").write_bytes(_CONFIG)
-        config_decrypt_cli.enable(home=home, root=root, backend=backend, store=store)
+        config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         (home / "config.yaml").unlink()  # sealed (reseal-on-exit removed the plaintext)
 
         rc = config_decrypt_cli.purge(home=home, root=root, backend=backend, store=store)
@@ -269,3 +275,89 @@ class TestCliAdapters:
         assert config_decrypt_cli.cli_disable(argparse.Namespace(root=str(tmp_path / "custom"))) == 0
         assert seen["home"] == tmp_path / "home"
         assert seen["root"] == (tmp_path / "custom")
+
+
+# -----------------------------------------------------------------------------
+# runtime gate — refuse to arm the config.yaml seal when the `hermes` runtime
+# cannot decrypt it at startup (parity with env_decrypt_cli's gate).
+# -----------------------------------------------------------------------------
+def _boom_probe(*, home: Path) -> tuple[bool, str]:
+    raise AssertionError("runtime probe must not be consulted on this path")
+
+
+class TestRuntimeGate:
+    """macOS fail-closed gate: enabling arms reseal-on-exit, which removes the
+    plaintext config.yaml. So enable must first prove the interpreter that runs
+    ``hermes`` can re-materialize it at startup. When it cannot, ``enable``
+    refuses and leaves every byte of state untouched.
+    """
+
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / "config.yaml").write_bytes(_CONFIG)
+        return root, home, backend, store
+
+    def test_refuses_and_keeps_state_when_runtime_cannot_decrypt(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = config_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=lambda *, home: (False, "config-decrypt .pth hook not installed in this runtime"),
+        )
+        assert rc == 1
+        assert (home / "config.yaml").read_bytes() == _CONFIG  # plaintext untouched
+        assert _read_vault_config(root, backend, store) is None  # nothing enrolled
+        assert not _marker_path(home).exists()  # marker never written
+        out = capsys.readouterr()
+        assert "refusing to vault-seal config.yaml" in (out.err + out.out)
+
+    def test_force_bypasses_the_gate(self, tmp_path: Path) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = config_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=_boom_probe,  # must not be consulted under force
+            force_runtime_unverified=True,
+        )
+        assert rc == 0
+        assert _marker_path(home).exists()
+        assert _read_vault_config(root, backend, store) == _CONFIG  # enrolled despite unverified runtime
+
+    def test_gate_not_applied_off_macos(self, tmp_path: Path) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = config_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="linux",
+            backend=backend,
+            store=store,
+            runtime_probe=_boom_probe,  # off macOS the gate never runs
+        )
+        assert rc == 0
+        assert _marker_path(home).exists()
+        assert _read_vault_config(root, backend, store) == _CONFIG
+
+    def test_proceeds_when_runtime_can_decrypt(self, tmp_path: Path) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        rc = config_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=lambda *, home: (True, "ok"),
+        )
+        assert rc == 0
+        assert _marker_path(home).exists()
+        assert _read_vault_config(root, backend, store) == _CONFIG
