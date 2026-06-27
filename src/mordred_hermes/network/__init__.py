@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
+from .._yaml_io import load_yaml_mapping
 from . import api, hooks
 from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
 from .vpn_providers import known_providers
@@ -199,20 +200,7 @@ def _load_network_section(config_path: Path) -> dict[str, Any]:
     All failure modes collapse to ``{}`` so downstream resolvers apply
     their own defaults without crashing plugin registration.
     """
-    if not config_path.exists():
-        return {}
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except (OSError, YAMLError) as e:
-        _LOG.warning("could not read %s: %s", config_path, e)
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    data = load_yaml_mapping(config_path, log=_LOG)
     plugins = data.get("plugins")
     if not isinstance(plugins, dict):
         return {}

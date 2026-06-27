@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from .._home import HERMES_BASE, hermes_home
+from .._yaml_io import load_yaml_mapping
 from .audit import Writer, make_audit_writer
 from .policy import PolicyMode
 
@@ -229,18 +230,9 @@ def _resolve_audit_path(raw: object) -> Path:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    from ruamel.yaml import YAML
-
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except Exception as e:
-        _LOG.warning("failed to read %s: %s", path, e)
-        return {}
-    return data if isinstance(data, dict) else {}
+    # Historically caught bare ``Exception``; ``catch=(Exception,)`` preserves
+    # that wider net (see :mod:`mordred_hermes._yaml_io`).
+    return load_yaml_mapping(path, catch=(Exception,), log=_LOG)
 
 
 def _read_disabled_from_yaml(config_path: Path) -> set[str]:

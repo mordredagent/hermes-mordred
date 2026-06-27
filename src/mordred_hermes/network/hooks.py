@@ -32,6 +32,7 @@ from typing import Any, Final
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
+from .._yaml_io import load_yaml_mapping
 from . import api
 from ._exceptions import (
     BringupFailed,
@@ -113,20 +114,7 @@ def _read_default_network_path(config_path: Path) -> str:
     Missing file / missing key / invalid value all collapse to
     ``clearnet`` (safe default). Wizard PR2-C is the writer.
     """
-    if not config_path.exists():
-        return _DEFAULT_NETWORK_PATH
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except (OSError, YAMLError) as e:
-        _LOG.warning("could not read %s: %s", config_path, e)
-        return _DEFAULT_NETWORK_PATH
-    if not isinstance(data, dict):
-        return _DEFAULT_NETWORK_PATH
+    data = load_yaml_mapping(config_path, log=_LOG)
     plugins = data.get("plugins")
     if not isinstance(plugins, dict):
         return _DEFAULT_NETWORK_PATH

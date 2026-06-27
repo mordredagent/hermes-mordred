@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, cast
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
 from .._provider_identity import canonicalize_provider
+from .._yaml_io import load_yaml_mapping
 from . import enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._typing import PluginContext
@@ -231,23 +232,10 @@ def _read_auth_active_provider(auth_json_path: Path) -> str | None:
 
 
 def _read_config_model_provider(config_path: Path) -> str | None:
-    if not config_path.exists():
-        return None
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except (OSError, YAMLError) as e:
-        # Narrowed from bare ``Exception`` (review LOW finding #3): I/O errors
-        # and any parse failure inside ruamel.yaml both route to the degraded
-        # "no resolved provider" path; programming errors should still escape.
-        _LOG.warning("could not read %s: %s", config_path, e)
-        return None
-    if not isinstance(data, dict):
-        return None
+    # Default catch=(OSError, YAMLError) is deliberately narrow (review LOW
+    # finding #3): I/O errors and YAML parse failures route to the degraded
+    # "no resolved provider" path; programming errors still escape.
+    data = load_yaml_mapping(config_path, log=_LOG)
     model = data.get("model")
     if not isinstance(model, dict):
         return None

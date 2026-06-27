@@ -35,6 +35,7 @@ from typing import Any
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
+from .._yaml_io import load_yaml_mapping
 from ._exceptions import MordredHarnessRefused
 
 _LOG = logging.getLogger("mordred.llm_guard.harness_detect")
@@ -153,20 +154,9 @@ def _read_harness_primary(config_path: Path) -> str | None:
     not-yet-run path, which must never trigger a refusal (users would be
     locked out before they could configure).
     """
-    if not config_path.exists():
-        return None
-
-    from ruamel.yaml import YAML
-
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except Exception as e:
-        _LOG.warning("failed to read %s: %s", config_path, e)
-        return None
-    if not isinstance(data, dict):
-        return None
+    # Historically caught bare ``Exception``; ``catch=(Exception,)`` preserves
+    # that wider net (the wizard-not-yet-run path must never raise).
+    data = load_yaml_mapping(config_path, catch=(Exception,), log=_LOG)
 
     plugins = data.get("plugins")
     if not isinstance(plugins, dict):
