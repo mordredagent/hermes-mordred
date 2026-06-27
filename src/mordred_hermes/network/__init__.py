@@ -189,16 +189,6 @@ def _resolve_disable_ipv6(data: dict[str, Any], policy_mode: str) -> bool:
     return policy_mode == "strict"
 
 
-def _read_policy_mode(policy_json_path: Path) -> str:
-    """Backward-compatible wrapper for the single-field reader.
-
-    Kept so the hooks layer can call the single-field reader without
-    learning the new ``_load_policy_json`` interface. New code should
-    prefer the bulk reader.
-    """
-    return _resolve_policy_mode(_load_policy_json(policy_json_path))
-
-
 def _load_network_section(config_path: Path) -> dict[str, Any]:
     """Open ``config.yaml`` and return ``plugins.mordred_network`` as a dict.
 
@@ -324,15 +314,6 @@ def _resolve_custom_health_cmd(network: dict[str, Any]) -> tuple[str, ...] | Non
     """Derive ``RuntimeConfig.custom_health_cmd`` (None when unset/empty)."""
     cmd = _resolve_custom_cmd(network, "custom_health_cmd")
     return cmd or None
-
-
-def _read_default_path(config_path: Path) -> str:
-    """Backward-compatible wrapper for the single-field reader.
-
-    Kept so callers that only need ``default_path`` don't have to learn
-    the new ``_load_network_section`` interface.
-    """
-    return _resolve_default_path(_load_network_section(config_path))
 
 
 @functools.lru_cache(maxsize=1)
