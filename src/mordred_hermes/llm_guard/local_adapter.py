@@ -22,7 +22,6 @@ read-only.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Final
@@ -31,6 +30,7 @@ from providers import register_provider
 from providers.base import ProviderProfile
 
 from .._home import HERMES_BASE
+from .._policy_io import load_policy_mapping
 
 _LOG = logging.getLogger("mordred.llm_guard.local_adapter")
 
@@ -95,16 +95,7 @@ def register_mordred_local(
 
 def _read_endpoint(policy_json_path: Path) -> str:
     """Read ``local_llm_endpoint`` from ``policy.json`` with safe fallback."""
-    if not policy_json_path.exists():
-        return DEFAULT_LOCAL_ENDPOINT
-    try:
-        with policy_json_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.warning("could not read %s: %s; using default endpoint", policy_json_path, e)
-        return DEFAULT_LOCAL_ENDPOINT
-    if not isinstance(data, dict):
-        return DEFAULT_LOCAL_ENDPOINT
+    data = load_policy_mapping(policy_json_path, log=_LOG)
     endpoint = data.get("local_llm_endpoint")
     if isinstance(endpoint, str) and endpoint:
         return endpoint

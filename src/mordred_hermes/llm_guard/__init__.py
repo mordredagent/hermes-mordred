@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
+from .._policy_io import load_policy_mapping
 from .._provider_identity import canonicalize_provider
 from .._yaml_io import load_yaml_mapping
 from . import enforce, harness_detect, local_adapter
@@ -256,16 +257,7 @@ def _read_config_model_provider(config_path: Path) -> str | None:
 
 def _read_policy_mode(policy_json_path: Path) -> str:
     """Read ``policy`` from ``policy.json``; default to ``_DEFAULT_POLICY_MODE``."""
-    if not policy_json_path.exists():
-        return _DEFAULT_POLICY_MODE
-    try:
-        with policy_json_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.warning("could not read %s: %s; defaulting to %s", policy_json_path, e, _DEFAULT_POLICY_MODE)
-        return _DEFAULT_POLICY_MODE
-    if not isinstance(data, dict):
-        return _DEFAULT_POLICY_MODE
+    data = load_policy_mapping(policy_json_path, log=_LOG)
     mode = data.get("policy", _DEFAULT_POLICY_MODE)
     if mode in ("strict", "lenient", "off"):
         return cast(str, mode)

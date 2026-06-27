@@ -15,7 +15,6 @@ audit. Refuse paths and the mordred-local branch land in later cycles.
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from collections.abc import Callable, Mapping
@@ -24,6 +23,7 @@ from typing import Any, Final, Literal, TypeAlias
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
+from .._policy_io import load_policy_mapping
 from . import health
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from .local_adapter import LOCAL_PROVIDER_NAME
@@ -418,23 +418,12 @@ def _read_policy_settings(policy_json_path: Path) -> _PolicySettings:
     Missing or malformed fields fall back to the safe-by-default values:
     ``allow_cloud_llm=False``, empty allowlist, default local endpoint.
     Under strict mode these defaults result in refusal for any cloud
-    provider — i.e. failure-closed.
+    provider — i.e. failure-closed. A missing / unreadable / malformed /
+    non-object ``policy.json`` loads as ``{}`` (via
+    :func:`_policy_io.load_policy_mapping`), so the ``.get(...)`` chain
+    below reproduces exactly those safe-by-default values.
     """
-    safe_default = _PolicySettings(
-        allow_cloud_llm=False,
-        cloud_allowlist=frozenset(),
-        local_endpoint=_DEFAULT_LOCAL_ENDPOINT,
-    )
-    if not policy_json_path.exists():
-        return safe_default
-    try:
-        with policy_json_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.warning("could not read %s: %s; using safe defaults", policy_json_path, e)
-        return safe_default
-    if not isinstance(data, dict):
-        return safe_default
+    data = load_policy_mapping(policy_json_path, log=_LOG)
 
     # Codex review P2: ``bool("false")`` is ``True`` in Python — using
     # ``bool(...)`` here would let a hand-edited or migrated

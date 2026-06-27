@@ -17,7 +17,6 @@ the ``register(FakeCtx)`` assertions in ``tests/test_network_hooks.py``.
 from __future__ import annotations
 
 import functools
-import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
+from .._policy_io import load_policy_mapping
 from .._yaml_io import load_yaml_mapping
 from . import api, hooks
 from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
@@ -150,17 +150,7 @@ def _load_policy_json(policy_json_path: Path) -> dict[str, Any]:
     to ``{}`` so downstream resolvers can apply their own defaults
     without crashing plugin registration.
     """
-    if not policy_json_path.exists():
-        return {}
-    try:
-        with policy_json_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.warning("could not read %s: %s; defaulting to empty", policy_json_path, e)
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return cast(dict[str, Any], data)
+    return load_policy_mapping(policy_json_path, log=_LOG)
 
 
 def _resolve_policy_mode(data: dict[str, Any]) -> str:
