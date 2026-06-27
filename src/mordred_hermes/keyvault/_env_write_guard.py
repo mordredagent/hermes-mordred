@@ -162,7 +162,7 @@ def reseal_stray_env_if_present(
         # Surface a stranded plaintext rather than crashing the session boundary,
         # and let `encryption status` flag it as exposed.
         with contextlib.suppress(Exception):
-            from ..wizard import _term
+            from .. import _term
 
             _term.emit_warn(
                 f"could not reseal .env into the vault at a session boundary: {exc} — a plaintext copy "

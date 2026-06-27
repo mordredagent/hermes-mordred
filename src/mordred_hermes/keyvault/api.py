@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import contextlib
 import hmac
-import sys
 import threading
 import time
 import unicodedata
@@ -617,9 +616,10 @@ def confirm_generate(
             }
         )
     except Exception as exc:  # success-path suppress (POLICY.md #22)
-        print(
-            f"keyvault.init_completed audit emit failed (init already durable, key_id_hash={key_id_hash_hex}): {exc!r}",
-            file=sys.stderr,
+        from .. import _term
+
+        _term.emit_warn(
+            f"keyvault.init_completed audit emit failed (init already durable, key_id_hash={key_id_hash_hex}): {exc!r}"
         )
 
     return GenerateResult(

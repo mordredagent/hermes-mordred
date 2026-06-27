@@ -321,10 +321,9 @@ def _delete_wrapping_keys(key_ids: list[str], *, backend: NativeBackend | None) 
         try:
             wrap.delete_wrapping_key(key_id, backend=backend)
         except WrapError as exc:
-            print(
-                f"note: could not delete Secure Enclave key {key_id!r} ({exc}); "
-                "remove it manually via Keychain Access if it lingers.",
-                file=sys.stderr,
+            _term.emit_note(
+                f"could not delete Secure Enclave key {key_id!r} ({exc}); "
+                "remove it manually via Keychain Access if it lingers."
             )
 
 

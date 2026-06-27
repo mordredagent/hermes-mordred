@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
 from typing import TYPE_CHECKING
 
 from . import _term
@@ -234,7 +233,6 @@ def purge(
 
     print(
         f"agent-memory encryption purged ({_MEMORY_KEY_ENV} removed from the vault; config flag off). "
-        "Memories encrypted under the old key can no longer be decrypted.",
-        file=sys.stderr,
+        "Memories encrypted under the old key can no longer be decrypted."
     )
     return 0

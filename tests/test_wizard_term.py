@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from mordred_hermes.wizard import _term
 
 
@@ -147,3 +149,25 @@ class TestEmit:
         buf = io.StringIO()
         _term.emit_warn("careful", stream=buf, env={})
         assert buf.getvalue().startswith("warning: careful")
+
+    def test_emit_note_writes_note_prefix_plain_to_non_tty(self) -> None:
+        buf = io.StringIO()  # not a tty -> no colour
+        _term.emit_note("heads up", stream=buf, env={})
+        out = buf.getvalue()
+        assert out.startswith("note: heads up")
+        assert "\033" not in out
+
+    def test_emit_note_colours_cyan_when_forced(self) -> None:
+        buf = io.StringIO()
+        _term.emit_note("heads up", stream=buf, env={"FORCE_COLOR": "1"})
+        out = buf.getvalue()
+        assert "\033[36m" in out  # cyan label
+        assert "heads up" in out
+
+    def test_emit_note_defaults_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Like emit_error / emit_warn, a note is a diagnostic and defaults to
+        # stderr (so stdout stays reserved for primary command output).
+        _term.emit_note("fyi", env={})
+        captured = capsys.readouterr()
+        assert captured.err.startswith("note: fyi")
+        assert captured.out == ""
