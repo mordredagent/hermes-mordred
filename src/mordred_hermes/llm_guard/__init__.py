@@ -34,6 +34,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
 from .._provider_identity import canonicalize_provider
 from . import enforce, harness_detect, local_adapter
@@ -294,11 +295,11 @@ def _build_audit_writer(path: Path) -> NDJSONWriter:
     write) and the cached instance can be shared across every
     ``on_session_start`` invocation.
 
-    Local import avoids loading privacy_check at plugin-discovery time
-    (keeps :func:`register` cheap and side-effect-free until invoked); the
-    matching ``TYPE_CHECKING`` import at the top of the module preserves
-    the return type for static checkers (review LOW finding #1).
+    Construction is delegated to the shared
+    :func:`mordred_hermes._audit_support.build_audit_writer` (which does the
+    lazy ``privacy_check`` import); the module-local ``lru_cache`` keeps this
+    cache -- and the ``cache_clear()`` the tests drive -- separate from
+    ``network``'s identically-pathed writer. The ``TYPE_CHECKING`` import at
+    the top preserves the return type for static checkers.
     """
-    from ..privacy_check.audit import NDJSONWriter
-
-    return NDJSONWriter(path=path)
+    return build_audit_writer(path)

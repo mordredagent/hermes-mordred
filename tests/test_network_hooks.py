@@ -20,7 +20,7 @@ A tiny ``_FakeCtx`` records ``register_hook`` calls so we can assert
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,7 @@ class _FakeAudit:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: Mapping[str, Any]) -> None:
         self.entries.append(dict(entry))
 
 

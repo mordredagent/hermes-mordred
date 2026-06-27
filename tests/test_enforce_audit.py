@@ -13,6 +13,7 @@ shared fixtures — it focuses solely on the audit-shape contract.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ class _FakeAuditWriter:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: Mapping[str, Any]) -> None:
         self.entries.append(entry)
 
 

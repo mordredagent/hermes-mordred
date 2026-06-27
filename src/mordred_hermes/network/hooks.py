@@ -28,8 +28,10 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
+from .._audit_support import AuditWriter as _AuditWriter
+from .._audit_support import safe_audit_append
 from . import api
 from ._exceptions import (
     BringupFailed,
@@ -44,10 +46,6 @@ _DEFAULT_POLICY_MODE: Final[str] = "off"
 _DEFAULT_NETWORK_PATH: Final[str] = "clearnet"
 _VALID_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn", "clearnet"})
 _VALID_MODES: Final[frozenset[str]] = frozenset({"strict", "lenient", "off"})
-
-
-class _AuditWriter(Protocol):
-    def append(self, entry: Mapping[str, Any]) -> None: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -316,17 +314,13 @@ def wait_until_ready(*, timeout: float = 5.0, poll_interval: float = 0.05) -> bo
 
 
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
-    """Best-effort audit append.
+    """Best-effort audit append binding this module's logger.
 
-    Mirrors :func:`mordred_hermes.llm_guard.enforce._safe_audit_append` -
-    a strict-mode refusal must raise even if audit write fails (disk
-    full, permission denied, etc.). The underlying error is logged so
-    operators can investigate.
+    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
+    -- a strict-mode refusal must still raise even if the audit write fails
+    (disk full, permission denied, etc.).
     """
-    try:
-        audit.append(entry)
-    except Exception as e:
-        _LOG.error("network audit append failed for entry %r: %s", entry, e)
+    safe_audit_append(audit, entry, logger=_LOG)
 
 
 __all__ = ["on_session_end", "on_session_start", "pre_tool_call", "wait_until_ready"]

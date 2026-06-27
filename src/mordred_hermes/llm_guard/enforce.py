@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol, TypeAlias
+from typing import Any, Final, Literal, TypeAlias
 
+from .._audit_support import AuditWriter as _AuditWriter
+from .._audit_support import safe_audit_append
 from . import health
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from .local_adapter import LOCAL_PROVIDER_NAME
@@ -66,33 +68,17 @@ _no_resolved_provider_emitted = False
 _cloud_prompt_decisions: dict[str, bool] = {}
 
 
-class _AuditWriter(Protocol):
-    """Structural protocol mirroring ``privacy_check.audit.Writer``.
+def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
+    """Best-effort audit write binding this module's logger.
 
-    Declared inline (instead of importing) to keep cross-plugin coupling
-    out of llm_guard. ``NDJSONWriter`` is duck-compatible.
+    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
+    (Codex review P1 round 6): the strict-mode refusal raises
+    :class:`MordredSessionRefused` (``BaseException``-derived) and must still
+    fire even if the audit write itself raises a plain ``Exception`` before
+    the refusal -- otherwise Hermes' ``except Exception`` filters would
+    swallow it and continue (fail-open).
     """
-
-    def append(self, entry: dict[str, Any]) -> None: ...
-
-
-def _safe_audit_append(audit: _AuditWriter, entry: dict[str, Any]) -> None:
-    """Best-effort audit write.
-
-    Codex review P1 round 6: a strict-mode refusal path must raise
-    :class:`MordredSessionRefused` (``BaseException``-derived) so it
-    escapes Hermes' ``except Exception`` filters at
-    ``hermes_cli/plugins.py:1112`` and ``run_agent.py:11337``. If the
-    audit writer itself raises a plain :class:`Exception` (disk full,
-    broken NDJSON path, permission denied) BEFORE we get to the raise,
-    Hermes would catch it and continue — fail-open. This wrapper
-    swallows audit-side failures so the BaseException refusal still
-    fires. The underlying error is logged so operators can investigate.
-    """
-    try:
-        audit.append(entry)
-    except Exception as e:
-        _LOG.error("audit append failed for entry %r: %s", entry, e)
+    safe_audit_append(audit, entry, logger=_LOG)
 
 
 def check_session_provider(
@@ -586,7 +572,7 @@ class _RefuseOnlyAuditWriter:
     def __init__(self, inner: _AuditWriter) -> None:
         self._inner = inner
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: Mapping[str, Any]) -> None:
         if entry.get("decision") == "allow":
             return
         self._inner.append(entry)

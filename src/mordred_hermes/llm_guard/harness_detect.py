@@ -29,9 +29,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
+from .._audit_support import AuditWriter as _AuditWriter
+from .._audit_support import safe_audit_append
 from ._exceptions import MordredHarnessRefused
 
 _LOG = logging.getLogger("mordred.llm_guard.harness_detect")
@@ -61,35 +64,16 @@ _HARNESS_PATTERNS: tuple[re.Pattern[str], ...] = (
 _REASON = "mordred.degraded.disable_unprotected"
 
 
-class _AuditWriter(Protocol):
-    """Structural protocol for the audit writer injected by ``register(ctx)``.
+def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
+    """Best-effort audit write binding this module's logger.
 
-    Declared inline to avoid importing privacy_check from llm_guard at
-    module-import time (cross-plugin coupling). The shared
-    ``privacy_check.audit.Writer`` Protocol is duck-compatible.
-    """
-
-    def append(self, entry: dict[str, Any]) -> None: ...
-
-
-def _safe_audit_append(audit: _AuditWriter, entry: dict[str, Any]) -> None:
-    """Best-effort audit write that never fails the caller open.
-
-    Mirrors :func:`mordred_hermes.llm_guard.enforce._safe_audit_append`
+    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
     (security review H1): the strict-mode refusal raises
-    :class:`MordredHarnessRefused` (``BaseException``-derived) so it
-    escapes Hermes' ``except Exception:`` filters at
-    ``hermes_cli/plugins.py`` and ``run_agent.py``. If the audit writer
-    itself raises a plain :class:`Exception` (disk full, broken NDJSON
-    path, permission denied) BEFORE the raise, Hermes would catch it and
-    continue the session — a fail-open bypass of harness detection. This
-    wrapper swallows audit-side failures so the refusal still fires; the
-    underlying error is logged for operators.
+    :class:`MordredHarnessRefused` (``BaseException``-derived) and must still
+    fire even if the audit write itself raises a plain ``Exception`` before
+    the refusal -- otherwise Hermes would swallow it and continue (fail-open).
     """
-    try:
-        audit.append(entry)
-    except Exception as e:
-        _LOG.error("audit append failed for entry %r: %s", entry, e)
+    safe_audit_append(audit, entry, logger=_LOG)
 
 
 def check_harness_primary(

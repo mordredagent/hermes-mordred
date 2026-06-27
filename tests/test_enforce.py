@@ -24,6 +24,7 @@ Patterns mirror ``test_harness_detect.py``:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,7 @@ class _FakeAuditWriter:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: Mapping[str, Any]) -> None:
         self.entries.append(entry)
 
 
@@ -809,7 +810,7 @@ class TestCheckRuntimeProvider:
         """
 
         class _ExplodingAuditWriter:
-            def append(self, entry: dict[str, Any]) -> None:
+            def append(self, entry: Mapping[str, Any]) -> None:
                 raise RuntimeError("simulated audit log write failure")
 
         cfg = _write_policy_json(tmp_path, policy="strict")  # empty allowlist

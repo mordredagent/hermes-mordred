@@ -23,6 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
+from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
 from . import api, hooks
 from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
@@ -318,14 +319,12 @@ def _resolve_custom_health_cmd(network: dict[str, Any]) -> tuple[str, ...] | Non
 
 @functools.lru_cache(maxsize=1)
 def _build_audit_writer(path: Path) -> NDJSONWriter:
-    """Build the shared NDJSON writer.
+    """Per-process cached NDJSON writer (one ``mkdir`` + ``chmod`` per path).
 
-    Cached so ``__post_init__`` (``mkdir`` + ``chmod``) only fires once
-    per process per path. Mirrors the pattern in
-    :func:`mordred_hermes.llm_guard._build_audit_writer`.
-    Local import keeps ``register`` cheap by avoiding privacy_check
-    load at plugin-discovery time.
+    The module-local ``lru_cache`` keeps this cache -- and the
+    ``cache_clear()`` the tests drive -- separate from ``llm_guard``'s
+    identically-pathed writer; construction is delegated to the shared
+    :func:`mordred_hermes._audit_support.build_audit_writer`, which does the
+    lazy ``privacy_check`` import to keep ``register`` cheap.
     """
-    from ..privacy_check.audit import NDJSONWriter
-
-    return NDJSONWriter(path=path)
+    return build_audit_writer(path)

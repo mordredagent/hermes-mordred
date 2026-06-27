@@ -21,6 +21,7 @@ or ``codex-style-prompt``) must not trigger; only the documented prefixes
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ class _FakeAuditWriter:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: Mapping[str, Any]) -> None:
         self.entries.append(entry)
 
 
@@ -216,7 +217,7 @@ class _RaisingAuditWriter:
     catch it and continue the session — a fail-open bypass.
     """
 
-    def append(self, entry: dict[str, Any]) -> None:
+    def append(self, entry: Mapping[str, Any]) -> None:
         raise RuntimeError("audit sink unavailable (disk full)")
 
 

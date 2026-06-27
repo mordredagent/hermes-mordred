@@ -34,12 +34,13 @@ import logging
 import os
 import subprocess
 import threading
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, cast
 
+from .._audit_support import AuditWriter as _AuditWriter
 from . import proxy_env as proxy_env_mod
 from ._exceptions import (
     AlreadySwitching,
@@ -65,17 +66,6 @@ class State(Enum):
     READY = "ready"
     TEARING_DOWN = "tearing_down"
     DEGRADED = "degraded"
-
-
-class _AuditWriter(Protocol):
-    """Structural mirror of :class:`mordred_hermes.privacy_check.audit.Writer`.
-
-    Declared inline to keep ``network`` free of a hard dependency on
-    ``privacy_check``; the PR2 hooks layer wires the real
-    ``NDJSONWriter`` from ``privacy_check.audit``.
-    """
-
-    def append(self, entry: Mapping[str, Any]) -> None: ...
 
 
 # Audit reason codes (Phase 3 PR1 freeze, POLICY.md §Audit log reason enum).
