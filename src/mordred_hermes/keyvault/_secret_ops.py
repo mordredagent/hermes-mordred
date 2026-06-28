@@ -163,29 +163,12 @@ def encrypt(
     envelope_path = purpose_dir / f"{envelope_id}.gcm"
 
     with _storage.keyvault_lock(root):
-        # codex pre-merge P2-1: validate any pre-existing directory before
-        # writing inside it. Without this an attacker who pre-creates the
-        # key_dir as a symlink (or with wrong mode) could redirect the
-        # envelope into attacker-controlled territory.
-        #
-        # Cross-module private access (in-tree code-reviewer LOW-3,
-        # 2026-05-15): ``_storage._check_dir_mode`` is intentionally
-        # consumed across the api.py / _storage.py boundary inside the
-        # same ``mordred_hermes.keyvault`` package. The underscore prefix
-        # signals "package-internal", not "module-internal" — the same
-        # pattern PR3 uses for ``_exceptions.py`` shared between
-        # ``native.py`` and ``wrap.py``. Step-G may promote the helper to
-        # ``_storage.validate_existing_dir`` if a third call site appears.
-        if key_dir.exists() or key_dir.is_symlink():
-            _storage._check_dir_mode(key_dir)
-        else:
-            key_dir.mkdir(mode=0o700)
-            os.chmod(key_dir, 0o700)
-        if purpose_dir.exists() or purpose_dir.is_symlink():
-            _storage._check_dir_mode(purpose_dir)
-        else:
-            purpose_dir.mkdir(mode=0o700)
-            os.chmod(purpose_dir, 0o700)
+        # Validate any pre-existing directory before writing inside it: an
+        # attacker who pre-creates key_dir/purpose_dir as a symlink (or with a
+        # loose mode) is rejected rather than written through (codex pre-merge
+        # P2-1). Shared with the backup/restore path via _ensure_managed_subdir.
+        _ensure_managed_subdir(key_dir)
+        _ensure_managed_subdir(purpose_dir)
         _storage.atomic_write(envelope_path, envelope)
 
     return envelope_id
@@ -248,9 +231,16 @@ def decrypt(
 def _ensure_managed_subdir(path: Path) -> None:
     """Create ``path`` at mode ``0o700``, or validate it if it exists.
 
-    Mirrors the per-directory guard :func:`encrypt` applies before writing
-    an envelope: an attacker who pre-creates the directory as a symlink (or
-    with a loose mode) is rejected rather than silently written through.
+    The shared per-directory guard applied before writing inside a managed
+    keyvault subdir — by :func:`encrypt` (envelope writes) and the
+    backup/restore path: an attacker who pre-creates the directory as a
+    symlink (or with a loose mode) is rejected rather than silently written
+    through.
+
+    ``_storage._check_dir_mode`` is intentionally consumed across the
+    ``_secret_ops`` / ``_storage`` boundary inside the same
+    ``mordred_hermes.keyvault`` package — the underscore prefix signals
+    "package-internal", not "module-internal".
     """
     if path.exists() or path.is_symlink():
         _storage._check_dir_mode(path)

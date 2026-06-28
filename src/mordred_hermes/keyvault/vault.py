@@ -588,6 +588,48 @@ class OpenVault:
         except file_container.EncryptedFileError as e:
             raise VaultError(f"failed to authenticate / decrypt {name!r}") from e
 
+    def _commit_new_manifest(
+        self,
+        store: AnchorStore,
+        new_manifest: manifest.VaultManifest,
+        *,
+        blobs: tuple[tuple[Path, bytes], ...] = (),
+    ) -> None:
+        """Commit ``new_manifest`` under the keyvault lock — shared by enroll/unenroll.
+
+        Re-derives the authoritative state from the device anchor under the lock
+        and fails closed if another writer advanced it: writing ``manifest.<N+1>``
+        over the newer state and flipping the anchor back would roll the vault
+        back and let :meth:`_gc` drop the newer writer's blobs (codex impl-review
+        P1: stale-writer rollback). The anchor is the source of truth (an offline
+        attacker cannot move it), so an advance here is a legitimate concurrent
+        writer: fail closed and require a reopen.
+
+        Writes any new content ``blobs`` (enroll supplies the ciphertext blob;
+        unenroll supplies none) then the new manifest, then flips the anchor —
+        the single commit point that makes ``new_manifest.generation``
+        authoritative. A crash before the flip leaves the previous generation
+        committed; :meth:`_gc` then drops the superseded manifest + orphan blobs.
+        """
+        new_generation = new_manifest.generation
+        _ensure_lock(self._root)
+        with keyvault_lock(self._root):
+            pinned = anchor.read_anchor(store, self._label)
+            stale_generation = pinned.generation != self._manifest.generation
+            wmk_changed = not hmac.compare_digest(pinned.wmk_sha256, anchor.wmk_fingerprint(self._wmk))
+            if stale_generation or wmk_changed:
+                raise VaultError(
+                    f"stale vault handle: in-memory generation {self._manifest.generation} no longer matches the "
+                    f"device anchor (generation {pinned.generation}) — another writer advanced the vault; reopen it"
+                )
+            for blob_path, blob in blobs:
+                atomic_write(blob_path, blob)
+            atomic_write(_manifest_path(self._root, new_generation), manifest.encode(new_manifest, self._master))
+            # ---- commit: the anchor flip makes generation N+1 authoritative ----
+            anchor.write_anchor(store, self._label, wmk=self._wmk, generation=new_generation)
+            self._manifest = new_manifest
+            self._gc(superseded_generation=new_generation - 1)
+
     def enroll_file(self, name: str, plaintext: bytes) -> None:
         """Encrypt ``plaintext`` as enrolled file ``name`` and commit it.
 
@@ -613,32 +655,7 @@ class OpenVault:
         new_manifest = manifest.VaultManifest(
             key_id=self._key_id, wmk=self._wmk, files=new_files, generation=new_generation
         )
-
-        _ensure_lock(self._root)
-        with keyvault_lock(self._root):
-            # Re-derive the authoritative state under the lock before writing.
-            # If another process committed since this handle opened (or last
-            # enrolled), our in-RAM generation lags the device anchor — writing
-            # manifest.<N+1> over the newer state and flipping the anchor back
-            # would roll the vault back and let _gc drop the newer writer's
-            # blobs (codex impl-review P1: stale-writer rollback). The anchor is
-            # the source of truth (an offline attacker cannot move it), so an
-            # advance here is a legitimate concurrent writer: fail closed and
-            # require a reopen.
-            pinned = anchor.read_anchor(store, self._label)
-            stale_generation = pinned.generation != self._manifest.generation
-            wmk_changed = not hmac.compare_digest(pinned.wmk_sha256, anchor.wmk_fingerprint(self._wmk))
-            if stale_generation or wmk_changed:
-                raise VaultError(
-                    f"stale vault handle: in-memory generation {self._manifest.generation} no longer matches the "
-                    f"device anchor (generation {pinned.generation}) — another writer advanced the vault; reopen it"
-                )
-            atomic_write(_blob_path(self._root, digest), blob)
-            atomic_write(_manifest_path(self._root, new_generation), manifest.encode(new_manifest, self._master))
-            # ---- commit: the anchor flip makes generation N+1 authoritative ----
-            anchor.write_anchor(store, self._label, wmk=self._wmk, generation=new_generation)
-            self._manifest = new_manifest
-            self._gc(superseded_generation=new_generation - 1)
+        self._commit_new_manifest(store, new_manifest, blobs=((_blob_path(self._root, digest), blob),))
 
     def unenroll_file(self, name: str) -> None:
         """Remove enrolled file ``name`` and commit — the mirror of :meth:`enroll_file`.
@@ -670,27 +687,7 @@ class OpenVault:
         new_manifest = manifest.VaultManifest(
             key_id=self._key_id, wmk=self._wmk, files=new_files, generation=new_generation
         )
-
-        _ensure_lock(self._root)
-        with keyvault_lock(self._root):
-            # Same stale-writer guard as enroll_file: the device anchor is the
-            # source of truth. If another process advanced it since this handle
-            # opened, writing manifest.<N+1> over the newer state and flipping the
-            # anchor back would roll the vault back and let _gc drop the newer
-            # writer's blobs — fail closed and require a reopen.
-            pinned = anchor.read_anchor(store, self._label)
-            stale_generation = pinned.generation != self._manifest.generation
-            wmk_changed = not hmac.compare_digest(pinned.wmk_sha256, anchor.wmk_fingerprint(self._wmk))
-            if stale_generation or wmk_changed:
-                raise VaultError(
-                    f"stale vault handle: in-memory generation {self._manifest.generation} no longer matches the "
-                    f"device anchor (generation {pinned.generation}) — another writer advanced the vault; reopen it"
-                )
-            atomic_write(_manifest_path(self._root, new_generation), manifest.encode(new_manifest, self._master))
-            # ---- commit: the anchor flip makes generation N+1 authoritative ----
-            anchor.write_anchor(store, self._label, wmk=self._wmk, generation=new_generation)
-            self._manifest = new_manifest
-            self._gc(superseded_generation=new_generation - 1)
+        self._commit_new_manifest(store, new_manifest)
 
     def _gc(self, *, superseded_generation: int) -> None:
         """Best-effort: drop the superseded manifest + any orphan blobs.

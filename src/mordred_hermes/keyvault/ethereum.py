@@ -97,6 +97,20 @@ def _eth_keys() -> Any:
         ) from exc
 
 
+def _eth_signature(sig: Any) -> EthereumSignature:
+    """Convert an ``eth_keys`` signature into Ethereum legacy wire format.
+
+    Shared by :func:`sign_hash` and :func:`sign_hash_hd`. ``eth_keys`` returns
+    ``v`` as a recovery id (0 or 1); Ethereum's legacy format uses ``27``/``28``
+    (recovery id + 27). ``r`` and ``s`` are encoded as 32-byte big-endian.
+    """
+    return EthereumSignature(
+        v=sig.v + 27,
+        r=sig.r.to_bytes(_SCALAR_BYTES, "big"),
+        s=sig.s.to_bytes(_SCALAR_BYTES, "big"),
+    )
+
+
 def generate_ethereum_key(
     key_id: str,
     *,
@@ -255,14 +269,7 @@ def sign_hash(
     )
     try:
         priv = eth.keys.PrivateKey(priv_bytes)
-        sig = priv.sign_msg_hash(message_hash)
-        # eth_keys returns v as 0 or 1 (recovery id).  Ethereum legacy
-        # format uses 27 or 28 (recovery id + 27).
-        return EthereumSignature(
-            v=sig.v + 27,
-            r=sig.r.to_bytes(_SCALAR_BYTES, "big"),
-            s=sig.s.to_bytes(_SCALAR_BYTES, "big"),
-        )
+        return _eth_signature(priv.sign_msg_hash(message_hash))
     finally:
         del priv_bytes
 
@@ -337,6 +344,42 @@ def list_seed_envelope_ids(key_id: str, *, home: Path | None = None) -> list[str
     return sorted(path.stem for path in seed_dir.glob("*.gcm"))
 
 
+def _derive_hd_priv(
+    key_id: str,
+    seed_envelope_id: str,
+    index: int,
+    *,
+    backend: NativeBackend,
+    audit_sink: AuditSink,
+    home: Path | None,
+    bip39_passphrase: str,
+    account: int,
+    change: int,
+) -> tuple[bytes, str]:
+    """Decrypt the stored seed and derive the BIP44 private scalar + path.
+
+    Shared by :func:`derive_ethereum_key` and :func:`sign_hash_hd`. Decrypts the
+    SE-encrypted seed (triggers Enclave authorization — Touch ID / passcode
+    unless the wrapping key is unattended), runs BIP39 mnemonic→seed then BIP44
+    ``m/44'/60'/account'/change/index`` derivation, and returns
+    ``(priv_bytes, path)``. The plaintext seed is wiped before returning; the
+    caller owns ``priv_bytes`` and must drop it (``del``) immediately after use.
+
+    ``bip39_passphrase`` is the optional BIP39 "25th word" — independent of the
+    keyvault's own Passphrase.
+    """
+    from . import _bip32, _bip39, api
+
+    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
+    try:
+        mnemonic = seed_bytes.decode("utf-8")
+        path = _bip44_eth_path(index, account=account, change=change)
+        priv_bytes = _bip32.derive_path(_bip39.mnemonic_to_seed(mnemonic, bip39_passphrase), path)
+        return priv_bytes, path
+    finally:
+        del seed_bytes
+
+
 def derive_ethereum_key(
     key_id: str,
     seed_envelope_id: str,
@@ -360,19 +403,23 @@ def derive_ethereum_key(
     ``bip39_passphrase`` is the optional BIP39 "25th word" — independent of
     the keyvault's own Passphrase.
     """
-    from . import _bip32, _bip39, api
-
     eth = _eth_keys()
-    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
     priv_bytes: bytes | None = None
     try:
-        mnemonic = seed_bytes.decode("utf-8")
-        path = _bip44_eth_path(index, account=account, change=change)
-        priv_bytes = _bip32.derive_path(_bip39.mnemonic_to_seed(mnemonic, bip39_passphrase), path)
+        priv_bytes, path = _derive_hd_priv(
+            key_id,
+            seed_envelope_id,
+            index,
+            backend=backend,
+            audit_sink=audit_sink,
+            home=home,
+            bip39_passphrase=bip39_passphrase,
+            account=account,
+            change=change,
+        )
         address: str = eth.keys.PrivateKey(priv_bytes).public_key.to_checksum_address()
         return address, path
     finally:
-        del seed_bytes
         if priv_bytes is not None:
             del priv_bytes
 
@@ -400,22 +447,21 @@ def sign_hash_hd(
     if len(message_hash) != _SCALAR_BYTES:
         raise ValueError(f"message_hash must be exactly {_SCALAR_BYTES} bytes, got {len(message_hash)}")
 
-    from . import _bip32, _bip39, api
-
     eth = _eth_keys()
-    seed_bytes = api.decrypt(key_id, seed_envelope_id, _SEED_PURPOSE, backend=backend, audit_sink=audit_sink, home=home)
     priv_bytes: bytes | None = None
     try:
-        mnemonic = seed_bytes.decode("utf-8")
-        path = _bip44_eth_path(index, account=account, change=change)
-        priv_bytes = _bip32.derive_path(_bip39.mnemonic_to_seed(mnemonic, bip39_passphrase), path)
-        sig = eth.keys.PrivateKey(priv_bytes).sign_msg_hash(message_hash)
-        return EthereumSignature(
-            v=sig.v + 27,
-            r=sig.r.to_bytes(_SCALAR_BYTES, "big"),
-            s=sig.s.to_bytes(_SCALAR_BYTES, "big"),
+        priv_bytes, _path = _derive_hd_priv(
+            key_id,
+            seed_envelope_id,
+            index,
+            backend=backend,
+            audit_sink=audit_sink,
+            home=home,
+            bip39_passphrase=bip39_passphrase,
+            account=account,
+            change=change,
         )
+        return _eth_signature(eth.keys.PrivateKey(priv_bytes).sign_msg_hash(message_hash))
     finally:
-        del seed_bytes
         if priv_bytes is not None:
             del priv_bytes

@@ -260,6 +260,19 @@ def test_sign_hash_hd_recovers_to_derived_address(tmp_path: Path) -> None:
     assert recovered == addr
 
 
+def test_sign_hash_hd_wrong_length_raises_before_decrypt(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault.ethereum import sign_hash_hd, store_seed_phrase
+
+    _, log, kw = _wrap_backend(tmp_path)
+    seed_env = store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+    log.clear()
+    with pytest.raises(ValueError, match="32 bytes"):
+        sign_hash_hd("default", seed_env, 0, b"too-short", **kw)
+    # The length guard must fire before any seed decrypt — a malformed hash
+    # never spends an Enclave unwrap (no biometric prompt).
+    assert not any(e.get("reason", "").startswith("keyvault.unwrap") for e in log)
+
+
 def test_derive_bip39_passphrase_changes_address(tmp_path: Path) -> None:
     from mordred_hermes.keyvault.ethereum import derive_ethereum_key, store_seed_phrase
 
