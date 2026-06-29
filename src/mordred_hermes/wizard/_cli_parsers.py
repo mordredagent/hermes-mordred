@@ -48,11 +48,20 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_vault(sub)
     _add_encryption(sub)
     _add_plugins(sub)
+    _add_extension(sub)
 
 
 # -----------------------------------------------------------------------------
 # Subcommand parsers — each calls set_defaults(func=...) wiring its handler.
 # -----------------------------------------------------------------------------
+
+
+def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("extension", help="Browser extension: pairing and bridge")
+    esub = p.add_subparsers(dest="extension_command", required=True, metavar="COMMAND")
+    p_pair = esub.add_parser("pair", help="Generate a pairing code and wait for the extension")
+    p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait for pairing (default: 600)")
+    p_pair.set_defaults(func=_handle_extension_pair)
 
 
 def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -694,3 +703,9 @@ def _handle_plugins_list(args: argparse.Namespace) -> int:
     from . import plugins_list
 
     return plugins_list.cli_handler(args)
+
+
+def _handle_extension_pair(args: argparse.Namespace) -> int:
+    from . import extension_pair_cli
+
+    return extension_pair_cli.cli_extension_pair(args)

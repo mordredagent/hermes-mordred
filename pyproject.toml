@@ -248,14 +248,34 @@ ignore_missing_imports = true
 follow_imports = "skip"
 
 # Untyped third-party modules with no stubs:
-# - eth-keys lives in the optional `ethereum` extra, which CI does not install
-#   (only `dev` / `keyvault` / `macos`), so keyvault/ethereum.py must type-check
-#   without it present.
+# - eth-keys / eth-account / rlp / eth-hash live in the optional `ethereum`
+#   extra, which CI does not install (only `dev` / `keyvault` / `macos`), so
+#   keyvault/ethereum.py and keyvault/extension_sign.py must type-check without
+#   them present.
 # - objc (pyobjc) is the macOS-only Security/CoreFoundation bridge used by
 #   keyvault/_seckey_ctypes.py; it ships no py.typed marker and is absent on the
 #   Linux runner entirely.
-# Treat both as untyped so `mypy --strict src` resolves cross-platform.
+# - qrcode lives in the optional `messaging` extra (also not installed for the
+#   mypy job); the extension-pair CLI imports it lazily.
+# - gateway is a repo-root top-level package (not under mordred-hermes/src), so
+#   it isn't importable from the mordred-hermes mypy run; the extension-pair CLI
+#   only imports it lazily at runtime.
+# Treat all as untyped so `mypy --strict src` resolves cross-platform.
 [[tool.mypy.overrides]]
-module = ["eth_keys", "eth_keys.*", "objc"]
+module = [
+    "eth_keys",
+    "eth_keys.*",
+    "eth_account",
+    "eth_account.*",
+    "rlp",
+    "rlp.*",
+    "eth_hash",
+    "eth_hash.*",
+    "qrcode",
+    "qrcode.*",
+    "gateway",
+    "gateway.*",
+    "objc",
+]
 ignore_missing_imports = true
 
