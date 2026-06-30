@@ -397,6 +397,86 @@ def _is_slack_voice_clip(file_obj: Dict[str, Any]) -> bool:
     return name.startswith("audio_message")
 
 
+# ---------------------------------------------------------------------------
+# Mordred extension E2E (inbound decrypt + outbound reply encryption).
+# Ported from gateway/platforms/slack.py (extension branch) to the 0.17.x Slack
+# plugin. See Mordred-Extension/SPEC.ja.md §4 and mordred-docs/dev/SLACK_E2E.md.
+# ---------------------------------------------------------------------------
+
+def _extension_decrypt_inbound(text: str) -> Optional[str]:
+    """Decrypt a Mordred `🔒ENC:v1:` message, or return None (fail-open)."""
+    try:
+        from gateway.extension_crypto import decrypt_message, is_encrypted
+
+        if not text or not is_encrypted(text):
+            return None
+        from gateway.extension_pairing import load_pairing
+
+        pairing = load_pairing()
+        if pairing is None:
+            return None
+        return decrypt_message(pairing.aes_key, text)
+    except Exception:  # noqa: BLE001 — fail-open: never block message handling
+        return None
+
+
+# Threads/channels where an encrypted message was received → reply-in-kind.
+_MORDRED_ENC_THREADS: Dict[Tuple[str, Optional[str]], float] = {}
+_MORDRED_ENC_TTL = 24 * 3600  # seconds
+
+# Leading Slack control tokens kept PLAINTEXT (mentions/links still work).
+_MORDRED_MENTION_PREFIX_RE = re.compile(
+    r"^((?:<@[A-Z0-9]+>|<!(?:here|channel|everyone)>"
+    r"|<!subteam\^[A-Z0-9]+(?:\|[^>]*)?>|<#[A-Z0-9]+(?:\|[^>]*)?>|\s)+)"
+)
+
+
+def _mordred_mark_encrypted_thread(channel_id: str, thread_root: Optional[str]) -> None:
+    if not channel_id:
+        return
+    _MORDRED_ENC_THREADS[(channel_id, thread_root)] = time.time() + _MORDRED_ENC_TTL
+
+
+def _mordred_is_encrypted_thread(channel_id: str, thread_ts: Optional[str]) -> bool:
+    now = time.time()
+    for key, exp in list(_MORDRED_ENC_THREADS.items()):  # opportunistic prune
+        if exp < now:
+            _MORDRED_ENC_THREADS.pop(key, None)
+    if _MORDRED_ENC_THREADS.get((channel_id, thread_ts), 0) > now:
+        return True
+    if thread_ts is None and _MORDRED_ENC_THREADS.get((channel_id, None), 0) > now:
+        return True
+    return False
+
+
+def _mordred_aes_key() -> Optional[bytes]:
+    try:
+        from gateway.extension_pairing import load_pairing
+
+        pairing = load_pairing()
+        return pairing.aes_key if pairing is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _mordred_encrypt_reply(aes_key: bytes, content: str, max_len: int) -> List[str]:
+    """Encrypt a reply body-only, keeping leading @mentions plaintext (§4.6)."""
+    from gateway.extension_crypto import encrypt_message
+
+    m = _MORDRED_MENTION_PREFIX_RE.match(content)
+    prefix = m.group(1).strip() if m else ""
+    body = content[m.end() :] if m else content
+    if not body.strip():
+        return [content]
+    safe = max(512, int(max_len * 0.6))
+    pieces = [body[i : i + safe] for i in range(0, len(body), safe)]
+    out: List[str] = []
+    for i, piece in enumerate(pieces):
+        enc = encrypt_message(aes_key, piece)
+        out.append(f"{prefix} {enc}" if (i == 0 and prefix) else enc)
+    return out
+
+
 class SlackAdapter(BasePlatformAdapter):
     """
     Slack bot adapter using Socket Mode.
@@ -1294,13 +1374,31 @@ class SlackAdapter(BasePlatformAdapter):
                     content,
                 )
 
-            # Convert standard markdown → Slack mrkdwn
-            formatted = self.format_message(content)
-
-            # Split long messages, preserving code block boundaries
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
+
+            # Mordred E2E (reply-in-kind): in an encrypted thread, encrypt the
+            # reply — body only, leading @mentions stay plaintext. Fail-closed:
+            # never post plaintext when encryption should apply but can't.
+            mordred_encrypted = _mordred_is_encrypted_thread(chat_id, thread_ts)
+            if mordred_encrypted:
+                aes_key = _mordred_aes_key()
+                if aes_key is None:
+                    notice_kwargs = {
+                        "channel": chat_id,
+                        "text": "🔒 (暗号化できないため本文を送信できませんでした)",
+                        "mrkdwn": False,
+                    }
+                    if thread_ts:
+                        notice_kwargs["thread_ts"] = thread_ts
+                    await self._get_client(chat_id).chat_postMessage(**notice_kwargs)
+                    return SendResult(success=False, error="mordred_encrypt_unavailable")
+                chunks = _mordred_encrypt_reply(aes_key, content, self.MAX_MESSAGE_LENGTH)
+            else:
+                # Convert standard markdown → Slack mrkdwn
+                formatted = self.format_message(content)
+                # Split long messages, preserving code block boundaries
+                chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+
             last_result = None
 
             # reply_broadcast: also post thread replies to the main channel.
@@ -1311,7 +1409,9 @@ class SlackAdapter(BasePlatformAdapter):
                 kwargs = {
                     "channel": chat_id,
                     "text": chunk,
-                    "mrkdwn": True,
+                    # Ciphertext must not be mrkdwn-formatted (base64 "_" would be
+                    # mangled into italics and corrupt the blob).
+                    "mrkdwn": not mordred_encrypted,
                 }
                 if thread_ts:
                     kwargs["thread_ts"] = thread_ts
@@ -2456,6 +2556,19 @@ class SlackAdapter(BasePlatformAdapter):
                 pass
 
         text = original_text
+
+        # Mordred extension E2E: decrypt `🔒ENC:v1:` before the agent sees it,
+        # and mark this thread/channel as an encrypted context (reply-in-kind).
+        # Fail-open on decrypt. See mordred-docs/dev/SLACK_E2E.md.
+        _mordred_decrypted = _extension_decrypt_inbound(text)
+        if _mordred_decrypted is not None:
+            text = _mordred_decrypted
+            original_text = _mordred_decrypted
+            event["text"] = _mordred_decrypted
+            _mc = event.get("channel", "")
+            _mordred_mark_encrypted_thread(_mc, event.get("thread_ts") or event.get("ts"))
+            if not event.get("thread_ts"):
+                _mordred_mark_encrypted_thread(_mc, None)
 
         # Extract quoted/forwarded content from Slack blocks.
         # Slack's modern composer embeds forwarded messages in the ``blocks``
