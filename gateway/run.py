@@ -6521,9 +6521,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # engages drain on the first tick.
         asyncio.create_task(self._drain_control_watcher())
 
+        # Start the Mordred browser-extension WebSocket API (ws://localhost:7788/ext).
+        # Fail-soft: a bind error / missing dep must never block the gateway.
+        # Opt out with MORDRED_EXTENSION_API=0.
+        await self._start_extension_api()
+
         logger.info("Press Ctrl+C to stop")
-        
+
         return True
+
+    async def _start_extension_api(self) -> None:
+        """Start the Mordred extension API server (best-effort, opt-out via env)."""
+        self._ext_api_server = None
+        if os.environ.get("MORDRED_EXTENSION_API", "1").strip() in ("0", "false", "no"):
+            logger.info("Mordred extension API disabled (MORDRED_EXTENSION_API)")
+            return
+        try:
+            from gateway.extension_api import ExtensionAPIServer
+            from gateway.extension_chat import make_gateway_chat_handler
+
+            host = os.environ.get("MORDRED_EXTENSION_HOST", "127.0.0.1")
+            port = int(os.environ.get("MORDRED_EXTENSION_PORT", "7788"))
+            # Extension chat runs the real agent (passes all Mordred hooks, §2.1).
+            chat_handler = make_gateway_chat_handler(self)
+            server = ExtensionAPIServer(host=host, port=port, chat_handler=chat_handler)
+            await server.start()
+            self._ext_api_server = server
+        except Exception as e:  # noqa: BLE001 — never break gateway startup
+            logger.warning("Mordred extension API not started: %s", e)
 
     async def _handoff_watcher(self, interval: float = 2.0) -> None:
         """Background task that processes pending CLI→gateway session handoffs.
