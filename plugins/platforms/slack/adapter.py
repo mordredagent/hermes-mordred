@@ -410,15 +410,15 @@ _MORDRED_ENC_TOKEN_RE = re.compile(r"🔒?ENC:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+")
 
 
 def _extension_decrypt_inbound(text: str) -> Optional[str]:
-    """Decrypt the Mordred `🔒ENC:v1:` token inside `text` (anywhere; a leading
-    @mention may precede it) and replace it with the plaintext. Returns the
-    rewritten text, or None when there's no token / decryption fails (fail-open).
+    """Replace EVERY Mordred `🔒ENC:v1:` token in `text` with its plaintext, so
+    the agent sees the message as if encryption never happened (Slack is just an
+    encrypted transport). Tokens may appear anywhere and more than once (the
+    plain text field AND re-extracted Slack blocks/attachments both carry them).
+    Returns the rewritten text, or None when there's no token / no pairing
+    (fail-open). A per-token decrypt failure leaves that one token untouched.
     """
     try:
-        if not text:
-            return None
-        m = _MORDRED_ENC_TOKEN_RE.search(text)
-        if not m:
+        if not text or not _MORDRED_ENC_TOKEN_RE.search(text):
             return None
         from gateway.extension_pairing import load_pairing
 
@@ -427,10 +427,15 @@ def _extension_decrypt_inbound(text: str) -> Optional[str]:
             return None
         from gateway.extension_crypto import decrypt_message
 
-        token = m.group(0)
-        core = token[1:] if token.startswith("🔒") else token  # ensure 🔒 prefix
-        plaintext = decrypt_message(pairing.aes_key, "🔒" + core)
-        return text[: m.start()] + plaintext + text[m.end() :]
+        def _sub(m: "re.Match[str]") -> str:
+            token = m.group(0)
+            core = token[1:] if token.startswith("🔒") else token  # ensure 🔒 prefix
+            try:
+                return decrypt_message(pairing.aes_key, "🔒" + core)
+            except Exception:  # noqa: BLE001 — leave an undecryptable token as-is
+                return token
+
+        return _MORDRED_ENC_TOKEN_RE.sub(_sub, text)
     except Exception:  # noqa: BLE001 — fail-open: never block message handling
         return None
 
@@ -2753,6 +2758,16 @@ class SlackAdapter(BasePlatformAdapter):
         #   3. The message is in a thread where the bot was previously @mentioned, OR
         #   4. There's an existing session for this thread (survives restarts)
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
+
+        # Final Mordred sweep: blocks/attachments re-extraction above can
+        # re-introduce 🔒ENC:v1: tokens after the early decrypt. Decrypt the
+        # fully-assembled text so the agent only ever sees plaintext — Slack is
+        # treated purely as an encrypted transport (encryption never leaks into
+        # the conversation the agent reasons about).
+        _md = _extension_decrypt_inbound(text)
+        if _md is not None:
+            text = _md
+
         routing_text = original_text or ""
         is_mentioned = bool(
             (bot_uid and f"<@{bot_uid}>" in routing_text)
@@ -3134,6 +3149,14 @@ class SlackAdapter(BasePlatformAdapter):
                 )
             except Exception:  # pragma: no cover - defensive
                 reply_to_text = None
+
+        # Definitive Mordred decrypt, immediately before the agent sees the text:
+        # decrypt every 🔒ENC:v1: token in the fully-assembled message (plain
+        # field + blocks + attachments + thread context). The agent reasons only
+        # over plaintext — encryption is an invisible transport concern.
+        _md_final = _extension_decrypt_inbound(text)
+        if _md_final is not None:
+            text = _md_final
 
         msg_event = MessageEvent(
             text=text,
