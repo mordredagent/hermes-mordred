@@ -28,9 +28,8 @@ from pathlib import Path
 
 import pytest
 
-# Locate the script via the worktree root (this file is
-# <worktree>/mordred-hermes/tests/<this>.py).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Locate the script via the repo root (this file is <repo>/tests/<this>.py).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / "scripts" / "keyvault_offline_digest.py"
 
 # Reuse the canonical SPEC vector from test_keyvault_digest. Keeping the
