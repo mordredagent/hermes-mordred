@@ -403,19 +403,34 @@ def _is_slack_voice_clip(file_obj: Dict[str, Any]) -> bool:
 # plugin. See Mordred-Extension/SPEC.ja.md §4 and mordred-docs/dev/SLACK_E2E.md.
 # ---------------------------------------------------------------------------
 
-def _extension_decrypt_inbound(text: str) -> Optional[str]:
-    """Decrypt a Mordred `🔒ENC:v1:` message, or return None (fail-open)."""
-    try:
-        from gateway.extension_crypto import decrypt_message, is_encrypted
+# A `🔒ENC:v1:{nonce}:{ct}` token anywhere in the text. The extension keeps a
+# leading @mention plaintext (SPEC §4.6), so the ciphertext is NOT necessarily
+# at the start (e.g. "<@U…> 🔒ENC:v1:…"); the 🔒 may also be dropped by Slack.
+_MORDRED_ENC_TOKEN_RE = re.compile(r"🔒?ENC:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+")
 
-        if not text or not is_encrypted(text):
+
+def _extension_decrypt_inbound(text: str) -> Optional[str]:
+    """Decrypt the Mordred `🔒ENC:v1:` token inside `text` (anywhere; a leading
+    @mention may precede it) and replace it with the plaintext. Returns the
+    rewritten text, or None when there's no token / decryption fails (fail-open).
+    """
+    try:
+        if not text:
+            return None
+        m = _MORDRED_ENC_TOKEN_RE.search(text)
+        if not m:
             return None
         from gateway.extension_pairing import load_pairing
 
         pairing = load_pairing()
         if pairing is None:
             return None
-        return decrypt_message(pairing.aes_key, text)
+        from gateway.extension_crypto import decrypt_message
+
+        token = m.group(0)
+        core = token[1:] if token.startswith("🔒") else token  # ensure 🔒 prefix
+        plaintext = decrypt_message(pairing.aes_key, "🔒" + core)
+        return text[: m.start()] + plaintext + text[m.end() :]
     except Exception:  # noqa: BLE001 — fail-open: never block message handling
         return None
 
