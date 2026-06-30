@@ -8,7 +8,7 @@ which calls :func:`collect_network_answers` / :func:`network_answers_from_args`
 and then persists the result.
 
 The per-prompt description strings (mirrors of the Tor / VPN tables in
-``mordred-docs/user/QUICKSTART.md``) live here next to the prompts that use
+``docs/user/QUICKSTART.md``) live here next to the prompts that use
 them; ``network_cli`` re-exports the handful the tests assert on.
 """
 
@@ -40,7 +40,7 @@ from .configure import PromptIO
 #: hint of what it does (UX request 2026-06-15); these orient the operator the
 #: same way the keyvault-init intro and the ``configure`` policy-mode
 #: descriptions do. Copy condenses the "What each route is" section of
-#: ``mordred-docs/user/QUICKSTART.md`` so the wizard and the docs never drift.
+#: ``docs/user/QUICKSTART.md`` so the wizard and the docs never drift.
 _NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "tor": "Anonymity via the Tor network — slowest; needs `tor` installed",
     "vpn": "IP privacy via any VPN — faster; Mullvad recommended (paid)",
@@ -54,7 +54,7 @@ _NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
 #: Mullvad VPN provider is selected (the provider question is asked first), so
 #: a WireGuard / custom-VPN user is never prompted for a Mullvad account number
 #: (UX request 2026-06-16). Mirrors the per-prompt Tor / VPN tables in
-#: ``mordred-docs/user/QUICKSTART.md``.
+#: ``docs/user/QUICKSTART.md``.
 _TOR_BINARY_DESCRIPTION: Final[str] = (
     "Tor route only — where the `tor` program is. Leave as `tor` if it's on your PATH."
 )

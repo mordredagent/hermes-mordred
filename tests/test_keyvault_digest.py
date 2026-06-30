@@ -6,7 +6,7 @@ primitives in PR1).
 The digest binds together SeedPhrase + Passphrase + PoW so cross-machine
 recovery can detect mis-transcription before unwrapping the secret.
 Canonical algorithm is frozen in
-``mordred-docs/dev/SPEC.md §Key generation and verification digest``:
+``docs/dev/SPEC.md §Key generation and verification digest``:
 
     H               := BLAKE3 (32-byte digest mode)
     seed_hash       := H(SeedPhrase as UTF-8 bytes)

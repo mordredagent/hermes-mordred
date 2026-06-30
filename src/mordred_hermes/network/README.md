@@ -2,7 +2,7 @@
 
 Tor / VPN / Clearnet path management.
 
-## Owned filesystem paths (see `mordred-docs/dev/PATHS.md`)
+## Owned filesystem paths (see `docs/dev/PATHS.md`)
 
 - `~/.hermes/mordred/credentials/` — Mullvad account, WireGuard config (Phase 3 owner; sole reader)
 - `~/.hermes/mordred/tor-data/` — torrc, control_auth_cookie, DataDirectory
@@ -66,7 +66,7 @@ Phase 3 step-0 freeze appended to `mordred_hermes.privacy_check._audit_reasons.R
 - `network.bringup_failed` — lenient: runtime fallback to clearnet (decision `fallback`); strict: hooks layer emits this + raises `MordredPathBringupFailed`
 - `network.path_dropped` — M9 liveness 2× consecutive failure (decision `block` in strict, `warn` in lenient)
 
-Naming normalized to dotted form (`network.use` rather than the `network_use` form in TODO L331) for consistency with `policy.*` / `mordred.*`. See `mordred-docs/dev/POLICY.md`.
+Naming normalized to dotted form (`network.use` rather than the `network_use` form in TODO L331) for consistency with `policy.*` / `mordred.*`. See `docs/dev/POLICY.md`.
 
 ## M3 transitive proxy-env failure mode
 
@@ -94,4 +94,4 @@ Still deferred:
 - Live Mullvad VPN path verification (Phase 3 acceptance gate L381) — `test_vpn.py` stays `MORDRED_LIVE_VPN_TEST` gated; no `mullvad` CLI on the dev box.
 - Stem-against-real-Tor deep liveness probe (requires bind-mounted `data_dir` so the host can read `control_auth_cookie`).
 
-See `mordred-docs/dev/SPEC.md` §Plugin: `mordred_network` and `mordred-docs/dev/TODO.md` §3.
+See `docs/dev/SPEC.md` §Plugin: `mordred_network` and `docs/dev/TODO.md` §3.

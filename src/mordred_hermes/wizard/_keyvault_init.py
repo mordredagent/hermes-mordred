@@ -311,7 +311,7 @@ def _display_seed_or_refuse(
     # The operator needs top4(PoW) to recompute the digest offline; it is derived
     # from the (secret) seed but is itself only a 4-byte mask. The offline tool is
     # `scripts/keyvault_offline_digest.py`; the recipe for preparing the second
-    # device is documented in `mordred-docs/dev/setup.md` §"Offline verification
+    # device is documented in `docs/dev/setup.md` §"Offline verification
     # digest".
     surface.banner(
         "\n"
@@ -330,7 +330,7 @@ def _display_seed_or_refuse(
         "\n"
         "  The script prints a 64-char digest. Re-enter it on THIS\n"
         "  device at the `Verification digest ...` prompt below.\n"
-        "  (Recipe: mordred-docs/dev/setup.md §Offline verification digest)\n"
+        "  (Recipe: docs/dev/setup.md §Offline verification digest)\n"
         "────────────────────────────────────────────────────────────"
     )
 

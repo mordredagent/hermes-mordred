@@ -9,7 +9,7 @@ Two propagation regimes (Codex review H2, Phase 2 PR1):
 - :class:`MordredHarnessRefused` and :class:`MordredSessionRefused`
   inherit :class:`BaseException` directly. They escape the
   ``except Exception:`` wrapper inside ``hermes_cli.plugins.invoke_hook``
-  (see ``mordred-docs/dev/HOOK_PAYLOADS.md`` §1) so strict-mode policy
+  (see ``docs/dev/HOOK_PAYLOADS.md`` §1) so strict-mode policy
   refusals actually abort the session, and they are *not* :class:`SystemExit`
   subclasses so cleanup-style ``except SystemExit:`` blocks do not mistake
   a policy refusal for an ordinary CLI exit.
@@ -20,7 +20,7 @@ Phase 2 PR1 prep verified that Hermes core owns the streaming pipeline
 plugin-side ``transport.py`` wrapper cannot capture the
 ``policy.strict.local_stream_interrupted`` audit fields. The class will be
 reintroduced when a streaming hook lands upstream (tracked as v2 follow-up
-in ``mordred-docs/dev/TODO.md`` §2 and ROADMAP).
+in ``docs/dev/TODO.md`` §2 and ROADMAP).
 """
 
 from __future__ import annotations

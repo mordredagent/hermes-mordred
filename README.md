@@ -16,7 +16,7 @@ Active alpha (`0.1.0a0`). The five entry-point plugins are implemented beyond
 the original Phase 0 scaffold; the default unit suite is intended to stay
 hermetic, while hardware- and network-mutating checks remain opt-in.
 
-See `../mordred-docs/dev/` for SPEC, PLAN, TODO, PATHS, MIGRATION, UPSTREAM, CI.
+See `docs/dev/` for SPEC, PLAN, TODO, PATHS, MIGRATION, UPSTREAM, CI, and `docs/user/` for QUICKSTART and USAGE.
 
 ## Validation
 
@@ -41,8 +41,8 @@ The Tor path is covered separately by the hermetic Docker-based
 ## Install (development)
 
 ```sh
-# From repo root
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ./mordred-hermes
+# From this repo's root
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e .
 ```
 
 Verify discovery (Hermes 0.11.0):
@@ -73,5 +73,5 @@ plugins:
 For Phase 4 (`mordred_keyvault`) on macOS Apple Silicon:
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e "./mordred-hermes[macos]"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ".[macos]"
 ```

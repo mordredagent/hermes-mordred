@@ -1,6 +1,6 @@
 """Phase 4 PR2 + PR3 step-0 freeze of ``keyvault.*`` audit reason codes.
 
-Per ``mordred-docs/dev/POLICY.md`` §Phase 4 step-0 freeze (added
+Per ``docs/dev/POLICY.md`` §Phase 4 step-0 freeze (added
 2026-05-14, PR2 + PR3): only codes with an emit site OR already
 referenced by frozen SPEC text are included.
 
