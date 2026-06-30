@@ -1,0 +1,281 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mordred-hermes"
+# Version is sourced dynamically from src/mordred_hermes/__about__.py (see
+# [tool.hatch.version] below) rather than hardcoded here. The single source
+# of truth lives inside the importable package so sdist->wheel builds — which
+# run in an isolated dir without the repo's docs tree — can still resolve it
+# (TODO 0.5 L64). Bump everything in lockstep via `tools/bump_version.py`.
+dynamic = ["version"]
+description = "Privacy-preserving plugin bundle for the Hermes agent (NousResearch/hermes-agent)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "InternetMaximalism" }]
+license = { text = "MIT" }
+keywords = ["hermes", "agent", "privacy", "tor", "vpn", "keyvault"]
+
+dependencies = [
+  "hermes-agent>=0.11.0",
+  "ruamel.yaml>=0.18",
+]
+
+[project.optional-dependencies]
+# Cross-platform crypto stack for the keyvault package. Kept separate
+# from `macos` so Linux CI installs it too and `mypy --strict src` can
+# resolve blake3 / argon2 / cryptography — these packages are
+# cross-platform even though the keyvault *feature* (Secure Enclave) is
+# macOS-only. The macOS gate is the pyobjc bridges in `macos` below.
+keyvault = [
+  "argon2-cffi>=23",
+  "cryptography>=42",
+  "blake3>=0.4",
+]
+macos = [
+  # Everything keyvault needs on a Mac = the cross-platform crypto stack
+  # (recursive extra) plus the pyobjc Security-framework bridges.
+  "mordred-hermes[keyvault]",
+  "pyobjc-framework-Security>=10.0",
+  # Phase 4 PR5: SCNetworkReachability probe for keyvault.network_fallback
+  # (OS-API network-blackout fallback when mordred_network is absent).
+  "pyobjc-framework-SystemConfiguration>=10.0",
+  # Phase 4 PR7: CGScreenIsBeingCaptured probe for keyvault.seed_display
+  # (best-effort screenshot detection during the Seed display window, M5).
+  "pyobjc-framework-Quartz>=10.0",
+]
+# Phase 3 PR3a Task #5: Tor ControlPort cookie auth + `GETINFO circuit-status`
+# liveness probe. Optional because (a) stem's last release was 2021-12 so we
+# don't want to make every Mordred user inherit that supply-chain risk, and
+# (b) the shallow `process.poll()` fallback covers lenient/off operators who
+# don't need the deeper M9 liveness signal. Strict-mode operators install
+# with `pip install mordred-hermes[tor-control]`.
+ethereum = [
+  # keyvault crypto stack is a prerequisite (AES-GCM encrypt/decrypt).
+  "mordred-hermes[keyvault]",
+  # secp256k1 key operations + EIP-55 address derivation + signing.
+  "eth-keys>=0.6",
+  # keccak256 backend required by eth-keys via eth-hash.
+  "eth-hash[pycryptodome]>=0.5",
+]
+tor-control = [
+  "stem>=1.8.0,<2",
+]
+# TODO §0.8 L110-122: real-traffic SOCKS5h library + provider transport
+# verification. Heavy and optional — only the `integration-tor` CI job
+# and operators running `pytest -m integration` need it. The SOCKS
+# client libraries back `tests/integration/test_socks5h_libs.py`; the
+# provider SDKs back `test_provider_transport.py` and are
+# import-or-skipped, so a partial install still runs what it can.
+integration = [
+  "httpx[socks]>=0.27",
+  "requests[socks]>=2.32",
+  "aiohttp-socks>=0.10",
+  "anthropic>=0.40",
+  "openai>=1.40",
+  # >=1.20: floor where google.genai.types.HttpOptions(base_url=...) is
+  # stable — test_provider_transport.py builds the client with it.
+  "google-genai>=1.20",
+  "boto3>=1.34",
+]
+dev = [
+  "pytest>=8",
+  "pytest-cov",
+  # Pin the linters exactly. CI installs this extra with unpinned pip, so a
+  # floating ruff/mypy silently reformats or re-type-checks the whole tree on
+  # every new release and turns CI red with no code change (an unpinned float
+  # to ruff 0.15.15 did exactly this). Pin to the locked version so local (uv)
+  # and CI (pip) always run identical formatters and rules; bump deliberately,
+  # reformatting in the same commit.
+  "ruff==0.15.13",
+  "mypy==2.1.0",
+]
+
+# Entry points point at the MODULE (not module:register). Hermes loader
+# (hermes_cli/plugins.py:_load_entrypoint_module) calls ep.load() and then
+# getattr(module, "register"), so module-only is what works in practice.
+[project.entry-points."hermes_agent.plugins"]
+mordred_network = "mordred_hermes.network"
+mordred_privacy_check = "mordred_hermes.privacy_check"
+mordred_llm_guard = "mordred_hermes.llm_guard"
+mordred_keyvault = "mordred_hermes.keyvault"
+mordred_wizard = "mordred_hermes.wizard"
+
+# Standalone console script -- `hermes-mordred ...` works today.
+# Hermes 0.11.0 does NOT iterate PluginManager._cli_commands when building
+# its argparse subparsers (only `plugins.memory.discover_plugin_cli_commands`
+# is consulted from hermes_cli/main.py:9728-9740), so the wizard's
+# ctx.register_cli_command("mordred", ...) call is silently dropped at
+# parser-construction time. This console_script is the v1 workaround;
+# when Hermes 0.12+ wires entry-point CLI commands to argparse the
+# `hermes mordred ...` form will start working too without code changes
+# (both entry points coexist).
+[project.scripts]
+hermes-mordred = "mordred_hermes.wizard.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/InternetMaximalism/Mordred-Hermes/tree/main/mordred-docs/dev"
+Source = "https://github.com/InternetMaximalism/Mordred-Hermes"
+
+[tool.mordred]
+min-hermes-version = "0.11.0"
+
+# Dynamic version source. Hatchling's built-in regex source reads the
+# `__version__ = "..."` assignment from the file below. It must live under
+# src/ (shipped in both sdist and wheel) so a wheel built from the sdist —
+# where mordred-docs/ is absent — still resolves the version. See
+# src/mordred_hermes/__about__.py for why the canonical value lives there.
+[tool.hatch.version]
+path = "src/mordred_hermes/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mordred_hermes"]
+
+# Ship the Secure Enclave helper's Swift *sources* inside the package (NOT the
+# Swift `.build/` artifacts) so `hermes mordred keyvault enable-se` can build
+# them after a plain `pip install`. `_seckey_helper._locate_helper_source()`
+# finds them via importlib.resources at `mordred_hermes/_native/sekey-helper/`.
+[tool.hatch.build.targets.wheel.force-include]
+"native/sekey-helper/build.sh" = "mordred_hermes/_native/sekey-helper/build.sh"
+"native/sekey-helper/Package.swift" = "mordred_hermes/_native/sekey-helper/Package.swift"
+"native/sekey-helper/Sources" = "mordred_hermes/_native/sekey-helper/Sources"
+"native/sekey-helper/README.md" = "mordred_hermes/_native/sekey-helper/README.md"
+# The Linux TPM 2.0 helper's Rust *sources* (NOT the cargo `target/` artifacts)
+# so `hermes mordred keyvault enable-tpm` can build them after a plain
+# `pip install`. `_seckey_helper._locate_tpmkey_source()` finds them via
+# importlib.resources at `mordred_hermes/_native/tpmkey-helper/` (v2-OS2 2c).
+"native/tpmkey-helper/build.sh" = "mordred_hermes/_native/tpmkey-helper/build.sh"
+"native/tpmkey-helper/Cargo.toml" = "mordred_hermes/_native/tpmkey-helper/Cargo.toml"
+"native/tpmkey-helper/Cargo.lock" = "mordred_hermes/_native/tpmkey-helper/Cargo.lock"
+"native/tpmkey-helper/src" = "mordred_hermes/_native/tpmkey-helper/src"
+"native/tpmkey-helper/README.md" = "mordred_hermes/_native/tpmkey-helper/README.md"
+# config.yaml at-rest transparent decrypt (ROADMAP v2-F8). The .pth lands at the
+# site-packages root and runs a cheap inline guard at every interpreter start;
+# only a Hermes invocation (or MORDRED_CONFIG_DECRYPT=1) imports _pth_bootstrap.
+# Opt-in at runtime via `hermes-mordred vault enable-config-decrypt` (the marker);
+# absent that marker the hook is a no-op even for Hermes.
+"packaging/pth/mordred_hermes_config_decrypt.pth" = "mordred_hermes_config_decrypt.pth"
+
+[tool.hatch.build.targets.sdist]
+# /packaging/pth ships the config-decrypt .pth that the wheel force-includes
+# (above). Without it, a wheel built FROM the sdist — which is what
+# `python -m build` and release.yml do — fails with "Forced include not
+# found". The name-reservation stub elsewhere under /packaging is
+# intentionally NOT shipped (it is a separate distribution).
+include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native", "/packaging/pth"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Codex review (2026-05-14, P2-1): default unit-test runs must skip
+# integration tests so `pytest` on a Linux dev box with Docker doesn't
+# spin up the Tor container. The dedicated `integration-tor` /
+# `integration-vpn` CI jobs opt back in via `-m integration`.
+addopts = "-q --strict-markers -m 'not integration'"
+markers = [
+    "integration: requires external services (Docker, real Mullvad daemon, live network); excluded from default runs",
+]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["src/mordred_hermes"]
+
+[tool.coverage.report]
+# CI coverage floor — enforces the project's 80% minimum (code-review
+# standard) on every `pytest --cov` run, per matrix cell. pytest-cov reads
+# this automatically. The floor is 80, not the ~89% observed on macOS,
+# because the gate must also pass on the Linux runner where the macOS-only
+# pyobjc/ctypes Secure-Enclave paths (_seckey_ctypes, _PyobjcSecKeyOps,
+# _anchor_keychain ops) don't execute — pulling that matrix cell to ~85%.
+# Ratchet upward once a Linux CI run confirms the true floor.
+fail_under = 80
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear, UP: pyupgrade,
+# SIM: simplify, RUF: ruff-specific. C901 + PLR0912/PLR0915 are the
+# function-complexity caps (cyclomatic complexity / branches / statements).
+# They were enabled (Tier C) once the Tier A + Tier B refactors brought every
+# hotspot under threshold, so the gate now prevents silent regression.
+# PLR0913 (too-many-args) is deliberately NOT enabled — the crypto signers
+# take intentional keyword-only params, which is good design, not a smell.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "C901", "PLR0912", "PLR0915"]
+ignore = []
+
+# Explicit complexity thresholds. These equal ruff's current defaults and are
+# pinned here so a future ruff default change can't silently loosen the gate.
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+
+[tool.ruff.lint.per-file-ignores]
+# Complexity caps target production-code maintainability. Test functions are
+# intentionally long (arrange-act-assert across many cases) and splitting them
+# hurts readability, so tests are exempt from the complexity rules ONLY — all
+# other lint rules still apply to tests.
+"tests/**" = ["C901", "PLR0912", "PLR0915"]
+
+[tool.ruff.format]
+# Defaults are intentional: double quotes, trailing commas auto, LF.
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+# tools/ holds dev-only scripts (e.g. bump_version.py). Type-check them too so
+# a regression there is caught by the standard `mypy` run, not just an ad-hoc
+# invocation. tests/ stays out (large legacy surface, separate effort).
+files = ["src/mordred_hermes", "tools"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# Phase 0: hermes_cli has no published stubs — ignore its types only.
+# follow_imports = "skip" prevents mypy from descending into the upstream
+# package and tripping on its own (unrelated) typing/syntax issues.
+# hermes_constants is a sibling top-level module from the upstream Hermes
+# package; we use get_hermes_home() for profile-aware path resolution.
+# providers / providers.base are also upstream Hermes — Phase 2 PR1
+# llm_guard.local_adapter subclasses ``providers.base.ProviderProfile`` to
+# register the ``mordred-local`` synthetic provider.
+[[tool.mypy.overrides]]
+module = ["hermes_cli", "hermes_cli.*", "hermes_constants", "providers", "providers.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# Untyped third-party modules with no stubs:
+# - eth-keys / eth-account / rlp / eth-hash live in the optional `ethereum`
+#   extra, which CI does not install (only `dev` / `keyvault` / `macos`), so
+#   keyvault/ethereum.py and keyvault/extension_sign.py must type-check without
+#   them present.
+# - objc (pyobjc) is the macOS-only Security/CoreFoundation bridge used by
+#   keyvault/_seckey_ctypes.py; it ships no py.typed marker and is absent on the
+#   Linux runner entirely.
+# - qrcode lives in the optional `messaging` extra (also not installed for the
+#   mypy job); the extension-pair CLI imports it lazily.
+# - gateway is a repo-root top-level package (not under mordred-hermes/src), so
+#   it isn't importable from the mordred-hermes mypy run; the extension-pair CLI
+#   only imports it lazily at runtime.
+# Treat all as untyped so `mypy --strict src` resolves cross-platform.
+[[tool.mypy.overrides]]
+module = [
+    "eth_keys",
+    "eth_keys.*",
+    "eth_account",
+    "eth_account.*",
+    "rlp",
+    "rlp.*",
+    "eth_hash",
+    "eth_hash.*",
+    "qrcode",
+    "qrcode.*",
+    "gateway",
+    "gateway.*",
+    "objc",
+]
+ignore_missing_imports = true
+

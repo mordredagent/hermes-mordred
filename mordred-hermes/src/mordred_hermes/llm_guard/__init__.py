@@ -1,0 +1,285 @@
+"""mordred_llm_guard — local LLM enforcement (Phase 2 PR1 + PR2).
+
+PR1 wiring (Codex review applied):
+
+1. **Provider registration** — :func:`register` explicitly calls
+   :func:`local_adapter.register_mordred_local` (Codex B1: the upstream
+   ``providers._discover_providers()`` scanner does not see entry-point
+   plugins, so module-import side effects would never land the profile in
+   the registry).
+
+2. **Harness primary detection** — ``on_session_start`` hook invokes
+   :func:`harness_detect.check_harness_primary` to refuse strict-mode
+   sessions whose primary is a harness (Codex / Claude CLI / Cursor /
+   ACP client). Lenient mode warns + audits and continues.
+
+PR2 additions:
+
+3. **Session-scoped enforce** — a second ``on_session_start`` callback
+   registered AFTER ``harness_detect`` so harness refusals take precedence
+   (HOOK_PAYLOADS.md §1: callbacks fire in registration order). Reads the
+   active provider via :func:`_resolve_active_provider` and applies the
+   refuse-only decision matrix in :func:`enforce.check_session_provider`.
+
+This module is intentionally side-effect-free at import time: provider
+registration only happens via :func:`register`. Tests verify this
+invariant (``test_llm_guard_register.py``).
+"""
+
+from __future__ import annotations
+
+import functools
+import json
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+from .._audit_support import build_audit_writer
+from .._home import HERMES_BASE
+from .._policy_io import load_policy_mapping
+from .._provider_identity import canonicalize_provider
+from .._yaml_io import load_yaml_mapping
+from . import enforce, harness_detect, local_adapter
+from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
+from ._typing import PluginContext
+
+if TYPE_CHECKING:
+    # Type-only import — keeps :func:`register` cheap and side-effect-free by
+    # avoiding privacy_check load at plugin-discovery time (the runtime body
+    # of :func:`_build_audit_writer` does the lazy import on first call).
+    from ..privacy_check.audit import NDJSONWriter
+
+_LOG = logging.getLogger("mordred.llm_guard")
+
+# Codex L1 follow-up: inline literal lifted to a module constant for
+# grep-ability; ``_read_policy_mode`` returned ``"lenient"`` from five sites.
+_DEFAULT_POLICY_MODE = "lenient"
+
+DEFAULT_CONFIG_PATH: Path = HERMES_BASE / "config.yaml"
+DEFAULT_POLICY_JSON_PATH: Path = HERMES_BASE / "mordred" / "policy.json"
+DEFAULT_AUDIT_PATH: Path = HERMES_BASE / "mordred" / "audit.log"
+DEFAULT_AUTH_JSON_PATH: Path = HERMES_BASE / "auth.json"
+
+
+def register(ctx: PluginContext) -> None:
+    """Hermes plugin entry point — wires PR1 + PR2 surface.
+
+    Steps:
+
+    1. Register the ``mordred-local`` synthetic provider with the upstream
+       provider registry.
+    2. Register the harness-primary detector on ``on_session_start``.
+    3. Register the enforce handler on the same hook (after step 2 so
+       harness refusals propagate first).
+    """
+    local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
+    ctx.register_hook("on_session_start", _on_session_start_harness)
+    ctx.register_hook("on_session_start", _on_session_start_enforce)
+    # Codex review P1 round 3: ``on_session_start`` only sees disk-based
+    # state, so runtime overrides (``hermes --provider …``,
+    # ``HERMES_INFERENCE_PROVIDER``, oneshot/gateway switches) would
+    # bypass strict mode otherwise. ``pre_api_request`` is the only hook
+    # whose payload carries the resolved runtime ``provider`` kwarg
+    # (run_agent.py:11327).
+    ctx.register_hook("pre_api_request", _on_pre_api_request_enforce)
+
+
+def _on_session_start_harness(**_kwargs: Any) -> None:
+    """First callback — harness detection (PR1)."""
+    policy_mode = _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
+    harness_detect.check_harness_primary(
+        policy_mode=policy_mode,
+        config_path=DEFAULT_CONFIG_PATH,
+        audit=audit,
+    )
+
+
+def _on_session_start_enforce(**_kwargs: Any) -> None:
+    """Second callback — audit-only disk-state pre-check (PR2).
+
+    Refreshes the ``mordred-local`` profile from ``policy.json`` so a
+    mid-process ``hermes mordred configure`` rerun updates ``base_url``
+    before the next session start (Codex M1 PR2 follow-up — the previous
+    in-process value would otherwise stay stale until process restart).
+
+    Codex review P2 round 4: this hook can only see disk-based provider
+    state (``config.yaml model.provider`` / ``auth.json active_provider``),
+    not runtime overrides (``hermes --provider …``,
+    ``HERMES_INFERENCE_PROVIDER``, oneshot / gateway model switches).
+    Raising :class:`MordredSessionRefused` here on a stale-disk mismatch
+    would falsely reject sessions whose actual runtime is allowed.
+
+    The strict-mode refusal exceptions are therefore swallowed at this
+    boundary — the audit entries written by
+    :func:`enforce.check_session_provider` BEFORE the raise are still
+    persisted, so observers see the disk-based pre-check signal.
+    Authoritative refusal happens at :func:`_on_pre_api_request_enforce`
+    where the actually-resolved runtime provider is known.
+    """
+    local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
+    policy_mode = _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
+    active_provider = _resolve_active_provider(
+        auth_json_path=DEFAULT_AUTH_JSON_PATH,
+        config_path=DEFAULT_CONFIG_PATH,
+    )
+    try:
+        enforce.check_session_provider(
+            policy_mode=policy_mode,
+            policy_json_path=DEFAULT_POLICY_JSON_PATH,
+            active_provider=active_provider,
+            audit=audit,
+        )
+    except MordredSessionRefused as e:
+        _LOG.info(
+            "on_session_start enforce: disk-state pre-check would refuse (%s); "
+            "deferring authoritative decision to pre_api_request",
+            e,
+        )
+    except MordredLocalUnreachable as e:
+        _LOG.info(
+            "on_session_start enforce: local probe failed for disk-configured "
+            "endpoint (%s); deferring to pre_api_request",
+            e,
+        )
+
+
+def _on_pre_api_request_enforce(**kwargs: Any) -> None:
+    """Per-request authoritative enforcement against the resolved runtime provider.
+
+    ``run_agent.py:11320-11338`` fires this hook just before the outbound
+    API call with kwargs that include ``provider`` — the actually-resolved
+    runtime provider (after CLI overrides, env vars, and oneshot/gateway
+    switches). Strict-mode block paths raise
+    :class:`MordredSessionRefused` (``BaseException``-derived) which
+    escapes both the plugin manager's ``except Exception`` filter
+    (``hermes_cli/plugins.py:1112``) and the call site's wrapper
+    (``run_agent.py:11337``), so the API request is actually aborted.
+
+    Codex review P1 round 3: this is the only enforcement point that
+    cannot be bypassed by a runtime provider override; ``on_session_start``
+    enforce remains as best-effort early refusal based on disk state.
+    """
+    provider = kwargs.get("provider")
+    # Canonicalize aliases (e.g. ``claude`` → ``anthropic``) so the runtime
+    # provider matches the strict-mode allowlist / transport registry keys,
+    # not the raw Hermes alias the user happened to configure.
+    active_provider = canonicalize_provider(provider) if isinstance(provider, str) and provider.strip() else None
+    # Codex review P2 round 7: the runtime ``base_url`` is what the
+    # outbound call will actually use; in long-lived processes it can
+    # diverge from policy.json's ``local_llm_endpoint`` mirror after a
+    # configure rerun. For the mordred-local path we want to probe
+    # *that* URL, not the disk mirror.
+    base_url = kwargs.get("base_url")
+    runtime_base_url = base_url if isinstance(base_url, str) and base_url.strip() else None
+    policy_mode = _read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
+    enforce.check_runtime_provider(
+        policy_mode=policy_mode,
+        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        active_provider=active_provider,
+        audit=audit,
+        runtime_base_url=runtime_base_url,
+    )
+
+
+def _resolve_active_provider(*, auth_json_path: Path, config_path: Path) -> str | None:
+    """Resolve the active provider id Hermes will actually run.
+
+    Mirrors ``hermes_cli/runtime_provider.py::resolve_requested_provider``
+    (the function that drives runtime inference, NOT the "is this
+    configured?" predicate ``is_provider_explicitly_configured`` which
+    earlier revisions of this function copied). Order:
+
+    1. ``~/.hermes/config.yaml`` → ``model.provider`` — the persistent
+       source of truth when it names a concrete provider.
+    2. ``~/.hermes/auth.json`` → ``active_provider`` — fallback used when
+       ``model.provider`` is missing, empty, or ``"auto"`` (Hermes'
+       auto-resolution path).
+
+    Codex review P1: enforce must NOT defer to a stale auth.json when
+    ``model.provider`` names a different runtime; that scenario allowed
+    cloud sessions to slip past strict mode against the wrong identifier.
+
+    Returns ``None`` when neither source yields a usable string. The
+    caller (enforce) treats ``None`` as the degraded
+    ``no_resolved_provider`` path (POLICY.md row 6).
+    """
+    configured = _read_config_model_provider(config_path)
+    if configured:
+        return canonicalize_provider(configured)
+    resolved = _read_auth_active_provider(auth_json_path)
+    return canonicalize_provider(resolved) if resolved else None
+
+
+def _read_auth_active_provider(auth_json_path: Path) -> str | None:
+    if not auth_json_path.exists():
+        return None
+    try:
+        with auth_json_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        _LOG.warning("could not read %s: %s", auth_json_path, e)
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("active_provider")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized:
+            return normalized
+    return None
+
+
+def _read_config_model_provider(config_path: Path) -> str | None:
+    # Default catch=(OSError, YAMLError) is deliberately narrow (review LOW
+    # finding #3): I/O errors and YAML parse failures route to the degraded
+    # "no resolved provider" path; programming errors still escape.
+    data = load_yaml_mapping(config_path, log=_LOG)
+    model = data.get("model")
+    if not isinstance(model, dict):
+        return None
+    value = model.get("provider")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    # ``"auto"`` is Hermes' sentinel for "fall back to auth.json / env"
+    # (``runtime_provider.resolve_requested_provider`` returns it when no
+    # concrete provider is set). Treat as no-config so the caller defers
+    # to ``auth.json active_provider``. Lowercase normalization matches
+    # the allowlist normalization in ``enforce._read_policy_settings``
+    # (Codex P2 round 5).
+    if not normalized or normalized == "auto":
+        return None
+    return normalized
+
+
+def _read_policy_mode(policy_json_path: Path) -> str:
+    """Read ``policy`` from ``policy.json``; default to ``_DEFAULT_POLICY_MODE``."""
+    data = load_policy_mapping(policy_json_path, log=_LOG)
+    mode = data.get("policy", _DEFAULT_POLICY_MODE)
+    if mode in ("strict", "lenient", "off"):
+        return cast(str, mode)
+    _LOG.warning("invalid policy %r in %s; defaulting to %s", mode, policy_json_path, _DEFAULT_POLICY_MODE)
+    return _DEFAULT_POLICY_MODE
+
+
+@functools.lru_cache(maxsize=1)
+def _build_audit_writer(path: Path) -> NDJSONWriter:
+    """Construct the NDJSON writer privacy_check already uses.
+
+    Codex M2 follow-up: cached so the ``__post_init__`` ``mkdir`` + ``chmod``
+    only fire once per process per path. Module-scoped ``lru_cache`` is
+    safe — :class:`NDJSONWriter` is process-safe (POSIX ``O_APPEND`` per
+    write) and the cached instance can be shared across every
+    ``on_session_start`` invocation.
+
+    Construction is delegated to the shared
+    :func:`mordred_hermes._audit_support.build_audit_writer` (which does the
+    lazy ``privacy_check`` import); the module-local ``lru_cache`` keeps this
+    cache -- and the ``cache_clear()`` the tests drive -- separate from
+    ``network``'s identically-pathed writer. The ``TYPE_CHECKING`` import at
+    the top preserves the return type for static checkers.
+    """
+    return build_audit_writer(path)

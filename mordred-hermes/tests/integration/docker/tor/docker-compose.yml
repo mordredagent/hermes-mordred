@@ -1,0 +1,22 @@
+# PR3b: hermetic Tor container for mordred-hermes integration tests.
+#
+# Bind 127.0.0.1:9050 only — never the all-interfaces 0.0.0.0 — so
+# the SOCKS port is unreachable to anything but the test runner. The
+# container runs unprivileged and is fully ephemeral (no volumes);
+# `compose down --volumes` reaps everything between test modules.
+
+services:
+  tor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mordred-hermes-pr3b-tor
+    ports:
+      - "127.0.0.1:9050:9050"
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q 'Bootstrapped 100%' /var/log/tor/notices.log"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: "no"

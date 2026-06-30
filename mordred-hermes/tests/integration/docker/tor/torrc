@@ -1,0 +1,37 @@
+# PR3b: minimal torrc for hermetic integration tests.
+#
+# - SOCKSPort bound to 0.0.0.0:9050 inside the container so the
+#   docker port mapping (host 127.0.0.1:9050 -> container 9050) works.
+#   The compose file is what enforces the loopback-only host binding.
+# - SocksPolicy accepts loopback + RFC1918 ranges (docker bridges
+#   pick from 172.16.0.0/12 by default) so even if the bind ever
+#   drifts, only the test runner and the container itself can speak
+#   SOCKS.
+# - Log notice to TWO sinks, both required:
+#   * /var/log/tor/notices.log — the docker-compose healthcheck greps
+#     this file (the Dockerfile chowns the dir to the `tor` user).
+#   * stdout — the `_wait_for_bootstrap_token` helper polls
+#     `docker compose logs`, which only ever sees container stdout.
+#   A torrc with a `Log notice file` line and no `Log notice stdout`
+#   line sends *all* notices to the file once the config is parsed, so
+#   `Bootstrapped 100%` never reaches `docker compose logs` and the
+#   helper times out every run. Both lines are needed; do not drop one.
+
+SOCKSPort 0.0.0.0:9050
+SocksPolicy accept 127.0.0.1
+SocksPolicy accept 10.0.0.0/8
+SocksPolicy accept 172.16.0.0/12
+SocksPolicy accept 192.168.0.0/16
+SocksPolicy reject *
+
+DataDirectory /tmp/tor-data
+Log notice file /var/log/tor/notices.log
+Log notice stdout
+
+# Stay IPv4-only: GitHub Actions runners have no working IPv6 egress,
+# so an IPv6 bootstrap attempt just wastes the deadline. `ClientUseIPv6 0`
+# is the whole knob — there is no `ClientPreferIPv4*` option, and torrc
+# fails *all* validation (Tor exits before bootstrap) on any unknown key.
+ClientUseIPv6 0
+
+DormantTimeoutEnabled 0

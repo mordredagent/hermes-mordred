@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+build/
+dist/
+*.egg
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local dev-only keyvault init helper (bypasses safety controls, prints seed).
+# Must never be committed.
+dev_init_keyvault.py

@@ -1,0 +1,46 @@
+[package]
+name = "mordred-hermes-tpmkey"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "TPM 2.0 hardware-key helper for the Mordred keyvault (Linux). Speaks the same JSON-over-stdio protocol as the macOS Secure-Enclave helper (mordred-hermes-sekey)."
+license = "MIT"
+publish = false
+
+[lib]
+name = "mordred_hermes_tpmkey"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mordred-hermes-tpmkey"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+# M4 (security review 2026-06-11): wipe our copies of the ECDH Z secret
+# (best-effort — tss-esapi-owned response buffers are out of our reach).
+zeroize = "1"
+# M4: O_NOFOLLOW on blob reads (the store layer is unix-only in practice;
+# it already uses std::os::unix unconditionally).
+libc = "0.2"
+
+# Phase 2b (Linux TPM backend). The real TPM operations (CreatePrimary /
+# Create / ECDH_ZGen / FlushContext) live in `src/tpm.rs` behind
+# `#[cfg(target_os = "linux")]`. tss-esapi links libtss2 and only builds on
+# Linux, so it is a target-gated dependency: the pure-function layer (and the
+# whole crate on macOS) still builds with no TPM toolchain present.
+[target.'cfg(target_os = "linux")'.dependencies]
+tss-esapi = "7"
+
+# Linux-only test deps: an independent software P-256 implementation used to
+# prove the TPM's ECDH shared secret matches a software ECDH (wrap.py HKDF
+# parity). Gated to Linux so the macOS dev host never pulls them.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+p256 = { version = "0.13", features = ["ecdh"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[profile.release]
+strip = true
+lto = true
