@@ -124,7 +124,7 @@ min-hermes-version = "0.11.0"
 # Dynamic version source. Hatchling's built-in regex source reads the
 # `__version__ = "..."` assignment from the file below. It must live under
 # src/ (shipped in both sdist and wheel) so a wheel built from the sdist —
-# where mordred-docs/ is absent — still resolves the version. See
+# where docs/ is absent — still resolves the version. See
 # src/mordred_hermes/__about__.py for why the canonical value lives there.
 [tool.hatch.version]
 path = "src/mordred_hermes/__about__.py"

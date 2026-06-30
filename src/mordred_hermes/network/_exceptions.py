@@ -13,7 +13,7 @@ H2, Phase 2 PR1):
   ``on_session_start`` and the liveness worker / ``pre_tool_call`` hook
   respectively. They escape the ``except Exception:`` filter inside
   ``hermes_cli.plugins.invoke_hook`` (see
-  ``mordred-docs/dev/HOOK_PAYLOADS.md`` §1) so strict-mode network
+  ``docs/dev/HOOK_PAYLOADS.md`` §1) so strict-mode network
   refusals actually abort the session, and they are *not* :class:`SystemExit`
   subclasses so cleanup-style ``except SystemExit:`` blocks do not mistake
   a policy refusal for an ordinary CLI exit.
@@ -84,7 +84,7 @@ class MordredPathBringupFailed(BaseException):
 
     BaseException-derived so it escapes the ``except Exception:`` filter
     inside ``hermes_cli.plugins.invoke_hook`` (see
-    ``mordred-docs/dev/HOOK_PAYLOADS.md`` §1). Distinct from
+    ``docs/dev/HOOK_PAYLOADS.md`` §1). Distinct from
     :class:`BringupFailed` so ``except MordredNetworkError`` does not
     accidentally swallow a strict-mode abort.
     """

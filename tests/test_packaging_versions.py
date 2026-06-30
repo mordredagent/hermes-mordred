@@ -15,7 +15,7 @@ Two invariants are pinned here:
    longer hardcodes its version in pyproject. It is sourced dynamically from
    ``src/mordred_hermes/__about__.py`` (Hatch ``[tool.hatch.version] path``),
    which lives inside the importable package so sdist->wheel builds resolve it
-   without the docs tree. The docs marker (``mordred-docs/dev/VERSION``)
+   without the docs tree. The docs marker (``docs/dev/VERSION``)
    and every ``plugin.yaml`` must match that single source — otherwise a
    release bump that touches only some of them ships an inconsistent version.
    ``tools/bump_version.py`` rewrites all of them in lockstep; these tests are
@@ -32,11 +32,8 @@ from pathlib import Path
 import pytest
 from packaging.version import Version
 
-#: ``mordred-hermes/`` — the directory holding the real package pyproject.
+#: Repository root — holds the real package pyproject and the docs tree.
 _PKG_ROOT = Path(__file__).resolve().parent.parent
-
-#: Repository root — ``mordred-hermes/``'s parent, which holds the docs tree.
-_REPO_ROOT = _PKG_ROOT.parent
 
 #: The empty stub uploaded first to claim the name (M7).
 _STUB_PYPROJECT = _PKG_ROOT / "packaging" / "name-reservation" / "pyproject.toml"
@@ -48,7 +45,7 @@ _REAL_PYPROJECT = _PKG_ROOT / "pyproject.toml"
 _ABOUT = _PKG_ROOT / "src" / "mordred_hermes" / "__about__.py"
 
 #: Human-facing version marker in the docs tree (a mirror of ``_ABOUT``).
-_DOC_VERSION = _REPO_ROOT / "mordred-docs" / "dev" / "VERSION"
+_DOC_VERSION = _PKG_ROOT / "docs" / "dev" / "VERSION"
 
 
 def _read(pyproject: Path) -> dict[str, object]:

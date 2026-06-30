@@ -3,11 +3,12 @@
 # Hatchling reads ``__version__`` from this file at build time
 # (``[tool.hatch.version] path`` in pyproject.toml), so the version is NOT
 # hardcoded in pyproject. This file lives INSIDE the importable package —
-# not in the docs tree (mordred-docs/dev/VERSION) — because a
-# sdist->wheel build runs in an isolated directory that does not contain
-# anything outside mordred-hermes/. Reading the docs-tree VERSION marker at
-# build time would therefore break (TODO 0.5 L64). Keeping the canonical
-# value here is the build-isolation-safe resolution of that follow-up.
+# not in the docs tree (docs/dev/VERSION) — because the sdist only includes
+# /src, /tests, /README.md, /pyproject.toml, /native, /packaging/pth
+# (see [tool.hatch.build.targets.sdist] in pyproject.toml); docs/ is excluded,
+# so a wheel built from that sdist can't see the docs-tree VERSION marker
+# (TODO 0.5 L64). Keeping the canonical value here is the
+# build-isolation-safe resolution of that follow-up.
 #
 # Bump with `python tools/bump_version.py <new-version>`, which rewrites this
 # file, the docs VERSION marker, and every plugin.yaml in lockstep. The

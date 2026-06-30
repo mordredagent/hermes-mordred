@@ -4,7 +4,7 @@ Binds (SeedPhrase, Passphrase, PoW) into a 32-byte digest used as the
 cross-machine recovery anti-mis-transcription anchor.
 
 Canonical algorithm is frozen in
-``mordred-docs/dev/SPEC.md §Key generation and verification digest``::
+``docs/dev/SPEC.md §Key generation and verification digest``::
 
     H               := BLAKE3 (32-byte digest mode)
     seed_hash       := H(SeedPhrase as UTF-8 bytes)

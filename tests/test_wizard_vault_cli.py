@@ -1,6 +1,6 @@
 """Tests for ``hermes mordred vault ...`` — the at-rest vault CLI.
 
-Design note: ``mordred-docs/dev/SECRETS_ENV_ENCRYPTION.md`` §8.2.
+Design note: ``docs/dev/SECRETS_ENV_ENCRYPTION.md`` §8.2.
 
 These cover the **cold-path** surface — commands that open a vault through
 :func:`mordred_hermes.keyvault.vault.recover_vault` (passphrase recovery

@@ -19,7 +19,7 @@ manifest that makes a keyvault recoverable on a second device even though
 the Secure Enclave wrapping key is non-exportable. See SPEC.md
 §"export_backup / import_backup (ciphertext-rewrap manifest)".
 
-Authoritative contract lives in ``mordred-docs/dev/SPEC.md``
+Authoritative contract lives in ``docs/dev/SPEC.md``
 §"PR4 API contract & MREN envelope wire format". Codex pre-implementation
 review (3 BLOCKER + 5 HIGH) drove the split normalization in this
 module: applying ``casefold`` and whitespace-collapse uniformly to the

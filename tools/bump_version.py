@@ -6,7 +6,7 @@ Hatch reads ``__version__`` from it (``[tool.hatch.version] path``). But a
 release version also appears in surfaces that are not auto-derived from it:
 
   - src/mordred_hermes/__about__.py    (__version__ — the canonical source)
-  - mordred-docs/dev/VERSION        (docs-tree marker; a human mirror)
+  - docs/dev/VERSION                 (docs-tree marker; a human mirror)
   - src/mordred_hermes/*/plugin.yaml    (each plugin manifest's ``version:``)
 
 This rewrites all of them at once so a release bump is one command instead of
@@ -31,9 +31,8 @@ from pathlib import Path
 from packaging.version import InvalidVersion, Version
 
 _PKG_ROOT = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _PKG_ROOT.parent
 _ABOUT = _PKG_ROOT / "src" / "mordred_hermes" / "__about__.py"
-_DOC_VERSION = _REPO_ROOT / "mordred-docs" / "dev" / "VERSION"
+_DOC_VERSION = _PKG_ROOT / "docs" / "dev" / "VERSION"
 
 _ABOUT_VALUE_RE = re.compile(r"""(?m)^__version__\s*=\s*["']([^"']+)["']\s*$""")
 _ABOUT_LINE_RE = re.compile(r"""(?m)^__version__\s*=\s*["'][^"']+["'][^\n]*$""")
@@ -108,16 +107,16 @@ def main(argv: list[str] | None = None) -> int:
     for path, pattern, replacement in targets:
         if _rewrite(path, pattern, replacement, dry_run=args.dry_run):
             changed += 1
-            print(f"  {label}: {path.relative_to(_REPO_ROOT)}")
+            print(f"  {label}: {path.relative_to(_PKG_ROOT)}")
         else:
-            print(f"  unchanged: {path.relative_to(_REPO_ROOT)}")
+            print(f"  unchanged: {path.relative_to(_PKG_ROOT)}")
 
     print(f"\n{current} -> {new_str}  ({changed} file(s) {label})")
     if not args.dry_run:
         print(
             "\nNext: add a changelog entry, then verify with\n"
-            f"  (cd {_PKG_ROOT.name} && .venv/bin/python -m pytest tests/test_packaging_versions.py)\n"
-            f"  (cd {_PKG_ROOT.name} && uv build)   # confirm sdist + wheel still build"
+            "  .venv/bin/python -m pytest tests/test_packaging_versions.py\n"
+            "  uv build   # confirm sdist + wheel still build"
         )
     return 0
 

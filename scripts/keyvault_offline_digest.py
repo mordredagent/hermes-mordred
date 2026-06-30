@@ -9,7 +9,7 @@ package so it can be carried to a stripped-down offline machine that
 only has ``python3`` + ``blake3`` installed.
 
 The canonical algorithm is frozen in
-``mordred-docs/dev/SPEC.md §Key generation and verification digest``::
+``docs/dev/SPEC.md §Key generation and verification digest``::
 
     H               := BLAKE3 (32-byte digest mode)
     seed_hash       := H(SeedPhrase as UTF-8 bytes)
@@ -30,7 +30,7 @@ Unicode normalization rules (copied verbatim from
   Cf chars are entropy — collapsing any of them would conflate distinct
   passphrase choices.
 
-Operator preparation (see ``mordred-docs/dev/setup.md``):
+Operator preparation (see ``docs/dev/setup.md``):
 
     1. On a second device that has internet: ``pip install blake3``
     2. Copy this file to the second device (USB / QR / printed-and-typed).
