@@ -213,6 +213,8 @@ class _Connection:
                 await self._on_decrypt(msg)
             elif mtype == "channel_key_set":
                 await self._on_channel_key_set(msg)
+            elif mtype == "slack_setup":
+                await self._on_slack_setup(msg)
             elif mtype == "accounts_request":
                 await self._on_accounts(msg)
             elif mtype == "sign_request":
@@ -344,6 +346,49 @@ class _Connection:
             pairing.save_channel_key(channel_id, b64u_decode(raw_b64))
         except Exception:  # noqa: BLE001
             return
+
+    async def _on_slack_setup(self, msg: dict[str, Any]) -> None:
+        """Write Slack tokens the extension collected into ~/.hermes/.env so a
+        new user doesn't have to hand-edit files (SPEC-v2 §6). We only persist
+        config; the tokens take effect on the next Hermes restart."""
+        mid = msg.get("id")
+
+        async def _reply(ok: bool, note: str = "", error: str = "") -> None:
+            await self._send(
+                {"id": mid, "type": "slack_setup_result", "ok": ok, "note": note, "error": error}
+            )
+
+        if not self.authed:
+            await _reply(False, error="not_authed")
+            return
+        bot = str(msg.get("bot_token", "")).strip()
+        app = str(msg.get("app_token", "")).strip()
+        if not bot.startswith("xoxb-") or not app.startswith("xapp-"):
+            await _reply(False, error="bad_token_format")
+            return
+        try:
+            from hermes_constants import get_hermes_home
+
+            env_path = get_hermes_home() / ".env"
+            existing = env_path.read_text() if env_path.exists() else ""
+            lines = existing.splitlines()
+            updates = {"SLACK_BOT_TOKEN": bot, "SLACK_APP_TOKEN": app}
+            seen: set[str] = set()
+            out: list[str] = []
+            for ln in lines:
+                key = ln.split("=", 1)[0].strip() if "=" in ln else ""
+                if key in updates:
+                    out.append(f"{key}={updates[key]}")
+                    seen.add(key)
+                else:
+                    out.append(ln)
+            for key, val in updates.items():
+                if key not in seen:
+                    out.append(f"{key}={val}")
+            env_path.write_text("\n".join(out) + "\n")
+            await _reply(True, note="tokens written to ~/.hermes/.env — restart Hermes to apply")
+        except Exception as exc:  # noqa: BLE001
+            await _reply(False, error=str(exc))
 
     # -- Slack crypto (fallback path) --------------------------------------
 
