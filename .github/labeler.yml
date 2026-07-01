@@ -1,0 +1,31 @@
+# actions/labeler@v5 config — path-glob -> label mapping.
+# Labels must exist in the repo first (one-time `gh label create`, see
+# docs/dev/CI.md §`labeler.yml` 詳細).
+
+"plugins/mordred-network":
+  - changed-files:
+      - any-glob-to-any-file: "src/mordred_hermes/network/**"
+
+"plugins/mordred-privacy-check":
+  - changed-files:
+      - any-glob-to-any-file: "src/mordred_hermes/privacy_check/**"
+
+"plugins/mordred-llm-guard":
+  - changed-files:
+      - any-glob-to-any-file: "src/mordred_hermes/llm_guard/**"
+
+"plugins/mordred-keyvault":
+  - changed-files:
+      - any-glob-to-any-file: "src/mordred_hermes/keyvault/**"
+
+"plugins/mordred-wizard":
+  - changed-files:
+      - any-glob-to-any-file: "src/mordred_hermes/wizard/**"
+
+"docs":
+  - changed-files:
+      - any-glob-to-any-file: "docs/**"
+
+"ci":
+  - changed-files:
+      - any-glob-to-any-file: ".github/workflows/**"

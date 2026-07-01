@@ -14,6 +14,19 @@ SPEC/PLAN より頻繁に更新される想定。優先順位と順序は流動�
 
 ---
 
+## Known gap: Browser-extension gateway counterpart (deferred)
+
+- **Background**: while still part of `Mordred-Hermes-monorepo`, #204 (`feat(mordred): browser-extension WebSocket API + localhost web app`) shipped `gateway/extension_api.py` / `extension_pairing.py` / `extension_crypto.py` / `extension_chat.py` / `extension_rpc.py` / `extension_history.py` (a repo-root top-level `gateway/` package on the Hermes-fork side — a core change) together with `src/mordred_hermes/keyvault/extension_sign.py` / `wizard/extension_pair_cli.py` (the plugin side). The 2026-06-30/07-01 standalone-repo split left the `gateway/` side in the monorepo; only the two plugin-side files came to this repo
+- **Current state**: `hermes mordred extension pair` fails closed (exit code 2, clear stderr message) because `gateway.extension_pairing` can't be imported. `keyvault/extension_sign.py` doesn't depend on `gateway` so it imports fine, but its caller (the gateway-side WebSocket server) isn't in this repo's dependency closure, so it's unreachable. The original commit's "36 tests" weren't copied into this repo either
+- **Plan going forward**: the `gateway/`-side implementation (including starting the WebSocket server) is **planned to be added later** (confirmed with the operator, 2026-07-01). Until then, the two plugin-side files stay "unused but fail safely"
+- **Checklist for when work resumes**:
+  - Decide how `gateway/extension_*.py` will be distributed (a separate repo declared as an explicit `pip install` dependency / folded into a vendored-fork `[hard-lock]`-style extra / other). Re-check alignment with the zero-PR/plugin-only principle (`PLAN.md` §Boundary discipline)
+  - Decide whether to port the 36 tests from `tests/extension/` into this repo or keep them in whichever repo hosts the dependency
+  - Confirm the `ethereum` / `messaging` extras in `pyproject.toml` (already extended on 2026-07-01 with `eth-account`/`rlp`/`qrcode`) are still sufficient once implementation resumes
+- **Priority**: M (explicitly deferred pending the operator's own timeline; until then, only the fail-closed behavior needs to be maintained)
+
+---
+
 ## v2 candidates: Hermes hook 拡張 (PR 候補)
 
 旧 SPEC が "Core minimal seams" として列挙していた項目を、 Hermes での拡張ポイントとして再評価。`MIGRATION.md` §2 のマッピング表に対応。

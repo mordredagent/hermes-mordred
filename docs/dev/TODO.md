@@ -12,6 +12,23 @@ Open decisions are surfaced as `DECIDE:` items at the top of the relevant phase.
 
 **Plugin-Only Architecture policy (zero-PR、 2026-05-07 確定)**: ほぼすべての作業は `src/mordred_hermes/<plugin>/` に landing。 v1 では Hermes 上流への PR を一切提出しない (MIGRATION.md §10 row 4)。 disable footgun の防御は plugin-side **strict-mode startup refusal** (Phase 1.1 H3 タスク、 SPEC.md §Plugin-disable protection Tier A) と `mordred.degraded.disable_unprotected` audit log で完結。 hard-enforce が真に必要になった項目は v2 で vendored fork extra (`mordred-hermes[hard-lock]`、 Tier B、 UPSTREAM.md §Tier B) に escalate する。
 
+## Standalone-repo repair backlog (2026-07-01)
+
+The split from `Mordred-Hermes-monorepo` (2026-06-30/07-01) left `.github/workflows/` missing entirely. See also CI.md §Standalone-repo adaptations and ROADMAP.md §Known gap: Browser-extension gateway counterpart (deferred).
+
+- [x] Restore the `test` job (lint + mypy strict + pytest matrix) in `.github/workflows/ci.yml`
+- [x] Restore `.github/workflows/upstream-check.yml` (simplified `git clone` to `pip install hermes-agent`, since it's now published on PyPI)
+- [x] Restore `.github/workflows/labeler.yml` + `.github/labeler.yml`
+- [x] Fix the `test_provider_identity.py::test_replica_matches_hermes_source` drift (resync the 6 aliases hermes-agent 0.14.0 added)
+- [x] Add `eth-account`/`rlp` to the `ethereum` extra and add a new `messaging` extra (`qrcode`) in `pyproject.toml` (both were imported at call time but never declared)
+- [x] Make `hermes mordred extension pair` fail closed when `gateway` is absent (exit code 2 + clear message instead of a raw `ImportError`)
+- [x] Add `HERMES_HOME` to the `ci.yml` `pytest` step's env (matches README.md's documented canonical test invocation)
+- [x] Fix `docs/dev/CI.md`'s "Auditing" section (expected-output list and repo-name casing) to match the 3 workflows actually restored, and mark the upstream-origin-workflows paragraph as monorepo-era/not applicable here
+- [ ] Restore `.github/workflows/release.yml` (PyPI Trusted Publishing, M7) — requires a one-time manual operator setup (CI.md §initial setup)
+- [ ] Restore `.github/workflows/integration-vpn.yml` — requires a paid Mullvad account
+- [ ] Restore the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs in `ci.yml` — require Docker / a Rust toolchain / swtpm
+- [ ] Resume implementation and decide the distribution strategy for `gateway/extension_*.py` (the browser-extension WebSocket server) — see the "checklist for when work resumes" in the relevant ROADMAP.md section
+
 ---
 
 ## Phase 0 — Operational Setup (blocks all later phases)

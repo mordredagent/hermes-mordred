@@ -1,0 +1,22 @@
+name: Labeler
+
+# pull_request_target (not pull_request) so labels are applied even to PRs
+# from forks. Deliberately scoped to label mutation only: it never checks
+# out PR HEAD code, so a malicious fork PR can't run its own code with
+# this workflow's elevated token.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          configuration-path: .github/labeler.yml

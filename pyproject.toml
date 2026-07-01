@@ -58,6 +58,19 @@ ethereum = [
   "eth-keys>=0.6",
   # keccak256 backend required by eth-keys via eth-hash.
   "eth-hash[pycryptodome]>=0.5",
+  # EIP-191/EIP-712 message hashing (keyvault/extension_sign.py personal_sign
+  # / sign_typed_data_v4) and legacy/EIP-1559 transaction RLP encoding
+  # (sign_transaction). Both were previously undeclared even though the
+  # module imports them at call time.
+  "eth-account>=0.13",
+  "rlp>=4",
+]
+messaging = [
+  # Terminal QR-code rendering for `hermes mordred extension pair`. Optional
+  # (the command already falls back to printing the code as plain text when
+  # this isn't installed) — was referenced in a comment as living in this
+  # extra before the extra itself existed.
+  "qrcode>=7.4",
 ]
 tor-control = [
   "stem>=1.8.0,<2",
