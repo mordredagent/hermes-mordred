@@ -412,6 +412,15 @@ _MORDRED_ENC_TOKEN_RE = re.compile(
     r"|🔒?ENC:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+"
 )
 
+# Mordred channel-key exchange control tokens (SPEC-v2 §5). These are plaintext
+# peer-to-peer messages between extensions (🔑REQ / 🔑GRANT); the agent must
+# never see or respond to them. The leading 🔑 may be dropped by Slack.
+_MORDRED_KEYEXCH_RE = re.compile(r"🔑?(?:REQ|GRANT):v1:\S+")
+
+
+def _mordred_is_key_exchange(text: str) -> bool:
+    return bool(text) and _MORDRED_KEYEXCH_RE.search(text) is not None
+
 
 def _mordred_key_index() -> dict[str, bytes]:
     """keyId → raw key for every key Hermes holds (per-channel + master/v1)."""
@@ -2604,6 +2613,12 @@ class SlackAdapter(BasePlatformAdapter):
                 pass
 
         text = original_text
+
+        # Mordred channel-key exchange (SPEC-v2 §5): 🔑REQ/🔑GRANT are peer-to-peer
+        # control messages between extensions. Ignore them entirely so the agent
+        # never responds to a key handshake.
+        if _mordred_is_key_exchange(text):
+            return
 
         # Mordred extension E2E: decrypt `🔒ENC:v1:` before the agent sees it,
         # and mark this thread/channel as an encrypted context (reply-in-kind).
