@@ -16,10 +16,11 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 MORDRED_HERMES_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_DIR = MORDRED_HERMES_ROOT / "tools"
 CONTRACT_PATH = TOOLS_DIR / "hook_payload_contract.json"
-REPO_ROOT = MORDRED_HERMES_ROOT.parent
 
 
 def _load_tool():
@@ -221,14 +222,26 @@ class TestContractFile:
             assert value == sorted(value), f"{key}: keep fields sorted"
 
 
-class TestVendoredHermesCanary:
-    def test_vendored_hermes_satisfies_contract(self) -> None:
-        """The in-repo Hermes fork must pass the same check CI runs against
-        upstream — if this fails, either upstream truly drifted (sync brought
-        the drift in) or the contract/excludes need updating."""
+class TestInstalledHermesCanary:
+    def test_installed_hermes_satisfies_contract(self) -> None:
+        """The installed hermes-agent package must pass the same check
+        upstream-check.yml runs in CI — if this fails, either upstream truly
+        drifted (sync brought the drift in) or the contract/excludes need
+        updating.
+
+        Pre-split, this scanned a vendored Hermes source tree checked into
+        the monorepo alongside this package. Standalone mordred-hermes has no
+        such tree — it just depends on the hermes-agent PyPI package — so
+        this mirrors upstream-check.yml's approach instead: point the AST
+        scanner at wherever the currently-installed hermes-agent's source
+        lives (its site-packages parent directory), which works because pip
+        installs plain, uncompiled ``.py`` files.
+        """
         contract = {
             k: v for k, v in json.loads(CONTRACT_PATH.read_text(encoding="utf-8")).items() if not k.startswith("_")
         }
-        sites = drift.extract_hook_payload_fields(REPO_ROOT)
-        assert sites, "no invoke_hook dispatch sites found in the vendored Hermes tree"
+        hermes_cli = pytest.importorskip("hermes_cli")
+        hermes_root = Path(hermes_cli.__file__).resolve().parent.parent
+        sites = drift.extract_hook_payload_fields(hermes_root)
+        assert sites, "no invoke_hook dispatch sites found in the installed hermes-agent package"
         assert drift.compare(contract, sites) == []
