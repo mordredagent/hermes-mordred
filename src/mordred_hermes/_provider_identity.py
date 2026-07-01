@@ -14,7 +14,7 @@ real anthropic transport facts, and the strict-mode allowlist check compares
 against the wrong identifier.
 
 ``PROVIDER_ALIASES`` is a faithful replica of
-``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.14.0). It is *replicated*
+``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.17.0). It is *replicated*
 rather than imported: ``hermes_cli`` is a private module with no stability
 contract, so importing it would couple Mordred's enforcement to Hermes'
 internal layout. ``tests/test_provider_identity.py`` guards the replica's
@@ -73,9 +73,6 @@ PROVIDER_ALIASES: Final[Mapping[str, str]] = {
     "zen": "opencode-zen",
     "go": "opencode-go",
     "opencode-go-sub": "opencode-go",
-    "aigateway": "ai-gateway",
-    "vercel": "ai-gateway",
-    "vercel-ai-gateway": "ai-gateway",
     "kilo": "kilocode",
     "kilo-code": "kilocode",
     "kilo-gateway": "kilocode",
