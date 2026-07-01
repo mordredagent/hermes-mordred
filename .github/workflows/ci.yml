@@ -1,0 +1,85 @@
+name: CI
+
+# Restored after the Mordred-Hermes-monorepo -> standalone-repo split
+# (2026-06-30/07-01). See docs/dev/CI.md for the full policy this
+# implements, and the "Standalone-repo adaptations" note at the top of
+# that doc for what changed vs. the pre-split design (chiefly: hermes-agent
+# now ships on PyPI, so the old "install hermes-agent from the monorepo
+# root, then install mordred-hermes" step is gone).
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
+      - "docs/dev/CI.md"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+        python-version: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # hermes-agent is a normal PyPI dependency (pyproject.toml pins
+      # `hermes-agent>=0.11.0`) so `pip install -e .` resolves it directly —
+      # no monorepo root install step needed.
+      - name: Install mordred-hermes (dev + keyvault extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,keyvault]"
+
+      # macos extra = keyvault extra + Phase 4 pyobjc Security/SystemConfiguration/Quartz
+      # bridges; only meaningful (and only installable) on macOS.
+      - name: Install macOS extra
+        if: runner.os == 'macOS'
+        run: pip install -e ".[macos]"
+
+      - name: ruff check
+        run: ruff check src tests
+
+      - name: ruff format --check
+        run: ruff format --check src tests
+
+      - name: mypy --strict
+        run: mypy --strict src
+
+      - name: pytest
+        env:
+          # README.md's documented canonical test invocation always pins
+          # HERMES_HOME to an isolated path — without it, _home.py's
+          # module-level HERMES_BASE resolves against the runner's real
+          # $HOME/.hermes instead of a throwaway directory.
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        run: pytest -q --cov=mordred_hermes --cov-report=xml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: ignore

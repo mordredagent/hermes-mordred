@@ -116,6 +116,18 @@ unavailable.
 
 Implementation: `plugins_list.py`.
 
+### `extension pair [--timeout=SECONDS]`
+
+Generates a browser-extension pairing code and waits for it to be consumed.
+**Deferred in this standalone repo**: it imports `gateway.extension_pairing`,
+the Hermes-fork counterpart to this plugin (WebSocket server, chat/crypto/RPC
+bridges) — see `docs/dev/ROADMAP.md` §"Browser-extension gateway counterpart
+(deferred)". Until that ships alongside `mordred-hermes`, this command fails
+closed with exit code `2` and a clear stderr message instead of a raw
+`ImportError`.
+
+Implementation: `extension_pair_cli.py`.
+
 ### `keyvault {list,verify-digest}`
 
 Backend-free keyvault inspection (Phase 4 PR8). Both only read the

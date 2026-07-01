@@ -21,6 +21,7 @@ Secure Enclave-backed key management. macOS Apple Silicon **or T2 Intel** (`pip 
 | `seed_display.py` | PR7 | **landed** | `display_seed()` orchestrator: blackout assert → M4 banner → screenshot pre-check → `SeedDisplayHandle.consume()` → 60s monotonic timer + capture polling → auto-clear; `_default_capture_probe` wraps macOS `CGScreenIsBeingCaptured` (best-effort, fails open); `SeedDisplaySurface` Protocol abstracts rendering |
 | `network_fallback.py` | PR5 | **landed** | OS-API blackout fallback: `resolve_blackout_assert()` delegates to `mordred_network` when importable, else probes macOS `SCNetworkReachability` (pyobjc, lazy import); `blackout_assert` fails closed when the probe cannot run |
 | `log_encryption.py` | PR6 | **landed** | `EncryptedWriter` (Phase 1 `Writer` Protocol) + `decrypt_log_file`; `MRAL` v1 line-oriented AES-GCM wire format, keyvault-wrapped DEK in the header, per-entry AAD bound to `SHA-256(header)` |
+| `extension_sign.py` | #204 | **landed, unreachable** | `personal_sign` / `sign_typed_data_v4` / `sign_transaction` for the browser extension. Pure Python API — no `gateway` import — but nothing in this repo calls it yet: the caller is the gateway WebSocket server, which lives in the Hermes-fork counterpart to this plugin and isn't published alongside `mordred-hermes` (see `docs/dev/ROADMAP.md` §"Browser-extension gateway counterpart (deferred)"). Requires the `ethereum` extra. |
 
 `register(ctx)` remains a no-op until Phase 4 PR4 wires the public surface to Hermes.
 

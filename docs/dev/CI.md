@@ -16,15 +16,28 @@ CI が果たすべき責務:
 
 それ以外は upstream の責務であり、 upstream の CI で実行される。
 
-## Active workflows (5 個)
+## Standalone-repo adaptations (2026-07-01)
 
-| Path | Purpose |
-|------|---------|
-| `.github/workflows/ci.yml` | Per-PR / push: 5 job — `test` (matrix; ruff + mypy + pytest)、 `fresh-venv-resolution` (H1 fail-fast 契約)、 `integration-tor` (hermetic Tor Docker 統合テスト)、 `tpmkey-helper` (`native/tpmkey-helper` Rust crate を ubuntu+macOS で cargo fmt/clippy/test; Linux は tss-esapi backend も build)、 `tpmkey-helper-tpm` (swtpm で TPM backend を統合テスト) |
-| `.github/workflows/upstream-check.yml` (optional) | 週次に Hermes 最新の hook signature drift を検知 |
-| `.github/workflows/labeler.yml` | PR の path にラベル自動付与 (mordred-* paths) |
-| `.github/workflows/integration-vpn.yml` | `workflow_dispatch` 限定: live Mullvad VPN 統合テスト (PR3b、 `integration-tor` job と対をなす) |
-| `.github/workflows/release.yml` | `workflow_dispatch` 限定: `mordred-hermes` の PyPI publish (M7) |
+When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Browser-extension gateway counterpart (deferred)"), `.github/workflows/` was left out entirely, and this document was the only thing that survived the split — still describing workflows that no longer existed. Restoring them requires reflecting the following changed assumptions:
+
+- **`hermes-agent` is now published on PyPI** (confirmed `hermes-agent==0.14.0`, 2026-07-01). The old design's premises — "`hermes-agent` isn't on PyPI so a root install is required" and "the `fresh-venv-resolution` job (H1) asserts install **fails** without it" — no longer hold. `pip install -e .` resolves `hermes-agent` on its own. The `fresh-venv-resolution` job is **retired**: H1's purpose (fail-fast when `hermes-agent` is absent) is moot now that it's always resolvable from PyPI
+- **`upstream-check.yml` no longer needs `git clone`**: `pip install hermes-agent` unpacks its source (plain `.py` files, not compiled) into site-packages, so `tools/check_hook_payload_drift.py --hermes-root <site-packages>` works directly (verified locally)
+- The following are **out of scope** for this restoration (tracked as follow-ups in TODO.md):
+  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — requires a one-time external operator setup (see §"`release.yml` details" §"initial setup") that couldn't be verified in this session
+  - `.github/workflows/integration-vpn.yml` — requires a paid Mullvad account and mutates real network state
+  - the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs inside `ci.yml` — heavyweight jobs requiring Docker / a Rust toolchain / swtpm. The `ci.yml` restored below only covers the `test` job
+
+## Active workflows
+
+| Path | Purpose | Status |
+|------|---------|--------|
+| `.github/workflows/ci.yml` | Per-PR / push: `test` job (matrix; ruff + mypy + pytest) | **restored** (`test` job only; `integration-tor`/`tpmkey-helper`/`tpmkey-helper-tpm` are follow-ups) |
+| `.github/workflows/upstream-check.yml` | Weekly detection of Hermes hook signature + payload drift | **restored** (simplified `git clone` to `pip install hermes-agent`) |
+| `.github/workflows/labeler.yml` | Auto-labels PRs by path (mordred-* paths) | **restored** |
+| `.github/workflows/integration-vpn.yml` | `workflow_dispatch`-only: live Mullvad VPN integration test (PR3b, pairs with the `integration-tor` job) | follow-up |
+| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | follow-up |
+
+The detail sections below are left as they were in the pre-split design (historical record). Where they conflict, the "Standalone-repo adaptations" note above takes precedence.
 
 ## `ci.yml` 詳細
 
@@ -160,21 +173,19 @@ Phase 0 完了後、 `main` ブランチで以下を有効化:
 Mordred plugin リポジトリは upstream OpenClaw のような大量の workflow を持たないため、 旧版にあった `workflow-allowlist-audit` job は不要。
 
 ```sh
-gh api -X GET /repos/InternetMaximalism/Mordred-Hermes/actions/workflows --paginate \
+gh api -X GET /repos/InternetMaximalism/mordred-hermes/actions/workflows --paginate \
   --jq '.workflows[] | select(.state=="active") | .path' | sort
 ```
 
-期待出力 (Mordred-owned 5 個):
+Expected output (as of 2026-07-01, only the 3 workflows restored under §Standalone-repo adaptations — `release.yml` / `integration-vpn.yml` are follow-ups and should be added to this list once restored):
 
 ```
 .github/workflows/ci.yml
-.github/workflows/integration-vpn.yml
 .github/workflows/labeler.yml
-.github/workflows/release.yml
 .github/workflows/upstream-check.yml
 ```
 
-**Hermes upstream 由来の workflow について**: 本リポジトリは Hermes (`NousResearch/hermes-agent`) フォーク派生のため、 上流由来の workflow (`tests.yml`, `osv-scanner.yml`, `nix.yml`, `docker-publish.yml`, `deploy-site.yml`, `docs-site-checks.yml`, `nix-lockfile-fix.yml`, `skills-index.yml`, `supply-chain-audit.yml`, `contributor-check.yml`) が `.github/workflows/` に共存している。 これらは **Mordred-Hermes v0.1.0-mvp.0 の本 PR では touch せず残置** し、 後続の cleanup PR で個別に評価して disable / archive する (Mordred plugin 開発に必要なら残す、 不要なら削除)。 Mordred-owned workflow と paths filter で住み分けているため、 当面の co-existence で問題はない。
+**On Hermes-upstream-origin workflows (monorepo-era note, no longer applicable)**: the paragraph below dates from when this repo was part of `Mordred-Hermes-monorepo` (the Hermes fork). This repo is now the post-split **Mordred-plugin-only standalone repo**, so no upstream-origin workflows exist here at all (`.github/workflows/` contains only the 3 Mordred-owned workflows above). Kept as a historical record: "this repo derives from a fork of Hermes (`NousResearch/hermes-agent`), so upstream-origin workflows (`tests.yml`, `osv-scanner.yml`, `nix.yml`, `docker-publish.yml`, `deploy-site.yml`, `docs-site-checks.yml`, `nix-lockfile-fix.yml`, `skills-index.yml`, `supply-chain-audit.yml`, `contributor-check.yml`) coexist in `.github/workflows/`. These were left untouched in the Mordred-Hermes v0.1.0-mvp.0 PR and will be individually evaluated for disable/archive in a follow-up cleanup PR."
 
 ## Future expansion
 
