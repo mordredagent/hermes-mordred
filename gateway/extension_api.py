@@ -27,7 +27,19 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from aiohttp import WSMsgType, web
 
 from . import extension_pairing as pairing
-from .extension_crypto import DecryptError, decrypt_message, encrypt_message
+from .extension_crypto import (
+    DecryptError,
+    decrypt_message,
+    encrypt_message,
+    encrypt_message_v2,
+    hkdf_subkey,
+    is_encrypted,
+    key_id,
+)
+
+# K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
+_EXTCHAT_SALT = "mordred-extchat-v1"
+_EXTCHAT_INFO = "extchat"
 
 _log = logging.getLogger(__name__)
 
@@ -275,13 +287,35 @@ class _Connection:
 
     # -- chat ---------------------------------------------------------------
 
+    def _extchat_key(self) -> Optional[bytes]:
+        """K_extchat = HKDF(master, extchat) — separate from Slack keys (SPEC-v2 §2)."""
+        p = pairing.load_pairing()
+        if p is None:
+            return None
+        return hkdf_subkey(p.aes_key, _EXTCHAT_SALT, _EXTCHAT_INFO)
+
     async def _on_chat(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")
         content = msg.get("content", "")
         context = msg.get("context") or {}
+
+        # Chat E2E (reply-in-kind, SPEC-v2 §2): if the client encrypted the
+        # message with K_extchat, decrypt it for the agent and encrypt each
+        # reply chunk back. Plaintext in → plaintext out (e.g. the localhost web
+        # app, which has no key yet). Fail-open on decrypt.
+        ek = self._extchat_key()
+        encrypt_reply = bool(ek) and is_encrypted(content)
+        if encrypt_reply:
+            try:
+                content = decrypt_message(ek, content)
+            except DecryptError:
+                encrypt_reply = False  # not our key — treat as plaintext, don't encrypt back
+        kid = key_id(ek) if (encrypt_reply and ek) else ""
+
         try:
             async for chunk in self.chat_handler(content, context):
-                await self._send({"id": mid, "type": "chat_chunk", "content": chunk})
+                out = encrypt_message_v2(ek, chunk, kid) if encrypt_reply else chunk
+                await self._send({"id": mid, "type": "chat_chunk", "content": out})
             await self._send({"id": mid, "type": "chat_end"})
         except Exception as exc:  # noqa: BLE001
             await self._send({"id": mid, "type": "chat_error", "reason": str(exc)})
