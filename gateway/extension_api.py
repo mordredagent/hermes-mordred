@@ -211,6 +211,8 @@ class _Connection:
                 await self._on_encrypt(msg)
             elif mtype == "decrypt":
                 await self._on_decrypt(msg)
+            elif mtype == "channel_key_set":
+                await self._on_channel_key_set(msg)
             elif mtype == "accounts_request":
                 await self._on_accounts(msg)
             elif mtype == "sign_request":
@@ -319,6 +321,29 @@ class _Connection:
             await self._send({"id": mid, "type": "chat_end"})
         except Exception as exc:  # noqa: BLE001
             await self._send({"id": mid, "type": "chat_error", "reason": str(exc)})
+
+    async def _on_channel_key_set(self, msg: dict[str, Any]) -> None:
+        """Store a per-channel Slack key pushed by the extension (SPEC-v2 §4.4).
+        key_ct is the raw K_chan (base64url), itself encrypted with K_extchat."""
+        if not self.authed:
+            return
+        channel_id = msg.get("channel_id")
+        key_ct = msg.get("key_ct", "")
+        if not channel_id or not key_ct:
+            return
+        raw_b64 = key_ct
+        ek = self._extchat_key()
+        if ek is not None and is_encrypted(key_ct):
+            try:
+                raw_b64 = decrypt_message(ek, key_ct)
+            except DecryptError:
+                return  # can't unwrap the pushed key — ignore
+        try:
+            from .extension_crypto import b64u_decode
+
+            pairing.save_channel_key(channel_id, b64u_decode(raw_b64))
+        except Exception:  # noqa: BLE001
+            return
 
     # -- Slack crypto (fallback path) --------------------------------------
 

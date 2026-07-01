@@ -403,36 +403,58 @@ def _is_slack_voice_clip(file_obj: Dict[str, Any]) -> bool:
 # plugin. See Mordred-Extension/SPEC.ja.md §4 and mordred-docs/dev/SLACK_E2E.md.
 # ---------------------------------------------------------------------------
 
-# A `🔒ENC:v1:{nonce}:{ct}` token anywhere in the text. The extension keeps a
-# leading @mention plaintext (SPEC §4.6), so the ciphertext is NOT necessarily
-# at the start (e.g. "<@U…> 🔒ENC:v1:…"); the 🔒 may also be dropped by Slack.
-_MORDRED_ENC_TOKEN_RE = re.compile(r"🔒?ENC:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+")
+# A `🔒ENC:v1/v2:…` token anywhere in the text. The extension keeps a leading
+# @mention plaintext (SPEC §4.6), so the ciphertext is NOT necessarily at the
+# start (e.g. "<@U…> 🔒ENC:v2:…"); the 🔒 may also be dropped by Slack. v2 (with
+# keyId) is matched first since it's longer.
+_MORDRED_ENC_TOKEN_RE = re.compile(
+    r"🔒?ENC:v2:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+"
+    r"|🔒?ENC:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+"
+)
+
+
+def _mordred_key_index() -> dict[str, bytes]:
+    """keyId → raw key for every key Hermes holds (per-channel + master/v1)."""
+    from gateway.extension_crypto import key_id
+    from gateway.extension_pairing import load_channel_keys, load_pairing
+
+    idx: dict[str, bytes] = {}
+    for raw in load_channel_keys().values():
+        idx[key_id(raw)] = raw
+    p = load_pairing()
+    if p is not None:
+        idx.setdefault(key_id(p.aes_key), p.aes_key)  # master (v1 legacy)
+    return idx
 
 
 def _extension_decrypt_inbound(text: str) -> Optional[str]:
-    """Replace EVERY Mordred `🔒ENC:v1:` token in `text` with its plaintext, so
-    the agent sees the message as if encryption never happened (Slack is just an
-    encrypted transport). Tokens may appear anywhere and more than once (the
-    plain text field AND re-extracted Slack blocks/attachments both carry them).
-    Returns the rewritten text, or None when there's no token / no pairing
-    (fail-open). A per-token decrypt failure leaves that one token untouched.
+    """Replace EVERY Mordred `🔒ENC:v1/v2:` token in `text` with its plaintext,
+    selecting the key per token (v2: by keyId from the channel keyring; v1:
+    master). Slack is just an encrypted transport — the agent sees plaintext.
+    Fail-open; a per-token failure leaves that token as-is.
     """
     try:
         if not text or not _MORDRED_ENC_TOKEN_RE.search(text):
             return None
+        from gateway.extension_crypto import DecryptError, decrypt_message, parse_token
         from gateway.extension_pairing import load_pairing
 
         pairing = load_pairing()
         if pairing is None:
             return None
-        from gateway.extension_crypto import decrypt_message
+        by_id = _mordred_key_index()
 
         def _sub(m: "re.Match[str]") -> str:
             token = m.group(0)
-            core = token[1:] if token.startswith("🔒") else token  # ensure 🔒 prefix
+            core = token[1:] if token.startswith("🔒") else token
+            full = "🔒" + core
             try:
-                return decrypt_message(pairing.aes_key, "🔒" + core)
-            except Exception:  # noqa: BLE001 — leave an undecryptable token as-is
+                ver, kid, _n, _c = parse_token(full)
+                key = by_id.get(kid) if ver == 2 else pairing.aes_key
+                if key is None:
+                    return token  # missing channel key — leave locked
+                return decrypt_message(key, full)
+            except (DecryptError, Exception):  # noqa: BLE001 — leave token as-is
                 return token
 
         return _MORDRED_ENC_TOKEN_RE.sub(_sub, text)
@@ -469,20 +491,26 @@ def _mordred_is_encrypted_thread(channel_id: str, thread_ts: Optional[str]) -> b
     return False
 
 
-def _mordred_aes_key() -> Optional[bytes]:
+def _mordred_channel_key(channel_id: str) -> Optional[bytes]:
+    """The K_chan for a channel (SPEC-v2), falling back to the master key for
+    channels that only have a v1/legacy key."""
     try:
-        from gateway.extension_pairing import load_pairing
+        from gateway.extension_pairing import load_channel_keys, load_pairing
 
-        pairing = load_pairing()
-        return pairing.aes_key if pairing is not None else None
+        ck = load_channel_keys().get(channel_id)
+        if ck is not None:
+            return ck
+        p = load_pairing()
+        return p.aes_key if p is not None else None
     except Exception:  # noqa: BLE001
         return None
 
 
-def _mordred_encrypt_reply(aes_key: bytes, content: str, max_len: int) -> List[str]:
-    """Encrypt a reply body-only, keeping leading @mentions plaintext (§4.6)."""
-    from gateway.extension_crypto import encrypt_message
+def _mordred_encrypt_reply(raw_key: bytes, content: str, max_len: int) -> List[str]:
+    """Encrypt a reply body-only (v2), keeping leading @mentions plaintext (§4.6)."""
+    from gateway.extension_crypto import encrypt_message_v2, key_id
 
+    kid = key_id(raw_key)
     m = _MORDRED_MENTION_PREFIX_RE.match(content)
     prefix = m.group(1).strip() if m else ""
     body = content[m.end() :] if m else content
@@ -492,7 +520,7 @@ def _mordred_encrypt_reply(aes_key: bytes, content: str, max_len: int) -> List[s
     pieces = [body[i : i + safe] for i in range(0, len(body), safe)]
     out: List[str] = []
     for i, piece in enumerate(pieces):
-        enc = encrypt_message(aes_key, piece)
+        enc = encrypt_message_v2(raw_key, piece, kid)
         out.append(f"{prefix} {enc}" if (i == 0 and prefix) else enc)
     return out
 
@@ -1401,8 +1429,8 @@ class SlackAdapter(BasePlatformAdapter):
             # never post plaintext when encryption should apply but can't.
             mordred_encrypted = _mordred_is_encrypted_thread(chat_id, thread_ts)
             if mordred_encrypted:
-                aes_key = _mordred_aes_key()
-                if aes_key is None:
+                chan_key = _mordred_channel_key(chat_id)  # K_chan (SPEC-v2), master fallback
+                if chan_key is None:
                     notice_kwargs = {
                         "channel": chat_id,
                         "text": "🔒 (暗号化できないため本文を送信できませんでした)",
@@ -1412,7 +1440,7 @@ class SlackAdapter(BasePlatformAdapter):
                         notice_kwargs["thread_ts"] = thread_ts
                     await self._get_client(chat_id).chat_postMessage(**notice_kwargs)
                     return SendResult(success=False, error="mordred_encrypt_unavailable")
-                chunks = _mordred_encrypt_reply(aes_key, content, self.MAX_MESSAGE_LENGTH)
+                chunks = _mordred_encrypt_reply(chan_key, content, self.MAX_MESSAGE_LENGTH)
             else:
                 # Convert standard markdown → Slack mrkdwn
                 formatted = self.format_message(content)
