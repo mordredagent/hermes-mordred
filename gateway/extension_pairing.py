@@ -237,18 +237,58 @@ def load_pairing() -> Optional[Pairing]:
 
 
 def _save_pairing(p: Pairing) -> None:
-    _write_private(
-        _state_path(),
-        json.dumps(
-            {
-                "aes_key": b64u_encode(p.aes_key),
-                "ext_token": p.ext_token,
-                "ext_pubkey": p.ext_pubkey_b64,
-                "hermes_pubkey": p.hermes_pubkey_b64,
-                "paired_at": p.paired_at,
-            }
-        ).encode("utf-8"),
+    # Preserve any v2 keyring fields (channel_keys/extchat_key) already in state.
+    data = _read_json(_state_path()) or {}
+    data.update(
+        {
+            "aes_key": b64u_encode(p.aes_key),
+            "ext_token": p.ext_token,
+            "ext_pubkey": p.ext_pubkey_b64,
+            "hermes_pubkey": p.hermes_pubkey_b64,
+            "paired_at": p.paired_at,
+        }
     )
+    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+
+
+# --- v2 key ring (SPEC-v2 §1.3): per-channel Slack keys + extension-chat key ---
+
+
+def load_channel_keys() -> dict[str, bytes]:
+    """channelId → raw K_chan for every stored Slack channel key."""
+    data = _read_json(_state_path()) or {}
+    out: dict[str, bytes] = {}
+    for cid, kb in (data.get("channel_keys") or {}).items():
+        try:
+            out[cid] = b64u_decode(kb)
+        except Exception:  # noqa: BLE001 — skip a corrupt entry
+            continue
+    return out
+
+
+def save_channel_key(channel_id: str, raw_key: bytes) -> None:
+    data = _read_json(_state_path()) or {}
+    ck = dict(data.get("channel_keys") or {})
+    ck[channel_id] = b64u_encode(raw_key)
+    data["channel_keys"] = ck
+    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+
+
+def load_extchat_key() -> Optional[bytes]:
+    data = _read_json(_state_path()) or {}
+    kb = data.get("extchat_key")
+    if not kb:
+        return None
+    try:
+        return b64u_decode(kb)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def save_extchat_key(raw_key: bytes) -> None:
+    data = _read_json(_state_path()) or {}
+    data["extchat_key"] = b64u_encode(raw_key)
+    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
 
 
 def clear_pairing() -> None:

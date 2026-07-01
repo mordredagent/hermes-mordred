@@ -27,7 +27,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-ENC_PREFIX = "🔒ENC:v1:"
+ENC_PREFIX_V1 = "🔒ENC:v1:"
+ENC_PREFIX_V2 = "🔒ENC:v2:"  # 🔒ENC:v2:{keyId}:{nonce}:{ct} (SPEC-v2 §1.2)
+ENC_PREFIX = ENC_PREFIX_V1  # backward-compat alias
 HKDF_SALT = b"mordred-extension-v1"
 _NONCE_SIZE = 12
 
@@ -83,30 +85,74 @@ def derive_shared_key(priv: X25519PrivateKey, ext_pubkey_b64: str, code: str) ->
 
 
 def is_encrypted(text: str) -> bool:
-    return text.lstrip().startswith(ENC_PREFIX)
+    t = text.lstrip()
+    return t.startswith(ENC_PREFIX_V1) or t.startswith(ENC_PREFIX_V2)
+
+
+def key_id(raw_key: bytes) -> str:
+    """Short key fingerprint: base64url(SHA-256(key)[0:6]) — 8 chars (SPEC-v2 §1.2)."""
+    import hashlib
+
+    return b64u_encode(hashlib.sha256(raw_key).digest()[:6])
+
+
+def hkdf_subkey(raw_key: bytes, salt: str, info: str) -> bytes:
+    """HKDF-SHA256 derive a 32-byte sub-key from a raw key (SPEC-v2 §1.1)."""
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt.encode("utf-8"),
+        info=info.encode("utf-8"),
+    ).derive(raw_key)
 
 
 def encrypt_message(aes_key: bytes, plaintext: str, *, nonce: bytes | None = None) -> str:
+    """v1 encrypt (legacy single key). New code should prefer encrypt_message_v2."""
     if nonce is None:
         import os
 
         nonce = os.urandom(_NONCE_SIZE)
     ct = AESGCM(aes_key).encrypt(nonce, plaintext.encode("utf-8"), None)
-    return f"{ENC_PREFIX}{b64u_encode(nonce)}:{b64u_encode(ct)}"
+    return f"{ENC_PREFIX_V1}{b64u_encode(nonce)}:{b64u_encode(ct)}"
+
+
+def encrypt_message_v2(
+    aes_key: bytes, plaintext: str, kid: str, *, nonce: bytes | None = None
+) -> str:
+    """v2 encrypt with an explicit key fingerprint (SPEC-v2 §1.2)."""
+    if nonce is None:
+        import os
+
+        nonce = os.urandom(_NONCE_SIZE)
+    ct = AESGCM(aes_key).encrypt(nonce, plaintext.encode("utf-8"), None)
+    return f"{ENC_PREFIX_V2}{kid}:{b64u_encode(nonce)}:{b64u_encode(ct)}"
+
+
+def parse_token(formatted: str) -> tuple[int, str | None, bytes, bytes]:
+    """Parse a v1/v2 token → (version, key_id|None, nonce, ct). Raises DecryptError."""
+    body = formatted.lstrip()
+    try:
+        if body.startswith(ENC_PREFIX_V2):
+            p = body[len(ENC_PREFIX_V2) :].split(":")
+            if len(p) != 3:
+                raise DecryptError("malformed")
+            return 2, p[0], b64u_decode(p[1]), b64u_decode(p[2])
+        if body.startswith(ENC_PREFIX_V1):
+            p = body[len(ENC_PREFIX_V1) :].split(":")
+            if len(p) != 2:
+                raise DecryptError("malformed")
+            return 1, None, b64u_decode(p[0]), b64u_decode(p[1])
+    except DecryptError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any decode failure is "malformed"
+        raise DecryptError("malformed") from exc
+    raise DecryptError("malformed")
 
 
 def decrypt_message(aes_key: bytes, formatted: str) -> str:
-    body = formatted.lstrip()
-    if not body.startswith(ENC_PREFIX):
-        raise DecryptError("malformed")
-    parts = body[len(ENC_PREFIX) :].split(":")
-    if len(parts) != 2:
-        raise DecryptError("malformed")
-    try:
-        nonce = b64u_decode(parts[0])
-        ct = b64u_decode(parts[1])
-    except Exception as exc:  # noqa: BLE001 — any decode failure is "malformed"
-        raise DecryptError("malformed") from exc
+    """Decrypt a v1 or v2 token with the given key (caller selects the key, e.g.
+    by key_id from the keyring)."""
+    _ver, _kid, nonce, ct = parse_token(formatted)
     try:
         pt = AESGCM(aes_key).decrypt(nonce, ct, None)
     except InvalidTag as exc:
