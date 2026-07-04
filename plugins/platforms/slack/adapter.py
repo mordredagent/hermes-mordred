@@ -415,7 +415,8 @@ _MORDRED_ENC_TOKEN_RE = re.compile(
 # Mordred channel-key exchange control tokens (SPEC-v2 §5). These are plaintext
 # peer-to-peer messages between extensions (🔑REQ / 🔑GRANT); the agent must
 # never see or respond to them. The leading 🔑 may be dropped by Slack.
-_MORDRED_KEYEXCH_RE = re.compile(r"🔑?(?:REQ|GRANT):v1:\S+")
+# v1 = X25519-only (legacy), v2 = hybrid X25519+ML-KEM-768 (post-quantum).
+_MORDRED_KEYEXCH_RE = re.compile(r"🔑?(?:REQ|GRANT):v[12]:\S+")
 
 
 def _mordred_is_key_exchange(text: str) -> bool:
