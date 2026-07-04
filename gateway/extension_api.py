@@ -363,6 +363,17 @@ class _Connection:
             return
         bot = str(msg.get("bot_token", "")).strip()
         app = str(msg.get("app_token", "")).strip()
+        # The extension E2E-encrypts the tokens with K_extchat (SPEC-v2 §6) so
+        # credentials never cross the WS in plaintext. Unwrap before validating.
+        ek = self._extchat_key()
+        try:
+            if ek is not None and is_encrypted(bot):
+                bot = decrypt_message(ek, bot).strip()
+            if ek is not None and is_encrypted(app):
+                app = decrypt_message(ek, app).strip()
+        except DecryptError:
+            await _reply(False, error="token_decrypt_failed")
+            return
         if not bot.startswith("xoxb-") or not app.startswith("xapp-"):
             await _reply(False, error="bad_token_format")
             return
