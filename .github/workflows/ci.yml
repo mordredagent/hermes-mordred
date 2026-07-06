@@ -13,6 +13,7 @@ on:
       - "src/**"
       - "tests/**"
       - "tools/**"
+      - "native/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ci.yml"
@@ -23,6 +24,7 @@ on:
       - "src/**"
       - "tests/**"
       - "tools/**"
+      - "native/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ci.yml"
@@ -83,3 +85,138 @@ jobs:
           name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
           path: coverage.xml
           if-no-files-found: ignore
+
+  # Hermetic Tor integration tests (Docker-backed; Linux only — macOS
+  # runners have no Docker). The socks5h / provider-transport suites are
+  # hermetic (no Docker) but consume the `integration` extra, so they
+  # ride this job.
+  integration-tor:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # `integration` extra carries the SOCKS client libraries and
+      # provider SDKs the §0.8 verification suites need. hermes-agent
+      # resolves from PyPI — no monorepo root install step.
+      - name: Install mordred-hermes (dev + integration extras)
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev,integration]"
+
+      - name: Verify docker compose is available
+        run: |
+          docker --version
+          docker compose version
+          docker info --format '{{.ServerVersion}}'
+
+      - name: Build Tor integration image
+        working-directory: tests/integration/docker/tor
+        run: docker compose build
+
+      - name: Run Tor + SOCKS5h + provider transport integration tests
+        env:
+          # Isolate _home.py's HERMES_BASE from the runner's real $HOME
+          # (same rationale as the test job above).
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        # `-m integration` overrides the default `-m "not integration"`
+        # from pyproject.toml so the suites actually run here.
+        run: |
+          pytest -v -m integration \
+            tests/integration/test_tor.py \
+            tests/integration/test_socks5h_libs.py \
+            tests/integration/test_provider_transport.py
+
+  # v2-OS2 tpmkey-helper: the native/tpmkey-helper Rust crate (Linux TPM 2.0
+  # helper). Covers fmt + clippy + the pure, host-agnostic layer (wire protocol,
+  # SEC1 codec, 32-byte ECDH-Z left-pad, blob store, neutral error taxonomy) on
+  # BOTH Linux and macOS — proving the cross-platform build claim on real Linux,
+  # which the macOS dev host cannot. On Linux it additionally COMPILES the
+  # tss-esapi TPM backend (Phase 2b), so libtss2 + libclang are installed there;
+  # macOS excludes the backend via cfg. The backend's live tests are gated on
+  # MORDRED_TPM_TEST and run in the swtpm-backed tpmkey-helper-tpm job below.
+  # Runs independently of the Python matrix; runners ship a stable Rust toolchain.
+  tpmkey-helper:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    defaults:
+      run:
+        working-directory: native/tpmkey-helper
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tss-esapi TPM backend only compiles on Linux and needs the libtss2
+      # headers + libclang (bindgen). macOS excludes it via cfg, so skip there.
+      - name: Install libtss2 (Linux — tss-esapi backend)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libtss2-dev libclang-dev clang pkg-config
+
+      - name: Toolchain info + components
+        run: |
+          rustup component add rustfmt clippy
+          cargo --version
+          rustc --version
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  # v2-OS2 Phase 2b: exercise the Linux-only tss-esapi TPM backend end to end
+  # against a swtpm software TPM (generate / public_key / delete / ECDH parity).
+  # The pure layer + cross-platform build are covered by tpmkey-helper above;
+  # this job sets MORDRED_TPM_TEST=1 so the otherwise-skipped live tests run.
+  # Single-threaded because the tests share one swtpm command server.
+  tpmkey-helper-tpm:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: native/tpmkey-helper
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libtss2 + swtpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libtss2-dev libtss2-tcti-swtpm0 libclang-dev clang pkg-config \
+            swtpm swtpm-tools tpm2-tools
+
+      - name: Start swtpm software TPM
+        run: |
+          mkdir -p /tmp/swtpm-state
+          swtpm socket --tpm2 \
+            --tpmstate dir=/tmp/swtpm-state \
+            --ctrl type=tcp,port=2322 \
+            --server type=tcp,port=2321 \
+            --flags startup-clear \
+            --daemon
+          for _ in $(seq 1 40); do
+            if (exec 3<>/dev/tcp/127.0.0.1/2321) 2>/dev/null; then exec 3>&- 3<&-; break; fi
+            sleep 0.25
+          done
+
+      - name: Toolchain info
+        run: cargo --version
+
+      - name: cargo test (TPM backend vs swtpm)
+        env:
+          TCTI: swtpm:host=127.0.0.1,port=2321
+          MORDRED_TPM_TEST: "1"
+        run: cargo test -- --test-threads=1
