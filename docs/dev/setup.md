@@ -1,12 +1,10 @@
 # Mordred — Development Setup (Hermes-base)
 
-> **Note**: 本ドキュメントは Mordred plugin 開発者向けのローカル環境セットアップ手順をまとめたものです。 GA (`v0.1.0-mvp.0`) 後に `dev/setup.md` へ移動予定 (`ROADMAP.md` v2-X3)。 GA 前は prefix 規則 (`DEV_*.md`) に従い `docs/` 直下に flat 配置。
+> **Note**: 本ドキュメントは Mordred plugin 開発者向けのローカル環境セットアップ手順をまとめたものです。
 
 本ガイドは **Mordred plugin の開発に着手する開発者** が対象。 Mordred を end-user として install したい場合は将来の package README を参照すること (Phase 0.5 完了後に追加予定)。
 
 正式な順序・タスク内訳は `PLAN.md` Phase 0、 チェックリストは `TODO.md` §0.1–0.6 を canonical とする。 本ファイルはそれらを日常運用視点で再構成したリファレンスであり、 仕様の出典ではない。
-
-リポジトリルートの `CONTRIBUTING.md` / `AGENTS.md` / `setup-hermes.sh` は Hermes upstream のドキュメントであり、 本ファイルとは対象 (Hermes 本体への貢献 vs Mordred plugin 開発) が異なる。
 
 ---
 
@@ -19,28 +17,30 @@
 
 ## リポジトリ構成
 
-`Mordred-Hermes/` (本リポジトリ) は **Hermes plugin 開発用のワーキングコピー** であり、 Hermes upstream のフォークではない (`UPSTREAM.md` §Repository position)。
+本リポジトリは **standalone の Mordred plugin パッケージリポジトリ** であり、 Hermes upstream のフォークではない (`UPSTREAM.md` §Repository position)。 2026-07-01 にモノレポ (`Mordred-Hermes-monorepo`) から分離され、 パッケージ一式がリポジトリルートに flat 配置されている。
 
 ```
-Mordred-Hermes/
-├── hermes_cli/                       # Hermes upstream の clone (テスト用、 Mordred 開発者は触らない)
-├── pyproject.toml                    # Hermes 既存。 Mordred 自身の pyproject は mordred-hermes/ 内に分離
-├── mordred-hermes/                   # Mordred plugin パッケージ (1 subdir = 1 package、 build root を分離)
-│   ├── pyproject.toml                # Mordred package config (Phase 0.5 で landing)
-│   ├── src/mordred_hermes/           # Mordred plugin の landing site (Phase 0.4 で scaffold)
-│   │   ├── privacy_check/
-│   │   ├── wizard/
-│   │   ├── llm_guard/
-│   │   ├── network/
-│   │   └── keyvault/
-│   └── tests/                        # Mordred 側 test (Hermes root tests/ とは分離)
-├── tests/                            # Hermes upstream の test。 Mordred 側は mordred-hermes/tests/
-└── mordred-docs/                     # Mordred 自身の SPEC / PLAN / TODO 等
+mordred-hermes-plugin/
+├── pyproject.toml                    # mordred-hermes package config (5 entry point)
+├── uv.lock                           # uv lockfile (ローカル開発用。 CI は pip で PyPI 最新を解決)
+├── src/mordred_hermes/               # plugin 本体 (5 subpackage + 共有 _*.py helper)
+│   ├── privacy_check/
+│   ├── wizard/
+│   ├── llm_guard/
+│   ├── network/
+│   └── keyvault/
+├── tests/                            # default suite + integration/ (opt-in) + fixtures/
+├── docs/dev/                         # SPEC / PLAN / TODO / ROADMAP / CI / setup 等
+├── docs/user/                        # QUICKSTART / USAGE
+├── tools/                            # bump_version.py / check_hook_payload_drift.py
+├── scripts/                          # keyvault_offline_digest.py (air-gapped 検証)
+├── native/                           # sekey-helper (Swift) / tpmkey-helper (Rust)
+└── packaging/                        # config-decrypt .pth bootstrap
 ```
 
-> 開発用 venv は Hermes が管理する `~/.hermes/hermes-agent/venv` を使う (`hermes setup` が生成)。 リポジトリ内に自前の `.venv/` を作る必要はない (`README.md` の canonical install フロー参照)。
+> 開発用 venv は Hermes が管理する `~/.hermes/hermes-agent/venv` を使う (`hermes setup` が生成)。 リポジトリ内の `.venv/` (uv 管理、 `uv sync --all-extras`) は pytest / ruff / mypy 用の補助環境として併用できる (git ignore 済み)。
 
-> **現状 (`v0.1.0-mvp.0` GA 前、 2026-05-14)**: Phase 0.4–0.5 完了済み (PR #8、 2026-05-09)。 `mordred-hermes/` subdir 一式 (`pyproject.toml` + `src/mordred_hermes/{privacy_check,wizard,llm_guard,network,keyvault}/` + `tests/`) が landing 済み。 Phase 1.1 / 1.3 / 2 / 3 PR1-PR3b / 4 PR1-PR2 まで実装済みで、 `pip install -e ./mordred-hermes` が即座に動く状態。
+> **現状 (2026-07-06)**: v1 スコープ (Phase 0–4) の 5 plugin は実装済みで、 リポジトリルートからの `pip install -e .` が即座に動く状態。 残作業は `TODO.md` §Standalone-repo repair backlog を参照。
 
 ## 初期セットアップ
 
@@ -57,7 +57,7 @@ python -m hermes_cli --version
 
 # 4. mordred-hermes を Hermes 管理 venv に editable install
 #    canonical なコマンドは README.md を参照
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ./mordred-hermes
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e .
 ```
 
 `pyproject.toml` は既に landing 済み (version `0.1.0a0`、 5 entry point) なので、 上記 install ステップは **現行かつ必須**。 自前で `.venv` を作るのではなく、 Hermes が管理する `~/.hermes/hermes-agent/venv` に対して `uv pip` で install するのが canonical なフロー (`README.md` 参照)。
@@ -76,11 +76,11 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ./mordred-her
 
 ```sh
 # 開発者の標準セット (CI の test job と同じ — ci.yml は [dev] + [keyvault] を install)
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e "./mordred-hermes[dev]"
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e "./mordred-hermes[keyvault]"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ".[dev]"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ".[keyvault]"
 
 # macOS で mordred_keyvault を開発する場合 (keyvault extra を包含)
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e "./mordred-hermes[macos]"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e ".[macos]"
 ```
 
 > **重要**: 下記「日常コマンド」表が参照する `pytest` / `ruff` / `mypy` は `[dev]` extra に含まれる。 `[dev]` を install していないとこれらのコマンドは動かない。
