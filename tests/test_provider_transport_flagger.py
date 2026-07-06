@@ -191,11 +191,11 @@ class TestRegistrySync:
     def test_known_provider_slugs_are_real_hermes_ids(self) -> None:
         """Every non-localhost registry slug must be a provider id Hermes
         actually recognises — guarding against typos in the synced slugs and
-        accidental stale entries. ``vertex`` and ``novita`` are explicitly
-        retained despite being absent from the bundled Hermes ``hermes_cli``
-        version (kept for back-compat / plugin-provided endpoints; ``novita`` is
-        one of the synced Hermes 0.14 cloud providers). Skips if the upstream
-        registry can't be imported."""
+        accidental stale entries. ``vertex`` and ``novita`` used to be
+        carve-outs while absent from older bundled Hermes versions;
+        hermes-agent 0.18.0 recognises both, so the registry is now checked
+        without exceptions. Skips if the upstream registry can't be
+        imported."""
         from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
         try:
@@ -204,9 +204,8 @@ class TestRegistrySync:
             pytest.skip("hermes_cli.models provider registry not importable")
 
         recognised = {p.slug for p in CANONICAL_PROVIDERS} | set(_PROVIDER_MODELS)
-        retained_non_hermes = {"vertex", "novita"}
         mordred_cloud = {name for name, e in KNOWN_PROVIDERS.items() if not e.localhost_only}
-        unrecognised = mordred_cloud - recognised - retained_non_hermes
+        unrecognised = mordred_cloud - recognised
         assert not unrecognised, f"registry slugs not known to Hermes: {unrecognised}"
 
 
