@@ -13,6 +13,7 @@ dist/
 .coverage.*
 coverage.xml
 htmlcov/
+.venv/
 
 # Local dev-only keyvault init helper (bypasses safety controls, prints seed).
 # Must never be committed.

@@ -14,7 +14,7 @@ real anthropic transport facts, and the strict-mode allowlist check compares
 against the wrong identifier.
 
 ``PROVIDER_ALIASES`` is a faithful replica of
-``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.17.0). It is *replicated*
+``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.18.0). It is *replicated*
 rather than imported: ``hermes_cli`` is a private module with no stability
 contract, so importing it would couple Mordred's enforcement to Hermes'
 internal layout. ``tests/test_provider_identity.py`` guards the replica's
@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from typing import Final
 
 #: Faithful replica of ``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes
-#: 0.14.0). Identity entries (e.g. ``xai-oauth`` → ``xai-oauth``) are kept
+#: 0.18.0). Identity entries (e.g. ``xai-oauth`` → ``xai-oauth``) are kept
 #: verbatim from upstream so the replica diffs cleanly against the source.
 #: The bare ``ollama`` → ``custom`` mapping is upstream's "local endpoint"
 #: sentinel (use ``ollama-cloud`` for the hosted product); it is preserved
@@ -51,6 +51,10 @@ PROVIDER_ALIASES: Final[Mapping[str, str]] = {
     "google": "gemini",
     "google-gemini": "gemini",
     "google-ai-studio": "gemini",
+    "google-vertex": "vertex",
+    "vertex-ai": "vertex",
+    "gcp-vertex": "vertex",
+    "vertexai": "vertex",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
     "kimi-cn": "kimi-coding-cn",
@@ -81,8 +85,6 @@ PROVIDER_ALIASES: Final[Mapping[str, str]] = {
     "qwen": "alibaba",
     "alibaba-cloud": "alibaba",
     "qwen-portal": "qwen-oauth",
-    "gemini-cli": "google-gemini-cli",
-    "gemini-oauth": "google-gemini-cli",
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
