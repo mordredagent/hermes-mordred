@@ -24,9 +24,9 @@ The split from `Mordred-Hermes-monorepo` (2026-06-30/07-01) left `.github/workfl
 - [x] Make `hermes mordred extension pair` fail closed when `gateway` is absent (exit code 2 + clear message instead of a raw `ImportError`)
 - [x] Add `HERMES_HOME` to the `ci.yml` `pytest` step's env (matches README.md's documented canonical test invocation)
 - [x] Fix `docs/dev/CI.md`'s "Auditing" section (expected-output list and repo-name casing) to match the 3 workflows actually restored, and mark the upstream-origin-workflows paragraph as monorepo-era/not applicable here
-- [ ] Restore `.github/workflows/release.yml` (PyPI Trusted Publishing, M7) — requires a one-time manual operator setup (CI.md §initial setup)
-- [ ] Restore `.github/workflows/integration-vpn.yml` — requires a paid Mullvad account
-- [ ] Restore the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs in `ci.yml` — require Docker / a Rust toolchain / swtpm
+- [x] Restore `.github/workflows/release.yml` (PyPI Trusted Publishing, M7) — workflow restored 2026-07-06 (paths adapted to the flat repo root); the one-time manual operator setup (pending publishers + GitHub Environments, CI.md §初回 setup) is still pending and must precede the first dispatch
+- [x] Restore `.github/workflows/integration-vpn.yml` — restored 2026-07-06 (`workflow_dispatch`-only); dispatching still requires the paid-account `MORDRED_MULLVAD_ACCOUNT` repo secret
+- [x] Restore the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs in `ci.yml` — restored 2026-07-06; `native/**` added to the paths filter (Docker / Rust / swtpm all provisioned on the ubuntu-24.04 runner inside the jobs)
 - [ ] Resume implementation and decide the distribution strategy for `gateway/extension_*.py` (the browser-extension WebSocket server) — see the "checklist for when work resumes" in the relevant ROADMAP.md section
 
 ---

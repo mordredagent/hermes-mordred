@@ -1,0 +1,125 @@
+---
+# M7: PyPI publish for `mordred-hermes`. workflow_dispatch only — never
+# auto-runs, because publishing to PyPI is an irreversible external
+# action (a deleted version/filename can never be re-uploaded).
+#
+# Restored after the Mordred-Hermes-monorepo -> standalone-repo split
+# (2026-07-06). Paths adapted: the package now builds from the repo root
+# instead of the old `mordred-hermes/` subdirectory.
+#
+# Two modes:
+#   reserve  — builds the empty 0.0.0.dev0 stub
+#              (packaging/name-reservation/) to claim the
+#              `mordred-hermes` name before the public docs launch.
+#              Run once against testpypi, then once against pypi.
+#   release  — builds the real package (repo root, version 0.1.0a0+).
+#              Used for every real release after the name is reserved.
+#
+# Authentication is PyPI Trusted Publishing (OIDC) — NO API tokens are
+# stored. Before the first run, register a "pending publisher" on PyPI
+# and TestPyPI for project `mordred-hermes`, workflow `release.yml`,
+# environment `pypi` / `testpypi` respectively. Full operator runbook:
+# docs/dev/CI.md § `release.yml` 詳細 § 初回 setup.
+
+name: Release (PyPI publish)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish target index"
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+      mode:
+        description: "reserve = 0.0.0.dev0 stub | release = real package"
+        required: true
+        type: choice
+        options:
+          - reserve
+          - release
+        default: reserve
+
+# Never publish two builds to the same index concurrently. Not cancelled
+# in-progress: an interrupted upload could leave a half-published release.
+concurrency:
+  group: release-${{ inputs.target }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build + twine
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Resolve project directory for ${{ inputs.mode }} mode
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.mode }}" = "reserve" ]; then
+            echo "dir=packaging/name-reservation" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sdist + wheel
+        run: python -m build --outdir dist "${{ steps.resolve.outputs.dir }}"
+
+      - name: Verify distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Guard — reserve mode must build the 0.0.0.dev0 stub
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.mode }}" = "reserve" ]; then
+            ls dist/ | grep -q '0\.0\.0\.dev0' \
+              || { echo "::error::reserve mode expected 0.0.0.dev0 artifacts"; exit 1; }
+          else
+            if ls dist/ | grep -q '0\.0\.0\.dev0'; then
+              echo "::error::release mode must not publish the 0.0.0.dev0 stub"; exit 1
+            fi
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # GitHub environment gates the upload — configure required reviewers
+    # on `pypi` so a human approves before any real PyPI publish.
+    environment: ${{ inputs.target }}
+    permissions:
+      id-token: write  # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to ${{ inputs.target }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Empty repository-url => upload.pypi.org (production PyPI).
+          repository-url: ${{ inputs.target == 'testpypi' && 'https://test.pypi.org/legacy/' || '' }}
+          packages-dir: dist/
+          print-hash: true

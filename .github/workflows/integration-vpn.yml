@@ -1,0 +1,87 @@
+---
+# PR3b: live-gated Mullvad integration tests. workflow_dispatch only —
+# never auto-runs on push/PR because the account number is a paid
+# resource and the bring-up mutates real network state on the runner.
+#
+# Restored after the Mordred-Hermes-monorepo -> standalone-repo split
+# (2026-07-06). Adapted: hermes-agent resolves from PyPI (no monorepo
+# root install) and the package installs from the repo root.
+#
+# Requires repo secrets:
+#   MORDRED_MULLVAD_ACCOUNT — 16-digit account number
+#
+# Operators trigger via the Actions tab -> "Mullvad VPN integration" ->
+# "Run workflow". The job installs the official Mullvad daemon on the
+# runner, runs the live-gated test_vpn.py suite, and tears down.
+
+name: Mullvad VPN integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      mullvad_version:
+        description: "Mullvad client version (semver or 'latest')"
+        required: true
+        default: "latest"
+
+concurrency:
+  group: integration-vpn
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  vpn-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # hermes-agent is a normal PyPI dependency, so a single editable
+      # install resolves everything — no monorepo root install step.
+      - name: Install mordred-hermes (dev extra)
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Install Mullvad client
+        env:
+          # Free-text workflow input — passed via env (not inline ${{ }})
+          # so it can never inject into the shell command.
+          MULLVAD_VERSION: ${{ inputs.mullvad_version }}
+        run: |
+          set -euo pipefail
+          sudo curl -fsSLo /usr/share/keyrings/mullvad-keyring.asc https://repository.mullvad.net/deb/mullvad-keyring.asc
+          echo "deb [signed-by=/usr/share/keyrings/mullvad-keyring.asc arch=$(dpkg --print-architecture)] https://repository.mullvad.net/deb/stable $(lsb_release -cs) main" | \
+            sudo tee /etc/apt/sources.list.d/mullvad.list
+          sudo apt-get update
+          if [ "$MULLVAD_VERSION" = "latest" ]; then
+            sudo apt-get install -y mullvad-vpn
+          else
+            sudo apt-get install -y "mullvad-vpn=$MULLVAD_VERSION"
+          fi
+          mullvad --version
+
+      - name: Run live VPN integration tests
+        env:
+          MORDRED_LIVE_VPN_TEST: "1"
+          MORDRED_MULLVAD_ACCOUNT: ${{ secrets.MORDRED_MULLVAD_ACCOUNT }}
+          # Isolate _home.py's HERMES_BASE from the runner's real $HOME
+          # (same rationale as the ci.yml test job).
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        # `-m integration` overrides the default `-m "not integration"`
+        # so the suite runs in this dedicated workflow.
+        run: pytest -v -m integration tests/integration/test_vpn.py
+
+      - name: Always disconnect on teardown
+        if: always()
+        run: |
+          mullvad disconnect || true
+          mullvad account logout || true

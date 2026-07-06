@@ -22,20 +22,20 @@ When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Brows
 
 - **`hermes-agent` is now published on PyPI** (confirmed `hermes-agent==0.14.0`, 2026-07-01). The old design's premises — "`hermes-agent` isn't on PyPI so a root install is required" and "the `fresh-venv-resolution` job (H1) asserts install **fails** without it" — no longer hold. `pip install -e .` resolves `hermes-agent` on its own. The `fresh-venv-resolution` job is **retired**: H1's purpose (fail-fast when `hermes-agent` is absent) is moot now that it's always resolvable from PyPI
 - **`upstream-check.yml` no longer needs `git clone`**: `pip install hermes-agent` unpacks its source (plain `.py` files, not compiled) into site-packages, so `tools/check_hook_payload_drift.py --hermes-root <site-packages>` works directly (verified locally)
-- The following are **out of scope** for this restoration (tracked as follow-ups in TODO.md):
-  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — requires a one-time external operator setup (see §"`release.yml` details" §"initial setup") that couldn't be verified in this session
-  - `.github/workflows/integration-vpn.yml` — requires a paid Mullvad account and mutates real network state
-  - the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs inside `ci.yml` — heavyweight jobs requiring Docker / a Rust toolchain / swtpm. The `ci.yml` restored below only covers the `test` job
+- The following were initially left out of the 2026-07-01 restoration and were **restored on 2026-07-06** (same adaptation pattern: PyPI install, flat repo-root paths, `HERMES_HOME` isolation on pytest steps):
+  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — workflow restored (`reserve` builds `packaging/name-reservation/`, `release` builds the repo root). The one-time external operator setup (pending publishers + GitHub Environments, see §"`release.yml` 詳細" §"初回 setup") is still pending and must happen before the first run
+  - `.github/workflows/integration-vpn.yml` — restored; still `workflow_dispatch`-only and requires the `MORDRED_MULLVAD_ACCOUNT` repo secret (paid resource) before it can be dispatched
+  - the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs inside `ci.yml` — restored; `native/**` was added to the `ci.yml` paths filter so Rust-crate changes trigger CI. These jobs are not branch-protection required checks (required checks stay the two `test` 3.12 cells)
 
 ## Active workflows
 
 | Path | Purpose | Status |
 |------|---------|--------|
-| `.github/workflows/ci.yml` | Per-PR / push: `test` job (matrix; ruff + mypy + pytest) | **restored** (`test` job only; `integration-tor`/`tpmkey-helper`/`tpmkey-helper-tpm` are follow-ups) |
+| `.github/workflows/ci.yml` | Per-PR / push: `test` (matrix; ruff + mypy + pytest) + `integration-tor` + `tpmkey-helper` + `tpmkey-helper-tpm` jobs | **restored** (all 4 jobs; `fresh-venv-resolution` is retired) |
 | `.github/workflows/upstream-check.yml` | Weekly detection of Hermes hook signature + payload drift | **restored** (simplified `git clone` to `pip install hermes-agent`) |
 | `.github/workflows/labeler.yml` | Auto-labels PRs by path (mordred-* paths) | **restored** |
-| `.github/workflows/integration-vpn.yml` | `workflow_dispatch`-only: live Mullvad VPN integration test (PR3b, pairs with the `integration-tor` job) | follow-up |
-| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | follow-up |
+| `.github/workflows/integration-vpn.yml` | `workflow_dispatch`-only: live Mullvad VPN integration test (PR3b, pairs with the `integration-tor` job) | **restored** (needs `MORDRED_MULLVAD_ACCOUNT` secret before dispatch) |
+| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | **restored** (operator one-time setup still pending, §初回 setup) |
 
 The detail sections below are left as they were in the pre-split design (historical record). Where they conflict, the "Standalone-repo adaptations" note above takes precedence.
 
@@ -136,7 +136,7 @@ PyPI への upload は不可逆な外部公開のため、 以下は **operator 
 1. **PyPI 名の空き確認**: <https://pypi.org/project/mordred-hermes/> と <https://test.pypi.org/project/mordred-hermes/> が未登録であることを確認
 2. **pending publisher 登録 (TestPyPI)**: TestPyPI → Account settings → Publishing → "Add a new pending publisher":
    - PyPI Project Name: `mordred-hermes`
-   - Owner: `InternetMaximalism` / Repository: `Mordred-Hermes`
+   - Owner: `InternetMaximalism` / Repository: `mordred-hermes`
    - Workflow name: `release.yml` / Environment name: `testpypi`
 3. **pending publisher 登録 (PyPI)**: 同様に PyPI 側で Environment name = `pypi`
 4. **GitHub Environment 作成**: リポジトリ Settings → Environments で `testpypi` と `pypi` を作成。 `pypi` には required reviewers の設定を推奨
@@ -177,11 +177,13 @@ gh api -X GET /repos/InternetMaximalism/mordred-hermes/actions/workflows --pagin
   --jq '.workflows[] | select(.state=="active") | .path' | sort
 ```
 
-Expected output (as of 2026-07-01, only the 3 workflows restored under §Standalone-repo adaptations — `release.yml` / `integration-vpn.yml` are follow-ups and should be added to this list once restored):
+Expected output (as of 2026-07-06, all 5 Mordred-owned workflows restored under §Standalone-repo adaptations):
 
 ```
 .github/workflows/ci.yml
+.github/workflows/integration-vpn.yml
 .github/workflows/labeler.yml
+.github/workflows/release.yml
 .github/workflows/upstream-check.yml
 ```
 
