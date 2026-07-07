@@ -159,7 +159,17 @@ Mordred は専用の `CHANGELOG.md` ファイルを**持たない**。変更履�
 
 **共有 PR テンプレートは編集しない**: リポジトリ root の `.github/PULL_REQUEST_TEMPLATE.md` は Hermes upstream 所有でモノレポ全体に適用されるため、 Mordred 固有の見出しを注入しない (soft-fork 規律、 `ROADMAP.md` "Forever out of scope")。 本規約は Mordred PR の author が手動で踏襲する。
 
+## Branching model (dev / main、 2026-07-07 導入)
+
+- `dev` — **default branch**。 日常開発の統合ブランチ: feature branch → PR → `dev`
+- `main` — リリース/安定ブランチ。 `dev` → `main` の PR でのみ更新する (直接 push・ feature PR の直接 target は行わない)
+- `ci.yml` の `push` トリガーは `main` / `dev` 両方が対象 (post-merge CI)。 `pull_request` トリガーは branch filter なしのため dev 向け PR でも従来どおり実行される
+- schedule 系 workflow (`upstream-check.yml` 週次 cron) は default branch (`dev`) 上の workflow 定義で実行される
+- `release.yml` の dispatch は原則 `main` ref から実行する (リリース成果物は main の内容)
+
 ## Branch protection (one-time setup)
+
+> **2026-07-07 注記**: 現行 billing plan (private repo) では branch protection / rulesets が利用不可 (API 403)。 以下は repo public 化または plan upgrade 後に有効化する予定の設定で、 それまでは §Branching model の運用規律 (convention) で代替する。 有効化時は `main` に加えて `dev` にも同等の protection を適用する。
 
 Phase 0 完了後、 `main` ブランチで以下を有効化:
 
