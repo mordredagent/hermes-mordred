@@ -19,7 +19,7 @@ on:
       - ".github/workflows/ci.yml"
       - "docs/dev/CI.md"
   push:
-    branches: [main]
+    branches: [main, dev]
     paths:
       - "src/**"
       - "tests/**"
