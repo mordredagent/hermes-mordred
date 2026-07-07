@@ -211,7 +211,7 @@ def set_memory_key(
     if opened is None:
         return 1
 
-    try:
+    with opened:
         existing = _read_enrolled_env(opened, root)
         if existing is None:
             return 1
@@ -275,8 +275,6 @@ def set_memory_key(
             )
         _print_memory_config_hint()
         return 0
-    finally:
-        opened.close()
 
 
 def _read_enrolled_env(opened: OpenVault, root: Path) -> str | None:

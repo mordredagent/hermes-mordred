@@ -410,6 +410,29 @@ class TestInit:
     def _noop_display(self, handle: object, surface: object) -> None:
         return None
 
+    def test_init_refuses_seed_display_when_stdout_not_a_tty(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # capsys replaces stdout with a non-tty buffer — exactly the redirected
+        # case (`keyvault init > log.txt`) the guard must refuse: the production
+        # surface prints the 24 words to stdout, so a redirect would persist
+        # them to disk. Must refuse BEFORE the passphrase prompt (fail fast,
+        # like the blackout pre-check), hence surface=None + a recording
+        # prompt_io that must stay untouched.
+        prompt_io = _RecordingPromptIO(seed=self.FIXED_SEED, passphrase=self.PASSPHRASE)
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=prompt_io,
+            surface=None,
+            display_fn=self._noop_display,
+        )
+        assert rc == 1
+        assert prompt_io.calls == []  # refused before any prompt
+        captured = capsys.readouterr()
+        assert "stdout is not a terminal" in captured.err
+        assert "SEED" not in captured.out
+
     def test_already_initialised_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _build_keyvault(tmp_path, {"default": b"\x01" * 32})
         rc = keyvault_cli.init_keyvault(
@@ -981,3 +1004,19 @@ class TestErrorColour:
         err = capsys.readouterr().err
         assert err.startswith("error: cannot read backup blob")
         assert "\033" not in err
+
+
+class TestOfflineDigestScriptLocator:
+    """The init banner must point at a real copy of the offline digest tool —
+    a repo ``scripts/`` checkout here, the wheel's ``_offline/`` copy after a
+    plain ``pip install`` (UX review 2026-07-07: the old banner hardcoded
+    ``scripts/keyvault_offline_digest.py``, a dead path for PyPI users).
+    """
+
+    def test_locates_an_existing_copy(self) -> None:
+        from mordred_hermes.wizard import _keyvault_init
+
+        path = _keyvault_init._locate_offline_digest_script()
+        assert path is not None
+        assert path.is_file()
+        assert path.name == "keyvault_offline_digest.py"

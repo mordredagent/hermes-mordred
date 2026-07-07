@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import sys
 import time
 from typing import Any
 
@@ -37,6 +38,9 @@ def _print_qr(code: str) -> None:
     try:
         import qrcode
     except ImportError:
+        # The code is still fully usable typed by hand; the QR is a convenience,
+        # so a missing optional dep degrades to a note rather than silence.
+        _term.emit_note("QR display skipped — `pip install qrcode` to also render the code as a scannable QR.")
         return
     qr = qrcode.QRCode(border=1)
     qr.add_data(code)
@@ -85,29 +89,41 @@ def extension_pair(*, timeout: float = 600.0) -> int:
         return 2
 
     code, expires_at = pairing.generate_code()
+    color = _term.should_color(sys.stdout)
+    ascii_only = not _term.supports_unicode(sys.stdout)
+    ttl_minutes = max(1, round((expires_at - time.time()) / 60))
 
-    print("\nMordred Extension ペアリング")
-    print("━" * 32)
-    print(f"\nペアリングコード:  {code}")
-    print("有効期限: 10 分\n")
+    print()
+    print(_term.heading("Mordred Extension pairing", enabled=color))
+    print()
+    print(f"Pairing code:  {_term.bold(code, enabled=color)}")
+    print(f"Expires in {ttl_minutes} minute{'s' if ttl_minutes != 1 else ''}.")
+    print()
     _print_qr(code)
-    print("\n拡張機能の設定画面でこのコードを入力してください。")
-    print(f"コードをコピー: {code}\n")
-    print("待機中... (Ctrl+C でキャンセル)")
+    print("Enter this code in the extension's settings page.")
+    print("Waiting for the extension to connect... (Ctrl+C to cancel)")
 
     deadline = min(expires_at, time.time() + timeout)
     try:
         while time.time() < deadline:
             if pairing.code_consumed(code):
-                print(f"✓ ペアリング完了 ({time.strftime('%Y-%m-%d %H:%M:%S')})")
+                mark = _term.glyph("ok", ascii_only=ascii_only)
+                print(f"{_term.success(mark, enabled=color)} Paired ({time.strftime('%Y-%m-%d %H:%M:%S')}).")
                 return 0
             time.sleep(_POLL_SECONDS)
     except KeyboardInterrupt:
-        print("\nキャンセルしました。")
+        print("\nCancelled — no pairing was completed.", file=sys.stderr)
         return 1
 
-    print("\n⌛ コードの有効期限が切れました。もう一度実行してください。")
-    print("   (ゲートウェイが起動しているか確認してください: `hermes --gateway`)")
+    reason = (
+        "the pairing code expired before the extension connected"
+        if time.time() >= expires_at
+        else f"no pairing within {int(timeout)} seconds"
+    )
+    _term.emit_warn(
+        f"{reason} — run `hermes-mordred extension pair` for a new code "
+        "(check the gateway is running: `hermes --gateway`)."
+    )
     return 1
 
 

@@ -34,6 +34,11 @@ if TYPE_CHECKING:
     from .configure import PromptIO
 
 
+def _vault_present(root: Path) -> bool:
+    """Whether a vault exists at ``root`` (a manifest on disk) — no key needed."""
+    return any(root.glob("manifest.*.mvmf"))
+
+
 def _resolve_root(root: str | None) -> Path:
     """Resolve the vault root, defaulting to ``<hermes home>/mordred/vault``.
 

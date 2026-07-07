@@ -343,7 +343,9 @@ def reset_keyvault(
     """
     root = _resolve_root(home)
     if not root.exists():
-        print("No keyvault found — nothing to reset.", file=sys.stderr)
+        # Outcome of a no-op run — stdout, like every other command's outcome
+        # line (the interactive WARNING above the prompt stays on stderr).
+        print("No keyvault found — nothing to reset.")
         return 0
 
     key_ids = _collect_reset_key_ids(root)
@@ -353,7 +355,7 @@ def reset_keyvault(
 
             prompt_io = PromptToolkitIO()
         if not _confirm_reset(prompt_io, key_ids):
-            print("Reset aborted — nothing was deleted.", file=sys.stderr)
+            print("Reset aborted — nothing was deleted.")
             return 1
 
     _delete_wrapping_keys(key_ids, backend=backend)

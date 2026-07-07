@@ -156,6 +156,36 @@ class TestDispatchWithoutFunc:
             dispatch(argparse.Namespace())
 
 
+class TestDispatchInterruptGuard:
+    """A ^C at any interactive prompt aborts cleanly instead of dumping a
+    traceback (UX review 2026-07-07). The prompt layer re-raises
+    KeyboardInterrupt on purpose (see ``_prompt_io``); ``dispatch`` is the one
+    place every handler funnels through, so the guard lives there.
+    """
+
+    def test_keyboard_interrupt_prints_aborted_and_returns_130(self, capsys: pytest.CaptureFixture[str]) -> None:
+        def _boom(args: argparse.Namespace) -> int:
+            raise KeyboardInterrupt
+
+        rc = dispatch(argparse.Namespace(func=_boom))
+        assert rc == 130  # 128 + SIGINT, the shell convention
+        captured = capsys.readouterr()
+        assert "Aborted." in captured.err
+        assert captured.out == ""
+
+    def test_non_interactive_abort_prints_error_and_returns_2(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from mordred_hermes.wizard._prompt_io import NonInteractiveAbort
+
+        def _refuse(args: argparse.Namespace) -> int:
+            raise NonInteractiveAbort("--non-interactive set but prompt required: 'Passphrase'")
+
+        rc = dispatch(argparse.Namespace(func=_refuse))
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error:")
+        assert "prompt required" in err
+
+
 class TestMainStandaloneEntry:
     """`hermes-mordred` console-script entry (Codex P1 workaround for Hermes 0.11)."""
 

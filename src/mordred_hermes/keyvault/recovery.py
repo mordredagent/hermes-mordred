@@ -33,18 +33,13 @@ The ``ts`` field is added by the upstream Writer, not here.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from hmac import compare_digest as _compare_digest
-from typing import Any
 
 from . import backup
 from .digest import VerificationDigestMismatch
+from .wrap import AuditSink
 
 _DIGEST_LEN = 32
-
-# Type alias for the audit sink. The dict shape is POLICY.md §Audit
-# entry shape minus ``ts`` (Writer auto-adds that).
-AuditSink = Callable[[dict[str, Any]], None]
 
 
 class RecoveryDigestMismatch(VerificationDigestMismatch):

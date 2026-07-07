@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
+from ._vault_open import _vault_present
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -111,11 +112,6 @@ def _handle_missing_plaintext(root: Path, home: Path, env_path: Path) -> int:
 #: status reader can still flag — and :func:`enable` can still sweep — a leftover
 #: one that an interrupted older reseal may have stranded at rest during upgrade.
 _RESEAL_TMP_NAME = ".env.reseal.tmp"
-
-
-def _vault_present(root: Path) -> bool:
-    """Whether a vault exists at ``root`` (a manifest on disk) — no key needed."""
-    return any(root.glob("manifest.*.mvmf"))
 
 
 def _env_enrolled(root: Path) -> bool:
@@ -216,12 +212,10 @@ def _restore_plaintext(
     opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
     if opened is None:
         return 0 if env_path.exists() else 1
-    try:
+    with opened:
         if _ENV_NAME not in opened.list_files():
             return 0
         vault_bytes = opened.read_file(_ENV_NAME)
-    finally:
-        opened.close()
 
     if env_path.exists():
         if env_path.read_bytes() != vault_bytes:
@@ -332,13 +326,12 @@ def reseal(
         )
         return 1
 
-    try:
-        remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
-    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-        _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
-        return 1
-    finally:
-        opened.close()
+    with opened:
+        try:
+            remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
+        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+            _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
+            return 1
 
     if not remove_plaintext:
         return 0  # a warning was already emitted; the plaintext is kept
@@ -509,24 +502,23 @@ def purge(
         opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
         if opened is None:
             return 0 if env_path.exists() else 1
-        try:
-            if _ENV_NAME in opened.list_files():
-                vault_bytes = opened.read_file(_ENV_NAME)
-                if not env_path.exists():
-                    _storage.atomic_write(env_path, vault_bytes)  # restore the only copy
-                elif env_path.read_bytes() != vault_bytes:
-                    backup = home / ".env.vault-purged"
-                    _storage.atomic_write(backup, vault_bytes)
-                    _term.emit_warn(
-                        f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
-                        "before purging (nothing is lost)."
-                    )
-                opened.unenroll_file(_ENV_NAME)
-        except (vault.VaultError, anchor.AnchorError, OSError) as exc:
-            _term.emit_error(f"cannot purge .env from the vault: {exc}")
-            return 1
-        finally:
-            opened.close()
+        with opened:
+            try:
+                if _ENV_NAME in opened.list_files():
+                    vault_bytes = opened.read_file(_ENV_NAME)
+                    if not env_path.exists():
+                        _storage.atomic_write(env_path, vault_bytes)  # restore the only copy
+                    elif env_path.read_bytes() != vault_bytes:
+                        backup = home / ".env.vault-purged"
+                        _storage.atomic_write(backup, vault_bytes)
+                        _term.emit_warn(
+                            f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
+                            "before purging (nothing is lost)."
+                        )
+                    opened.unenroll_file(_ENV_NAME)
+            except (vault.VaultError, anchor.AnchorError, OSError) as exc:
+                _term.emit_error(f"cannot purge .env from the vault: {exc}")
+                return 1
 
     _env_optout_marker_path(home).unlink(missing_ok=True)
     print(".env purged from the vault; the plaintext is on disk and unencrypted.")
