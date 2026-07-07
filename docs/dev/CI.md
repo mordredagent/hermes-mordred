@@ -23,7 +23,7 @@ When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Brows
 - **`hermes-agent` is now published on PyPI** (confirmed `hermes-agent==0.14.0`, 2026-07-01). The old design's premises — "`hermes-agent` isn't on PyPI so a root install is required" and "the `fresh-venv-resolution` job (H1) asserts install **fails** without it" — no longer hold. `pip install -e .` resolves `hermes-agent` on its own. The `fresh-venv-resolution` job is **retired**: H1's purpose (fail-fast when `hermes-agent` is absent) is moot now that it's always resolvable from PyPI
 - **`upstream-check.yml` no longer needs `git clone`**: `pip install hermes-agent` unpacks its source (plain `.py` files, not compiled) into site-packages, so `tools/check_hook_payload_drift.py --hermes-root <site-packages>` works directly (verified locally)
 - The following were initially left out of the 2026-07-01 restoration and were **restored on 2026-07-06** (same adaptation pattern: PyPI install, flat repo-root paths, `HERMES_HOME` isolation on pytest steps):
-  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — workflow restored (`reserve` builds `packaging/name-reservation/`, `release` builds the repo root). The one-time external operator setup (pending publishers + GitHub Environments, see §"`release.yml` 詳細" §"初回 setup") is still pending and must happen before the first run
+  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — workflow restored (`reserve` builds `packaging/name-reservation/`, `release` builds the repo root). The one-time external operator setup (pending publishers + GitHub Environments, see §"`release.yml` 詳細" §"初回 setup") was **completed on 2026-07-07** and the M7 name reservation (`mode=reserve`) was dispatched and verified on both TestPyPI and PyPI (`mordred-hermes 0.0.0.dev0`)
   - `.github/workflows/integration-vpn.yml` — restored; still `workflow_dispatch`-only and requires the `MORDRED_MULLVAD_ACCOUNT` repo secret (paid resource) before it can be dispatched
   - the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs inside `ci.yml` — restored; `native/**` was added to the `ci.yml` paths filter so Rust-crate changes trigger CI. These jobs are not branch-protection required checks (required checks stay the two `test` 3.12 cells)
 
@@ -35,7 +35,7 @@ When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Brows
 | `.github/workflows/upstream-check.yml` | Weekly detection of Hermes hook signature + payload drift | **restored** (simplified `git clone` to `pip install hermes-agent`) |
 | `.github/workflows/labeler.yml` | Auto-labels PRs by path (mordred-* paths) | **restored** |
 | `.github/workflows/integration-vpn.yml` | `workflow_dispatch`-only: live Mullvad VPN integration test (PR3b, pairs with the `integration-tor` job) | **restored** (needs `MORDRED_MULLVAD_ACCOUNT` secret before dispatch) |
-| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | **restored** (operator one-time setup still pending, §初回 setup) |
+| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | **restored** (operator setup + M7 name reservation completed 2026-07-07, §初回 setup) |
 
 The detail sections below are left as they were in the pre-split design (historical record). Where they conflict, the "Standalone-repo adaptations" note above takes precedence.
 
@@ -130,6 +130,8 @@ gh label create ci                             --color 6F42C1 --description "CI/
 - **version 順序の不変条件**: `0.0.0.dev0 < 0.1.0a0` (PEP 440)。 stub が本体より小さいことで、 予約 stub が後続の本リリースを塞がない。 `tests/test_packaging_versions.py` がこの不変条件を pin
 
 ### 初回 setup (one-time、 operator 手動)
+
+> **2026-07-07 完了**: 全 6 ステップ実施済み。 TestPyPI / PyPI とも `mordred-hermes 0.0.0.dev0` の予約を live 確認 (runs `28832255704` / `28832311414`)。 **Deviation**: step 4 の `pypi` Environment への required reviewers は現行 billing plan (private repo) では設定不可 (HTTP 422) のため未設定 — `workflow_dispatch` 限定であることが手動ゲートの代替。 repo public 化または plan 変更時に required reviewers を追加すること。
 
 PyPI への upload は不可逆な外部公開のため、 以下は **operator が手動で実施** する (CI 自動化対象外):
 
