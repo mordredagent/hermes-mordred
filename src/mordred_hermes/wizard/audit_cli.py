@@ -23,13 +23,15 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..keyvault.wrap import AuditSink
 from ..privacy_check._runtime import get_active_audit_path
 from . import _term
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
 if TYPE_CHECKING:
-    from ..keyvault.wrap import NativeBackend
+    # Annotation-only: importing ``keyvault.wrap`` at runtime would pull the
+    # ``cryptography`` stack, which minimal installs (no ``[keyvault]`` extra)
+    # don't have — and tail/grep/purge must keep working there.
+    from ..keyvault.wrap import AuditSink, NativeBackend
 
 __all__ = [
     "DEFAULT_AUDIT_LOG_PATH",
