@@ -58,6 +58,7 @@ from collections.abc import Callable
 from typing import Any, NoReturn, Protocol
 
 from .api import SeedDisplayExpired, SeedDisplayHandle
+from .wrap import AuditSink
 
 _LOG = logging.getLogger("mordred.keyvault.seed_display")
 
@@ -105,9 +106,6 @@ CaptureProbe = Callable[[], "str | None"]
 # ENTER once the words are written down); False to keep waiting out the timer.
 # Polled once per capture-poll iteration, after the capture probe.
 DismissProbe = Callable[[], bool]
-
-# Audit sink — matches the POLICY.md §Audit entry shape contract.
-AuditSink = Callable[[dict[str, Any]], None]
 
 
 class SeedDisplayAborted(Exception):

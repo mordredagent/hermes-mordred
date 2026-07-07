@@ -219,8 +219,9 @@ def _add_audit(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     p_decrypt.add_argument("--date", required=True, help="YYYY-MM-DD")
     p_decrypt.set_defaults(func=_handle_audit_decrypt)
 
-    p_purge = asub.add_parser("purge", help="Manually purge plaintext audit entries")
+    p_purge = asub.add_parser("purge", help="Manually purge plaintext audit entries (destructive; needs --yes)")
     p_purge.add_argument("--before", required=True, help="YYYY-MM-DD")
+    p_purge.add_argument("-y", "--yes", action="store_true", help="Confirm the destructive purge")
     p_purge.set_defaults(func=_handle_audit_purge)
 
 

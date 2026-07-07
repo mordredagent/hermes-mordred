@@ -29,6 +29,7 @@ import io
 from typing import TYPE_CHECKING
 
 from . import _term
+from ._vault_open import _vault_present
 from .vault_memory_key import _MEMORY_KEY_ENV
 
 if TYPE_CHECKING:
@@ -173,7 +174,7 @@ def enable(
     rc = _set_encryption_flag(home, enabled=True)
     if rc != 0:
         return rc
-    print("agent-memory encryption enabled (key sealed in the vault .env; config flag set).")
+    print("Agent-memory encryption enabled (key sealed in the vault .env; config flag set).")
     return 0
 
 
@@ -193,7 +194,7 @@ def disable(*, home: Path) -> int:
             "they cannot be read until you re-enable it (the key is kept in the vault). To remove encryption "
             "for good, use 'encryption purge memory'."
         )
-    print("agent-memory encryption disabled (config flag off; the key is kept in the vault for re-enable).")
+    print("Agent-memory encryption disabled (config flag off; the key is kept in the vault for re-enable).")
     return 0
 
 
@@ -217,22 +218,21 @@ def purge(
     if rc != 0:
         return rc
 
-    if any(root.glob("manifest.*.mvmf")):
+    if _vault_present(root):
         opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
         if opened is None:
             return 1
-        try:
-            if ".env" in opened.list_files():
-                stripped = _strip_memory_key(opened.read_file(".env").decode("utf-8"))
-                opened.enroll_file(".env", stripped.encode("utf-8"))
-        except (vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
-            _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
-            return 1
-        finally:
-            opened.close()
+        with opened:
+            try:
+                if ".env" in opened.list_files():
+                    stripped = _strip_memory_key(opened.read_file(".env").decode("utf-8"))
+                    opened.enroll_file(".env", stripped.encode("utf-8"))
+            except (vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
+                _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
+                return 1
 
     print(
-        f"agent-memory encryption purged ({_MEMORY_KEY_ENV} removed from the vault; config flag off). "
+        f"Agent-memory encryption purged ({_MEMORY_KEY_ENV} removed from the vault; config flag off). "
         "Memories encrypted under the old key can no longer be decrypted."
     )
     return 0

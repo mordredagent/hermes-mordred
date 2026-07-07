@@ -167,7 +167,9 @@ class TestResetAbsent:
         rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
-        assert "nothing to reset" in capsys.readouterr().err.lower()
+        # Outcome lines land on stdout (UX review 2026-07-07); stderr stays
+        # reserved for diagnostics and the interactive WARNING chrome.
+        assert "nothing to reset" in capsys.readouterr().out.lower()
         assert _deleted(backend) == set()  # never touched the Enclave
 
 
@@ -186,7 +188,7 @@ class TestResetConfirmation:
         assert rc == 1
         assert root.exists()  # nothing deleted on abort
         assert _deleted(backend) == set()
-        assert "aborted" in capsys.readouterr().err.lower()
+        assert "aborted" in capsys.readouterr().out.lower()
 
     def test_correct_phrase_proceeds(self, tmp_path: Path) -> None:
         root = _build_keyvault(tmp_path, ["default"])

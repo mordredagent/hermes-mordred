@@ -169,6 +169,12 @@ packages = ["src/mordred_hermes"]
 # Opt-in at runtime via `hermes-mordred vault enable-config-decrypt` (the marker);
 # absent that marker the hook is a no-op even for Hermes.
 "packaging/pth/mordred_hermes_config_decrypt.pth" = "mordred_hermes_config_decrypt.pth"
+# The offline verification-digest tool for `keyvault init`. Deliberately a
+# standalone file (stdlib + blake3 only) the operator copies to the air-gapped
+# second device; shipped in the wheel so the init banner can print a path that
+# exists after a plain `pip install`, not only in a repo clone.
+# `wizard._keyvault_init._locate_offline_digest_script()` resolves it.
+"scripts/keyvault_offline_digest.py" = "mordred_hermes/_offline/keyvault_offline_digest.py"
 
 [tool.hatch.build.targets.sdist]
 # /packaging/pth ships the config-decrypt .pth that the wheel force-includes
@@ -176,7 +182,7 @@ packages = ["src/mordred_hermes"]
 # `python -m build` and release.yml do — fails with "Forced include not
 # found". The name-reservation stub elsewhere under /packaging is
 # intentionally NOT shipped (it is a separate distribution).
-include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native", "/packaging/pth"]
+include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native", "/packaging/pth", "/scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -18,20 +18,18 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..keyvault.wrap import AuditSink
 from ..privacy_check._runtime import get_active_audit_path
 from . import _term
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
 if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
-
-#: Sink shape for the DEK-unwrap audit entry emitted by ``decrypt_log_file``.
-AuditSink = Callable[[dict[str, Any]], None]
 
 __all__ = [
     "DEFAULT_AUDIT_LOG_PATH",
@@ -306,7 +304,7 @@ def decrypt(
             _term.emit_error(f"{path.name}: Secure Enclave authorization was cancelled")
             return 1
         except WrapKeyNotFound:
-            _term.emit_error(f"{path.name}: audit-log wrapping key not found — is the keyvault initialized?")
+            _term.emit_error(f"{path.name}: audit-log wrapping key not found — is the keyvault initialised?")
             return 1
         except log_encryption.AuditLogDecryptError as exc:
             _term.emit_error(f"{path.name}: {exc}")
@@ -333,6 +331,18 @@ def cli_grep(args: argparse.Namespace) -> int:
 
 
 def cli_purge(args: argparse.Namespace) -> int:
+    """``audit purge --before … --yes`` — destructive; refuse without --yes.
+
+    Mirrors ``encryption purge``, the CLI's destructive-verb convention:
+    deleting rotated audit history is irreversible, so it demands the same
+    explicit confirmation flag (rc 2 = usage error, like the date validation).
+    """
+    if not bool(getattr(args, "yes", False)):
+        _term.emit_error(
+            f"audit purge is destructive (deletes rotated audit-log files dated "
+            f"before {args.before}). Re-run with --yes to confirm."
+        )
+        return 2
     return purge(before=str(args.before))
 
 

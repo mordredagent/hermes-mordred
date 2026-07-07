@@ -92,6 +92,12 @@ class _ReadOSErrorVault:
     def close(self) -> None:
         pass
 
+    def __enter__(self) -> _ReadOSErrorVault:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
 
 _KEY_ID = "vault-cli-test-key"
 _LABEL = "mordred.vault.cli.test"

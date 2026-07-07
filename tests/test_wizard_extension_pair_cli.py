@@ -63,6 +63,38 @@ def test_extension_pair_uses_pairing_once_gateway_importable(
 
     assert rc == 0
     assert calls["consumed"] is True
+    out = capsys.readouterr().out
+    # Output contract (UX review 2026-07-07): English, code shown exactly once,
+    # success line carries the ok glyph (ASCII fallback off a non-UTF stream).
+    assert "Mordred Extension pairing" in out
+    assert out.count("MORT-TEST0000-TEST0000") == 1
+    assert "Paired (" in out
+
+
+def test_extension_pair_expiry_warns_on_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _generate_code() -> tuple[str, float]:
+        return "MORT-TEST0000-TEST0000", time.time() - 1.0  # already expired
+
+    fake_pairing = types.SimpleNamespace(
+        generate_code=_generate_code,
+        code_consumed=lambda code: False,
+    )
+    fake_gateway = types.SimpleNamespace(extension_pairing=fake_pairing)
+    monkeypatch.setitem(sys.modules, "gateway", fake_gateway)
+    monkeypatch.setitem(sys.modules, "gateway.extension_pairing", fake_pairing)
+
+    rc = extension_pair_cli.extension_pair(timeout=1.0)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    # `note: QR display skipped …` may precede the warning when the optional
+    # qrcode dep is absent, so match the line rather than the stream head.
+    assert "warning:" in err
+    assert "expired" in err
+    assert "hermes --gateway" in err
 
 
 def test_cli_extension_pair_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
