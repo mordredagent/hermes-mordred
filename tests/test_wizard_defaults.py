@@ -18,6 +18,27 @@ import pytest
 from mordred_hermes.wizard import _defaults
 
 
+class TestIsMissingKeyvaultStack:
+    """The shared predicate that classifies a ``ModuleNotFoundError`` as a
+    missing ``[keyvault]`` crypto-stack dependency (used by ``cli.dispatch`` to
+    emit an install hint and by ``status`` to degrade gracefully)."""
+
+    @pytest.mark.parametrize("name", ["argon2", "cryptography", "blake3", "argon2.low_level"])
+    def test_matches_crypto_stack_and_submodules(self, name: str) -> None:
+        exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
+        assert _defaults.is_missing_keyvault_stack(exc) is True
+
+    @pytest.mark.parametrize("name", ["numpy", "requests", "mordred_hermes.keyvault.vault"])
+    def test_rejects_unrelated_modules(self, name: str) -> None:
+        exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
+        assert _defaults.is_missing_keyvault_stack(exc) is False
+
+    def test_rejects_nameless_error(self) -> None:
+        # A hand-raised ModuleNotFoundError with no ``name`` must not be
+        # misclassified as a missing crypto dependency.
+        assert _defaults.is_missing_keyvault_stack(ModuleNotFoundError("mystery")) is False
+
+
 class TestPassThrough:
     """An injected (non-None) value is returned as-is, no import triggered."""
 
