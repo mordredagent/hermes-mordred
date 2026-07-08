@@ -183,7 +183,20 @@ class TestDispatchInterruptGuard:
         assert rc == 2
         err = capsys.readouterr().err
         assert err.startswith("error:")
-        assert "prompt required" in err
+
+    def test_eoferror_prints_aborted_and_returns_130(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Ctrl-D at a prompt — prompt_toolkit raises EOFError — aborts cleanly
+        like Ctrl-C instead of dumping a traceback (found via `vault status`,
+        2026-07-09)."""
+
+        def _eof(args: argparse.Namespace) -> int:
+            raise EOFError
+
+        rc = dispatch(argparse.Namespace(func=_eof))
+        assert rc == 130
+        captured = capsys.readouterr()
+        assert "Aborted" in captured.err
+        assert captured.out == ""
 
 
 class TestMainStandaloneEntry:
