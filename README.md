@@ -63,7 +63,13 @@ Enclave keyvault on Apple Silicon. Then enable the plugins in
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e .
 ```
 
-Verify discovery (Hermes 0.11.0):
+Verify discovery:
+
+```sh
+~/.hermes/hermes-agent/venv/bin/hermes plugins list   # Hermes ≥0.18: shows the five mordred_* rows with source `entrypoint`
+```
+
+or, on any supported Hermes version (≥0.11.0):
 
 ```sh
 ~/.hermes/hermes-agent/venv/bin/python3 -c "
@@ -74,7 +80,10 @@ print(sorted(k for k, p in mgr._plugins.items() if p.manifest.source == 'entrypo
 # → ['mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
 ```
 
-Note: `hermes plugins list` does **not** display entry-point plugins in Hermes 0.11.0 — it only scans `<repo>/plugins/` and `~/.hermes/plugins/` directories. The loader (`PluginManager.discover_and_load`) does discover them and call `register()`. Phase 1.3 will ship `hermes mordred plugins list` as a wrapper that surfaces entry-point plugins in the CLI.
+Version notes (verified against hermes-agent 0.18.2, 2026-07-08):
+
+- `hermes plugins list` displays entry-point plugins on 0.18.2. On Hermes 0.11.0 it did **not** (it only scanned `<repo>/plugins/` and `~/.hermes/plugins/` directories) — the Python snippet above is the fallback check for older versions.
+- `hermes mordred ...` subcommands are still **not** wired into Hermes's argparse, even on 0.18.2. Use the standalone `hermes-mordred` console script (same subcommand tree) until upstream wires entry-point CLI commands.
 
 To enable, edit `~/.hermes/config.yaml`:
 
