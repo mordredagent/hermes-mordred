@@ -199,6 +199,49 @@ class TestDispatchInterruptGuard:
         assert captured.out == ""
 
 
+class TestDispatchMissingCryptoStack:
+    """A ModuleNotFoundError for the optional keyvault crypto stack becomes an
+    actionable install hint instead of a raw traceback.
+
+    On a minimal install (no ``[keyvault]`` extra) ``vault status`` died with
+    ``ModuleNotFoundError: No module named 'argon2'`` deep inside
+    ``_open_cold_path`` (found verifying the 0.1.0a1 TestPyPI wheel,
+    2026-07-09). ``dispatch`` is the chokepoint every vault / keyvault /
+    encryption handler funnels through, so the translation lives there —
+    but ONLY for the known crypto-stack modules; anything else must
+    propagate so real import bugs stay visible.
+    """
+
+    @pytest.mark.parametrize("missing", ["argon2", "cryptography", "blake3", "argon2.low_level"])
+    def test_keyvault_stack_module_becomes_install_hint(self, capsys: pytest.CaptureFixture[str], missing: str) -> None:
+        def _boom(args: argparse.Namespace) -> int:
+            raise ModuleNotFoundError(f"No module named {missing!r}", name=missing)
+
+        rc = dispatch(argparse.Namespace(func=_boom))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert err.startswith("error:")
+        assert "mordred-hermes[keyvault]" in err
+        assert missing.partition(".")[0] in err
+
+    def test_unrelated_module_not_found_propagates(self) -> None:
+        def _boom(args: argparse.Namespace) -> int:
+            raise ModuleNotFoundError("No module named 'numpy'", name="numpy")
+
+        with pytest.raises(ModuleNotFoundError, match="numpy"):
+            dispatch(argparse.Namespace(func=_boom))
+
+    def test_nameless_module_not_found_propagates(self) -> None:
+        """A ModuleNotFoundError with no ``name`` attribute (hand-raised) must
+        not be misclassified as a missing crypto dependency."""
+
+        def _boom(args: argparse.Namespace) -> int:
+            raise ModuleNotFoundError("mystery import failure")
+
+        with pytest.raises(ModuleNotFoundError, match="mystery"):
+            dispatch(argparse.Namespace(func=_boom))
+
+
 class TestMainStandaloneEntry:
     """`hermes-mordred` console-script entry (Codex P1 workaround for Hermes 0.11)."""
 
