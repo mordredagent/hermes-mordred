@@ -764,6 +764,17 @@ def _drive_multichoice_app(values: list[tuple[str, str]], default_values: list[s
 
 
 class TestPromptToolkitIO:
+    @pytest.fixture(autouse=True)
+    def _tty_stdin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make stdin look like a terminal so the ``_require_tty`` guard passes.
+
+        These tests drive the prompt methods with a faked prompt_toolkit;
+        under pytest the real stdin is a pipe, which the non-tty guard
+        (``TestPromptToolkitIoRequiresTty`` below) would otherwise refuse
+        before reaching the behavior under test.
+        """
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
     def test_ask_choice_returns_dialog_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, object] = {}
 
@@ -1152,3 +1163,37 @@ class TestSelectableCloudProviders:
 
         expected = tuple(name for name, e in KNOWN_PROVIDERS.items() if not e.localhost_only)
         assert expected == configure._SELECTABLE_CLOUD_PROVIDERS
+
+
+# -----------------------------------------------------------------------------
+# Non-tty guard on the production prompt layer.
+# -----------------------------------------------------------------------------
+
+
+class TestPromptToolkitIoRequiresTty:
+    """Every interactive prompt refuses a non-terminal stdin up front.
+
+    Without the guard, prompt_toolkit's event loop dies deep inside asyncio
+    (``OSError: [Errno 22]`` from ``_add_reader``) when stdin is a pipe or
+    ``/dev/null`` — observed with ``hermes-mordred vault status </dev/null``
+    (2026-07-09). Raising :class:`NonInteractiveAbort` instead routes piped /
+    cron invocations through the clean ``error:`` + exit-2 path
+    ``cli.dispatch`` already implements for ``--non-interactive``.
+    """
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda io_: io_.ask_choice("Mode", ("a", "b"), "a"), id="ask_choice"),
+            pytest.param(lambda io_: io_.ask_text("Name"), id="ask_text"),
+            pytest.param(lambda io_: io_.ask_bool("Sure?", True), id="ask_bool"),
+            pytest.param(lambda io_: io_.ask_multi("Pick", ("a",)), id="ask_multi"),
+            pytest.param(lambda io_: io_.ask_password("Vault passphrase"), id="ask_password"),
+        ],
+    )
+    def test_refuses_before_touching_prompt_toolkit(self, monkeypatch: pytest.MonkeyPatch, call) -> None:
+        import io
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO())
+        with pytest.raises(NonInteractiveAbort, match="not a terminal"):
+            call(configure.PromptToolkitIO())
