@@ -38,6 +38,24 @@ MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/
 The Tor path is covered separately by the hermetic Docker-based
 `integration-tor` CI job.
 
+## Install (PyPI)
+
+Published on [PyPI](https://pypi.org/project/mordred-hermes/) since `0.1.0a0`
+(2026-07-08). Install into the **same environment as `hermes-agent`** so the
+entry-point plugins are visible to its loader:
+
+```sh
+~/.hermes/hermes-agent/venv/bin/pip install mordred-hermes==0.1.0a0
+```
+
+Pin the version explicitly (or pass `--pre`): every release is currently a
+pre-release, so an unpinned `pip install mordred-hermes` resolves the latest
+alpha only via pip's all-prereleases fallback.
+
+Platform extras are opt-in, e.g. `mordred-hermes[macos]` for the Secure
+Enclave keyvault on Apple Silicon. Then enable the plugins in
+`~/.hermes/config.yaml` as shown below.
+
 ## Install (development)
 
 ```sh

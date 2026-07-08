@@ -149,6 +149,8 @@ PyPI への upload は不可逆な外部公開のため、 以下は **operator 
 
 名前予約後は `target=pypi, mode=release` で本体を publish。 version bump 手順は v1 リリース時に別途追記する。
 
+> **2026-07-08 完了 (初回 `mode=release`)**: `0.1.0a0` を publish 済み — dev→main merge (PR #12) → `main` ref から `target=testpypi` (run `28942410646`) → fresh-venv install 検証 (entry-point discovery 5/5 + `hermes-mordred` CLI、 hermes-agent 0.18.2) → `target=pypi` (run `28942564707`) → 本番 PyPI からの e2e install 検証、 の順で実施。 tag `v0.1.0a0`。 注意: 全リリースが pre-release の間は、 unpinned `pip install mordred-hermes` は pip の all-prereleases fallback 頼みになるため、 ユーザー向け手順は `==0.1.0a0` の pin (または `--pre`) を案内する (README §Install (PyPI))。 既知の follow-up: dirty checkout からの local `uv build` は nested `.gitignore` (`native/tpmkey-helper/.gitignore`) を hatchling が respect せず cargo `target/` を sdist に混入させる (CI のクリーン checkout は無影響) — sdist config への明示 exclude 追加を検討。
+
 ## Changelog 規約
 
 Mordred は専用の `CHANGELOG.md` ファイルを**持たない**。変更履歴は **各 PR の説明文**に記述する (`PLAN.md` / `TODO.md` の cross-cutting 運用規律):
