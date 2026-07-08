@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._config_bootstrap import _marker_path, config_hook_installed
 from . import _term
+from ._runtime_gate import RuntimeProbe, runtime_gate
+from ._vault_open import _vault_present
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -38,12 +39,6 @@ if TYPE_CHECKING:
 __all__ = ["cli_disable", "cli_enable", "disable", "enable"]
 
 _CONFIG_NAME = "config.yaml"
-
-#: Runtime-decrypt probe signature: called ``probe(home=...)`` -> ``(ok, detail)``.
-#: Injected into :func:`enable` so tests can fake the runtime check (matching the
-#: ``backend=`` / ``store=`` injection style); production uses
-#: :func:`_default_runtime_probe`.
-RuntimeProbe = Callable[..., "tuple[bool, str]"]
 
 
 def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
@@ -66,27 +61,27 @@ def _runtime_gate(
     Returns 1 (after printing actionable guidance) when the interpreter that runs
     ``hermes`` cannot materialize a sealed ``config.yaml`` at startup, else 0. A
     no-op (0) off macOS — the plaintext is kept there anyway — and when
-    ``force_runtime_unverified`` is set. Mirrors ``env_decrypt_cli._runtime_gate``.
+    ``force_runtime_unverified`` is set. The gate core is shared with
+    ``env_decrypt_cli`` via :func:`._runtime_gate.runtime_gate`; only the
+    config.yaml-specific guidance text lives here.
     """
-    if platform != "darwin" or force_runtime_unverified:
-        return 0
-    ok, detail = (runtime_probe or _default_runtime_probe)(home=home)
-    if ok:
-        return 0
-    from ..keyvault._runtime_probe import discover_runtime_python
-
-    runtime_python = discover_runtime_python(home=home) or (home / "hermes-agent" / "venv" / "bin" / "python3")
-    _term.emit_error(
-        "refusing to vault-seal config.yaml — " + detail + ".\n"
-        "  A sealed config.yaml is materialized at startup only by the mordred .pth\n"
-        "  hook in the interpreter that runs `hermes`. mordred-hermes is not published\n"
-        "  to an index — install it into that runtime from your local checkout instead\n"
-        "  (run from the repo root):\n"
-        f"    uv pip install --python {runtime_python} -e './mordred-hermes[macos]'\n"
-        "  then re-run `encryption enable config`. To seal anyway (config stays\n"
-        "  unreadable until the runtime has the hook), pass --force-runtime-unverified."
+    return runtime_gate(
+        home=home,
+        platform=platform,
+        runtime_probe=runtime_probe,
+        force_runtime_unverified=force_runtime_unverified,
+        default_probe=_default_runtime_probe,
+        target="config.yaml",
+        mechanism=(
+            "  A sealed config.yaml is materialized at startup only by the mordred .pth\n"
+            "  hook in the interpreter that runs `hermes`. mordred-hermes is not published\n"
+            "  to an index — install it into that runtime from your local checkout instead\n"
+        ),
+        rerun_tail=(
+            "  then re-run `encryption enable config`. To seal anyway (config stays\n"
+            "  unreadable until the runtime has the hook), pass --force-runtime-unverified."
+        ),
     )
-    return 1
 
 
 def _default_root(home: Path) -> Path:
@@ -196,12 +191,10 @@ def disable(
         opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
         if opened is None:
             return 1
-        try:
+        with opened:
             if _CONFIG_NAME in opened.list_files():
                 _storage.atomic_write(config_path, opened.read_file(_CONFIG_NAME))
             # No enrolled config and no plaintext: Hermes will use defaults — not an error.
-        finally:
-            opened.close()
 
     marker.unlink(missing_ok=True)
     print("config.yaml is no longer vault-managed (marker removed).")
@@ -231,23 +224,22 @@ def purge(
     """
     config_path = home / _CONFIG_NAME
 
-    if any(root.glob("manifest.*.mvmf")):
+    if _vault_present(root):
         from ..keyvault import _storage, anchor, vault
         from . import vault_cli
 
         opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
         if opened is None:
             return 1
-        try:
-            if _CONFIG_NAME in opened.list_files():
-                if not config_path.exists():
-                    _storage.atomic_write(config_path, opened.read_file(_CONFIG_NAME))  # recover BEFORE dropping
-                opened.unenroll_file(_CONFIG_NAME)
-        except (vault.VaultError, anchor.AnchorError, OSError) as exc:
-            _term.emit_error(f"cannot purge config.yaml from the vault: {exc}")
-            return 1
-        finally:
-            opened.close()
+        with opened:
+            try:
+                if _CONFIG_NAME in opened.list_files():
+                    if not config_path.exists():
+                        _storage.atomic_write(config_path, opened.read_file(_CONFIG_NAME))  # recover BEFORE dropping
+                    opened.unenroll_file(_CONFIG_NAME)
+            except (vault.VaultError, anchor.AnchorError, OSError) as exc:
+                _term.emit_error(f"cannot purge config.yaml from the vault: {exc}")
+                return 1
     elif _marker_path(home).exists() and not config_path.exists():
         # Managed (marker) but no vault to recover from and no plaintext on disk:
         # dropping the marker here would silently convert a fail-closed managed

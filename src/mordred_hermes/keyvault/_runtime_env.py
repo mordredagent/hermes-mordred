@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home as _hermes_home
-from ._identity import default_vault_root, vault_identity
+from ._identity import default_vault_root, resolve_backend_store, vault_identity
 
 if TYPE_CHECKING:
     from .anchor import AnchorStore
@@ -72,23 +72,15 @@ def inject_vault_env(
     from . import vault
 
     key_id = anchor_label = vault_identity(root)
-
-    if backend is None:
-        from ._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
+    backend, store = resolve_backend_store(backend, store)
 
     # No anchor → no vault here: a clean no-op. BUT if vault artifacts are still
-    # on disk while the anchor is gone, that is anomalous — silently no-oping
-    # would let an anchor deletion downgrade us to whatever plaintext remains, so
-    # we fail closed. A read *error* (e.g. a locked Keychain) is likewise never
-    # swallowed: it propagates fail-closed, since we cannot prove the vault absent.
+    # on disk while the anchor is gone (vault.artifacts_present), that is
+    # anomalous and we fail closed rather than silently no-op. A read *error*
+    # (e.g. a locked Keychain) is likewise never swallowed: it propagates
+    # fail-closed, since we cannot prove the vault absent.
     if store.read(anchor_label) is None:
-        if any(root.glob("manifest.*.mvmf")):
+        if vault.artifacts_present(root):
             raise vault.VaultError(
                 f"vault artifacts present at {root} but the device anchor is missing "
                 "— refusing to start (possible anchor deletion)."

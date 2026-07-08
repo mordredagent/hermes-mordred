@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+import textwrap
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -443,9 +446,22 @@ class TestPurge:
     def test_cli_purge_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._seed_rotated(tmp_path, ["audit.log.2020-01-01.gz"])
         monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: tmp_path / "audit.log")
-        rc = audit_cli.cli_purge(argparse.Namespace(before="2030-01-01"))
+        rc = audit_cli.cli_purge(argparse.Namespace(before="2030-01-01", yes=True))
         assert rc == 0
         assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
+
+    def test_cli_purge_refuses_without_yes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Destructive-verb convention (UX review 2026-07-07): like
+        # `encryption purge`, deleting audit history demands --yes.
+        self._seed_rotated(tmp_path, ["audit.log.2020-01-01.gz"])
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: tmp_path / "audit.log")
+        rc = audit_cli.cli_purge(argparse.Namespace(before="2030-01-01"))
+        assert rc == 2
+        assert (tmp_path / "audit.log.2020-01-01.gz").exists()  # nothing deleted
+        err = capsys.readouterr().err
+        assert "--yes" in err
 
 
 class TestDecrypt:
@@ -577,3 +593,47 @@ class TestErrorColour:
         err = capsys.readouterr().err
         assert err.startswith("error: invalid regex")
         assert "\033" not in err
+
+
+class TestMinimalInstallImport:
+    """``audit tail/grep/purge`` must import without the ``[keyvault]`` extra.
+
+    The crypto stack (``cryptography`` / ``blake3`` / ``argon2``) is
+    extra-gated in pyproject, and the plaintext read path is deliberately
+    stdlib-only (see the ``_MRAL_FMT`` comment in ``audit_cli``). Regression
+    guard for the 2026-07-07 review finding: a module-level
+    ``from ..keyvault.wrap import AuditSink`` pulled ``cryptography`` into
+    every ``hermes-mordred audit …`` invocation, so minimal installs crashed
+    before argparse even dispatched. CI installs ``[dev,keyvault]``, which is
+    why the plain test suite could never catch it.
+    """
+
+    # Runs in a subprocess: blocking the crypto imports in-process would race
+    # with the copies other tests have already imported.
+    _IMPORT_UNDER_BLOCKER = textwrap.dedent(
+        """
+        import sys
+
+        class _Blocker:
+            BLOCKED = ("cryptography", "blake3", "argon2")
+
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] in self.BLOCKED:
+                    raise ModuleNotFoundError(f"No module named {name!r} (blocked by test)")
+                return None
+
+        sys.meta_path.insert(0, _Blocker())
+
+        import mordred_hermes.wizard.audit_cli  # noqa: F401
+        """
+    )
+
+    def test_audit_cli_imports_without_crypto_stack(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, "-c", self._IMPORT_UNDER_BLOCKER],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert proc.returncode == 0, f"audit_cli needs the crypto stack at import time:\n{proc.stderr}"

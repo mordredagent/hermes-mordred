@@ -46,7 +46,7 @@ def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = Fal
     opened = _open_cold_path(root, prompt_io=prompt_io)
     if opened is None:
         return 1
-    try:
+    with opened:
         names = sorted(opened.list_files())
         if as_json:
             body = {
@@ -63,8 +63,6 @@ def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = Fal
         for name in names:
             print(f"    {_display_name(name)}")
         print("  (read-only: opened via passphrase recovery)")
-    finally:
-        opened.close()
     return 0
 
 
@@ -82,13 +80,12 @@ def cat(*, root: Path, name: str, prompt_io: PromptIO | None = None) -> int:
     opened = _open_cold_path(root, prompt_io=prompt_io)
     if opened is None:
         return 1
-    try:
-        data = opened.read_file(name)
-    except vault.VaultError as exc:
-        _term.emit_error(f"cannot read {name!r}: {exc}")
-        return 1
-    finally:
-        opened.close()
+    with opened:
+        try:
+            data = opened.read_file(name)
+        except vault.VaultError as exc:
+            _term.emit_error(f"cannot read {name!r}: {exc}")
+            return 1
 
     try:
         sys.stdout.buffer.write(data)
@@ -131,15 +128,14 @@ def _enroll_one(
     if opened is None:
         return 1, None, None
 
-    try:
-        opened.enroll_file(name, plaintext)
-        generation = opened.generation
-        enrolled = opened.read_file(name) if read_back else None
-    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-        _term.emit_error(f"cannot add {name!r}: {exc}")
-        return 1, None, None
-    finally:
-        opened.close()
+    with opened:
+        try:
+            opened.enroll_file(name, plaintext)
+            generation = opened.generation
+            enrolled = opened.read_file(name) if read_back else None
+        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+            _term.emit_error(f"cannot add {name!r}: {exc}")
+            return 1, None, None
 
     return 0, generation, enrolled
 
@@ -281,21 +277,20 @@ def migrate(
         return 1
 
     enrolled = 0
-    try:
-        for name, plaintext in plaintexts:
-            opened.enroll_file(name, plaintext)
-            enrolled += 1
-        generation = opened.generation
-    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-        # `enrolled` is the index of the file that failed (incremented only after
-        # a successful enroll). Bounds-guard the lookup so a failure raised
-        # anywhere in the try — even after the loop — still fails closed with a
-        # message rather than an IndexError traceback.
-        failed = plaintexts[enrolled][0] if enrolled < len(plaintexts) else "<unknown>"
-        _term.emit_error(f"cannot migrate {failed!r} ({enrolled} of {len(plaintexts)} already enrolled): {exc}")
-        return 1
-    finally:
-        opened.close()
+    with opened:
+        try:
+            for name, plaintext in plaintexts:
+                opened.enroll_file(name, plaintext)
+                enrolled += 1
+            generation = opened.generation
+        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+            # `enrolled` is the index of the file that failed (incremented only after
+            # a successful enroll). Bounds-guard the lookup so a failure raised
+            # anywhere in the try — even after the loop — still fails closed with a
+            # message rather than an IndexError traceback.
+            failed = plaintexts[enrolled][0] if enrolled < len(plaintexts) else "<unknown>"
+            _term.emit_error(f"cannot migrate {failed!r} ({enrolled} of {len(plaintexts)} already enrolled): {exc}")
+            return 1
 
     listed = ", ".join(_display_name(n) for n, _ in plaintexts)
     print(f"Migrated {len(plaintexts)} file(s) into the vault at {root} (now at generation {generation}): {listed}.")

@@ -25,8 +25,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final
 
+from ..._policy_types import PolicyMode as PolicyMode
 from .._exceptions import BringupFailed
 from ..guidance import MACOS_MULLVAD_APP_CLI, mullvad_install_guidance
 
@@ -37,8 +38,6 @@ MACOS_APP_BUNDLE_PATH: Final[str] = MACOS_MULLVAD_APP_CLI
 DEFAULT_CONNECT_TIMEOUT: Final[float] = 10.0
 DEFAULT_POLL_INTERVAL: Final[float] = 0.5
 DEFAULT_MAX_HANDSHAKE_AGE_SECONDS: Final[float] = 180.0
-
-PolicyMode = Literal["strict", "lenient", "off"]
 
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 

@@ -3,9 +3,11 @@
 Single-sources the "open ``config.yaml`` and hand back a mapping, or fall
 back to empty on any read/parse failure" core that was independently
 copy-pasted across five call sites (``network`` x2, ``llm_guard`` x2,
-``privacy_check`` x1). Each caller still owns its own extraction (the
-``plugins.<section>`` / ``model.provider`` ``.get()`` chain) and its own
-default; only the load core is shared.
+``privacy_check`` x1). Callers that extract something other than a plugin
+section (e.g. the ``model.provider`` chain) still own their extraction and
+their default; the ``plugins.<section>`` chain itself — which grew its own
+copy-paste family across ``network``, ``llm_guard``, ``privacy_check`` and
+the wizard — is single-sourced in :func:`load_plugin_section`.
 
 :func:`load_yaml_mapping` keeps the two behaviours that genuinely diverged
 across the call sites configurable, so each site's return values and
@@ -42,6 +44,7 @@ def load_yaml_mapping(
     *,
     catch: tuple[type[BaseException], ...] | None = None,
     log: logging.Logger | None = None,
+    round_trip: bool = False,
 ) -> dict[str, Any]:
     """Load ``path`` as a YAML mapping, collapsing every failure to ``{}``.
 
@@ -50,6 +53,14 @@ def load_yaml_mapping(
     own defaults without crashing. ``catch`` selects which exceptions route
     to that degraded path (default ``(OSError, YAMLError)``); anything else
     propagates. When ``log`` is supplied, the swallowed error is warned on it.
+
+    ``round_trip`` selects ruamel's ``rt`` loader instead of ``safe``/pure.
+    Section-comparison callers (the wizard's upgrade / OpenClaw-migration
+    conflict checks) need it: the safe loader *raises* on custom YAML tags,
+    which the degraded path would collapse to "no section" and route around
+    the caller's conflict handling — the rt loader loads tags as
+    ``TaggedScalar`` values that simply compare unequal, so a hand-edited
+    section still reaches the conflict prompt instead of being overwritten.
     """
     if not path.exists():
         return {}
@@ -58,7 +69,7 @@ def load_yaml_mapping(
 
     if catch is None:
         catch = (OSError, YAMLError)
-    yaml = YAML(typ="safe", pure=True)
+    yaml = YAML(typ="rt") if round_trip else YAML(typ="safe", pure=True)
     try:
         with path.open(encoding="utf-8") as f:
             data = yaml.load(f)
@@ -67,3 +78,30 @@ def load_yaml_mapping(
             log.warning("could not read %s: %s", path, e)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def load_plugin_section(
+    path: Path,
+    plugin: str,
+    *,
+    catch: tuple[type[BaseException], ...] | None = None,
+    log: logging.Logger | None = None,
+    round_trip: bool = False,
+) -> dict[str, Any] | None:
+    """Return the ``plugins.<plugin>`` mapping from ``path``, or ``None``.
+
+    Wraps :func:`load_yaml_mapping` (same ``catch``/``log``/``round_trip``
+    semantics) with the ``plugins -> isinstance -> section -> isinstance``
+    extraction chain that was previously hand-rolled at each call site.
+    ``None`` — rather than ``{}`` — is returned when the file is
+    missing/unreadable, when ``plugins`` is absent or not a mapping, or when
+    the plugin's section is absent or not a mapping, so callers that
+    distinguish "absent" from "present but empty" (e.g. section-comparison
+    in the wizard's upgrade path) keep that distinction; callers that don't
+    can apply ``or {}``.
+    """
+    plugins = load_yaml_mapping(path, catch=catch, log=log, round_trip=round_trip).get("plugins")
+    if not isinstance(plugins, dict):
+        return None
+    section = plugins.get(plugin)
+    return section if isinstance(section, dict) else None

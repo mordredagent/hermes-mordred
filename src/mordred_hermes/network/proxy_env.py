@@ -21,12 +21,12 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final
 from urllib.parse import quote
 
+from .._policy_types import ACTIVE_PATHS
+from .._policy_types import ActivePath as ActivePath
 from ._exceptions import UnknownPath
-
-ActivePath = Literal["tor", "vpn", "clearnet"]
 
 _LOCALHOST_DEFAULTS: Final[tuple[str, ...]] = ("localhost", "127.0.0.1", "::1")
 # Codex round 5 P1 (2026-05-14): include lowercase variants. POSIX tools
@@ -80,7 +80,7 @@ def desired_env(
     circuit. ``None`` / empty leaves the URL credential-free. It is a
     silent no-op on the clearnet / vpn paths, which carry no SOCKS proxy.
     """
-    if path not in ("tor", "vpn", "clearnet"):
+    if path not in ACTIVE_PATHS:
         raise UnknownPath(f"unknown network path: {path!r}")
 
     env: dict[str, str] = {}

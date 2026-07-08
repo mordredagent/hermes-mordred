@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..keyvault import _storage
 from . import _term
+from ._defaults import resolve_backend, resolve_prompt_io
 
 if TYPE_CHECKING:
     from ..keyvault.api import GenerateResult, SeedDisplayHandle
@@ -289,6 +290,86 @@ def _generate_seed_material(passphrase: str, *, store_seed_for_hd: bool) -> tupl
     return handle, pow_bytes, (seed_phrase if store_seed_for_hd else None)
 
 
+def _refuse_if_stdout_redirected(surface: SeedDisplaySurface | None) -> int | None:
+    """Pre-init guard: the production surface prints the Seed to *stdout*, so a
+    redirect (``keyvault init > log.txt``) would persist the 24 words to a file
+    — and the ANSI clear that follows would scrub nothing. Returns 1 (after
+    printing) when the production surface would write to a non-TTY stdout; an
+    injected ``surface`` (tests / alternate UIs) owns its destination, so it
+    passes. Runs before the passphrase prompt — same fail-fast rationale as
+    the blackout pre-check.
+    """
+    if surface is not None:
+        return None
+    try:
+        stdout_tty = sys.stdout.isatty()
+    except (ValueError, OSError):
+        stdout_tty = False  # closed/detached stream — treat as redirected
+    if stdout_tty:
+        return None
+    _term.emit_error(
+        "refusing to display the seed phrase: stdout is not a terminal, so "
+        "the 24 words would be written into the redirect target instead of "
+        "a screen that can be cleared. Re-run `hermes-mordred keyvault init` "
+        "without redirecting or piping its output."
+    )
+    return 1
+
+
+def _preflight_or_refuse(
+    *,
+    home: Path | None,
+    blackout_assert: Callable[..., None] | None,
+    surface: SeedDisplaySurface | None,
+) -> int | None:
+    """Run the pre-ceremony guards, all before the passphrase prompt so a
+    doomed run never asks the operator to type one:
+
+    1. re-init guard (v1 keyvault is single-key);
+    2. air-gap pre-check — refuse fast while the host is online (UX review
+       2026-06-15; ``display_seed`` re-asserts isolation as the real gate);
+    3. stdout-TTY guard (:func:`_refuse_if_stdout_redirected`).
+
+    Returns the refusal exit code (after printing), or None to proceed.
+    """
+    guard = _refuse_if_initialised(home)
+    if guard is not None:
+        return guard
+    refusal = _precheck_blackout_or_refuse(blackout_assert)
+    if refusal is not None:
+        return refusal
+    return _refuse_if_stdout_redirected(surface)
+
+
+#: File name of the standalone offline verification-digest tool.
+_OFFLINE_DIGEST_SCRIPT = "keyvault_offline_digest.py"
+
+
+def _locate_offline_digest_script() -> Path | None:
+    """Locate ``keyvault_offline_digest.py`` for the copy-to-offline-device step.
+
+    Mirror of ``_seckey_helper._locate_helper_source()``: a ``scripts/`` repo
+    checkout first (editable install / clone), then the ``_offline/`` copy the
+    wheel force-includes (see pyproject). Unlike the helper sources this file is
+    only *named* in the banner, never executed here, so no content validation is
+    needed. Returns ``None`` when neither exists — the banner then names the
+    file without a path instead of printing a dead one.
+    """
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "scripts" / _OFFLINE_DIGEST_SCRIPT
+        if candidate.is_file():
+            return candidate
+    try:
+        from importlib.resources import files
+
+        packaged = Path(str(files("mordred_hermes").joinpath("_offline", _OFFLINE_DIGEST_SCRIPT)))
+        if packaged.is_file():
+            return packaged
+    except (ModuleNotFoundError, TypeError, OSError):
+        pass
+    return None
+
+
 def _display_seed_or_refuse(
     handle: SeedDisplayHandle,
     pow_bytes: bytes,
@@ -309,10 +390,16 @@ def _display_seed_or_refuse(
         surface = TerminalSeedSurface()
     show = display_fn if display_fn is not None else seed_display.display_seed
     # The operator needs top4(PoW) to recompute the digest offline; it is derived
-    # from the (secret) seed but is itself only a 4-byte mask. The offline tool is
-    # `scripts/keyvault_offline_digest.py`; the recipe for preparing the second
-    # device is documented in `docs/dev/setup.md` §"Offline verification
-    # digest".
+    # from the (secret) seed but is itself only a 4-byte mask. The offline tool
+    # ships inside the wheel (see pyproject force-include) so the path printed
+    # here exists after a plain `pip install`, not only in a repo clone; the
+    # second-device preparation steps live in the script's own header.
+    script = _locate_offline_digest_script()
+    copy_hint = (
+        f"  (copy it to that device from this machine: {script})\n"
+        if script is not None
+        else "  (ships with mordred-hermes; copy it to that device first)\n"
+    )
     surface.banner(
         "\n"
         "────────────────────────────────────────────────────────────\n"
@@ -320,8 +407,7 @@ def _display_seed_or_refuse(
         "────────────────────────────────────────────────────────────\n"
         "\n"
         "  On the second (air-gapped) device, run:\n"
-        "      python3 scripts/keyvault_offline_digest.py\n"
-        "\n"
+        f"      python3 {_OFFLINE_DIGEST_SCRIPT}\n" + copy_hint + "\n"
         "  It will ask for THREE values — transcribe them in this order:\n"
         "\n"
         "    [1] Seed Phrase     →  the 24 words shown below (60s only)\n"
@@ -330,7 +416,7 @@ def _display_seed_or_refuse(
         "\n"
         "  The script prints a 64-char digest. Re-enter it on THIS\n"
         "  device at the `Verification digest ...` prompt below.\n"
-        "  (Recipe: docs/dev/setup.md §Offline verification digest)\n"
+        "  (Preparation steps are in the script's own header.)\n"
         "────────────────────────────────────────────────────────────"
     )
 
@@ -414,10 +500,9 @@ def _provision_audit_log_key(backend: NativeBackend) -> None:
     try:
         generate_wrapping_key(AUDIT_LOG_KEY_ID, backend=backend)
     except WrapError as exc:
-        print(
-            f"note: audit-log wrapping key not provisioned ({exc}); the audit log "
-            "stays plaintext until the keyvault is repaired.",
-            file=sys.stderr,
+        _term.emit_note(
+            f"audit-log wrapping key not provisioned ({exc}); the audit log "
+            "stays plaintext until the keyvault is repaired."
         )
 
 
@@ -444,10 +529,9 @@ def _store_seed_for_hd_envelope(
         seed_env_id = store_seed_phrase(key_id, mnemonic, backend=backend, audit_sink=audit_sink, home=home)
         print(f"HD wallet enabled. Seed stored SE-encrypted (envelope {seed_env_id}).")
     except Exception as exc:
-        print(
-            f"note: HD seed not stored ({exc!r}); the keyvault is still initialised, "
-            "but HD derivation is unavailable until the seed is stored.",
-            file=sys.stderr,
+        _term.emit_note(
+            f"HD seed not stored ({exc!r}); the keyvault is still initialised, "
+            "but HD derivation is unavailable until the seed is stored."
         )
 
 
@@ -471,6 +555,9 @@ def init_keyvault(
         passphrase prompt, so an online operator is not asked to type a
         passphrase that the late blackout gate would discard. ``display_seed``
         re-asserts isolation as the real gate (defense in depth).
+    1b. stdout-TTY guard — the production surface prints the Seed to stdout,
+        so refuse under a redirect before the 24 words could land in a file
+        (:func:`_refuse_if_stdout_redirected`).
     2. Prompt for the Passphrase twice (hidden, must match, non-empty).
     3. Generate a 24-word BIP39 Seed Phrase + the seed-bound PoW.
     4. ``prepare_generate`` — compute the verification digest in memory.
@@ -490,21 +577,11 @@ def init_keyvault(
     (already initialised, online host at the pre-check, passphrase mismatch,
     blackout failure, capture abort, expiry, digest mismatch, Enclave error).
     """
-    guard = _refuse_if_initialised(home)
-    if guard is not None:
-        return guard
-
-    # Fail fast if the host is still online — before the operator types a
-    # passphrase the late blackout gate would otherwise discard (UX review
-    # 2026-06-15). display_seed re-asserts isolation as the real gate.
-    refusal = _precheck_blackout_or_refuse(blackout_assert)
+    refusal = _preflight_or_refuse(home=home, blackout_assert=blackout_assert, surface=surface)
     if refusal is not None:
         return refusal
 
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
     # Orient the operator before the bare passphrase prompt: what this
     # command does and what the Passphrase protects (UX review 2026-06-15).
     print(_intro_banner(), file=sys.stderr)
@@ -523,10 +600,7 @@ def init_keyvault(
     if user_digest is None:
         return 1
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
+    backend = resolve_backend(backend)
     sink = audit_sink if audit_sink is not None else _stderr_audit_sink
 
     result = _confirm_or_refuse(handle, user_digest, backend=backend, audit_sink=sink, home=home)

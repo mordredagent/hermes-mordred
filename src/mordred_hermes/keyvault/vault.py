@@ -62,7 +62,7 @@ from pathlib import Path
 from types import TracebackType
 
 from . import anchor, file_container, manifest, vault_master
-from ._storage import atomic_write, keyvault_lock, safe_read
+from ._storage import atomic_write, ensure_lock_file, keyvault_lock, safe_read
 from .anchor import AnchorStore
 from .kek import MasterKey, open_master_key
 from .wrap import NativeBackend
@@ -71,7 +71,6 @@ _RECOVERY_NAME = "recovery.mrkv"
 _LOCK_NAME = ".lock"
 _BLOBS_DIR = "blobs"
 _DIR_MODE = 0o700
-_FILE_MODE = 0o600
 
 
 class VaultError(Exception):
@@ -128,15 +127,89 @@ def _ensure_dir(path: Path) -> None:
 
 
 def _ensure_lock(root: Path) -> None:
-    lock = root / _LOCK_NAME
-    if not lock.exists():
-        try:
-            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _FILE_MODE)
-            os.close(fd)
-        except FileExistsError:
-            # Lost the creation race to a concurrent writer — the winner's
-            # lock file serves both processes; keyvault_lock flocks it next.
-            pass
+    # keyvault_lock opens .lock without O_CREAT, so materialize it first;
+    # creation races and symlink refusal live in _storage.ensure_lock_file.
+    ensure_lock_file(root / _LOCK_NAME)
+
+
+def artifacts_present(root: Path) -> bool:
+    """Whether vault manifest artifacts (``manifest.*.mvmf``) remain at ``root``.
+
+    The anchor-deletion tell shared by the startup shims
+    (:mod:`._runtime_env` / :mod:`._config_bootstrap`): the device-bound
+    anchor is the one vault component an offline attacker can *delete* but
+    not forge, so "anchor missing while authenticated manifests are still on
+    disk" is anomalous — treating it as "no vault here" would let an anchor
+    deletion silently downgrade the process to whatever plaintext remains.
+    Only the detection is shared; each caller decides the outcome (both
+    shims fail closed with their own messages, and a missing anchor with NO
+    artifacts stays a clean "no vault at this root").
+    """
+    return any(root.glob("manifest.*.mvmf"))
+
+
+def _load_pinned_unverified(
+    root: Path,
+    *,
+    store: AnchorStore,
+    anchor_label: str,
+    missing_detail: str,
+) -> tuple[bytes, manifest.VaultManifest]:
+    """Device-path open preamble shared by :func:`open_vault` and the device
+    branch of :func:`change_passphrase`: read the device-bound anchor, load
+    the manifest generation it pins, and pin-check it.
+
+    The pin-check runs BEFORE anything is unwrapped: the ``wmk`` the caller
+    is about to feed the Enclave must match the fingerprint the (unwritable)
+    anchor holds, and the manifest's generation must match the authoritative
+    generation (defeats P1-a substitution + P1-b rollback). ``missing_detail``
+    finishes the missing-manifest message so each caller keeps its exact
+    error string.
+
+    Returns ``(blob, untrusted)`` — parsed but NOT yet authenticated; the
+    caller still authenticates via :func:`manifest.decode` under the master.
+    """
+    record = anchor.read_anchor(store, anchor_label)
+    try:
+        blob = safe_read(_manifest_path(root, record.generation))
+    except FileNotFoundError as e:
+        raise VaultError(
+            f"authoritative manifest for generation {record.generation} is missing — {missing_detail}"
+        ) from e
+    untrusted = manifest.parse_unverified(blob)
+    anchor.verify_anchor(store, anchor_label, wmk=untrusted.wmk, generation=untrusted.generation)
+    return blob, untrusted
+
+
+def _load_latest_unverified(root: Path, *, action: str) -> tuple[int, bytes, manifest.VaultManifest]:
+    """Cold-path open preamble shared by :func:`recover_vault`,
+    :func:`recover_to_device`, and the cold branch of :func:`change_passphrase`:
+    pick the newest on-disk manifest and parse it unverified.
+
+    These paths have no device-bound anchor to name the authoritative
+    generation, so the newest ``manifest.<gen>.mvmf`` is the fallback; the
+    manifest is only trusted after :func:`manifest.decode` authenticates it
+    under the passphrase-recovered master. ``action`` finishes the
+    vanished-manifest message ("cannot recover this vault" / "cannot re-key
+    this vault" / "cannot rotate") so each caller keeps its exact error string.
+    """
+    generation = _latest_manifest_generation(root)
+    if generation is None:
+        raise VaultError("no manifest found at this root — not a vault, or all manifests are missing")
+    try:
+        blob = safe_read(_manifest_path(root, generation))
+    except FileNotFoundError as e:
+        raise VaultError(f"manifest for generation {generation} vanished — {action}") from e
+    return generation, blob, manifest.parse_unverified(blob)
+
+
+def _read_recovery_blob(root: Path, *, action: str) -> bytes:
+    """Read the passphrase recovery sidecar, failing closed with the caller's
+    exact message tail when it is missing."""
+    try:
+        return safe_read(root / _RECOVERY_NAME)
+    except FileNotFoundError as e:
+        raise VaultError(f"recovery sidecar (recovery.mrkv) is missing — {action}") from e
 
 
 def init_vault(
@@ -221,22 +294,12 @@ def open_vault(
         WrapKeyNotFound / WrapAuthCancelled / ...: SE unwrap failures.
     """
     root = Path(root)
-    record = anchor.read_anchor(store, anchor_label)
-
-    mpath = _manifest_path(root, record.generation)
-    try:
-        blob = safe_read(mpath)
-    except FileNotFoundError as e:
-        raise VaultError(
-            f"authoritative manifest for generation {record.generation} is missing — "
-            "vault is corrupt or was rolled back below its anchor"
-        ) from e
-
-    untrusted = manifest.parse_unverified(blob)
-    # Pin-check BEFORE unwrapping: the wmk we are about to feed the Enclave
-    # must match the fingerprint the (unwritable) anchor holds, and the
-    # manifest's generation must match the authoritative generation.
-    anchor.verify_anchor(store, anchor_label, wmk=untrusted.wmk, generation=untrusted.generation)
+    blob, untrusted = _load_pinned_unverified(
+        root,
+        store=store,
+        anchor_label=anchor_label,
+        missing_detail="vault is corrupt or was rolled back below its anchor",
+    )
 
     master = open_master_key(untrusted.wmk, key_id, backend=backend)
     try:
@@ -285,19 +348,8 @@ def recover_vault(root: Path, passphrase: str) -> OpenVault:
         ManifestError: the manifest failed authentication under the master.
     """
     root = Path(root)
-    generation = _latest_manifest_generation(root)
-    if generation is None:
-        raise VaultError("no manifest found at this root — not a vault, or all manifests are missing")
-    try:
-        blob = safe_read(_manifest_path(root, generation))
-    except FileNotFoundError as e:
-        raise VaultError(f"manifest for generation {generation} vanished — cannot recover this vault") from e
-    untrusted = manifest.parse_unverified(blob)
-
-    try:
-        recovery_blob = safe_read(root / _RECOVERY_NAME)
-    except FileNotFoundError as e:
-        raise VaultError("recovery sidecar (recovery.mrkv) is missing — cannot recover this vault") from e
+    _generation, blob, untrusted = _load_latest_unverified(root, action="cannot recover this vault")
+    recovery_blob = _read_recovery_blob(root, action="cannot recover this vault")
 
     master = vault_master.open_passphrase(recovery_blob, passphrase, wmk=untrusted.wmk)
     try:
@@ -372,19 +424,8 @@ def recover_to_device(
     root = Path(root)
     _ensure_lock(root)
     with keyvault_lock(root):
-        generation = _latest_manifest_generation(root)
-        if generation is None:
-            raise VaultError("no manifest found at this root — not a vault, or all manifests are missing")
-        try:
-            blob = safe_read(_manifest_path(root, generation))
-        except FileNotFoundError as e:
-            raise VaultError(f"manifest for generation {generation} vanished — cannot re-key this vault") from e
-        untrusted = manifest.parse_unverified(blob)
-
-        try:
-            recovery_blob = safe_read(root / _RECOVERY_NAME)
-        except FileNotFoundError as e:
-            raise VaultError("recovery sidecar (recovery.mrkv) is missing — cannot re-key this vault") from e
+        generation, blob, untrusted = _load_latest_unverified(root, action="cannot re-key this vault")
+        recovery_blob = _read_recovery_blob(root, action="cannot re-key this vault")
 
         # Open the master under the passphrase + verify the manifest under it, so
         # we re-encode only an authenticated file set (never a forged manifest).
@@ -478,38 +519,22 @@ def change_passphrase(
     # otherwise fail the rotation with an uncaught FileNotFoundError.
     _ensure_lock(root)
     with keyvault_lock(root):
-        try:
-            recovery_blob = safe_read(root / _RECOVERY_NAME)
-        except FileNotFoundError as e:
-            raise VaultError("recovery sidecar (recovery.mrkv) is missing — not a vault, or it is corrupt") from e
+        recovery_blob = _read_recovery_blob(root, action="not a vault, or it is corrupt")
 
         if old_passphrase is None:
             # Device-key path: pin-check the anchor, then trust the manifest wmk.
             if backend is None or store is None:
                 raise VaultError("device-key rotation requires a backend and an anchor store")
-            record = anchor.read_anchor(store, anchor_label)
-            try:
-                blob = safe_read(_manifest_path(root, record.generation))
-            except FileNotFoundError as e:
-                raise VaultError(
-                    f"authoritative manifest for generation {record.generation} is missing — vault is corrupt"
-                ) from e
-            untrusted = manifest.parse_unverified(blob)
-            anchor.verify_anchor(store, anchor_label, wmk=untrusted.wmk, generation=untrusted.generation)
+            _blob, untrusted = _load_pinned_unverified(
+                root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
+            )
             new_recovery = vault_master.rewrap_from_device(
                 key_id=key_id, new_passphrase=new_passphrase, backend=backend, wmk=untrusted.wmk
             )
         else:
             # Cold path: the sidecar's SHA-256(wmk) digest binds it to the real
             # wmk, so the newest manifest (no anchor to name it) supplies it.
-            generation = _latest_manifest_generation(root)
-            if generation is None:
-                raise VaultError("no manifest found at this root — not a vault, or all manifests are missing")
-            try:
-                blob = safe_read(_manifest_path(root, generation))
-            except FileNotFoundError as e:
-                raise VaultError(f"manifest for generation {generation} vanished — cannot rotate") from e
-            untrusted = manifest.parse_unverified(blob)
+            _generation, _blob, untrusted = _load_latest_unverified(root, action="cannot rotate")
             new_recovery = vault_master.rewrap_from_passphrase(
                 recovery_blob, old_passphrase, new_passphrase, wmk=untrusted.wmk
             )

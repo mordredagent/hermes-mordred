@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import Any
+
+from . import _term
 
 # The subcommand tree + handlers live in ``_cli_parsers``; re-export them so
 # ``cli._setup_subparser`` (Hermes registration in ``wizard/__init__.py``) and
@@ -85,6 +88,7 @@ from ._cli_parsers import (
     _handle_vault_status,
     _setup_subparser,
 )
+from ._prompt_io import NonInteractiveAbort
 
 __all__ = [
     "_add_audit",
@@ -149,11 +153,32 @@ def dispatch(args: argparse.Namespace) -> int:
     Hermes calls the handler set via ``set_defaults(func=...)`` directly,
     so this helper is mainly for tests that build a Namespace by hand.
     Returns the handler's exit code (0 = success).
+
+    A ``KeyboardInterrupt`` from any handler — the prompt layer re-raises it
+    on Ctrl-C by design (see ``_prompt_io``) — becomes a clean ``Aborted.``
+    on stderr with exit code 130 (128 + SIGINT), not a traceback. Likewise
+    :class:`NonInteractiveAbort` becomes an ``error:`` line with exit code 2
+    (the usage-error convention shared with ``encryption purge`` / ``audit``).
+
+    Scope note (review 2026-07-07): this guard protects the standalone
+    ``hermes-mordred`` entry (``main`` routes through here). The Hermes-native
+    ``hermes mordred …`` path calls ``args.func(args)`` itself, bypassing this
+    helper — when Hermes 0.12+ wires that path, it needs the same guard at the
+    registration boundary (or to route through ``dispatch``).
     """
     func = getattr(args, "func", None)
     if func is None:
         raise SystemExit("usage: hermes-mordred <COMMAND> ... (no subcommand provided)")
-    result: Any = func(args)
+    try:
+        result: Any = func(args)
+    except KeyboardInterrupt:
+        # The leading newline moves past the ``^C`` the terminal echoes onto
+        # the prompt line, so ``Aborted.`` starts on its own line.
+        print("\nAborted.", file=sys.stderr)
+        return 130
+    except NonInteractiveAbort as exc:
+        _term.emit_error(str(exc))
+        return 2
     return int(result) if isinstance(result, int) else 0
 
 

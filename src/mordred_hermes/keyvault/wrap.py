@@ -55,6 +55,7 @@ from cryptography.hazmat.primitives.keywrap import (
 )
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from ._audit_emit import chain_and_raise, emit_capture
 from ._exceptions import (
     WrapAuthCancelled,
     WrapIntegrityError,
@@ -223,9 +224,11 @@ def _audit_key_id_hex(key_id: str) -> str:
 
     Never use the full ``key_id`` in the audit log — POLICY.md code #19
     explicitly forbids it so consumers can rate-limit by hash without
-    seeing the cleartext.
+    seeing the cleartext. A prefix of :func:`_key_id_hash` on purpose:
+    operators grep audit entries against the blob/Keychain hashes, so the
+    two derivations must never diverge.
     """
-    return hashlib.sha256(key_id.encode("utf-8")).digest()[:8].hex()
+    return _key_id_hash(key_id)[:8].hex()
 
 
 def _build_hkdf_info(key_id_hash: bytes, ephemeral_pub: bytes) -> bytes:
@@ -352,27 +355,19 @@ def _emit_unwrap_denied(
     Returns the sink's exception (if any, only :class:`Exception`
     subclasses) so the caller can chain it as ``__context__`` on the
     primary :class:`WrapAuthCancelled`. Mirrors PR2 ``recovery._emit_mismatch``
-    (code-reviewer HIGH-1, 2026-05-14).
-
-    The ``except Exception`` is intentional — we do NOT catch
-    :class:`BaseException`. KeyboardInterrupt / SystemExit /
-    GeneratorExit are control-flow exceptions that must propagate
-    untouched so Ctrl-C handling in any CLI built on top of this module
-    keeps working.
+    (code-reviewer HIGH-1, 2026-05-14); the capture / chaining policy lives
+    in :mod:`._audit_emit`.
     """
-    try:
-        audit_sink(
-            {
-                "event": "keyvault.unwrap_dek",
-                "decision": "block",
-                "reason": "keyvault.unwrap_denied",
-                "key_id_hash": _audit_key_id_hex(key_id),
-                "native_error_code": native_error_code,
-            }
-        )
-    except Exception as exc:
-        return exc
-    return None
+    return emit_capture(
+        audit_sink,
+        {
+            "event": "keyvault.unwrap_dek",
+            "decision": "block",
+            "reason": "keyvault.unwrap_denied",
+            "key_id_hash": _audit_key_id_hex(key_id),
+            "native_error_code": native_error_code,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -535,15 +530,13 @@ def unwrap_dek(
         # ``keyvault.unwrap_denied`` and raise ``WrapAuthCancelled``,
         # chaining the native error via ``__cause__`` and any sink
         # failure via ``__context__``. Both attributes are assigned
-        # explicitly before ``raise`` so neither is touched by the raise
-        # machinery (we are outside the ``except`` handler here, so
-        # there is no active exception to auto-fill ``__context__`` with).
+        # explicitly outside the ``except`` handler (there is no active
+        # exception here to auto-fill ``__context__`` with) — the
+        # chaining contract is documented once in ``_audit_emit``.
         sink_exc = _emit_unwrap_denied(audit_sink, key_id=key_id, native_error_code=denied.code)
         primary = WrapAuthCancelled(denied.code)
         primary.__cause__ = denied
-        if sink_exc is not None:
-            primary.__context__ = sink_exc
-        raise primary
+        chain_and_raise(primary, sink_exc)
 
     # HIGH-2: ``denied is None`` here means the ``try`` block completed,
     # so ``shared_secret`` is bound. The ``assert`` form would be

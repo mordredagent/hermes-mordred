@@ -242,6 +242,46 @@ class TestCrossMachineRoundtrip:
         eid = api.encrypt(imported, b"post-import", "fresh", backend=backend_b, audit_sink=sink, home=home_b)
         assert api.decrypt(imported, eid, "fresh", backend=backend_b, audit_sink=sink, home=home_b) == b"post-import"
 
+    def test_import_clears_stale_ciphertext_residue(
+        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
+    ) -> None:
+        """Rollback residue must not poison later exports.
+
+        A rollback killed between its enclave-key delete and tree rmtree
+        leaves ``.gcm`` envelopes wrapped by a destroyed key. The import
+        retry must clear this key id's ciphertext tree before rebuilding —
+        otherwise the stale envelope survives and ``export_backup`` (a glob
+        walk that fails wholesale on one bad envelope) is permanently
+        broken with a misleading integrity error.
+        """
+        _log, sink = audit
+        backend_a = FakeBackend()
+        home_a = tmp_path / "deviceA"
+        key_id = _init_device(home_a, backend_a, sink)
+        eid = api.encrypt(key_id, b"live-secret", "vault", backend=backend_a, audit_sink=sink, home=home_a)
+        blob = api.export_backup(key_id, PASSPHRASE, backend=backend_a, audit_sink=sink, home=home_a)
+
+        # Device B: pre-seed the residue — an envelope under this key id's
+        # tree, wrapped by a key that no longer exists anywhere.
+        backend_b = FakeBackend()
+        home_b = tmp_path / "deviceB"
+        root_b = home_b / "mordred" / "keyvault"
+        _storage.ensure_layout(root_b)
+        stale_dir = root_b / "ciphertexts" / _key_id_hash_hex(key_id) / ("0" * 32)
+        stale_dir.mkdir(parents=True, mode=0o700)
+        stale_path = stale_dir / "deadbeef.gcm"
+        stale_path.write_bytes(b"MREN-garbage-wrapped-by-a-destroyed-key")
+
+        imported = api.import_backup(
+            blob, PASSPHRASE, seed_phrase=SEED, pow_bytes=POW, backend=backend_b, audit_sink=sink, home=home_b
+        )
+
+        assert not stale_path.exists()  # residue cleared before the rebuild
+        # The live envelope round-trips and — the real regression — a fresh
+        # export walks the tree without tripping over stale residue.
+        assert api.decrypt(imported, eid, "vault", backend=backend_b, audit_sink=sink, home=home_b) == b"live-secret"
+        api.export_backup(imported, PASSPHRASE, backend=backend_b, audit_sink=sink, home=home_b)
+
     def test_import_creates_meta_row_and_commit_digest(
         self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
     ) -> None:

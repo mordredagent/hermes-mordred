@@ -18,11 +18,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
+from .._policy_types import ActivePath as ActivePath
+from .._policy_types import PolicyMode as PolicyMode
 from ._audit_reasons import ReasonCode
 
-PolicyMode: TypeAlias = Literal["strict", "lenient", "off"]
 NetworkRequirement: TypeAlias = Literal["tor", "vpn", "clearnet", "local-only"]
-ActivePath: TypeAlias = Literal["tor", "vpn", "clearnet"]
 Decision: TypeAlias = Literal["allow", "block", "warn"]
 
 VALID_NETWORK_REQUIREMENTS: Final[frozenset[str]] = frozenset({"tor", "vpn", "clearnet", "local-only"})

@@ -13,21 +13,24 @@ here is a pure transform over ``bytes``. Wire format is frozen in SPEC.md
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import secrets
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ._exceptions import WrapParseError
+from .wrap import KEY_ID_HASH_LEN, _key_id_hash
 
 # ----------------------------- MREN envelope constants -----------------------------
 # Wire format frozen in SPEC.md §"PR4 API contract / MREN envelope".
 
 _ENVELOPE_MAGIC = b"MREN"
 _ENVELOPE_VERSION = 1
-_KEY_ID_HASH_LEN = 16
-_PURPOSE_HASH_LEN = 16
+# Both hash fields are produced by wrap._key_id_hash (see _hash_id), so the
+# layout widths are derived from wrap's constant rather than restated: the
+# produced width and the slicing math cannot desynchronize.
+_KEY_ID_HASH_LEN = KEY_ID_HASH_LEN
+_PURPOSE_HASH_LEN = KEY_ID_HASH_LEN
 _WRAPPED_DEK_LEN = 127  # PR3 MRKW blob, SPEC §"Wrap wire format & algorithm"
 _AES_BLOB_LEN_FIELD_LEN = 4
 _ENVELOPE_AAD_LEN = 4 + 1 + _KEY_ID_HASH_LEN + _PURPOSE_HASH_LEN + _WRAPPED_DEK_LEN  # 164
@@ -40,9 +43,13 @@ def _hash_id(value: str) -> bytes:
     """Return the first 16 bytes of ``sha256(value.encode("utf-8"))``.
 
     Used for both ``key_id_hash`` and ``purpose_hash`` (same algorithm
-    and width).
+    and width). Delegates to :func:`mordred_hermes.keyvault.wrap._key_id_hash`
+    because the MREN envelope's ``key_id_hash`` and the embedded MRKW wrap
+    blob's ``key_id_hash`` MUST stay byte-identical — ``decrypt`` locates an
+    envelope by one and the wrap layer validates the other against the same
+    ``key_id`` — so there is exactly one definition.
     """
-    return hashlib.sha256(value.encode("utf-8")).digest()[:_KEY_ID_HASH_LEN]
+    return _key_id_hash(value)
 
 
 def _encode_envelope_from_hashes(

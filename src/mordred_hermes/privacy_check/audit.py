@@ -93,6 +93,23 @@ def _today_utc_date() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+def _next_rotation_target(path: Path, date_suffix: str) -> Path:
+    """Pick a collision-free rotation target ``<name>.<date>[.N]``.
+
+    Shared by the size/date rotation (:meth:`NDJSONWriter._rotate`) and the
+    encrypted-log rotate-aside (:func:`_rotate_encrypted_log_aside`): both
+    must skip names already taken by a prior rotation — including rotations
+    that were subsequently gzipped — so a same-day rotation can never
+    overwrite history.
+    """
+    target = path.with_name(f"{path.name}.{date_suffix}")
+    n = 0
+    while target.exists() or target.with_suffix(target.suffix + ".gz").exists():
+        n += 1
+        target = path.with_name(f"{path.name}.{date_suffix}.{n}")
+    return target
+
+
 def _serialize(entry: Mapping[str, Any]) -> bytes:
     """Serialize an audit entry to NDJSON bytes (terminated with newline).
 
@@ -174,11 +191,7 @@ class NDJSONWriter:
         if not self.path.exists():
             return
 
-        target = self.path.with_name(f"{self.path.name}.{date_suffix}")
-        n = 0
-        while target.exists() or target.with_suffix(target.suffix + ".gz").exists():
-            n += 1
-            target = self.path.with_name(f"{self.path.name}.{date_suffix}.{n}")
+        target = _next_rotation_target(self.path, date_suffix)
         os.replace(self.path, target)
 
         gz_target = target.with_suffix(target.suffix + ".gz")
@@ -259,12 +272,7 @@ def _rotate_encrypted_log_aside(audit_path: Path) -> None:
     """
     if not _audit_log_is_encrypted(audit_path):
         return
-    date_suffix = _today_utc_date()
-    target = audit_path.with_name(f"{audit_path.name}.{date_suffix}")
-    n = 0
-    while target.exists() or target.with_suffix(target.suffix + ".gz").exists():
-        n += 1
-        target = audit_path.with_name(f"{audit_path.name}.{date_suffix}.{n}")
+    target = _next_rotation_target(audit_path, _today_utc_date())
     os.replace(audit_path, target)
     _LOG.warning(
         "audit log at %s is MRAL-encrypted but a plaintext writer is taking over; "
@@ -309,13 +317,11 @@ def make_audit_writer(
             return NDJSONWriter(path=audit_path)
 
         # Keyvault is initialized — only now touch the crypto stack.
+        from ..keyvault._identity import resolve_backend
         from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
         from ..keyvault.wrap import get_wrapping_key_public
 
-        if backend is None:
-            from ..keyvault._seckey_backend import _SecKeyBackend
-
-            backend = _SecKeyBackend()
+        backend = resolve_backend(backend)
         # Probe that the audit-log wrapping key exists and the backend is
         # usable. get_wrapping_key_public needs no Enclave authorization.
         get_wrapping_key_public(AUDIT_LOG_KEY_ID, backend=backend)

@@ -184,7 +184,7 @@ def _print_decision(
         try:
             vault_ready = keyvault_initialized()
         except KeyvaultProbeError as e:
-            _term.emit_warn(f"{e}; treating keyvault as uninitialized")
+            _term.emit_warn(f"{e}; treating keyvault as uninitialised")
             vault_ready = False
     outcome = evaluate_install(
         policy_mode=policy_mode,

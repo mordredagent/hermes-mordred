@@ -36,32 +36,16 @@ from pathlib import Path
 from typing import Any
 
 from .._home import HERMES_BASE
+from .._yaml_io import load_plugin_section
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from ..network.guidance import dependency_warning
+from ..network.hooks import resolve_default_path
 from . import _term
 from ._network_answers import (
     _VALID_PATHS,
     NetworkAnswers,
     NetworkInitInputs,
-)
-from ._network_init import (
-    _MULLVAD_ACCOUNT_DESCRIPTION as _MULLVAD_ACCOUNT_DESCRIPTION,
-)
-from ._network_init import (
-    _MULLVAD_KILLSWITCH_DESCRIPTION as _MULLVAD_KILLSWITCH_DESCRIPTION,
-)
-from ._network_init import (
-    _MULLVAD_RELAY_DESCRIPTION as _MULLVAD_RELAY_DESCRIPTION,
-)
-from ._network_init import (
-    _NETWORK_PATH_DESCRIPTIONS as _NETWORK_PATH_DESCRIPTIONS,
-)
-from ._network_init import (
-    _TOR_BINARY_DESCRIPTION as _TOR_BINARY_DESCRIPTION,
-)
-from ._network_init import (
-    _TOR_SOCKS_PORT_DESCRIPTION as _TOR_SOCKS_PORT_DESCRIPTION,
 )
 from ._network_init import (
     collect_network_answers,
@@ -206,31 +190,12 @@ def _write_default_path_to_config(config_path: Path, default_path: str) -> None:
 
 
 def _read_default_path_from_config(config_path: Path) -> str:
-    """Read ``plugins.mordred_network.default_path`` or fall back to clearnet."""
-    if not config_path.exists():
-        return "clearnet"
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
+    """Read ``plugins.mordred_network.default_path`` or fall back to clearnet.
 
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except (OSError, YAMLError) as e:
-        _LOG.warning("could not read %s: %s", config_path, e)
-        return "clearnet"
-    if not isinstance(data, dict):
-        return "clearnet"
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return "clearnet"
-    network = plugins.get("mordred_network")
-    if not isinstance(network, dict):
-        return "clearnet"
-    value = network.get("default_path", "clearnet")
-    if isinstance(value, str) and value in _VALID_PATHS:
-        return value
-    return "clearnet"
+    Validation delegates to ``network.hooks.resolve_default_path`` so the
+    wizard reports exactly the path the runtime would bootstrap with.
+    """
+    return resolve_default_path(load_plugin_section(config_path, "mordred_network", log=_LOG))
 
 
 def _dependency_warning_for_configured_path(config_path: Path, target: str) -> str | None:
@@ -384,27 +349,7 @@ def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
     existing values. Any read/parse error collapses to ``{}`` (the prompts
     then fall back to their safe static defaults).
     """
-    if not config_path.exists():
-        return {}
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    yaml = YAML(typ="safe", pure=True)
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-    except (OSError, YAMLError) as e:
-        _LOG.warning("could not read %s: %s", config_path, e)
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return {}
-    section = plugins.get("mordred_network")
-    if not isinstance(section, dict):
-        return {}
-    return dict(section)
+    return load_plugin_section(config_path, "mordred_network", log=_LOG) or {}
 
 
 def _join_cmd_or(cmd: tuple[str, ...], empty: str) -> str:

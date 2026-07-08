@@ -38,7 +38,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn, SupportsIndex
 
-from . import _storage, wrap
+from . import _secret_ops, _storage, wrap
+from ._audit_emit import chain_and_raise, emit_capture
 from ._envelope_codec import (
     _hash_id,
 )
@@ -426,24 +427,18 @@ def _emit_init_denied(audit_sink: AuditSink, *, key_id: str) -> Exception | None
     Returns the sink's exception (only :class:`Exception` subclasses) so
     :func:`confirm_generate` can chain it as ``__context__`` on the
     :class:`VerificationDigestMismatch` it is about to raise — mirrors the
-    PR2 recovery ``_emit_mismatch`` / PR3 ``_emit_unwrap_denied`` policy.
-
-    The ``except Exception`` is intentional: KeyboardInterrupt / SystemExit
-    / GeneratorExit are control-flow exceptions that must propagate
-    untouched so CLI shutdown stays clean.
+    PR2 recovery ``_emit_mismatch`` / PR3 ``_emit_unwrap_denied`` policy,
+    documented once in :mod:`._audit_emit`.
     """
-    try:
-        audit_sink(
-            {
-                "event": "keyvault.init",
-                "decision": "block",
-                "reason": "keyvault.init_denied",
-                "key_id_hash": wrap._audit_key_id_hex(key_id),
-            }
-        )
-    except Exception as exc:
-        return exc
-    return None
+    return emit_capture(
+        audit_sink,
+        {
+            "event": "keyvault.init",
+            "decision": "block",
+            "reason": "keyvault.init_denied",
+            "key_id_hash": wrap._audit_key_id_hex(key_id),
+        },
+    )
 
 
 def confirm_generate(
@@ -516,16 +511,15 @@ def confirm_generate(
     verification_digest = handle.expected_digest()
 
     # 2. Defense-in-depth digest check (hmac.compare_digest — constant time).
+    #    A sink failure during the denied emit is chained as __context__ so
+    #    it stays diagnosable without displacing the primary mismatch signal
+    #    (the PR2 recovery._emit_mismatch pattern — see _audit_emit).
     if not hmac.compare_digest(user_confirmed_digest, verification_digest):
         sink_exc = _emit_init_denied(audit_sink, key_id=resolved_key_id)
-        mismatch = VerificationDigestMismatch("user-confirmed digest does not match the prepared verification digest")
-        # Chain the sink failure (if any) as __context__ — not __cause__ —
-        # so it stays diagnosable without displacing the primary mismatch
-        # signal. Matches the PR2 recovery._emit_mismatch pattern (an
-        # explicit assignment because ``raise X from Y`` sets __cause__).
-        if sink_exc is not None:
-            mismatch.__context__ = sink_exc
-        raise mismatch
+        chain_and_raise(
+            VerificationDigestMismatch("user-confirmed digest does not match the prepared verification digest"),
+            sink_exc,
+        )
 
     # 3. Re-init guard (advisory pre-check). v1 keyvault is single-key
     #    (SPEC Story 5): reject if any key already exists, BEFORE emitting
@@ -556,8 +550,8 @@ def confirm_generate(
     #     the transaction commit point (codex P2). ``save_meta`` replaces
     #     meta.json via atomic_write (tmp+rename); a clean failure leaves
     #     the prior meta.json intact, and the rollback additionally repairs
-    #     the row in the rare case the atomic rename committed before a
-    #     later fsync raised.
+    #     the row when the rename committed early (see
+    #     ``_secret_ops._rollback_import``).
     _storage.ensure_layout(root)
     created_at = _utc_now_iso()
     key_id_hash_hex = _hash_id(resolved_key_id).hex()
@@ -585,21 +579,17 @@ def confirm_generate(
             # Rollback — best-effort, so the ORIGINAL failure always
             # propagates via the bare ``raise``. ``BaseException`` (not
             # ``Exception``) so a KeyboardInterrupt mid-write still triggers
-            # cleanup. Three steps, each independently suppressed:
-            #  - delete the orphaned Enclave key;
-            #  - remove the digest commit file if it was written;
-            #  - repair meta.json: save_meta's atomic rename may have
-            #    committed the new meta.json before a later fsync raised,
-            #    so re-read and drop the row if it landed (codex P2).
-            with contextlib.suppress(Exception):
-                wrap.delete_wrapping_key(resolved_key_id, backend=backend)
-            if commit_path is not None:
-                with contextlib.suppress(OSError):
-                    commit_path.unlink(missing_ok=True)
-            with contextlib.suppress(Exception):
-                repaired = _storage.load_meta(root)
-                if repaired["keys"].pop(key_id_hash_hex, None) is not None:
-                    _storage.save_meta(root, repaired)
+            # cleanup. confirm_generate wrote no ciphertext envelopes, so
+            # only the Enclave key / commit file / meta.json row are undone
+            # (the step-by-step rationale lives on ``_rollback_import``).
+            _secret_ops._rollback_import(
+                root,
+                new_key_id_hash_hex=key_id_hash_hex,
+                commit_path=commit_path,
+                imported_key_id=resolved_key_id,
+                backend=backend,
+                remove_ciphertext_tree=False,
+            )
             raise
 
     # 4c. init_completed — success-path emit. The init is already durable,

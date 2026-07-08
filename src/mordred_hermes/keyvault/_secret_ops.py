@@ -23,11 +23,8 @@ import secrets
 import shutil
 from pathlib import Path
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from . import _storage, backup, crypto, recovery, wrap
 from ._envelope_codec import (
-    _AES_NONCE_LEN,
     _encode_envelope,
     _encode_envelope_from_hashes,
     _hash_id,
@@ -218,9 +215,11 @@ def decrypt(
     aad, wrapped_dek_blob, aes_blob = _parse_envelope(blob, key_id, purpose)
     dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
     try:
-        nonce = aes_blob[:_AES_NONCE_LEN]
-        ct_tag = aes_blob[_AES_NONCE_LEN:]
-        return AESGCM(dek).decrypt(nonce, ct_tag, aad)
+        # The envelope's aes_blob is exactly crypto.encrypt's self-contained
+        # ``nonce(12) || ct || tag`` format, and _split_envelope already
+        # enforced the nonce+tag minimum length, so crypto.decrypt is the
+        # single nonce-split implementation.
+        return crypto.decrypt(dek, aes_blob, aad=aad)
     finally:
         del dek
 
@@ -303,26 +302,35 @@ def export_backup(
         if cipher_root.exists() or cipher_root.is_symlink():
             _storage._check_dir_mode(cipher_root)
             for gcm_path in sorted(cipher_root.glob("*/*.gcm")):
-                _storage._check_dir_mode(gcm_path.parent)
-                blob = _storage.safe_read(gcm_path)
-                aad, purpose_hash, wrapped_dek_blob, aes_blob = _split_envelope(blob, key_id_hash)
-                dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
                 try:
-                    plaintext = AESGCM(dek).decrypt(aes_blob[:_AES_NONCE_LEN], aes_blob[_AES_NONCE_LEN:], aad)
-                    # Portable AAD — no per-device MRKW prefix, so the import
-                    # device reconstructs it from key_id + purpose_hash.
-                    manifest_aad = _MANIFEST_MAGIC + key_id_hash + purpose_hash
-                    manifest_aes_blob = crypto.encrypt(dek, plaintext, aad=manifest_aad)
-                    entries.append(
-                        {
-                            "purpose_hash_hex": purpose_hash.hex(),
-                            "envelope_id": gcm_path.stem,
-                            "dek_hex": dek.hex(),
-                            "manifest_aes_blob_b64": base64.b64encode(manifest_aes_blob).decode("ascii"),
-                        }
-                    )
-                finally:
-                    del dek
+                    _storage._check_dir_mode(gcm_path.parent)
+                    blob = _storage.safe_read(gcm_path)
+                    aad, purpose_hash, wrapped_dek_blob, aes_blob = _split_envelope(blob, key_id_hash)
+                    dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
+                    try:
+                        plaintext = crypto.decrypt(dek, aes_blob, aad=aad)
+                        # Portable AAD — no per-device MRKW prefix, so the import
+                        # device reconstructs it from key_id + purpose_hash.
+                        manifest_aad = _MANIFEST_MAGIC + key_id_hash + purpose_hash
+                        manifest_aes_blob = crypto.encrypt(dek, plaintext, aad=manifest_aad)
+                        entries.append(
+                            {
+                                "purpose_hash_hex": purpose_hash.hex(),
+                                "envelope_id": gcm_path.stem,
+                                "dek_hex": dek.hex(),
+                                "manifest_aes_blob_b64": base64.b64encode(manifest_aes_blob).decode("ascii"),
+                            }
+                        )
+                    finally:
+                        del dek
+                except Exception as exc:
+                    # One bad envelope fails the whole export by design (the
+                    # manifest must be complete), but a bare integrity error
+                    # names no file and reads as tampering — attach the path
+                    # so on-disk residue is diagnosable. add_note keeps the
+                    # exception type and message intact.
+                    exc.add_note(f"while exporting envelope {gcm_path}")
+                    raise
 
     manifest_json = json.dumps(
         {"version": _MANIFEST_VERSION, "key_id": key_id, "envelopes": entries},
@@ -422,23 +430,45 @@ def _rollback_import(
     root: Path,
     *,
     new_key_id_hash_hex: str,
-    commit_path: Path,
+    commit_path: Path | None,
     imported_key_id: str,
     backend: NativeBackend,
+    remove_ciphertext_tree: bool = True,
 ) -> None:
-    """Best-effort rollback of a failed :func:`import_backup`.
+    """Best-effort rollback of a failed provisioning transaction.
 
-    Each step is independently suppressed so the ORIGINAL failure always
-    propagates via the caller's bare ``raise``. Removes the ciphertext tree
-    and the commit digest, deletes the destination Enclave key, and drops the
-    ``meta.json`` row if it landed.
+    Shared by :func:`import_backup` and ``api.confirm_generate`` — both
+    commit the same way (Enclave key first, then the commit digest, then the
+    ``meta.json`` row) and so undo the same way. Each step is independently
+    suppressed so the ORIGINAL failure always propagates via the caller's
+    bare ``raise``:
+
+    - delete the destination Enclave key FIRST: an orphaned Enclave key
+      makes the retry's ``generate_enclave_key`` fail with
+      ``WrapKeyAlreadyExists`` and needs a destructive ``keyvault reset``
+      to clear, so it must be the residue least likely to survive. The
+      other residues are recoverable if the process dies between rollback
+      steps: a stale digest is overwritten by the retry, a stale ciphertext
+      tree is cleared by ``import_backup``'s pre-rebuild rmtree, and a
+      landed meta row is overwritten by an import retry (a
+      ``confirm_generate`` retry, however, stops at api's "already
+      initialized" guard and still needs ``keyvault reset``);
+    - remove the rebuilt ciphertext tree (``remove_ciphertext_tree=False``
+      for ``confirm_generate``, which writes no envelopes);
+    - drop the commit digest if it was written (``commit_path=None`` when
+      the transaction failed before the path was even derived);
+    - repair ``meta.json``: ``save_meta``'s atomic rename may have committed
+      the new meta.json before a later fsync raised, so re-read and drop the
+      row if it landed (codex P2).
     """
     with contextlib.suppress(Exception):
-        shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
-    with contextlib.suppress(OSError):
-        commit_path.unlink(missing_ok=True)
-    with contextlib.suppress(Exception):
         backend.delete_enclave_key(imported_key_id)
+    if remove_ciphertext_tree:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
+    if commit_path is not None:
+        with contextlib.suppress(OSError):
+            commit_path.unlink(missing_ok=True)
     with contextlib.suppress(Exception):
         repaired = _storage.load_meta(root)
         if repaired["keys"].pop(new_key_id_hash_hex, None) is not None:
@@ -474,9 +504,10 @@ def import_backup(
     3. Write ``digests/<kid>.commit`` then the ``meta.json`` row (the
        transaction commit point) under the keyvault lock.
 
-    Any failure after the Enclave key is created rolls back — the
-    ciphertext tree and the Enclave key are removed, and a ``meta.json``
-    row is dropped if it landed — then the original exception re-raises.
+    Any failure after the Enclave key is created rolls back via
+    :func:`_rollback_import` — the Enclave key is deleted first, then the
+    ciphertext tree, the commit digest, and a ``meta.json`` row if it
+    landed — and the original exception re-raises.
 
     Returns the imported ``key_id``. Raises
     :class:`mordred_hermes.keyvault.backup.BackupCorrupt` for a structurally
@@ -520,7 +551,17 @@ def import_backup(
 
     try:
         with _storage.keyvault_lock(root):
-            # 7. Rebuild every envelope against this device's Enclave key.
+            # 7. Clear any stale ciphertext tree for this key id before the
+            #    rebuild. Reaching this line proves generate_enclave_key
+            #    succeeded, i.e. no Enclave key existed for this key_id —
+            #    so any pre-existing envelope here is wrapped by a destroyed
+            #    key and permanently undecryptable (e.g. residue from a
+            #    rollback killed between its key-delete and rmtree steps).
+            #    Left in place it would poison every later export_backup,
+            #    whose glob walk fails wholesale on one bad envelope.
+            shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
+
+            # 8. Rebuild every envelope against this device's Enclave key.
             for entry in envelopes:
                 _rebuild_envelope(
                     entry,
@@ -531,7 +572,7 @@ def import_backup(
                     backend=backend,
                 )
 
-            # 8. Commit digest FIRST, meta.json row LAST — meta.json is the
+            # 9. Commit digest FIRST, meta.json row LAST — meta.json is the
             #    transaction commit point (mirrors confirm_generate).
             _storage.atomic_write(commit_path, recomputed_digest)
             meta = _storage.load_meta(root)

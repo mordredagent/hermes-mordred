@@ -22,11 +22,12 @@ Heavy imports stay function-local so this module imports on any platform.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
+from ._runtime_gate import RuntimeProbe, runtime_gate
+from ._vault_open import _vault_present
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,12 +40,6 @@ if TYPE_CHECKING:
 __all__ = ["disable", "enable", "purge", "reseal"]
 
 _ENV_NAME = ".env"
-
-#: Runtime-injection probe signature: called ``probe(home=...)`` -> ``(ok, detail)``.
-#: Injected into :func:`enable` so tests can fake the runtime check (matching the
-#: ``backend=`` / ``store=`` injection style); production uses
-#: :func:`_default_runtime_probe`.
-RuntimeProbe = Callable[..., "tuple[bool, str]"]
 
 
 def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
@@ -67,27 +62,27 @@ def _runtime_gate(
     Returns 1 (after printing actionable guidance) when the interpreter that runs
     ``hermes`` cannot inject a sealed ``.env`` at startup, else 0. A no-op (0) off
     macOS — the plaintext is kept there anyway — and when
-    ``force_runtime_unverified`` is set.
+    ``force_runtime_unverified`` is set. The gate core is shared with
+    ``config_decrypt_cli`` via :func:`._runtime_gate.runtime_gate`; only the
+    .env-specific guidance text lives here.
     """
-    if platform != "darwin" or force_runtime_unverified:
-        return 0
-    ok, detail = (runtime_probe or _default_runtime_probe)(home=home)
-    if ok:
-        return 0
-    from ..keyvault._runtime_probe import discover_runtime_python
-
-    runtime_python = discover_runtime_python(home=home) or (home / "hermes-agent" / "venv" / "bin" / "python3")
-    _term.emit_error(
-        "refusing to vault-seal .env — " + detail + ".\n"
-        "  A sealed .env is injected at startup only by the mordred plugin in the\n"
-        "  interpreter that runs `hermes`. mordred-hermes is not published to an\n"
-        "  index — install it into that runtime from your local checkout instead\n"
-        "  (run from the repo root):\n"
-        f"    uv pip install --python {runtime_python} -e './mordred-hermes[macos]'\n"
-        "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"
-        "  unreadable until the runtime has mordred), pass --force-runtime-unverified."
+    return runtime_gate(
+        home=home,
+        platform=platform,
+        runtime_probe=runtime_probe,
+        force_runtime_unverified=force_runtime_unverified,
+        default_probe=_default_runtime_probe,
+        target=".env",
+        mechanism=(
+            "  A sealed .env is injected at startup only by the mordred plugin in the\n"
+            "  interpreter that runs `hermes`. mordred-hermes is not published to an\n"
+            "  index — install it into that runtime from your local checkout instead\n"
+        ),
+        rerun_tail=(
+            "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"
+            "  unreadable until the runtime has mordred), pass --force-runtime-unverified."
+        ),
     )
-    return 1
 
 
 def _handle_missing_plaintext(root: Path, home: Path, env_path: Path) -> int:
@@ -113,29 +108,17 @@ def _handle_missing_plaintext(root: Path, home: Path, env_path: Path) -> int:
 _RESEAL_TMP_NAME = ".env.reseal.tmp"
 
 
-def _vault_present(root: Path) -> bool:
-    """Whether a vault exists at ``root`` (a manifest on disk) — no key needed."""
-    return any(root.glob("manifest.*.mvmf"))
-
-
 def _env_enrolled(root: Path) -> bool:
     """Whether ``.env`` is enrolled per the manifest — cheap, no device unlock.
 
     Reads the newest manifest's *unverified* plaintext body (the ``files`` keys
     are operational metadata, not secret), so the drift / reseal decision needs
-    neither the master key nor a passphrase. Mirrors
-    :func:`...wizard.encryption_cli._enrolled_names` but scoped to ``.env``.
+    neither the master key nor a passphrase — the same read
+    :func:`.encryption_cli._enrolled_names` does, scoped to ``.env``.
     """
-    from ..keyvault import manifest, vault
+    from .encryption_cli import _enrolled_names
 
-    try:
-        generation = vault._latest_manifest_generation(root)
-        if generation is None:
-            return False
-        blob = vault._manifest_path(root, generation).read_bytes()
-        return _ENV_NAME in manifest.parse_unverified(blob).files
-    except (OSError, manifest.ManifestError):
-        return False
+    return _ENV_NAME in _enrolled_names(root)
 
 
 def _render_env_value(value: str) -> str:
@@ -216,12 +199,10 @@ def _restore_plaintext(
     opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
     if opened is None:
         return 0 if env_path.exists() else 1
-    try:
+    with opened:
         if _ENV_NAME not in opened.list_files():
             return 0
         vault_bytes = opened.read_file(_ENV_NAME)
-    finally:
-        opened.close()
 
     if env_path.exists():
         if env_path.read_bytes() != vault_bytes:
@@ -332,13 +313,12 @@ def reseal(
         )
         return 1
 
-    try:
-        remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
-    except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-        _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
-        return 1
-    finally:
-        opened.close()
+    with opened:
+        try:
+            remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
+        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+            _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
+            return 1
 
     if not remove_plaintext:
         return 0  # a warning was already emitted; the plaintext is kept
@@ -509,24 +489,23 @@ def purge(
         opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
         if opened is None:
             return 0 if env_path.exists() else 1
-        try:
-            if _ENV_NAME in opened.list_files():
-                vault_bytes = opened.read_file(_ENV_NAME)
-                if not env_path.exists():
-                    _storage.atomic_write(env_path, vault_bytes)  # restore the only copy
-                elif env_path.read_bytes() != vault_bytes:
-                    backup = home / ".env.vault-purged"
-                    _storage.atomic_write(backup, vault_bytes)
-                    _term.emit_warn(
-                        f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
-                        "before purging (nothing is lost)."
-                    )
-                opened.unenroll_file(_ENV_NAME)
-        except (vault.VaultError, anchor.AnchorError, OSError) as exc:
-            _term.emit_error(f"cannot purge .env from the vault: {exc}")
-            return 1
-        finally:
-            opened.close()
+        with opened:
+            try:
+                if _ENV_NAME in opened.list_files():
+                    vault_bytes = opened.read_file(_ENV_NAME)
+                    if not env_path.exists():
+                        _storage.atomic_write(env_path, vault_bytes)  # restore the only copy
+                    elif env_path.read_bytes() != vault_bytes:
+                        backup = home / ".env.vault-purged"
+                        _storage.atomic_write(backup, vault_bytes)
+                        _term.emit_warn(
+                            f"on-disk .env differs from the vault copy — saved the vault copy to {backup} "
+                            "before purging (nothing is lost)."
+                        )
+                    opened.unenroll_file(_ENV_NAME)
+            except (vault.VaultError, anchor.AnchorError, OSError) as exc:
+                _term.emit_error(f"cannot purge .env from the vault: {exc}")
+                return 1
 
     _env_optout_marker_path(home).unlink(missing_ok=True)
     print(".env purged from the vault; the plaintext is on disk and unencrypted.")

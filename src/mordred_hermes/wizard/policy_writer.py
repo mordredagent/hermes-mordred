@@ -317,6 +317,20 @@ class PolicySnapshot:
         return body
 
 
+def _section_matches_dict(existing: Mapping[str, Any], want: Mapping[str, Any]) -> bool:
+    """True iff ``existing`` super-set-equals ``want`` field-by-field.
+
+    The idempotency / conflict predicate shared by ``upgrade`` and
+    ``openclaw_migration`` for comparing an on-disk ``plugins.mordred_*``
+    section against a :meth:`PolicySnapshot.to_config_yaml_section` body:
+    every target field must be present with an equal value, while extra
+    user-added keys are tolerated (a superset still matches, so an annotated
+    config is not flagged as a conflict). Lives beside the snapshot it
+    compares against so the two migration callers cannot drift.
+    """
+    return all(existing.get(k) == v for k, v in want.items()) and set(existing.keys()) >= set(want.keys())
+
+
 @dataclass
 class PolicyWriter:
     """Sole writer for ``~/.hermes/config.yaml plugins.mordred_*`` and ``policy.json``."""

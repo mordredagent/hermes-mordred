@@ -34,7 +34,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .policy_writer import PolicySnapshot, PolicyWriter, _atomic_write_text
+from .._policy_types import POLICY_MODES
+from .._yaml_io import load_plugin_section
+from .policy_writer import PolicySnapshot, PolicyWriter, _atomic_write_text, _section_matches_dict
 
 if TYPE_CHECKING:
     from .upgrade import Story1_5Action, UpgradeOptions
@@ -289,10 +291,22 @@ def _should_write_policy(
     Returns True to proceed with the write, False to keep the existing section.
     Raises ``SystemExit`` on an unresolved conflict (``abort``, or an
     interactive prompt that a non-interactive run cannot satisfy).
+
+    The section read mirrors ``upgrade._read_existing_section`` (read-only
+    comparison, broad catch, and — load-bearing — ``round_trip=True`` so a
+    custom-tagged section compares unequal and reaches conflict resolution
+    instead of being collapsed to "no section" and overwritten) but goes
+    through the shared root helper directly — importing ``upgrade`` here
+    would be cyclic.
     """
-    existing = _read_existing_section(policy_writer.config_path)
-    if existing is None:
+    section = load_plugin_section(
+        policy_writer.config_path, "mordred_privacy_check", catch=(Exception,), log=_LOG, round_trip=True
+    )
+    if section is None:
         return True
+    # Plain-dict coercion (shallow) mirrors upgrade._read_existing_section —
+    # the two conflict checks must return the same shape for the same file.
+    existing = dict(section)
     want = snapshot.to_config_yaml_section()
     if _section_matches_dict(existing, want):
         return True
@@ -322,35 +336,6 @@ def _should_write_policy(
     )
 
 
-def _read_existing_section(config_path: Path) -> dict[str, Any] | None:
-    """Local helper -- avoids cyclic import with upgrade._read_existing_section."""
-    if not config_path.exists():
-        return None
-    from ruamel.yaml import YAML
-
-    yaml = YAML(typ="rt")
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            root = yaml.load(f)
-    except Exception as e:
-        _LOG.warning("could not parse %s: %s", config_path, e)
-        return None
-    if not isinstance(root, dict):
-        return None
-    plugins = root.get("plugins")
-    if not isinstance(plugins, dict):
-        return None
-    section = plugins.get("mordred_privacy_check")
-    if not isinstance(section, dict):
-        return None
-    return dict(section)
-
-
-def _section_matches_dict(existing: dict[str, Any], want: dict[str, Any]) -> bool:
-    """True iff ``existing`` super-set-equals ``want`` field-by-field."""
-    return all(existing.get(k) == v for k, v in want.items()) and set(existing.keys()) >= set(want.keys())
-
-
 def _coerce_snapshot(config: dict[str, Any]) -> PolicySnapshot:
     """Map an OpenClaw ``config`` dict to :class:`PolicySnapshot`.
 
@@ -358,7 +343,10 @@ def _coerce_snapshot(config: dict[str, Any]) -> PolicySnapshot:
     ``configure`` defaults so users never end up worse-off than fresh setup.
     """
     raw_policy = config.get("policy", "lenient")
-    policy = raw_policy if raw_policy in ("strict", "lenient", "off") else "lenient"
+    # POLICY_MODES is the tuple, not the frozenset: foreign JSON can carry
+    # unhashable values, and tuple membership returns False instead of
+    # raising TypeError (hooks.py Codex round 3 P2).
+    policy = raw_policy if raw_policy in POLICY_MODES else "lenient"
     # M2 (security review 2026-06-11): a foreign config's string "false"
     # must not truthy-coerce into an enabled cloud-LLM grant.
     raw_allow_flag = config.get("allow_cloud_llm", False)

@@ -20,12 +20,13 @@ import functools
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping
-from .._yaml_io import load_yaml_mapping
+from .._policy_types import VALID_POLICY_MODES
+from .._yaml_io import load_plugin_section
 from . import api, hooks
 from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
 from .vpn_providers import known_providers
@@ -44,10 +45,6 @@ class PluginContext(Protocol):
     """Subset of ``hermes_cli.plugins.PluginContext`` used by mordred_network."""
 
     def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None: ...
-
-
-_VALID_POLICY_MODES: Final[frozenset[str]] = frozenset({"strict", "lenient", "off"})
-_VALID_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn", "clearnet"})
 
 
 def register(ctx: PluginContext) -> None:
@@ -124,7 +121,7 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     policy_mode = _resolve_policy_mode(policy_data)
     disable_ipv6 = _resolve_disable_ipv6(policy_data, policy_mode)
     network = _load_network_section(config_path)
-    default_path = _resolve_default_path(network)
+    default_path = hooks.resolve_default_path(network)
     return RuntimeConfig(
         policy_mode=cast(PolicyMode, policy_mode),
         default_path=cast(ActivePath, default_path),
@@ -160,7 +157,7 @@ def _resolve_policy_mode(data: dict[str, Any]) -> str:
     # frozenset raises TypeError for unhashable values like ``[]`` or
     # ``{}``. A corrupted ``policy.json`` must collapse to ``off``, not
     # crash plugin registration before the hooks are installed.
-    if isinstance(mode, str) and mode in _VALID_POLICY_MODES:
+    if isinstance(mode, str) and mode in VALID_POLICY_MODES:
         return mode
     return "off"
 
@@ -188,23 +185,12 @@ def _load_network_section(config_path: Path) -> dict[str, Any]:
     network fields the runtime consumes (``default_path``,
     ``tor_binary_path``, ``tor_socks_port``, ``mullvad_relay_country``).
     All failure modes collapse to ``{}`` so downstream resolvers apply
-    their own defaults without crashing plugin registration.
+    their own defaults without crashing plugin registration. The
+    ``plugins.mordred_network`` extraction is shared with
+    ``hooks._read_default_network_path`` via :func:`load_plugin_section`
+    so the two readers cannot drift.
     """
-    data = load_yaml_mapping(config_path, log=_LOG)
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return {}
-    network = plugins.get("mordred_network")
-    if not isinstance(network, dict):
-        return {}
-    return cast(dict[str, Any], network)
-
-
-def _resolve_default_path(network: dict[str, Any]) -> str:
-    value = network.get("default_path", "clearnet")
-    if isinstance(value, str) and value in _VALID_PATHS:
-        return value
-    return "clearnet"
+    return load_plugin_section(config_path, "mordred_network", log=_LOG) or {}
 
 
 def _resolve_tor_binary(network: dict[str, Any]) -> str:

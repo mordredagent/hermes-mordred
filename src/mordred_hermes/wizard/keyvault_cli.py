@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _storage
 from . import _term
+from ._defaults import resolve_backend, resolve_prompt_io
 from ._keyvault_init import (
     TerminalSeedSurface,
     _stderr_audit_sink,
@@ -163,10 +164,7 @@ def recover(
     from ..keyvault import _bip39, api
     from ..keyvault import pow as kvpow
 
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
     # Security review H5: the Seed Phrase is the keyvault's root secret —
     # collect it masked (ask_password), never with terminal echo
     # (ask_text), so it does not land in scrollback or a shared TTY.
@@ -187,10 +185,7 @@ def recover(
     # than asking the operator to transcribe 32 more bytes.
     pow_bytes = kvpow.compute_pow(normalized_seed, difficulty_bits=kvpow.POW_DIFFICULTY_BITS)
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
+    backend = resolve_backend(backend)
     sink = audit_sink if audit_sink is not None else _stderr_audit_sink
 
     from ..keyvault._exceptions import WrapError
@@ -313,10 +308,7 @@ def _delete_wrapping_keys(key_ids: list[str], *, backend: NativeBackend | None) 
     from ..keyvault import wrap
     from ..keyvault._exceptions import WrapError
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
+    backend = resolve_backend(backend)
     for key_id in key_ids:
         try:
             wrap.delete_wrapping_key(key_id, backend=backend)
@@ -343,17 +335,16 @@ def reset_keyvault(
     """
     root = _resolve_root(home)
     if not root.exists():
-        print("No keyvault found — nothing to reset.", file=sys.stderr)
+        # Outcome of a no-op run — stdout, like every other command's outcome
+        # line (the interactive WARNING above the prompt stays on stderr).
+        print("No keyvault found — nothing to reset.")
         return 0
 
     key_ids = _collect_reset_key_ids(root)
     if not assume_yes:
-        if prompt_io is None:
-            from .configure import PromptToolkitIO
-
-            prompt_io = PromptToolkitIO()
+        prompt_io = resolve_prompt_io(prompt_io)
         if not _confirm_reset(prompt_io, key_ids):
-            print("Reset aborted — nothing was deleted.", file=sys.stderr)
+            print("Reset aborted — nothing was deleted.")
             return 1
 
     _delete_wrapping_keys(key_ids, backend=backend)

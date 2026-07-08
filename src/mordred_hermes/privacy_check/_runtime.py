@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from .._home import HERMES_BASE, hermes_home
-from .._yaml_io import load_yaml_mapping
+from .._policy_types import POLICY_MODES
+from .._yaml_io import load_plugin_section, load_yaml_mapping
 from .audit import Writer, make_audit_writer
 from .policy import PolicyMode
 
@@ -107,28 +108,70 @@ def reload_state() -> None:
         _state = None
 
 
+def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, Any]]:
+    """``(policy_mode, section)`` — the MODE fails closed, the section degrades.
+
+    M1 port (the fix originally landed only on network's policy.json
+    reader): an absent ``config.yaml`` or an absent / not-yet-written
+    ``plugins.mordred_privacy_check`` section is a fresh or unconfigured
+    install and keeps ``"lenient"`` — but a config.yaml that EXISTS and
+    cannot be opened, read, or parsed, a non-mapping root, and an invalid
+    ``policy`` value all read as ``"strict"``. Collapsing those to lenient
+    (the old ``_load_own_section`` path) meant corrupting or chmod-ing
+    config.yaml silently downgraded install-time enforcement.
+
+    Open-first for the same reason as ``_policy_io.read_policy_mode_fail_closed``:
+    an ``exists()`` pre-check would misread a stat failure as "absent" →
+    lenient. The non-mode fields keep their own degraded defaults — the
+    returned section is ``{}`` whenever the file is unreadable, and
+    ``allow_cloud_llm``/``audit_log_path`` defaults are already safe.
+    """
+    try:
+        f = config_path.open(encoding="utf-8")
+    except FileNotFoundError:
+        return "lenient", {}
+    except OSError as e:
+        _LOG.error("config file %s exists but is unreadable (%s); failing closed to strict", config_path, e)
+        return "strict", {}
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        with f:
+            data = YAML(typ="safe", pure=True).load(f)
+    except (OSError, YAMLError) as e:
+        _LOG.error("config file %s exists but is unreadable (%s); failing closed to strict", config_path, e)
+        return "strict", {}
+    if data is None:
+        return "lenient", {}  # empty file == freshly-touched config, not damage
+    if not isinstance(data, dict):
+        _LOG.error("config file %s has a non-mapping root; failing closed to strict", config_path)
+        return "strict", {}
+    plugins = data.get("plugins")
+    section_raw = plugins.get("mordred_privacy_check") if isinstance(plugins, dict) else None
+    if not isinstance(section_raw, dict):
+        return "lenient", {}  # plugin not configured — must stay lenient
+    section: dict[str, Any] = section_raw
+    raw = section.get("policy", "lenient")
+    # isinstance before membership mirrors the shared reader; tuple keeps
+    # unhashable YAML values on the False branch (hooks.py Codex round 3 P2).
+    if isinstance(raw, str) and raw in POLICY_MODES:
+        return cast(PolicyMode, raw), section
+    _LOG.error("invalid policy %r in %s; failing closed to strict", raw, config_path)
+    return "strict", section
+
+
 def get_active_policy_mode(*, config_path: Path | None = None) -> PolicyMode:
     """Read the active policy mode from ``~/.hermes/config.yaml``.
 
     Public read-only helper for tools (e.g. wizard's ``policy explain``)
     that must evaluate decisions identically to the install hook without
-    touching the cached :class:`PluginState`. Reads the same field the
-    hook reads (``plugins.mordred_privacy_check.policy``), so explainer
+    touching the cached :class:`PluginState`. Reads via the same
+    fail-closed reader the hook's :func:`_load_state` uses, so explainer
     output cannot drift from install-time enforcement when users edit
-    ``config.yaml`` directly.
+    (or damage) ``config.yaml`` directly.
     """
-    cfg = _load_yaml(config_path or DEFAULT_HERMES_CONFIG_PATH)
-    plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
-        return "lenient"
-    section = plugins_cfg.get("mordred_privacy_check")
-    if not isinstance(section, dict):
-        return "lenient"
-    raw = section.get("policy", "lenient")
-    if raw in ("strict", "lenient", "off"):
-        return cast(PolicyMode, raw)
-    _LOG.warning("invalid policy %r in %s; defaulting to lenient", raw, config_path or DEFAULT_HERMES_CONFIG_PATH)
-    return "lenient"
+    return _read_section_fail_closed(config_path or DEFAULT_HERMES_CONFIG_PATH)[0]
 
 
 def get_active_audit_path(*, config_path: Path | None = None) -> Path:
@@ -144,31 +187,17 @@ def get_active_audit_path(*, config_path: Path | None = None) -> Path:
     when users configure a custom ``plugins.mordred_privacy_check.audit_log_path``;
     otherwise the CLI would silently read the default path and miss entries.
     """
-    cfg = _load_yaml(config_path or DEFAULT_HERMES_CONFIG_PATH)
-    plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
-        return DEFAULT_AUDIT_PATH
-    section = plugins_cfg.get("mordred_privacy_check")
-    if not isinstance(section, dict):
+    section = _load_own_section(config_path or DEFAULT_HERMES_CONFIG_PATH)
+    if section is None:
         return DEFAULT_AUDIT_PATH
     return _resolve_audit_path(section.get("audit_log_path"))
 
 
 def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginState:
-    cfg = _load_yaml(config_path)
-    plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
-        plugins_cfg = {}
-    section = plugins_cfg.get("mordred_privacy_check")
-    if not isinstance(section, dict):
-        section = {}
-
-    raw_policy = section.get("policy", "lenient")
-    if raw_policy in ("strict", "lenient", "off"):
-        policy_mode: PolicyMode = raw_policy
-    else:
-        _LOG.warning("invalid policy %r in config; defaulting to lenient", raw_policy)
-        policy_mode = "lenient"
+    # One fail-closed read serves both the mode (strict on a damaged file)
+    # and the section (degrades to {} — the remaining fields' defaults are
+    # already the safe ones).
+    policy_mode, section = _read_section_fail_closed(config_path)
 
     # M2 (security review 2026-06-11): only the bool ``True`` may grant
     # cloud-LLM permission. ``bool(...)`` truthy-coerced YAML strings, so a
@@ -233,6 +262,15 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     # Historically caught bare ``Exception``; ``catch=(Exception,)`` preserves
     # that wider net (see :mod:`mordred_hermes._yaml_io`).
     return load_yaml_mapping(path, catch=(Exception,), log=_LOG)
+
+
+def _load_own_section(path: Path) -> dict[str, Any] | None:
+    """Return the ``plugins.mordred_privacy_check`` mapping, or ``None``.
+
+    Same broad ``catch=(Exception,)`` net as :func:`_load_yaml` — a config
+    read must never crash a hook invocation.
+    """
+    return load_plugin_section(path, "mordred_privacy_check", catch=(Exception,), log=_LOG)
 
 
 def _read_disabled_from_yaml(config_path: Path) -> set[str]:

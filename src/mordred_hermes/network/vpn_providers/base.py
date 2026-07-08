@@ -24,11 +24,10 @@ from __future__ import annotations
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
+from ..._policy_types import PolicyMode
 from ..paths.vpn import DEFAULT_RUNNER, SubprocessRunner
-
-PolicyMode = Literal["strict", "lenient", "off"]
 
 #: Re-exported so providers and the runtime share one runner type.
 __all__ = ["DEFAULT_RUNNER", "PolicyMode", "SubprocessRunner", "VpnCapabilities", "VpnProvider"]

@@ -28,15 +28,17 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
-from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
-from mordred_hermes.wizard.network_cli import (
+from mordred_hermes.wizard._network_init import (
     _MULLVAD_ACCOUNT_DESCRIPTION,
     _MULLVAD_KILLSWITCH_DESCRIPTION,
     _MULLVAD_RELAY_DESCRIPTION,
     _NETWORK_PATH_DESCRIPTIONS,
     _TOR_BINARY_DESCRIPTION,
     _TOR_SOCKS_PORT_DESCRIPTION,
+)
+from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
+from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
+from mordred_hermes.wizard.network_cli import (
     _VALID_PATHS,
     NetworkAnswers,
     collect_network_answers,

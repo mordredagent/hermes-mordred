@@ -23,7 +23,6 @@ suite can swap in a tiny fake runtime via :func:`api.set_runtime`.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Mapping
@@ -32,7 +31,9 @@ from typing import Any, Final
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
-from .._yaml_io import load_yaml_mapping
+from .._policy_io import read_policy_mode_fail_closed
+from .._policy_types import VALID_ACTIVE_PATHS
+from .._yaml_io import load_plugin_section
 from . import api
 from ._exceptions import (
     BringupFailed,
@@ -45,8 +46,6 @@ _LOG = logging.getLogger("mordred.network.hooks")
 
 _DEFAULT_POLICY_MODE: Final[str] = "off"
 _DEFAULT_NETWORK_PATH: Final[str] = "clearnet"
-_VALID_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn", "clearnet"})
-_VALID_MODES: Final[frozenset[str]] = frozenset({"strict", "lenient", "off"})
 
 
 # --------------------------------------------------------------------------- #
@@ -62,69 +61,36 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     cannot be read or parsed reads as ``"strict"``. Falling back to
     ``"off"`` meant corrupting policy.json silently disabled strict
     enforcement on both hook paths (session bring-up and the per-tool
-    dropped-path gate).
-
-    Open-first (review follow-up): an ``exists()`` pre-check would both
-    race the open (TOCTOU) and read a stat failure (e.g. search permission
-    stripped from the parent dir) as "absent" → off. Only a clean
-    ``FileNotFoundError`` — including a dangling symlink, equivalent to
-    deletion — keeps the fresh-install default; every other failure is
-    strict.
+    dropped-path gate). The open-first mechanics live in the shared
+    :func:`.._policy_io.read_policy_mode_fail_closed` so llm_guard's
+    reader cannot drift from this one.
     """
-    try:
-        f = policy_json_path.open(encoding="utf-8")
-    except FileNotFoundError:
-        return _DEFAULT_POLICY_MODE
-    except OSError as e:
-        _LOG.error(
-            "policy file %s exists but is unreadable (%s); failing closed to strict",
-            policy_json_path,
-            e,
-        )
-        return "strict"
-    try:
-        with f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.error(
-            "policy file %s exists but is unreadable (%s); failing closed to strict",
-            policy_json_path,
-            e,
-        )
-        return "strict"
-    if not isinstance(data, dict):
-        _LOG.error(
-            "policy file %s has a non-dict root; failing closed to strict",
-            policy_json_path,
-        )
-        return "strict"
-    mode = data.get("policy", _DEFAULT_POLICY_MODE)
-    # Codex round 3 P2 (2026-05-14): isinstance check before frozenset
-    # membership — ``in`` on a frozenset raises TypeError for unhashable
-    # values like ``[]`` / ``{}``.
-    if isinstance(mode, str) and mode in _VALID_MODES:
-        return mode
-    _LOG.error("invalid policy %r in %s; failing closed to strict", mode, policy_json_path)
-    return "strict"
+    return read_policy_mode_fail_closed(policy_json_path, default=_DEFAULT_POLICY_MODE, log=_LOG)
+
+
+def resolve_default_path(section: Mapping[str, Any] | None) -> str:
+    """Validated ``default_path`` from a ``plugins.mordred_network`` section.
+
+    Missing section / missing key / invalid value all collapse to
+    ``clearnet`` (safe default). THE single definition of that validation —
+    the hook-time read (:func:`_read_default_network_path`), the
+    registration-time bootstrap (``network.__init__._load_runtime_config``)
+    and the wizard's status reader all resolve through here, so the path the
+    runtime bootstraps with and the path the other readers report cannot
+    drift.
+    """
+    value = (section or {}).get("default_path", _DEFAULT_NETWORK_PATH)
+    if isinstance(value, str) and value in VALID_ACTIVE_PATHS:
+        return value
+    return _DEFAULT_NETWORK_PATH
 
 
 def _read_default_network_path(config_path: Path) -> str:
     """Read ``plugins.mordred_network.default_path`` from ``config.yaml``.
 
-    Missing file / missing key / invalid value all collapse to
-    ``clearnet`` (safe default). Wizard PR2-C is the writer.
+    Wizard PR2-C is the writer.
     """
-    data = load_yaml_mapping(config_path, log=_LOG)
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return _DEFAULT_NETWORK_PATH
-    network = plugins.get("mordred_network")
-    if not isinstance(network, dict):
-        return _DEFAULT_NETWORK_PATH
-    value = network.get("default_path", _DEFAULT_NETWORK_PATH)
-    if isinstance(value, str) and value in _VALID_PATHS:
-        return value
-    return _DEFAULT_NETWORK_PATH
+    return resolve_default_path(load_plugin_section(config_path, "mordred_network", log=_LOG))
 
 
 # --------------------------------------------------------------------------- #
