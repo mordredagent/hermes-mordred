@@ -147,6 +147,15 @@ __all__ = [
 ]
 
 
+#: Top-level modules of the optional ``[keyvault]`` crypto stack (pyproject
+#: ``[project.optional-dependencies]``). :func:`dispatch` translates a
+#: ``ModuleNotFoundError`` for exactly these into an install hint — on a
+#: minimal install (core deps only) a vault / keyvault / encryption command
+#: otherwise dumps a raw traceback the first time it touches a crypto-backed
+#: module (observed: ``vault status`` on the 0.1.0a1 wheel, 2026-07-09).
+_KEYVAULT_STACK_MODULES = frozenset({"argon2", "cryptography", "blake3"})
+
+
 def dispatch(args: argparse.Namespace) -> int:
     """Top-level dispatch helper.
 
@@ -185,6 +194,18 @@ def dispatch(args: argparse.Namespace) -> int:
     except NonInteractiveAbort as exc:
         _term.emit_error(str(exc))
         return 2
+    except ModuleNotFoundError as exc:
+        # Only the known optional crypto stack is translated; any other
+        # missing module is a real bug and must keep its traceback.
+        root = (exc.name or "").partition(".")[0]
+        if root not in _KEYVAULT_STACK_MODULES:
+            raise
+        _term.emit_error(
+            f"this command needs the keyvault crypto stack (missing: {root}) — "
+            "install with: pip install 'mordred-hermes[keyvault]' "
+            "(on macOS use '[macos]' to also enable Secure Enclave support)"
+        )
+        return 1
     return int(result) if isinstance(result, int) else 0
 
 
