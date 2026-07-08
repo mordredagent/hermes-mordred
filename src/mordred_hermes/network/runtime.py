@@ -38,9 +38,12 @@ from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
+from .._audit_support import safe_audit_append
+from .._policy_types import ActivePath as ActivePath
+from .._policy_types import PolicyMode as PolicyMode
 from . import proxy_env as proxy_env_mod
 from ._exceptions import (
     AlreadySwitching,
@@ -55,9 +58,6 @@ from .paths import tor as tor_mod
 from .vpn_providers import VpnProvider, build_provider
 
 _LOG = logging.getLogger("mordred.network.runtime")
-
-PolicyMode = Literal["strict", "lenient", "off"]
-ActivePath = Literal["tor", "vpn", "clearnet"]
 
 
 class State(Enum):
@@ -307,9 +307,7 @@ class Runtime:
             self._restore_env()
             self._state = State.IDLE
             self._active_path = "clearnet"
-            self._failure_count = 0
-            self._dropped = False
-            self._last_health = True
+            self._reset_liveness()
 
     # ------------------------------------------------------------------ #
     # Public helpers for hooks layer (PR2-B)                              #
@@ -362,6 +360,20 @@ class Runtime:
     # Internals                                                          #
     # ------------------------------------------------------------------ #
 
+    def _reset_liveness(self) -> None:
+        """Zero the M9 liveness-worker counters for a fresh observation run.
+
+        Every transition that installs a definitive new path state
+        (successful switch, lenient fallback, strict unwind, ``stop``)
+        must clear the failure streak and the sticky ``_dropped`` flag so
+        the worker judges the new path on its own probes only. Callers
+        hold ``_lock``; the accompanying ``_state`` value differs per
+        transition and stays at the call site.
+        """
+        self._failure_count = 0
+        self._dropped = False
+        self._last_health = True
+
     def _switch(self, target: ActivePath) -> None:
         """State machine transition: optional teardown -> bring-up -> ready.
 
@@ -394,9 +406,7 @@ class Runtime:
                 self._restore_env()
                 self._active_path = "clearnet"
                 self._state = State.IDLE
-                self._failure_count = 0
-                self._dropped = False
-                self._last_health = True
+                self._reset_liveness()
                 raise
             # lenient / off: fall back to clearnet and audit it.
             self._emit_audit(
@@ -414,9 +424,7 @@ class Runtime:
             self._active_path = "clearnet"
             self._apply_env("clearnet")
             self._state = State.DEGRADED
-            self._failure_count = 0
-            self._dropped = False
-            self._last_health = True
+            self._reset_liveness()
             self._start_worker()
             return
 
@@ -424,9 +432,7 @@ class Runtime:
         self._active_path = target
         self._apply_env(target)
         self._state = State.READY
-        self._failure_count = 0
-        self._dropped = False
-        self._last_health = True
+        self._reset_liveness()
         self._start_worker()
 
     def _stop_worker_during_switch(self) -> None:
@@ -479,31 +485,24 @@ class Runtime:
                 f"tor binary {self._config.tor_binary!r} could not be spawned: {spawn_err}. "
                 f"{tor_install_guidance(tor_binary=self._config.tor_binary)}"
             ) from spawn_err
+        # Plain-dataclass construction (no side effects), built once so the
+        # bring-up-failure cleanup and the success return cannot drift.
+        tor_handle = tor_mod.TorHandle(
+            process=proc,
+            socks_port=port,
+            control_port=control_port,
+            data_dir=self._config.tor_data_dir,
+        )
         try:
             self._tor_wait(proc)
         except BringupFailed:
             # Half-started process must not leak even when bring-up fails.
             try:
-                self._tor_stop(
-                    tor_mod.TorHandle(
-                        process=proc,
-                        socks_port=port,
-                        control_port=control_port,
-                        data_dir=self._config.tor_data_dir,
-                    )
-                )
+                self._tor_stop(tor_handle)
             except Exception as cleanup_err:
                 _LOG.warning("tor cleanup after bring-up failure: %s", cleanup_err)
             raise
-        return _ActiveHandle(
-            "tor",
-            tor_mod.TorHandle(
-                process=proc,
-                socks_port=port,
-                control_port=control_port,
-                data_dir=self._config.tor_data_dir,
-            ),
-        )
+        return _ActiveHandle("tor", tor_handle)
 
     def _bring_up_vpn(self) -> _ActiveHandle:
         # Fail-closed kill-switch gate (design §6): strict mode demands a
@@ -550,7 +549,13 @@ class Runtime:
         preserve_on_cleanup = not getattr(vpn_handle, "lockdown_applied_by_us", False)
         try:
             self._vpn_provider.wait_connected(cli_path=cli_path)
-        except BringupFailed:
+        except (BringupFailed, OSError) as wait_err:
+            # One shared disconnect-cleanup; the re-raise below preserves the
+            # two distinct exception contracts: BringupFailed propagates
+            # as-is, while a bare OSError is wrapped so the strict-mode
+            # escalation in :meth:`_switch` (which catches only
+            # BringupFailed) cannot be bypassed by Hermes' ``except
+            # Exception`` filter swallowing the OSError (Codex round 4 P1).
             try:
                 self._vpn_provider.disconnect(
                     vpn_handle,
@@ -558,15 +563,8 @@ class Runtime:
                 )
             except Exception as cleanup_err:
                 _LOG.warning("vpn cleanup after wait failure: %s", cleanup_err)
-            raise
-        except OSError as wait_err:
-            try:
-                self._vpn_provider.disconnect(
-                    vpn_handle,
-                    preserve_lockdown=preserve_on_cleanup,
-                )
-            except Exception as cleanup_err:
-                _LOG.warning("vpn cleanup after wait OSError: %s", cleanup_err)
+            if isinstance(wait_err, BringupFailed):
+                raise
             raise BringupFailed(f"vpn provider wait failed: {wait_err}") from wait_err
         return _ActiveHandle("vpn", vpn_handle)
 
@@ -622,14 +620,14 @@ class Runtime:
         self._env_snapshot = None
 
     def _emit_audit(self, entry: dict[str, Any]) -> None:
+        """Best-effort audit append via the shared ``safe_audit_append``.
+
+        Audit failure must never break a path switch (M3 contract:
+        ``use(path)`` either completes or raises a network error).
+        """
         if self._audit is None:
             return
-        try:
-            self._audit.append(entry)
-        except Exception as e:
-            # Audit failure must never break a path switch (M3 contract:
-            # ``use(path)`` either completes or raises a network error).
-            _LOG.error("network audit append failed: %s", e)
+        safe_audit_append(self._audit, entry, logger=_LOG)
 
     # ------------------------------------------------------------------ #
     # Liveness worker                                                    #

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..privacy_check._runtime import get_active_audit_path
 from . import _term
+from ._defaults import resolve_backend
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
 if TYPE_CHECKING:
@@ -292,10 +293,7 @@ def decrypt(
     from ..keyvault import log_encryption
     from ..keyvault._exceptions import WrapAuthCancelled, WrapKeyNotFound
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
+    backend = resolve_backend(backend)
     sink = audit_sink if audit_sink is not None else _stderr_unwrap_sink
 
     rc = 0

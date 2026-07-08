@@ -23,11 +23,8 @@ import secrets
 import shutil
 from pathlib import Path
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from . import _storage, backup, crypto, recovery, wrap
 from ._envelope_codec import (
-    _AES_NONCE_LEN,
     _encode_envelope,
     _encode_envelope_from_hashes,
     _hash_id,
@@ -218,9 +215,11 @@ def decrypt(
     aad, wrapped_dek_blob, aes_blob = _parse_envelope(blob, key_id, purpose)
     dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
     try:
-        nonce = aes_blob[:_AES_NONCE_LEN]
-        ct_tag = aes_blob[_AES_NONCE_LEN:]
-        return AESGCM(dek).decrypt(nonce, ct_tag, aad)
+        # The envelope's aes_blob is exactly crypto.encrypt's self-contained
+        # ``nonce(12) || ct || tag`` format, and _split_envelope already
+        # enforced the nonce+tag minimum length, so crypto.decrypt is the
+        # single nonce-split implementation.
+        return crypto.decrypt(dek, aes_blob, aad=aad)
     finally:
         del dek
 
@@ -308,7 +307,7 @@ def export_backup(
                 aad, purpose_hash, wrapped_dek_blob, aes_blob = _split_envelope(blob, key_id_hash)
                 dek = wrap.unwrap_dek(wrapped_dek_blob, key_id, audit_sink=audit_sink, backend=backend)
                 try:
-                    plaintext = AESGCM(dek).decrypt(aes_blob[:_AES_NONCE_LEN], aes_blob[_AES_NONCE_LEN:], aad)
+                    plaintext = crypto.decrypt(dek, aes_blob, aad=aad)
                     # Portable AAD — no per-device MRKW prefix, so the import
                     # device reconstructs it from key_id + purpose_hash.
                     manifest_aad = _MANIFEST_MAGIC + key_id_hash + purpose_hash
@@ -422,23 +421,41 @@ def _rollback_import(
     root: Path,
     *,
     new_key_id_hash_hex: str,
-    commit_path: Path,
+    commit_path: Path | None,
     imported_key_id: str,
     backend: NativeBackend,
+    remove_ciphertext_tree: bool = True,
 ) -> None:
-    """Best-effort rollback of a failed :func:`import_backup`.
+    """Best-effort rollback of a failed provisioning transaction.
 
-    Each step is independently suppressed so the ORIGINAL failure always
-    propagates via the caller's bare ``raise``. Removes the ciphertext tree
-    and the commit digest, deletes the destination Enclave key, and drops the
-    ``meta.json`` row if it landed.
+    Shared by :func:`import_backup` and ``api.confirm_generate`` — both
+    commit the same way (Enclave key first, then the commit digest, then the
+    ``meta.json`` row) and so undo the same way. Each step is independently
+    suppressed so the ORIGINAL failure always propagates via the caller's
+    bare ``raise``:
+
+    - delete the destination Enclave key FIRST: if the process dies between
+      rollback steps, every remaining residue (stale digest, orphaned
+      ciphertext tree, meta row) self-heals on the next attempt, whereas an
+      orphaned Enclave key makes the retry's ``generate_wrapping_key`` fail
+      with ``WrapKeyAlreadyExists`` and needs a destructive ``keyvault
+      reset`` to clear;
+    - remove the rebuilt ciphertext tree (``remove_ciphertext_tree=False``
+      for ``confirm_generate``, which writes no envelopes);
+    - drop the commit digest if it was written (``commit_path=None`` when
+      the transaction failed before the path was even derived);
+    - repair ``meta.json``: ``save_meta``'s atomic rename may have committed
+      the new meta.json before a later fsync raised, so re-read and drop the
+      row if it landed (codex P2).
     """
     with contextlib.suppress(Exception):
-        shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
-    with contextlib.suppress(OSError):
-        commit_path.unlink(missing_ok=True)
-    with contextlib.suppress(Exception):
         backend.delete_enclave_key(imported_key_id)
+    if remove_ciphertext_tree:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(root / "ciphertexts" / new_key_id_hash_hex, ignore_errors=True)
+    if commit_path is not None:
+        with contextlib.suppress(OSError):
+            commit_path.unlink(missing_ok=True)
     with contextlib.suppress(Exception):
         repaired = _storage.load_meta(root)
         if repaired["keys"].pop(new_key_id_hash_hex, None) is not None:

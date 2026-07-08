@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from .._home import HERMES_BASE, hermes_home
-from .._yaml_io import load_yaml_mapping
+from .._policy_types import POLICY_MODES
+from .._yaml_io import load_plugin_section, load_yaml_mapping
 from .audit import Writer, make_audit_writer
 from .policy import PolicyMode
 
@@ -117,15 +118,14 @@ def get_active_policy_mode(*, config_path: Path | None = None) -> PolicyMode:
     output cannot drift from install-time enforcement when users edit
     ``config.yaml`` directly.
     """
-    cfg = _load_yaml(config_path or DEFAULT_HERMES_CONFIG_PATH)
-    plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
-        return "lenient"
-    section = plugins_cfg.get("mordred_privacy_check")
-    if not isinstance(section, dict):
+    section = _load_own_section(config_path or DEFAULT_HERMES_CONFIG_PATH)
+    if section is None:
         return "lenient"
     raw = section.get("policy", "lenient")
-    if raw in ("strict", "lenient", "off"):
+    # POLICY_MODES is the ordered tuple, not the frozenset: ``in`` on a
+    # frozenset raises TypeError for unhashable YAML values (hooks.py Codex
+    # round 3 P2), while the tuple returns False and falls back to lenient.
+    if raw in POLICY_MODES:
         return cast(PolicyMode, raw)
     _LOG.warning("invalid policy %r in %s; defaulting to lenient", raw, config_path or DEFAULT_HERMES_CONFIG_PATH)
     return "lenient"
@@ -144,27 +144,18 @@ def get_active_audit_path(*, config_path: Path | None = None) -> Path:
     when users configure a custom ``plugins.mordred_privacy_check.audit_log_path``;
     otherwise the CLI would silently read the default path and miss entries.
     """
-    cfg = _load_yaml(config_path or DEFAULT_HERMES_CONFIG_PATH)
-    plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
-        return DEFAULT_AUDIT_PATH
-    section = plugins_cfg.get("mordred_privacy_check")
-    if not isinstance(section, dict):
+    section = _load_own_section(config_path or DEFAULT_HERMES_CONFIG_PATH)
+    if section is None:
         return DEFAULT_AUDIT_PATH
     return _resolve_audit_path(section.get("audit_log_path"))
 
 
 def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginState:
-    cfg = _load_yaml(config_path)
-    plugins_cfg = cfg.get("plugins")
-    if not isinstance(plugins_cfg, dict):
-        plugins_cfg = {}
-    section = plugins_cfg.get("mordred_privacy_check")
-    if not isinstance(section, dict):
-        section = {}
+    section = _load_own_section(config_path) or {}
 
     raw_policy = section.get("policy", "lenient")
-    if raw_policy in ("strict", "lenient", "off"):
+    # Tuple membership on purpose — see get_active_policy_mode.
+    if raw_policy in POLICY_MODES:
         policy_mode: PolicyMode = raw_policy
     else:
         _LOG.warning("invalid policy %r in config; defaulting to lenient", raw_policy)
@@ -233,6 +224,15 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     # Historically caught bare ``Exception``; ``catch=(Exception,)`` preserves
     # that wider net (see :mod:`mordred_hermes._yaml_io`).
     return load_yaml_mapping(path, catch=(Exception,), log=_LOG)
+
+
+def _load_own_section(path: Path) -> dict[str, Any] | None:
+    """Return the ``plugins.mordred_privacy_check`` mapping, or ``None``.
+
+    Same broad ``catch=(Exception,)`` net as :func:`_load_yaml` — a config
+    read must never crash a hook invocation.
+    """
+    return load_plugin_section(path, "mordred_privacy_check", catch=(Exception,), log=_LOG)
 
 
 def _read_disabled_from_yaml(config_path: Path) -> set[str]:

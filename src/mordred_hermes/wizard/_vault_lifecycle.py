@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import _term
+from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
 from ._vault_open import _build_device_auth, _vault_identity
 
 if TYPE_CHECKING:
@@ -57,14 +58,8 @@ def init(
 
     key_id = anchor_label = _vault_identity(root)
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
+    backend = resolve_backend(backend)
+    store = resolve_store(store)
 
     # Re-init guard before prompting: an existing anchor means a live vault. A
     # Keychain read failure here is fail-closed (we cannot prove the vault is
@@ -78,10 +73,7 @@ def init(
         _term.emit_error(f"A vault is already initialised at {root} — refusing to clobber it.")
         return 1
 
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
     # Teach the two-key model at creation time — the single most confusing point
     # for newcomers (vault has ONE master key opened two ways): the device key is
     # the everyday opener; the passphrase is the cold-path backup, not something
@@ -151,10 +143,7 @@ def ensure_initialised(
     """
     from ..keyvault import anchor
 
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
+    store = resolve_store(store)
 
     anchor_label = _vault_identity(root)
     try:
@@ -206,10 +195,7 @@ def change_passphrase(
     # Off-macOS the SE backend / keychain don't import; _build_device_auth returns
     # (None, None) then, and we fall through to the passphrase path below.
     device_backend, device_store = _build_device_auth(backend, store)
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
 
     new_passphrase = prompt_io.ask_password("Choose a NEW recovery passphrase")
     if not new_passphrase:
@@ -311,10 +297,7 @@ def recover(
         )
         return 1
 
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
     passphrase = prompt_io.ask_password("Vault recovery passphrase")
 
     try:

@@ -162,25 +162,35 @@ def ensure_layout(root: Path) -> None:
             os.chmod(d, _DIR_MODE)
 
     lock = root / ".lock"
-    if not lock.exists():
-        try:
-            fd = os.open(
-                lock,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                _FILE_MODE,
-            )
-            os.close(fd)
-        except FileExistsError:
-            # Lost the creation race to a concurrent ensure_layout — the
-            # winner's lock file serves both processes; _check_file_mode
-            # below validates it exactly as if we had created it.
-            pass
+    ensure_lock_file(lock)
     _check_file_mode(lock)
 
     meta = root / "meta.json"
     if not meta.exists():
         _write_meta_atomic(meta, {"version": _META_VERSION, "keys": {}})
     _check_file_mode(meta)
+
+
+def ensure_lock_file(path: Path) -> None:
+    """Create the ``fcntl.flock`` target at ``path`` (mode ``0o600``) if absent.
+
+    Shared by :func:`ensure_layout` and the vault layer (``vault._ensure_lock``),
+    which materialize their flock targets the same way. ``O_EXCL | O_NOFOLLOW``
+    so a pre-planted symlink is refused rather than followed. Losing the
+    creation race to a concurrent creator is fine — the winner's lock file
+    serves both processes; the caller's subsequent flock (or
+    :func:`_check_file_mode`) uses/validates it exactly as if we had created it.
+    """
+    if not path.exists():
+        try:
+            fd = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                _FILE_MODE,
+            )
+            os.close(fd)
+        except FileExistsError:
+            pass
 
 
 def atomic_write(path: Path, data: bytes) -> None:

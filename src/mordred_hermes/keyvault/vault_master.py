@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from . import backup, recovery, wrap
 from ._exceptions import WrapKeyAlreadyExists
-from .kek import MasterKey
+from .kek import MasterKey, _noop_audit
 from .wrap import DEK_LEN, NativeBackend
 
 
@@ -111,15 +111,6 @@ def open_passphrase(recovery_blob: bytes, passphrase: str, *, wmk: bytes) -> Mas
         del master_bytes
 
 
-def _noop_audit(_entry: dict[str, object]) -> None:
-    """Discard sink for the device unwrap during a passphrase rotation.
-
-    Mirrors :func:`mordred_hermes.keyvault.kek.open_master_key`, which also
-    unwraps prompt-free with no audit sink by default. Auditing the rotation
-    itself is a possible follow-up.
-    """
-
-
 def rewrap_from_device(*, key_id: str, new_passphrase: str, backend: NativeBackend, wmk: bytes) -> bytes:
     """Re-seal the EXISTING master under *new_passphrase*, authorized by the device key.
 
@@ -137,6 +128,9 @@ def rewrap_from_device(*, key_id: str, new_passphrase: str, backend: NativeBacke
     """
     if not new_passphrase:
         raise ValueError("vault recovery passphrase must not be empty")
+    # The rotation's device unwrap discards its audit entry (kek._noop_audit),
+    # mirroring kek.open_master_key's prompt-free default. Auditing the
+    # rotation itself is a possible follow-up.
     master_bytes = wrap.unwrap_dek(wmk, key_id, audit_sink=_noop_audit, backend=backend)
     try:
         return backup.export(master_bytes, new_passphrase, verification_digest=_recovery_digest(wmk))

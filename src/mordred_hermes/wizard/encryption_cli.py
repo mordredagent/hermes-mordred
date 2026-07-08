@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,6 +44,8 @@ from ..keyvault._config_bootstrap import config_hook_installed
 from ..keyvault._identity import resolve_root
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
+from ._workspace_paths import WorkspacePaths, resolve_workspace_env
+from ._workspace_paths import is_mountpoint as _is_mountpoint
 
 __all__ = [
     "TARGETS",
@@ -105,15 +106,6 @@ class TargetStatus:
         return out
 
 
-@dataclass(frozen=True)
-class WorkspacePaths:
-    """On-disk locations of the external ``claude-private`` workspace."""
-
-    image: Path
-    blob: Path
-    mount: Path
-
-
 # -----------------------------------------------------------------------------
 # Side-effect-free detection primitives
 # -----------------------------------------------------------------------------
@@ -145,21 +137,9 @@ def _memory_flag_enabled(home: Path) -> bool:
     Side-effect-free read. A missing / unreadable / sealed-away config.yaml is
     treated as not-enabled (the flag is simply not observable here).
     """
-    config_path = home / _CONFIG_NAME
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
+    from .._yaml_io import load_yaml_mapping
 
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
-    try:
-        data = YAML(typ="safe").load(text)
-    except YAMLError:
-        return False
-    if not isinstance(data, dict):
-        return False
+    data = load_yaml_mapping(home / _CONFIG_NAME)
     memory = data.get("memory")
     encryption = memory.get("encryption") if isinstance(memory, dict) else None
     enabled = encryption.get("enabled") if isinstance(encryption, dict) else None
@@ -267,13 +247,6 @@ def workspace_status(
     # `mounted` only carries meaning once the volume is set up on this OS;
     # otherwise the mark is plain `off` and the sealed/open distinction is moot.
     return TargetStatus("workspace", configured, active, detail, mounted=mounted if active else None)
-
-
-def _is_mountpoint(path: Path) -> bool:
-    try:
-        return os.path.ismount(str(path))
-    except OSError:
-        return False
 
 
 # -----------------------------------------------------------------------------
@@ -420,14 +393,11 @@ def render_text(statuses: list[TargetStatus], *, color: bool = False) -> str:
 def _default_workspace_paths() -> WorkspacePaths:
     """Resolve the ``claude-private`` artifact locations from env + HOME defaults.
 
-    Mirrors the external wrapper's own defaults / ``CLAUDE_PRIVATE_*`` overrides
-    (see ``~/.local/share/claude-private/bin/claude-private``).
+    Delegates to :func:`._workspace_paths.resolve_workspace_env` — the same
+    resolver the enable/disable/purge verbs use — so ``status`` reports exactly
+    the artifacts those verbs operate on.
     """
-    home = Path(os.path.expanduser("~"))
-    image = Path(os.environ.get("CLAUDE_PRIVATE_IMAGE", str(home / "Private" / "claude-private.sparsebundle")))
-    keydir = Path(os.environ.get("CLAUDE_PRIVATE_KEYDIR", str(home / ".config" / "claude-private")))
-    mount = Path(os.environ.get("CLAUDE_PRIVATE_MOUNT", str(home / ".claude-private-mnt")))
-    return WorkspacePaths(image=image, blob=keydir / "passphrase.wrapped", mount=mount)
+    return resolve_workspace_env()
 
 
 def status(

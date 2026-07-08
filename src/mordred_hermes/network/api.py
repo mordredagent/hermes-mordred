@@ -24,13 +24,11 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final, Literal, Protocol
+from typing import Any, Protocol
 
+from .._policy_types import VALID_ACTIVE_PATHS
+from .._policy_types import ActivePath as ActivePath
 from ._exceptions import BlackoutNotAsserted, MordredNetworkError, UnknownPath
-
-ActivePath = Literal["tor", "vpn", "clearnet"]
-
-_VALID_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn", "clearnet"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +67,12 @@ class Runtime(Protocol):
 
     def is_dropped(self) -> bool: ...
 
-    # ``PolicyMode`` Literal lives in :mod:`.runtime` to avoid an
-    # import cycle; ``str`` here keeps the Protocol decoupled. The
-    # concrete runtime narrows at the call site.
+    # ``PolicyMode`` now lives in the leaf module
+    # :mod:`mordred_hermes._policy_types`, so no import cycle forces the
+    # wide type — it stays wide because the module-level
+    # :func:`update_policy_mode` passes through the plain ``str`` the
+    # hooks layer reads from disk; the concrete runtime narrows at the
+    # call site.
     def update_policy_mode(self, policy_mode: Any) -> None: ...
 
     def set_isolation_token(self, token: str | None) -> None: ...
@@ -107,7 +108,7 @@ def _resolve_runtime(runtime: Runtime | None) -> Runtime:
 
 def use(path: ActivePath, *, runtime: Runtime | None = None) -> None:
     """Switch the active path. Raises :class:`UnknownPath` for bad input."""
-    if path not in _VALID_PATHS:
+    if path not in VALID_ACTIVE_PATHS:
         raise UnknownPath(f"unknown network path: {path!r}")
     rt = _resolve_runtime(runtime)
     rt.use(path)

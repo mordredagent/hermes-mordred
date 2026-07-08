@@ -456,18 +456,15 @@ def _read_existing_policy_inputs(policy_writer: PolicyWriter) -> dict[str, objec
     except (OSError, ValueError):
         pass
 
-    from ruamel.yaml import YAML
     from ruamel.yaml.error import YAMLError
 
-    try:
-        with policy_writer.config_path.open(encoding="utf-8") as f:
-            data = YAML(typ="safe", pure=True).load(f)
-        plugins = data.get("plugins") if isinstance(data, dict) else None
-        guard = plugins.get("mordred_llm_guard") if isinstance(plugins, dict) else None
-        if isinstance(guard, dict) and isinstance(guard.get("harness_primary"), str):
-            existing["harness_primary"] = guard["harness_primary"]
-    except (OSError, ValueError, YAMLError):
-        pass  # any unreadable config falls back to defaults
+    from .._yaml_io import load_plugin_section
+
+    # ValueError joins the shared helper's default catch set — this site has
+    # historically swallowed it, and any unreadable config falls back to defaults.
+    guard = load_plugin_section(policy_writer.config_path, "mordred_llm_guard", catch=(OSError, ValueError, YAMLError))
+    if guard is not None and isinstance(guard.get("harness_primary"), str):
+        existing["harness_primary"] = guard["harness_primary"]
     return existing
 
 

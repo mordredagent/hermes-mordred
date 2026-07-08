@@ -57,6 +57,7 @@ import time
 from collections.abc import Callable
 from typing import Any, NoReturn, Protocol
 
+from ._audit_emit import chain_and_raise, emit_capture
 from .api import SeedDisplayExpired, SeedDisplayHandle
 from .wrap import AuditSink
 
@@ -261,24 +262,18 @@ def _emit_abort(audit_sink: AuditSink | None, *, detector: str) -> Exception | N
     """Best-effort emit of the ``keyvault.seed_display_aborted_screenshot`` entry.
 
     Returns the sink's exception (if it raised) so the caller can chain it
-    as ``__context__`` on :class:`SeedDisplayAborted`. ``except Exception``
-    (not ``BaseException``) — ``KeyboardInterrupt`` / ``SystemExit`` /
-    ``GeneratorExit`` must propagate untouched (mirrors PR2/PR3 sinks).
+    as ``__context__`` on :class:`SeedDisplayAborted` — the PR2/PR3 sink
+    policy, documented once in :mod:`._audit_emit`.
     """
-    if audit_sink is None:
-        return None
-    try:
-        audit_sink(
-            {
-                "event": "keyvault.seed_display",
-                "decision": "block",
-                "reason": "keyvault.seed_display_aborted_screenshot",
-                "detector": detector,
-            }
-        )
-    except Exception as exc:
-        return exc
-    return None
+    return emit_capture(
+        audit_sink,
+        {
+            "event": "keyvault.seed_display",
+            "decision": "block",
+            "reason": "keyvault.seed_display_aborted_screenshot",
+            "detector": detector,
+        },
+    )
 
 
 def _abort(audit_sink: AuditSink | None, *, detector: str) -> NoReturn:
@@ -286,13 +281,10 @@ def _abort(audit_sink: AuditSink | None, *, detector: str) -> NoReturn:
 
     Called from :func:`display_seed`'s normal control flow (never from an
     ``except`` handler), so the explicit ``__context__`` assignment is not
-    overwritten by the ``raise`` machinery.
+    overwritten by the ``raise`` machinery (see :mod:`._audit_emit`).
     """
     sink_exc = _emit_abort(audit_sink, detector=detector)
-    aborted = SeedDisplayAborted(detector)
-    if sink_exc is not None:
-        aborted.__context__ = sink_exc
-    raise aborted
+    chain_and_raise(SeedDisplayAborted(detector), sink_exc)
 
 
 def display_seed(

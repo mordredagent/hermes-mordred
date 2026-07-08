@@ -24,31 +24,22 @@ so the orchestration is unit-tested on any platform.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 from . import _term
+from ._workspace_paths import WorkspaceEnv
+from ._workspace_paths import is_mountpoint as _is_mounted
+from ._workspace_paths import resolve_workspace_env as _resolve_env
 
 __all__ = ["WorkspaceEnv", "cli_disable", "cli_enable", "cli_purge", "disable", "enable", "purge"]
 
 _DARWIN = "darwin"
 _SETUP_BIN = "claude-private-setup"
 _DETACH = "hdiutil"
-
-
-@dataclass(frozen=True)
-class WorkspaceEnv:
-    """On-disk locations of the external ``claude-private`` workspace."""
-
-    image: Path  # the encrypted sparsebundle
-    blob: Path  # the SE-wrapped passphrase
-    mount: Path  # the mountpoint while in-session
-    keydir: Path  # holds the wrapped passphrase (removed on purge)
 
 
 def _is_set_up(env: WorkspaceEnv) -> bool:
@@ -184,24 +175,8 @@ def _remove_path(path: Path) -> bool:
 # -----------------------------------------------------------------------------
 # Production resolution + CLI adapters (wired via encryption_cli dispatch)
 # -----------------------------------------------------------------------------
-def _resolve_env() -> WorkspaceEnv:
-    """Resolve the ``claude-private`` locations from ``CLAUDE_PRIVATE_*`` + HOME defaults."""
-    home = Path(os.path.expanduser("~"))
-    image = Path(os.environ.get("CLAUDE_PRIVATE_IMAGE", str(home / "Private" / "claude-private.sparsebundle")))
-    keydir = Path(os.environ.get("CLAUDE_PRIVATE_KEYDIR", str(home / ".config" / "claude-private")))
-    mount = Path(os.environ.get("CLAUDE_PRIVATE_MOUNT", str(home / ".claude-private-mnt")))
-    return WorkspaceEnv(image=image, blob=keydir / "passphrase.wrapped", mount=mount, keydir=keydir)
-
-
 def _run(cmd: list[str]) -> int:
     return subprocess.run(cmd, check=False).returncode
-
-
-def _is_mounted(path: Path) -> bool:
-    try:
-        return os.path.ismount(str(path))
-    except OSError:
-        return False
 
 
 def cli_enable() -> int:

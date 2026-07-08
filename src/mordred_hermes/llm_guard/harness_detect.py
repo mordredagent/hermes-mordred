@@ -35,7 +35,7 @@ from typing import Any
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
-from .._yaml_io import load_yaml_mapping
+from .._yaml_io import load_plugin_section
 from ._exceptions import MordredHarnessRefused
 
 _LOG = logging.getLogger("mordred.llm_guard.harness_detect")
@@ -156,14 +156,8 @@ def _read_harness_primary(config_path: Path) -> str | None:
     """
     # Historically caught bare ``Exception``; ``catch=(Exception,)`` preserves
     # that wider net (the wizard-not-yet-run path must never raise).
-    data = load_yaml_mapping(config_path, catch=(Exception,), log=_LOG)
-
-    plugins = data.get("plugins")
-    if not isinstance(plugins, dict):
-        return None
-
-    section = plugins.get("mordred_llm_guard")
-    if not isinstance(section, dict):
+    section = load_plugin_section(config_path, "mordred_llm_guard", catch=(Exception,), log=_LOG)
+    if section is None:
         return None
 
     value = section.get("harness_primary")

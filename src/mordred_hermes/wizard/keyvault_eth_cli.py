@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from ..keyvault._exceptions import WrapError
 from . import _term
+from ._defaults import resolve_backend
 from ._keyvault_init import _stderr_audit_sink
 
 if TYPE_CHECKING:
@@ -52,20 +53,6 @@ __all__ = [
 #: a malformed ``envelope_id`` (``ValueError``), or a Secure-Enclave failure
 #: (``WrapError``). Anything else is a real bug and propagates.
 _EXPECTED_ERRORS = (ImportError, OSError, ValueError, WrapError)
-
-
-def _resolve_backend(backend: NativeBackend | None) -> NativeBackend:
-    """Return ``backend`` or build the production Secure-Enclave backend.
-
-    ``None`` builds ``_SecKeyBackend`` (function-local import — it pulls in
-    the native bindings); tests inject a ``FakeBackend``. Mirrors
-    :func:`mordred_hermes.wizard.keyvault_cli.recover`.
-    """
-    if backend is not None:
-        return backend
-    from ..keyvault._seckey_backend import _SecKeyBackend
-
-    return _SecKeyBackend()
 
 
 def _resolve_sink(audit_sink: AuditSink | None) -> AuditSink:
@@ -140,7 +127,7 @@ def eth_new(
     Secure Enclave fails. The private key is stored encrypted and never
     printed.
     """
-    backend = _resolve_backend(backend)
+    backend = resolve_backend(backend)
     sink = _resolve_sink(audit_sink)
     try:
         from ..keyvault.ethereum import generate_ethereum_key
@@ -183,7 +170,7 @@ def eth_derive(
     protected by a 25th word must be derived through the Python API
     (:func:`mordred_hermes.keyvault.ethereum.derive_ethereum_key`).
     """
-    backend = _resolve_backend(backend)
+    backend = resolve_backend(backend)
     sink = _resolve_sink(audit_sink)
 
     resolved = _resolve_seed_envelope_id(key_id, seed_envelope_id, home)
@@ -236,7 +223,7 @@ def eth_address(
     Decryption triggers Enclave authorization (Touch ID / passcode). Returns
     0 on success; 1 for an unknown/malformed envelope or an Enclave error.
     """
-    backend = _resolve_backend(backend)
+    backend = resolve_backend(backend)
     sink = _resolve_sink(audit_sink)
     try:
         from ..keyvault.ethereum import get_ethereum_address

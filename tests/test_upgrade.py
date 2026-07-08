@@ -170,6 +170,54 @@ class TestRunPolicyConflict:
                 openclaw_base=tmp_path / "no-openclaw-here",
             )
 
+    def test_custom_tagged_section_reaches_conflict_path(self, tmp_path: Path) -> None:
+        """A custom YAML tag in the mordred section must not bypass conflict handling.
+
+        Regression: the section read uses the rt loader (``round_trip=True``)
+        precisely because the safe loader raises on custom tags — the broad
+        catch would collapse that to "no section" and the upgrade would
+        silently overwrite the operator's hand-edited section instead of
+        honoring --policy-conflict.
+        """
+        w = _writer(tmp_path)
+        w.write(PolicySnapshot(policy="strict"))
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8").replace("policy: strict", "policy: !keep strict"),
+            encoding="utf-8",
+        )
+
+        report = upgrade.run(
+            options=upgrade.UpgradeOptions(policy_conflict="keep-existing"),
+            policy_writer=w,
+            target_snapshot=PolicySnapshot(policy="strict"),
+            openclaw_base=tmp_path / "no-openclaw-here",
+        )
+        assert report.story1_action == "kept-existing"
+        assert "policy: !keep strict" in config.read_text(encoding="utf-8")  # untouched
+
+    def test_custom_tag_outside_section_stays_idempotent(self, tmp_path: Path) -> None:
+        """A custom tag elsewhere in config.yaml must not break the noop path.
+
+        The safe loader rejects the whole document on any tag; the rt read
+        must still see the (plain, matching) mordred section and report noop.
+        """
+        w = _writer(tmp_path)
+        w.write(PolicySnapshot(policy="strict"))
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8") + "unrelated: !custom value\n",
+            encoding="utf-8",
+        )
+
+        report = upgrade.run(
+            options=upgrade.UpgradeOptions(),
+            policy_writer=w,
+            target_snapshot=PolicySnapshot(policy="strict"),
+            openclaw_base=tmp_path / "no-openclaw-here",
+        )
+        assert report.story1_action == "noop"
+
     def test_reset_overrides_policy_conflict(self, tmp_path: Path) -> None:
         """--reset forces overwrite regardless of --policy-conflict."""
         w = _writer(tmp_path)

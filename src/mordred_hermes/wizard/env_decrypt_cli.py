@@ -22,11 +22,11 @@ Heavy imports stay function-local so this module imports on any platform.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
+from ._runtime_gate import RuntimeProbe, runtime_gate
 from ._vault_open import _vault_present
 
 if TYPE_CHECKING:
@@ -40,12 +40,6 @@ if TYPE_CHECKING:
 __all__ = ["disable", "enable", "purge", "reseal"]
 
 _ENV_NAME = ".env"
-
-#: Runtime-injection probe signature: called ``probe(home=...)`` -> ``(ok, detail)``.
-#: Injected into :func:`enable` so tests can fake the runtime check (matching the
-#: ``backend=`` / ``store=`` injection style); production uses
-#: :func:`_default_runtime_probe`.
-RuntimeProbe = Callable[..., "tuple[bool, str]"]
 
 
 def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
@@ -68,27 +62,27 @@ def _runtime_gate(
     Returns 1 (after printing actionable guidance) when the interpreter that runs
     ``hermes`` cannot inject a sealed ``.env`` at startup, else 0. A no-op (0) off
     macOS — the plaintext is kept there anyway — and when
-    ``force_runtime_unverified`` is set.
+    ``force_runtime_unverified`` is set. The gate core is shared with
+    ``config_decrypt_cli`` via :func:`._runtime_gate.runtime_gate`; only the
+    .env-specific guidance text lives here.
     """
-    if platform != "darwin" or force_runtime_unverified:
-        return 0
-    ok, detail = (runtime_probe or _default_runtime_probe)(home=home)
-    if ok:
-        return 0
-    from ..keyvault._runtime_probe import discover_runtime_python
-
-    runtime_python = discover_runtime_python(home=home) or (home / "hermes-agent" / "venv" / "bin" / "python3")
-    _term.emit_error(
-        "refusing to vault-seal .env — " + detail + ".\n"
-        "  A sealed .env is injected at startup only by the mordred plugin in the\n"
-        "  interpreter that runs `hermes`. mordred-hermes is not published to an\n"
-        "  index — install it into that runtime from your local checkout instead\n"
-        "  (run from the repo root):\n"
-        f"    uv pip install --python {runtime_python} -e './mordred-hermes[macos]'\n"
-        "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"
-        "  unreadable until the runtime has mordred), pass --force-runtime-unverified."
+    return runtime_gate(
+        home=home,
+        platform=platform,
+        runtime_probe=runtime_probe,
+        force_runtime_unverified=force_runtime_unverified,
+        default_probe=_default_runtime_probe,
+        target=".env",
+        mechanism=(
+            "  A sealed .env is injected at startup only by the mordred plugin in the\n"
+            "  interpreter that runs `hermes`. mordred-hermes is not published to an\n"
+            "  index — install it into that runtime from your local checkout instead\n"
+        ),
+        rerun_tail=(
+            "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"
+            "  unreadable until the runtime has mordred), pass --force-runtime-unverified."
+        ),
     )
-    return 1
 
 
 def _handle_missing_plaintext(root: Path, home: Path, env_path: Path) -> int:
@@ -119,19 +113,12 @@ def _env_enrolled(root: Path) -> bool:
 
     Reads the newest manifest's *unverified* plaintext body (the ``files`` keys
     are operational metadata, not secret), so the drift / reseal decision needs
-    neither the master key nor a passphrase. Mirrors
-    :func:`...wizard.encryption_cli._enrolled_names` but scoped to ``.env``.
+    neither the master key nor a passphrase — the same read
+    :func:`.encryption_cli._enrolled_names` does, scoped to ``.env``.
     """
-    from ..keyvault import manifest, vault
+    from .encryption_cli import _enrolled_names
 
-    try:
-        generation = vault._latest_manifest_generation(root)
-        if generation is None:
-            return False
-        blob = vault._manifest_path(root, generation).read_bytes()
-        return _ENV_NAME in manifest.parse_unverified(blob).files
-    except (OSError, manifest.ManifestError):
-        return False
+    return _ENV_NAME in _enrolled_names(root)
 
 
 def _render_env_value(value: str) -> str:

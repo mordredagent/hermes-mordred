@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .._home import hermes_home
-from ._identity import default_vault_root, vault_identity
+from ._identity import default_vault_root, resolve_backend_store, vault_identity
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -114,21 +114,6 @@ def config_hook_installed(*, site_dirs: Sequence[str] | None = None) -> bool:
     return False
 
 
-def _resolve_backend_store(
-    backend: NativeBackend | None, store: AnchorStore | None
-) -> tuple[NativeBackend, AnchorStore]:
-    """Default ``backend`` / ``store`` to the production hot-path implementations."""
-    if backend is None:
-        from ._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
-    return backend, store
-
-
 def materialize_config(
     *,
     root: Path,
@@ -155,14 +140,15 @@ def materialize_config(
     from . import _storage, vault
 
     key_id = anchor_label = vault_identity(root)
-    backend, store = _resolve_backend_store(backend, store)
+    backend, store = resolve_backend_store(backend, store)
 
     # No anchor → no usable vault. The marker promises a vault-managed config, so
     # refusing is the fail-closed choice: starting on default config would silently
-    # drop the operator's settings. Distinguish anchor deletion (artifacts remain)
-    # for a sharper message — a Keychain *read error* propagates untouched.
+    # drop the operator's settings. Distinguish anchor deletion (artifacts remain,
+    # vault.artifacts_present) for a sharper message — a Keychain *read error*
+    # propagates untouched.
     if store.read(anchor_label) is None:
-        if any(root.glob("manifest.*.mvmf")):
+        if vault.artifacts_present(root):
             raise vault.VaultError(
                 f"config.yaml is vault-managed but the device anchor at {root} is missing "
                 f"— refusing to start (possible anchor deletion). {_RECOVERY_HINT}"
@@ -217,7 +203,7 @@ def reseal_config(
     from . import vault
 
     key_id = anchor_label = vault_identity(root)
-    backend, store = _resolve_backend_store(backend, store)
+    backend, store = resolve_backend_store(backend, store)
 
     disk_bytes = plaintext_path.read_bytes()
     with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:

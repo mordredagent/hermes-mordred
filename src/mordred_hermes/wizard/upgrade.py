@@ -32,11 +32,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from ruamel.yaml import YAML
-
+from .._yaml_io import load_plugin_section
 from . import openclaw_migration
 from ._runtime import DEFAULT_OPENCLAW_BASE
-from .policy_writer import PolicySnapshot, PolicyWriter
+from .policy_writer import PolicySnapshot, PolicyWriter, _section_matches_dict
 
 _LOG = logging.getLogger("mordred.wizard.upgrade")
 
@@ -109,35 +108,21 @@ def _read_existing_section(config_path: Path) -> dict[str, Any] | None:
 
     Returns ``None`` if the file or section is absent. Returns the body
     dict (matching ``PolicySnapshot.to_config_yaml_section()``) otherwise.
+    ``round_trip=True`` is load-bearing: the safe loader raises on custom
+    YAML tags, which the broad catch would collapse to "no section" and the
+    caller would then overwrite a hand-edited section without the conflict
+    prompt — the rt loader reads tags as values that compare unequal and
+    route to conflict resolution. ``catch=(Exception,)`` keeps the
+    historical broad net — an unreadable / unparseable config degrades to
+    "no section" here rather than crashing the upgrade.
     """
-    if not config_path.exists():
-        return None
-    yaml = YAML(typ="rt")
-    try:
-        with config_path.open(encoding="utf-8") as f:
-            root = yaml.load(f)
-    except Exception as e:
-        _LOG.warning("could not parse %s: %s", config_path, e)
-        return None
-    if not isinstance(root, dict):
-        return None
-    plugins = root.get("plugins")
-    if not isinstance(plugins, dict):
-        return None
-    section = plugins.get("mordred_privacy_check")
-    if not isinstance(section, dict):
-        return None
-    # Coerce to plain dict (ruamel returns CommentedMap; comparison still
-    # works but tests prefer plain dicts).
-    return dict(section)
+    section = load_plugin_section(config_path, "mordred_privacy_check", catch=(Exception,), log=_LOG, round_trip=True)
+    return None if section is None else dict(section)
 
 
 def _section_matches(existing: dict[str, Any] | None, target: PolicySnapshot) -> bool:
     """True iff the on-disk section equals what the wizard would write."""
-    if existing is None:
-        return False
-    want = target.to_config_yaml_section()
-    return all(existing.get(k) == v for k, v in want.items()) and set(existing.keys()) >= set(want.keys())
+    return existing is not None and _section_matches_dict(existing, target.to_config_yaml_section())
 
 
 def _resolve_story1(

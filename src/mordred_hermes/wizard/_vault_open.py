@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from ..keyvault import _identity
 from . import _term
+from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -86,10 +87,7 @@ def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | No
 
     from ..keyvault import backup, manifest, recovery, vault
 
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
     passphrase = prompt_io.ask_password("Vault passphrase")
 
     try:
@@ -137,14 +135,8 @@ def _open_hot_path_or_report(
     from ..keyvault._exceptions import WrapError
 
     key_id = anchor_label = _vault_identity(root)
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
-    if store is None:
-        from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-        store = KeychainAnchorStore()
+    backend = resolve_backend(backend)
+    store = resolve_store(store)
 
     try:
         return vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
@@ -171,17 +163,9 @@ def _build_device_auth(
     passphrase (cold) path instead of crashing before it. Injected values
     (tests / callers that already have them) are returned unchanged.
     """
-    if backend is not None and store is not None:
-        return backend, store
     try:
-        if backend is None:
-            from ..keyvault._seckey_backend import _SecKeyBackend
-
-            backend = _SecKeyBackend()
-        if store is None:
-            from ..keyvault._anchor_keychain import KeychainAnchorStore
-
-            store = KeychainAnchorStore()
+        backend = resolve_backend(backend)
+        store = resolve_store(store)
     except ImportError:
         return None, None
     return backend, store

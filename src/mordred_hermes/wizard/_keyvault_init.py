@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..keyvault import _storage
 from . import _term
+from ._defaults import resolve_backend, resolve_prompt_io
 
 if TYPE_CHECKING:
     from ..keyvault.api import GenerateResult, SeedDisplayHandle
@@ -580,10 +581,7 @@ def init_keyvault(
     if refusal is not None:
         return refusal
 
-    if prompt_io is None:
-        from .configure import PromptToolkitIO
-
-        prompt_io = PromptToolkitIO()
+    prompt_io = resolve_prompt_io(prompt_io)
     # Orient the operator before the bare passphrase prompt: what this
     # command does and what the Passphrase protects (UX review 2026-06-15).
     print(_intro_banner(), file=sys.stderr)
@@ -602,10 +600,7 @@ def init_keyvault(
     if user_digest is None:
         return 1
 
-    if backend is None:
-        from ..keyvault._seckey_backend import _SecKeyBackend
-
-        backend = _SecKeyBackend()
+    backend = resolve_backend(backend)
     sink = audit_sink if audit_sink is not None else _stderr_audit_sink
 
     result = _confirm_or_refuse(handle, user_digest, backend=backend, audit_sink=sink, home=home)

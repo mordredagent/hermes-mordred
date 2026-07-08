@@ -42,10 +42,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from .._policy_types import ActivePath, PolicyMode
 from .._provider_identity import canonicalize_provider
-from .proxy_env import ActivePath
 
-PolicyMode = Literal["strict", "lenient", "off"]
 Severity = Literal["abort", "warning"]
 TransportClass = Literal["http", "tcp", "udp", "quic", "grpc", "websocket"]
 
