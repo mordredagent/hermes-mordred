@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 
+from .._policy_types import ACTIVE_PATHS, POLICY_MODES
+
 
 def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
     """Build the full ``hermes mordred`` subcommand tree.
@@ -83,7 +85,7 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         action="store_true",
         help="Apply from flags without prompting (CI / scripted use); unspecified flags keep existing settings",
     )
-    p.add_argument("--policy", choices=["strict", "lenient", "off"], help="Mordred policy mode")
+    p.add_argument("--policy", choices=POLICY_MODES, help="Mordred policy mode")
     p.add_argument(
         "--allow-cloud-llm",
         action=argparse.BooleanOptionalAction,
@@ -144,7 +146,7 @@ def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     nsub = p.add_subparsers(dest="network_command", required=True, metavar="COMMAND")
 
     p_use = nsub.add_parser("use", help="Switch active network path")
-    p_use.add_argument("path", choices=["tor", "vpn", "clearnet"])
+    p_use.add_argument("path", choices=ACTIVE_PATHS)
     p_use.set_defaults(func=_handle_network_use)
 
     p_status = nsub.add_parser("status", help="Show active path and liveness")
@@ -160,7 +162,7 @@ def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         action="store_true",
         help="Apply from flags without prompting (CI / scripted use); keeps the existing Mullvad secret",
     )
-    p_init.add_argument("--path", choices=["tor", "vpn", "clearnet"], help="Default network path")
+    p_init.add_argument("--path", choices=ACTIVE_PATHS, help="Default network path")
     p_init.add_argument("--tor-binary", help="Tor binary path (filesystem path or shell-resolvable name)")
     p_init.add_argument("--tor-socks-port", type=int, help="Tor SOCKS port")
     p_init.add_argument("--mullvad-relay", help="Mullvad relay country ('auto' or a 2-letter code)")

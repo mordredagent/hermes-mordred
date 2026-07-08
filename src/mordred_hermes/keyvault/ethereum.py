@@ -86,6 +86,15 @@ class EthereumSignature:
         return self.as_bytes.hex()
 
 
+# One copy of the install guidance for both lazy accessors below — the
+# _eth_validation_error copy fires exactly on the path tests exercise least
+# (a stubbed ``_eth_keys``), so a drifted duplicate would surface stale
+# instructions precisely where nobody notices.
+_ETH_KEYS_REQUIRED = (
+    'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
+)
+
+
 def _eth_keys() -> Any:
     """Lazy import of ``eth_keys``, with an actionable error if absent."""
     try:
@@ -93,9 +102,7 @@ def _eth_keys() -> Any:
 
         return eth_keys
     except ImportError as exc:
-        raise ImportError(
-            'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
-        ) from exc
+        raise ImportError(_ETH_KEYS_REQUIRED) from exc
 
 
 def _eth_validation_error() -> type[Exception]:
@@ -115,9 +122,7 @@ def _eth_validation_error() -> type[Exception]:
     try:
         validation_error: type[Exception] = importlib.import_module("eth_keys.exceptions").ValidationError
     except ImportError as exc:
-        raise ImportError(
-            'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
-        ) from exc
+        raise ImportError(_ETH_KEYS_REQUIRED) from exc
     return validation_error
 
 

@@ -42,6 +42,7 @@ from typing import Any, Final, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
+from .._policy_types import ACTIVE_PATHS
 from .._policy_types import ActivePath as ActivePath
 from .._policy_types import PolicyMode as PolicyMode
 from . import proxy_env as proxy_env_mod
@@ -210,7 +211,7 @@ class Runtime:
 
     def use(self, path: str) -> None:
         """Switch the active path, mutating env + audit log accordingly."""
-        if path not in ("tor", "vpn", "clearnet"):
+        if path not in ACTIVE_PATHS:
             raise UnknownPath(f"unknown network path: {path!r}")
         target = cast(ActivePath, path)
         # Snapshot the subprocess count OUTSIDE the lock (review M1,

@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, cast
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping
+from .._policy_types import POLICY_MODES
 from .._provider_identity import canonicalize_provider
 from .._yaml_io import load_yaml_mapping
 from . import enforce, harness_detect, local_adapter
@@ -259,7 +260,9 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     """Read ``policy`` from ``policy.json``; default to ``_DEFAULT_POLICY_MODE``."""
     data = load_policy_mapping(policy_json_path, log=_LOG)
     mode = data.get("policy", _DEFAULT_POLICY_MODE)
-    if mode in ("strict", "lenient", "off"):
+    # Tuple membership on purpose — unhashable YAML/JSON values must return
+    # False (warn + default), not raise (hooks.py Codex round 3 P2).
+    if mode in POLICY_MODES:
         return cast(str, mode)
     _LOG.warning("invalid policy %r in %s; defaulting to %s", mode, policy_json_path, _DEFAULT_POLICY_MODE)
     return _DEFAULT_POLICY_MODE

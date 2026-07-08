@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import quote
 
+from .._policy_types import ACTIVE_PATHS
 from .._policy_types import ActivePath as ActivePath
 from ._exceptions import UnknownPath
 
@@ -79,7 +80,7 @@ def desired_env(
     circuit. ``None`` / empty leaves the URL credential-free. It is a
     silent no-op on the clearnet / vpn paths, which carry no SOCKS proxy.
     """
-    if path not in ("tor", "vpn", "clearnet"):
+    if path not in ACTIVE_PATHS:
         raise UnknownPath(f"unknown network path: {path!r}")
 
     env: dict[str, str] = {}

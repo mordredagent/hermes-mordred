@@ -121,7 +121,7 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     policy_mode = _resolve_policy_mode(policy_data)
     disable_ipv6 = _resolve_disable_ipv6(policy_data, policy_mode)
     network = _load_network_section(config_path)
-    default_path = _resolve_default_path(network)
+    default_path = hooks.resolve_default_path(network)
     return RuntimeConfig(
         policy_mode=cast(PolicyMode, policy_mode),
         default_path=cast(ActivePath, default_path),
@@ -191,10 +191,6 @@ def _load_network_section(config_path: Path) -> dict[str, Any]:
     so the two readers cannot drift.
     """
     return load_plugin_section(config_path, "mordred_network", log=_LOG) or {}
-
-
-def _resolve_default_path(network: dict[str, Any]) -> str:
-    return hooks.resolve_default_path(network)
 
 
 def _resolve_tor_binary(network: dict[str, Any]) -> str:

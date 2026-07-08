@@ -113,7 +113,7 @@ def resolve_default_path(section: Mapping[str, Any] | None) -> str:
     Missing section / missing key / invalid value all collapse to
     ``clearnet`` (safe default). THE single definition of that validation —
     the hook-time read (:func:`_read_default_network_path`), the
-    registration-time bootstrap (``network.__init__._resolve_default_path``)
+    registration-time bootstrap (``network.__init__._load_runtime_config``)
     and the wizard's status reader all resolve through here, so the path the
     runtime bootstraps with and the path the other readers report cannot
     drift.

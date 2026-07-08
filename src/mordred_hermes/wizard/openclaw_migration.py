@@ -34,6 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section
 from .policy_writer import PolicySnapshot, PolicyWriter, _atomic_write_text, _section_matches_dict
 
@@ -298,11 +299,14 @@ def _should_write_policy(
     through the shared root helper directly — importing ``upgrade`` here
     would be cyclic.
     """
-    existing = load_plugin_section(
+    section = load_plugin_section(
         policy_writer.config_path, "mordred_privacy_check", catch=(Exception,), log=_LOG, round_trip=True
     )
-    if existing is None:
+    if section is None:
         return True
+    # Plain-dict coercion (shallow) mirrors upgrade._read_existing_section —
+    # the two conflict checks must return the same shape for the same file.
+    existing = dict(section)
     want = snapshot.to_config_yaml_section()
     if _section_matches_dict(existing, want):
         return True
@@ -339,7 +343,10 @@ def _coerce_snapshot(config: dict[str, Any]) -> PolicySnapshot:
     ``configure`` defaults so users never end up worse-off than fresh setup.
     """
     raw_policy = config.get("policy", "lenient")
-    policy = raw_policy if raw_policy in ("strict", "lenient", "off") else "lenient"
+    # POLICY_MODES is the tuple, not the frozenset: foreign JSON can carry
+    # unhashable values, and tuple membership returns False instead of
+    # raising TypeError (hooks.py Codex round 3 P2).
+    policy = raw_policy if raw_policy in POLICY_MODES else "lenient"
     # M2 (security review 2026-06-11): a foreign config's string "false"
     # must not truthy-coerce into an enabled cloud-LLM grant.
     raw_allow_flag = config.get("allow_cloud_llm", False)

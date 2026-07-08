@@ -36,6 +36,7 @@ from typing import Any, Final, Literal, Protocol
 
 from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
 
+from .._policy_types import POLICY_MODES
 from . import _term
 from ._prompt_io import (
     _CHOICE_NAV_HINT,
@@ -292,7 +293,7 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
     """
     policy = prompt_io.ask_choice(
         label="Mordred policy mode",
-        choices=("strict", "lenient", "off"),
+        choices=POLICY_MODES,
         default="lenient",
         descriptions=_POLICY_MODE_DESCRIPTIONS,
     )
@@ -492,7 +493,7 @@ def snapshot_from_args(
     # closed-set fields back to their defaults instead of crashing the
     # non-interactive path on a corrupt or downgraded file (review 2026-06-12).
     policy = str(_seeded("policy", "policy", "lenient"))
-    if policy not in ("strict", "lenient", "off"):
+    if policy not in POLICY_MODES:
         policy = "lenient"
     # M2 (security review 2026-06-11): only a real bool may enable —
     # ``bool(...)`` truthy-coerced a hand-edited ``"allow_cloud_llm": "false"``
