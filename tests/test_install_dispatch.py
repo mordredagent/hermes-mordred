@@ -124,6 +124,37 @@ class TestRunAllow:
         assert runner.calls == [["hermes", "skills", "install", str(CLEARNET)]]
 
 
+class TestRunMissingSkill:
+    """A nonexistent / unreadable skill path is an operator error, not a crash.
+
+    ``FileNotFoundError`` otherwise escaped ``run`` as a raw traceback
+    (found in the 2026-07-09 CLI verification sweep:
+    ``hermes-mordred install /tmp/no-such-skill``). Install did not happen,
+    so exit code 2 matches the blocked paths.
+    """
+
+    def test_nonexistent_path_returns_2_with_clean_error(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        state = _make_state(tmp_path, mode="lenient")
+        runner = _RunnerSpy(calls=[])
+
+        rc = install_dispatch.run(
+            skill_arg=str(tmp_path / "no-such-skill"),
+            state=state,
+            runner=runner,
+        )
+
+        assert rc == 2
+        assert runner.calls == [], "unreadable skill must not reach hermes skills install"
+        captured = capsys.readouterr()
+        assert "error" in captured.err.lower()
+        assert "no-such-skill" in captured.err
+        assert captured.out == ""
+
+
 class TestCLIHandler:
     """``cli_handler`` is the thin argparse adapter wired in cli.py."""
 
