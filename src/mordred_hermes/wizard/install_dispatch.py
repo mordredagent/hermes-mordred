@@ -64,6 +64,13 @@ def run(
         label = _term.error("blocked:", enabled=_term.should_color(sys.stderr))
         print(f"{label} {skill_arg} (keyvault unreadable — {corrupt})", file=sys.stderr)
         return 2
+    except OSError as unreadable:
+        # A missing / unreadable skill path is an operator error, not a
+        # crash — FileNotFoundError otherwise escapes as a raw traceback.
+        # Install did not happen, so exit code 2 matches the paths above.
+        label = _term.error("error:", enabled=_term.should_color(sys.stderr))
+        print(f"{label} cannot read skill at {skill_arg}: {unreadable}", file=sys.stderr)
+        return 2
     return result.install_returncode
 
 
