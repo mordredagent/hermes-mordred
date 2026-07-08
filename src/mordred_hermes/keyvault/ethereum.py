@@ -28,6 +28,7 @@ which pulls in ``eth-keys`` (secp256k1 / EIP-55 / signing) and
 
 from __future__ import annotations
 
+import importlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,29 @@ def _eth_keys() -> Any:
         ) from exc
 
 
+def _eth_validation_error() -> type[Exception]:
+    """Lazy accessor for ``eth_keys``' invalid-input exception type.
+
+    ``eth_keys.exceptions.ValidationError`` (a re-export of
+    ``eth_utils.ValidationError``, kept by eth-keys precisely for consumers
+    that catch it) is what ``PrivateKey`` raises for a scalar outside
+    ``[1, n-1]``. Loaded via :func:`importlib.import_module` (the
+    ``seed_display._import_quartz`` pattern) so mypy strict need not resolve
+    the implicit re-export, and lazily like :func:`_eth_keys` so this module
+    stays importable without the ``ethereum`` extra. Carries the same
+    actionable ImportError as :func:`_eth_keys` rather than relying on that
+    accessor having run first — with ``_eth_keys`` stubbed (a test seam),
+    this is the import that actually touches the real package.
+    """
+    try:
+        validation_error: type[Exception] = importlib.import_module("eth_keys.exceptions").ValidationError
+    except ImportError as exc:
+        raise ImportError(
+            'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
+        ) from exc
+    return validation_error
+
+
 def _eth_signature(sig: Any) -> EthereumSignature:
     """Convert an ``eth_keys`` signature into Ethereum legacy wire format.
 
@@ -145,12 +169,17 @@ def generate_ethereum_key(
     # os.urandom(32) has negligible probability (~2^-127) of landing on
     # an invalid scalar (0 or curve order).  eth_keys.keys.PrivateKey
     # raises ValidationError on those two values; the loop exits in one
-    # iteration in the overwhelming majority of cases.
+    # iteration in the overwhelming majority of cases.  ONLY that
+    # ValidationError is retried: any other exception (an eth-keys API
+    # change, a broken keccak backend) is deterministic — retrying it
+    # would turn a hard failure into a silent infinite CPU spin — so it
+    # propagates.
+    invalid_scalar = _eth_validation_error()
     while True:
         try:
             priv = eth.keys.PrivateKey(os.urandom(_SCALAR_BYTES))
             break
-        except Exception:
+        except invalid_scalar:
             continue
 
     priv_bytes: bytes = priv.to_bytes()

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from mordred_hermes.keyvault import ethereum
 from mordred_hermes.keyvault.ethereum import (
     _PURPOSE,
     EthereumSignature,
@@ -68,6 +71,51 @@ def test_generate_two_keys_produce_different_addresses(tmp_path: Path) -> None:
     _, addr1 = generate_ethereum_key("default", **kw)
     _, addr2 = generate_ethereum_key("default", **kw)
     assert addr1 != addr2
+
+
+def test_generate_deterministic_privatekey_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The keygen retry loop exists only for the ~2^-127 invalid-scalar draw
+    (eth-keys ValidationError). A deterministic failure — an eth-keys API
+    change, a broken keccak backend — must propagate instead of being
+    retried into a silent infinite CPU spin."""
+    _, _, kw = _wrap_backend(tmp_path)
+
+    def broken_private_key(_raw: bytes) -> Any:
+        raise TypeError("simulated deterministic eth-keys failure")
+
+    monkeypatch.setattr(
+        ethereum,
+        "_eth_keys",
+        lambda: SimpleNamespace(keys=SimpleNamespace(PrivateKey=broken_private_key)),
+    )
+    with pytest.raises(TypeError, match="simulated deterministic"):
+        generate_ethereum_key("default", **kw)
+
+
+def test_generate_retries_invalid_scalar_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ValidationError draw (invalid scalar) is retried; the next draw
+    succeeds and the generated key is stored and addressable as usual."""
+    import eth_keys
+    from eth_keys.exceptions import ValidationError
+
+    _, _, kw = _wrap_backend(tmp_path)
+    calls = {"n": 0}
+
+    def flaky_private_key(raw: bytes) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValidationError("simulated invalid scalar draw")
+        return eth_keys.keys.PrivateKey(raw)
+
+    monkeypatch.setattr(
+        ethereum,
+        "_eth_keys",
+        lambda: SimpleNamespace(keys=SimpleNamespace(PrivateKey=flaky_private_key)),
+    )
+    envelope_id, address = generate_ethereum_key("default", **kw)
+    assert calls["n"] == 2
+    assert address.startswith("0x") and len(address) == 42
+    assert isinstance(envelope_id, str) and len(envelope_id) > 0
 
 
 # ---------------------------------------------------------------------------
