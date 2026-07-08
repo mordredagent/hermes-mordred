@@ -145,9 +145,20 @@ PyPI への upload は不可逆な外部公開のため、 以下は **operator 
 5. **name reservation 実行**: Actions → "Release (PyPI publish)" → Run workflow → `target=testpypi, mode=reserve` で検証 → 成功確認後 `target=pypi, mode=reserve` で本予約
 6. 予約完了後、 `TODO.md` §0.5 L70 (M7) の checkbox を `[x]` 化
 
-### 通常リリース
+### 通常リリース (runbook)
 
-名前予約後は `target=pypi, mode=release` で本体を publish。 version bump 手順は v1 リリース時に別途追記する。
+名前予約後の実リリースは毎回この手順で行う (初回 `0.1.0a0` で検証済みの流れ):
+
+1. **version bump (必須)** — `python tools/bump_version.py <new-version>` で `src/mordred_hermes/__about__.py` (正準) + `docs/dev/VERSION` + 全 `plugin.yaml` を一括更新。 PEP 440 準拠 (`0.1.0a1` / `0.1.0b0` / `0.1.0rc0` / `0.1.0` GA / `0.1.1` patch 等)。 **PyPI は一度使ったファイル名を永久に再利用不可** (yank/削除しても再 upload 不可) のため、 publish 済み version の再リリースは物理的に不可能 — 必ず bump する。 `tests/test_packaging_versions.py` が 7 surface の一致と stub < real を CI で保証
+2. bump を通常 PR で `dev` へ merge
+3. **dev→main リリース PR** — 集約 release notes (各 PR の `### Changes` / `### Fixes`、 §Changelog 規約) を PR 説明に記載し、 CI green を確認して merge。 `release.yml` の dispatch は `main` ref から行う (リリース成果物は main の内容)
+4. **TestPyPI で予行**: `gh workflow run release.yml --ref main -f target=testpypi -f mode=release` → run 成功確認
+5. **TestPyPI install 検証**: fresh venv で `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "mordred-hermes==<version>"` (extra-index は `hermes-agent` 等の依存解決用) → entry-point discovery 5/5 (`PluginManager.discover_and_load`) + `hermes-mordred --version` を確認
+6. **本番 publish**: `gh workflow run release.yml --ref main -f target=pypi -f mode=release` → PyPI JSON / simple index で live 確認。 **注意**: `pypi` Environment に required reviewers が未設定の間 (billing plan 制約、 §初回 setup の deviation) は dispatch ≈ 即公開
+7. **本番 install 検証**: fresh venv で pin 付き install → discovery + CLI を再確認
+8. **tag + GitHub Release**: main のリリース merge commit に annotated tag `v<version>` → GitHub Release 作成 (pre-release 版は `--prerelease`、 notes は手順 3 の集約を転記)
+
+> **2026-07-08 完了 (初回 `mode=release`)**: `0.1.0a0` を publish 済み — dev→main merge (PR #12) → `main` ref から `target=testpypi` (run `28942410646`) → fresh-venv install 検証 (entry-point discovery 5/5 + `hermes-mordred` CLI、 hermes-agent 0.18.2) → `target=pypi` (run `28942564707`) → 本番 PyPI からの e2e install 検証、 の順で実施。 tag `v0.1.0a0`。 初回のみ version bump なし (`0.1.0a0` が未公開だったため)。 注意: 全リリースが pre-release の間は、 unpinned `pip install mordred-hermes` は pip の all-prereleases fallback 頼みになるため、 ユーザー向け手順は `==0.1.0a0` の pin (または `--pre`) を案内する (README §Install (PyPI))。 dirty checkout からの local `uv build` が nested `.gitignore` 非尊重で cargo `target/` を sdist に混入させる件は、 sdist config への明示 exclude 追加で解消済み (2026-07-09、 pyproject `[tool.hatch.build.targets.sdist] exclude`)。
 
 ## Changelog 規約
 

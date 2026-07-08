@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import logging
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
@@ -172,6 +173,20 @@ class SubprocessSetupRunner:
 # -----------------------------------------------------------------------------
 
 
+def _require_tty(label: str) -> None:
+    """Refuse to prompt when stdin is not a terminal (fail closed).
+
+    prompt_toolkit needs a real terminal on stdin; without one its asyncio
+    event loop crashes deep in ``_add_reader`` with ``OSError: [Errno 22]``
+    (observed: ``hermes-mordred vault status </dev/null``, 2026-07-09).
+    Raising :class:`NonInteractiveAbort` instead routes piped / cron
+    invocations through the same clean ``error:`` + exit-2 path
+    ``cli.dispatch`` already implements for ``--non-interactive``.
+    """
+    if not sys.stdin.isatty():
+        raise NonInteractiveAbort(f"stdin is not a terminal but prompt required: {label!r}")
+
+
 class PromptToolkitIO:
     """Default :class:`PromptIO` -- thin wrapper around ``prompt_toolkit``.
 
@@ -181,6 +196,9 @@ class PromptToolkitIO:
     prompt_toolkit's ``radiolist_dialog`` / ``checkboxlist_dialog`` shortcuts,
     gaining keyboard-confirm affordances and dropping the blue backdrop while
     still rendering well in SSH / Docker / TTY-without-tput environments.
+
+    Every prompt method fail-closes via :func:`_require_tty` when stdin is
+    not a terminal.
     """
 
     def ask_choice(
@@ -191,6 +209,7 @@ class PromptToolkitIO:
         *,
         descriptions: Mapping[str, str] | None = None,
     ) -> str:
+        _require_tty(label)
         app = _build_choice_app(
             title=label,
             values=_choice_values(choices, descriptions),
@@ -205,6 +224,7 @@ class PromptToolkitIO:
         return chosen
 
     def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
+        _require_tty(label)
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
@@ -221,6 +241,7 @@ class PromptToolkitIO:
         return answer.strip() or default
 
     def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+        _require_tty(label)
         try:
             from prompt_toolkit import prompt
         except ImportError as e:
@@ -241,6 +262,7 @@ class PromptToolkitIO:
         free-text comma-separated entry so users pick from known providers
         instead of guessing names (UX request 2026-06-14).
         """
+        _require_tty(label)
         app = _build_multichoice_app(
             title=label,
             values=_choice_values(choices, None),
@@ -260,6 +282,7 @@ class PromptToolkitIO:
         the prompt (mirrors ``ask_text`` / ``ask_bool``); ``is_password`` masks
         only the typed secret, never the help text or the label.
         """
+        _require_tty(label)
         try:
             from prompt_toolkit import prompt
         except ImportError as e:

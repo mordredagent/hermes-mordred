@@ -116,14 +116,15 @@ mordred_keyvault = "mordred_hermes.keyvault"
 mordred_wizard = "mordred_hermes.wizard"
 
 # Standalone console script -- `hermes-mordred ...` works today.
-# Hermes 0.11.0 does NOT iterate PluginManager._cli_commands when building
-# its argparse subparsers (only `plugins.memory.discover_plugin_cli_commands`
-# is consulted from hermes_cli/main.py:9728-9740), so the wizard's
-# ctx.register_cli_command("mordred", ...) call is silently dropped at
-# parser-construction time. This console_script is the v1 workaround;
-# when Hermes 0.12+ wires entry-point CLI commands to argparse the
-# `hermes mordred ...` form will start working too without code changes
-# (both entry points coexist).
+# Hermes does NOT iterate PluginManager._cli_commands when building its
+# argparse subparsers (only `plugins.memory.discover_plugin_cli_commands`
+# is consulted; observed at hermes_cli/main.py:9728-9740 in 0.11.0), so the
+# wizard's ctx.register_cli_command("mordred", ...) call is silently dropped
+# at parser-construction time. Still true on hermes-agent 0.18.2 (verified
+# 2026-07-08: `hermes mordred` falls through to top-level usage). This
+# console_script is the workaround until upstream wires entry-point CLI
+# commands to argparse, at which point `hermes mordred ...` starts working
+# too without code changes (both entry points coexist).
 [project.scripts]
 hermes-mordred = "mordred_hermes.wizard.cli:main"
 
@@ -183,6 +184,16 @@ packages = ["src/mordred_hermes"]
 # found". The name-reservation stub elsewhere under /packaging is
 # intentionally NOT shipped (it is a separate distribution).
 include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native", "/packaging/pth", "/scripts"]
+# Hatchling only respects the ROOT .gitignore, not the nested ones inside the
+# native helper crates (native/tpmkey-helper/.gitignore, sekey-helper's), so a
+# local build from a checkout that has compiled the helpers vacuums the build
+# artifacts into the sdist (~26 MB of cargo target/ observed vs ~770 KB clean;
+# 2026-07-08 release note, CI.md §通常リリース). CI's clean checkouts never
+# hit this, but exclude them explicitly so local and CI sdists are identical.
+exclude = [
+  "native/tpmkey-helper/target",
+  "native/sekey-helper/.build",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

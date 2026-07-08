@@ -156,9 +156,11 @@ def dispatch(args: argparse.Namespace) -> int:
 
     A ``KeyboardInterrupt`` from any handler — the prompt layer re-raises it
     on Ctrl-C by design (see ``_prompt_io``) — becomes a clean ``Aborted.``
-    on stderr with exit code 130 (128 + SIGINT), not a traceback. Likewise
-    :class:`NonInteractiveAbort` becomes an ``error:`` line with exit code 2
-    (the usage-error convention shared with ``encryption purge`` / ``audit``).
+    on stderr with exit code 130 (128 + SIGINT), not a traceback. An
+    ``EOFError`` (Ctrl-D at a prompt_toolkit prompt) is treated the same way.
+    Likewise :class:`NonInteractiveAbort` becomes an ``error:`` line with exit
+    code 2 (the usage-error convention shared with ``encryption purge`` /
+    ``audit``).
 
     Scope note (review 2026-07-07): this guard protects the standalone
     ``hermes-mordred`` entry (``main`` routes through here). The Hermes-native
@@ -174,6 +176,10 @@ def dispatch(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         # The leading newline moves past the ``^C`` the terminal echoes onto
         # the prompt line, so ``Aborted.`` starts on its own line.
+        print("\nAborted.", file=sys.stderr)
+        return 130
+    except EOFError:
+        # Ctrl-D at a prompt: the operator declined to answer, same as Ctrl-C.
         print("\nAborted.", file=sys.stderr)
         return 130
     except NonInteractiveAbort as exc:
