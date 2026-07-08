@@ -45,6 +45,34 @@ def _isolate_provider_registry() -> Any:
     providers._ALIASES.pop("mordred-local", None)
 
 
+class TestReadPolicyModeFailClosed:
+    """The hook-time policy read must fail CLOSED (M1 port from network.hooks).
+
+    All three llm_guard hook callbacks gate on ``_read_policy_mode``; a
+    damaged policy.json previously collapsed to lenient, silently
+    downgrading the pre-API-request enforcement point.
+    """
+
+    def test_absent_file_stays_lenient(self, tmp_path: Any) -> None:
+        from mordred_hermes.llm_guard import _read_policy_mode
+
+        assert _read_policy_mode(tmp_path / "absent.json") == "lenient"
+
+    def test_corrupt_file_is_strict(self, tmp_path: Any) -> None:
+        from mordred_hermes.llm_guard import _read_policy_mode
+
+        p = tmp_path / "policy.json"
+        p.write_text("{not json", encoding="utf-8")
+        assert _read_policy_mode(p) == "strict"
+
+    def test_invalid_mode_is_strict(self, tmp_path: Any) -> None:
+        from mordred_hermes.llm_guard import _read_policy_mode
+
+        p = tmp_path / "policy.json"
+        p.write_text('{"policy": "garbage"}', encoding="utf-8")
+        assert _read_policy_mode(p) == "strict"
+
+
 class TestRegisterEntryPoint:
     def test_register_is_callable(self) -> None:
         from mordred_hermes.llm_guard import register

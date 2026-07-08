@@ -313,13 +313,22 @@ class TestResolvePolicyMode:
     def test_defaults_to_lenient_when_config_missing(self, tmp_path: Path) -> None:
         assert policy_explainer._resolve_policy_mode(tmp_path / "missing.yaml") == "lenient"
 
-    def test_defaults_to_lenient_on_invalid_yaml(self, tmp_path: Path) -> None:
+    def test_fails_closed_to_strict_on_invalid_yaml(self, tmp_path: Path) -> None:
+        # M1 port: a config.yaml that EXISTS but cannot be parsed reads as
+        # strict — collapsing it to lenient let a corrupted file silently
+        # downgrade install-time enforcement.
         p = tmp_path / "config.yaml"
-        # ruamel safe loader treats malformed YAML as empty -> defaults to lenient
         p.write_text("plugins:\n  mordred_privacy_check:\n    policy: : :", encoding="utf-8")
-        assert policy_explainer._resolve_policy_mode(p) == "lenient"
+        assert policy_explainer._resolve_policy_mode(p) == "strict"
 
-    def test_defaults_to_lenient_on_unknown_policy_value(
+    def test_fails_closed_to_strict_on_unreadable_config(self, tmp_path: Path) -> None:
+        # Exists-but-unreadable (a directory raises IsADirectoryError on
+        # open) must not be misread as "absent" -> lenient.
+        a_dir = tmp_path / "config.yaml"
+        a_dir.mkdir()
+        assert policy_explainer._resolve_policy_mode(a_dir) == "strict"
+
+    def test_fails_closed_to_strict_on_unknown_policy_value(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         p = tmp_path / "config.yaml"
@@ -327,7 +336,7 @@ class TestResolvePolicyMode:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="mordred.privacy_check"):
-            assert policy_explainer._resolve_policy_mode(p) == "lenient"
+            assert policy_explainer._resolve_policy_mode(p) == "strict"
         assert any("invalid policy" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("mode", ["strict", "lenient", "off"])

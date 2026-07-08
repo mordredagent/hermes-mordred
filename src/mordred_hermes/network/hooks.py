@@ -23,7 +23,6 @@ suite can swap in a tiny fake runtime via :func:`api.set_runtime`.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Mapping
@@ -32,7 +31,8 @@ from typing import Any, Final
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
-from .._policy_types import VALID_ACTIVE_PATHS, VALID_POLICY_MODES
+from .._policy_io import read_policy_mode_fail_closed
+from .._policy_types import VALID_ACTIVE_PATHS
 from .._yaml_io import load_plugin_section
 from . import api
 from ._exceptions import (
@@ -61,50 +61,11 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     cannot be read or parsed reads as ``"strict"``. Falling back to
     ``"off"`` meant corrupting policy.json silently disabled strict
     enforcement on both hook paths (session bring-up and the per-tool
-    dropped-path gate).
-
-    Open-first (review follow-up): an ``exists()`` pre-check would both
-    race the open (TOCTOU) and read a stat failure (e.g. search permission
-    stripped from the parent dir) as "absent" → off. Only a clean
-    ``FileNotFoundError`` — including a dangling symlink, equivalent to
-    deletion — keeps the fresh-install default; every other failure is
-    strict.
+    dropped-path gate). The open-first mechanics live in the shared
+    :func:`.._policy_io.read_policy_mode_fail_closed` so llm_guard's
+    reader cannot drift from this one.
     """
-    try:
-        f = policy_json_path.open(encoding="utf-8")
-    except FileNotFoundError:
-        return _DEFAULT_POLICY_MODE
-    except OSError as e:
-        _LOG.error(
-            "policy file %s exists but is unreadable (%s); failing closed to strict",
-            policy_json_path,
-            e,
-        )
-        return "strict"
-    try:
-        with f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.error(
-            "policy file %s exists but is unreadable (%s); failing closed to strict",
-            policy_json_path,
-            e,
-        )
-        return "strict"
-    if not isinstance(data, dict):
-        _LOG.error(
-            "policy file %s has a non-dict root; failing closed to strict",
-            policy_json_path,
-        )
-        return "strict"
-    mode = data.get("policy", _DEFAULT_POLICY_MODE)
-    # Codex round 3 P2 (2026-05-14): isinstance check before frozenset
-    # membership — ``in`` on a frozenset raises TypeError for unhashable
-    # values like ``[]`` / ``{}``.
-    if isinstance(mode, str) and mode in VALID_POLICY_MODES:
-        return mode
-    _LOG.error("invalid policy %r in %s; failing closed to strict", mode, policy_json_path)
-    return "strict"
+    return read_policy_mode_fail_closed(policy_json_path, default=_DEFAULT_POLICY_MODE, log=_LOG)
 
 
 def resolve_default_path(section: Mapping[str, Any] | None) -> str:
