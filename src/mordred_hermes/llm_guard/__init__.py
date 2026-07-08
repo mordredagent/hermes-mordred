@@ -32,12 +32,11 @@ import functools
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
-from .._policy_io import load_policy_mapping
-from .._policy_types import POLICY_MODES
+from .._policy_io import read_policy_mode_fail_closed
 from .._provider_identity import canonicalize_provider
 from .._yaml_io import load_yaml_mapping
 from . import enforce, harness_detect, local_adapter
@@ -257,15 +256,17 @@ def _read_config_model_provider(config_path: Path) -> str | None:
 
 
 def _read_policy_mode(policy_json_path: Path) -> str:
-    """Read ``policy`` from ``policy.json``; default to ``_DEFAULT_POLICY_MODE``."""
-    data = load_policy_mapping(policy_json_path, log=_LOG)
-    mode = data.get("policy", _DEFAULT_POLICY_MODE)
-    # Tuple membership on purpose — unhashable YAML/JSON values must return
-    # False (warn + default), not raise (hooks.py Codex round 3 P2).
-    if mode in POLICY_MODES:
-        return cast(str, mode)
-    _LOG.warning("invalid policy %r in %s; defaulting to %s", mode, policy_json_path, _DEFAULT_POLICY_MODE)
-    return _DEFAULT_POLICY_MODE
+    """Read ``policy`` from ``policy.json``, failing CLOSED on a damaged file.
+
+    M1 port (originally landed only in ``network.hooks``): an absent file is
+    a fresh install and keeps the ``"lenient"`` default, but a policy.json
+    that EXISTS and cannot be read or parsed — or carries an invalid mode —
+    reads as ``"strict"``. Falling back to lenient meant corrupting or
+    chmod-ing policy.json silently downgraded the pre-API-request
+    enforcement point, the one gate this plugin documents as impossible to
+    bypass.
+    """
+    return read_policy_mode_fail_closed(policy_json_path, default=_DEFAULT_POLICY_MODE, log=_LOG)
 
 
 @functools.lru_cache(maxsize=1)

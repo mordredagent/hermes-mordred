@@ -230,7 +230,10 @@ class TestPolicyDefaults:
         # Lenient mode allows web_fetch
         assert hooks.pre_tool_call(tool_name="web_fetch") is None
 
-    def test_invalid_policy_value_falls_back_to_lenient(self, tmp_path: Path) -> None:
+    def test_invalid_policy_value_fails_closed_to_strict(self, tmp_path: Path) -> None:
+        # M1 port: an invalid mode in an EXISTING config reads as strict —
+        # falling back to lenient let a corrupted value silently downgrade
+        # enforcement.
         config = _write_config(
             tmp_path / "config.yaml",
             """\
@@ -240,7 +243,9 @@ plugins:
 """,
         )
         _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
-        assert hooks.pre_tool_call(tool_name="web_fetch") is None
+        result = hooks.pre_tool_call(tool_name="web_fetch")
+        assert result is not None
+        assert result["action"] == "block"
 
     def test_missing_config_file_defaults_to_lenient(self, tmp_path: Path) -> None:
         non_existent = tmp_path / "nope.yaml"

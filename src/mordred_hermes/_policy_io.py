@@ -14,14 +14,18 @@ collapsed to ``{}`` so callers can apply their own defaults without
 crashing plugin registration. Unlike ``_yaml_io`` the catch set never
 diverged across callers, so there is no ``catch`` parameter.
 
-Intentionally NOT a client of this helper: ``network.hooks._read_policy_mode``.
-That reader is *open-first* and fails CLOSED to ``"strict"`` on every error
-other than a clean ``FileNotFoundError`` (M1 security review, 2026-06-11): an
-``exists()`` pre-check would both race the open (TOCTOU) and misread a stat
-failure -- e.g. search permission stripped from the parent dir -- as
-"absent" -> ``off``, silently disabling strict enforcement. Collapsing its
-missing-vs-unreadable distinction into a single ``{}`` would destroy that
-fail-closed contract, so it keeps its bespoke loader.
+:func:`read_policy_mode_fail_closed` is the *other* reader this module
+hosts: the open-first, fail-CLOSED policy-mode read (M1 security review,
+2026-06-11). It exists because collapsing missing-vs-unreadable into a
+single ``{}`` (what :func:`load_policy_mapping` does) silently disabled
+strict enforcement when ``policy.json`` was corrupted or made unreadable.
+An ``exists()`` pre-check would both race the open (TOCTOU) and misread a
+stat failure -- e.g. search permission stripped from the parent dir -- as
+"absent" -> default, so only a clean ``FileNotFoundError`` keeps the
+fresh-install default; every other failure reads as ``"strict"``.
+``network.hooks`` (where the M1 fix originally landed) and
+``llm_guard._read_policy_mode`` both resolve through it, so the two
+enforcement layers reading ``policy.json`` cannot diverge again.
 
 As with ``_yaml_io``, the warning text is normalised here to
 ``"could not read ..."``. The per-site suffixes ("defaulting to empty",
@@ -39,6 +43,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+
+from ._policy_types import VALID_POLICY_MODES
 
 
 def load_policy_mapping(
@@ -67,3 +73,46 @@ def load_policy_mapping(
             log.warning("could not read %s: %s", path, e)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def read_policy_mode_fail_closed(
+    path: Path,
+    *,
+    default: str,
+    log: logging.Logger,
+) -> str:
+    """Open-first, fail-closed read of ``policy`` from ``path`` (M1 contract).
+
+    Only a clean ``FileNotFoundError`` — including a dangling symlink,
+    equivalent to deletion — returns ``default`` (the fresh-install mode:
+    ``"off"`` for network, ``"lenient"`` for llm_guard). A file that EXISTS
+    and cannot be opened, read, or parsed, a non-dict root, and an invalid
+    ``policy`` value all read as ``"strict"``: falling back to the default
+    meant corrupting policy.json silently disabled strict enforcement.
+    ``default`` is also the mode when the file parses but has no ``policy``
+    key — an incomplete file is user-authored, not an attack surface, and
+    the pre-M1 readers agreed on that.
+    """
+    try:
+        f = path.open(encoding="utf-8")
+    except FileNotFoundError:
+        return default
+    except OSError as e:
+        log.error("policy file %s exists but is unreadable (%s); failing closed to strict", path, e)
+        return "strict"
+    try:
+        with f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        log.error("policy file %s exists but is unreadable (%s); failing closed to strict", path, e)
+        return "strict"
+    if not isinstance(data, dict):
+        log.error("policy file %s has a non-dict root; failing closed to strict", path)
+        return "strict"
+    mode = data.get("policy", default)
+    # isinstance before frozenset membership — ``in`` on a frozenset raises
+    # TypeError for unhashable values like ``[]`` / ``{}`` (Codex round 3 P2).
+    if isinstance(mode, str) and mode in VALID_POLICY_MODES:
+        return mode
+    log.error("invalid policy %r in %s; failing closed to strict", mode, path)
+    return "strict"
