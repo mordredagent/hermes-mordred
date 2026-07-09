@@ -65,18 +65,19 @@ the repo does **not** ship — build it once with [uv](https://docs.astral.sh/uv
 from the repo root:
 
 ```sh
-uv sync --project mordred-hermes --extra macos     # macOS — Secure Enclave keyvault
+uv sync --extra macos     # macOS — Secure Enclave keyvault
 # Linux:
-uv sync --project mordred-hermes --extra keyvault
+uv sync --extra keyvault
 ```
 
-`uv sync` reads `uv.lock` and creates `.venv/` with
-the `hermes-mordred` command on its `bin/`. The `--extra` pulls the crypto stack
-that `keyvault init` and `encryption enable` need; plain `uv sync` (no extra) is
-enough for `status` / `configure` only. Confirm it landed:
+`uv sync` reads `uv.lock` and creates `.venv/` with both the `hermes-mordred`
+command and the base `hermes` agent (pulled in as the `hermes-agent` dependency)
+on its `bin/`. The `--extra` pulls the crypto stack that `keyvault init` and
+`encryption enable` need; plain `uv sync` (no extra) is enough for `status` /
+`configure` only. Confirm it landed:
 
 ```sh
-.venv/bin/hermes-mordred --version  # → hermes-mordred 0.1.0a0
+.venv/bin/hermes-mordred --version  # → hermes-mordred 0.1.0a1
 ```
 
 > **No uv?** `brew install uv` (macOS), or
@@ -92,7 +93,7 @@ each line says what it does. Detail for every step follows below.
 
 ```sh
 cd <repo-root>                 # /Users/.../Mordred-Hermes
-uv sync --project mordred-hermes --extra macos   # 0. build the venv (Linux: --extra keyvault)
+uv sync --extra macos          # 0. build the venv (Linux: --extra keyvault)
 M=.venv/bin/hermes-mordred
 
 $M configure                   # 1. set up policy / LLM / harness
@@ -351,25 +352,27 @@ return only the EIP-55 address and an opaque `envelope_id` handle.
 
 > **Different CLI from the rest of this guide.** Everything above drives
 > `hermes-mordred` (the privacy layer). This section is the **base Hermes
-> agent** — the `hermes` command itself — run from *this* dev checkout. The two
-> live in different venvs: Mordred is `.venv`, the host agent is
-> the **repo-root** `.venv`.
+> agent** — the `hermes` command itself — run from *this* dev checkout. Both
+> commands live in the **same** `.venv`: `hermes` is pulled in as the
+> `hermes-agent` dependency, so the venv you built above already provides it.
 
-### Build the repo-root venv
+### The `hermes` binary is already in `.venv`
 
-Just like `.venv` above, the **repo-root** `.venv` that runs the
-base `hermes` agent is **not** shipped — build it once with
-[uv](https://docs.astral.sh/uv/) from the repo root:
+The base `hermes` agent ships inside the **same** `.venv` you built in
+[Build the venv](#build-the-venv) — it comes from the `hermes-agent`
+dependency, so there is **nothing extra to build**. If you skipped that step, a
+plain `uv sync` from the repo root creates `.venv` with both binaries:
 
 ```sh
 cd <repo-root>            # /Users/.../Mordred-Hermes
-uv sync                   # reads ./uv.lock, creates ./.venv with the `hermes` binary
+uv sync                   # reads ./uv.lock, creates ./.venv with `hermes` + `hermes-mordred`
 ```
 
-Plain `uv sync` (no `--project`, no `--extra`) installs the core CLI — enough for
-everything below. Optional integrations pull their own extras: the messaging
-gateway needs `uv sync --extra messaging`, local voice `--extra voice`. Confirm
-it landed:
+Plain `uv sync` (no `--extra`) is enough to run the base agent below; the
+`--extra macos` / `--extra keyvault` you used above only adds Mordred's keyvault
+crypto stack. (Base-agent integrations such as the messaging gateway and local
+voice are `hermes-agent`'s own extras, not re-exposed by this repo — see the
+hermes-agent docs to enable them.) Confirm it landed:
 
 ```sh
 .venv/bin/hermes --version   # prints  Project: <repo-root>
@@ -383,8 +386,8 @@ it landed:
 
 A global `hermes` may already be on your `PATH` at `~/.local/bin/hermes` — that
 is a **separate install** (`~/.hermes/hermes-agent/`), not this checkout. Once
-you've [built the repo-root venv](#build-the-repo-root-venv) above, activate it
-to run the source you are editing:
+you've [built `.venv`](#build-the-venv) above, activate it to run this repo's
+pinned copy:
 
 ```sh
 cd <repo-root>                 # /Users/.../Mordred-Hermes
@@ -393,10 +396,10 @@ which hermes                   # → <repo-root>/.venv/bin/hermes  (confirms the
 hermes --version               # prints  Project: <repo-root>
 ```
 
-- **Purpose**: make `hermes` resolve to the editable repo install, overriding the global one.
+- **Purpose**: make `hermes` resolve to this repo's `.venv` copy, overriding the global one.
 - **Result**: activation prepends `.venv/bin` to `PATH`, so `hermes` now runs the
-  repo source (edits under `hermes_cli/` take effect live). `deactivate` reverts
-  to the global `hermes`.
+  `hermes-agent` version pinned in `uv.lock` (installed into `.venv`, not the
+  global `~/.local/bin/hermes`). `deactivate` reverts to the global `hermes`.
 
 > One-shot without activating: run the binary directly — `.venv/bin/hermes <args>`.
 

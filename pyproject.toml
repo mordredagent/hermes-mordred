@@ -183,7 +183,7 @@ packages = ["src/mordred_hermes"]
 # `python -m build` and release.yml do — fails with "Forced include not
 # found". The name-reservation stub elsewhere under /packaging is
 # intentionally NOT shipped (it is a separate distribution).
-include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/native", "/packaging/pth", "/scripts"]
+include = ["/src", "/tests", "/README.md", "/LICENSE", "/pyproject.toml", "/native", "/packaging/pth", "/scripts"]
 # Hatchling only respects the ROOT .gitignore, not the nested ones inside the
 # native helper crates (native/tpmkey-helper/.gitignore, sekey-helper's), so a
 # local build from a checkout that has compiled the helpers vacuums the build
