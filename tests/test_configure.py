@@ -408,6 +408,47 @@ class TestCliHandler:
         out = capsys.readouterr().out.lower()
         assert "network init" in out
 
+    def test_interactive_runs_hermes_setup_by_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Positive control: without --skip-hermes-setup (attr absent), the
+        interactive path still delegates to `hermes setup` exactly once."""
+        spy = _SetupRunnerSpy()
+        scripted = _ScriptedPromptIO(answers=_core_answers(policy="off"))
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+        monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
+        rc = cli_handler(argparse.Namespace(non_interactive=False))
+        assert rc == 0
+        assert spy.calls == [False], "default configure must delegate to `hermes setup`"
+
+    def test_interactive_skip_hermes_setup_bypasses_runner(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """--skip-hermes-setup must not spawn `hermes setup`, yet the Mordred
+        prompts still run and the policy is written."""
+        spy = _SetupRunnerSpy()
+        scripted = _ScriptedPromptIO(answers=_core_answers(policy="off"))
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+        monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
+        rc = cli_handler(argparse.Namespace(non_interactive=False, skip_hermes_setup=True))
+        assert rc == 0
+        assert spy.calls == [], "skip_hermes_setup must not spawn `hermes setup`"
+        body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
+        assert body["policy"] == "off"
+
+    def test_non_interactive_skip_hermes_setup_bypasses_runner(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--skip-hermes-setup in flag-driven mode suppresses `hermes setup`
+        while still writing the policy from the CLI flags."""
+        spy = _SetupRunnerSpy()
+        _patch_for_cli(monkeypatch, tmp_path)
+        monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
+        ns = argparse.Namespace(non_interactive=True, policy="strict", skip_hermes_setup=True)
+        rc = cli_handler(ns)
+        assert rc == 0
+        assert spy.calls == [], "skip_hermes_setup must not spawn `hermes setup`"
+        body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
+        assert body["policy"] == "strict"
+
 
 # -----------------------------------------------------------------------------
 # Default subprocess runner -- assert command shape without spawning.

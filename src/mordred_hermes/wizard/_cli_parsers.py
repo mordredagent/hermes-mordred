@@ -85,6 +85,11 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         action="store_true",
         help="Apply from flags without prompting (CI / scripted use); unspecified flags keep existing settings",
     )
+    p.add_argument(
+        "--skip-hermes-setup",
+        action="store_true",
+        help="Skip the `hermes setup` delegation; configure only the Mordred policy",
+    )
     p.add_argument("--policy", choices=POLICY_MODES, help="Mordred policy mode")
     p.add_argument(
         "--allow-cloud-llm",

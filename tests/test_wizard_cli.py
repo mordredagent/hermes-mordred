@@ -74,6 +74,7 @@ class TestSubcommandTree:
         "argv",
         [
             ["mordred", "configure"],
+            ["mordred", "configure", "--skip-hermes-setup"],
             ["mordred", "upgrade"],
             ["mordred", "upgrade", "--reset"],
             ["mordred", "upgrade", "--non-interactive"],
@@ -125,6 +126,19 @@ class TestSubcommandTree:
         parser = _build_parser()
         ns = parser.parse_args(["mordred", "keyvault", "init", "--paper-only"])
         assert ns.store_seed_for_hd is False
+
+    def test_configure_skip_hermes_setup_defaults_false(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "configure"])
+        assert ns.skip_hermes_setup is False
+
+    def test_configure_skip_hermes_setup_flag_sets_true(self) -> None:
+        # Guards the flag-name -> dest mapping that cli_handler reads via
+        # getattr(args, "skip_hermes_setup", ...); a rename would break the CLI
+        # while leaving the Namespace-based handler tests green.
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "configure", "--skip-hermes-setup"])
+        assert ns.skip_hermes_setup is True
 
 
 class TestUpgradeFlagShape:

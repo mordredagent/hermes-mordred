@@ -3,7 +3,9 @@
 Two-step flow:
 
 1. Delegate first-run Hermes setup via ``subprocess.run(["hermes", "setup", ...])``
-   (Hermes uses its own curses TUI -- ``hermes_cli/main.py:8704``).
+   (Hermes uses its own curses TUI -- ``hermes_cli/main.py:8704``). This step
+   runs on every invocation; ``--skip-hermes-setup`` suppresses it so a re-run
+   can touch only the Mordred policy (step 2/3 still run).
 2. Collect Mordred-specific prompts (policy mode, cloud allowlist, local LLM
    endpoint, agent harness) via :class:`PromptIO`.
 3. Persist via :class:`PolicyWriter` (writes ``~/.hermes/mordred/policy.json``
@@ -557,12 +559,18 @@ def cli_handler(args: argparse.Namespace) -> int:
       bare re-run keeps prior settings).
     - Otherwise: real :class:`SubprocessSetupRunner` + :class:`PromptToolkitIO`,
       then a hint pointing the user at the on-demand network-privacy command.
+    - ``--skip-hermes-setup``: suppresses the ``hermes setup`` delegation in
+      either mode (the Mordred prompts / flag application still run). Lets an
+      operator re-run ``configure`` to touch only the Mordred policy without
+      stepping through the upstream Hermes wizard every time.
     """
     non_interactive = bool(getattr(args, "non_interactive", False))
+    skip_hermes_setup = bool(getattr(args, "skip_hermes_setup", False))
     if non_interactive:
-        setup_rc = SubprocessSetupRunner().run(non_interactive=True)
-        if setup_rc != 0:
-            _LOG.warning("`hermes setup` exited with code %d; continuing with Mordred flags anyway", setup_rc)
+        if not skip_hermes_setup:
+            setup_rc = SubprocessSetupRunner().run(non_interactive=True)
+            if setup_rc != 0:
+                _LOG.warning("`hermes setup` exited with code %d; continuing with Mordred flags anyway", setup_rc)
         writer = PolicyWriter()
         result = snapshot_from_args(args, existing=_read_existing_policy_inputs(writer))
         try:
@@ -578,6 +586,7 @@ def cli_handler(args: argparse.Namespace) -> int:
         prompt_io=PromptToolkitIO(),
         policy_writer=PolicyWriter(),
         non_interactive=False,
+        skip_hermes_setup=skip_hermes_setup,
     )
     print(_render_configure_summary(result.snapshot))
     return 0
