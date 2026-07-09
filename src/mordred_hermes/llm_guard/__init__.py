@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     # Type-only import — keeps :func:`register` cheap and side-effect-free by
     # avoiding privacy_check load at plugin-discovery time (the runtime body
     # of :func:`_build_audit_writer` does the lazy import on first call).
-    from ..privacy_check.audit import NDJSONWriter
+    from ..privacy_check.audit import Writer
 
 _LOG = logging.getLogger("mordred.llm_guard")
 
@@ -270,20 +270,23 @@ def _read_policy_mode(policy_json_path: Path) -> str:
 
 
 @functools.lru_cache(maxsize=1)
-def _build_audit_writer(path: Path) -> NDJSONWriter:
-    """Construct the NDJSON writer privacy_check already uses.
+def _build_audit_writer(path: Path) -> Writer:
+    """Construct the encryption-aware audit writer privacy_check uses.
 
     Codex M2 follow-up: cached so the ``__post_init__`` ``mkdir`` + ``chmod``
     only fire once per process per path. Module-scoped ``lru_cache`` is
-    safe — :class:`NDJSONWriter` is process-safe (POSIX ``O_APPEND`` per
-    write) and the cached instance can be shared across every
-    ``on_session_start`` invocation.
+    safe — a single cached writer instance is appended to sequentially by this
+    plugin's hooks, so it can be shared across every ``on_session_start``
+    invocation.
 
     Construction is delegated to the shared
-    :func:`mordred_hermes._audit_support.build_audit_writer` (which does the
-    lazy ``privacy_check`` import); the module-local ``lru_cache`` keeps this
-    cache -- and the ``cache_clear()`` the tests drive -- separate from
-    ``network``'s identically-pathed writer. The ``TYPE_CHECKING`` import at
-    the top preserves the return type for static checkers.
+    :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
+    encryption-aware writer ``privacy_check`` uses for ``audit.log`` (an
+    ``EncryptedWriter`` once the keyvault is initialized, else an
+    ``NDJSONWriter``), doing the lazy ``privacy_check`` import so ``register``
+    stays cheap. The module-local ``lru_cache`` keeps this cache -- and the
+    ``cache_clear()`` the tests drive -- separate from ``network``'s
+    identically-pathed writer. The ``TYPE_CHECKING`` import at the top
+    preserves the return type for static checkers.
     """
     return build_audit_writer(path)
