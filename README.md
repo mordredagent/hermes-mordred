@@ -97,6 +97,7 @@ $M network use <tor|vpn|clearnet>  # switch the active privacy route
 $M network status                  # show the active route and liveness
 $M encryption change-passphrase    # rotate the vault recovery passphrase
 $M configure                       # re-run interactive setup anytime
+$M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
 ```
 
 Step-by-step guide with expected output:
