@@ -194,9 +194,14 @@ def _is_setting_on(runner: SubprocessRunner, cli_path: str, setting: str) -> boo
         return False
     stdout = (result.stdout or "").lower()
     # Mullvad CLI output forms: "Network lockdown when disconnected: on"
-    # / "Always require VPN: off". Look for the bare token; the labels
-    # vary by Mullvad version but the value tokens are stable.
-    return ": on" in stdout or " on\n" in stdout or stdout.strip().endswith("on")
+    # / "Always require VPN: off". Match the bare value token, never a
+    # substring: a stray word ending in "on" (e.g. "...connection") must
+    # not be misread as the setting being ON — in strict that would fail
+    # OPEN, because bring_up would then skip ``lockdown-mode set on``
+    # believing the kill-switch is already active. The value token
+    # ("on"/"off") is stable across Mullvad versions even as labels drift.
+    tokens = stdout.split()
+    return ": on" in stdout or (bool(tokens) and tokens[-1] == "on")
 
 
 def _run_or_raise(runner: SubprocessRunner, argv: tuple[str, ...]) -> None:
@@ -266,27 +271,41 @@ _UNIT_SECONDS: Final[dict[str, float]] = {
     "hour": 3600.0,
     "day": 86400.0,
 }
+# One ``wg show`` handshake line, e.g. "  latest handshake: 1 minute, 30 seconds
+# ago". Captures the age text so each peer's compound age is summed on its own
+# line (see :func:`parse_handshake_age`) rather than across the whole output.
+_HANDSHAKE_LINE_RE: Final = re.compile(r"latest handshake:\s*(?P<age>.*)", re.IGNORECASE)
 
 
 def parse_handshake_age(wg_show_stdout: str) -> float | None:
-    """Return the latest handshake age in seconds, or ``None`` if absent.
+    """Return the most-recent handshake age in seconds, or ``None`` if absent.
 
-    Returns ``None`` for ``"latest handshake: (none)"`` so callers can
-    distinguish "never handshook" from a successfully-parsed long age.
-    Also returns ``None`` when no age token is present at all
-    (handles malformed / truncated stdout gracefully).
+    ``wg show`` (unscoped) lists EVERY WireGuard interface on the host, so a
+    second, unrelated tunnel contributes its own ``latest handshake:`` line.
+    We therefore parse each handshake line independently — summing the tokens
+    WITHIN a single compound age (``"1 minute, 30 seconds ago"`` → 90s) — and
+    return the MINIMUM across peers (the freshest handshake). Summing across
+    peers, as an earlier version did, over-estimated the age and caused a
+    false ``health() == False`` path-drop whenever another tunnel was present.
+
+    Returns ``None`` when no parsable handshake is found — an all-``(none)``
+    output ("never handshook") or malformed / truncated stdout — so callers
+    can distinguish "no fresh handshake" from a successfully-parsed age.
     """
-    if "(none)" in wg_show_stdout:
+    ages: list[float] = []
+    for line in wg_show_stdout.splitlines():
+        m = _HANDSHAKE_LINE_RE.search(line)
+        if m is None:
+            continue
+        tokens = list(_AGE_TOKEN_RE.finditer(m.group("age")))
+        if not tokens:
+            # "(none)" or an otherwise unparseable age — this peer has no
+            # fresh handshake; skip it rather than poisoning a fresh peer.
+            continue
+        ages.append(sum(int(t.group("value")) * _UNIT_SECONDS[t.group("unit").lower()] for t in tokens))
+    if not ages:
         return None
-    matches = list(_AGE_TOKEN_RE.finditer(wg_show_stdout))
-    if not matches:
-        return None
-    total = 0.0
-    for m in matches:
-        value = int(m.group("value"))
-        unit = m.group("unit").lower()
-        total += value * _UNIT_SECONDS[unit]
-    return total
+    return min(ages)
 
 
 def health(
