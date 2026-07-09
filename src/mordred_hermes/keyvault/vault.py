@@ -92,18 +92,25 @@ def _manifest_path(root: Path, generation: int) -> Path:
     return root / f"manifest.{generation}.mvmf"
 
 
-def _latest_manifest_generation(root: Path) -> int | None:
-    """Highest ``manifest.<gen>.mvmf`` generation on disk, or ``None`` if none.
-
-    Used only by :func:`recover_vault`, which has no device-bound anchor to
-    name the authoritative generation and so falls back to the newest manifest
-    present. (Normal :func:`open_vault` never guesses — the anchor names it.)
-    """
+def _all_manifest_generations(root: Path) -> list[int]:
+    """Every ``manifest.<gen>.mvmf`` generation present on disk (unsorted)."""
     generations: list[int] = []
     for p in root.glob("manifest.*.mvmf"):
         middle = p.name[len("manifest.") : -len(".mvmf")]
         if middle.isdigit():
             generations.append(int(middle))
+    return generations
+
+
+def _latest_manifest_generation(root: Path) -> int | None:
+    """Highest ``manifest.<gen>.mvmf`` generation on disk, or ``None`` if none.
+
+    The cold-path fallback when there is no device-bound anchor to name the
+    authoritative generation. (Normal :func:`open_vault` never guesses — the
+    anchor names it.) :func:`_load_recovery_matched_unverified` refines this to
+    the newest generation the recovery sidecar actually certifies.
+    """
+    generations = _all_manifest_generations(root)
     return max(generations) if generations else None
 
 
@@ -210,6 +217,40 @@ def _read_recovery_blob(root: Path, *, action: str) -> bytes:
         return safe_read(root / _RECOVERY_NAME)
     except FileNotFoundError as e:
         raise VaultError(f"recovery sidecar (recovery.mrkv) is missing — {action}") from e
+
+
+def _load_recovery_matched_unverified(
+    root: Path, recovery_blob: bytes, *, action: str
+) -> tuple[int, bytes, manifest.VaultManifest]:
+    """Cold-path manifest selection that tolerates a crash mid recover_to_device.
+
+    :func:`recover_to_device` writes ``manifest.<new_gen>`` (bound to the NEW
+    ``wmk``) BEFORE it rewrites the recovery sidecar (also the new ``wmk``);
+    those two files cannot be updated atomically together. A crash in that
+    window leaves the newest manifest bound to a ``wmk`` the still-old sidecar
+    does not certify, so picking strictly the newest manifest
+    (:func:`_load_latest_unverified`) would raise
+    :class:`recovery.RecoveryDigestMismatch` on every recovery entry point even
+    though the older, self-consistent generation is fully intact on disk.
+
+    We therefore pick the NEWEST generation whose ``SHA-256(wmk)`` matches the
+    sidecar's embedded verification digest — the generation the passphrase can
+    actually open. When none match (a genuinely substituted / rolled-back
+    ``wmk``, or an empty root), we fall back to :func:`_load_latest_unverified`
+    so the same ``RecoveryDigestMismatch`` / "no manifest" errors still surface
+    downstream rather than a silent wrong pick. The chosen manifest is
+    authenticated under the passphrase-recovered master by the caller, so this
+    selection never weakens the tamper guarantees.
+    """
+    for generation in sorted(_all_manifest_generations(root), reverse=True):
+        try:
+            blob = safe_read(_manifest_path(root, generation))
+        except FileNotFoundError:
+            continue
+        untrusted = manifest.parse_unverified(blob)
+        if vault_master.recovery_blob_matches_wmk(recovery_blob, untrusted.wmk):
+            return generation, blob, untrusted
+    return _load_latest_unverified(root, action=action)
 
 
 def init_vault(
@@ -325,7 +366,9 @@ def recover_vault(root: Path, passphrase: str) -> OpenVault:
     the device-bound anchor — is gone (new machine, lost key, non-macOS).
     Uses neither the SE backend nor the anchor store:
 
-    1. pick the newest ``manifest.<gen>.mvmf`` on disk (no anchor to name it),
+    1. pick the newest ``manifest.<gen>.mvmf`` whose ``wmk`` the recovery
+       sidecar certifies (no anchor to name it; tolerant of a crash mid
+       :func:`recover_to_device` — see :func:`_load_recovery_matched_unverified`),
     2. ``parse_unverified`` to extract ``wmk``,
     3. read ``recovery.mrkv`` and :func:`vault_master.open_passphrase` —
        its baked-in ``SHA-256(wmk)`` verification digest still binds the
@@ -348,8 +391,10 @@ def recover_vault(root: Path, passphrase: str) -> OpenVault:
         ManifestError: the manifest failed authentication under the master.
     """
     root = Path(root)
-    _generation, blob, untrusted = _load_latest_unverified(root, action="cannot recover this vault")
     recovery_blob = _read_recovery_blob(root, action="cannot recover this vault")
+    _generation, blob, untrusted = _load_recovery_matched_unverified(
+        root, recovery_blob, action="cannot recover this vault"
+    )
 
     master = vault_master.open_passphrase(recovery_blob, passphrase, wmk=untrusted.wmk)
     try:
@@ -404,14 +449,15 @@ def recover_to_device(
        mirroring :meth:`OpenVault._gc`).
 
     The whole sequence runs under the vault lock so a concurrent writer cannot
-    interleave. Crash-safety note: because the master is unchanged, the re-encoded
-    manifest at the new generation authenticates identically; the only header
-    change is ``wmk``. The recovery sidecar is rewritten in step 4 — written
-    last among the on-disk files but still before the anchor — so a crash between
-    the sidecar rewrite and the anchor flip leaves the (new) sidecar bound to the
-    new ``wmk`` while the anchor still pins the old generation's old ``wmk``;
-    re-running ``recover`` simply re-keys again from the old manifest, which is
-    still present until GC. The returned vault is fully device-anchored, so
+    interleave. Crash-safety note: the new-generation manifest (bound to the new
+    ``wmk``) is written BEFORE the re-bound recovery sidecar, and these two files
+    cannot be updated atomically together. A crash between them leaves the newest
+    manifest bound to a ``wmk`` the still-old sidecar does not certify. Recovery
+    is therefore digest-guided (:func:`_load_recovery_matched_unverified`): it
+    selects the newest generation whose ``SHA-256(wmk)`` matches the sidecar, so
+    a re-run of ``recover`` (or :func:`recover_vault`) transparently re-keys from
+    the older, self-consistent generation and the vault is never bricked by this
+    window. The returned vault is fully device-anchored, so
     :meth:`OpenVault.enroll_file` works immediately.
 
     Raises:
@@ -424,8 +470,10 @@ def recover_to_device(
     root = Path(root)
     _ensure_lock(root)
     with keyvault_lock(root):
-        generation, blob, untrusted = _load_latest_unverified(root, action="cannot re-key this vault")
         recovery_blob = _read_recovery_blob(root, action="cannot re-key this vault")
+        generation, blob, untrusted = _load_recovery_matched_unverified(
+            root, recovery_blob, action="cannot re-key this vault"
+        )
 
         # Open the master under the passphrase + verify the manifest under it, so
         # we re-encode only an authenticated file set (never a forged manifest).
@@ -533,8 +581,11 @@ def change_passphrase(
             )
         else:
             # Cold path: the sidecar's SHA-256(wmk) digest binds it to the real
-            # wmk, so the newest manifest (no anchor to name it) supplies it.
-            _generation, _blob, untrusted = _load_latest_unverified(root, action="cannot rotate")
+            # wmk, so pick the newest manifest the sidecar certifies (tolerant of
+            # a crash mid recover_to_device; no anchor to name it here).
+            _generation, _blob, untrusted = _load_recovery_matched_unverified(
+                root, recovery_blob, action="cannot rotate"
+            )
             new_recovery = vault_master.rewrap_from_passphrase(
                 recovery_blob, old_passphrase, new_passphrase, wmk=untrusted.wmk
             )
