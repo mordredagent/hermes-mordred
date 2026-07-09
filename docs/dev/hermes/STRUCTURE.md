@@ -1,6 +1,10 @@
 # Hermes Repository Structure
 
 > **Purpose**: Map the upstream Hermes (`hermes-agent`) source tree.
+>
+> **Path note**: The `../../../…` links in this file are relative to the
+> **upstream `hermes-agent` checkout** (snapshot commit below), **not this
+> repository** — they do not resolve from here.
 
 ## Snapshot
 

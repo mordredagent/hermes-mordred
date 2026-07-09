@@ -4,6 +4,12 @@
 > Provides diagrams, layered subsystem overview, and deep links into the
 > canonical references — does not replace them.
 >
+> **Path note**: The `../../../…` link targets below (e.g.
+> [`AGENTS.md`](../../../AGENTS.md), `../../../website/docs/…`,
+> `../../../gateway/…`) are relative to the **upstream `hermes-agent` checkout**
+> at the snapshot commit below — **not this repository** — so they do not resolve
+> from here.
+>
 > **Position vs other docs**:
 > - [`AGENTS.md`](../../../AGENTS.md) (~44k) — contributor "how to write code" guide.
 > - [`website/docs/developer-guide/architecture.md`](../../../website/docs/developer-guide/architecture.md) — public top-level architecture page.
