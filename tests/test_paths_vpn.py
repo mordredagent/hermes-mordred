@@ -568,7 +568,7 @@ class TestParseHandshakeAge:
     def test_none_handshake_does_not_poison_a_fresh_peer(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        out = "peer: AAA\n  latest handshake: (none)\n" "peer: BBB\n  latest handshake: 45 seconds ago\n"
+        out = "peer: AAA\n  latest handshake: (none)\npeer: BBB\n  latest handshake: 45 seconds ago\n"
         assert vpn.parse_handshake_age(out) == 45.0
 
     def test_all_none_or_absent_returns_none(self) -> None:
