@@ -86,11 +86,20 @@ $M status --json     # machine-readable
 ### `configure` — interactive setup
 Writes `config.yaml` + `policy.json`. Interactive by default; scriptable with
 `--non-interactive` (unspecified flags keep existing values).
+
+Runs in two steps: it first delegates to the upstream `hermes setup` wizard,
+then collects the Mordred-specific prompts. `hermes setup` runs on **every**
+invocation (Hermes re-shows its wizard even when already configured, pre-filling
+each prompt so you can press Enter to keep it). To re-run `configure` and touch
+**only** the Mordred policy, pass `--skip-hermes-setup` to suppress that step.
 ```sh
 $M configure
+$M configure --skip-hermes-setup                       # Mordred prompts only, no hermes setup
 $M configure --non-interactive --policy strict --no-allow-cloud-llm
+$M configure --non-interactive --skip-hermes-setup --policy lenient
 ```
-Key flags: `--policy {strict,lenient,off}`, `--allow-cloud-llm/--no-allow-cloud-llm`,
+Key flags: `--skip-hermes-setup`, `--policy {strict,lenient,off}`,
+`--allow-cloud-llm/--no-allow-cloud-llm`,
 `--cloud-allowlist <csv>`, `--local-llm-endpoint <url>`, `--local-llm-model-id <id>`,
 `--cloud-attempt-action {always-block,prompt-once}`,
 `--harness {none,codex,claude-cli,cursor,acp-claude,acp-cline}`.
@@ -173,6 +182,7 @@ $M vault status                 # generation + enrolled file names
 $M vault cat <name>             # decrypt one entry to stdout
 $M vault migrate                # import plaintext .env + config.yaml
 $M vault recover                # re-key a vault copied to this machine onto its device
+$M vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
 $M vault set-memory-key         # store/rotate HERMES_MEMORY_KEY
 $M vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
 $M vault disable-config-decrypt # stop managing config.yaml; restore plaintext
@@ -206,6 +216,17 @@ material from a backup blob). Until you run it, a copied vault opens read-only
 $M plugins list                 # discovered Mordred plugins
 ```
 
+### `extension` — browser-extension pairing (preview)
+```sh
+$M extension pair               # print a MORT-… pairing code + terminal QR, then wait
+$M extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
+```
+> Requires the Hermes gateway running (it hosts the extension WebSocket server)
+> and the `messaging` extra for the QR render. The gateway counterpart isn't
+> published alongside this repo yet, so today `extension pair` **fails closed
+> with a clear message** rather than hanging — see
+> [`ROADMAP.md`](../dev/ROADMAP.md).
+
 ---
 
 ## 4. Interactive command walkthroughs
@@ -219,8 +240,9 @@ path and points back to these sections for detail.
 
 `keyvault init` is not a one-shot key generation: it is an **interactive security
 ceremony that needs a real terminal**. In a pipe or non-interactive context it
-fails with `OSError: [Errno 22]` — always run it in your own terminal. Three
-steps, in order:
+aborts cleanly with a non-interactive error (and a redirected stdout is refused
+separately) instead of raising a raw error — always run it in your own terminal.
+Three steps, in order:
 
 1. **Choose a Passphrase** (hidden input). It is never stored anywhere; combined
    with the Seed Phrase it protects the keyvault. Lose it and the keyvault cannot
@@ -321,7 +343,7 @@ unlocked.
 
 > **Already created an attended key?** The attended/unattended choice is fixed when
 > the key is created, so switching means re-keying the vault onto a fresh
-> unattended key — see [SECRETS_ENV_ENCRYPTION.md](SECRETS_ENV_ENCRYPTION.md)
+> unattended key — see [SECRETS_ENV_ENCRYPTION.md](../dev/SECRETS_ENV_ENCRYPTION.md)
 > (`keyvault enable-se`).
 
 ### 4.4 `network init` — the dialog and prompts
