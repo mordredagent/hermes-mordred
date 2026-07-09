@@ -14,14 +14,14 @@ real anthropic transport facts, and the strict-mode allowlist check compares
 against the wrong identifier.
 
 ``PROVIDER_ALIASES`` is a faithful replica of
-``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.18.0). It is *replicated*
+``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.18.2). It is *replicated*
 rather than imported: ``hermes_cli`` is a private module with no stability
 contract, so importing it would couple Mordred's enforcement to Hermes'
 internal layout. ``tests/test_provider_identity.py`` guards the replica's
 shape; a follow-up registry-drift test keeps it aligned with upstream.
 
 ``canonicalize_provider`` mirrors Hermes' own application of the table
-(``models.py:1830`` — ``_PROVIDER_ALIASES.get(name_lower, name_lower)``):
+(``models.py:1913`` — ``_PROVIDER_ALIASES.get(name_lower, name_lower)``):
 an alias resolves to its canonical slug; an unknown id passes through
 unchanged.
 """
@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from typing import Final
 
 #: Faithful replica of ``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes
-#: 0.18.0). Identity entries (e.g. ``xai-oauth`` → ``xai-oauth``) are kept
+#: 0.18.2). Identity entries (e.g. ``xai-oauth`` → ``xai-oauth``) are kept
 #: verbatim from upstream so the replica diffs cleanly against the source.
 #: The bare ``ollama`` → ``custom`` mapping is upstream's "local endpoint"
 #: sentinel (use ``ollama-cloud`` for the hosted product); it is preserved
@@ -124,7 +124,7 @@ def canonicalize_provider(name: str) -> str:
 
     The input is stripped and lowercased before lookup so callers can pass a
     raw ``config.yaml`` / ``auth.json`` value directly. Mirrors Hermes'
-    ``_PROVIDER_ALIASES.get(name_lower, name_lower)`` (``models.py:1830``):
+    ``_PROVIDER_ALIASES.get(name_lower, name_lower)`` (``models.py:1913``):
     a known alias maps to its canonical slug, and any unknown id (including
     the empty string and canonical slugs themselves) passes through unchanged.
 
