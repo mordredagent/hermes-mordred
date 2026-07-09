@@ -44,6 +44,7 @@ from ..keyvault._config_bootstrap import config_hook_installed
 from ..keyvault._identity import resolve_root
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
+from ._defaults import is_missing_keyvault_stack
 from ._workspace_paths import WorkspacePaths, resolve_workspace_env
 from ._workspace_paths import is_mountpoint as _is_mountpoint
 
@@ -118,7 +119,17 @@ def _enrolled_names(root: Path) -> set[str]:
     passphrase. Returns an empty set when there is no vault / no manifest / the
     manifest is unreadable — status must never raise.
     """
-    from ..keyvault import manifest, vault
+    try:
+        from ..keyvault import manifest, vault
+    except ModuleNotFoundError as exc:
+        # Minimal install (no ``[keyvault]`` extra): ``keyvault.vault`` pulls the
+        # crypto stack (argon2 / cryptography / blake3) at import. Nothing can be
+        # enrolled without it, so degrade to "nothing enrolled" rather than let
+        # ``status`` — an overview command — abort. A genuinely unrelated missing
+        # module still propagates (real bug, keeps its traceback).
+        if is_missing_keyvault_stack(exc):
+            return set()
+        raise
 
     try:
         generation = vault._latest_manifest_generation(root)

@@ -88,6 +88,7 @@ from ._cli_parsers import (
     _handle_vault_status,
     _setup_subparser,
 )
+from ._defaults import is_missing_keyvault_stack
 from ._prompt_io import NonInteractiveAbort
 
 __all__ = [
@@ -185,6 +186,17 @@ def dispatch(args: argparse.Namespace) -> int:
     except NonInteractiveAbort as exc:
         _term.emit_error(str(exc))
         return 2
+    except ModuleNotFoundError as exc:
+        # Only the known optional crypto stack is translated; any other
+        # missing module is a real bug and must keep its traceback.
+        if not is_missing_keyvault_stack(exc):
+            raise
+        _term.emit_error(
+            f"this command needs the keyvault crypto stack (missing: {(exc.name or '').partition('.')[0]}) — "
+            "install with: pip install 'mordred-hermes[keyvault]' "
+            "(on macOS use '[macos]' to also enable Secure Enclave support)"
+        )
+        return 1
     return int(result) if isinstance(result, int) else 0
 
 
