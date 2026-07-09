@@ -251,7 +251,12 @@ def test_config_decrypt_lifecycle_through_real_enclave(tmp_path: Path, monkeypat
         assert isinstance(_seckey_backend._default_ops(), _seckey_helper._HelperSecKeyOps)
 
         # enable-config-decrypt: enroll config.yaml into the vault + write the opt-in marker.
-        assert config_decrypt_cli.enable(home=home, root=root) == 0
+        # This dev .venv lacks the config-decrypt .pth hook, so bypass the macOS runtime gate
+        # (force_runtime_unverified); the real-Enclave seal/reseal lifecycle driven directly below
+        # is what this test verifies. Mirrors cli_enable's platform=sys.platform.
+        assert (
+            config_decrypt_cli.enable(home=home, root=root, platform=sys.platform, force_runtime_unverified=True) == 0
+        )
         assert _marker_path(home).exists()
         # The SE private key persisted as a CryptoKit dataRepresentation blob under the
         # isolated home — concrete proof the real Enclave path ran (software keys live
@@ -319,7 +324,10 @@ def test_config_decrypt_fail_closed_on_missing_anchor_through_real_enclave(
 
     try:
         assert vault_cli.init(root=root, prompt_io=_FixedPassphrase("itest-passphrase")) == 0
-        assert config_decrypt_cli.enable(home=home, root=root) == 0
+        # dev .venv lacks the .pth hook → bypass the macOS runtime gate (see the lifecycle test).
+        assert (
+            config_decrypt_cli.enable(home=home, root=root, platform=sys.platform, force_runtime_unverified=True) == 0
+        )
         assert reseal_config(root=root, home=home) == 1  # plaintext sealed away
 
         # Simulate device-anchor deletion: the marker still promises a vault-managed
