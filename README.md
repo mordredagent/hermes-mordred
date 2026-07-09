@@ -82,11 +82,21 @@ The CLI is the standalone `hermes-mordred` console script (installed next to
 ```sh
 M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 
+# First run — set up, in order:
 $M configure                 # interactive setup — policy / LLM / harness
 $M network init              # optional — pick a privacy route (Tor / VPN / clearnet)
 $M keyvault init             # create the hardware-backed key (interactive ceremony)
 $M encryption enable env     # encrypt your .env at rest
 $M status                    # verify — the `env` row reads [on] enrolled
+
+# Everyday commands:
+$M status                          # protection at a glance
+$M encryption status               # what's encrypted (env / config / memory)
+$M encryption enable <target>      # turn on at-rest encryption for a target
+$M network use <tor|vpn|clearnet>  # switch the active privacy route
+$M network status                  # show the active route and liveness
+$M encryption change-passphrase    # rotate the vault recovery passphrase
+$M configure                       # re-run interactive setup anytime
 ```
 
 Step-by-step guide with expected output:
