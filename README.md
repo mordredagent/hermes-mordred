@@ -55,8 +55,8 @@ Optional extras, all opt-in:
 | Extra | Adds | Install when you need |
 |---|---|---|
 | `keyvault` | `cryptography` / `argon2-cffi` / `blake3` | `encryption` / `keyvault` commands on any platform |
-| `macos` | `keyvault` + pyobjc Security bridges | Secure Enclave key protection on macOS |
-| `ethereum` | `eth-keys` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
+| `macos` | `keyvault` + pyobjc Security / SystemConfiguration / Quartz bridges | Secure Enclave key protection on macOS |
+| `ethereum` | `eth-keys` / `eth-hash` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
 | `tor-control` | `stem` | Deep Tor liveness probing for strict-mode operators |
 | `messaging` | `qrcode` | Terminal QR rendering for `extension pair` |
 
@@ -82,11 +82,23 @@ The CLI is the standalone `hermes-mordred` console script (installed next to
 ```sh
 M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 
-$M configure                 # interactive setup — policy / LLM / harness
-$M network init              # optional — pick a privacy route (Tor / VPN / clearnet)
-$M keyvault init             # create the hardware-backed key (interactive ceremony)
-$M encryption enable env     # encrypt your .env at rest
-$M status                    # verify — the `env` row reads [on] enrolled
+# First run — set up, in order:
+$M configure                     # interactive setup — policy / LLM / harness
+$M configure --skip-hermes-setup # re-run but skip the upstream `hermes setup` step
+$M network init                  # optional — pick a privacy route (Tor / VPN / clearnet)
+$M keyvault init                 # create the hardware-backed key (interactive ceremony)
+$M encryption enable env         # encrypt your .env at rest
+$M status                        # verify — the `env` row reads [on] enrolled
+
+# Everyday commands:
+$M status                          # protection at a glance
+$M encryption status               # what's encrypted (env / config / memory)
+$M encryption enable <target>      # turn on at-rest encryption for a target
+$M network use <tor|vpn|clearnet>  # switch the active privacy route
+$M network status                  # show the active route and liveness
+$M encryption change-passphrase    # rotate the vault recovery passphrase
+$M configure                       # re-run interactive setup anytime
+$M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
 ```
 
 Step-by-step guide with expected output:
@@ -132,6 +144,23 @@ for the full environment build):
 # from this repo's root; add ".[macos]" on macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e .
 ```
+
+**Refresh a non-editable live venv.** If the live venv holds a *wheel* instead
+of the editable install above — the PyPI wheel, or a prior repo build — repo
+edits do **not** reach the `hermes-mordred` binary until you rebuild and
+reinstall it from the repo root:
+
+```sh
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --reinstall --no-deps .
+```
+
+`--reinstall` is required whenever the version string is unchanged (two builds
+both reporting `0.1.0a1`, say): without it uv treats the requirement as already
+satisfied and no-ops, leaving the binary on stale code — the symptom is a newly
+added flag such as `configure --skip-hermes-setup` failing with `unrecognized
+arguments`. `--no-deps` keeps the live editable `hermes-agent` checkout
+untouched. Re-run the same command if Hermes rebuilds its venv and drops the
+wheel.
 
 Local checks run from the repo's own uv-managed venv and mirror the CI `test`
 job (`HERMES_HOME` keeps the tests away from your real `~/.hermes`):

@@ -181,7 +181,8 @@ If you only want your `.env` protected, three commands are the whole job:
 | 3 | `$M status` | Confirm. | `env` row shows `[on] enrolled`. |
 
 **What to expect from `keyvault init`.** It is an **interactive security ceremony
-that needs a real terminal** (in a pipe it fails with `OSError: [Errno 22]`).
+that needs a real terminal** (run it non-interactively — e.g. piped — and it
+aborts cleanly with a non-interactive error instead of encrypting anything).
 You'll choose a passphrase, write down a 24-word seed phrase, and confirm an
 offline verification digest. With no hardware key it degrades to a
 software-protected key automatically — the ceremony is unchanged.

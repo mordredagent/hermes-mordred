@@ -60,7 +60,7 @@ python -m hermes_cli --version
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e .
 ```
 
-`pyproject.toml` は既に landing 済み (version `0.1.0a0`、 5 entry point) なので、 上記 install ステップは **現行かつ必須**。 自前で `.venv` を作るのではなく、 Hermes が管理する `~/.hermes/hermes-agent/venv` に対して `uv pip` で install するのが canonical なフロー (`README.md` 参照)。
+`pyproject.toml` は既に landing 済み (version `0.1.0a1`、 5 entry point) なので、 上記 install ステップは **現行かつ必須**。 自前で `.venv` を作るのではなく、 Hermes が管理する `~/.hermes/hermes-agent/venv` に対して `uv pip` で install するのが canonical なフロー (`README.md` 参照)。
 
 ### Optional extras
 
