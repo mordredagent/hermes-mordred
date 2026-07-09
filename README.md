@@ -83,11 +83,12 @@ The CLI is the standalone `hermes-mordred` console script (installed next to
 M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 
 # First run — set up, in order:
-$M configure                 # interactive setup — policy / LLM / harness
-$M network init              # optional — pick a privacy route (Tor / VPN / clearnet)
-$M keyvault init             # create the hardware-backed key (interactive ceremony)
-$M encryption enable env     # encrypt your .env at rest
-$M status                    # verify — the `env` row reads [on] enrolled
+$M configure                     # interactive setup — policy / LLM / harness
+$M configure --skip-hermes-setup # re-run but skip the upstream `hermes setup` step
+$M network init                  # optional — pick a privacy route (Tor / VPN / clearnet)
+$M keyvault init                 # create the hardware-backed key (interactive ceremony)
+$M encryption enable env         # encrypt your .env at rest
+$M status                        # verify — the `env` row reads [on] enrolled
 
 # Everyday commands:
 $M status                          # protection at a glance
@@ -143,6 +144,23 @@ for the full environment build):
 # from this repo's root; add ".[macos]" on macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 -e .
 ```
+
+**Refresh a non-editable live venv.** If the live venv holds a *wheel* instead
+of the editable install above — the PyPI wheel, or a prior repo build — repo
+edits do **not** reach the `hermes-mordred` binary until you rebuild and
+reinstall it from the repo root:
+
+```sh
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --reinstall --no-deps .
+```
+
+`--reinstall` is required whenever the version string is unchanged (two builds
+both reporting `0.1.0a1`, say): without it uv treats the requirement as already
+satisfied and no-ops, leaving the binary on stale code — the symptom is a newly
+added flag such as `configure --skip-hermes-setup` failing with `unrecognized
+arguments`. `--no-deps` keeps the live editable `hermes-agent` checkout
+untouched. Re-run the same command if Hermes rebuilds its venv and drops the
+wheel.
 
 Local checks run from the repo's own uv-managed venv and mirror the CI `test`
 job (`HERMES_HOME` keeps the tests away from your real `~/.hermes`):
