@@ -15,11 +15,14 @@ Single-sources three things that were independently copy-pasted across
   broken NDJSON path) *before* that refusal fired, Hermes would catch it and
   continue -- a fail-open bypass. Swallowing the audit-side error here keeps
   the refusal authoritative while logging the cause on the caller's logger.
-* :func:`build_audit_writer` -- lazily constructs the ``NDJSONWriter`` that
-  ``privacy_check`` already provides, importing it inside the call so plugin
-  discovery stays cheap. Callers wrap this in their own
-  ``functools.lru_cache`` so the per-process cache (and the ``cache_clear()``
-  the tests drive) stays module-local rather than shared across plugins.
+* :func:`build_audit_writer` -- lazily delegates to
+  ``privacy_check.audit.make_audit_writer`` so ``network`` / ``llm_guard`` get
+  the SAME encryption-aware writer ``privacy_check`` uses for the shared
+  ``audit.log`` (``EncryptedWriter`` when the keyvault is initialized, else
+  ``NDJSONWriter``). The import is inside the call so plugin discovery stays
+  cheap. Callers wrap this in their own ``functools.lru_cache`` so the
+  per-process cache (and the ``cache_clear()`` the tests drive) stays
+  module-local rather than shared across plugins.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from .privacy_check.audit import NDJSONWriter
+    from .privacy_check.audit import Writer
 
 
 class AuditWriter(Protocol):
@@ -58,13 +61,30 @@ def safe_audit_append(audit: AuditWriter, entry: Mapping[str, Any], *, logger: l
         logger.error("audit append failed for entry %r: %s", entry, e)
 
 
-def build_audit_writer(path: Path) -> NDJSONWriter:
-    """Construct the NDJSON audit writer ``privacy_check`` already provides.
+def build_audit_writer(path: Path) -> Writer:
+    """Construct the encryption-aware audit writer ``privacy_check`` provides.
 
-    The import is local so ``privacy_check`` is not loaded at plugin-discovery
-    time (keeps each plugin's ``register`` cheap and side-effect-free until
-    invoked). Callers are expected to memoise the result themselves.
+    Delegates to :func:`mordred_hermes.privacy_check.audit.make_audit_writer`
+    so ``network`` / ``llm_guard`` obtain the SAME writer kind ``privacy_check``
+    uses for the shared ``audit.log``: an ``EncryptedWriter`` once the Mordred
+    keyvault is initialized, an ``NDJSONWriter`` otherwise. Routing all three
+    plugins through one factory prevents a plaintext writer from splicing
+    cleartext lines into an MRAL-encrypted log (which would leak audit metadata
+    at rest and make ``audit decrypt`` fail for the whole day's trail).
+
+    The import is local so ``privacy_check`` — and, only when the keyvault is
+    actually initialized, the keyvault crypto stack — is not loaded at
+    plugin-discovery time (keeps each plugin's ``register`` cheap and
+    side-effect-free until invoked). Callers memoise the result themselves.
+
+    ``path`` is ``<HERMES_BASE>/mordred/audit.log``, so the keyvault home is
+    ``<HERMES_BASE>`` == ``path.parent.parent``. We pass it explicitly — the
+    same way privacy_check does (``make_audit_writer(keyvault_home=
+    config_path.parent)``) — so the encryption decision is bound to the
+    keyvault that owns THIS log, not the ambient default home. That keeps the
+    three plugins in agreement in production and keeps the choice deterministic
+    under tests that redirect the audit path to a scratch directory.
     """
-    from .privacy_check.audit import NDJSONWriter
+    from .privacy_check.audit import make_audit_writer
 
-    return NDJSONWriter(path=path)
+    return make_audit_writer(path, keyvault_home=path.parent.parent)

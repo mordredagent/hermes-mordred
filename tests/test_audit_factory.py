@@ -195,3 +195,35 @@ class TestMakeAuditWriter:
         writer.close()
         entries = decrypt_log_file(log_path, backend=backend, audit_sink=lambda entry: None)
         assert entries[0]["event"] == "policy.strict.clearnet"
+
+
+class TestSharedBuildAuditWriter:
+    """``_audit_support.build_audit_writer`` — the factory ``network`` /
+    ``llm_guard`` use for the shared ``audit.log`` — must route through
+    ``privacy_check.audit.make_audit_writer`` (audit HIGH #3). Otherwise those
+    two plugins write plaintext NDJSON lines into an MRAL-encrypted log,
+    leaking audit metadata at rest and breaking ``audit decrypt`` for the whole
+    day's trail.
+    """
+
+    def test_delegates_to_make_audit_writer_with_log_bound_home(self, monkeypatch, tmp_path: Path) -> None:
+        import mordred_hermes.privacy_check.audit as pc_audit
+        from mordred_hermes import _audit_support
+
+        seen: list[tuple[Path, Path]] = []
+        sentinel = object()
+
+        def fake_make(path: Path, *, keyvault_home: Path) -> object:
+            seen.append((path, keyvault_home))
+            return sentinel
+
+        # build_audit_writer imports make_audit_writer lazily from this module,
+        # so patching the attribute here is what the delegation resolves to.
+        monkeypatch.setattr(pc_audit, "make_audit_writer", fake_make)
+        audit_path = tmp_path / "mordred" / "audit.log"
+        result = _audit_support.build_audit_writer(audit_path)
+        assert result is sentinel
+        # Encryption state is bound to THIS log's HERMES_BASE
+        # (audit_path.parent.parent), matching privacy_check — not the ambient
+        # default home.
+        assert seen == [(audit_path, tmp_path)]

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import secrets
 from dataclasses import dataclass
 
@@ -56,6 +57,23 @@ class SealedMaster:
 def _recovery_digest(wmk: bytes) -> bytes:
     """Verification digest binding a recovery blob to its ``wmk`` (not the passphrase)."""
     return hashlib.sha256(wmk).digest()
+
+
+def recovery_blob_matches_wmk(recovery_blob: bytes, wmk: bytes) -> bool:
+    """Whether *recovery_blob* was minted against *wmk*.
+
+    A cheap, header-only, constant-time check — no passphrase, no Argon2. The
+    blob's embedded verification digest is ``SHA-256(wmk)`` (see module docs),
+    so this recomputes ``SHA-256(wmk)`` and compares. When several manifest
+    generations sit on disk — e.g. a crash mid :func:`recover_to_device` wrote a
+    new-``wmk`` manifest before the re-bound sidecar — the vault uses this to
+    pick the generation the recovery sidecar actually certifies rather than
+    blindly trusting the newest one. The chosen manifest is still authenticated
+    under the passphrase-recovered master afterwards, so this only narrows WHICH
+    generation to open; it is never a substitute for authentication.
+    """
+    parsed = backup.parse_header(recovery_blob)
+    return hmac.compare_digest(parsed.verification_digest, _recovery_digest(wmk))
 
 
 def seal(*, key_id: str, passphrase: str, backend: NativeBackend) -> tuple[SealedMaster, MasterKey]:

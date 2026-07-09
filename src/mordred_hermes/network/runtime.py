@@ -577,7 +577,15 @@ class Runtime:
             if self._handle.path == "tor":
                 self._tor_stop(h)
             elif self._handle.path == "vpn":
-                preserve = self._config.policy_mode == "strict"
+                # Codex r8-P1 symmetry: only roll back the lockdown WE applied.
+                # In lenient/off, bring_up leaves a user's pre-existing lockdown
+                # untouched (``lockdown_applied_by_us=False``); normal teardown
+                # must preserve it too, mirroring the bring-up-failure cleanup
+                # (see ``preserve_on_cleanup`` above). Strict always preserves
+                # (the kill-switch is required there). ``getattr`` keeps this
+                # generic for handles with no lockdown concept (WireGuard /
+                # custom) — they default to "preserve", a no-op for them.
+                preserve = self._config.policy_mode == "strict" or not getattr(h, "lockdown_applied_by_us", False)
                 self._vpn_provider.disconnect(h, preserve_lockdown=preserve)
             else:
                 clearnet_mod.stop(h)
