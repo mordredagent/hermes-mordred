@@ -55,8 +55,8 @@ Optional extras, all opt-in:
 | Extra | Adds | Install when you need |
 |---|---|---|
 | `keyvault` | `cryptography` / `argon2-cffi` / `blake3` | `encryption` / `keyvault` commands on any platform |
-| `macos` | `keyvault` + pyobjc Security bridges | Secure Enclave key protection on macOS |
-| `ethereum` | `eth-keys` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
+| `macos` | `keyvault` + pyobjc Security / SystemConfiguration / Quartz bridges | Secure Enclave key protection on macOS |
+| `ethereum` | `eth-keys` / `eth-hash` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
 | `tor-control` | `stem` | Deep Tor liveness probing for strict-mode operators |
 | `messaging` | `qrcode` | Terminal QR rendering for `extension pair` |
 
