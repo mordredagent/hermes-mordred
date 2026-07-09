@@ -109,6 +109,21 @@ $M configure                       # re-run interactive setup anytime
 $M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
 ```
 
+> **Network troubleshooting.** If network communication drops out now and then,
+> check the active privacy path first — `network status` tells you whether Tor /
+> VPN is actually up:
+>
+> ```sh
+> $M network status
+> # active_path = tor  state = ready      last_health = ok       ← path is up
+> # active_path = tor  state = not ready  last_health = FAILED   ← path is down
+> ```
+>
+> `state` is `ready` / `not ready`, `last_health` is `ok` / `FAILED`. A trailing
+> `[warning] path was flagged as DROPPED` line means the liveness worker saw
+> consecutive failures; in strict mode tool calls refuse until you re-establish
+> the path with `network use <tor|vpn|clearnet>`.
+
 Step-by-step guide with expected output:
 **[QUICKSTART](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**.
 Full command reference and interactive-command walkthroughs:
@@ -195,6 +210,64 @@ Both live suites were last validated on real devices on 2026-05-25.
 Releases are cut via the `release.yml` workflow (PyPI Trusted Publishing);
 bump versions in lockstep with `tools/bump_version.py`. Runbook:
 [CI.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/CI.md).
+
+## Uninstall
+
+Reverse the setup in the order below.
+
+> **⚠️ Decrypt before you remove anything.** If you turned on at-rest encryption,
+> uninstalling the package or deleting the key first leaves your `.env`, config,
+> and memory **permanently unreadable**. Run step 1 while the CLI and key are still
+> present.
+
+```sh
+M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
+```
+
+**1. Decrypt everything back to plaintext.**
+
+```sh
+$M encryption disable all        # env / config / memory / workspace → plaintext
+$M vault disable-config-decrypt  # stop transparent config decrypt, restore plaintext config.yaml
+$M encryption status             # verify — every row reads [off]
+```
+
+**2. Destroy the key material** — optional and **irreversible**. Skip it if you
+plan to reinstall and keep the same vault.
+
+```sh
+$M keyvault reset --yes          # DESTROY the hardware-backed key + remove the keyvault dir
+```
+
+**3. Disable the plugins.** Remove the five `mordred_*` entries from the
+`plugins.enabled` list in `~/.hermes/config.yaml` (undo
+[Enable the plugins](#enable-the-plugins)).
+
+**4. Uninstall the package** from the Hermes venv. This also removes the
+config-decrypt `.pth` bootstrap from site-packages.
+
+```sh
+uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
+# or, if the venv ships pip:
+~/.hermes/hermes-agent/venv/bin/pip uninstall mordred-hermes
+```
+
+**5. Remove leftover state** — optional, and only after step 1 (the vault lives
+here):
+
+```sh
+rm -rf ~/.hermes/mordred/        # audit log, policy, credentials, tor-data, keyvault
+```
+
+Also delete any `MORDRED_*` entries you added to `~/.hermes/.env`. If you ran
+`keyvault enable-se` / `enable-tpm`, the built helper is **not** removed by the
+steps above — delete it by hand (default location, unless you set
+`MORDRED_SEKEY_INSTALL_DIR` / `MORDRED_TPMKEY_INSTALL_DIR`):
+
+```sh
+rm -f ~/.local/bin/mordred-hermes-sekey    # macOS Secure Enclave helper
+rm -f ~/.local/bin/mordred-hermes-tpmkey   # Linux TPM 2.0 helper
+```
 
 ## Repository layout
 
