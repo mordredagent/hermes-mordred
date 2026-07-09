@@ -61,6 +61,51 @@ class TestEnrolledNames:
         # No backend / store / passphrase passed — purely reads the plaintext manifest body.
         assert ".env" in encryption_cli._enrolled_names(root)
 
+    def test_degrades_without_crypto_stack_in_subprocess(self) -> None:
+        """Minimal install (no ``[keyvault]`` extra): the lazy keyvault import
+        raises ``ModuleNotFoundError`` for argon2 — ``_enrolled_names`` must
+        degrade to the empty set (its never-raise contract) and the whole
+        ``status`` overview must still exit 0, not abort with the install hint.
+
+        Found in the 2026-07-09 CLI sweep: ``hermes-mordred status`` exited 1
+        with the keyvault hint instead of printing policy / network state.
+
+        Runs in a subprocess: blocking the crypto imports in-process would race
+        the copies other tests have already imported (mirrors
+        ``test_audit_cli.TestMinimalInstallImport``).
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import argparse, os, sys, tempfile
+            from pathlib import Path
+
+            class _Blocker:
+                BLOCKED = ("cryptography", "blake3", "argon2")
+                def find_spec(self, name, path=None, target=None):
+                    if name.split(".")[0] in self.BLOCKED:
+                        raise ModuleNotFoundError(f"No module named {name!r} (blocked by test)", name=name)
+                    return None
+
+            sys.meta_path.insert(0, _Blocker())
+            os.environ["HERMES_HOME"] = tempfile.mkdtemp()
+
+            from mordred_hermes.wizard import encryption_cli
+            assert encryption_cli._enrolled_names(Path("/nonexistent/vault")) == set()
+
+            from mordred_hermes.wizard._cli_parsers import _handle_status
+            rc = _handle_status(argparse.Namespace(json=False))
+            assert rc == 0, f"status must degrade cleanly, got rc={rc}"
+            print("OK")
+            """
+        )
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60, check=False)
+        assert proc.returncode == 0, f"status crashed without crypto stack:\n{proc.stderr}"
+        assert "OK" in proc.stdout
+
 
 # -----------------------------------------------------------------------------
 # Per-target detectors — configured / active / detail
