@@ -11,6 +11,14 @@ enforcement for local-only LLM operation.
 **Status: active alpha** — current release `0.1.0a1`
 ([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-08).
 
+> **⭐ Recommended: set up with an AI coding agent.** The first-run setup
+> (`configure`, `network init`, `keyvault init`) is a series of interactive
+> ceremonies with several prompts. Running them inside
+> [Claude Code](https://www.anthropic.com/claude-code) or
+> [Codex](https://openai.com/codex) is the recommended path — the agent walks you
+> through each prompt, explains the options, and picks sensible defaults for your
+> platform.
+
 ## The plugins
 
 Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
