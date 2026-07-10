@@ -223,11 +223,12 @@ $M extension pair --timeout 300 # seconds to wait for the extension to pair (def
 $M extension serve              # run the extension WebSocket server in the foreground
 $M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
 ```
-> `pair` requires the Hermes gateway running (it hosts the extension WebSocket
-> server) and the `messaging` extra for the QR render. The gateway counterpart
-> isn't published alongside this repo yet, so today `extension pair` **fails
-> closed with a clear message** rather than hanging — see
-> [`ROADMAP.md`](../dev/ROADMAP.md).
+> `pair` prints a code and waits for a running extension WebSocket server to
+> consume it — either this plugin's `extension serve` or a full Hermes
+> gateway; both share `~/.hermes/extension/pending.json`. Needs the
+> `extension` extra (pairing backend) and `messaging` for the QR render. On
+> builds without the extension package (e.g. the `0.1.0a1` wheel) it fails
+> closed with a clear message.
 >
 > `serve` runs the plugin's own ported server (`mordred_hermes.extension`,
 > requires the `extension` extra) standalone — pairing, crypto, history, and
