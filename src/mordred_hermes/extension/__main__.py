@@ -51,7 +51,11 @@ def _resolve_chat_handler() -> Any:
         from .chat import make_gateway_chat_handler
 
         return make_gateway_chat_handler(None)
-    except Exception:
+    except Exception as exc:
+        # A broken runtime should degrade to the stub, but never silently:
+        # without this line a real bug in chat.py would masquerade as a
+        # missing-runtime install.
+        logging.getLogger(__name__).warning("gateway chat handler unavailable, falling back to stub: %s", exc)
         return None
 
 

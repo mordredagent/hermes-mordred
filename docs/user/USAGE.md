@@ -233,9 +233,11 @@ $M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:77
 > closed with a clear message.
 >
 > `serve` runs the plugin's own ported server (`mordred_hermes.extension`,
-> requires the `extension` extra) standalone — pairing, crypto, history, and
-> keyvault signing work, but chat replies are stubbed without a live Hermes
-> gateway; see the README's "Browser-extension WebSocket gateway" section.
+> requires the `extension` extra) standalone — pairing, crypto, history,
+> keyvault signing, and agent chat all work: the chat handler binds the
+> Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
+> real agent replies (a stub reply appears only if that runtime is missing);
+> see the README's "Browser-extension WebSocket gateway" section.
 > Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
 > with a one-line error.
 
