@@ -64,6 +64,17 @@ def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p_pair = esub.add_parser("pair", help="Generate a pairing code and wait for the extension")
     p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait for pairing (default: 600)")
     p_pair.set_defaults(func=_handle_extension_pair)
+    p_serve = esub.add_parser(
+        "serve",
+        help="Run the extension WebSocket server (ws://127.0.0.1:7788/ext) in the foreground",
+    )
+    p_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1 — non-loopback exposes the no-TLS API to your network)",
+    )
+    p_serve.add_argument("--port", type=int, default=7788, help="Bind port (default: 7788)")
+    p_serve.set_defaults(func=_handle_extension_serve)
 
 
 def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -717,3 +728,25 @@ def _handle_extension_pair(args: argparse.Namespace) -> int:
     from . import extension_pair_cli
 
     return extension_pair_cli.cli_extension_pair(args)
+
+
+def _handle_extension_serve(args: argparse.Namespace) -> int:
+    # The import below executes mordred_hermes/extension/__init__.py, which
+    # eagerly imports .api and therefore aiohttp — so a missing `extension`
+    # extra surfaces HERE, not inside serve()'s own lazy-import guard.
+    try:
+        from mordred_hermes.extension.__main__ import serve
+    except ImportError as exc:
+        import sys
+
+        # Echo the underlying error so a genuine import bug inside the
+        # package isn't misdiagnosed as a missing extra.
+        print(
+            "error: the extension server needs the `extension` extra (aiohttp). "
+            'Install it with `pip install "mordred-hermes[extension]"` or, inside '
+            f"this repo, `uv sync --extra extension`. (import failed: {exc})",
+            file=sys.stderr,
+        )
+        return 2
+
+    return serve(host=args.host, port=args.port)
