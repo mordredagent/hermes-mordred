@@ -1811,6 +1811,9 @@ ethereum = [
     { name = "eth-keys" },
     { name = "rlp" },
 ]
+extension = [
+    { name = "aiohttp" },
+]
 integration = [
     { name = "aiohttp-socks" },
     { name = "anthropic" },
@@ -1842,6 +1845,7 @@ tor-control = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", marker = "extra == 'extension'", specifier = ">=3.9" },
     { name = "aiohttp-socks", marker = "extra == 'integration'", specifier = ">=0.10" },
     { name = "anthropic", marker = "extra == 'integration'", specifier = ">=0.40" },
     { name = "argon2-cffi", marker = "extra == 'ethereum'", specifier = ">=23" },
@@ -1874,7 +1878,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
     { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
 ]
-provides-extras = ["dev", "ethereum", "integration", "keyvault", "macos", "messaging", "tor-control"]
+provides-extras = ["dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "tor-control"]
 
 [[package]]
 name = "multidict"
