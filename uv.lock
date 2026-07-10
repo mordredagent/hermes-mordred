@@ -1813,6 +1813,7 @@ ethereum = [
 ]
 extension = [
     { name = "aiohttp" },
+    { name = "cryptography" },
 ]
 integration = [
     { name = "aiohttp-socks" },
@@ -1856,6 +1857,7 @@ requires-dist = [
     { name = "blake3", marker = "extra == 'macos'", specifier = ">=0.4" },
     { name = "boto3", marker = "extra == 'integration'", specifier = ">=1.34" },
     { name = "cryptography", marker = "extra == 'ethereum'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'extension'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'keyvault'", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'macos'", specifier = ">=42" },
     { name = "eth-account", marker = "extra == 'ethereum'", specifier = ">=0.13" },

@@ -4,17 +4,18 @@ Generates a ``MORT-XXXXXXXX-XXXXXXXX`` code (10-min TTL), prints it plus a
 terminal QR, and waits for the gateway's extension WebSocket server to consume
 it via a ``pair_init`` from the browser extension.
 
-The gateway must be running (it hosts ``ws://localhost:7788/ext``); this command
-and the gateway hand the code off through ``~/.hermes/extension/pending.json``.
+A WebSocket server must be running to consume the code (it hosts
+``ws://localhost:7788/ext``) — either this plugin's own
+``hermes-mordred extension serve`` or a full Hermes gateway; this command and
+the server hand the code off through ``~/.hermes/extension/pending.json``
+(identical layout in both implementations).
 
 See ``Mordred-Extension/SPEC.ja.md`` §3.1 / §7.3.
 
-**Standalone-repo status**: ``gateway.extension_pairing`` (and the rest of the
-WebSocket server it talks to) lives in the Hermes-fork counterpart to this
-plugin, which has not been published alongside this repo yet — see
-``docs/dev/ROADMAP.md`` §"Browser-extension gateway counterpart (deferred)".
-Until that lands, this command fails closed with a clear message instead of a
-raw ``ImportError`` (:func:`_import_pairing`).
+Pairing-code generation itself is served by the plugin's own ported module
+(``mordred_hermes.extension.pairing``, shipped since the #30 port), with the
+Hermes-fork ``gateway.extension_pairing`` kept as a fallback for full-gateway
+checkouts whose plugin copy predates the port (:func:`_import_pairing`).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ _POLL_SECONDS = 1.0
 
 
 class ExtensionGatewayUnavailable(Exception):
-    """``gateway.extension_pairing`` isn't importable in this build."""
+    """No pairing backend is importable in this build."""
 
 
 def _print_qr(code: str) -> None:
@@ -50,18 +51,33 @@ def _print_qr(code: str) -> None:
 
 
 def _import_pairing() -> Any:
-    """Import ``gateway.extension_pairing``, adding the repo root to sys.path if
-    the gateway package (a repo-root top-level package) isn't already importable.
+    """Import the pairing backend, preferring the plugin's own ported module.
+
+    1. ``mordred_hermes.extension.pairing`` — ships with this plugin (#30
+       port). Same ``pending.json`` contract as the full-gateway code, so
+       codes generated here are consumable by either server implementation.
+       Note the package ``__init__`` eagerly imports ``.api`` (aiohttp), so
+       this import needs the ``extension`` extra installed.
+    2. ``gateway.extension_pairing`` — Hermes-fork layout, kept as a fallback
+       for full-gateway checkouts whose plugin copy predates the port (the
+       repo root is added to sys.path when running from such a checkout).
 
     Raises :class:`ExtensionGatewayUnavailable` — instead of leaking the raw
-    ``ImportError`` — when the Hermes-fork gateway counterpart isn't present,
-    which is the expected state for a plain ``pip install mordred-hermes``
-    today (see the module docstring's "Standalone-repo status" note).
+    ``ImportError`` — when neither is importable: e.g. the published
+    ``0.1.0a1`` wheel (predates the extension package) or a newer build
+    without the ``extension`` extra's dependencies.
     """
+    ported_exc: ImportError
+    try:
+        from mordred_hermes.extension import pairing as ported
+
+        return ported
+    except ImportError as exc:
+        ported_exc = exc
+
     try:
         from gateway import extension_pairing as pairing
     except ImportError:
-        import sys
         from pathlib import Path
 
         here = Path(__file__).resolve()
@@ -71,12 +87,18 @@ def _import_pairing() -> Any:
                 break
         try:
             from gateway import extension_pairing as pairing
-        except ImportError as exc:
+        except ImportError as gw_exc:
+            # Surface BOTH failures: chaining alone would suppress whichever
+            # one isn't the explicit cause, and they can differ (missing
+            # aiohttp vs. a broken fallback checkout).
             raise ExtensionGatewayUnavailable(
-                "the browser-extension gateway (`gateway.extension_pairing`) is not "
-                "available in this build. It ships separately from mordred-hermes "
-                "and is not published yet — this command is not usable until then."
-            ) from exc
+                "extension pairing is not available in this build: importing "
+                f"`mordred_hermes.extension.pairing` failed ({ported_exc}); the "
+                f"`gateway.extension_pairing` fallback also failed ({gw_exc}). "
+                'Install the `extension` extra (`pip install "mordred-hermes[extension]"` '
+                "or, inside this repo, `uv sync --extra extension`) on a build newer "
+                "than 0.1.0a1."
+            ) from ported_exc
     return pairing
 
 
@@ -122,7 +144,8 @@ def extension_pair(*, timeout: float = 600.0) -> int:
     )
     _term.emit_warn(
         f"{reason} — run `hermes-mordred extension pair` for a new code "
-        "(check the gateway is running: `hermes --gateway`)."
+        "(check a server is running: `hermes-mordred extension serve` or a "
+        "full Hermes gateway)."
     )
     return 1
 

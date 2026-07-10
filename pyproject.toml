@@ -39,6 +39,10 @@ keyvault = [
 # `mypy --strict src` and pytest can resolve the extension modules.
 extension = [
   "aiohttp>=3.9",
+  # pairing/crypto hard-import cryptography at module scope; until now it only
+  # rode along transitively via hermes-agent's own pin, which this extra must
+  # not silently depend on.
+  "cryptography>=42",
 ]
 macos = [
   # Everything keyvault needs on a Mac = the cross-platform crypto stack

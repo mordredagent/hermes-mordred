@@ -220,9 +220,10 @@ standalone — they only touch `~/.hermes` and the keyvault.
   `GatewayRunner` and lazily imports `gateway.run` / `run_agent` from the
   Hermes-fork runtime; agent-backed chat starts working once the gateway side
   launches this server itself.
-- **`hermes-mordred extension pair` still fails closed** (exit 2): it imports
-  the pre-port `gateway.extension_pairing` path, not the ported
-  `mordred_hermes.extension.pairing`.
+- **Pairing works end-to-end**: run `hermes-mordred extension pair` in a
+  second terminal while `extension serve` is running — both sides share
+  `~/.hermes/extension/pending.json`, so codes are also consumable by a full
+  Hermes gateway hosting the WS server.
 - **`GET http://127.0.0.1:7788/` returns 503**: the server serves the bundled
   localhost web app from `extension_web/`, but the built page ships in `web/`.
   The WS endpoint `/ext` is unaffected.
