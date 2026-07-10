@@ -199,12 +199,15 @@ prompts**, and how to **migrate the vault to a new machine**, see
 the `vault recover` notes in
 [`USAGE.md` §3 (Migrate to a new machine)](./USAGE.md#migrate-to-a-new-machine).
 
-> **Want zero Touch ID prompts? (macOS)** Once `env` / `config` / `memory` are
-> vault-managed, every `hermes` / `$M …` run unlocks the vault to decrypt them, so
-> the default **attended** device key asks for Touch ID — up to 3× per command (one
-> per target). This is expected, not a bug. To make the hot path silent while your
-> Mac is unlocked, build the Secure Enclave helper in **unattended** mode *before*
-> the device key is first created:
+> **Recommended (macOS): create the device key unattended.** Once `env` /
+> `config` / `memory` are vault-managed, every `hermes` / `$M …` run unlocks the
+> vault to decrypt them, so the default **attended** device key asks for Touch ID —
+> up to 3× per command (one per target). Worse, a **background** process (a
+> launchd-started gateway, `extension serve`) can never answer the prompt: it
+> blocks until the 120 s helper timeout and then starts **without** the
+> vault-managed secrets — a sealed Slack token silently drops the platform. To
+> make the hot path silent while your Mac is unlocked, build the Secure Enclave
+> helper in **unattended** mode *before* the device key is first created:
 >
 > ```sh
 > $M keyvault enable-se --unattended   # SE helper as a no-Touch-ID key

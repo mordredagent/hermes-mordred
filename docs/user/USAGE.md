@@ -170,6 +170,7 @@ $M keyvault verify-digest       # integrity check
 $M keyvault recover --blob <path>   # restore from a backup blob
 $M keyvault reset               # DESTROY all key material + remove the keyvault (irreversible; --yes to skip the prompt)
 $M keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
+                                # recommended: --unattended, run BEFORE `keyvault init` — see §4.3
 $M keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
 ```
 
@@ -339,8 +340,15 @@ unwrapped**. Each component that opens the vault prompts independently, so a
 So with `env` + `config` on you will typically see **2–3 Touch ID prompts per
 command** — expected, not a bug.
 
-To make the hot path **silent** (no Touch ID while the Mac is unlocked), build the
-SE helper in **unattended** mode **before** the device key is first created:
+**Recommended: build the SE helper in unattended mode** — especially if anything
+starts Hermes in the **background** (a launchd-started gateway, `extension
+serve`). An attended key blocks a background process on a Touch ID prompt it can
+never answer: after the 120 s helper timeout the process starts **without** the
+vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
+that platform, with only a `Failed to load plugin 'mordred_keyvault':
+auth_failed` warning in the logs). To make the hot path **silent** (no Touch ID
+while the Mac is unlocked), build the SE helper in **unattended** mode
+**before** the device key is first created:
 
 ```sh
 $M keyvault enable-se --unattended   # build + install the SE helper as a no-Touch-ID key

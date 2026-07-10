@@ -95,6 +95,7 @@ M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 $M configure                     # interactive setup — policy / LLM / harness
 $M configure --skip-hermes-setup # re-run but skip the upstream `hermes setup` step
 $M network init                  # optional — pick a privacy route (Tor / VPN / clearnet)
+$M keyvault enable-se --unattended  # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
 $M keyvault init                 # create the hardware-backed key (interactive ceremony)
 $M encryption enable env         # encrypt your .env at rest
 $M status                        # verify — the `env` row reads [on] enrolled
@@ -109,6 +110,22 @@ $M encryption change-passphrase    # rotate the vault recovery passphrase
 $M configure                       # re-run interactive setup anytime
 $M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
 ```
+
+> **Why `enable-se --unattended` is recommended (macOS).** The default
+> **attended** device key asks for Touch ID on every vault unwrap. That works
+> at an interactive terminal — but a **background** process (a launchd-started
+> gateway, `extension serve`) can never answer the prompt: it blocks on it,
+> hits the 120 s helper timeout, and then starts **without** the vault-managed
+> secrets — e.g. a Slack bot token sealed in `.env` silently drops the whole
+> platform, with only a `Failed to load plugin 'mordred_keyvault':
+> auth_failed` warning in the logs. Run it **before** `keyvault init`: the
+> attended/unattended choice is fixed at key creation (switching later means
+> re-keying — see
+> [USAGE §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them)).
+> Trade-off: while the Mac is unlocked, any process running as you can unwrap
+> the vault — ciphertext at rest and the recovery passphrase are unaffected.
+> Skip `--unattended` only if you want per-use biometric confirmation and
+> nothing starts Hermes in the background.
 
 > **Network troubleshooting.** If network communication drops out now and then,
 > check the active privacy path first — `network status` tells you whether Tor /
