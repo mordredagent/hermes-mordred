@@ -148,6 +148,33 @@ def test_serve_sigterm_clean_shutdown(tmp_path) -> None:
     assert proc.returncode == 0, out
 
 
+def test_resolve_chat_handler_uses_gateway_runtime_when_present() -> None:
+    # hermes-agent is a base dependency, so the repo venv always has the
+    # gateway/run_agent modules — serve must wire the REAL agent handler,
+    # not the stub (the stub silently drops E2E chat on the floor).
+    from mordred_hermes.extension.__main__ import _resolve_chat_handler
+
+    assert _resolve_chat_handler() is not None
+
+
+def test_resolve_chat_handler_falls_back_to_stub_without_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *args: object) -> object:
+        if name in ("gateway", "run_agent"):
+            return None
+        return real_find_spec(name, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    from mordred_hermes.extension.__main__ import _resolve_chat_handler
+
+    assert _resolve_chat_handler() is None
+
+
 def test_wizard_extension_serve_parses_host_and_port() -> None:
     parser = _build_wizard_parser()
     ns = parser.parse_args(["mordred", "extension", "serve", "--port", "1234"])
