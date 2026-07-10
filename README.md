@@ -8,8 +8,8 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a1`
-([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-08).
+**Status: active alpha** — current release `0.1.0a2`
+([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-10).
 
 > **⭐ Recommended: set up with an AI coding agent.** The first-run setup
 > (`configure`, `network init`, `keyvault init`) is a series of interactive
@@ -47,10 +47,10 @@ form is `uv pip install --python …`:
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a1"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a2"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a1"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a2"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -67,7 +67,7 @@ Optional extras, all opt-in:
 | `ethereum` | `eth-keys` / `eth-hash` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
 | `tor-control` | `stem` | Deep Tor liveness probing for strict-mode operators |
 | `messaging` | `qrcode` | Terminal QR rendering for `extension pair` |
-| `extension` | `aiohttp` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview) — not in `0.1.0a1`; dev checkout only until the next release |
+| `extension` | `aiohttp` / `cryptography` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview) and pairing (since `0.1.0a2`) |
 
 ### Enable the plugins
 
@@ -162,8 +162,8 @@ print(sorted(k for k, p in mgr._plugins.items() if p.manifest.source == 'entrypo
 
 `mordred_hermes.extension` ships the WebSocket server the Mordred browser
 extension talks to — `ws://127.0.0.1:7788/ext`, localhost-only, no TLS. It was
-ported from the full-Hermes gateway layer in #30 and is **not part of the
-`0.1.0a1` wheel** — run it from a dev checkout until the next release.
+ported from the full-Hermes gateway layer in #30 and ships on PyPI since
+`0.1.0a2` (install the `extension` extra).
 
 ### How it works
 
