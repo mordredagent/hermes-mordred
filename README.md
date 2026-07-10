@@ -213,13 +213,14 @@ Pairing, auth (incl. WebAuthn), `encrypt`/`decrypt`, history, and the
 keyvault-backed `accounts_request` / `sign_request` flows are fully functional
 standalone — they only touch `~/.hermes` and the keyvault.
 
-### Standalone limitations
+### Standalone behavior notes
 
-- **`chat` answers with a stub.** The real handler
-  (`extension/chat.py:make_gateway_chat_handler`) binds to a live Hermes
-  `GatewayRunner` and lazily imports `gateway.run` / `run_agent` from the
-  Hermes-fork runtime; agent-backed chat starts working once the gateway side
-  launches this server itself.
+- **Chat runs the real agent.** `serve` probes for the Hermes runtime
+  (`gateway` / `run_agent` — shipped by the PyPI `hermes-agent` package, a
+  base dependency) and wires `extension/chat.py:make_gateway_chat_handler`
+  automatically; E2E-encrypted messages are decrypted, answered by the real
+  `AIAgent`, and re-encrypted reply-in-kind. A stub reply appears only when
+  that runtime is missing — the startup log names which handler was wired.
 - **Pairing works end-to-end**: run `hermes-mordred extension pair` in a
   second terminal while `extension serve` is running — both sides share
   `~/.hermes/extension/pending.json`, so codes are also consumable by a full
