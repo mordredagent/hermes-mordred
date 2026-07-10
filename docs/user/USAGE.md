@@ -226,7 +226,9 @@ $M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:77
 > `pair` prints a code and waits for a running extension WebSocket server to
 > consume it — either this plugin's `extension serve` or a full Hermes
 > gateway; both share `~/.hermes/extension/pending.json`. Needs the
-> `extension` extra (pairing backend) and `messaging` for the QR render. On
+> `extension` extra for the built-in pairing backend (full-gateway checkouts
+> can fall back to `gateway.extension_pairing` without it) and `messaging`
+> for the QR render. On
 > builds without the extension package (e.g. the `0.1.0a1` wheel) it fails
 > closed with a clear message.
 >

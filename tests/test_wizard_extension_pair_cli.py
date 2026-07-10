@@ -178,6 +178,10 @@ def test_extension_pair_completes_against_ported_backend(
     rc = extension_pair_cli.extension_pair(timeout=10.0)
     consumer.join(timeout=5)
 
+    # A still-alive consumer would outlive this test's HERMES_HOME monkeypatch
+    # and write pairing state into the NEXT test's home — fail loudly here
+    # instead of poisoning an unrelated test.
+    assert not consumer.is_alive()
     assert not errors, errors
     assert rc == 0
     assert "Paired" in capsys.readouterr().out

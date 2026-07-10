@@ -78,7 +78,6 @@ def _import_pairing() -> Any:
     try:
         from gateway import extension_pairing as pairing
     except ImportError:
-        import sys
         from pathlib import Path
 
         here = Path(__file__).resolve()
@@ -88,10 +87,14 @@ def _import_pairing() -> Any:
                 break
         try:
             from gateway import extension_pairing as pairing
-        except ImportError:
+        except ImportError as gw_exc:
+            # Surface BOTH failures: chaining alone would suppress whichever
+            # one isn't the explicit cause, and they can differ (missing
+            # aiohttp vs. a broken fallback checkout).
             raise ExtensionGatewayUnavailable(
                 "extension pairing is not available in this build: importing "
-                f"`mordred_hermes.extension.pairing` failed ({ported_exc}). "
+                f"`mordred_hermes.extension.pairing` failed ({ported_exc}); the "
+                f"`gateway.extension_pairing` fallback also failed ({gw_exc}). "
                 'Install the `extension` extra (`pip install "mordred-hermes[extension]"` '
                 "or, inside this repo, `uv sync --extra extension`) on a build newer "
                 "than 0.1.0a1."
