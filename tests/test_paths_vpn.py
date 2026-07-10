@@ -536,3 +536,86 @@ def _detect_cli_signature_sanity() -> None:
 
     cli: Callable[..., str] = vpn.detect_cli
     del cli
+
+
+# --------------------------------------------------------------------------- #
+# parse_handshake_age — multi-peer safety (audit #6)                          #
+# --------------------------------------------------------------------------- #
+
+
+class TestParseHandshakeAge:
+    def test_compound_age_is_summed_within_one_line(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        out = "peer: AAA\n  latest handshake: 1 minute, 30 seconds ago\n"
+        assert vpn.parse_handshake_age(out) == 90.0
+
+    def test_multiple_peers_return_the_freshest_not_the_sum(self) -> None:
+        # Regression #6: an unrelated second WireGuard tunnel must not inflate
+        # the age. ``wg show`` (unscoped) lists both; the freshest handshake
+        # wins. The old code summed 60s + 150s = 210s > 180s ceiling and
+        # false-dropped the path even though Mullvad was healthy.
+        from mordred_hermes.network.paths import vpn
+
+        out = (
+            "interface: wg0-mullvad\n"
+            "peer: AAA\n  latest handshake: 1 minute ago\n"
+            "interface: wg1-other\n"
+            "peer: BBB\n  latest handshake: 2 minutes, 30 seconds ago\n"
+        )
+        assert vpn.parse_handshake_age(out) == 60.0
+
+    def test_none_handshake_does_not_poison_a_fresh_peer(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        out = "peer: AAA\n  latest handshake: (none)\npeer: BBB\n  latest handshake: 45 seconds ago\n"
+        assert vpn.parse_handshake_age(out) == 45.0
+
+    def test_all_none_or_absent_returns_none(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        assert vpn.parse_handshake_age("peer: AAA\n  latest handshake: (none)\n") is None
+        assert vpn.parse_handshake_age("no handshake lines here at all") is None
+
+
+# --------------------------------------------------------------------------- #
+# _is_setting_on — bare-token match, not substring (audit #7)                 #
+# --------------------------------------------------------------------------- #
+
+
+class TestIsSettingOn:
+    def test_labeled_on_reads_true(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+            return _result("Network lockdown when disconnected: on\n")
+
+        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is True
+
+    def test_labeled_off_reads_false(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+            return _result("Network lockdown when disconnected: off\n")
+
+        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is False
+
+    def test_word_ending_in_on_is_not_misread_as_on(self) -> None:
+        # Regression #7: an OFF status whose last word merely ends in "on"
+        # (e.g. "...connection") must NOT read as ON — that would fail OPEN
+        # in strict (bring_up would skip enabling the kill-switch, believing
+        # it is already active).
+        from mordred_hermes.network.paths import vpn
+
+        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+            return _result("Tunnel status: no active connection\n")
+
+        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is False
+
+    def test_nonzero_returncode_reads_false(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+            return _result("on", returncode=1)
+
+        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is False

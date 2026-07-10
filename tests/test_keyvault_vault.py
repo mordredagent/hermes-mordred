@@ -714,6 +714,49 @@ def test_recover_to_device_rebinds_recovery_sidecar(
         rv.close()
 
 
+def test_recover_survives_crash_between_manifest_and_sidecar_rewrite(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    """Regression (audit #4): recover_to_device writes the new-generation
+    manifest (new wmk) BEFORE the re-bound recovery sidecar. A crash in that
+    window used to brick cold recovery — the newest manifest's wmk no longer
+    matched the still-old sidecar, so every recovery entry point raised
+    RecoveryDigestMismatch even though the older, self-consistent generation was
+    fully intact on disk. Recovery is now digest-guided and opens the matching
+    older generation instead.
+    """
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"v1")  # gen 1, wmk_A
+    v.close()
+    sidecar_old = (tmp_path / "recovery.mrkv").read_bytes()
+    manifest1_bytes = (tmp_path / "manifest.1.mvmf").read_bytes()
+
+    # Drive a real re-key to mint a valid manifest.2 bound to a NEW wmk_B.
+    new_backend, new_store = _fresh_machine()
+    vault.recover_to_device(
+        tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
+    ).close()
+    assert (tmp_path / "manifest.2.mvmf").exists()  # new-gen manifest is durable
+
+    # Rewind to the crash window: manifest.2 is durable, but the sidecar rewrite
+    # (and the anchor flip) had not happened yet, and the superseded manifest.1
+    # is still present (GC is post-commit). Restore the owner-only 0o600 mode a
+    # real on-disk vault file carries (write_bytes would leave 0o644).
+    (tmp_path / "manifest.1.mvmf").write_bytes(manifest1_bytes)
+    (tmp_path / "manifest.1.mvmf").chmod(0o600)
+    (tmp_path / "recovery.mrkv").write_bytes(sidecar_old)
+    (tmp_path / "recovery.mrkv").chmod(0o600)
+
+    # Cold recovery must NOT brick: it opens the older generation the sidecar
+    # still certifies (wmk_A / gen 1), not the newest (wmk_B / gen 2).
+    rv = vault.recover_vault(tmp_path, _PASSPHRASE)
+    try:
+        assert rv.generation == 1
+        assert rv.read_file(".env") == b"v1"
+    finally:
+        rv.close()
+
+
 def test_recover_to_device_wrong_passphrase_raises(
     tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
 ) -> None:

@@ -216,16 +216,28 @@ material from a backup blob). Until you run it, a copied vault opens read-only
 $M plugins list                 # discovered Mordred plugins
 ```
 
-### `extension` — browser-extension pairing (preview)
+### `extension` — browser-extension pairing and server (preview)
 ```sh
 $M extension pair               # print a MORT-… pairing code + terminal QR, then wait
 $M extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
+$M extension serve              # run the extension WebSocket server in the foreground
+$M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
 ```
-> Requires the Hermes gateway running (it hosts the extension WebSocket server)
-> and the `messaging` extra for the QR render. The gateway counterpart isn't
-> published alongside this repo yet, so today `extension pair` **fails closed
-> with a clear message** rather than hanging — see
-> [`ROADMAP.md`](../dev/ROADMAP.md).
+> `pair` prints a code and waits for a running extension WebSocket server to
+> consume it — either this plugin's `extension serve` or a full Hermes
+> gateway; both share `~/.hermes/extension/pending.json`. Needs the
+> `extension` extra for the built-in pairing backend (full-gateway checkouts
+> can fall back to `gateway.extension_pairing` without it) and `messaging`
+> for the QR render. On
+> builds without the extension package (e.g. the `0.1.0a1` wheel) it fails
+> closed with a clear message.
+>
+> `serve` runs the plugin's own ported server (`mordred_hermes.extension`,
+> requires the `extension` extra) standalone — pairing, crypto, history, and
+> keyvault signing work, but chat replies are stubbed without a live Hermes
+> gateway; see the README's "Browser-extension WebSocket gateway" section.
+> Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
+> with a one-line error.
 
 ---
 

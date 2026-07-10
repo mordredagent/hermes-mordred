@@ -8,8 +8,8 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a1`
-([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-08).
+**Status: active alpha** — current release `0.1.0a2`
+([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-10).
 
 > **⭐ Recommended: set up with an AI coding agent.** The first-run setup
 > (`configure`, `network init`, `keyvault init`) is a series of interactive
@@ -47,10 +47,10 @@ form is `uv pip install --python …`:
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a1"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a2"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a1"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a2"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -67,6 +67,7 @@ Optional extras, all opt-in:
 | `ethereum` | `eth-keys` / `eth-hash` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
 | `tor-control` | `stem` | Deep Tor liveness probing for strict-mode operators |
 | `messaging` | `qrcode` | Terminal QR rendering for `extension pair` |
+| `extension` | `aiohttp` / `cryptography` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview) and pairing (since `0.1.0a2`) |
 
 ### Enable the plugins
 
@@ -109,6 +110,21 @@ $M configure                       # re-run interactive setup anytime
 $M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
 ```
 
+> **Network troubleshooting.** If network communication drops out now and then,
+> check the active privacy path first — `network status` tells you whether Tor /
+> VPN is actually up:
+>
+> ```sh
+> $M network status
+> # active_path = tor  state = ready      last_health = ok       ← path is up
+> # active_path = tor  state = not ready  last_health = FAILED   ← path is down
+> ```
+>
+> `state` is `ready` / `not ready`, `last_health` is `ok` / `FAILED`. A trailing
+> `[warning] path was flagged as DROPPED` line means the liveness worker saw
+> consecutive failures; in strict mode tool calls refuse until you re-establish
+> the path with `network use <tor|vpn|clearnet>`.
+
 Step-by-step guide with expected output:
 **[QUICKSTART](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**.
 Full command reference and interactive-command walkthroughs:
@@ -141,6 +157,76 @@ print(sorted(k for k, p in mgr._plugins.items() if p.manifest.source == 'entrypo
 "
 # → ['mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
 ```
+
+## Browser-extension WebSocket gateway (preview)
+
+`mordred_hermes.extension` ships the WebSocket server the Mordred browser
+extension talks to — `ws://127.0.0.1:7788/ext`, localhost-only, no TLS. It was
+ported from the full-Hermes gateway layer in #30 and ships on PyPI since
+`0.1.0a2` (install the `extension` extra).
+
+### How it works
+
+An Origin check admits only `chrome-extension://` / `moz-extension://` clients,
+header-less local processes, and the server's own localhost page. On connect
+the server sends an `auth_challenge`; the extension authenticates with its
+paired `ext_token` (plus a WebAuthn assertion once a credential is registered),
+the localhost page with a per-process page token. After auth:
+
+| Message | What it does |
+|---|---|
+| `pair_init` | Consume a `MORT-…` pairing code, establish the shared key (pre-auth) |
+| `chat` | Stream one conversation turn as `chat_chunk*` + `chat_end`; replies-in-kind E2E with `K_extchat` (encrypted in → encrypted out) |
+| `encrypt` / `decrypt` | Slack-message crypto with the paired key |
+| `accounts_request` | Wallet address + chain id from the keyvault |
+| `sign_request` → `sign_prompt`, then `sign_approve` → `sign_result` | Deterministic risk analysis, user approval, then keyvault signing (`personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction` incl. RPC fill + broadcast) |
+| `history_get` / `history_clear` | Encrypted-at-rest conversation history |
+
+Wire protocol: the extension repo's `SPEC.ja.md` §6 / `src/lib/protocol.ts`;
+server side in [`src/mordred_hermes/extension/api.py`](src/mordred_hermes/extension/api.py).
+
+### Run it (standalone)
+
+Nothing starts the server automatically yet: Hermes exposes no gateway-boot
+hook a plugin could use, so `register(ctx)` cannot launch a long-running server
+(see `docs/dev/ROADMAP.md` § browser-extension gateway counterpart). Until that
+lands, start it in the foreground with one command — it needs the `extension`
+extra:
+
+```sh
+uv sync --extra extension     # or: uv pip install -e ".[extension]"
+
+.venv/bin/hermes-mordred extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
+# equivalent module form, same --host/--port flags:
+.venv/bin/python -m mordred_hermes.extension
+```
+
+Bind failures (port already in use, bad host, privileged port) exit with a
+one-line error instead of a traceback — a bound 7788 usually means a full
+Hermes gateway is already hosting the extension API, in which case there is
+nothing to start. Both Ctrl+C and SIGTERM (systemd, `docker stop`) shut down
+cleanly. One divergence between the two forms: with the `extension` extra
+missing, only `hermes-mordred extension serve` prints the install hint — the
+module form fails on the package import itself with a plain `ImportError`.
+
+Pairing, auth (incl. WebAuthn), `encrypt`/`decrypt`, history, and the
+keyvault-backed `accounts_request` / `sign_request` flows are fully functional
+standalone — they only touch `~/.hermes` and the keyvault.
+
+### Standalone limitations
+
+- **`chat` answers with a stub.** The real handler
+  (`extension/chat.py:make_gateway_chat_handler`) binds to a live Hermes
+  `GatewayRunner` and lazily imports `gateway.run` / `run_agent` from the
+  Hermes-fork runtime; agent-backed chat starts working once the gateway side
+  launches this server itself.
+- **Pairing works end-to-end**: run `hermes-mordred extension pair` in a
+  second terminal while `extension serve` is running — both sides share
+  `~/.hermes/extension/pending.json`, so codes are also consumable by a full
+  Hermes gateway hosting the WS server.
+- **`GET http://127.0.0.1:7788/` returns 503**: the server serves the bundled
+  localhost web app from `extension_web/`, but the built page ships in `web/`.
+  The WS endpoint `/ext` is unaffected.
 
 ## Install (development)
 
@@ -195,6 +281,64 @@ Both live suites were last validated on real devices on 2026-05-25.
 Releases are cut via the `release.yml` workflow (PyPI Trusted Publishing);
 bump versions in lockstep with `tools/bump_version.py`. Runbook:
 [CI.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/CI.md).
+
+## Uninstall
+
+Reverse the setup in the order below.
+
+> **⚠️ Decrypt before you remove anything.** If you turned on at-rest encryption,
+> uninstalling the package or deleting the key first leaves your `.env`, config,
+> and memory **permanently unreadable**. Run step 1 while the CLI and key are still
+> present.
+
+```sh
+M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
+```
+
+**1. Decrypt everything back to plaintext.**
+
+```sh
+$M encryption disable all        # env / config / memory / workspace → plaintext
+$M vault disable-config-decrypt  # stop transparent config decrypt, restore plaintext config.yaml
+$M encryption status             # verify — every row reads [off]
+```
+
+**2. Destroy the key material** — optional and **irreversible**. Skip it if you
+plan to reinstall and keep the same vault.
+
+```sh
+$M keyvault reset --yes          # DESTROY the hardware-backed key + remove the keyvault dir
+```
+
+**3. Disable the plugins.** Remove the five `mordred_*` entries from the
+`plugins.enabled` list in `~/.hermes/config.yaml` (undo
+[Enable the plugins](#enable-the-plugins)).
+
+**4. Uninstall the package** from the Hermes venv. This also removes the
+config-decrypt `.pth` bootstrap from site-packages.
+
+```sh
+uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
+# or, if the venv ships pip:
+~/.hermes/hermes-agent/venv/bin/pip uninstall mordred-hermes
+```
+
+**5. Remove leftover state** — optional, and only after step 1 (the vault lives
+here):
+
+```sh
+rm -rf ~/.hermes/mordred/        # audit log, policy, credentials, tor-data, keyvault
+```
+
+Also delete any `MORDRED_*` entries you added to `~/.hermes/.env`. If you ran
+`keyvault enable-se` / `enable-tpm`, the built helper is **not** removed by the
+steps above — delete it by hand (default location, unless you set
+`MORDRED_SEKEY_INSTALL_DIR` / `MORDRED_TPMKEY_INSTALL_DIR`):
+
+```sh
+rm -f ~/.local/bin/mordred-hermes-sekey    # macOS Secure Enclave helper
+rm -f ~/.local/bin/mordred-hermes-tpmkey   # Linux TPM 2.0 helper
+```
 
 ## Repository layout
 

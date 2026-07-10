@@ -32,7 +32,7 @@ from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
 from .vpn_providers import known_providers
 
 if TYPE_CHECKING:
-    from ..privacy_check.audit import NDJSONWriter
+    from ..privacy_check.audit import Writer
 
 _LOG = logging.getLogger("mordred.network")
 
@@ -282,13 +282,16 @@ def _resolve_custom_health_cmd(network: dict[str, Any]) -> tuple[str, ...] | Non
 
 
 @functools.lru_cache(maxsize=1)
-def _build_audit_writer(path: Path) -> NDJSONWriter:
-    """Per-process cached NDJSON writer (one ``mkdir`` + ``chmod`` per path).
+def _build_audit_writer(path: Path) -> Writer:
+    """Per-process cached audit writer (one ``mkdir`` + ``chmod`` per path).
 
     The module-local ``lru_cache`` keeps this cache -- and the
     ``cache_clear()`` the tests drive -- separate from ``llm_guard``'s
     identically-pathed writer; construction is delegated to the shared
-    :func:`mordred_hermes._audit_support.build_audit_writer`, which does the
-    lazy ``privacy_check`` import to keep ``register`` cheap.
+    :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
+    encryption-aware writer ``privacy_check`` uses for ``audit.log`` (an
+    ``EncryptedWriter`` once the keyvault is initialized, else an
+    ``NDJSONWriter``), doing the lazy ``privacy_check`` import to keep
+    ``register`` cheap.
     """
     return build_audit_writer(path)

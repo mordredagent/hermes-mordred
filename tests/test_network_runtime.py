@@ -871,6 +871,43 @@ class TestVpnWaitFailureRollback:
         assert call.get("preserve_lockdown") is True
         rt.stop()
 
+    def test_stop_preserves_user_lockdown_in_lenient_when_not_applied(self) -> None:
+        # Regression (audit HIGH #1): NORMAL teardown must honour
+        # ``lockdown_applied_by_us`` exactly like the bring-up-failure
+        # cleanup above. In lenient, bring_up leaves a user's pre-existing
+        # kill-switch untouched (applied_by_us=False) — so ``stop()`` must
+        # NOT disable it. Before the fix, teardown keyed only on
+        # ``policy_mode`` and cleared the user's own lockdown.
+        vpn = _VpnFakes()  # default bring_up → lockdown_applied_by_us=False
+        rt = _make_runtime(vpn_fakes=vpn, policy_mode="lenient")
+        rt.use("vpn")
+        rt.stop()
+        assert len(vpn.disconnect_calls) == 1
+        assert vpn.disconnect_calls[0].get("preserve_lockdown") is True
+
+    def test_stop_clears_our_lockdown_in_lenient_when_applied(self) -> None:
+        # Symmetric: a lockdown WE applied is rolled back on teardown even
+        # in lenient (preserve_lockdown=False) — we only refuse to touch
+        # what the user set themselves.
+        from mordred_hermes.network.paths import vpn as vpn_real
+
+        vpn = _VpnFakes()
+
+        def applying_bring_up(**kwargs: Any) -> Any:
+            return vpn_real.MullvadHandle(
+                cli_path=kwargs["cli_path"],
+                region=kwargs["region"],
+                lockdown_enforced=(kwargs["policy_mode"] == "strict"),
+                lockdown_applied_by_us=True,
+            )
+
+        vpn.bring_up = applying_bring_up  # type: ignore[method-assign]
+        rt = _make_runtime(vpn_fakes=vpn, policy_mode="lenient")
+        rt.use("vpn")
+        rt.stop()
+        assert len(vpn.disconnect_calls) == 1
+        assert vpn.disconnect_calls[0].get("preserve_lockdown") is False
+
 
 class TestVpnBringupOSErrorWrapping:
     """Codex round 4 P1 (2026-05-14): VPN path symmetric to Tor r3-P1.

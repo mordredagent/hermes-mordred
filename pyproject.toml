@@ -33,6 +33,17 @@ keyvault = [
   "cryptography>=42",
   "blake3>=0.4",
 ]
+# Browser-extension WebSocket API server (mordred_hermes.extension). aiohttp is
+# the only extra dependency; it's kept out of the base install so users who only
+# want the tor/keyvault plugins don't pull it. CI installs this extra so
+# `mypy --strict src` and pytest can resolve the extension modules.
+extension = [
+  "aiohttp>=3.9",
+  # pairing/crypto hard-import cryptography at module scope; until now it only
+  # rode along transitively via hermes-agent's own pin, which this extra must
+  # not silently depend on.
+  "cryptography>=42",
+]
 macos = [
   # Everything keyvault needs on a Mac = the cross-platform crypto stack
   # (recursive extra) plus the pyobjc Security-framework bridges.
@@ -305,6 +316,14 @@ module = [
     "qrcode.*",
     "gateway",
     "gateway.*",
+    # run_agent is a repo-root top-level Hermes module (like gateway); the
+    # extension chat bridge imports AIAgent from it lazily at runtime.
+    "run_agent",
+    "run_agent.*",
+    # requests lives in the optional `network` extra (not installed for the mypy
+    # job); the extension RPC client imports it lazily.
+    "requests",
+    "requests.*",
     "objc",
 ]
 ignore_missing_imports = true
