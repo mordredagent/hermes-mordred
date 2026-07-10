@@ -8,7 +8,7 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a2`
+**Status: active alpha** — current release `0.1.0a3`
 ([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-10).
 
 > **⭐ Recommended: set up with an AI coding agent.** The first-run setup
@@ -47,10 +47,10 @@ form is `uv pip install --python …`:
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a2"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a3"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a2"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a3"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -213,13 +213,14 @@ Pairing, auth (incl. WebAuthn), `encrypt`/`decrypt`, history, and the
 keyvault-backed `accounts_request` / `sign_request` flows are fully functional
 standalone — they only touch `~/.hermes` and the keyvault.
 
-### Standalone limitations
+### Standalone behavior notes
 
-- **`chat` answers with a stub.** The real handler
-  (`extension/chat.py:make_gateway_chat_handler`) binds to a live Hermes
-  `GatewayRunner` and lazily imports `gateway.run` / `run_agent` from the
-  Hermes-fork runtime; agent-backed chat starts working once the gateway side
-  launches this server itself.
+- **Chat runs the real agent.** `serve` probes for the Hermes runtime
+  (`gateway` / `run_agent` — shipped by the PyPI `hermes-agent` package, a
+  base dependency) and wires `extension/chat.py:make_gateway_chat_handler`
+  automatically; E2E-encrypted messages are decrypted, answered by the real
+  `AIAgent`, and re-encrypted reply-in-kind. A stub reply appears only when
+  that runtime is missing — the startup log names which handler was wired.
 - **Pairing works end-to-end**: run `hermes-mordred extension pair` in a
   second terminal while `extension serve` is running — both sides share
   `~/.hermes/extension/pending.json`, so codes are also consumable by a full

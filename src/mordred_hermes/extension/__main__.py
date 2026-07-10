@@ -24,12 +24,39 @@ import errno
 import logging
 import signal
 import sys
+from typing import Any
 
 # Mirrors mordred_hermes.extension.api.DEFAULT_HOST / DEFAULT_PORT (protocol
 # constants, SPEC.ja.md §6). Hardcoded rather than imported at module scope so
 # importing *this* module never pulls in aiohttp — see the module docstring.
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7788
+
+
+def _resolve_chat_handler() -> Any:
+    """Return the real gateway-agent chat handler when the Hermes runtime is
+    importable, else ``None`` (server falls back to its built-in stub).
+
+    The PyPI ``hermes-agent`` package ships ``gateway`` / ``run_agent`` as
+    top-level modules, so any correctly-installed plugin environment gets the
+    real handler — the stub remains only for exotic installs without the
+    runtime. ``find_spec`` probes without importing; the heavy imports happen
+    lazily inside the handler on the first chat turn.
+    """
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("gateway") is None or importlib.util.find_spec("run_agent") is None:
+            return None
+        from .chat import make_gateway_chat_handler
+
+        return make_gateway_chat_handler(None)
+    except Exception as exc:
+        # A broken runtime should degrade to the stub, but never silently:
+        # without this line a real bug in chat.py would masquerade as a
+        # missing-runtime install.
+        logging.getLogger(__name__).warning("gateway chat handler unavailable, falling back to stub: %s", exc)
+        return None
 
 
 def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
@@ -74,7 +101,12 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     # library import, so configuring the root logger here is appropriate.
     logging.basicConfig(level=logging.INFO)
 
-    server = ExtensionAPIServer(host=host, port=port)
+    chat_handler = _resolve_chat_handler()
+    logging.getLogger(__name__).info(
+        "chat handler: %s",
+        "gateway agent (Hermes runtime found)" if chat_handler else "stub (Hermes runtime not importable)",
+    )
+    server = ExtensionAPIServer(host=host, port=port, chat_handler=chat_handler)
     # A manually managed loop (vs. asyncio.run) so the EADDRINUSE / Ctrl+C
     # paths below can each call `server.stop()` deterministically on the same
     # loop before it closes, instead of relying on asyncio.run()'s implicit
