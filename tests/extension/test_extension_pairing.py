@@ -80,3 +80,28 @@ def test_normalize_code():
     assert pairing.normalize_code("mort-abcdefgh-jklmnpqr") == "MORT-ABCDEFGH-JKLMNPQR"
     # Strips ambiguous/garbage chars and re-groups.
     assert pairing.normalize_code("ABCDEFGHJKLMNPQR") == "MORT-ABCDEFGH-JKLMNPQR"
+
+
+def test_consume_code_single_use_under_concurrency():
+    """Racing pair_init frames must not consume the same one-time code twice
+    (read-modify-write on pending.json is guarded by the state lock)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    code, _ = pairing.generate_code()
+    n = 8
+    barrier = threading.Barrier(n)
+
+    def attempt(_i: int) -> str:
+        barrier.wait()
+        try:
+            pairing._consume_code(code)
+            return "ok"
+        except pairing.PairError as e:
+            return e.reason
+
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        results = list(ex.map(attempt, range(n)))
+
+    assert results.count("ok") == 1
+    assert set(results) <= {"ok", "already_used"}
