@@ -114,6 +114,14 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        # systemd / `docker stop` / plain `kill` send SIGTERM; route it through
+        # the same clean shutdown as Ctrl+C so supervisors see exit 0 rather
+        # than an abrupt signal death. Installed BEFORE binding: a supervisor
+        # (or the SIGTERM test) may signal as soon as the port accepts, which
+        # happens inside server.start() — the handler must already exist then.
+        stop = asyncio.Event()
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(signal.SIGTERM, stop.set)
         try:
             loop.run_until_complete(server.start())
         except OSError as exc:
@@ -130,12 +138,6 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
             else:
                 print(f"error: could not bind {host}:{port} — {exc}", file=sys.stderr)
             return 1
-        # systemd / `docker stop` / plain `kill` send SIGTERM; route it through
-        # the same clean shutdown as Ctrl+C so supervisors see exit 0 rather
-        # than an abrupt signal death.
-        stop = asyncio.Event()
-        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
-            loop.add_signal_handler(signal.SIGTERM, stop.set)
         try:
             loop.run_until_complete(stop.wait())
         except KeyboardInterrupt:
