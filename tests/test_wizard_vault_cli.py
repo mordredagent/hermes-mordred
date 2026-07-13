@@ -27,6 +27,7 @@ from mordred_hermes.keyvault._anchor_keychain import KeychainAnchorError
 from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault._storage import KeyvaultPermissionError
 from mordred_hermes.wizard import vault_cli, vault_memory_key
+from mordred_hermes.wizard._prompt_io import _RefusingPromptIO
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
@@ -422,11 +423,41 @@ class TestStatus:
         vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
         assert "read-only" in capsys.readouterr().out.lower()
 
-    def test_wrong_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_succeeds_with_no_prompt_io_at_all(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """The default call shape (no ``prompt_io``, exactly how ``cli_status``
+        invokes it) succeeds — there is nothing to prompt for."""
         _build_vault(tmp_path, files={".env": b"K=v\n"})
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password="not the passphrase"))
-        assert rc == 1
-        assert "passphrase" in capsys.readouterr().err.lower()
+        rc = vault_cli.status(root=tmp_path)
+        assert rc == 0
+        assert "generation: 1" in capsys.readouterr().out
+
+    def test_never_prompts_even_with_a_refusing_prompt_io(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``status`` must never prompt: a ``prompt_io`` that raises
+        :class:`NonInteractiveAbort` on its very first call (the
+        ``--non-interactive`` guard) still lets ``status`` succeed, proving it
+        is never called at all."""
+        _build_vault(tmp_path, files={".env": b"K=v\n"})
+        rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO())
+        assert rc == 0
+        assert "generation: 1" in capsys.readouterr().out
+
+    def test_json_succeeds_with_a_refusing_prompt_io(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """The ``--json`` shape is equally non-prompting — Phase 5 (UX review
+        2026-06-11) added ``--json`` for scripting, but a non-interactive run
+        used to abort via ``NonInteractiveAbort`` on the passphrase prompt every
+        time, making it unusable in automation. It no longer prompts at all."""
+        import json
+
+        _build_vault(tmp_path, files={".env": b"K=v\n", "config.yaml": b"a: 1\n"})
+        rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO(), as_json=True)
+        assert rc == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["generation"] == 2
+        assert sorted(body["files"]) == [".env", "config.yaml"]
+        assert body["read_only"] is True
+        assert body["authenticated"] is False
 
     def test_escapes_control_chars_in_names(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """L-1: a crafted enrolled name must not emit raw terminal control codes."""
@@ -437,10 +468,11 @@ class TestStatus:
         assert "\x1b" not in out  # raw ESC must never reach the terminal
 
     def test_not_a_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        # An empty directory has no manifest — recover_vault raises VaultError.
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
+        # An empty directory has no manifest.*.mvmf — nothing to parse. A
+        # _RefusingPromptIO proves this fails closed WITHOUT ever prompting.
+        rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO())
         assert rc == 1
-        assert capsys.readouterr().err.strip() != ""
+        assert "no vault" in capsys.readouterr().err.lower()
 
     def test_cli_status_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """``cli_status(args)`` resolves ``--root`` and delegates to :func:`status`."""
@@ -457,9 +489,14 @@ class TestStatus:
         assert seen["root"] == tmp_path
         assert seen["as_json"] is False
 
-    def test_tampered_manifest_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """A manifest-body edit (no master) passes the recovery-digest check on
-        the untouched wmk but fails the MAC — status fails closed (rc 1)."""
+    def test_tampered_manifest_tag_is_not_detected(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """``status`` now reads the manifest body UNAUTHENTICATED (no master key
+        is ever unwrapped — see its docstring), so it has nothing to check a MAC
+        tag against. A tampered tag (the body itself is untouched here) is
+        therefore invisible to it: rc 0, the still-correct body contents. Only a
+        command that actually opens the vault (``cat``) would catch this; the
+        JSON ``"authenticated": false`` field is the caller-visible flag for the
+        trade."""
         _build_vault(tmp_path, files={".env": b"value"})
         mpath = tmp_path / "manifest.1.mvmf"
         body, _, b64tag = mpath.read_bytes().partition(b"\n")
@@ -467,13 +504,19 @@ class TestStatus:
         raw[-1] ^= 0x01  # flip a MAC-tag bit
         mpath.write_bytes(body + b"\n" + base64.b64encode(bytes(raw)))
 
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
-        assert rc == 1
-        assert "manifest" in capsys.readouterr().err.lower()
+        rc = vault_cli.status(root=tmp_path)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "generation: 1" in out
+        assert ".env" in out
 
-    def test_wmk_substitution_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """A swapped-wmk manifest is rejected by the sidecar's SHA-256(wmk)
-        recovery digest before any decrypt — status fails closed (rc 1)."""
+    def test_wmk_substitution_is_not_detected(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """A swapped-``wmk`` manifest would previously be rejected by the
+        sidecar's SHA-256(wmk) recovery digest — but ``status`` no longer opens
+        the vault (so it never reads the sidecar), so a structurally-valid
+        forged manifest parses fine and its forged contents are reported as-is:
+        rc 0, the forged empty file list. Detecting a substitution like this
+        again requires a command that actually opens the vault."""
         backend = FakeBackend()
         backend.generate_enclave_key(_KEY_ID)
         store = FakeAnchorStore()
@@ -490,9 +533,11 @@ class TestStatus:
         )
         (tmp_path / "manifest.1.mvmf").write_bytes(forged)
 
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
-        assert rc == 1
-        assert "tampering" in capsys.readouterr().err.lower()
+        rc = vault_cli.status(root=tmp_path)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "generation: 1" in out
+        assert "files: 0" in out
 
 
 class TestCat:
@@ -604,14 +649,28 @@ class TestFailClosed:
         assert capsys.readouterr().err.strip() != ""
 
     def test_cold_path_corrupt_recovery_sidecar(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """``cat`` still opens the cold path (unlike ``status``, which no longer
+        touches the recovery sidecar at all — see the test below) — a corrupt
+        sidecar fails closed."""
         _build_vault(tmp_path, files={".env": b"v"})
         rec = tmp_path / "recovery.mrkv"
         raw = bytearray(rec.read_bytes())
         raw[:4] = b"XXXX"  # corrupt the MRKV magic -> backup.BackupCorrupt
         rec.write_bytes(raw)
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
+        rc = vault_cli.cat(root=tmp_path, name=".env", prompt_io=_PromptIO(password=_PASSPHRASE))
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
+
+    def test_status_ignores_corrupt_recovery_sidecar(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """``status`` reads only the manifest, never the recovery sidecar, so a
+        sidecar corruption that fails ``cat`` (above) does not affect it."""
+        _build_vault(tmp_path, files={".env": b"v"})
+        rec = tmp_path / "recovery.mrkv"
+        raw = bytearray(rec.read_bytes())
+        raw[:4] = b"XXXX"
+        rec.write_bytes(raw)
+        rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO())
+        assert rc == 0
 
 
 class TestMigrate:

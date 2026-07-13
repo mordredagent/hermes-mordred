@@ -160,6 +160,10 @@ def enable_se(
         )
         return 1
 
+    print(
+        "Building the Secure Enclave signing helper (Swift) — this can take several minutes on first run...",
+        flush=True,
+    )
     rc, output = _run_sekey_build(src, install_dir=install_dir, unattended=unattended)
     if rc != 0:
         _term.emit_error(f"sekey-helper build failed:\n{output}")
@@ -315,6 +319,10 @@ def enable_tpm(
         )
         return 1
 
+    print(
+        "Building the TPM 2.0 signing helper (Rust) — this can take several minutes on first run...",
+        flush=True,
+    )
     rc, output = _run_tpmkey_build(src, install_dir=install_dir)
     if rc != 0:
         _term.emit_error(f"tpmkey-helper build failed:\n{output}")

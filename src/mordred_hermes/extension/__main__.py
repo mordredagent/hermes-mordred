@@ -26,6 +26,8 @@ import signal
 import sys
 from typing import Any
 
+from .. import _term
+
 # Mirrors mordred_hermes.extension.api.DEFAULT_HOST / DEFAULT_PORT (protocol
 # constants, SPEC.ja.md §6). Hardcoded rather than imported at module scope so
 # importing *this* module never pulls in aiohttp — see the module docstring.
@@ -65,9 +67,10 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     Returns a process exit code (never raises for the documented failure
     modes): ``2`` if the ``extension`` extra (aiohttp) isn't installed or
     ``port`` is out of range, ``1`` if binding ``host``:``port`` failed —
-    already bound (most likely a running Hermes gateway hosting the
-    extension API), unresolvable host, or insufficient privileges — else
-    ``0`` after a clean shutdown on Ctrl+C or SIGTERM.
+    already bound (either a stale ``extension serve`` from an earlier
+    session or a running Hermes gateway already hosting the extension API),
+    unresolvable host, or insufficient privileges — else ``0`` after a clean
+    shutdown on Ctrl+C or SIGTERM.
     """
     try:
         from .api import ExtensionAPIServer
@@ -107,6 +110,7 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
         "gateway agent (Hermes runtime found)" if chat_handler else "stub (Hermes runtime not importable)",
     )
     server = ExtensionAPIServer(host=host, port=port, chat_handler=chat_handler)
+    color = _term.should_color(sys.stdout)
     # A manually managed loop (vs. asyncio.run) so the EADDRINUSE / Ctrl+C
     # paths below can each call `server.stop()` deterministically on the same
     # loop before it closes, instead of relying on asyncio.run()'s implicit
@@ -131,13 +135,33 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
             loop.run_until_complete(server.stop())
             if exc.errno == errno.EADDRINUSE:
                 print(
-                    f"error: port {port} is already in use — a running Hermes "
-                    "gateway may already be hosting the extension API.",
+                    f"error: port {port} is already in use — something is already "
+                    "listening there. Common causes: an `extension serve` process "
+                    "already running from an earlier session, or a full Hermes "
+                    "gateway already hosting the extension API (nothing to start "
+                    "in that case).\n"
+                    f"  Run `lsof -i :{port}` to see what's listening, or pass "
+                    "--port to use a different one.",
                     file=sys.stderr,
                 )
             else:
                 print(f"error: could not bind {host}:{port} — {exc}", file=sys.stderr)
             return 1
+
+        # Additive user-facing signal that the server is up. The INFO log
+        # line from ExtensionAPIServer.start() ("Mordred extension API on
+        # ws://...") is for log consumers; this print is for a human
+        # watching the foreground terminal, so it stays even if logging is
+        # configured away. should_color() already accounts for a non-tty
+        # stdout (piped/redirected), so this degrades to plain text there.
+        print()
+        print(_term.heading("Mordred Extension server", enabled=color))
+        print()
+        print(f"WebSocket:  ws://{host}:{port}/ext")
+        print(f"Web page:   http://{host}:{port}/")
+        print()
+        print("Press Ctrl+C to stop.")
+
         try:
             loop.run_until_complete(stop.wait())
         except KeyboardInterrupt:
@@ -146,6 +170,7 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
             with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                 loop.remove_signal_handler(signal.SIGTERM)
             loop.run_until_complete(server.stop())
+            print("Stopped.")
         return 0
     finally:
         loop.close()

@@ -4,7 +4,8 @@ The commands that read a vault's listing / contents or enroll plaintext into it,
 as opposed to creating or re-keying it (those live in
 :mod:`mordred_hermes.wizard._vault_lifecycle`):
 
-* :func:`status` -- list a vault's generation + enrolled names (cold path, read-only).
+* :func:`status` -- list a vault's generation + enrolled names (reads the
+  on-disk manifest directly; never opens the vault, never prompts).
 * :func:`cat` -- write one enrolled file's decrypted bytes to stdout (cold path).
 * :func:`add` -- enroll one plaintext file (hot path, device key).
 * :func:`add_and_verify` -- :func:`add` plus read the enrolled copy back through the
@@ -35,34 +36,68 @@ if TYPE_CHECKING:
 
 
 def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = False) -> int:
-    """Print a vault's generation and enrolled file names (cold path).
+    """Print a vault's generation and enrolled file names -- never prompts.
 
-    Opens read-only via :func:`_open_cold_path`. Enrolled *names* are listed;
-    file *contents* are never decrypted or printed. Returns 0 on a successful
-    open, 1 on any fail-closed open error (reason already on stderr).
+    Every status-shaped command in this CLI reads only what is on disk and
+    never opens the vault or asks for a passphrase (the convention noted at
+    the top of ``encryption_cli.py``); this one used to be the exception,
+    unconditionally cold-opening via :func:`_open_cold_path`. It now reads the
+    newest ``manifest.<gen>.mvmf`` body directly with
+    :func:`...keyvault.manifest.parse_unverified` -- the same technique
+    :func:`mordred_hermes.wizard.encryption_cli._enrolled_names` uses for the
+    ``encryption status`` enrolled-name reads -- so no master key, device key,
+    or passphrase is needed. ``prompt_io`` is accepted only for
+    backward-compatible call sites; it is never used, and never will be
+    called.
+
+    Trade accepted for that: the manifest is read UNAUTHENTICATED (its MAC
+    can only be checked under the master key, which needs a key of some kind
+    to unwrap). A tampered tag or a substituted ``wmk`` is therefore not
+    caught here -- only a command that actually opens the vault (``cat`` /
+    ``add`` / ...) would catch that. The reported generation/names are
+    operational metadata, not secret, so surfacing them unauthenticated is
+    the same trade the rest of the CLI's status surface already makes.
+
+    Returns 0 when a manifest is present and parses (including an
+    empty/no-files vault); 1 when there is no vault at ``root`` or its
+    manifest cannot be parsed (reason on stderr). File *contents* are never
+    read, so this never fails on a wrong/missing passphrase, a corrupt
+    recovery sidecar, or a missing device key -- see :func:`cat` for the
+    command that does need those.
     """
     import json
 
-    opened = _open_cold_path(root, prompt_io=prompt_io)
-    if opened is None:
+    from ..keyvault import manifest, vault
+
+    generation = vault._latest_manifest_generation(root)
+    if generation is None:
+        _term.emit_error(f"no vault at {root} — run `vault init` first.")
         return 1
-    with opened:
-        names = sorted(opened.list_files())
-        if as_json:
-            body = {
-                "root": str(root),
-                "generation": opened.generation,
-                "files": names,
-                "read_only": True,
-            }
-            print(json.dumps(body, indent=2))
-            return 0
-        print(f"Vault at {root}")
-        print(f"  generation: {opened.generation}")
-        print(f"  files: {len(names)}")
-        for name in names:
-            print(f"    {_display_name(name)}")
-        print("  (read-only: opened via passphrase recovery)")
+
+    try:
+        blob = vault._manifest_path(root, generation).read_bytes()
+        parsed = manifest.parse_unverified(blob)
+    except (OSError, manifest.ManifestError) as exc:
+        _term.emit_error(f"cannot read vault manifest at {root}: {exc}")
+        return 1
+
+    names = sorted(parsed.files)
+    if as_json:
+        body = {
+            "root": str(root),
+            "generation": parsed.generation,
+            "files": names,
+            "read_only": True,
+            "authenticated": False,
+        }
+        print(json.dumps(body, indent=2))
+        return 0
+    print(f"Vault at {root}")
+    print(f"  generation: {parsed.generation}")
+    print(f"  files: {len(names)}")
+    for name in names:
+        print(f"    {_display_name(name)}")
+    print("  (read-only: read from the on-disk manifest, unauthenticated — no passphrase needed or asked for)")
     return 0
 
 

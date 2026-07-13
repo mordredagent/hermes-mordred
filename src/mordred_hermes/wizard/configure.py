@@ -30,7 +30,6 @@ configure. It is opt-in via the dedicated, re-runnable
 from __future__ import annotations
 
 import argparse
-import logging
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -61,8 +60,6 @@ from ._prompt_io import (
     _RefusingPromptIO as _RefusingPromptIO,
 )
 from .policy_writer import PolicySnapshot, PolicyWriter
-
-_LOG = logging.getLogger("mordred.wizard.configure")
 
 #: Cloud providers offered as checkbox choices for the allowlist prompt.
 #: Sourced from the network flagger's canonical registry so the wizard and the
@@ -148,10 +145,10 @@ class SubprocessSetupRunner:
     """Default :class:`SetupRunner` -- shells out to ``hermes setup``.
 
     Returns the child process exit code on success. Returns ``1`` (with
-    a logged warning) if the ``hermes`` binary is missing from PATH so
-    that callers do not crash with an unhandled :class:`FileNotFoundError`
-    -- the Mordred prompt sequence still runs and the user gets a clean
-    exit code rather than a stack trace.
+    a warning printed to the user) if the ``hermes`` binary is missing
+    from PATH so that callers do not crash with an unhandled
+    :class:`FileNotFoundError` -- the Mordred prompt sequence still runs
+    and the user gets a clean exit code rather than a stack trace.
     """
 
     def run(self, *, non_interactive: bool) -> int:
@@ -161,7 +158,11 @@ class SubprocessSetupRunner:
         try:
             completed = subprocess.run(cmd, check=False)
         except FileNotFoundError:
-            _LOG.warning("`hermes` executable not found on PATH; skipping `hermes setup` step")
+            _term.emit_warn(
+                "`hermes` executable not found on PATH; skipping `hermes setup` step. "
+                "Install hermes and make sure it's on PATH, then re-run `hermes-mordred configure` "
+                "to pick up first-run Hermes setup."
+            )
             return 1
         return completed.returncode
 
@@ -427,7 +428,7 @@ def run(
     if not skip_hermes_setup:
         rc = setup_runner.run(non_interactive=non_interactive)
         if rc != 0:
-            _LOG.warning("`hermes setup` exited with code %d; continuing with Mordred prompts anyway", rc)
+            _term.emit_warn(f"`hermes setup` exited with code {rc}; continuing with Mordred prompts anyway")
 
     result = collect_answers(prompt_io)
     policy_writer.write(result.snapshot)
@@ -570,7 +571,7 @@ def cli_handler(args: argparse.Namespace) -> int:
         if not skip_hermes_setup:
             setup_rc = SubprocessSetupRunner().run(non_interactive=True)
             if setup_rc != 0:
-                _LOG.warning("`hermes setup` exited with code %d; continuing with Mordred flags anyway", setup_rc)
+                _term.emit_warn(f"`hermes setup` exited with code {setup_rc}; continuing with Mordred flags anyway")
         writer = PolicyWriter()
         result = snapshot_from_args(args, existing=_read_existing_policy_inputs(writer))
         try:

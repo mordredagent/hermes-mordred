@@ -77,10 +77,27 @@ def _resolve_root(home: Path | None) -> Path:
 
 
 def list_keys(*, home: Path | None = None, as_json: bool = False) -> int:
-    """Print the keyvault's key ids. Returns 0 always (an empty vault is not an error)."""
+    """Print the keyvault's key ids. Returns 0 always (an empty vault is not an error).
+
+    Returns 1 when the on-disk keyvault state cannot be read at all (corrupt
+    ``meta.json`` / unreadable file) — the read fails before there is
+    anything to list, so this is a genuine error, not an empty vault.
+    """
     import json
 
-    meta = _storage.load_meta(_resolve_root(home))
+    root = _resolve_root(home)
+    try:
+        meta = _storage.load_meta(root)
+    except _storage.KeyvaultCorruptError as exc:
+        _term.emit_error(
+            f"keyvault metadata is corrupt ({root / 'meta.json'}): {exc}. "
+            "Run `hermes-mordred keyvault recover` from a backup blob, or "
+            "`hermes-mordred keyvault reset` to discard this keyvault and start over."
+        )
+        return 1
+    except OSError as exc:
+        _term.emit_error(f"cannot read keyvault metadata ({root / 'meta.json'}): {exc}")
+        return 1
     keys = meta["keys"]
     if as_json:
         rows = [
@@ -108,11 +125,23 @@ def list_keys(*, home: Path | None = None, as_json: bool = False) -> int:
 def verify_digest(*, home: Path | None = None) -> int:
     """Print every key's full verification digest for offline cross-checking.
 
-    Returns 0 when every digest was read, 1 when the vault is empty or any
-    ``digests/<hash>.commit`` file could not be read.
+    Returns 0 when every digest was read, 1 when the vault is empty, any
+    ``digests/<hash>.commit`` file could not be read, or ``meta.json`` itself
+    is corrupt/unreadable.
     """
     root = _resolve_root(home)
-    meta = _storage.load_meta(root)
+    try:
+        meta = _storage.load_meta(root)
+    except _storage.KeyvaultCorruptError as exc:
+        _term.emit_error(
+            f"keyvault metadata is corrupt ({root / 'meta.json'}): {exc}. "
+            "Run `hermes-mordred keyvault recover` from a backup blob, or "
+            "`hermes-mordred keyvault reset` to discard this keyvault and start over."
+        )
+        return 1
+    except OSError as exc:
+        _term.emit_error(f"cannot read keyvault metadata ({root / 'meta.json'}): {exc}")
+        return 1
     keys = meta["keys"]
     if not keys:
         _term.emit_error("No keys to verify in keyvault.")
