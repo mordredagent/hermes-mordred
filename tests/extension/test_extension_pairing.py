@@ -113,6 +113,31 @@ def test_invalid_challenge_records_failed_outcome():
     assert pairing.pair_outcome(code) == ("failed", "invalid_challenge")
 
 
+def test_late_failure_preserves_existing_pairing(monkeypatch):
+    """A handshake that fails AFTER key derivation (e.g. attestation signing
+    I/O error) must not clobber a previously-working pairing: nothing is
+    persisted until every fallible step has succeeded, and the outcome is
+    recorded as failed."""
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    ch = xc.b64u_encode(b"\x22" * 32)
+
+    code1, _ = pairing.generate_code()
+    pairing.handle_pair_init(code1, ext_pub, ch)
+    before = pairing.load_pairing()
+    assert before is not None
+
+    def _boom(_challenge: bytes) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pairing, "_sign_attestation", _boom)
+    code2, _ = pairing.generate_code()
+    with pytest.raises(OSError):
+        pairing.handle_pair_init(code2, ext_pub, ch)
+
+    assert pairing.load_pairing() == before  # working pairing untouched
+    assert pairing.pair_outcome(code2) == ("failed", "internal_error")
+
+
 def test_legacy_consumed_entry_reports_consumed():
     """An entry claimed by a server build that predates outcome recording
     (used=True, no result field) reads as 'consumed' — the CLI applies its

@@ -491,16 +491,9 @@ def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict
         hermes_pub_b64 = b64u_encode(x25519_public_raw(hermes_priv))
         ext_token = b64u_encode(secrets.token_bytes(32))
 
-        _save_pairing(
-            Pairing(
-                aes_key=aes_key,
-                ext_token=ext_token,
-                ext_pubkey_b64=ext_pubkey_b64,
-                hermes_pubkey_b64=hermes_pub_b64,
-                paired_at=time.time(),
-            )
-        )
-
+        # Everything that can fail (attestation signing included) runs BEFORE
+        # _save_pairing: a failure after the save would have replaced a
+        # previously-working pairing's key/token with a half-completed one.
         payload = {
             "hermes_pubkey": hermes_pub_b64,
             "ext_token": ext_token,
@@ -510,12 +503,27 @@ def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict
                 "se_available": se_available(),
             },
         }
+
+        _save_pairing(
+            Pairing(
+                aes_key=aes_key,
+                ext_token=ext_token,
+                ext_pubkey_b64=ext_pubkey_b64,
+                hermes_pubkey_b64=hermes_pub_b64,
+                paired_at=time.time(),
+            )
+        )
     except PairError as exc:
-        _mark_pair_result(code, "failed", exc.reason)
+        # Outcome marking is best-effort UX metadata — never let its I/O
+        # failure mask the PairError the extension's pair_fail frame needs.
+        with contextlib.suppress(OSError):
+            _mark_pair_result(code, "failed", exc.reason)
         raise
     except Exception:
-        _mark_pair_result(code, "failed", "internal_error")
+        with contextlib.suppress(OSError):
+            _mark_pair_result(code, "failed", "internal_error")
         raise
 
-    _mark_pair_result(code, "paired")
+    with contextlib.suppress(OSError):
+        _mark_pair_result(code, "paired")
     return payload

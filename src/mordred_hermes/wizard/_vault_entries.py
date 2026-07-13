@@ -34,6 +34,10 @@ if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
     from .configure import PromptIO
 
+# Upper bound for a manifest read in `status` (real manifests are a few KBs;
+# the bytes are parsed unauthenticated, so refuse absurd sizes outright).
+_MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+
 
 def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = False) -> int:
     """Print a vault's generation and enrolled file names -- never prompts.
@@ -74,10 +78,22 @@ def status(*, root: Path, prompt_io: PromptIO | None = None, as_json: bool = Fal
         _term.emit_error(f"no vault at {root} — run `vault init` first.")
         return 1
 
+    # The bytes are untrusted (see above) and parsed pre-authentication, so
+    # bound the read (a real manifest is KBs; refuse a multi-GB decoy) and
+    # catch everything json.loads can raise on crafted input — ValueError
+    # covers JSONDecodeError; deeply-nested arrays raise RecursionError,
+    # which is NOT a ValueError and would otherwise traceback.
     try:
-        blob = vault._manifest_path(root, generation).read_bytes()
+        with vault._manifest_path(root, generation).open("rb") as fh:
+            blob = fh.read(_MAX_MANIFEST_BYTES + 1)
+        if len(blob) > _MAX_MANIFEST_BYTES:
+            _term.emit_error(
+                f"cannot read vault manifest at {root}: implausibly large "
+                f"(over {_MAX_MANIFEST_BYTES // (1024 * 1024)} MiB) — not a vault manifest."
+            )
+            return 1
         parsed = manifest.parse_unverified(blob)
-    except (OSError, manifest.ManifestError) as exc:
+    except (OSError, manifest.ManifestError, ValueError, RecursionError) as exc:
         _term.emit_error(f"cannot read vault manifest at {root}: {exc}")
         return 1
 

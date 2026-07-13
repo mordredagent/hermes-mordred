@@ -32,7 +32,7 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _storage
@@ -76,6 +76,26 @@ def _resolve_root(home: Path | None) -> Path:
     return _storage.resolve_keyvault_dir(home if home is not None else _hermes_home())
 
 
+def _load_meta_or_report(root: Path) -> dict[str, Any] | None:
+    """``load_meta`` with the read commands' shared corrupt/unreadable reporting.
+
+    Returns ``None`` after printing the error (callers return 1) so the two
+    read-only commands can't drift apart on wording or remediation hints.
+    """
+    try:
+        return _storage.load_meta(root)
+    except _storage.KeyvaultCorruptError as exc:
+        _term.emit_error(
+            f"keyvault metadata is corrupt ({root / 'meta.json'}): {exc}. "
+            "Run `hermes-mordred keyvault recover` from a backup blob, or "
+            "`hermes-mordred keyvault reset` to discard this keyvault and start over."
+        )
+        return None
+    except OSError as exc:
+        _term.emit_error(f"cannot read keyvault metadata ({root / 'meta.json'}): {exc}")
+        return None
+
+
 def list_keys(*, home: Path | None = None, as_json: bool = False) -> int:
     """Print the keyvault's key ids. Returns 0 always (an empty vault is not an error).
 
@@ -86,17 +106,8 @@ def list_keys(*, home: Path | None = None, as_json: bool = False) -> int:
     import json
 
     root = _resolve_root(home)
-    try:
-        meta = _storage.load_meta(root)
-    except _storage.KeyvaultCorruptError as exc:
-        _term.emit_error(
-            f"keyvault metadata is corrupt ({root / 'meta.json'}): {exc}. "
-            "Run `hermes-mordred keyvault recover` from a backup blob, or "
-            "`hermes-mordred keyvault reset` to discard this keyvault and start over."
-        )
-        return 1
-    except OSError as exc:
-        _term.emit_error(f"cannot read keyvault metadata ({root / 'meta.json'}): {exc}")
+    meta = _load_meta_or_report(root)
+    if meta is None:
         return 1
     keys = meta["keys"]
     if as_json:
@@ -130,17 +141,8 @@ def verify_digest(*, home: Path | None = None) -> int:
     is corrupt/unreadable.
     """
     root = _resolve_root(home)
-    try:
-        meta = _storage.load_meta(root)
-    except _storage.KeyvaultCorruptError as exc:
-        _term.emit_error(
-            f"keyvault metadata is corrupt ({root / 'meta.json'}): {exc}. "
-            "Run `hermes-mordred keyvault recover` from a backup blob, or "
-            "`hermes-mordred keyvault reset` to discard this keyvault and start over."
-        )
-        return 1
-    except OSError as exc:
-        _term.emit_error(f"cannot read keyvault metadata ({root / 'meta.json'}): {exc}")
+    meta = _load_meta_or_report(root)
+    if meta is None:
         return 1
     keys = meta["keys"]
     if not keys:

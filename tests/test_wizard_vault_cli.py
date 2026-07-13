@@ -474,6 +474,29 @@ class TestStatus:
         assert rc == 1
         assert "no vault" in capsys.readouterr().err.lower()
 
+    def test_deeply_nested_manifest_reports_error_not_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Code review 2026-07-13: the manifest is parsed unauthenticated, so a
+        crafted body must produce the friendly rc-1 error — json.loads raises
+        RecursionError (not a ManifestError) on deeply-nested arrays."""
+        depth = 100_000
+        (tmp_path / "manifest.0.mvmf").write_bytes(b"[" * depth + b"]" * depth + b"\ndGFn")
+        rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO())
+        assert rc == 1
+        assert "cannot read vault manifest" in capsys.readouterr().err
+
+    def test_oversized_manifest_reports_error_not_oom(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """A multi-GB decoy manifest must be refused by the size cap, not
+        slurped into memory; real manifests are a few KBs."""
+        from mordred_hermes.wizard import _vault_entries
+
+        cap = _vault_entries._MAX_MANIFEST_BYTES
+        (tmp_path / "manifest.0.mvmf").write_bytes(b"x" * (cap + 2))
+        rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO())
+        assert rc == 1
+        assert "implausibly large" in capsys.readouterr().err
+
     def test_cli_status_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """``cli_status(args)`` resolves ``--root`` and delegates to :func:`status`."""
         seen: dict[str, object] = {}
