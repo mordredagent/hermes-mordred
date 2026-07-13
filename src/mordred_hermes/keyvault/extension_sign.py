@@ -251,21 +251,42 @@ def get_address() -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _eip191_hash(signable: Any) -> bytes:
+    """32-byte EIP-191 signing hash of an ``eth_account`` ``SignableMessage``.
+
+    Reconstructed from the message's public fields rather than eth_account's
+    private ``_hash_eip191_message``: that underscore-prefixed helper is not part
+    of the package's public API and has moved across releases, so a routine
+    dependency bump could silently break all extension message signing (and,
+    because CI does not install the ``ethereum`` extra, the break would not
+    surface until runtime on a user's machine). ``SignableMessage`` is a public
+    ``NamedTuple`` and the ``0x19 ‖ version ‖ header ‖ body`` layout is the
+    EIP-191 spec itself, so this is stable. Verified byte-identical to
+    ``_hash_eip191_message`` for both ``encode_defunct`` and ``encode_typed_data``.
+    """
+    from eth_hash.auto import keccak
+
+    # bytes(...): eth-hash is untyped in the CI env (the ``ethereum`` extra isn't
+    # installed there), so keccak(...) is ``Any`` and returning it directly trips
+    # mypy --strict's no-any-return. keccak already yields bytes at runtime.
+    return bytes(keccak(b"\x19" + signable.version + signable.header + signable.body))
+
+
 def personal_sign(message: str) -> str:
     """EIP-191 ``personal_sign``. ``message`` is the DApp param (hex or text)."""
-    from eth_account.messages import _hash_eip191_message, encode_defunct
+    from eth_account.messages import encode_defunct
 
     signable = encode_defunct(hexstr=message) if message.startswith("0x") else encode_defunct(text=message)
-    sig = _sign_hash(_hash_eip191_message(signable))
+    sig = _sign_hash(_eip191_hash(signable))
     return "0x" + sig.hex
 
 
 def sign_typed_data_v4(typed_data: str | dict[str, Any]) -> str:
     """EIP-712 ``eth_signTypedData_v4``. Accepts the JSON string or dict."""
-    from eth_account.messages import _hash_eip191_message, encode_typed_data
+    from eth_account.messages import encode_typed_data
 
     data = json.loads(typed_data) if isinstance(typed_data, str) else typed_data
-    sig = _sign_hash(_hash_eip191_message(encode_typed_data(full_message=data)))
+    sig = _sign_hash(_eip191_hash(encode_typed_data(full_message=data)))
     return "0x" + sig.hex
 
 
