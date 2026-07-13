@@ -219,10 +219,15 @@ class EncryptedWriter:
     def close(self) -> None:
         """Zero and drop the in-memory DEK.
 
-        The DEK lives in a ``bytearray`` (see :meth:`_active`) so it is wiped
-        in place here — the long-lived audit-log key is scrubbed from the heap
-        rather than merely dereferenced. Kept for the ``Writer`` Protocol
-        contract — each ``append`` already opens and closes its own fd.
+        The DEK's authoritative buffer is a ``bytearray`` (see :meth:`_active`),
+        so it is wiped in place here rather than merely dereferenced — better
+        than leaving the long-lived audit-log key for the GC. Note this cannot
+        be a total heap scrub: :meth:`_active` hands callers an immutable
+        ``bytes`` snapshot per append and AES-GCM copies the key into OpenSSL,
+        and those transient copies live until GC — wiping the ``bytearray``
+        bounds the key's lifetime, it does not erase every copy. Kept for the
+        ``Writer`` Protocol contract — each ``append`` already opens and closes
+        its own fd.
         """
         with self._lock:
             self._wipe_dek()
@@ -230,8 +235,10 @@ class EncryptedWriter:
     def _wipe_dek(self) -> None:
         """Zero the DEK buffer in place (it is a ``bytearray``), then drop it.
 
-        Caller must hold ``self._lock``. Mirrors ``kek.MasterKey``'s wipe so
-        the audit-log DEK is scrubbed, not just dereferenced.
+        Caller must hold ``self._lock``. Mirrors ``kek.MasterKey``'s wipe so the
+        DEK's authoritative buffer is zeroed, not just dereferenced (transient
+        ``bytes``/OpenSSL copies are inherent and out of scope — see
+        :meth:`close`).
         """
         if self._dek is not None:
             self._dek[:] = bytes(len(self._dek))

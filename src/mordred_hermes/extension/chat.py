@@ -179,6 +179,29 @@ def _abandon_turn(
     fut.add_done_callback(_persist_detached)
 
 
+def _messages_added_this_turn(history_base: list[Any], msgs: list[Any]) -> list[Any]:
+    """The messages ``msgs`` adds beyond its shared prefix with ``history_base``.
+
+    Used only on the concurrent-merge path (the store moved while the turn ran).
+    The old code sliced ``msgs[len(history_base):]``, which assumes ``msgs``
+    begins with EXACTLY ``history_base`` — a real ``AIAgent`` that prepends a
+    system message or compresses history breaks that, silently dropping the
+    turn's user+assistant exchange or duplicating it. Taking the tail after the
+    longest common prefix degrades safely: in the normal case
+    (``msgs == history_base + new``) it is identical to the old slice, and when
+    the prefix diverges it never DROPS the turn's new messages (the worse
+    failure) — at most it re-appends a few already-present ones.
+    """
+    common = 0
+    # strict=False: the two are expected to differ in length (base is meant to
+    # be a prefix of msgs); we only walk the shared span to find the divergence.
+    for base_msg, msg in zip(history_base, msgs, strict=False):
+        if base_msg != msg:
+            break
+        common += 1
+    return msgs[common:]
+
+
 def _persist_and_final(result: Any, extension_history: Any, streamed_any: bool, history_base: list[Any]) -> str:
     """Persist the run's message history and return the final response to emit
     when nothing was streamed. Returns "" when there's nothing left to yield.
@@ -198,7 +221,7 @@ def _persist_and_final(result: Any, extension_history: Any, streamed_any: bool, 
         if current == history_base:
             extension_history.save_messages(msgs)
         else:
-            extension_history.save_messages([*current, *msgs[len(history_base) :]])
+            extension_history.save_messages([*current, *_messages_added_this_turn(history_base, msgs)])
             logger.info("extension chat: merged turn history over a concurrent update")
     if streamed_any:
         return ""

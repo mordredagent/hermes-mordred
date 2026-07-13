@@ -237,3 +237,34 @@ def test_detached_turn_merges_with_superseding_turn(monkeypatch, _mem_history):
     contents = [m["content"] for m in persisted]
     assert "fast-answer" in contents, "superseding turn's exchange lost"
     assert "slow-answer" in contents, "detached turn's exchange lost"
+
+
+def test_messages_added_this_turn_normal_case_is_the_tail():
+    """msgs == history_base + new: identical to the old positional slice."""
+    base = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    new = [{"role": "user", "content": "c"}, {"role": "assistant", "content": "d"}]
+    assert extension_chat._messages_added_this_turn(base, [*base, *new]) == new
+
+
+def test_messages_added_this_turn_never_drops_when_prefix_diverges():
+    """A real agent that PREPENDS a system message (or compresses history) makes
+    msgs NOT start with history_base. The old slice would silently drop the
+    turn's user+assistant exchange; the common-prefix helper must not — it
+    returns everything from the first divergence, so no new message is lost."""
+    base = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    prepended = [{"role": "system", "content": "sys"}, *base, {"role": "user", "content": "c"}]
+    added = extension_chat._messages_added_this_turn(base, prepended)
+    # The turn's genuinely-new message survives (drop was the dangerous failure).
+    assert {"role": "user", "content": "c"} in added
+    # And the old slice would have dropped it: msgs[len(base):] == [msgs[2], msgs[3]]
+    assert prepended[len(base) :] != added
+
+
+def test_messages_added_this_turn_identical_returns_empty():
+    base = [{"role": "user", "content": "a"}]
+    assert extension_chat._messages_added_this_turn(base, list(base)) == []
+
+
+def test_messages_added_this_turn_empty_base_returns_all():
+    msgs = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    assert extension_chat._messages_added_this_turn([], msgs) == msgs
