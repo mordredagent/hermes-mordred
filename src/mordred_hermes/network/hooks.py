@@ -442,6 +442,17 @@ def _flag_transport_compat(
             f"{active_path!r}: {'; '.join(abort_reasons)}; refusing the session."
         )
         _LOG.error(msg)
+        # Tear the path down BEFORE refusing. Unlike the bring-up-failure refusal
+        # (runtime._switch restores env + resets active_path when it raises), this
+        # gate runs AFTER a SUCCESSFUL switch — the Tor daemon is spawned, the
+        # SOCKS proxy is written into os.environ, and the liveness thread is
+        # running. Raising without teardown would orphan all three if the host
+        # doesn't call on_session_end after on_session_start raises. Best-effort:
+        # a stop() failure must not mask the refusal.
+        try:
+            api.stop()
+        except Exception as stop_err:
+            _LOG.warning("transport-compat abort: api.stop() during teardown raised %s", stop_err)
         raise MordredPathBringupFailed(msg)
 
 

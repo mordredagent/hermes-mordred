@@ -373,6 +373,10 @@ class TestTransportCompatibilityGate:
 
         # The path DID come up — the refusal is the transport gate, not bring-up.
         assert rt.use_calls == ["tor"]
+        # ...and it was torn down before the refusal escaped, so the Tor daemon /
+        # SOCKS proxy env / liveness thread aren't orphaned if the host never
+        # calls on_session_end after on_session_start raises.
+        assert rt.stop_called is True
         blocks = [e for e in self._transport_entries(audit) if e.get("decision") == "block"]
         assert blocks, "expected a block-decision transport audit entry"
         assert blocks[0]["provider"] == "bedrock"
