@@ -8,8 +8,10 @@ semantics for keyvault state:
 - ``os.open(path, O_NOFOLLOW)`` to refuse symlink-following.
 - File mode ``0600`` and directory mode ``0700`` enforced via ``fstat``
   after open (mode mismatch → ``KeyvaultPermissionError``).
-- Atomic writes via ``<file>.tmp + fsync(tmp_fd) + os.replace(tmp, final)
-  + fsync(parent_dir_fd)``.
+- Atomic writes via ``<file>.tmp + durable-fsync(tmp_fd) + os.replace(tmp,
+  final) + durable-fsync(parent_dir_fd)``, where "durable-fsync" issues
+  ``fcntl(fd, F_FULLFSYNC)`` on macOS (falling back to plain ``os.fsync``
+  elsewhere, and when ``F_FULLFSYNC`` itself is unsupported).
 - Exclusive ``fcntl.flock`` on ``<root>/.lock`` for the duration of any
   write transaction.
 - ``meta.json`` corruption raises :exc:`KeyvaultCorruptError` whose
@@ -22,6 +24,7 @@ safety semantics" for the canonical wording.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -200,6 +203,127 @@ class TestAtomicWrite:
         assert list(tmp_path.glob("*.tmp")) == []
         # The final file does not exist either (we never committed via rename).
         assert not target.exists()
+
+
+# ---------------------------- _fsync_durable ----------------------------
+#
+# On macOS, bare os.fsync(2) only reaches the drive's write cache — Apple
+# documents fcntl(fd, F_FULLFSYNC) as the call that actually reaches
+# stable storage. These tests pin _fsync_durable's dispatch and, crucially,
+# its fallback-to-os.fsync behavior for the cases where F_FULLFSYNC cannot
+# be used (unsupported filesystem, or a non-Darwin build of CPython that
+# does not define the attribute at all).
+
+
+class TestFsyncDurable:
+    def test_uses_f_fullfsync_when_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fcntl_calls: list[tuple[int, int]] = []
+        fsync_calls: list[int] = []
+        monkeypatch.setattr(_storage.fcntl, "F_FULLFSYNC", 12345, raising=False)
+        monkeypatch.setattr(_storage.fcntl, "fcntl", lambda fd, cmd: fcntl_calls.append((fd, cmd)))
+        monkeypatch.setattr(_storage.os, "fsync", lambda fd: fsync_calls.append(fd))
+
+        _storage._fsync_durable(7)
+
+        assert fcntl_calls == [(7, 12345)]
+        # os.fsync must NOT be used when F_FULLFSYNC succeeds — that would
+        # defeat the whole point (os.fsync on macOS is the weaker guarantee).
+        assert fsync_calls == []
+
+    @pytest.mark.parametrize("not_supported_errno", [errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL])
+    def test_falls_back_to_os_fsync_when_f_fullfsync_raises(
+        self, monkeypatch: pytest.MonkeyPatch, not_supported_errno: int
+    ) -> None:
+        """Regression test for the MEDIUM crash-consistency finding: some
+        filesystems (certain network/virtual filesystems mounted on macOS)
+        return ENOTSUP / EOPNOTSUPP / EINVAL for F_FULLFSYNC even on Darwin,
+        so the fallback to os.fsync must actually run for each of those
+        "filesystem can't do it" errnos rather than letting the OSError
+        escape."""
+        fsync_calls: list[int] = []
+        monkeypatch.setattr(_storage.fcntl, "F_FULLFSYNC", 12345, raising=False)
+
+        def raising_fcntl(fd: int, cmd: int) -> int:
+            raise OSError(not_supported_errno, "Operation not supported")
+
+        monkeypatch.setattr(_storage.fcntl, "fcntl", raising_fcntl)
+        monkeypatch.setattr(_storage.os, "fsync", lambda fd: fsync_calls.append(fd))
+
+        _storage._fsync_durable(9)  # must not raise
+
+        assert fsync_calls == [9]
+
+    def test_falls_back_to_os_fsync_when_f_fullfsync_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """fcntl.F_FULLFSYNC only exists on Darwin builds of CPython — the
+        attribute lookup must be guarded (getattr with a default), not
+        assumed to exist."""
+        fsync_calls: list[int] = []
+        monkeypatch.delattr(_storage.fcntl, "F_FULLFSYNC", raising=False)
+        monkeypatch.setattr(_storage.os, "fsync", lambda fd: fsync_calls.append(fd))
+
+        _storage._fsync_durable(3)
+
+        assert fsync_calls == [3]
+
+    def test_real_device_error_propagates_without_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A genuine device error (EIO — disk failing, ENOSPC, EDQUOT) from
+        F_FULLFSYNC means the flush actually failed. Swallowing it and
+        reporting success via a second os.fsync would let atomic_write claim
+        durability it never achieved — a silent data-loss fail-open in the
+        one function whose whole contract is crash-consistency. Only the
+        "filesystem can't do F_FULLFSYNC" errnos (ENOTSUP/EOPNOTSUPP/EINVAL)
+        may degrade to os.fsync; EIO must propagate instead."""
+        fsync_calls: list[int] = []
+        monkeypatch.setattr(_storage.fcntl, "F_FULLFSYNC", 12345, raising=False)
+
+        def raising_fcntl(fd: int, cmd: int) -> int:
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(_storage.fcntl, "fcntl", raising_fcntl)
+        monkeypatch.setattr(_storage.os, "fsync", lambda fd: fsync_calls.append(fd))
+
+        with pytest.raises(OSError) as excinfo:
+            _storage._fsync_durable(11)
+
+        assert excinfo.value.errno == errno.EIO
+        # os.fsync must NEVER run for a real device error — that would
+        # silently report a durability guarantee that was never met.
+        assert fsync_calls == []
+
+
+class TestAtomicWriteUsesFsyncDurable:
+    def test_atomic_write_calls_fsync_durable_for_tmp_and_parent_fd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """atomic_write must route BOTH fsyncs (tmp file, parent dir)
+        through _fsync_durable rather than calling os.fsync directly —
+        otherwise the durability fix is dead code."""
+        calls: list[int] = []
+        monkeypatch.setattr(_storage, "_fsync_durable", lambda fd: calls.append(fd))
+
+        target = tmp_path / "file.bin"
+        _storage.atomic_write(target, b"data")
+
+        assert len(calls) == 2
+
+    def test_atomic_write_propagates_real_device_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """End-to-end: a real F_FULLFSYNC device error (EIO) must escape
+        atomic_write rather than being swallowed as a false "write
+        succeeded" — the caller (e.g. keyvault meta.json save) needs to see
+        the failure, not silently lose data it believes was durably
+        committed."""
+        monkeypatch.setattr(_storage.fcntl, "F_FULLFSYNC", 12345, raising=False)
+
+        def raising_fcntl(fd: int, cmd: int) -> int:
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(_storage.fcntl, "fcntl", raising_fcntl)
+
+        target = tmp_path / "file.bin"
+        with pytest.raises(OSError) as excinfo:
+            _storage.atomic_write(target, b"data")
+
+        assert excinfo.value.errno == errno.EIO
 
 
 # ---------------------------- safe_read ----------------------------

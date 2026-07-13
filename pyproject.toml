@@ -325,6 +325,17 @@ module = [
     "requests",
     "requests.*",
     "objc",
+    # stem lives in the optional `tor-control` extra. CI does not install it, so
+    # `paths/tor.py`'s lazy `from stem.control import Controller` is an
+    # unresolvable import there (import-not-found) — but a DEV box synced with
+    # `--all-extras` DOES have it, and stem ships no py.typed, so the same line
+    # becomes import-untyped instead. An inline `type: ignore[...]` can only name
+    # one of those codes, so it necessarily false-fails in one of the two
+    # environments (and `warn_unused_ignores` turns the mismatch into a hard
+    # error). Declaring the module here covers both codes and keeps `mypy` green
+    # locally and in CI without an environment-dependent ignore at the call site.
+    "stem",
+    "stem.*",
 ]
 ignore_missing_imports = true
 

@@ -310,7 +310,10 @@ class TestRenderReport:
     @pytest.mark.parametrize(
         ("action", "phrase"),
         [
-            ("noop", "no OpenClaw install"),
+            # "no OpenClaw install detected" was a false statement once migrate()
+            # started returning "noop" ALSO when the base dir exists but holds
+            # nothing to migrate -- the phrase changed accordingly.
+            ("noop", "nothing to migrate"),
             ("migrated", "migrated"),
             ("skipped-marker", "already migrated"),
         ],

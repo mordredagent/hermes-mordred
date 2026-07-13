@@ -583,6 +583,63 @@ class TestPolicyJsonFallbacks:
                 health_probe=_noop_probe,
             )
 
+    def test_allowlist_entries_are_canonicalized_through_alias_table(self, tmp_path: Path) -> None:
+        """``_read_policy_settings`` must run allowlist entries through the
+        same alias table (``canonicalize_provider``) the runtime provider id
+        is compared against, not a bare ``.strip().lower()``. A Hermes alias
+        like ``"claude"`` resolves to the canonical ``"anthropic"`` slug.
+        """
+        cfg = _write_policy_json(
+            tmp_path,
+            policy="strict",
+            cloud_provider_allowlist=("claude", "  GOOGLE  ", "aws"),
+        )
+
+        settings = enforce._read_policy_settings(cfg)
+
+        assert settings.cloud_allowlist == frozenset({"anthropic", "gemini", "bedrock"})
+
+    def test_allowlist_empty_string_entries_still_drop_out(self, tmp_path: Path) -> None:
+        """A stray comma in the wizard's CSV (``"anthropic,"``) parses to an
+        empty-string list entry; canonicalizing must not let it widen the
+        allowlist into matching e.g. an unresolved/empty active_provider.
+        """
+        cfg = _write_policy_json(
+            tmp_path,
+            policy="strict",
+            cloud_provider_allowlist=("anthropic", "", "   "),
+        )
+
+        settings = enforce._read_policy_settings(cfg)
+
+        assert settings.cloud_allowlist == frozenset({"anthropic"})
+
+    def test_allowlist_ollama_entry_does_not_grant_generic_custom_provider(self, tmp_path: Path) -> None:
+        """``"ollama"`` canonicalizes to ``"custom"`` (Hermes' wildcard bucket
+        for an arbitrary OpenAI-compatible ``base_url``, and the canonical
+        form of the ``ollama`` local-endpoint alias). Letting an allowlist
+        entry resolve to it would turn a narrow grant -- a user writing
+        ``["ollama"]`` meaning "allow my local model" -- into permission for
+        ANY custom cloud endpoint: a fail-open widening in a strict CLOUD
+        allowlist. ``_read_policy_settings`` must drop ``"custom"`` from the
+        resulting allowlist rather than admit it as a real provider grant.
+        """
+        from mordred_hermes._provider_identity import canonicalize_provider
+
+        assert canonicalize_provider("ollama") == "custom"  # basis for this test
+        assert canonicalize_provider("claude") == "anthropic"  # existing alias behaviour unaffected
+
+        cfg = _write_policy_json(
+            tmp_path,
+            policy="strict",
+            cloud_provider_allowlist=("ollama",),
+        )
+
+        settings = enforce._read_policy_settings(cfg)
+
+        assert settings.cloud_allowlist == frozenset()
+        assert "custom" not in settings.cloud_allowlist
+
 
 # --------------------------------------------------------------------------- #
 # check_runtime_provider — runtime hook enforcement (no probe, no allow audit)#
@@ -842,6 +899,45 @@ class TestCheckRuntimeProvider:
 
         # Both lookups must succeed despite the casing/whitespace mismatch.
         for provider in ("openai", "anthropic"):
+            enforce.check_runtime_provider(
+                policy_mode="strict",
+                policy_json_path=cfg,
+                active_provider=provider,
+                audit=audit,
+            )
+
+        # Allow paths stay silent in runtime check.
+        assert audit.entries == []
+
+    def test_strict_allowlist_resolves_aliases(self, tmp_path: Path) -> None:
+        """A user-authored allowlist entry that is a Hermes *alias* (not the
+        canonical slug) must still permit the canonicalized runtime provider.
+
+        Verified finding: ``_read_policy_settings`` used to normalize
+        allowlist entries with a bare ``.strip().lower()``, while the
+        runtime provider id being compared against is normalized through
+        the full alias table via ``canonicalize_provider()``
+        (``__init__.py::_resolve_active_provider`` /
+        ``_on_pre_api_request_enforce``). A hand-edited
+        ``cloud_provider_allowlist: ["claude"]`` — ``"claude"`` is a real
+        Hermes alias for ``"anthropic"`` — would therefore never match the
+        canonicalized ``"anthropic"`` runtime id, and strict mode would
+        refuse a provider the user clearly intended to allow. Without the
+        fix (canonicalizing allowlist entries the same way) this test fails
+        with ``MordredSessionRefused``.
+        """
+        cfg = _write_policy_json(
+            tmp_path,
+            policy="strict",
+            allow_cloud_llm=True,
+            cloud_provider_allowlist=("claude", "google", "aws"),
+        )
+        audit = _FakeAuditWriter()
+
+        # "claude" / "google" / "aws" are aliases; the runtime provider id
+        # arrives already canonicalized (mirroring
+        # ``_on_pre_api_request_enforce``'s ``canonicalize_provider`` call).
+        for provider in ("anthropic", "gemini", "bedrock"):
             enforce.check_runtime_provider(
                 policy_mode="strict",
                 policy_json_path=cfg,

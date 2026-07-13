@@ -67,23 +67,32 @@ class TorHandle:
     data_dir: Path
 
 
-def render_torrc(*, socks_port: int, control_port: int, data_dir: Path) -> str:
+def render_torrc(*, socks_port: int, control_port: int, data_dir: Path, disable_ipv6: bool = False) -> str:
     """Render the torrc fragment we hand to ``tor -f -``.
-
-    Kept minimal on purpose. ``ClientUseIPv6 0`` and friends are layered
-    on by Phase 3 PR2 once the wizard collects the policy.json fields.
 
     ``IsolateSOCKSAuth`` is set explicitly so per-context circuit
     isolation (``proxy_env`` injects a per-token SOCKS credential) does not
     rely on Tor's silent default-on behaviour — a future Tor release could
     change the SOCKSPort default flags.
+
+    ``disable_ipv6`` emits ``ClientUseIPv6 0`` (the IPv6-leak defence the
+    ``policy.json`` field of the same name advertises: strict defaults it to
+    True, lenient/off to False — see ``network.__init__._resolve_disable_ipv6``).
+    It defaults to False here so the parameter is purely additive for callers
+    that don't pass it. Until this was wired, the flag was resolved into
+    ``RuntimeConfig`` and then dropped on the floor — every torrc was rendered
+    identically regardless of policy, so the documented strict-mode IPv6
+    defence was a silent no-op.
     """
-    return (
-        f"SOCKSPort 127.0.0.1:{socks_port} IsolateSOCKSAuth\n"
-        f"ControlPort 127.0.0.1:{control_port}\n"
-        f"CookieAuthentication 1\n"
-        f"DataDirectory {data_dir}\n"
-    )
+    lines = [
+        f"SOCKSPort 127.0.0.1:{socks_port} IsolateSOCKSAuth",
+        f"ControlPort 127.0.0.1:{control_port}",
+        "CookieAuthentication 1",
+        f"DataDirectory {data_dir}",
+    ]
+    if disable_ipv6:
+        lines.append("ClientUseIPv6 0")
+    return "".join(f"{line}\n" for line in lines)
 
 
 def pick_free_port(
@@ -298,7 +307,11 @@ def _default_controller_factory(*, host: str, port: int) -> _ControllerLike:
     raised here is caught by :func:`circuit_status_health` and surfaces
     as a graceful shallow fallback.
     """
-    from stem.control import Controller  # type: ignore[import-not-found]
+    # No inline `type: ignore` here on purpose: stem is an optional extra, so the
+    # error code differs by environment (import-not-found in CI where it is
+    # absent, import-untyped on a dev box that installed it). `[[tool.mypy.
+    # overrides]]` in pyproject.toml declares stem instead, which covers both.
+    from stem.control import Controller
 
     controller = Controller.from_port(address=host, port=port)
     return cast(_ControllerLike, controller)
@@ -429,6 +442,14 @@ def start_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # errors="replace": text mode defaults to STRICT decoding, so a single
+        # non-UTF-8 byte in tor's log output (a relay nickname, a locale-encoded
+        # OS error string) makes readline() raise UnicodeDecodeError deep inside
+        # the bootstrap tail — killing a bring-up over a cosmetic byte. We only
+        # scan these lines for the bootstrap token, so lossy decoding is strictly
+        # better than failing. ``runtime._bring_up_tor`` also defends against
+        # this, but fixing it at the source keeps the daemon from dying at all.
+        errors="replace",
         bufsize=1,
     )
     if proc.stdin is not None:

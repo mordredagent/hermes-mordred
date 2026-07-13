@@ -449,7 +449,13 @@ def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend) -> bytes:
 
     wrapped_dek = aes_key_wrap(kek, dek)
 
-    return MAGIC + bytes([VERSION, ALG_SUITE]) + kid_hash + ephemeral_pub_bytes + wrapped_dek
+    # The 127-byte blob is exactly ``info || wrapped_dek`` — ``info`` spans
+    # offsets 0.._OFFSET_WRAPPED_DEK (== 87 == len(MAGIC)+2+KEY_ID_HASH_LEN+
+    # EPHEMERAL_PUB_LEN). ``unwrap_dek`` reconstructs ``info`` from the
+    # parsed header fields, so re-serializing the same prefix a second time
+    # here (rather than reusing ``info``) would risk the two packings
+    # silently diverging and deriving a mismatched KEK, breaking unwrap.
+    return info + wrapped_dek
 
 
 def unwrap_dek(

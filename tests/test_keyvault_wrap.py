@@ -187,6 +187,31 @@ class TestWireFormat:
         assert blob1 != blob2
         assert blob1[22:87] != blob2[22:87]  # different ephemeral_pub
 
+    def test_blob_prefix_equals_hkdf_info(self, backend: FakeBackend) -> None:
+        """Regression test for the LOW refactor finding: ``wrap_dek`` used
+        to build the 87-byte HKDF ``info`` via ``_build_hkdf_info`` and
+        THEN re-serialize the identical prefix a second time in the return
+        statement. ``unwrap_dek`` reconstructs ``info`` from the parsed
+        header, so a divergence between the two packings would derive a
+        mismatched KEK and break unwrap. Pin ``blob[:87] == info`` so the
+        two can never silently drift apart again."""
+        from mordred_hermes.keyvault.wrap import (
+            _OFFSET_WRAPPED_DEK,
+            _build_hkdf_info,
+            _key_id_hash,
+            generate_wrapping_key,
+            wrap_dek,
+        )
+
+        generate_wrapping_key("k1", backend=backend)
+        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
+
+        assert _OFFSET_WRAPPED_DEK == 87
+        kid_hash = _key_id_hash("k1")
+        ephemeral_pub = blob[22:87]
+        expected_info = _build_hkdf_info(kid_hash, ephemeral_pub)
+        assert blob[:87] == expected_info
+
 
 # ---------------------------------------------------------------------------
 # Round-trip

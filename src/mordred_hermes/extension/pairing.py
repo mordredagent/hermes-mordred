@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
+from ..keyvault._storage import atomic_write
 from .crypto import b64u_decode, b64u_encode, derive_shared_key, x25519_public_raw
 
 # Unambiguous alphabet (no 0/O/1/I) — matches the extension and Hermes' own
@@ -73,16 +74,16 @@ def _ext_dir() -> Path:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    # Write 0600, atomically where possible.
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    """0600 atomic write, delegated to the keyvault's canonical helper.
+
+    These files hold the pairing AES key, the ext_token and the attestation
+    private key — the same class of secret the keyvault protects — so they get
+    the same guarantees instead of a hand-rolled, weaker copy: unpredictable tmp
+    name, ``O_EXCL | O_NOFOLLOW`` (no symlink follow / tmp pre-planting), fsync
+    of the tmp fd *and* the parent dir, and tmp cleanup on failure. The parent
+    directory always exists here — every caller resolves its path through
+    :func:`_ext_dir`, which mkdirs it."""
+    atomic_write(path, data)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -270,7 +271,7 @@ def load_pairing() -> Pairing | None:
 
 
 def _save_pairing(p: Pairing) -> None:
-    # Preserve any v2 keyring fields (channel_keys/extchat_key) already in state.
+    # Preserve any v2 keyring fields (channel_keys) already in state.
     with _state_lock():
         data = _read_json(_state_path()) or {}
         data.update(
@@ -309,22 +310,10 @@ def save_channel_key(channel_id: str, raw_key: bytes) -> None:
         _write_private(_state_path(), json.dumps(data).encode("utf-8"))
 
 
-def load_extchat_key() -> bytes | None:
-    data = _read_json(_state_path()) or {}
-    kb = data.get("extchat_key")
-    if not kb:
-        return None
-    try:
-        return b64u_decode(kb)
-    except Exception:
-        return None
-
-
-def save_extchat_key(raw_key: bytes) -> None:
-    with _state_lock():
-        data = _read_json(_state_path()) or {}
-        data["extchat_key"] = b64u_encode(raw_key)
-        _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+# NOTE: there is deliberately no load/save_extchat_key here. K_extchat is always
+# DERIVED fresh from the pairing master key (``api._extchat_key`` →
+# ``hkdf_subkey``); a persisted copy was written and read by nobody and would
+# only invite a derive-vs-stored mismatch after a re-pair.
 
 
 def clear_pairing() -> None:

@@ -4,6 +4,8 @@ valid token."""
 
 from __future__ import annotations
 
+import stat
+
 import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -80,6 +82,36 @@ def test_normalize_code():
     assert pairing.normalize_code("mort-abcdefgh-jklmnpqr") == "MORT-ABCDEFGH-JKLMNPQR"
     # Strips ambiguous/garbage chars and re-groups.
     assert pairing.normalize_code("ABCDEFGHJKLMNPQR") == "MORT-ABCDEFGH-JKLMNPQR"
+
+
+def test_state_write_ignores_a_preplanted_tmp_symlink(tmp_path):
+    """The pairing state holds the shared AES key and the ext_token. The old
+    hand-rolled writer staged them at a *predictable* ``state.json.tmp`` opened
+    without ``O_NOFOLLOW``, so a symlink pre-planted there redirected the secret
+    (and left state.json a symlink). ``keyvault._storage.atomic_write`` uses a
+    random tmp name + ``O_EXCL | O_NOFOLLOW``."""
+    ext = tmp_path / "extension"
+    ext.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched")
+    (ext / "state.json.tmp").symlink_to(victim)
+
+    code, _ = pairing.generate_code()
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    result = pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+
+    assert victim.read_text() == "untouched"  # no write through the symlink
+    assert result["ext_token"] not in victim.read_text()
+    state = ext / "state.json"
+    assert state.is_file() and not state.is_symlink()
+    assert stat.S_IMODE(state.lstat().st_mode) == 0o600
+
+
+def test_extchat_key_is_never_persisted():
+    """K_extchat is always derived from the master key (api._extchat_key); the
+    dead load/save_extchat_key pair (and its state field) is gone."""
+    assert not hasattr(pairing, "load_extchat_key")
+    assert not hasattr(pairing, "save_extchat_key")
 
 
 def test_consume_code_single_use_under_concurrency():

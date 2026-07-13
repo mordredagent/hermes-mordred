@@ -109,6 +109,21 @@ class TestMigrateNoOp:
         )
         assert result == "noop"
 
+    def test_returns_noop_when_base_exists_but_empty(self, tmp_path: Path) -> None:
+        """Codex review: `openclaw_base` existing as a bare directory with NONE
+        of the recognized artifacts (no audit.log, no keyvault/, no
+        credentials/, no sibling openclaw.json) must report "noop" -- nothing
+        was actually copied or written, so "migrated" would mislead the
+        `hermes-mordred upgrade` summary line."""
+        base = tmp_path / "openclaw" / "mordred"
+        base.mkdir(parents=True)
+        result = openclaw_migration.migrate(
+            openclaw_base=base,
+            policy_writer=_writer(tmp_path),
+            options=upgrade.UpgradeOptions(),
+        )
+        assert result == "noop"
+
 
 # -----------------------------------------------------------------------------
 # Audit log migration (H5: append-by-timestamp-window + marker file)
@@ -495,4 +510,8 @@ class TestPolicyTransform:
         _seed_openclaw(base, openclaw_json={"plugins": {"entries": {}}})
         w = _writer(tmp_path)
         result = openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
-        assert result == "migrated"
+        # openclaw.json is present but carries no recognisable
+        # mordred-privacy-check section -- and there's no audit/keyvault/
+        # credentials either, so nothing was actually migrated: "noop", not
+        # the misleading "migrated" (Codex review, see TestMigrateNoOp above).
+        assert result == "noop"

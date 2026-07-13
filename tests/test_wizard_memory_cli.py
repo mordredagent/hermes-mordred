@@ -197,3 +197,49 @@ class TestPurge:
         assert rc == 0
         assert _raw_flag(home) is False
         assert _MEMORY_KEY_ENV not in _vault_env_text(root, backend, store)
+
+
+# -----------------------------------------------------------------------------
+# _set_encryption_flag must round-trip config.yaml through PolicyWriter's
+# shared ruamel instance, not a bare YAML(). A bare YAML() uses ruamel's
+# default indent settings, which reformat every sequence already in the file
+# (e.g. a `plugins.enabled` list PolicyWriter wrote at dash-indent offset 2
+# collapses to offset 0) -- so alternating `configure` / `network init` /
+# `upgrade` with `encryption {enable,disable,purge} memory` caused gratuitous
+# config.yaml diff churn on lists that were never touched by this command.
+# -----------------------------------------------------------------------------
+class TestSetEncryptionFlagPreservesFormatting:
+    def test_plugins_enabled_list_formatting_survives_round_trip(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard.policy_writer import PolicySnapshot, PolicyWriter
+
+        home = tmp_path / "home"
+        home.mkdir()
+        # Seed config.yaml exactly the way PolicyWriter writes it (indent
+        # mapping=2, sequence=4, offset=2) so the test reproduces the real
+        # on-disk shape rather than a hand-authored approximation of it.
+        writer = PolicyWriter(
+            config_path=home / "config.yaml",
+            policy_json_path=home / "mordred" / "policy.json",
+            mordred_dir=home / "mordred",
+        )
+        writer.write(PolicySnapshot(policy="lenient"))
+        before = (home / "config.yaml").read_text(encoding="utf-8")
+        enabled_block = (
+            "  enabled:\n"
+            "    - mordred_privacy_check\n"
+            "    - mordred_wizard\n"
+            "    - mordred_llm_guard\n"
+            "    - mordred_network\n"
+            "    - mordred_keyvault\n"
+        )
+        assert enabled_block in before, "test setup must reproduce PolicyWriter's offset-2 dash indent"
+
+        rc = memory_cli._set_encryption_flag(home, enabled=True)
+        assert rc == 0
+
+        after = (home / "config.yaml").read_text(encoding="utf-8")
+        # The plugins.enabled block's indentation must be byte-identical --
+        # only the new memory.encryption.enabled key was added. A bare YAML()
+        # would instead collapse the dash indent to offset 0.
+        assert enabled_block in after
+        assert after.startswith(before.rstrip("\n"))

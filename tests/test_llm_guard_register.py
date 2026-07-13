@@ -387,6 +387,80 @@ class TestResolveActiveProvider:
         assert _resolve_active_provider(auth_json_path=auth, config_path=cfg) == "gemini"
 
 
+class TestReadAuthActiveProvider:
+    """``_read_auth_active_provider`` delegates its read-or-{} core to
+    ``_policy_io.load_policy_mapping`` (Codex duplication finding — it used
+    to hand-roll the exact exists()/open/json.load/except(OSError,
+    JSONDecodeError)/isinstance(dict) shape that module already centralizes
+    for the other ``policy.json`` readers). These tests pin the pre-existing
+    failure semantics (``None`` on missing / unreadable / malformed / non-dict
+    / non-string / empty) so the delegation cannot silently change behavior.
+    """
+
+    def test_missing_file_returns_none(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _read_auth_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"  # never created
+
+        assert _read_auth_active_provider(auth) is None
+
+    def test_malformed_json_returns_none(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _read_auth_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        auth.write_text("{not valid json", encoding="utf-8")
+
+        assert _read_auth_active_provider(auth) is None
+
+    def test_non_dict_root_returns_none(self, tmp_path: object) -> None:
+        import json
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _read_auth_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        auth.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+
+        assert _read_auth_active_provider(auth) is None
+
+    def test_non_string_active_provider_returns_none(self, tmp_path: object) -> None:
+        import json
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _read_auth_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        auth.write_text(json.dumps({"active_provider": 123}), encoding="utf-8")
+
+        assert _read_auth_active_provider(auth) is None
+
+    def test_empty_string_active_provider_returns_none(self, tmp_path: object) -> None:
+        import json
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _read_auth_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        auth.write_text(json.dumps({"active_provider": "   "}), encoding="utf-8")
+
+        assert _read_auth_active_provider(auth) is None
+
+    def test_value_is_stripped_and_lowered(self, tmp_path: object) -> None:
+        import json
+        from pathlib import Path
+
+        from mordred_hermes.llm_guard import _read_auth_active_provider
+
+        auth = Path(str(tmp_path)) / "auth.json"
+        auth.write_text(json.dumps({"active_provider": "  Anthropic  "}), encoding="utf-8")
+
+        assert _read_auth_active_provider(auth) == "anthropic"
+
+
 class TestRegisterIsIdempotent:
     def test_double_call_safe(self) -> None:
         """Defensive registration: plugin loader may call register() twice
