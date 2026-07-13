@@ -87,21 +87,93 @@ def test_extension_pair_output_contract(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # Legacy backend shape (code_consumed only, no pair_outcome) — also pins
+    # the grace fallback: claimed with no recorded outcome still ends Paired.
     fake_pairing = types.SimpleNamespace(
         generate_code=lambda: ("MORT-TEST0000-TEST0000", time.time() + 5.0),
         code_consumed=lambda code: True,
     )
     monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(extension_pair_cli, "_RESULT_GRACE_SECONDS", 0.05)
 
     rc = extension_pair_cli.extension_pair(timeout=1.0)
 
     assert rc == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     # Output contract (UX review 2026-07-07): English, code shown exactly once,
     # success line carries the ok glyph (ASCII fallback off a non-UTF stream).
     assert "Mordred Extension pairing" in out
     assert out.count("MORT-TEST0000-TEST0000") == 1
     assert "Paired (" in out
+    # Grace-fallback success is advisory-flagged (code review 2026-07-13): the
+    # server never recorded an outcome, so the user gets a verify hint.
+    assert "never recorded a pairing outcome" in captured.err
+
+
+def test_extension_pair_reports_handshake_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A handshake that dies after claiming the code must NOT print Paired
+    (the pre-fix behavior); the user gets the reason and a retry hint."""
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: ("MORT-TEST0000-TEST0000", time.time() + 60.0),
+        pair_outcome=lambda code: ("failed", "invalid_pubkey"),
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.01)
+
+    rc = extension_pair_cli.extension_pair(timeout=5.0)
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "Paired" not in captured.out
+    assert "invalid_pubkey" in captured.err
+    assert "fresh code" in captured.err
+
+
+def test_extension_pair_sanitizes_forged_fail_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """fail_reason comes back from same-user-writable pending.json; control
+    characters must be escaped before hitting the operator's terminal."""
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: ("MORT-TEST0000-TEST0000", time.time() + 60.0),
+        pair_outcome=lambda code: ("failed", "bad\x1b[31mreason"),
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.01)
+
+    rc = extension_pair_cli.extension_pair(timeout=5.0)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    # capsys streams are not ttys, so _term emits no colour of its own: any
+    # raw ESC byte here would have come from the forged reason.
+    assert "\x1b" not in err
+    assert "\\x1b[31m" in err  # escaped form is shown instead
+
+
+def test_extension_pair_success_prints_next_step(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: ("MORT-TEST0000-TEST0000", time.time() + 60.0),
+        pair_outcome=lambda code: ("paired", None),
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.01)
+
+    rc = extension_pair_cli.extension_pair(timeout=5.0)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Paired (" in out
+    assert "extension serve" in out  # next-step hint
 
 
 def test_extension_pair_expiry_warns_on_stderr(

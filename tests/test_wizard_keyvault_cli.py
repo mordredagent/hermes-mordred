@@ -94,6 +94,35 @@ class TestList:
         monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
         assert keyvault_cli.cli_list(argparse.Namespace()) == 0
 
+    def test_corrupt_meta_returns_1_with_friendly_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A corrupt meta.json must surface a clean error, not a traceback."""
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text("{ not valid json", encoding="utf-8")
+        rc = keyvault_cli.list_keys(home=tmp_path)
+        assert rc == 1
+        err = capsys.readouterr().err.lower()
+        assert "corrupt" in err
+        assert "meta.json" in err
+        # A remediation hint — recover from backup or reset the keyvault.
+        assert "recover" in err or "reset" in err
+
+    def test_unreadable_meta_returns_1_with_friendly_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A meta.json with the wrong mode (KeyvaultPermissionError, an
+        OSError subclass) must also surface cleanly, not raise."""
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        meta = root / "meta.json"
+        meta.write_text("{}", encoding="utf-8")
+        meta.chmod(0o644)  # KeyvaultPermissionError: keyvault files must be 0o600
+        rc = keyvault_cli.list_keys(home=tmp_path)
+        assert rc == 1
+        assert "meta.json" in capsys.readouterr().err.lower()
+
 
 # ---------------------------------------------------------------------------
 # keyvault verify-digest
@@ -137,6 +166,19 @@ class TestVerifyDigest:
         _build_keyvault(tmp_path, {"default": b"\x09" * 32})
         monkeypatch.setattr(keyvault_cli, "_hermes_home", lambda: tmp_path)
         assert keyvault_cli.cli_verify_digest(argparse.Namespace()) == 0
+
+    def test_corrupt_meta_returns_1_with_friendly_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A corrupt meta.json must surface a clean error, not a traceback."""
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_text("{ not valid json", encoding="utf-8")
+        rc = keyvault_cli.verify_digest(home=tmp_path)
+        assert rc == 1
+        err = capsys.readouterr().err.lower()
+        assert "corrupt" in err
+        assert "meta.json" in err
 
 
 # ---------------------------------------------------------------------------

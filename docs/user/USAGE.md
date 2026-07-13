@@ -179,7 +179,7 @@ Normally driven by `encryption`; rarely used directly.
 ```sh
 $M vault init                   # new vault sealed under a recovery passphrase
 $M vault add <name> <file>      # encrypt a file under a logical name
-$M vault status                 # generation + enrolled file names
+$M vault status                 # generation + enrolled file names (non-prompting)
 $M vault cat <name>             # decrypt one entry to stdout
 $M vault migrate                # import plaintext .env + config.yaml
 $M vault recover                # re-key a vault copied to this machine onto its device
@@ -210,7 +210,8 @@ works locally again — the master key and every enrolled file are unchanged, an
 your recovery passphrase stays the same for the next machine. It is the
 encryption-vault counterpart to `keyvault recover` (which restores keyvault key
 material from a backup blob). Until you run it, a copied vault opens read-only
-(`vault status` / `vault cat` work via the passphrase, but enrolling does not).
+(`vault cat` works via the passphrase; `vault status` works with no passphrase
+at all, since it only reads the on-disk manifest — but enrolling does not).
 
 ### `plugins`
 ```sh

@@ -131,7 +131,7 @@ def cli_recover(args: argparse.Namespace) -> int:
 
 
 def cli_status(args: argparse.Namespace) -> int:
-    """argparse handler for ``vault status [--root PATH] [--json]``."""
+    """argparse handler for ``vault status [--root PATH] [--json]``. Never prompts."""
     return status(
         root=_resolve_root(getattr(args, "root", None)),
         as_json=bool(getattr(args, "json", False)),

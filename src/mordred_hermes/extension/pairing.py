@@ -178,9 +178,56 @@ def _consume_code(code: str) -> None:
 
 
 def code_consumed(code: str) -> bool:
-    """Has this code been consumed by a successful pair_init? (CLI polling)."""
+    """Has this code been claimed by a pair_init attempt? (legacy CLI polling).
+
+    Claimed ≠ paired: the handshake can still fail after the code is consumed.
+    Prefer :func:`pair_outcome`, which distinguishes the two; this stays for
+    older CLI builds and the Hermes-fork gateway's identical pending.json."""
     entry = _read_json(_ext_dir() / "pending.json").get(code)
     return bool(entry and entry.get("used"))
+
+
+def _mark_pair_result(code: str, result: str, fail_reason: str | None = None) -> None:
+    """Record the pair_init outcome on the consumed pending entry.
+
+    The polling CLI reads this back via :func:`pair_outcome`; without it a
+    handshake that dies *after* claiming the code is indistinguishable from a
+    successful pairing. Additive fields only — servers that predate them (the
+    Hermes-fork gateway) simply never write a result."""
+    path = _ext_dir() / "pending.json"
+    with _state_lock():
+        pending = _read_json(path)
+        entry = pending.get(code)
+        if entry is None:  # pruned meanwhile — nothing to annotate
+            return
+        entry["result"] = result
+        if fail_reason is not None:
+            entry["fail_reason"] = fail_reason
+        pending[code] = entry
+        _write_private(path, json.dumps(pending).encode("utf-8"))
+
+
+def pair_outcome(code: str) -> tuple[str, str | None]:
+    """CLI polling: ``(state, fail_reason)``.
+
+    ``state`` is one of:
+
+    - ``"pending"``  — not claimed yet.
+    - ``"paired"``   — handshake completed and the pairing was persisted.
+    - ``"failed"``   — claimed, then rejected; ``fail_reason`` is the SPEC
+      pair_fail reason. The code stays burned (single-use).
+    - ``"consumed"`` — claimed with no outcome recorded: mid-handshake, or a
+      server implementation that predates result recording.
+    """
+    entry = _read_json(_ext_dir() / "pending.json").get(code)
+    if not entry or not entry.get("used"):
+        return ("pending", None)
+    result = entry.get("result")
+    if result == "paired":
+        return ("paired", None)
+    if result == "failed":
+        return ("failed", entry.get("fail_reason") or "unknown")
+    return ("consumed", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -419,42 +466,64 @@ def verify_webauthn_assertion(nonce: bytes, assertion: dict[str, Any]) -> bool:
 
 def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict[str, Any]:
     """Validate the code, derive the shared key, persist the pairing, and return
-    the ``pair_complete`` payload. Raises :class:`PairError` on rejection."""
+    the ``pair_complete`` payload. Raises :class:`PairError` on rejection.
+
+    The outcome is recorded back onto the consumed pending entry (see
+    :func:`_mark_pair_result`) so the polling CLI reports rejection instead of
+    a false "Paired" when the handshake dies after the code is claimed."""
     code = normalize_code(code)
-    _consume_code(code)  # raises on invalid/expired/used
+    _consume_code(code)  # raises on invalid/expired/used — nothing to record
 
     try:
-        challenge = b64u_decode(challenge_b64)
-    except Exception as exc:
-        raise PairError("invalid_challenge") from exc
-    if len(challenge) < 16:
-        raise PairError("invalid_challenge")
+        try:
+            challenge = b64u_decode(challenge_b64)
+        except Exception as exc:
+            raise PairError("invalid_challenge") from exc
+        if len(challenge) < 16:
+            raise PairError("invalid_challenge")
 
-    hermes_priv = X25519PrivateKey.generate()
-    try:
-        aes_key = derive_shared_key(hermes_priv, ext_pubkey_b64, code)
-    except Exception as exc:
-        raise PairError("invalid_pubkey") from exc
+        hermes_priv = X25519PrivateKey.generate()
+        try:
+            aes_key = derive_shared_key(hermes_priv, ext_pubkey_b64, code)
+        except Exception as exc:
+            raise PairError("invalid_pubkey") from exc
 
-    hermes_pub_b64 = b64u_encode(x25519_public_raw(hermes_priv))
-    ext_token = b64u_encode(secrets.token_bytes(32))
+        hermes_pub_b64 = b64u_encode(x25519_public_raw(hermes_priv))
+        ext_token = b64u_encode(secrets.token_bytes(32))
 
-    _save_pairing(
-        Pairing(
-            aes_key=aes_key,
-            ext_token=ext_token,
-            ext_pubkey_b64=ext_pubkey_b64,
-            hermes_pubkey_b64=hermes_pub_b64,
-            paired_at=time.time(),
+        # Everything that can fail (attestation signing included) runs BEFORE
+        # _save_pairing: a failure after the save would have replaced a
+        # previously-working pairing's key/token with a half-completed one.
+        payload = {
+            "hermes_pubkey": hermes_pub_b64,
+            "ext_token": ext_token,
+            "attestation": {
+                "signed_challenge": _sign_attestation(challenge),
+                "se_pubkey": attest_pubkey_spki_b64(),
+                "se_available": se_available(),
+            },
+        }
+
+        _save_pairing(
+            Pairing(
+                aes_key=aes_key,
+                ext_token=ext_token,
+                ext_pubkey_b64=ext_pubkey_b64,
+                hermes_pubkey_b64=hermes_pub_b64,
+                paired_at=time.time(),
+            )
         )
-    )
+    except PairError as exc:
+        # Outcome marking is best-effort UX metadata — never let its I/O
+        # failure mask the PairError the extension's pair_fail frame needs.
+        with contextlib.suppress(OSError):
+            _mark_pair_result(code, "failed", exc.reason)
+        raise
+    except Exception:
+        with contextlib.suppress(OSError):
+            _mark_pair_result(code, "failed", "internal_error")
+        raise
 
-    return {
-        "hermes_pubkey": hermes_pub_b64,
-        "ext_token": ext_token,
-        "attestation": {
-            "signed_challenge": _sign_attestation(challenge),
-            "se_pubkey": attest_pubkey_spki_b64(),
-            "se_available": se_available(),
-        },
-    }
+    with contextlib.suppress(OSError):
+        _mark_pair_result(code, "paired")
+    return payload

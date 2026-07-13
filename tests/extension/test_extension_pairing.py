@@ -78,6 +78,75 @@ def test_invalid_code():
     assert ei.value.reason == "invalid_code"
 
 
+def test_pair_outcome_lifecycle():
+    """pending → paired, recorded on the pending entry for the polling CLI."""
+    code, _ = pairing.generate_code()
+    assert pairing.pair_outcome(code) == ("pending", None)
+
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+
+    assert pairing.pair_outcome(code) == ("paired", None)
+
+
+def test_handshake_failure_after_consume_records_failed_outcome():
+    """A pair_init that dies *after* claiming the code must not look paired:
+    the CLI-visible outcome is ("failed", reason), no pairing is saved, and
+    the code stays burned (single-use)."""
+    code, _ = pairing.generate_code()
+    with pytest.raises(pairing.PairError) as ei:
+        pairing.handle_pair_init(code, "!!!not-a-key!!!", xc.b64u_encode(b"\x00" * 32))
+    assert ei.value.reason == "invalid_pubkey"
+
+    assert pairing.pair_outcome(code) == ("failed", "invalid_pubkey")
+    assert pairing.load_pairing() is None
+    with pytest.raises(pairing.PairError) as ei2:
+        pairing.handle_pair_init(code, "!!!not-a-key!!!", xc.b64u_encode(b"\x00" * 32))
+    assert ei2.value.reason == "already_used"
+
+
+def test_invalid_challenge_records_failed_outcome():
+    code, _ = pairing.generate_code()
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    with pytest.raises(pairing.PairError):
+        pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x01"))  # < 16 bytes
+    assert pairing.pair_outcome(code) == ("failed", "invalid_challenge")
+
+
+def test_late_failure_preserves_existing_pairing(monkeypatch):
+    """A handshake that fails AFTER key derivation (e.g. attestation signing
+    I/O error) must not clobber a previously-working pairing: nothing is
+    persisted until every fallible step has succeeded, and the outcome is
+    recorded as failed."""
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    ch = xc.b64u_encode(b"\x22" * 32)
+
+    code1, _ = pairing.generate_code()
+    pairing.handle_pair_init(code1, ext_pub, ch)
+    before = pairing.load_pairing()
+    assert before is not None
+
+    def _boom(_challenge: bytes) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pairing, "_sign_attestation", _boom)
+    code2, _ = pairing.generate_code()
+    with pytest.raises(OSError):
+        pairing.handle_pair_init(code2, ext_pub, ch)
+
+    assert pairing.load_pairing() == before  # working pairing untouched
+    assert pairing.pair_outcome(code2) == ("failed", "internal_error")
+
+
+def test_legacy_consumed_entry_reports_consumed():
+    """An entry claimed by a server build that predates outcome recording
+    (used=True, no result field) reads as 'consumed' — the CLI applies its
+    grace fallback, not an immediate paired/failed verdict."""
+    code, _ = pairing.generate_code()
+    pairing._consume_code(code)
+    assert pairing.pair_outcome(code) == ("consumed", None)
+
+
 def test_normalize_code():
     assert pairing.normalize_code("mort-abcdefgh-jklmnpqr") == "MORT-ABCDEFGH-JKLMNPQR"
     # Strips ambiguous/garbage chars and re-groups.

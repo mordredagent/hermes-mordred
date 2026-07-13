@@ -29,6 +29,15 @@ from typing import Any
 from . import _term
 
 _POLL_SECONDS = 1.0
+_HEARTBEAT_SECONDS = 30.0
+# A consumed code with no recorded outcome is either mid-handshake or was
+# claimed by a server build that predates outcome recording (the Hermes-fork
+# gateway never writes one). Give the result this long to appear before
+# falling back to the legacy claimed-means-paired interpretation. Sized to
+# comfortably exceed a slow handshake (SE probe + fsync'd writes behind the
+# shared state lock), since the CLI cannot tell WHICH server implementation
+# consumed the code; the fallback success also carries an advisory note.
+_RESULT_GRACE_SECONDS = 10.0
 
 
 class ExtensionGatewayUnavailable(Exception):
@@ -102,8 +111,83 @@ def _import_pairing() -> Any:
     return pairing
 
 
+def _poll_state(pairing: Any, code: str) -> tuple[str, str | None]:
+    """``(state, fail_reason)`` for the pending code — see ``pairing.pair_outcome``.
+
+    Falls back to the legacy ``code_consumed`` probe (claimed vs not) for
+    backends that predate outcome recording."""
+    outcome = getattr(pairing, "pair_outcome", None)
+    if outcome is not None:
+        state, fail_reason = outcome(code)
+        return str(state), None if fail_reason is None else str(fail_reason)
+    return ("consumed" if pairing.code_consumed(code) else "pending", None)
+
+
+def _sanitize_reason(reason: str | None) -> str:
+    """Escape a fail_reason read back from pending.json for terminal display.
+
+    Normally a fixed enum (invalid_challenge / invalid_pubkey /
+    internal_error), but the file is same-user-writable state — mirror
+    ``_vault_open._display_name``'s control-character escaping so a forged
+    value can't inject into the operator's terminal."""
+    text = (reason or "unknown")[:80]
+    return text if text.isprintable() else text.encode("unicode_escape").decode("ascii")
+
+
+def _print_paired(*, color: bool, ascii_only: bool, assumed: bool = False) -> int:
+    mark = _term.glyph("ok", ascii_only=ascii_only)
+    print(f"{_term.success(mark, enabled=color)} Paired ({time.strftime('%Y-%m-%d %H:%M:%S')}).")
+    print(
+        "Next: chat from the extension, or open the local page served by "
+        "`hermes-mordred extension serve` (http://127.0.0.1:7788/ by default)."
+    )
+    if assumed:
+        _term.emit_note(
+            "the server never recorded a pairing outcome (an older gateway build?) — "
+            "if the extension can't chat, run `hermes-mordred extension pair` again."
+        )
+    return 0
+
+
+def _await_outcome(pairing: Any, code: str, deadline: float, *, color: bool, ascii_only: bool) -> int | None:
+    """Poll until the code is paired or rejected. Returns the exit code, or
+    ``None`` when ``deadline`` passes unclaimed (the caller words the warning:
+    expiry vs. timeout).
+
+    ``deadline`` stays wall-clock (it is tied to ``expires_at``, cross-process
+    data in pending.json); the heartbeat and grace timers are local elapsed
+    time, so they use the monotonic clock and survive NTP steps/sleep-wake."""
+    next_heartbeat = time.monotonic() + _HEARTBEAT_SECONDS
+    result_grace: float | None = None  # monotonic deadline once "consumed" is seen
+    while True:
+        state, fail_reason = _poll_state(pairing, code)
+        if state == "paired":
+            return _print_paired(color=color, ascii_only=ascii_only)
+        if state == "failed":
+            _term.emit_error(
+                f"pairing was rejected ({_sanitize_reason(fail_reason)}). Codes are "
+                "single-use: run `hermes-mordred extension pair` for a fresh code "
+                "and retry from the extension."
+            )
+            return 1
+        if state == "consumed":
+            # Claimed, no outcome yet: wait for the handshake to record a
+            # result before assuming a legacy-server success.
+            if result_grace is None:
+                result_grace = time.monotonic() + _RESULT_GRACE_SECONDS
+            elif time.monotonic() >= result_grace:
+                return _print_paired(color=color, ascii_only=ascii_only, assumed=True)
+        elif time.time() >= deadline:
+            return None
+        if time.monotonic() >= next_heartbeat:
+            remaining = max(0, int(deadline - time.time()))
+            print(f"Still waiting… ({remaining // 60}m {remaining % 60:02d}s left, Ctrl+C to cancel)")
+            next_heartbeat = time.monotonic() + _HEARTBEAT_SECONDS
+        time.sleep(_POLL_SECONDS)
+
+
 def extension_pair(*, timeout: float = 600.0) -> int:
-    """Generate a code and block until paired, the code expires, or Ctrl+C."""
+    """Generate a code and block until paired, rejected, expired, or Ctrl+C."""
     try:
         pairing = _import_pairing()
     except ExtensionGatewayUnavailable as exc:
@@ -127,15 +211,12 @@ def extension_pair(*, timeout: float = 600.0) -> int:
 
     deadline = min(expires_at, time.time() + timeout)
     try:
-        while time.time() < deadline:
-            if pairing.code_consumed(code):
-                mark = _term.glyph("ok", ascii_only=ascii_only)
-                print(f"{_term.success(mark, enabled=color)} Paired ({time.strftime('%Y-%m-%d %H:%M:%S')}).")
-                return 0
-            time.sleep(_POLL_SECONDS)
+        rc = _await_outcome(pairing, code, deadline, color=color, ascii_only=ascii_only)
     except KeyboardInterrupt:
         print("\nCancelled — no pairing was completed.", file=sys.stderr)
         return 1
+    if rc is not None:
+        return rc
 
     reason = (
         "the pairing code expired before the extension connected"

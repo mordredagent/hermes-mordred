@@ -266,8 +266,10 @@ def recover(
 
     The encryption-vault counterpart of ``keyvault recover``. A vault directory
     copied from another machine has lost the original Secure-Enclave wrapping key
-    and the device-bound anchor, so ``vault status`` / ``cat`` open it read-only
-    (cold path). This command cold-opens it via the recovery passphrase and
+    and the device-bound anchor, so ``vault cat`` opens it read-only (cold path)
+    -- ``vault status`` needs neither the device key nor the passphrase, since it
+    reads the on-disk manifest directly without opening the vault at all. This
+    command cold-opens it via the recovery passphrase and
     re-wraps the SAME master under a fresh wrapping key on this device — writing a
     new manifest generation and flipping a new anchor — so the everyday writable
     device hot path works locally again. The master and every enrolled file are
