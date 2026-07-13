@@ -29,9 +29,13 @@ import shutil
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
+
+from .._log_rotation import next_rotation_target as _next_rotation_target
+from .._log_rotation import sweep_retention as _sweep_retention
+from .._log_rotation import today_utc_date as _today_utc_date
+from .._log_rotation import utcnow_iso as _utcnow_iso
 
 if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
@@ -81,33 +85,6 @@ class Writer(Protocol):
 
     def append(self, entry: Mapping[str, Any]) -> None: ...
     def close(self) -> None: ...
-
-
-def _utcnow_iso() -> str:
-    """ISO-8601 UTC timestamp with millisecond precision."""
-    now = datetime.now(UTC)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
-
-
-def _today_utc_date() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d")
-
-
-def _next_rotation_target(path: Path, date_suffix: str) -> Path:
-    """Pick a collision-free rotation target ``<name>.<date>[.N]``.
-
-    Shared by the size/date rotation (:meth:`NDJSONWriter._rotate`) and the
-    encrypted-log rotate-aside (:func:`_rotate_encrypted_log_aside`): both
-    must skip names already taken by a prior rotation — including rotations
-    that were subsequently gzipped — so a same-day rotation can never
-    overwrite history.
-    """
-    target = path.with_name(f"{path.name}.{date_suffix}")
-    n = 0
-    while target.exists() or target.with_suffix(target.suffix + ".gz").exists():
-        n += 1
-        target = path.with_name(f"{path.name}.{date_suffix}.{n}")
-    return target
 
 
 def _serialize(entry: Mapping[str, Any]) -> bytes:
@@ -211,20 +188,7 @@ class NDJSONWriter:
             with contextlib.suppress(OSError):
                 os.chmod(gz_target, 0o600)
 
-        self._sweep_retention()
-
-    def _sweep_retention(self) -> None:
-        cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
-        prefix = self.path.name + "."
-        for child in self.path.parent.iterdir():
-            if not child.name.startswith(prefix):
-                continue
-            try:
-                mtime = datetime.fromtimestamp(child.stat().st_mtime, tz=UTC)
-            except FileNotFoundError:
-                continue
-            if mtime < cutoff:
-                child.unlink(missing_ok=True)
+        _sweep_retention(self.path, self.retention_days)
 
 
 # Phase 4 ``MRAL`` encrypted-log format tag — mirrors

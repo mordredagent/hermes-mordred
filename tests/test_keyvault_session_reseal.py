@@ -39,11 +39,19 @@ def _make_home(tmp_path: Path, *, with_env: bool, with_optout: bool) -> Path:
 
 
 def _patch_reseal(monkeypatch: pytest.MonkeyPatch, behavior: Any) -> list[Path]:
-    """Replace ``env_decrypt_cli.reseal`` with a recording fake driven by
+    """Replace ``keyvault._env_reseal.reseal_env`` with a recording fake driven by
     ``behavior(home, root) -> int``; also stub ``default_vault_root`` so nothing
     touches the real vault. Returns the list of ``home`` values reseal was called
-    with (empty == reseal never invoked == no vault open / no Touch ID)."""
-    from mordred_hermes.wizard import env_decrypt_cli
+    with (empty == reseal never invoked == no vault open / no Touch ID).
+
+    ``_env_write_guard.reseal_stray_env_if_present`` does
+    ``from ._env_reseal import reseal_env`` *inside* the function body (a fresh
+    lookup every call, not a module-import-time binding — see that module's
+    "Heavy imports stay function-local" contract), so patching the attribute on
+    ``_env_reseal`` here is picked up correctly without needing to reach into
+    ``_env_write_guard``'s own namespace.
+    """
+    from mordred_hermes.keyvault import _env_reseal
 
     calls: list[Path] = []
 
@@ -51,7 +59,7 @@ def _patch_reseal(monkeypatch: pytest.MonkeyPatch, behavior: Any) -> list[Path]:
         calls.append(home)
         return behavior(home, root)
 
-    monkeypatch.setattr(env_decrypt_cli, "reseal", _fake)
+    monkeypatch.setattr(_env_reseal, "reseal_env", _fake)
     monkeypatch.setattr(_env_write_guard, "default_vault_root", lambda: Path("/tmp/_vault_root"))
     return calls
 

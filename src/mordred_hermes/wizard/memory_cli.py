@@ -24,7 +24,6 @@ Heavy imports stay function-local so this module imports on any platform.
 
 from __future__ import annotations
 
-import contextlib
 import io
 from typing import TYPE_CHECKING
 
@@ -55,14 +54,18 @@ def _set_encryption_flag(home: Path, *, enabled: bool) -> int:
     0 on success, 1 if config.yaml exists but is not a mapping (refuse to clobber
     an unexpected shape).
     """
-    import os
-    import tempfile
-
-    from ruamel.yaml import YAML
     from ruamel.yaml.comments import CommentedMap
 
+    from .policy_writer import _atomic_write_text, _round_trip_yaml
+
     path = home / _CONFIG_NAME
-    yaml = YAML()  # round-trip mode preserves comments + ordering
+    # Share PolicyWriter's ruamel instance (indent 2/4/2, preserve_quotes,
+    # width=4096) instead of a bare YAML() -- a bare instance's default indent
+    # settings reformat every sequence in the file (e.g. `plugins.enabled`
+    # written by PolicyWriter at offset 2 collapses to offset 0), so a
+    # `configure` run right after an `encryption enable memory` run would see
+    # gratuitous diff churn on unrelated lists.
+    yaml = _round_trip_yaml()
     if path.exists():
         data = yaml.load(path.read_text(encoding="utf-8"))
         if data is None:
@@ -92,20 +95,15 @@ def _set_encryption_flag(home: Path, *, enabled: bool) -> int:
         return 1
     encryption["enabled"] = enabled
 
-    # Atomic write: dump into a temp file in the same dir, then os.replace it in
-    # one rename so a crash mid-write can never truncate config.yaml. (Not
-    # _storage.atomic_write — that enforces vault mode 0o600; config.yaml is a
-    # normal user-readable config file.)
-    home.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(home), prefix=".config.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            yaml.dump(data, fh)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    # Atomic write via PolicyWriter's shared helper (tmpfile + os.replace, plus
+    # an idempotent no-write-if-unchanged short-circuit) instead of hand-rolling
+    # the same tempfile.mkstemp + os.replace dance again (see
+    # PolicyWriter._edit_config for the same io.StringIO() + yaml.dump idiom).
+    # Not _storage.atomic_write — that enforces vault mode 0o600; config.yaml is
+    # a normal user-readable config file.
+    buf = io.StringIO()
+    yaml.dump(data, buf)
+    _atomic_write_text(path, buf.getvalue())
     return 0
 
 

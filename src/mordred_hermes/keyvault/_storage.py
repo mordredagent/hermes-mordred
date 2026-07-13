@@ -9,7 +9,10 @@ Codex pre-implementation review HIGH #4 demanded:
 - ``os.open(O_NOFOLLOW)`` — no symlink-follow on any keyvault path.
 - File mode ``0o600`` and directory mode ``0o700`` enforced via
   ``fstat`` after open (mismatch → :exc:`KeyvaultPermissionError`).
-- Atomic writes: ``<file>.tmp + fsync(tmp_fd) + os.replace + fsync(parent_fd)``.
+- Atomic writes: ``<file>.tmp + durable-fsync(tmp_fd) + os.replace +
+  durable-fsync(parent_fd)``. "durable-fsync" is :func:`_fsync_durable`,
+  NOT a bare ``os.fsync`` — see its docstring for why plain ``os.fsync``
+  is not sufficient on macOS.
 - Exclusive ``fcntl.flock`` on ``<root>/.lock`` for write transactions.
 - ``meta.json`` corruption raises :exc:`KeyvaultCorruptError` whose
   ``str()`` does NOT include the corrupted file contents (audit safety
@@ -193,13 +196,67 @@ def ensure_lock_file(path: Path) -> None:
             pass
 
 
+def _fsync_durable(fd: int) -> None:
+    """Flush ``fd`` through to stable storage — NOT just the drive cache.
+
+    On Linux (and most POSIX platforms) ``os.fsync`` is sufficient: it
+    blocks until the kernel has handed the data to the device and the
+    device reports it durable.
+
+    On macOS this is NOT true. Apple's ``fsync(2)`` man page states that
+    ``fsync`` only flushes data to the drive's on-board write cache, not
+    through it — the drive is free to hold the bytes in volatile cache
+    and report "flushed" before they are physically on stable storage. A
+    power loss between that report and the actual platter/NAND write
+    loses the data despite a successful ``fsync``. Apple documents
+    ``fcntl(fd, F_FULLFSYNC)`` as the call that actually waits for the
+    underlying device to flush its cache, and recommends it for
+    applications (like this one) that need real crash-consistency
+    guarantees.
+
+    ``fcntl.F_FULLFSYNC`` only exists on Darwin builds of CPython, so the
+    attribute lookup is guarded rather than assumed. The fallback to
+    plain ``os.fsync`` also covers the case where ``F_FULLFSYNC`` is
+    UNSUPPORTED by the filesystem — some network / virtual filesystems
+    mounted on macOS return ``ENOTSUP`` / ``EOPNOTSUPP`` / ``EINVAL`` for
+    it — so the fallback is load-bearing in production, not just a
+    theoretical branch for non-Darwin platforms.
+
+    Crucially, the fallback fires ONLY for those "not supported" errnos. A
+    real device error (``EIO``, ``ENOSPC``, ``EDQUOT``) from ``F_FULLFSYNC``
+    means the flush genuinely failed and MUST propagate: swallowing it and
+    reporting success via a second ``os.fsync`` would let :func:`atomic_write`
+    claim durability it never achieved — a silent data-loss fail-open in the
+    one function whose contract is crash-consistency.
+    """
+    full_fsync = getattr(fcntl, "F_FULLFSYNC", None)
+    if full_fsync is not None:
+        try:
+            fcntl.fcntl(fd, full_fsync)
+            return
+        except OSError as e:
+            # Only "filesystem can't do F_FULLFSYNC" degrades to os.fsync;
+            # anything else is a genuine flush failure and must not be hidden.
+            if e.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL):
+                raise
+    os.fsync(fd)
+
+
 def atomic_write(path: Path, data: bytes) -> None:
     """Atomic write of ``data`` to ``path`` at mode ``0o600``.
 
     Sequence: open ``<path>.<rand>.tmp`` with ``O_EXCL | O_NOFOLLOW`` →
-    ``os.write`` → ``os.fsync(tmp_fd)`` → ``os.replace(tmp, final)`` →
-    ``os.fsync(parent_dir_fd)``. Cleans up the tmp file on any failure
-    so the directory does not accumulate orphaned ``*.tmp`` files.
+    ``os.write`` → :func:`_fsync_durable` (tmp fd) → ``os.replace(tmp,
+    final)`` → :func:`_fsync_durable` (parent dir fd). Cleans up the tmp
+    file on any failure so the directory does not accumulate orphaned
+    ``*.tmp`` files.
+
+    Durability guarantee: on macOS, :func:`_fsync_durable` issues
+    ``fcntl(fd, F_FULLFSYNC)`` — the call Apple documents as reaching
+    stable storage — rather than a bare ``os.fsync``, which on macOS only
+    reaches the drive's write cache. On every other platform (and on any
+    macOS filesystem where ``F_FULLFSYNC`` is unsupported) the guarantee
+    is whatever plain ``os.fsync`` provides for that OS/filesystem.
 
     Refuses to follow symlinks at the final path (existing symlink →
     :exc:`KeyvaultPermissionError`). If ``path`` already exists as a
@@ -232,7 +289,7 @@ def atomic_write(path: Path, data: bytes) -> None:
                 if written <= 0:
                     raise OSError("os.write returned 0 bytes — disk full or fd closed")
                 offset += written
-            os.fsync(fd)
+            _fsync_durable(fd)
         finally:
             os.close(fd)
     except BaseException:
@@ -249,7 +306,7 @@ def atomic_write(path: Path, data: bytes) -> None:
 
     parent_fd = os.open(path.parent, os.O_RDONLY)
     try:
-        os.fsync(parent_fd)
+        _fsync_durable(parent_fd)
     finally:
         os.close(parent_fd)
 

@@ -143,6 +143,34 @@ class TestTorrcRender:
         assert "SOCKSPort 127.0.0.1:9050 IsolateSOCKSAuth" in content
 
 
+class TestTorrcRenderDisableIpv6:
+    """``disable_ipv6`` was resolved into ``RuntimeConfig`` from
+    ``policy.json`` and then never threaded into ``render_torrc`` — every
+    torrc was rendered identically regardless of policy, so the advertised
+    strict-mode IPv6-leak defence (``ClientUseIPv6 0``) was a silent no-op.
+    """
+
+    def test_disable_ipv6_true_emits_client_use_ipv6_0(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path, disable_ipv6=True)
+        assert "ClientUseIPv6 0" in content
+
+    def test_disable_ipv6_default_omits_client_use_ipv6_0(self, tmp_path: Path) -> None:
+        """The parameter is purely additive: omitting it must not change any
+        existing caller's rendered torrc."""
+        from mordred_hermes.network.paths import tor
+
+        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
+        assert "ClientUseIPv6" not in content
+
+    def test_disable_ipv6_false_omits_client_use_ipv6_0(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path, disable_ipv6=False)
+        assert "ClientUseIPv6" not in content
+
+
 # --------------------------------------------------------------------------- #
 # Port collision handling                                                     #
 # --------------------------------------------------------------------------- #
@@ -290,6 +318,44 @@ class TestHealth:
         proc._returncode = 1
         handle = tor.TorHandle(process=proc, socks_port=9050, control_port=9051, data_dir=Path("/tmp/x"))
         assert tor.health(handle) is False
+
+
+# --------------------------------------------------------------------------- #
+# start_process — Popen decode-error hardening                                #
+# --------------------------------------------------------------------------- #
+
+
+class TestStartProcess:
+    """``start_process`` must pass ``errors="replace"`` to ``Popen``. Text
+    mode defaults to STRICT decoding, so a single non-UTF-8 byte in tor's
+    log output (a relay nickname, a locale-encoded OS error string) would
+    otherwise make ``readline()`` raise ``UnicodeDecodeError`` deep inside
+    the bootstrap tail, killing an otherwise-healthy bring-up over a
+    cosmetic byte.
+    """
+
+    class _FakeStartedProcess:
+        """Minimal stand-in for the ``Popen`` object ``start_process`` writes
+        the torrc into and returns; ``stdin=None`` skips the write/close."""
+
+        def __init__(self) -> None:
+            self.stdin = None
+
+    def test_popen_factory_receives_errors_replace(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        captured_kwargs: dict[str, Any] = {}
+
+        def fake_popen_factory(*args: Any, **kwargs: Any) -> Any:
+            captured_kwargs.update(kwargs)
+            captured_kwargs["_args"] = args
+            return self._FakeStartedProcess()
+
+        tor.start_process(binary="tor-bin", torrc="dummy torrc", popen_factory=fake_popen_factory)
+        assert captured_kwargs.get("errors") == "replace"
+        # Sanity: still text mode (not switched to bytes), since callers scan
+        # decoded lines for the bootstrap token.
+        assert captured_kwargs.get("text") is True
 
 
 # --------------------------------------------------------------------------- #

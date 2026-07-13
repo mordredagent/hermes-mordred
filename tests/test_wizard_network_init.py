@@ -800,6 +800,105 @@ class TestHandleInitNonInteractive:
         assert "MORDRED_MULLVAD_ACCOUNT" not in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
+class TestPersistNetworkErrorChannel:
+    """``_persist_network`` (used by both ``run_init`` and non-interactive
+    ``handle_init``) must guard OSError the same way ``handle_use`` already
+    does around its single PolicyWriter write (network_cli.py). Before this
+    fix, a disk-write failure during ``network init`` surfaced as an
+    unhandled traceback instead of the ``error:`` + exit-1 convention the
+    rest of the CLI uses."""
+
+    def test_policy_writer_failure_reports_to_stderr_with_rc_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class _BoomPolicyWriter:
+            config_path = tmp_path / "config.yaml"
+
+            def merge_mordred_sections(self, sections: object) -> None:
+                raise OSError("disk full")
+
+        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_FULL))
+        rc = run_init(
+            prompt_io=prompts,
+            policy_writer=_BoomPolicyWriter(),  # type: ignore[arg-type]
+            env_writer=_SpyEnvFileWriter(),
+            credentials_writer=_SpyCredentialsWriter(),
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "disk full" in captured.err
+        assert captured.out == ""
+
+    def test_env_writer_failure_reports_to_stderr_with_rc_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class _BoomEnvWriter:
+            def upsert(self, path: Path, *, key: str, value: str) -> None:
+                raise OSError("permission denied")
+
+        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_FULL))
+        rc = run_init(
+            prompt_io=prompts,
+            policy_writer=_writer(tmp_path),
+            env_writer=_BoomEnvWriter(),  # type: ignore[arg-type]
+            credentials_writer=_SpyCredentialsWriter(),
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "permission denied" in captured.err
+
+    def test_credentials_writer_failure_reports_to_stderr_with_rc_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class _BoomCredentialsWriter:
+            def write_network(
+                self,
+                path: Path,
+                *,
+                mullvad_account_id_env: str,
+                mullvad_relay_country: str,
+                mullvad_killswitch: bool,
+            ) -> None:
+                raise OSError("read-only filesystem")
+
+        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_FULL))
+        rc = run_init(
+            prompt_io=prompts,
+            policy_writer=_writer(tmp_path),
+            env_writer=_SpyEnvFileWriter(),
+            credentials_writer=_BoomCredentialsWriter(),  # type: ignore[arg-type]
+        )
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "read-only filesystem" in captured.err
+
+    def test_handle_init_non_interactive_surfaces_same_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The non-interactive ``handle_init`` path routes through the same
+        ``_persist_network`` -- the guard must cover it too, not just the
+        interactive ``run_init`` caller."""
+        from mordred_hermes.wizard import network_cli as nc
+
+        def _boom(self: object, sections: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(nc.PolicyWriter, "merge_mordred_sections", _boom)
+        ns = argparse.Namespace(
+            non_interactive=True,
+            clear_mullvad=False,
+            config_path=tmp_path / "config.yaml",
+            path="tor",
+            tor_binary=None,
+            tor_socks_port=None,
+            mullvad_relay=None,
+            mullvad_killswitch=None,
+        )
+        rc = handle_init(ns)
+        assert rc == 1
+        assert "disk full" in capsys.readouterr().err
+
+
 class TestHandleInit:
     def test_interactive_path_persists_and_prints(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]

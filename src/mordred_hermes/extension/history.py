@@ -16,10 +16,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
+from ..keyvault._storage import atomic_write
 from .crypto import decrypt_message, encrypt_message
 from .pairing import load_pairing
 
@@ -46,14 +46,12 @@ def save_messages(messages: list[dict[str, Any]]) -> None:
         return
     try:
         blob = encrypt_message(key, json.dumps(messages, ensure_ascii=False))
-        path = _history_path()
-        tmp = path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, blob.encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
+        # Canonical 0600 atomic write (keyvault._storage): unpredictable tmp
+        # name, O_EXCL | O_NOFOLLOW, fsync of the tmp fd and the parent dir, and
+        # tmp cleanup on failure — the hand-rolled version used a fixed ".tmp"
+        # name and leaked it when the write blew up. The parent dir is mkdir'd
+        # by _history_path().
+        atomic_write(_history_path(), blob.encode("utf-8"))
     except Exception:
         logger.debug("extension history save failed", exc_info=True)
 

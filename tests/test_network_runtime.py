@@ -165,6 +165,40 @@ class _VpnFakes:
         return self.health_return
 
 
+class _RecordingEnv(dict[str, str]):
+    """``dict`` subclass that snapshots its own contents after every mutation.
+
+    Regression aid for the ``_apply_env`` set-then-prune fix: ``self._env`` in
+    production IS ``os.environ`` — a global another thread can read via
+    ``subprocess.Popen`` at any instant, and the runtime lock only serialises
+    the runtime's OWN writers. A pop-all-then-set-all ordering left a real
+    window where every managed proxy var was absent at once; a child spawned
+    in that window would go out direct/clearnet. Recording a snapshot on
+    every ``__setitem__`` / ``__delitem__`` / ``pop`` lets a test assert that
+    window never existed, rather than only checking the before/after state.
+    """
+
+    def __init__(self, *args: Any, **kwargs: str) -> None:
+        super().__init__(*args, **kwargs)
+        self.snapshots: list[dict[str, str]] = []
+
+    def _record(self) -> None:
+        self.snapshots.append(dict(self))
+
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(key, value)
+        self._record()
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        self._record()
+
+    def pop(self, key: str, *default: str | None) -> str | None:
+        result = super().pop(key, *default)
+        self._record()
+        return result
+
+
 def _make_runtime(
     *,
     policy_mode: str = "off",
@@ -273,6 +307,83 @@ class TestClearnetUse:
 # --------------------------------------------------------------------------- #
 
 
+class TestTorHealthDefaultIsDeepProbe:
+    """FIX 2 (2026-07-13): the runtime's DEFAULT Tor liveness probe must be
+    the deep ``circuit_status_health`` (ControlPort ``GETINFO circuit-status``,
+    BUILT-circuit-present → healthy), not the shallow ``process.poll()``
+    ``health``. The deep probe self-degrades to the shallow check when the
+    ``[tor-control]`` extra / control cookie is absent, so wiring it as the
+    default is a safe drop-in — but WITHOUT this wiring a running-but-no-BUILT
+    -circuit Tor is never detected as dead, defeating strict drop detection.
+
+    These assertions fail if the default is reverted to ``tor_mod.health``.
+    """
+
+    def test_default_tor_health_is_circuit_status_health(self) -> None:
+        from mordred_hermes.network.runtime import Runtime, RuntimeConfig
+
+        # No ``tor_health=`` injection → the runtime must pick the deep probe.
+        rt = Runtime(config=RuntimeConfig(), env={})
+        assert rt._tor_health is tor_mod.circuit_status_health  # type: ignore[attr-defined]
+        assert rt._tor_health is not tor_mod.health  # type: ignore[attr-defined]
+
+    def test_injected_tor_health_still_overrides_default(self) -> None:
+        """The ``tor_health=`` injection point must keep working so tests
+        (and any future strict operator override) can swap in a fake."""
+        from mordred_hermes.network.runtime import Runtime, RuntimeConfig
+
+        def fake_health(_handle: Any) -> bool:
+            return False
+
+        rt = Runtime(config=RuntimeConfig(), env={}, tor_health=fake_health)
+        assert rt._tor_health is fake_health  # type: ignore[attr-defined]
+
+    def test_deep_probe_unhealthy_flows_through_runtime_liveness(self, tmp_path: Path) -> None:
+        """Behavioural proof: a Tor handle whose ControlPort reports NO BUILT
+        circuit reads as unhealthy through the runtime's own liveness path
+        (``runtime.health()``), exactly what the deep default buys us. We
+        inject the deep probe bound to a fake controller_factory to exercise
+        the real ``circuit_status_health`` parsing without a live daemon."""
+        import functools
+
+        from mordred_hermes.network.paths import tor as tor_paths
+        from mordred_hermes.network.runtime import Runtime, RuntimeConfig, State, _ActiveHandle
+
+        # A cookie file must exist so circuit_status_health opens the control
+        # port instead of short-circuiting to the shallow fallback.
+        data_dir = tmp_path
+        (data_dir / "control_auth_cookie").write_bytes(b"\x00" * 32)
+
+        class _NoBuiltController:
+            def authenticate(self) -> None:
+                return None
+
+            def get_info(self, key: str) -> str:
+                del key
+                # LAUNCHED, never BUILT → circuit_status_health → False.
+                return "1 LAUNCHED $AAAA~relay\n"
+
+            def close(self) -> None:
+                return None
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+        def factory(*, host: str, port: int) -> Any:
+            del host, port
+            return _NoBuiltController()
+
+        deep = functools.partial(tor_paths.circuit_status_health, controller_factory=factory)
+        rt = Runtime(config=RuntimeConfig(), env={}, tor_health=deep)
+        handle = tor_paths.TorHandle(process=_FakeTorProcess(), socks_port=9050, control_port=9051, data_dir=data_dir)
+        rt._handle = _ActiveHandle("tor", handle)  # type: ignore[attr-defined]
+        rt._state = State.READY  # type: ignore[attr-defined]
+        assert rt.health() is False
+
+
 class TestTorUse:
     def test_use_tor_picks_free_port_and_starts_process(self) -> None:
         tor = _TorFakes(pick_port_return=9150)
@@ -368,6 +479,124 @@ class TestTorUse:
         assert "HTTPS_PROXY" not in env
         reasons = [e.get("reason") for e in audit.entries]
         assert "network.bringup_failed" in reasons
+        rt.stop()
+
+
+class TestApplyEnvNeverAllAbsentDuringSwitch:
+    """``_apply_env`` must write the desired proxy vars BEFORE pruning the
+    now-unwanted managed keys, never pop-all-then-set-all. See
+    ``_RecordingEnv`` docstring for why: ``self._env`` is process-global
+    ``os.environ`` and the runtime lock cannot stop another thread's
+    ``subprocess.Popen`` from snapshotting it mid-switch.
+
+    Property under test: for a switch INTO a proxied path (tor), the proxy
+    var (``HTTPS_PROXY``) must be present in every recorded intermediate
+    snapshot — it must never go through an all-managed-vars-absent window.
+    """
+
+    def test_https_proxy_never_absent_across_tor_to_tor_reapply(self) -> None:
+        env = _RecordingEnv()
+        tor = _TorFakes()
+        rt = _make_runtime(tor_fakes=tor, env=env)
+        rt.use("tor")
+        assert "HTTPS_PROXY" in env
+        # Only the SECOND switch exercises the bug: the first application
+        # has nothing pre-existing to lose, so pop-then-set and set-then-pop
+        # are indistinguishable there.
+        env.snapshots.clear()
+        rt.use("tor")  # tor -> tor: teardown + re-bring-up + re-apply
+        assert env.snapshots, "expected _apply_env's mutations to be recorded"
+        assert all("HTTPS_PROXY" in snap for snap in env.snapshots), (
+            "HTTPS_PROXY was absent from the managed env at some point during "
+            "a tor->tor switch — a subprocess spawned in that window would "
+            "have gone out direct/clearnet"
+        )
+        rt.stop()
+
+    def test_https_proxy_never_absent_across_clearnet_to_tor(self) -> None:
+        env = _RecordingEnv()
+        tor = _TorFakes()
+        rt = _make_runtime(tor_fakes=tor, env=env)
+        rt.use("clearnet")
+        # Seed a pre-existing proxy value as if a prior process (or a
+        # previous Mordred session) already had Tor active — this is the
+        # shape that actually exercises the pop/set ordering, since an empty
+        # starting env can't show an absence regression either way.
+        env["HTTPS_PROXY"] = "socks5h://127.0.0.1:9050"
+        env.snapshots.clear()
+        rt.use("tor")
+        assert env.snapshots, "expected _apply_env's mutations to be recorded"
+        assert all("HTTPS_PROXY" in snap for snap in env.snapshots), (
+            "HTTPS_PROXY was absent from the managed env at some point while "
+            "switching into tor — a subprocess spawned in that window would "
+            "have gone out direct/clearnet"
+        )
+        rt.stop()
+
+
+class TestTorWaitUnicodeDecodeErrorWrapped:
+    """``_bring_up_tor``'s catch around ``self._tor_wait(proc)`` was widened
+    from ``except BringupFailed`` to ``except Exception``. ``_tor_wait``
+    tails tor's stdout in text mode, so a non-UTF-8 byte in tor's log output
+    raises ``UnicodeDecodeError`` — not ``BringupFailed``. Left uncaught,
+    that (a) orphaned the spawned tor child (nothing terminated it) and (b)
+    unwound past ``_switch``'s ``except BringupFailed`` with ``_state``
+    still at ``BRINGING_UP``, bricking the runtime so every later ``use()``
+    raised ``AlreadySwitching`` forever.
+    """
+
+    def _fakes(self) -> _TorFakes:
+        # Constructed the way the real decoder raises it: a single invalid
+        # start byte, matching a genuinely malformed UTF-8 log line.
+        return _TorFakes(wait_raises=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"))
+
+    def test_half_started_process_is_stopped_and_wrapped_as_bringup_failed(self) -> None:
+        tor = self._fakes()
+        rt = _make_runtime(tor_fakes=tor, policy_mode="strict")
+        with pytest.raises(BringupFailed):
+            rt.use("tor")
+        assert len(tor.stop_calls) == 1, "half-started tor process must be cleaned up, not orphaned"
+        rt.stop()
+
+    def test_runtime_not_wedged_after_unicode_decode_error(self) -> None:
+        tor = self._fakes()
+        rt = _make_runtime(tor_fakes=tor, policy_mode="strict")
+        with pytest.raises(BringupFailed):
+            rt.use("tor")
+        # Must not be stuck at BRINGING_UP: a subsequent use() succeeds
+        # rather than raising AlreadySwitching.
+        rt.use("clearnet")
+        s = rt.status()
+        assert s.active_path == "clearnet"
+        assert s.ready is True
+        rt.stop()
+
+
+class TestBringUpTorRendersDisableIpv6:
+    """``_bring_up_tor`` now threads ``self._config.disable_ipv6`` into
+    ``render_torrc``. Before this wiring, the flag was resolved into
+    ``RuntimeConfig`` from ``policy.json`` and then dropped on the floor —
+    every torrc was rendered identically regardless of policy, so the
+    advertised strict-mode ``ClientUseIPv6 0`` defence was a silent no-op.
+    Exercises the REAL ``tor_mod.render_torrc`` (only the subprocess-facing
+    calls are faked), so this catches a regression in the wiring itself,
+    not just in ``render_torrc``'s own rendering logic (see
+    ``TestTorrcRenderDisableIpv6`` in ``test_paths_tor.py`` for that).
+    """
+
+    def test_disable_ipv6_true_reaches_rendered_torrc(self) -> None:
+        tor = _TorFakes()
+        rt = _make_runtime(tor_fakes=tor, disable_ipv6=True)
+        rt.use("tor")
+        assert len(tor.start_calls) == 1
+        assert "ClientUseIPv6 0" in tor.start_calls[0]["torrc"]
+        rt.stop()
+
+    def test_disable_ipv6_false_omitted_from_rendered_torrc(self) -> None:
+        tor = _TorFakes()
+        rt = _make_runtime(tor_fakes=tor, disable_ipv6=False)
+        rt.use("tor")
+        assert "ClientUseIPv6" not in tor.start_calls[0]["torrc"]
         rt.stop()
 
 

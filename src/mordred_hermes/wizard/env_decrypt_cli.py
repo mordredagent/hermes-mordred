@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ..keyvault.anchor import AnchorStore
-    from ..keyvault.vault import OpenVault
     from ..keyvault.wrap import NativeBackend
     from .configure import PromptIO
 
@@ -121,49 +120,6 @@ def _env_enrolled(root: Path) -> bool:
     return _ENV_NAME in _enrolled_names(root)
 
 
-def _render_env_value(value: str) -> str:
-    """Render ``value`` for the right-hand side of a ``KEY=`` line so it round-trips
-    back through ``dotenv`` to the same string.
-
-    A bare ``KEY=value`` re-emission is lossy for anything ``dotenv`` parses
-    specially: a space-then-``#`` is truncated at the inline comment, a newline ends
-    the line, quotes are mis-read. Such values are double-quoted (with backslash,
-    quote, and newline escaped), mirroring how the host writes them; plain tokens
-    (the common case) and the empty string stay bare.
-    """
-    if value == "" or not any(c in value for c in " \t\n\r\"'#=$`\\"):
-        return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
-    return f'"{escaped}"'
-
-
-def _merge_env_text(base_text: str, overrides: dict[str, str]) -> str:
-    """Apply ``overrides`` onto ``base_text``, set-or-append, preserving the rest.
-
-    ``base_text`` is the vault's authoritative ``.env`` (the full set of enrolled
-    secrets); ``overrides`` are the keys a host write just set on disk. Each
-    override replaces its key in place (keeping the base file's comments, order,
-    and untouched lines) or is appended if new. Keys present only in ``base_text``
-    are **kept** — a host write after the seal produces a *partial* file, so a key
-    missing from ``overrides`` means "untouched", never "delete". Mirrors the
-    host's own set-or-append in ``hermes_cli.config.save_env_value``.
-    """
-    lines = base_text.splitlines(keepends=True)
-    remaining = dict(overrides)
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key = stripped.split("=", 1)[0].strip()
-        if key in remaining:
-            lines[i] = f"{key}={_render_env_value(remaining.pop(key))}\n"
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
-    for key, value in remaining.items():
-        lines.append(f"{key}={_render_env_value(value)}\n")
-    return "".join(lines)
-
-
 def _write_optout_marker(home: Path) -> None:
     marker = _env_optout_marker_path(home)
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -216,40 +172,6 @@ def _restore_plaintext(
     return 0
 
 
-def _reseal_within_open(opened: OpenVault, overrides: dict[str, str]) -> tuple[bool, str | None]:
-    """Merge ``overrides`` onto the enrolled ``.env`` inside an already-open vault.
-
-    Re-enrolls only when the merge changes the bytes, and verifies the read-back
-    through the *same* handle (one device-key unlock). Returns
-    ``(remove_plaintext, success_message)``: ``remove_plaintext`` is ``False``
-    (message ``None``) when the caller should keep the on-disk plaintext — a race
-    (``.env`` no longer enrolled), a non-UTF-8 vault copy, or a read-back mismatch
-    — and a warning has already been emitted.
-    """
-    if _ENV_NAME not in opened.list_files():
-        return False, None  # raced: no longer enrolled — nothing to reconcile
-    base = opened.read_file(_ENV_NAME)
-    try:
-        base_text = base.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        _term.emit_warn(f"cannot reseal .env (vault copy is not UTF-8): {exc} — leaving the plaintext in place.")
-        return False, None
-
-    merged = _merge_env_text(base_text, overrides).encode("utf-8")
-    if merged == base:
-        # The stray plaintext changed nothing the vault does not already hold.
-        return True, ".env: removed a redundant plaintext copy (the vault copy already held these values)."
-
-    opened.enroll_file(_ENV_NAME, merged)
-    if opened.read_file(_ENV_NAME) != merged:
-        _term.emit_warn(
-            ".env was merged + enrolled but the vault read-back does not match (changed during "
-            "reseal?) — leaving the plaintext in place; re-run enable."
-        )
-        return False, None
-    return True, ".env resealed: merged the new value(s) into the vault and removed the plaintext."
-
-
 def reseal(
     *,
     home: Path,
@@ -259,82 +181,26 @@ def reseal(
 ) -> int:
     """Reconcile a plaintext ``.env`` that reappeared while the vault still seals it.
 
-    The sealed state (``.env`` enrolled, injection ON, macOS) must hold **no**
-    plaintext ``.env``. When a host write puts one back (e.g.
-    ``hermes_cli.config.save_env_value`` after ``enable`` removed the plaintext),
-    that file is *partial*: the host starts from an empty file because the sealed
-    plaintext was deleted, so it carries only the just-written keys. Adopting it
-    wholesale would drop every other enrolled secret — so this **merges** the
-    on-disk keys onto the vault copy (the authoritative base), re-enrolls the
-    merged result, and removes the plaintext.
+    Thin CLI-facing wrapper: the actual merge-and-reseal logic is
+    ``keyvault``-owned (:func:`mordred_hermes.keyvault._env_reseal.reseal_env`) so
+    that :mod:`mordred_hermes.keyvault._env_write_guard` — which runs this same
+    reconciliation from the ``on_session_start`` / ``on_session_end`` plugin
+    hooks — never has to import ``wizard`` (it used to; a ``keyvault -> wizard``
+    layering inversion — see that module's docstring). This function keeps only
+    the public name / signature its callers already depend on (:func:`enable`'s
+    drift branch below, and the existing ``reseal`` test suite).
 
-    For the macOS sealed state only — callers gate on platform. A no-op (returns
-    0) when there is no plaintext, ``.env`` is not enrolled, or the env target is
-    in the reversible *disabled* state (opt-out marker present: the on-disk
-    plaintext is then the intentional live copy, not drift). Returns 1 when the
-    vault is present but cannot be opened or the re-enroll itself fails; on a
-    read-back mismatch or an unremovable plaintext it returns 0 — in every
-    non-clean case the plaintext is kept so no secret is stranded.
+    For the macOS sealed state only — callers gate on platform. See
+    :func:`mordred_hermes.keyvault._env_reseal.reseal_env` for the full
+    contract: a no-op (returns 0) when there is no plaintext, ``.env`` is not
+    enrolled, or the env target is in the reversible *disabled* state; returns 1
+    when the vault is present but cannot be opened or the re-enroll itself
+    fails; on a read-back mismatch or an unremovable plaintext it returns 0 —
+    in every non-clean case the plaintext is kept so no secret is stranded.
     """
-    from . import vault_cli
+    from ..keyvault._env_reseal import reseal_env
 
-    env_path = home / _ENV_NAME
-    if not env_path.is_file():
-        return 0  # no stray plaintext → nothing to reconcile
-    if _env_optout_marker_path(home).exists():
-        return 0  # disabled state: the plaintext is the live copy, not drift
-    if not _env_enrolled(root):
-        return 0  # not vault-managed → first-time enable handles enrollment
-
-    try:
-        disk_text = env_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        _term.emit_warn(f"cannot reseal .env (unreadable / non-UTF-8 plaintext): {exc} — leaving it in place.")
-        return 0
-
-    from io import StringIO
-
-    from dotenv import dotenv_values
-
-    overrides = {k: v for k, v in dotenv_values(stream=StringIO(disk_text), interpolate=False).items() if v is not None}
-
-    # One device-key unlock (one Touch ID) covers read-base → enroll-merged →
-    # verify-read-back through the *same* open (see :func:`_reseal_within_open`).
-    # Enrolling the merged bytes directly means the full plaintext is never staged
-    # in a temp file at rest, so an interrupted reseal leaves no plaintext behind.
-    from ..keyvault import anchor, vault
-    from ..keyvault._exceptions import WrapError
-
-    opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
-    if opened is None:
-        _term.emit_error(
-            ".env is enrolled but the vault could not be opened to reseal a stray plaintext "
-            "— leaving the plaintext in place (run `encryption status`)."
-        )
-        return 1
-
-    with opened:
-        try:
-            remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
-        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
-            _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
-            return 1
-
-    if not remove_plaintext:
-        return 0  # a warning was already emitted; the plaintext is kept
-
-    # The vault is closed and consistent; only now remove the stray plaintext — and
-    # report success only once it is actually gone.
-    try:
-        env_path.unlink()
-    except OSError as exc:
-        _term.emit_warn(
-            f".env was reconciled into the vault but the plaintext at {env_path} could not be removed: {exc} "
-            "— remove it by hand (it is still readable at rest)."
-        )
-        return 0
-    print(success_msg)
-    return 0
+    return reseal_env(home=home, root=root, backend=backend, store=store)
 
 
 def enable(

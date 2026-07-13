@@ -172,13 +172,25 @@ class TestMullvadProviderDelegation:
         assert ("/bin/mullvad", "disconnect") in runner.calls
         assert ("/bin/mullvad", "lockdown-mode", "set", "off") not in runner.calls
 
-    def test_health_reads_handshake_freshness(self) -> None:
+    def test_health_reads_mullvad_status_connected(self) -> None:
+        # Since the fix 2026-07-13 the Mullvad health probe is scoped to the
+        # daemon's own Connected state (``mullvad status``), not an unscoped
+        # ``wg show`` that a sibling WireGuard interface could mask.
         from mordred_hermes.network.paths import vpn as vpn_mod
         from mordred_hermes.network.vpn_providers import MullvadProvider
 
-        runner = _FakeRunner({("wg", "show"): _result(stdout="latest handshake: 30 seconds ago\n")})
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Connected to jp-tyo-wg-001\n")})
         handle = vpn_mod.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
         assert MullvadProvider().health(handle, runner=runner) is True
+        assert ("/bin/mullvad", "status") in runner.calls
+
+    def test_health_disconnected_is_unhealthy(self) -> None:
+        from mordred_hermes.network.paths import vpn as vpn_mod
+        from mordred_hermes.network.vpn_providers import MullvadProvider
+
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Disconnected\n")})
+        handle = vpn_mod.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
+        assert MullvadProvider().health(handle, runner=runner) is False
 
 
 # --------------------------------------------------------------------------- #

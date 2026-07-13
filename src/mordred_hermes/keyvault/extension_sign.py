@@ -16,12 +16,16 @@ See ``Mordred-Extension/SPEC.ja.md`` §5.5.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import ethereum
+
+if TYPE_CHECKING:
+    from ..privacy_check.audit import Writer
 
 _log = logging.getLogger(__name__)
 _KEY_ID_DEFAULT = "default"
@@ -65,16 +69,76 @@ def _backend() -> Any:
     return _SecKeyBackend()
 
 
-def _audit_sink(entry: dict[str, Any]) -> None:
-    # Best-effort: extension signs are audited at DEBUG. A full audit-log writer
-    # can be slotted in here later without changing the call sites.
-    _log.debug("extension_sign audit: %s", entry.get("event", "?"))
-
-
 def _ext_dir() -> Path:
     from hermes_constants import get_hermes_home
 
     return Path(get_hermes_home()) / "extension"
+
+
+def _audit_log_path() -> Path:
+    """``<HERMES_BASE>/mordred/audit.log`` — the same file ``network`` /
+    ``llm_guard`` / ``privacy_check`` append to.
+
+    Resolved the same way :func:`_ext_dir` already resolves the hermes home
+    (a fresh ``hermes_constants.get_hermes_home()`` call, not the
+    import-time-frozen :data:`mordred_hermes._home.HERMES_BASE`) so this
+    module keeps its existing import-cheapness contract: no package-root
+    import pulls in the profile-aware home resolution at module-import time.
+    ``.parent.parent`` of this path is ``<HERMES_BASE>``, matching
+    :func:`mordred_hermes._audit_support.build_audit_writer`'s
+    ``keyvault_home = path.parent.parent`` contract.
+    """
+    from hermes_constants import get_hermes_home
+
+    return Path(get_hermes_home()) / "mordred" / "audit.log"
+
+
+@functools.lru_cache(maxsize=1)
+def _audit_writer() -> Writer:
+    """Per-process memoized audit writer for extension-driven signs.
+
+    Zero-arg (unlike ``network`` / ``llm_guard``'s ``_build_audit_writer(path)``)
+    because this module deliberately never freezes ``HERMES_BASE`` at import
+    time (see :func:`_audit_log_path`); the path is recomputed on the first
+    call instead, then the resulting writer is cached for the process the same
+    way ``network`` / ``llm_guard`` cache theirs. The
+    :mod:`mordred_hermes._audit_support` import happens here, at first call,
+    not at module scope, so plugin discovery stays cheap.
+    """
+    from .._audit_support import build_audit_writer
+
+    return build_audit_writer(_audit_log_path())
+
+
+def _audit_sink(entry: dict[str, Any]) -> None:
+    """Best-effort audit for extension-driven Enclave key use.
+
+    The extension is the one path where a remote DApp — over the gateway
+    WebSocket — drives Secure-Enclave key use directly: ``personal_sign`` /
+    ``eth_signTypedData_v4`` / ``eth_sendTransaction`` all route through
+    :func:`_sign_hash` / :func:`get_address`, which pass this sink to the wrap
+    layer as ``audit_sink``. Without this, the ``keyvault.unwrap_authorized`` /
+    ``keyvault.unwrap_denied`` events that same wrap layer emits for every
+    other Enclave use (and that :func:`...keyvault.log_encryption.decrypt_log_file`
+    records durably) were silently dropped for the extension path, leaving no
+    tamper-evident trail for fund-moving operations. Now appended to the same
+    encryption-aware ``audit.log`` writer ``network`` / ``llm_guard`` /
+    ``privacy_check`` use (see :func:`_audit_writer`).
+
+    A signing operation must NEVER fail because the audit write failed — the
+    same contract every other ``audit_sink`` call site in this package
+    honors (``wrap.unwrap_dek``, ``recovery``, ``seed_display``) — so this
+    catches broadly, including a possible failure to construct the writer
+    itself. The DEBUG log line stays unconditional: it is cheap and aids live
+    debugging even when the durable write fails.
+    """
+    _log.debug("extension_sign audit: %s", entry.get("event", "?"))
+    try:
+        from .._audit_support import safe_audit_append
+
+        safe_audit_append(_audit_writer(), entry, logger=_log)
+    except Exception as exc:  # best-effort: never fail a sign over an audit issue
+        _log.error("extension_sign audit writer unavailable: %s", exc)
 
 
 def _load_wallet_cfg() -> dict[str, Any]:

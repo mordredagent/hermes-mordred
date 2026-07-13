@@ -78,7 +78,7 @@ _STORY1_PHRASES: dict[Story1Action, str] = {
 
 #: Human phrases for the Story 1.5 (OpenClaw) outcome shown by render_report.
 _STORY1_5_PHRASES: dict[Story1_5Action, str] = {
-    "noop": "not needed (no OpenClaw install detected)",
+    "noop": "not needed (nothing to migrate)",
     "migrated": "migrated from ~/.openclaw",
     "skipped-marker": "already migrated (marker present)",
 }

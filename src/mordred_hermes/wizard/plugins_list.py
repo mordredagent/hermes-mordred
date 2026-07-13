@@ -19,6 +19,7 @@ from typing import Any, Protocol, cast
 
 from ..__about__ import __version__ as _PACKAGE_VERSION
 from .._home import HERMES_BASE
+from .._yaml_io import load_yaml_mapping
 from . import _term
 
 DEFAULT_CONFIG_PATH = HERMES_BASE / "config.yaml"
@@ -71,16 +72,15 @@ def _print_from_yaml_fallback(config_path: Path) -> int:
         print("No Mordred plugins discovered (no config.yaml).")
         return 0
     try:
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        # ``catch=()`` -- the shared helper's own default catch (OSError,
+        # YAMLError) would swallow a read/parse failure into ``{}`` with only a
+        # *logger* warning (no ``log=`` is wired here to a visible destination
+        # anyway); this call site instead reports failures to the user via
+        # ``_term.emit_error``, so every exception must propagate to the
+        # ``except`` below rather than being absorbed inside the helper.
+        data = load_yaml_mapping(config_path, catch=())
     except Exception as e:
         _term.emit_error(f"Failed to read {config_path}: {e}")
-        return 0
-    if not isinstance(data, dict):
-        print("No Mordred plugins discovered.")
         return 0
     plugins_section = data.get("plugins")
     if not isinstance(plugins_section, dict):

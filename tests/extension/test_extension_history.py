@@ -3,6 +3,8 @@ the shared key, and projects to viewer turns."""
 
 from __future__ import annotations
 
+import stat
+
 import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
@@ -47,6 +49,27 @@ def test_projection_extracts_text():
     )
     turns = extension_history.projected_turns()
     assert turns == [{"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}]
+
+
+def test_save_ignores_a_preplanted_tmp_symlink(tmp_path):
+    """The old writer staged the blob at a *predictable* ``history.tmp`` opened
+    without ``O_NOFOLLOW``, so a symlink pre-planted there redirected the (still
+    secret-bearing) file and left history.enc a symlink. The canonical
+    ``keyvault._storage.atomic_write`` uses a random tmp name + O_EXCL|O_NOFOLLOW
+    and enforces 0600."""
+    ext = tmp_path / "extension"
+    ext.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched")
+    (ext / "history.tmp").symlink_to(victim)
+
+    extension_history.save_messages([{"role": "user", "content": "secret-text"}])
+
+    assert victim.read_text() == "untouched"  # no write through the symlink
+    history = ext / "history.enc"
+    assert history.is_file() and not history.is_symlink()
+    assert stat.S_IMODE(history.lstat().st_mode) == 0o600
+    assert extension_history.load_messages() == [{"role": "user", "content": "secret-text"}]
 
 
 def test_clear():

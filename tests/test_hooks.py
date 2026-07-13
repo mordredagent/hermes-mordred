@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -286,3 +288,122 @@ plugins:
             audit_path=tmp_path / "audit.log",
         )
         assert state.allow_cloud_llm is True
+
+
+# --------------------------------------------------------------------------- #
+# safe_audit_append routing — an audit-write failure must not bypass a        #
+# refusal decision (block / SystemExit)                                      #
+# --------------------------------------------------------------------------- #
+
+
+class _RaisingAudit:
+    """Audit writer whose ``append`` always raises — stands in for disk full,
+    a permission flip, or an over-long NDJSON entry.
+
+    Hermes wraps every hook callback in ``except Exception: log & continue``.
+    Before the fix, ``state.audit.append(...)`` was called directly and its
+    exception propagated straight into that wrapper — swallowed BEFORE the
+    ``raise SystemExit`` / ``return {"action": "block"}`` a few lines later
+    ever executed. That let a broken audit sink silently unblock a strict
+    session. ``safe_audit_append`` must swallow this itself so the refusal
+    below it is unconditionally reached.
+    """
+
+    def append(self, entry: Mapping[str, Any]) -> None:
+        raise OSError("simulated disk full")
+
+
+class TestAuditWriteFailureCannotBypassEnforcement:
+    """Regression guard for routing audit writes through
+    ``_audit_support.safe_audit_append`` instead of a bare
+    ``state.audit.append(...)``. Every refusal path below must still fire
+    even when the audit sink itself is broken.
+    """
+
+    def test_on_session_start_strict_disabled_sibling_still_raises_systemexit(self, tmp_path: Path) -> None:
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_network
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        state = _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        _runtime._state = dataclasses.replace(state, audit=_RaisingAudit())
+        with pytest.raises(SystemExit):
+            hooks.on_session_start()
+        # Defense in depth must still engage — the poison flag is the
+        # backstop if a higher harness swallows the SystemExit.
+        assert _runtime.is_poisoned()
+
+    def test_pre_tool_call_poisoned_still_blocks(self, strict_config: Path, tmp_path: Path) -> None:
+        state = _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        _runtime._state = dataclasses.replace(state, audit=_RaisingAudit())
+        _runtime.poison("synthetic poison reason for test")
+        result = hooks.pre_tool_call(tool_name="read_file")
+        assert result is not None
+        assert result["action"] == "block"
+
+    def test_pre_tool_call_strict_allowlist_still_blocks(self, strict_config: Path, tmp_path: Path) -> None:
+        state = _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        _runtime._state = dataclasses.replace(state, audit=_RaisingAudit())
+        result = hooks.pre_tool_call(tool_name="web_fetch")
+        assert result is not None
+        assert result["action"] == "block"
+
+
+# --------------------------------------------------------------------------- #
+# _read_section_fail_closed type guards — a PRESENT but wrong-typed          #
+# ``plugins`` / ``plugins.mordred_privacy_check`` is damage, not absence     #
+# --------------------------------------------------------------------------- #
+
+
+class TestReadSectionFailClosedTypeGuards:
+    """A hand-edited or corrupted ``plugins: "oops"`` (or a wrong-typed own
+    section) previously collapsed into the same branch as "plugin not
+    configured yet" and returned lenient — silently downgrading enforcement
+    on a damaged config. Both directions are asserted: the corrupted shapes
+    must fail closed to strict, while genuine absence (no ``plugins:`` key,
+    or an empty ``plugins: {}``) must keep resolving lenient.
+    """
+
+    def test_non_mapping_plugins_key_fails_closed_to_strict(self, tmp_path: Path) -> None:
+        config = _write_config(tmp_path / "config.yaml", 'plugins: "oops"\n')
+        assert _runtime.get_active_policy_mode(config_path=config) == "strict"
+
+    def test_non_mapping_own_section_fails_closed_to_strict(self, tmp_path: Path) -> None:
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  mordred_privacy_check: "oops"
+""",
+        )
+        assert _runtime.get_active_policy_mode(config_path=config) == "strict"
+
+    def test_empty_plugins_mapping_stays_lenient(self, tmp_path: Path) -> None:
+        # Unchanged: an empty ``plugins: {}`` is the legitimate "nothing
+        # configured yet" shape, not damage.
+        config = _write_config(tmp_path / "config.yaml", "plugins: {}\n")
+        assert _runtime.get_active_policy_mode(config_path=config) == "lenient"
+
+    def test_missing_plugins_key_stays_lenient(self, tmp_path: Path) -> None:
+        # Unchanged: no ``plugins:`` key at all is also legitimate absence.
+        config = _write_config(tmp_path / "config.yaml", "other: 1\n")
+        assert _runtime.get_active_policy_mode(config_path=config) == "lenient"
+
+    def test_valid_section_still_resolves_normally(self, tmp_path: Path) -> None:
+        # The type guards must not over-correct: a well-formed section keeps
+        # resolving its declared policy.
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        assert _runtime.get_active_policy_mode(config_path=config) == "strict"

@@ -270,38 +270,48 @@ def _persist_network(
       (keeping the current secret across re-runs).
     - The relay/killswitch indirection goes to the :class:`CredentialsWriter`
       (``~/.hermes/mordred/credentials/network.json``).
+
+    All three writes are guarded by the same ``except OSError`` convention
+    :func:`handle_use` already applies to its single PolicyWriter write: a
+    disk-write failure (full disk, permission error, read-only ``~/.hermes``)
+    reports a clean ``error:`` line + exit 1 instead of an unhandled traceback
+    from ``network init``.
     """
     na = inputs.network_answers
-    policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
-
     resolved_env_path = env_path if env_path is not None else (HERMES_BASE / ".env")
+    resolved_credentials_path = (
+        credentials_path if credentials_path is not None else (HERMES_BASE / "mordred" / "credentials" / "network.json")
+    )
     # ``secret_written`` / ``secret_cleared`` are bools (never the plaintext); the
     # secret itself is accessed only inline at the upsert call, so it never sits
     # in this frame's locals where --showlocals / a debugger / a rich traceback
     # could surface it (Codex review 2026-06-05).
     secret_written = False
     secret_cleared = False
-    if clear_mullvad:
-        env_writer.upsert(resolved_env_path, key=na.mullvad_account_id_env, value="")
-        secret_cleared = True
-    elif inputs._mullvad_account_secret:
-        env_writer.upsert(
-            resolved_env_path,
-            key=na.mullvad_account_id_env,
-            value=inputs._mullvad_account_secret,
-        )
-        secret_written = True
-    # else: blank => leave the existing .env untouched (keep the current secret).
+    try:
+        policy_writer.merge_mordred_sections({"mordred_network": na.to_config_yaml_section()})
 
-    resolved_credentials_path = (
-        credentials_path if credentials_path is not None else (HERMES_BASE / "mordred" / "credentials" / "network.json")
-    )
-    credentials_writer.write_network(
-        resolved_credentials_path,
-        mullvad_account_id_env=na.mullvad_account_id_env,
-        mullvad_relay_country=na.mullvad_relay_country,
-        mullvad_killswitch=na.mullvad_killswitch,
-    )
+        if clear_mullvad:
+            env_writer.upsert(resolved_env_path, key=na.mullvad_account_id_env, value="")
+            secret_cleared = True
+        elif inputs._mullvad_account_secret:
+            env_writer.upsert(
+                resolved_env_path,
+                key=na.mullvad_account_id_env,
+                value=inputs._mullvad_account_secret,
+            )
+            secret_written = True
+        # else: blank => leave the existing .env untouched (keep the current secret).
+
+        credentials_writer.write_network(
+            resolved_credentials_path,
+            mullvad_account_id_env=na.mullvad_account_id_env,
+            mullvad_relay_country=na.mullvad_relay_country,
+            mullvad_killswitch=na.mullvad_killswitch,
+        )
+    except OSError as e:
+        _term.emit_error(f"failed to persist network settings: {e}")
+        return 1
 
     print(_init_summary(na, secret_written=secret_written, secret_cleared=secret_cleared))
     return 0

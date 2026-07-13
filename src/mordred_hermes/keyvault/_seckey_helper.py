@@ -222,7 +222,10 @@ def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
             object. ``domain="helper"`` (with ``status=-1``) marks failures
             originating in this bridge rather than in Security.framework, so
             ``_translate_error`` maps them to the conservative
-            ``auth_failed`` default.
+            ``auth_failed`` default. The non-JSON and non-zero-exit messages
+            include a truncated ``proc.stderr`` snippet alongside the
+            existing ``proc.stdout`` snippet, since the helper prints its
+            real failure cause to stderr.
     """
     try:
         proc = subprocess.run(
@@ -236,11 +239,28 @@ def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
     except OSError as exc:
         raise _OpsError(-1, "helper", f"failed to spawn helper {binary!r}: {exc}") from exc
 
+    # ``proc.stderr`` is where the Swift/Rust helper prints its real
+    # failure cause (Security.framework message, panic text, etc.) — the
+    # ``{"error": {...}}`` JSON-on-stdout path already carries that detail
+    # structurally, but the two failure modes below (non-JSON stdout,
+    # non-zero exit with no error object) previously discarded stderr
+    # entirely, leaving only a stdout snippet (usually ``b''``) and the
+    # return code to diagnose a production helper failure. Truncated to a
+    # modest length and folded into the exception message only — never
+    # logged at INFO+ — mirroring the existing stdout-snippet policy.
+    # The truncation only bounds message size; it is NOT redaction (anything
+    # sensitive the helper prints would be at the START of stderr). The helper
+    # is trusted not to print secrets to stderr; this is a diagnostics aid.
     try:
         response = json.loads(proc.stdout.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
-        snippet = proc.stdout[:200]
-        raise _OpsError(-1, "helper", f"helper returned non-JSON (exit {proc.returncode}): {snippet!r}") from exc
+        stdout_snippet = proc.stdout[:200]
+        stderr_snippet = proc.stderr[:200]
+        raise _OpsError(
+            -1,
+            "helper",
+            f"helper returned non-JSON (exit {proc.returncode}): stdout={stdout_snippet!r} stderr={stderr_snippet!r}",
+        ) from exc
 
     if not isinstance(response, dict):
         raise _OpsError(-1, "helper", f"helper returned non-object JSON: {response!r}")
@@ -255,7 +275,12 @@ def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     if proc.returncode != 0:
-        raise _OpsError(-1, "helper", f"helper exited {proc.returncode} without an error object")
+        stderr_snippet = proc.stderr[:200]
+        raise _OpsError(
+            -1,
+            "helper",
+            f"helper exited {proc.returncode} without an error object; stderr={stderr_snippet!r}",
+        )
 
     return response
 

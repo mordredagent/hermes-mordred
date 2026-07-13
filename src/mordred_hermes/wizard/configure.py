@@ -581,12 +581,24 @@ def cli_handler(args: argparse.Namespace) -> int:
         print(_render_configure_summary(result.snapshot))
         return 0
 
-    result = run(
-        setup_runner=SubprocessSetupRunner(),
-        prompt_io=PromptToolkitIO(),
-        policy_writer=PolicyWriter(),
-        non_interactive=False,
-        skip_hermes_setup=skip_hermes_setup,
-    )
+    try:
+        result = run(
+            setup_runner=SubprocessSetupRunner(),
+            prompt_io=PromptToolkitIO(),
+            policy_writer=PolicyWriter(),
+            non_interactive=False,
+            skip_hermes_setup=skip_hermes_setup,
+        )
+    except OSError as e:
+        # cli.dispatch() only catches KeyboardInterrupt / EOFError /
+        # NonInteractiveAbort / ModuleNotFoundError, so any OSError from run()
+        # (the policy_writer.write(), but also the `hermes setup` subprocess or a
+        # prompt_toolkit reader on a broken TTY) would otherwise reach the user
+        # as a raw traceback. The message stays generic on purpose — this guard
+        # spans the whole interactive flow, not just the write, so it must not
+        # claim "failed to write policy" for a subprocess/prompt failure (the
+        # --non-interactive branch above IS scoped to the write and says so).
+        _term.emit_error(f"hermes-mordred configure failed: {e}")
+        return 1
     print(_render_configure_summary(result.snapshot))
     return 0
