@@ -30,10 +30,10 @@ import json
 import logging
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._log_rotation import utcnow_iso as _utcnow_iso
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section
 from .policy_writer import PolicySnapshot, PolicyWriter, _atomic_write_text, _section_matches_dict
@@ -71,12 +71,6 @@ def detect(openclaw_base: Path) -> OpenClawState:
 # -----------------------------------------------------------------------------
 # Audit-log migration -- append-by-timestamp-window + idempotency marker
 # -----------------------------------------------------------------------------
-
-
-def _utcnow_iso() -> str:
-    """ISO-8601 UTC ms-precision -- matches privacy_check.audit format."""
-    now = datetime.now(UTC)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def _read_audit_lines(path: Path) -> list[str]:
