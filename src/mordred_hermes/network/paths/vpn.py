@@ -312,26 +312,53 @@ def health(
     handle: MullvadHandle,
     *,
     runner: SubprocessRunner = DEFAULT_RUNNER,
-    max_handshake_age_seconds: float = DEFAULT_MAX_HANDSHAKE_AGE_SECONDS,
 ) -> bool:
-    """Probe ``wg show`` and return ``True`` iff handshake age is fresh enough.
+    """Probe ``mullvad status`` and return ``True`` iff it reports Connected.
 
-    Falls back to ``False`` on any subprocess failure — including the
-    invocation itself failing (Codex P2 / HIGH-3, 2026-05-13). On hosts
-    where ``wg`` is not on PATH the production ``subprocess.run`` raises
-    :class:`FileNotFoundError`; with a runner-side ``timeout=`` kwarg
-    (future PR2 wiring) :class:`subprocess.TimeoutExpired` is also
-    possible. Both are coerced to ``unhealthy`` so the PR2 liveness
-    worker records the path as down instead of crashing.
+    Mullvad-SCOPED by construction (fix 2026-07-13). The previous
+    implementation ran an UNSCOPED ``wg show`` and asked
+    :func:`parse_handshake_age` for the freshest handshake across EVERY
+    WireGuard interface on the host. On a machine with a second, unrelated
+    WireGuard tunnel (a corp VPN, a self-hosted peer, the generic-WireGuard
+    provider's own ``wg0``) that other interface's fresh handshake masked a
+    stale/dead Mullvad tunnel — ``health()`` reported the Mullvad path up
+    while Mullvad's OWN tunnel had dropped, defeating the strict kill-switch
+    drop detection for the one provider strict mode trusts.
+
+    We now use the Mullvad daemon's own ``Connected`` / ``Disconnected``
+    state — the exact signal :func:`wait_connected` polls at bring-up. It is
+    inherently scoped to Mullvad's tunnel (``mullvad status`` cannot be fooled
+    by a sibling ``wg`` interface) and flips to ``Disconnected`` /
+    ``Connecting`` the moment that tunnel drops. The ``Connected`` (capital C)
+    substring test never matches ``Disconnected`` (lower-case ``c`` after the
+    ``Dis`` prefix), so it distinguishes the two exactly as ``wait_connected``
+    does.
+
+    Trade-off — daemon belief vs kernel handshake ground truth: ``mullvad
+    status`` reflects the daemon's connection state, not the WireGuard kernel
+    handshake age. In the rare window where the daemon still believes it is
+    Connected but the peer has silently gone away, a handshake-age probe of
+    Mullvad's OWN interface would notice a little sooner. We accept that: a
+    false "healthy" borrowed from a SIBLING interface (the old bug) is a
+    strict-mode fail-OPEN and strictly worse than slightly slower drop
+    detection, whereas trusting the daemon's Mullvad-specific belief is
+    fail-closed against cross-interface masking. Pinning Mullvad's own
+    interface name at bring-up for a scoped ``wg show`` is a possible v2
+    refinement (:func:`parse_handshake_age` stays for the generic-WireGuard
+    provider, whose handle DOES know its interface name).
+
+    Falls back to ``False`` on any subprocess failure — the invocation itself
+    failing (``mullvad`` not on PATH → :class:`FileNotFoundError`), a
+    ``timeout=`` passed by the liveness worker
+    (:class:`subprocess.TimeoutExpired`), or a non-zero return code. All are
+    coerced to ``unhealthy`` so the PR2 liveness worker records the path as
+    down instead of crashing (matching the prior fail-closed contract, Codex
+    P2 / HIGH-3 2026-05-13).
     """
-    del handle
     try:
-        result = runner(("wg", "show"))
+        result = runner((handle.cli_path, "status"))
     except (FileNotFoundError, PermissionError, subprocess.SubprocessError, OSError):
         return False
     if result.returncode != 0:
         return False
-    age = parse_handshake_age(result.stdout or "")
-    if age is None:
-        return False
-    return age <= max_handshake_age_seconds
+    return "Connected" in (result.stdout or "")

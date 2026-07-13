@@ -440,70 +440,110 @@ class TestDisconnect:
 
 
 # --------------------------------------------------------------------------- #
-# Health (wg show handshake age)                                              #
+# Health (mullvad status Connected — Mullvad-scoped, fix 2026-07-13)          #
 # --------------------------------------------------------------------------- #
 
 
 class TestHealth:
-    _FRESH_WG = "latest handshake: 30 seconds ago\n"
-    _STALE_WG = "latest handshake: 9 minutes, 12 seconds ago\n"
-    _NEVER_WG = "latest handshake: (none)\n"
+    """The Mullvad-path health probe uses the daemon's own Connected state.
 
-    def test_fresh_handshake_is_healthy(self) -> None:
+    FIX 2026-07-13: it used to run an UNSCOPED ``wg show`` and take the
+    freshest handshake across ALL WireGuard interfaces, so a sibling tunnel
+    could mask a dead Mullvad tunnel (strict-mode fail-open). ``mullvad
+    status`` is inherently Mullvad-scoped and cannot be fooled that way.
+    """
+
+    _CONNECTED = "Connected to jp-tyo-wg-001 in Tokyo, Japan\n"
+    _DISCONNECTED = "Disconnected\n"
+    _CONNECTING = "Connecting to jp-tyo-wg-001...\n"
+
+    def test_connected_status_is_healthy(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner({("wg", "show"): _result(stdout=self._FRESH_WG)})
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout=self._CONNECTED)})
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
         assert vpn.health(handle, runner=runner) is True
 
-    def test_stale_handshake_is_unhealthy(self) -> None:
+    def test_disconnected_status_is_unhealthy(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner({("wg", "show"): _result(stdout=self._STALE_WG)})
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout=self._DISCONNECTED)})
+        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
+        # "Connected" (capital C) must NOT match inside "Disconnected".
+        assert vpn.health(handle, runner=runner) is False
+
+    def test_connecting_status_is_unhealthy(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout=self._CONNECTING)})
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
         assert vpn.health(handle, runner=runner) is False
 
-    def test_no_handshake_is_unhealthy(self) -> None:
-        from mordred_hermes.network.paths import vpn
-
-        runner = _FakeRunner({("wg", "show"): _result(stdout=self._NEVER_WG)})
-        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        assert vpn.health(handle, runner=runner) is False
-
-    def test_wg_command_failure_is_unhealthy(self) -> None:
-        from mordred_hermes.network.paths import vpn
-
-        runner = _FakeRunner({("wg", "show"): _result(stdout="", returncode=1)})
-        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        assert vpn.health(handle, runner=runner) is False
-
-    def test_wg_binary_missing_is_unhealthy(self) -> None:
-        """Codex P2 / HIGH-3 (2026-05-13): on hosts where ``wg`` is not on
-        PATH (some macOS Mullvad installs ship only the GUI),
-        ``subprocess.run`` raises :class:`FileNotFoundError` rather than
-        returning a non-zero ``CompletedProcess``. ``health`` must catch
-        the exception and return ``False`` so the PR2 liveness worker
-        records the path as unhealthy instead of crashing the thread.
+    def test_probe_is_mullvad_scoped_not_freshest_wg_interface(self) -> None:
+        """Regression proof for the fix. The OLD unscoped probe ran
+        ``wg show`` and returned the FRESHEST handshake across every
+        interface: given a stale Mullvad interface (5 min) beside a fresh
+        SIBLING interface (60 s < 180 s ceiling) it reported healthy even
+        though Mullvad's own tunnel was dead. The new probe never runs
+        ``wg show`` — it asks the daemon, which reports Disconnected — so
+        this scenario is correctly unhealthy. This assertion FAILS if the
+        fix is reverted to the freshest-of-all-interfaces logic.
         """
         from mordred_hermes.network.paths import vpn
 
-        def missing_wg(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            raise FileNotFoundError("[Errno 2] No such file or directory: 'wg'")
-
+        runner = _FakeRunner(
+            {
+                ("/bin/mullvad", "status"): _result(stdout=self._DISCONNECTED),
+                # The exact multi-interface output that fooled the old probe:
+                # Mullvad's iface stale, an unrelated sibling fresh.
+                ("wg", "show"): _result(
+                    stdout=(
+                        "interface: wg0-mullvad\n"
+                        "peer: AAA\n  latest handshake: 5 minutes ago\n"
+                        "interface: wg1-other\n"
+                        "peer: BBB\n  latest handshake: 1 minute ago\n"
+                    )
+                ),
+            }
+        )
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        assert vpn.health(handle, runner=missing_wg) is False
+        assert vpn.health(handle, runner=runner) is False
+        # It must have consulted the Mullvad daemon, never the unscoped wg show.
+        assert ("/bin/mullvad", "status") in runner.calls
+        assert ("wg", "show") not in runner.calls
 
-    def test_wg_command_timeout_is_unhealthy(self) -> None:
-        """Defensive: if the liveness worker passes a ``timeout=`` to the
-        runner (future PR2 wiring), ``subprocess.TimeoutExpired`` must
-        also be coerced into ``unhealthy`` rather than propagating."""
+    def test_mullvad_binary_missing_is_unhealthy(self) -> None:
+        """On hosts where the ``mullvad`` CLI is not on PATH,
+        ``subprocess.run`` raises :class:`FileNotFoundError`. ``health`` must
+        catch it and return ``False`` so the PR2 liveness worker records the
+        path as unhealthy instead of crashing the thread (fail-closed, Codex
+        P2 / HIGH-3 2026-05-13)."""
         from mordred_hermes.network.paths import vpn
 
-        def slow_wg(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            raise subprocess.TimeoutExpired(cmd=["wg", "show"], timeout=1.0)
+        def missing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError("[Errno 2] No such file or directory: 'mullvad'")
 
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
-        assert vpn.health(handle, runner=slow_wg) is False
+        assert vpn.health(handle, runner=missing) is False
+
+    def test_status_command_timeout_is_unhealthy(self) -> None:
+        """If the liveness worker passes a ``timeout=`` to the runner,
+        :class:`subprocess.TimeoutExpired` must also be coerced into
+        ``unhealthy`` rather than propagating."""
+        from mordred_hermes.network.paths import vpn
+
+        def slow(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd=["mullvad", "status"], timeout=1.0)
+
+        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
+        assert vpn.health(handle, runner=slow) is False
+
+    def test_status_nonzero_returncode_is_unhealthy(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Connected", returncode=1)})
+        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
+        assert vpn.health(handle, runner=runner) is False
 
 
 # --------------------------------------------------------------------------- #

@@ -27,13 +27,13 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
-from .._policy_io import read_policy_mode_fail_closed
-from .._policy_types import VALID_ACTIVE_PATHS
-from .._yaml_io import load_plugin_section
+from .._policy_io import load_policy_mapping, read_policy_mode_fail_closed
+from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
+from .._yaml_io import load_plugin_section, load_yaml_mapping
 from . import api
 from ._exceptions import (
     BringupFailed,
@@ -41,11 +41,16 @@ from ._exceptions import (
     MordredPathBringupFailed,
     MordredPathDropped,
 )
+from .provider_transport_flagger import evaluate
 
 _LOG = logging.getLogger("mordred.network.hooks")
 
 _DEFAULT_POLICY_MODE: Final[str] = "off"
 _DEFAULT_NETWORK_PATH: Final[str] = "clearnet"
+# Audit reason code for a provider-vs-transport compatibility flag (FIX 1,
+# 2026-07-13). ``decision`` is ``block`` for an abort-severity flag (strict
+# refusal) and ``warn`` for a warning-severity one (audited, session continues).
+_REASON_TRANSPORT_FLAG: Final[str] = "network.transport_incompatible"
 
 
 # --------------------------------------------------------------------------- #
@@ -102,6 +107,7 @@ def on_session_start(
     *,
     policy_json_path: Path,
     config_path: Path,
+    auth_json_path: Path | None = None,
     audit: _AuditWriter | None = None,
     **kwargs: Any,
 ) -> None:
@@ -179,6 +185,27 @@ def on_session_start(
             e,
             policy_mode,
         )
+
+    # FIX 1 (2026-07-13): provider-vs-transport compatibility gate. Once the
+    # path is up (or fell back to clearnet in lenient), verify the provider
+    # Hermes will use can actually reach the upstream API over the active
+    # transport. A strict Tor session talking to a SOCKS5h-ignoring provider
+    # (e.g. bedrock) is refused HERE — the abort the flagger always promised
+    # but that nothing in production ever invoked. Fail-safe: a bug in
+    # resolution or flagging must never crash a normal session, so it is
+    # wrapped in ``except Exception``; the strict refusal is raised as
+    # :class:`MordredPathBringupFailed` (a ``BaseException``) which escapes
+    # that handler by design (same escape the bring-up refusal relies on).
+    try:
+        _flag_transport_compat(
+            active_path=cast(ActivePath, api.status().active_path),
+            providers=_resolve_active_providers(config_path=config_path, auth_json_path=auth_json_path),
+            policy_mode=policy_mode,
+            disable_ipv6=_read_disable_ipv6(policy_json_path, policy_mode),
+            audit=audit,
+        )
+    except Exception as flag_err:
+        _LOG.warning("on_session_start: transport-compat flagging failed: %s", flag_err)
 
 
 def on_session_end(**_kwargs: Any) -> None:
@@ -275,6 +302,147 @@ def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
     (disk full, permission denied, etc.).
     """
     safe_audit_append(audit, entry, logger=_LOG)
+
+
+# --------------------------------------------------------------------------- #
+# Provider-vs-transport compatibility gate (FIX 1)                            #
+# --------------------------------------------------------------------------- #
+
+
+def _read_config_model_provider(config_path: Path) -> str | None:
+    """Read ``model.provider`` from ``config.yaml`` (Hermes' persistent
+    provider-of-record).
+
+    Returns ``None`` when the key is absent, non-string, empty, or the
+    ``"auto"`` sentinel (Hermes' "defer to auth.json / env" marker). Mirrors
+    ``llm_guard._read_config_model_provider`` — same shared ``load_yaml_mapping``
+    reader — so the two plugins resolve the same provider from the same file.
+    """
+    data = load_yaml_mapping(config_path, log=_LOG)
+    model = data.get("model")
+    if not isinstance(model, dict):
+        return None
+    value = model.get("provider")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized or normalized == "auto":
+        return None
+    return normalized
+
+
+def _read_auth_active_provider(auth_json_path: Path) -> str | None:
+    """Read ``active_provider`` from ``auth.json`` (Hermes' auto-resolution
+    fallback when ``model.provider`` is unset / ``auto``).
+
+    Mirrors ``llm_guard._read_auth_active_provider`` — the shared
+    ``load_policy_mapping`` reader collapses a missing / unreadable / malformed
+    file to ``{}`` so this degrades to ``None`` (no provider) rather than
+    raising out of the session-start hook.
+    """
+    value = load_policy_mapping(auth_json_path, log=_LOG).get("active_provider")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized:
+            return normalized
+    return None
+
+
+def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None) -> list[str]:
+    """Resolve the provider(s) Hermes will run, for the transport gate.
+
+    Same resolution order as ``llm_guard._resolve_active_provider``:
+    ``config.yaml model.provider`` wins, else ``auth.json active_provider``. A
+    single active provider is enough for the transport gate. Returns the RAW
+    (lower-cased) id — :func:`provider_transport_flagger.evaluate` applies
+    ``canonicalize_provider`` itself and preserves the raw id in the
+    unknown-provider Flag message. Returns ``[]`` when neither source yields a
+    provider, so ``evaluate`` simply emits no provider-specific flags
+    (fail-safe: a provider-less session is never refused by this gate).
+    """
+    configured = _read_config_model_provider(config_path)
+    if configured:
+        return [configured]
+    if auth_json_path is not None:
+        resolved = _read_auth_active_provider(auth_json_path)
+        if resolved:
+            return [resolved]
+    return []
+
+
+def _read_disable_ipv6(policy_json_path: Path, policy_mode: str) -> bool:
+    """Reproduce ``RuntimeConfig.disable_ipv6`` for the transport flagger.
+
+    The flagger's IPv6-leak branch must run with the SAME ``disable_ipv6`` the
+    runtime rendered into the torrc (``ClientUseIPv6 0``): otherwise a strict
+    session could abort on an IPv6 dimension the runtime already neutralised
+    (strict default ``True`` masks the unverified IPv6 seeds on the OpenAI-
+    compatible providers), or fail to surface it when it didn't. Reuses the
+    runtime's own resolver (``network.__init__._resolve_disable_ipv6``) against
+    the same ``policy.json`` so the two derivations cannot drift. The import is
+    function-local because ``network.__init__`` imports this module at package
+    load time (a top-level import would be circular).
+    """
+    from . import _resolve_disable_ipv6
+
+    data = load_policy_mapping(policy_json_path, log=_LOG)
+    return _resolve_disable_ipv6(data, policy_mode)
+
+
+def _flag_transport_compat(
+    *,
+    active_path: ActivePath,
+    providers: list[str],
+    policy_mode: str,
+    disable_ipv6: bool,
+    audit: _AuditWriter | None,
+) -> None:
+    """Run the provider-vs-transport flagger and enforce its severity.
+
+    Strict + an ``abort``-severity flag refuses the session by raising
+    :class:`MordredPathBringupFailed` (``BaseException``), the same escape the
+    bring-up refusal uses so Hermes' ``except Exception`` wrapper cannot
+    swallow it. A ``warning`` flag (an unknown provider, a lenient-downgraded
+    abort, or a clearnet informational) is audited and the session continues.
+    ``off`` mode never reaches the abort branch: ``evaluate`` returns ``[]``.
+
+    An ``abort`` severity only survives ``evaluate`` under strict policy
+    (lenient downgrades abort→warning, off returns ``[]``), so the explicit
+    ``policy_mode == "strict"`` guard is belt-and-braces around that invariant.
+    """
+    flags = evaluate(
+        active_path=active_path,
+        providers=providers,
+        policy_mode=cast(PolicyMode, policy_mode),
+        disable_ipv6=disable_ipv6,
+    )
+    if not flags:
+        return
+    abort_reasons: list[str] = []
+    for flag in flags:
+        if audit is not None:
+            _safe_audit_append(
+                audit,
+                {
+                    "event": "on_session_start",
+                    "decision": "block" if flag.severity == "abort" else "warn",
+                    "reason": _REASON_TRANSPORT_FLAG,
+                    "active_path": active_path,
+                    "provider": flag.provider,
+                    "severity": flag.severity,
+                    "detail": flag.reason,
+                    "policy_mode": policy_mode,
+                },
+            )
+        if flag.severity == "abort":
+            abort_reasons.append(f"{flag.provider}: {flag.reason}")
+    if abort_reasons and policy_mode == "strict":
+        msg = (
+            f"Mordred strict mode: provider transport is incompatible with network path "
+            f"{active_path!r}: {'; '.join(abort_reasons)}; refusing the session."
+        )
+        _LOG.error(msg)
+        raise MordredPathBringupFailed(msg)
 
 
 __all__ = ["on_session_end", "on_session_start", "pre_tool_call", "wait_until_ready"]

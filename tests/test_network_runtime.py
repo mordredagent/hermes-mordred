@@ -307,6 +307,83 @@ class TestClearnetUse:
 # --------------------------------------------------------------------------- #
 
 
+class TestTorHealthDefaultIsDeepProbe:
+    """FIX 2 (2026-07-13): the runtime's DEFAULT Tor liveness probe must be
+    the deep ``circuit_status_health`` (ControlPort ``GETINFO circuit-status``,
+    BUILT-circuit-present → healthy), not the shallow ``process.poll()``
+    ``health``. The deep probe self-degrades to the shallow check when the
+    ``[tor-control]`` extra / control cookie is absent, so wiring it as the
+    default is a safe drop-in — but WITHOUT this wiring a running-but-no-BUILT
+    -circuit Tor is never detected as dead, defeating strict drop detection.
+
+    These assertions fail if the default is reverted to ``tor_mod.health``.
+    """
+
+    def test_default_tor_health_is_circuit_status_health(self) -> None:
+        from mordred_hermes.network.runtime import Runtime, RuntimeConfig
+
+        # No ``tor_health=`` injection → the runtime must pick the deep probe.
+        rt = Runtime(config=RuntimeConfig(), env={})
+        assert rt._tor_health is tor_mod.circuit_status_health  # type: ignore[attr-defined]
+        assert rt._tor_health is not tor_mod.health  # type: ignore[attr-defined]
+
+    def test_injected_tor_health_still_overrides_default(self) -> None:
+        """The ``tor_health=`` injection point must keep working so tests
+        (and any future strict operator override) can swap in a fake."""
+        from mordred_hermes.network.runtime import Runtime, RuntimeConfig
+
+        def fake_health(_handle: Any) -> bool:
+            return False
+
+        rt = Runtime(config=RuntimeConfig(), env={}, tor_health=fake_health)
+        assert rt._tor_health is fake_health  # type: ignore[attr-defined]
+
+    def test_deep_probe_unhealthy_flows_through_runtime_liveness(self, tmp_path: Path) -> None:
+        """Behavioural proof: a Tor handle whose ControlPort reports NO BUILT
+        circuit reads as unhealthy through the runtime's own liveness path
+        (``runtime.health()``), exactly what the deep default buys us. We
+        inject the deep probe bound to a fake controller_factory to exercise
+        the real ``circuit_status_health`` parsing without a live daemon."""
+        import functools
+
+        from mordred_hermes.network.paths import tor as tor_paths
+        from mordred_hermes.network.runtime import Runtime, RuntimeConfig, State, _ActiveHandle
+
+        # A cookie file must exist so circuit_status_health opens the control
+        # port instead of short-circuiting to the shallow fallback.
+        data_dir = tmp_path
+        (data_dir / "control_auth_cookie").write_bytes(b"\x00" * 32)
+
+        class _NoBuiltController:
+            def authenticate(self) -> None:
+                return None
+
+            def get_info(self, key: str) -> str:
+                del key
+                # LAUNCHED, never BUILT → circuit_status_health → False.
+                return "1 LAUNCHED $AAAA~relay\n"
+
+            def close(self) -> None:
+                return None
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+        def factory(*, host: str, port: int) -> Any:
+            del host, port
+            return _NoBuiltController()
+
+        deep = functools.partial(tor_paths.circuit_status_health, controller_factory=factory)
+        rt = Runtime(config=RuntimeConfig(), env={}, tor_health=deep)
+        handle = tor_paths.TorHandle(process=_FakeTorProcess(), socks_port=9050, control_port=9051, data_dir=data_dir)
+        rt._handle = _ActiveHandle("tor", handle)  # type: ignore[attr-defined]
+        rt._state = State.READY  # type: ignore[attr-defined]
+        assert rt.health() is False
+
+
 class TestTorUse:
     def test_use_tor_picks_free_port_and_starts_process(self) -> None:
         tor = _TorFakes(pick_port_return=9150)

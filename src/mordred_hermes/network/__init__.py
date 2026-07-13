@@ -39,6 +39,10 @@ _LOG = logging.getLogger("mordred.network")
 DEFAULT_POLICY_JSON_PATH: Path = HERMES_BASE / "mordred" / "policy.json"
 DEFAULT_CONFIG_PATH: Path = HERMES_BASE / "config.yaml"
 DEFAULT_AUDIT_PATH: Path = HERMES_BASE / "mordred" / "audit.log"
+# FIX 1 (2026-07-13): the session-start transport gate resolves the active
+# provider the same way llm_guard does — config.yaml model.provider first,
+# then auth.json active_provider. Same file llm_guard reads.
+DEFAULT_AUTH_JSON_PATH: Path = HERMES_BASE / "auth.json"
 
 
 class PluginContext(Protocol):
@@ -71,6 +75,7 @@ def register(ctx: PluginContext) -> None:
         hooks.on_session_start(
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
             config_path=DEFAULT_CONFIG_PATH,
+            auth_json_path=DEFAULT_AUTH_JSON_PATH,
             audit=audit,
             **kwargs,
         )

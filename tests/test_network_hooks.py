@@ -130,6 +130,14 @@ def _write_config(tmp_path: Path, default_path: str = "clearnet") -> Path:
     return p
 
 
+def _write_config_with_provider(tmp_path: Path, default_path: str, provider: str) -> Path:
+    """config.yaml carrying both the network default_path and a
+    ``model.provider`` (the transport gate resolves the provider from there)."""
+    p = tmp_path / "config.yaml"
+    p.write_text(f"plugins:\n  mordred_network:\n    default_path: {default_path}\nmodel:\n  provider: {provider}\n")
+    return p
+
+
 @pytest.fixture(autouse=True)
 def _reset_api() -> Any:
     """Make sure the global api runtime is empty before each test."""
@@ -330,6 +338,147 @@ class TestOnSessionStart:
             )
         reasons = [e.get("reason") for e in audit.entries]
         assert "network.bringup_failed" in reasons
+
+
+# --------------------------------------------------------------------------- #
+# on_session_start — provider-vs-transport compatibility gate (FIX 1)         #
+# --------------------------------------------------------------------------- #
+
+
+class TestTransportCompatibilityGate:
+    """FIX 1 (2026-07-13): ``on_session_start`` now runs
+    ``provider_transport_flagger.evaluate`` against the resolved provider and
+    the active path. A strict Tor session talking to a SOCKS5h-ignoring
+    provider (``bedrock``) is refused with :class:`MordredPathBringupFailed`;
+    a compatible provider is not; lenient downgrades the abort to an audited
+    warning; ``off`` emits nothing. These tests fail if the gate is reverted.
+    """
+
+    _TRANSPORT_REASON = "network.transport_incompatible"
+
+    def _transport_entries(self, audit: _FakeAudit) -> list[dict[str, Any]]:
+        return [e for e in audit.entries if e.get("reason") == self._TRANSPORT_REASON]
+
+    def test_strict_tor_socks5h_ignoring_provider_aborts(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config_with_provider(tmp_path, "tor", "bedrock")
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
+
+        # The path DID come up — the refusal is the transport gate, not bring-up.
+        assert rt.use_calls == ["tor"]
+        blocks = [e for e in self._transport_entries(audit) if e.get("decision") == "block"]
+        assert blocks, "expected a block-decision transport audit entry"
+        assert blocks[0]["provider"] == "bedrock"
+        assert blocks[0]["severity"] == "abort"
+
+    def test_strict_tor_compatible_provider_does_not_abort(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config_with_provider(tmp_path, "tor", "anthropic")
+        audit = _FakeAudit()
+
+        # anthropic honours socks5h + ipv6 proxy → no flags, no refusal.
+        hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
+        assert rt.use_calls == ["tor"]
+        assert self._transport_entries(audit) == []
+
+    def test_strict_tor_unknown_provider_does_not_abort(self, tmp_path: Path) -> None:
+        """Fail-safe: an unknown provider yields a downgraded WARNING, never an
+        abort, so a strict session must NOT be refused for it."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config_with_provider(tmp_path, "tor", "my-internal-llm")
+        audit = _FakeAudit()
+
+        hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)  # no raise
+        assert rt.use_calls == ["tor"]
+        entries = self._transport_entries(audit)
+        assert entries, "unknown provider should be audited as a warning"
+        assert all(e.get("decision") == "warn" for e in entries)
+        assert all(e.get("severity") == "warning" for e in entries)
+
+    def test_lenient_tor_socks5h_ignoring_provider_audits_warning_no_abort(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config_with_provider(tmp_path, "tor", "bedrock")
+        audit = _FakeAudit()
+
+        # lenient downgrades every abort to a warning → audited, session continues.
+        hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
+        assert rt.use_calls == ["tor"]
+        entries = self._transport_entries(audit)
+        assert entries, "expected transport-incompatibility warning audit entries"
+        assert all(e.get("decision") == "warn" for e in entries)
+        assert all(e.get("severity") == "warning" for e in entries)
+
+    def test_off_emits_no_transport_flags(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "off")
+        # off + a non-clearnet default still exercises evaluate(); off returns [].
+        config = _write_config_with_provider(tmp_path, "tor", "bedrock")
+        audit = _FakeAudit()
+
+        hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
+        assert rt.use_calls == ["tor"]
+        assert self._transport_entries(audit) == []
+
+    def test_provider_resolved_from_auth_json_when_config_absent(self, tmp_path: Path) -> None:
+        """When config.yaml has no ``model.provider`` the gate falls back to
+        ``auth.json active_provider`` (canonicalised: ``aws`` → ``bedrock``)."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")  # no model.provider
+        auth = tmp_path / "auth.json"
+        auth.write_text(json.dumps({"active_provider": "aws"}))
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.on_session_start(
+                policy_json_path=policy,
+                config_path=config,
+                auth_json_path=auth,
+                audit=audit,
+            )
+        blocks = [e for e in self._transport_entries(audit) if e.get("decision") == "block"]
+        assert blocks and blocks[0]["provider"] == "bedrock"
+
+    def test_no_provider_configured_never_aborts(self, tmp_path: Path) -> None:
+        """A provider-less session (no model.provider, no auth.json) resolves to
+        no providers → evaluate returns [] → no flags. Guards the existing
+        provider-free tests against a false abort."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+        audit = _FakeAudit()
+
+        hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
+        assert rt.use_calls == ["tor"]
+        assert self._transport_entries(audit) == []
 
 
 # --------------------------------------------------------------------------- #

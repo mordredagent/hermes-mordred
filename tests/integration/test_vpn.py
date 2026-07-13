@@ -167,14 +167,12 @@ class TestMullvadHandshakeFreshness:
         authenticated_cli: str,
     ) -> None:
         """Right after ``wait_connected`` returns, ``health()`` should be
-        True with handshake age well under the strict 180s threshold.
+        True: the Mullvad daemon reports Connected.
 
-        Skips when ``wg`` is not on PATH (Mullvad's bundled wg may live
-        elsewhere on macOS — the test then has nothing to parse).
+        Since the fix 2026-07-13, ``health()`` uses ``mullvad status`` (the
+        daemon's own Connected state) rather than an unscoped ``wg show``, so
+        no ``wg`` binary is needed on PATH.
         """
-        if shutil.which("wg") is None:
-            pytest.skip("wg binary not on $PATH; health() probe needs it")
-
         handle = vpn.bring_up(
             cli_path=authenticated_cli,
             region="auto",
@@ -182,9 +180,7 @@ class TestMullvadHandshakeFreshness:
         )
         try:
             vpn.wait_connected(cli_path=authenticated_cli, timeout=30.0)
-            assert vpn.health(handle, max_handshake_age_seconds=180.0), (
-                "wg show reported no fresh handshake despite connect succeeding"
-            )
+            assert vpn.health(handle), "mullvad status did not report Connected despite connect succeeding"
         finally:
             vpn.disconnect(handle, preserve_lockdown=True)
 
