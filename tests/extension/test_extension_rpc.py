@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+import sys
+import types
+
 import pytest
 
 from mordred_hermes.extension import extension_rpc
@@ -52,3 +56,65 @@ def test_fill_preserves_explicit_fields(fake_rpc):
 def test_send_raw(fake_rpc):
     assert extension_rpc.send_raw_transaction("http://rpc", "0xdeadbeef") == "0xtxhash"
     assert fake_rpc["raw"] == "0xdeadbeef"
+
+
+# --------------------------------------------------------------------------- #
+# Proxy resolution (_proxies): gateway-routed vs env fallback
+# --------------------------------------------------------------------------- #
+
+
+def _rpc_warnings(caplog):
+    return [r for r in caplog.records if r.name == extension_rpc.logger.name and r.levelno >= logging.WARNING]
+
+
+def test_proxies_prefers_gateway_resolution_no_warning(monkeypatch, caplog):
+    """The happy path resolves through the gateway and logs nothing."""
+    gateway = types.ModuleType("gateway")
+    platforms = types.ModuleType("gateway.platforms")
+    base = types.ModuleType("gateway.platforms.base")
+    base.resolve_proxy_url = lambda target_hosts=None: "socks5h://127.0.0.1:9050"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.platforms", platforms)
+    monkeypatch.setitem(sys.modules, "gateway.platforms.base", base)
+    monkeypatch.setattr(extension_rpc, "_fallback_warned", False)
+
+    with caplog.at_level(logging.WARNING):
+        proxies = extension_rpc._proxies()
+
+    assert proxies == {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+    assert _rpc_warnings(caplog) == []
+
+
+def test_proxies_fallback_to_env_warns_once(monkeypatch, caplog):
+    """Losing the gateway resolver silently rerouted RPC egress off the
+    Tor/VPN path with no log line — it must warn (once per process, so a
+    multi-call broadcast doesn't spam) and still honor HTTPS_PROXY."""
+    monkeypatch.setitem(sys.modules, "gateway", None)  # import raises immediately
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8118")
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.setattr(extension_rpc, "_fallback_warned", False)
+
+    with caplog.at_level(logging.WARNING, logger=extension_rpc.logger.name):
+        first = extension_rpc._proxies()
+        second = extension_rpc._proxies()
+
+    assert first == second == {"http": "http://127.0.0.1:8118", "https": "http://127.0.0.1:8118"}
+    warnings = _rpc_warnings(caplog)
+    assert len(warnings) == 1
+    assert "fall" in warnings[0].getMessage()  # "falls back"
+
+
+def test_proxies_fallback_direct_connection_warns(monkeypatch, caplog):
+    """No resolver AND no env proxy = a DIRECT connection; the warning must
+    say so — that is the worst-case privacy regression."""
+    monkeypatch.setitem(sys.modules, "gateway", None)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.setattr(extension_rpc, "_fallback_warned", False)
+
+    with caplog.at_level(logging.WARNING, logger=extension_rpc.logger.name):
+        assert extension_rpc._proxies() is None
+
+    warnings = _rpc_warnings(caplog)
+    assert len(warnings) == 1
+    assert "DIRECT" in warnings[0].getMessage()

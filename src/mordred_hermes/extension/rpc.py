@@ -26,16 +26,34 @@ class JsonRpcError(Exception):
     pass
 
 
+# One warning per process, not per RPC call: filling + broadcasting a single
+# transaction calls _proxies() several times (nonce / fees / gas / send).
+_fallback_warned = False
+
+
 def _proxies() -> dict[str, str] | None:
     """Proxy dict for requests, honoring the gateway's resolved proxy/Tor."""
+    global _fallback_warned
     try:
         from gateway.platforms.base import resolve_proxy_url
 
         url = resolve_proxy_url(target_hosts=None)
     except Exception:
+        # resolve_proxy_url is a private hermes-agent API with no stability
+        # guarantee — this fallback keeps broadcasts working if it moves, but
+        # it silently abandons the gateway-routed (Tor/VPN) egress path, so it
+        # must never be silent.
         import os
 
         url = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        if not _fallback_warned:
+            _fallback_warned = True
+            logger.warning(
+                "gateway proxy resolution unavailable; RPC egress falls back to %s "
+                "(gateway-configured Tor/VPN routing does NOT apply)",
+                f"the HTTPS_PROXY environment proxy {url!r}" if url else "a DIRECT connection",
+                exc_info=True,
+            )
     return {"http": url, "https": url} if url else None
 
 
