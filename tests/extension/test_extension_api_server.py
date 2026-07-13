@@ -194,3 +194,146 @@ def test_auth_required_before_commands():
     msg = asyncio.run(_flow(_free_port()))
     assert msg["type"] == "auth_fail"
     assert msg["reason"] == "not_authenticated"
+
+
+def test_keepalive_ping_pushed_to_idle_client():
+    """An idle connection must receive app-level pings (MV3 service-worker
+    keepalive) without sending anything itself."""
+
+    async def _flow(port):
+        server = extension_api.ExtensionAPIServer(port=port, keepalive_interval=0.05)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s, s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
+                json.loads((await ws.receive()).data)  # auth_challenge
+                return json.loads((await asyncio.wait_for(ws.receive(), timeout=2)).data)
+        finally:
+            await server.stop()
+
+    assert asyncio.run(_flow(_free_port())) == {"type": "ping"}
+
+
+def test_reconnect_reauths_with_persisted_token():
+    """A reconnecting client (e.g. after an MV3 service-worker kill) redoes
+    only the auth handshake with its stored ext_token — no re-pairing."""
+
+    async def _flow(port):
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
+                    json.loads((await ws.receive()).data)  # auth_challenge
+                    code, _ = pairing.generate_code()
+                    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "id": "p1",
+                                "type": "pair_init",
+                                "code": code,
+                                "ext_pubkey": ext_pub,
+                                "challenge": xc.b64u_encode(b"\x07" * 32),
+                            }
+                        )
+                    )
+                    token = json.loads((await ws.receive()).data)["ext_token"]
+                # First socket is closed here — reconnect with the token only.
+                async with s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws2:
+                    json.loads((await ws2.receive()).data)  # fresh auth_challenge
+                    await ws2.send_str(json.dumps({"type": "auth", "ext_token": token}))
+                    return json.loads((await ws2.receive()).data)
+        finally:
+            await server.stop()
+
+    assert asyncio.run(_flow(_free_port()))["type"] == "auth_ok"
+
+
+def test_malformed_frames_get_error_and_connection_survives():
+    async def _flow(port):
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s, s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
+                json.loads((await ws.receive()).data)  # auth_challenge
+                await ws.send_str("this is {not json")
+                bad_json = json.loads((await ws.receive()).data)
+                await ws.send_str(json.dumps(["a", "json", "array"]))
+                non_dict = json.loads((await ws.receive()).data)
+                # The connection must still dispatch normally afterwards.
+                await ws.send_str(json.dumps({"type": "auth", "ext_token": "nope"}))
+                after = json.loads((await ws.receive()).data)
+                return bad_json, non_dict, after
+        finally:
+            await server.stop()
+
+    bad_json, non_dict, after = asyncio.run(_flow(_free_port()))
+    assert bad_json == {"type": "error", "reason": "bad_json"}
+    assert non_dict == {"type": "error", "reason": "bad_json"}
+    assert after["type"] == "auth_fail"
+
+
+def test_crashed_handler_replies_error(monkeypatch):
+    """A handler exception must produce an id-keyed error frame instead of
+    leaving the client to await a reply forever."""
+    from mordred_hermes.extension import extension_history
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(extension_history, "projected_turns", _boom)
+
+    async def _flow(port):
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                json.loads((await ws.receive()).data)  # auth_challenge
+                await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
+                json.loads((await ws.receive()).data)  # auth_ok
+                await ws.send_str(json.dumps({"id": "h1", "type": "history_get"}))
+                return json.loads((await asyncio.wait_for(ws.receive(), timeout=5)).data)
+        finally:
+            await server.stop()
+
+    msg = asyncio.run(_flow(_free_port()))
+    assert msg == {"id": "h1", "type": "error", "reason": "internal_error"}
+
+
+def test_ws_chat_client_disconnect_closes_generator():
+    """When the client vanishes mid-stream the server must stop consuming the
+    chat generator (closing it) instead of streaming into the void."""
+
+    async def _flow(port):
+        closed = asyncio.Event()
+
+        async def endless_handler(_content, _context):
+            try:
+                for i in range(200):
+                    yield f"c{i}"
+                    await asyncio.sleep(0.05)
+            finally:
+                closed.set()
+
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=endless_handler)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.ws_connect(
+                    f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}
+                ) as ws:
+                    json.loads((await ws.receive()).data)  # auth_challenge
+                    await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
+                    json.loads((await ws.receive()).data)  # auth_ok
+                    await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "x"}))
+                    for _ in range(2):  # prove streaming started, then vanish
+                        assert json.loads((await ws.receive()).data)["type"] == "chat_chunk"
+                await asyncio.wait_for(closed.wait(), timeout=10)
+                return True
+        finally:
+            await server.stop()
+
+    assert asyncio.run(_flow(_free_port())) is True

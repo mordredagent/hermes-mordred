@@ -13,6 +13,11 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``encrypt``/``decrypt`` → :mod:`mordred_hermes.extension.crypto` with the shared key
 - ``accounts_request`` → keyvault address (``accounts_result``)
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
+
+Server-initiated frames: ``ping`` (app-level keepalive, see
+``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
+Clients ignore unknown frame types (extension ``protocol.ts`` isServerMsg), so
+both are backward-compatible.
 """
 
 from __future__ import annotations
@@ -47,6 +52,12 @@ _log = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 7788
 
+# App-level keepalive period. Chrome kills an idle MV3 service worker after
+# ~30s; receiving a WS message (any type) fires onmessage and resets that
+# timer, while aiohttp's protocol-level ping/pong never reaches JS. Must stay
+# below 30s with margin.
+DEFAULT_KEEPALIVE_INTERVAL = 20.0
+
 # A chat handler streams response chunks for a user message.
 ChatHandler = Callable[[str, dict[str, Any]], AsyncIterator[str]]
 
@@ -71,10 +82,12 @@ class ExtensionAPIServer:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         chat_handler: ChatHandler | None = None,
+        keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
     ) -> None:
         self.host = host
         self.port = port
         self.chat_handler: ChatHandler = chat_handler or _default_chat_handler
+        self.keepalive_interval = keepalive_interval
         self._runner: web.AppRunner | None = None
         # Per-process token embedded in the served localhost page; only a client
         # that actually loaded Hermes' page (i.e. a real browser, not a random
@@ -138,11 +151,15 @@ class ExtensionAPIServer:
         page_token = self._page_token if (origin in self._local_origins) else None
         conn = _Connection(ws, self.chat_handler, page_token=page_token)
         await conn.send_challenge()
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                await conn.dispatch(msg.data)
-            elif msg.type == WSMsgType.ERROR:
-                break
+        keepalive = asyncio.create_task(conn.keepalive(self.keepalive_interval))
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    await conn.dispatch(msg.data)
+                elif msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            keepalive.cancel()
         return ws
 
 
@@ -175,6 +192,20 @@ class _Connection:
             _log.debug("extension WS send dropped (client gone): %s", e)
             return False
 
+    async def keepalive(self, interval: float) -> None:
+        """Push an app-level ``ping`` every ``interval`` seconds.
+
+        Keeps the browser extension's MV3 service worker alive: Chrome only
+        extends the worker's ~30s idle deadline on WS *message* events, which
+        protocol-level ping/pong (``heartbeat=30``) never produces. Clients
+        ignore the unknown frame type. Ends itself once the socket closes."""
+        if interval <= 0:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            if not await self._send({"type": "ping"}):
+                return
+
     async def send_challenge(self) -> None:
         import os
 
@@ -193,6 +224,10 @@ class _Connection:
         try:
             msg = json.loads(raw)
         except ValueError:
+            msg = None
+        if not isinstance(msg, dict):
+            _log.warning("extension WS: dropping malformed frame (%d bytes)", len(raw))
+            await self._send({"type": "error", "reason": "bad_json"})
             return
         mtype = msg.get("type")
         # Two dispatch tables keep the auth gate explicit: pre-auth messages are
@@ -220,13 +255,23 @@ class _Connection:
                 await authed[mtype](msg)
         except Exception:
             _log.exception("extension API handler error (type=%s)", mtype)
+            # A client awaiting a reply keyed by ``id`` must not hang forever
+            # on a crashed handler.
+            err: dict[str, Any] = {"type": "error", "reason": "internal_error"}
+            if msg.get("id") is not None:
+                err["id"] = msg["id"]
+            await self._send(err)
 
     # -- pairing / auth -----------------------------------------------------
 
     async def _on_pair_init(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")
         try:
-            result = pairing.handle_pair_init(msg.get("code", ""), msg.get("ext_pubkey", ""), msg.get("challenge", ""))
+            # Executor: handle_pair_init does ECDH/signing plus flock-guarded
+            # file I/O — neither belongs on the event loop.
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, pairing.handle_pair_init, msg.get("code", ""), msg.get("ext_pubkey", ""), msg.get("challenge", "")
+            )
         except pairing.PairError as exc:
             await self._send({"id": mid, "type": "pair_fail", "reason": exc.reason})
             return
@@ -303,13 +348,22 @@ class _Connection:
                 encrypt_reply = False  # not our key — treat as plaintext, don't encrypt back
         kid = key_id(ek) if (encrypt_reply and ek is not None) else ""
 
+        gen = self.chat_handler(content, context)
         try:
-            async for chunk in self.chat_handler(content, context):
+            async for chunk in gen:
                 out = encrypt_message_v2(ek, chunk, kid) if (encrypt_reply and ek is not None) else chunk
-                await self._send({"id": mid, "type": "chat_chunk", "content": out})
+                if not await self._send({"id": mid, "type": "chat_chunk", "content": out}):
+                    # Client gone mid-stream: stop consuming. Closing ``gen``
+                    # (finally below) lets the chat layer detach the running
+                    # turn instead of streaming into the void.
+                    return
             await self._send({"id": mid, "type": "chat_end"})
         except Exception as exc:
             await self._send({"id": mid, "type": "chat_error", "reason": str(exc)})
+        finally:
+            aclose = getattr(gen, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     async def _on_channel_key_set(self, msg: dict[str, Any]) -> None:
         """Store a per-channel Slack key pushed by the extension (SPEC-v2 §4.4).
@@ -330,7 +384,10 @@ class _Connection:
         try:
             from .crypto import b64u_decode
 
-            pairing.save_channel_key(channel_id, b64u_decode(raw_b64))
+            # Executor: the save is flock-guarded file I/O.
+            await asyncio.get_event_loop().run_in_executor(
+                None, pairing.save_channel_key, channel_id, b64u_decode(raw_b64)
+            )
         except Exception:
             return
 

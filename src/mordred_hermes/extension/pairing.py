@@ -25,9 +25,15 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX platform
+    fcntl = None  # type: ignore[assignment]
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -87,6 +93,31 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+@contextlib.contextmanager
+def _state_lock() -> Iterator[None]:
+    """Cross-process mutex for read-modify-write cycles on the JSON stores.
+
+    The CLI (``extension pair``) and the gateway server mutate ``pending.json``
+    / ``state.json`` from different processes; without this, interleaved
+    read→write cycles lose updates — e.g. two racing ``pair_init`` frames could
+    both consume the same one-time code. Locked sections must stay synchronous
+    (no awaits): callers run on the gateway's event loop and rely on the lock
+    being held only for a quick file round-trip.
+    """
+    if fcntl is None:  # non-POSIX fallback: single-process best effort
+        yield
+        return
+    fd = os.open(_ext_dir() / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 # --------------------------------------------------------------------------- #
 # Pairing code helpers
 # --------------------------------------------------------------------------- #
@@ -115,30 +146,34 @@ def generate_code() -> tuple[str, float]:
     code = _format_code(raw)
     expires_at = time.time() + _CODE_TTL_SECONDS
     path = _ext_dir() / "pending.json"
-    pending = _read_json(path)
-    # Drop expired entries to keep the file bounded.
-    now = time.time()
-    pending = {k: v for k, v in pending.items() if v.get("expires_at", 0) > now}
-    pending[code] = {"expires_at": expires_at, "used": False, "paired_at": None}
-    _write_private(path, json.dumps(pending).encode("utf-8"))
+    with _state_lock():
+        pending = _read_json(path)
+        # Drop expired entries to keep the file bounded.
+        now = time.time()
+        pending = {k: v for k, v in pending.items() if v.get("expires_at", 0) > now}
+        pending[code] = {"expires_at": expires_at, "used": False, "paired_at": None}
+        _write_private(path, json.dumps(pending).encode("utf-8"))
     return code, expires_at
 
 
 def _consume_code(code: str) -> None:
     """Validate a code against the pending store and mark it used. Raises PairError."""
     path = _ext_dir() / "pending.json"
-    pending = _read_json(path)
-    entry = pending.get(code)
-    if entry is None:
-        raise PairError("invalid_code")
-    if entry.get("used"):
-        raise PairError("already_used")
-    if entry.get("expires_at", 0) < time.time():
-        raise PairError("expired")
-    entry["used"] = True
-    entry["paired_at"] = time.time()
-    pending[code] = entry
-    _write_private(path, json.dumps(pending).encode("utf-8"))
+    # The lock spans check + mark-used: without it two racing pair_init frames
+    # could both see used=False and pair against the same one-time code.
+    with _state_lock():
+        pending = _read_json(path)
+        entry = pending.get(code)
+        if entry is None:
+            raise PairError("invalid_code")
+        if entry.get("used"):
+            raise PairError("already_used")
+        if entry.get("expires_at", 0) < time.time():
+            raise PairError("expired")
+        entry["used"] = True
+        entry["paired_at"] = time.time()
+        pending[code] = entry
+        _write_private(path, json.dumps(pending).encode("utf-8"))
 
 
 def code_consumed(code: str) -> bool:
@@ -236,17 +271,18 @@ def load_pairing() -> Pairing | None:
 
 def _save_pairing(p: Pairing) -> None:
     # Preserve any v2 keyring fields (channel_keys/extchat_key) already in state.
-    data = _read_json(_state_path()) or {}
-    data.update(
-        {
-            "aes_key": b64u_encode(p.aes_key),
-            "ext_token": p.ext_token,
-            "ext_pubkey": p.ext_pubkey_b64,
-            "hermes_pubkey": p.hermes_pubkey_b64,
-            "paired_at": p.paired_at,
-        }
-    )
-    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+    with _state_lock():
+        data = _read_json(_state_path()) or {}
+        data.update(
+            {
+                "aes_key": b64u_encode(p.aes_key),
+                "ext_token": p.ext_token,
+                "ext_pubkey": p.ext_pubkey_b64,
+                "hermes_pubkey": p.hermes_pubkey_b64,
+                "paired_at": p.paired_at,
+            }
+        )
+        _write_private(_state_path(), json.dumps(data).encode("utf-8"))
 
 
 # --- v2 key ring (SPEC-v2 §1.3): per-channel Slack keys + extension-chat key ---
@@ -265,11 +301,12 @@ def load_channel_keys() -> dict[str, bytes]:
 
 
 def save_channel_key(channel_id: str, raw_key: bytes) -> None:
-    data = _read_json(_state_path()) or {}
-    ck = dict(data.get("channel_keys") or {})
-    ck[channel_id] = b64u_encode(raw_key)
-    data["channel_keys"] = ck
-    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+    with _state_lock():
+        data = _read_json(_state_path()) or {}
+        ck = dict(data.get("channel_keys") or {})
+        ck[channel_id] = b64u_encode(raw_key)
+        data["channel_keys"] = ck
+        _write_private(_state_path(), json.dumps(data).encode("utf-8"))
 
 
 def load_extchat_key() -> bytes | None:
@@ -284,9 +321,10 @@ def load_extchat_key() -> bytes | None:
 
 
 def save_extchat_key(raw_key: bytes) -> None:
-    data = _read_json(_state_path()) or {}
-    data["extchat_key"] = b64u_encode(raw_key)
-    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+    with _state_lock():
+        data = _read_json(_state_path()) or {}
+        data["extchat_key"] = b64u_encode(raw_key)
+        _write_private(_state_path(), json.dumps(data).encode("utf-8"))
 
 
 def clear_pairing() -> None:
