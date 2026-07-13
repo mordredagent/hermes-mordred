@@ -266,7 +266,10 @@ def _eip191_hash(signable: Any) -> bytes:
     """
     from eth_hash.auto import keccak
 
-    return keccak(b"\x19" + signable.version + signable.header + signable.body)
+    # bytes(...): eth-hash is untyped in the CI env (the ``ethereum`` extra isn't
+    # installed there), so keccak(...) is ``Any`` and returning it directly trips
+    # mypy --strict's no-any-return. keccak already yields bytes at runtime.
+    return bytes(keccak(b"\x19" + signable.version + signable.header + signable.body))
 
 
 def personal_sign(message: str) -> str:
