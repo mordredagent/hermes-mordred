@@ -199,7 +199,7 @@ include = ["/src", "/tests", "/README.md", "/LICENSE", "/pyproject.toml", "/nati
 # native helper crates (native/tpmkey-helper/.gitignore, sekey-helper's), so a
 # local build from a checkout that has compiled the helpers vacuums the build
 # artifacts into the sdist (~26 MB of cargo target/ observed vs ~770 KB clean;
-# 2026-07-08 release note, CI.md §通常リリース). CI's clean checkouts never
+# 2026-07-08 release note, CI.md §Normal release). CI's clean checkouts never
 # hit this, but exclude them explicitly so local and CI sdists are identical.
 exclude = [
   "native/tpmkey-helper/target",

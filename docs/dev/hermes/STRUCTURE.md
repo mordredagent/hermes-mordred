@@ -86,12 +86,12 @@ hermes-agent/
 
 ## Per-directory notes
 
-Each entry is sourced from the directory's `README.md` or top `__init__.py` docstring where present; entries marked **(要確認)** lack an inline source and should be verified before quoting.
+Each entry is sourced from the directory's `README.md` or top `__init__.py` docstring where present; entries marked **(needs verification)** lack an inline source and should be verified before quoting.
 
 ### Core agent + protocol surface
 
-- **`acp_adapter/`** — ACP (Agent Client Protocol) server enabling VS Code / Zed / JetBrains integration: `server.py`, `session.py`, `auth.py`, `events.py`, `permissions.py`, `tools.py`, `entry.py`. (要確認: README absent.)
-- **`acp_registry/`** — ACP registry static artifacts: `agent.json`, `icon.svg`. (要確認: README absent.)
+- **`acp_adapter/`** — ACP (Agent Client Protocol) server enabling VS Code / Zed / JetBrains integration: `server.py`, `session.py`, `auth.py`, `events.py`, `permissions.py`, `tools.py`, `entry.py`. (needs verification: README absent.)
+- **`acp_registry/`** — ACP registry static artifacts: `agent.json`, `icon.svg`. (needs verification: README absent.)
 - **`agent/`** — Agent internals: prompt building (`prompt_builder.py`), context engine (`context_engine.py`, `context_compressor.py`, `context_references.py`), memory (`memory_manager.py`, `memory_provider.py`), model metadata (`model_metadata.py`, `models_dev.py`), retry / error classification (`retry_utils.py`, `error_classifier.py`), provider adapters (`anthropic_adapter.py`, `bedrock_adapter.py`, `gemini_*`, `codex_responses_adapter.py`, `lmstudio_reasoning.py`), trajectory (`trajectory.py`), redaction (`redact.py`), display / onboarding (`display.py`, `onboarding.py`).
   - **`agent/transports/`** — Transport-level wire formats: `anthropic.py`, `bedrock.py`, `chat_completions.py`, `codex.py`, plus `base.py` and shared `types.py`.
 - **`gateway/`** — Multi-platform messaging gateway: session orchestration (`session.py`, `session_context.py`), hooks dispatch (`hooks.py`), runtime (`run.py`), pairing / restart / mirror (`pairing.py`, `restart.py`, `mirror.py`), platform registry (`platform_registry.py`), delivery / display config / status, sticker cache, WhatsApp identity glue.
@@ -123,7 +123,7 @@ Each entry is sourced from the directory's `README.md` or top `__init__.py` docs
 - **`tools/`** — Built-in tool implementations: browser providers (`browser_camofox`, `browser_cdp_tool`, `browser_supervisor`), file/shell/MCP/voice/image/discord/feishu/yuanbao tools, plus `registry.py` (auto-discovery), `path_security.py`, `url_safety.py`, `tirith_security.py`, `osv_check.py`. Tool files self-register at import time via `registry.register()`.
   - **`tools/environments/`** — Terminal backends: local, docker, ssh, modal, daytona, singularity, vercel.
 - **`environments/`** — Evaluation / RL environments (`hermes_base_env.py`, `agent_loop.py`, `web_research_env.py`, `agentic_opd_env.py`) + benchmarks, SWE, terminal subenvs.
-- **`tinker-atropos/`** — Tinker / Atropos RL training integration. (要確認: README absent at root, contents not yet inventoried in this pass.)
+- **`tinker-atropos/`** — Tinker / Atropos RL training integration. (needs verification: README absent at root, contents not yet inventoried in this pass.)
 
 ### UI / surfaces
 
@@ -171,7 +171,7 @@ Each entry is sourced from the directory's `README.md` or top `__init__.py` docs
 - `AGENTS.md` — Development guide for AI coding assistants and contributors (canonical contributor reference).
 - `README.md` / `README.zh-CN.md` — Project intro.
 - `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`, `MANIFEST.in`.
-- `hermes-already-has-routines.md` — Historical note. (要確認.)
+- `hermes-already-has-routines.md` — Historical note. (needs verification.)
 - `RELEASE_v0.{2..12}.0.md` — Historical release notes; intentionally out of scope for this map.
 
 ---

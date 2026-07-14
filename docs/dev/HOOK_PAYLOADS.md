@@ -1,26 +1,26 @@
 # Mordred — Hermes Hook Payload Verification Reference
 
-> **Status**: Phase 0.8 source-code verification (2026-05-10、 PR `docs/mordred-hermes-phase0.8-hook-verify`).
-> **Source of truth**: `hermes-agent` v0.11.0 (release date 2026-04-23) installed at `~/.hermes/hermes-agent/`、 which is what `mordred-hermes`'s `hermes-agent>=0.11.0` resolves to.
-> **Drift watch**: `./hermes_cli/` at the repo root is an **un-tracked v0.12.0 preview clone** kept for development convenience. Findings here are anchored to v0.11.0; cross-version drift is monitored by `.github/workflows/upstream-check.yml` (週次 月曜 03:00 UTC).
+> **Status**: Phase 0.8 source-code verification (2026-05-10, PR `docs/mordred-hermes-phase0.8-hook-verify`).
+> **Source of truth**: `hermes-agent` v0.11.0 (release date 2026-04-23) installed at `~/.hermes/hermes-agent/`, which is what `mordred-hermes`'s `hermes-agent>=0.11.0` resolves to.
+> **Drift watch**: `./hermes_cli/` at the repo root is an **un-tracked v0.12.0 preview clone** kept for development convenience. Findings here are anchored to v0.11.0; cross-version drift is monitored by `.github/workflows/upstream-check.yml` (weekly Monday 03:00 UTC).
 
 ---
 
 ## Why this doc exists
 
-`docs/dev/TODO.md` §0.8 (Phase 0 acceptance gate の最後の未消化項目) は **「Hermes hook payload を実コードで verify」**。 Phase 1.1 / 2.1 / 3.1 の plugin 実装は payload 形状と return 形式に依存するため、 ここで 1 箇所に findings を集約する。
+`docs/dev/TODO.md` §0.8 (Phase 0 acceptance gate's final unresolved items) is **"Verify Hermes hook payload with real code"**. Phase 1.1 / 2.1 / 3.1 plugin implementations depend on payload shape and return format, so we consolidate findings in one place here.
 
-Findings は すべて **`~/.hermes/hermes-agent/`** (v0.11.0) を読んだ結果。 行番号は v0.11.0 anchored — 上流が rev する度に CI (`upstream-check.yml`) が VALID_HOOKS 集合の drift を検知し issue を起票する。 行番号 drift は本ドキュメントの bump で吸収する。
+All findings are the result of reading **`~/.hermes/hermes-agent/`** (v0.11.0). Line numbers are anchored to v0.11.0 — each time upstream revs, CI (`upstream-check.yml`) detects drift in the VALID_HOOKS set and files an issue. Line number drift is absorbed by bumping this document.
 
 ---
 
-## 1. `VALID_HOOKS` 集合と hook 順序保証
+## 1. `VALID_HOOKS` set and hook ordering guarantee
 
 **Source**: `hermes_cli/plugins.py` L60-96 (v0.11.0)
 
 16 hooks: `pre_tool_call`, `post_tool_call`, `transform_terminal_output`, `transform_tool_result`, `pre_llm_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `subagent_stop`, `pre_gateway_dispatch`, `pre_approval_request`, `post_approval_response`.
 
-**Hook 順序保証** (`PluginManager.invoke_hook()` at L968-1002):
+**Hook ordering guarantee** (`PluginManager.invoke_hook()` at L968-1002):
 - Callbacks are invoked in **registration order** (`for cb in callbacks` over a list built by `register_hook()` at L463: `self._manager._hooks.setdefault(hook_name, []).append(callback)`).
 - **No priority system**.
 - Plugin **load order** (and therefore registration order on each hook):
@@ -37,7 +37,7 @@ Findings は すべて **`~/.hermes/hermes-agent/`** (v0.11.0) を読んだ結�
 - A Mordred plugin loaded via entry-point but absent from `plugins.enabled` is recorded with `enabled=False` and **`register()` is not called**.
 - `hermes mordred upgrade` (Phase 1.3) **must** add the 5 keys (`mordred_network`, `mordred_privacy_check`, `mordred_llm_guard`, `mordred_keyvault`, `mordred_wizard`) to `plugins.enabled` for the system to function.
 
-## 2. Plugin disable detection (`hermes plugins list --disabled` 相当 API)
+## 2. Plugin disable detection (`hermes plugins list --disabled` equivalent API)
 
 **Source**: `hermes_cli/plugins.py` L108-121 (`_get_disabled_plugins`); `hermes_cli/plugins_cmd.py` L646-696 (`_discover_all_plugins`).
 

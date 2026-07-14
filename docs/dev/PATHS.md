@@ -1,10 +1,10 @@
 # Mordred-Owned Filesystem Paths (Hermes-base)
 
-> **Note**: 本ドキュメントは `Hermes` 基盤での Mordred 所有パスを定義します。OpenClaw 基準の旧版は `../../mordred/mordred-mvp-docs/PATHS.md` (deprecated) に残置。
+> **Note**: This document defines the Mordred-owned paths on the `Hermes` foundation. The old OpenClaw-based version remains at `../../mordred/mordred-mvp-docs/PATHS.md` (deprecated).
 
 All filesystem paths read or written by the Mordred distribution are isolated
-under `~/.hermes/mordred/` (Hermes の `get_hermes_home()` 経由で profile-aware に解決)。
-各 path には単一の owning plugin が存在し、他 plugin は内部 Python API か共有ファイル契約経由でのみアクセスする。
+under `~/.hermes/mordred/` (resolved profile-aware via Hermes's `get_hermes_home()`).
+Each path has a single owning plugin; other plugins may access it only via internal Python APIs or shared file contracts.
 
 This document is the primary reference per TODO.md §0.3. After plugin
 scaffolding (TODO.md §0.4), a summary of each entry is also duplicated into
@@ -16,23 +16,23 @@ the owning plugin's `README.md`.
 | ------------------------------------- | --------------------------------- | ----------------------------- | --------------------------------- |
 | `~/.hermes/mordred/audit.log`         | `mordred_privacy_check` (Phase 1) | privacy_check (single writer) | wizard (`audit tail/grep`)        |
 | `~/.hermes/mordred/policy.json`       | `mordred_privacy_check` (Phase 1) | `mordred_wizard`              | privacy_check, llm_guard, network |
-| `~/.hermes/mordred/credentials/`      | `mordred_network` (Phase 3)       | `mordred_wizard`              | (現状なし — write-only)             |
+| `~/.hermes/mordred/credentials/`      | `mordred_network` (Phase 3)       | `mordred_wizard`              | (none currently — write-only)     |
 | `~/.hermes/mordred/tor-data/`         | `mordred_network` (Phase 3)       | bundled `tor` process         | bundled `tor` process             |
-| `~/.hermes/mordred/keyvault/`         | `mordred_keyvault` (Phase 4)      | keyvault (single writer)      | keyvault のみ                       |
+| `~/.hermes/mordred/keyvault/`         | `mordred_keyvault` (Phase 4)      | keyvault (single writer)      | keyvault only                      |
 
 Hermes config integration:
 
-- `~/.hermes/config.yaml` の `plugins.mordred_*` セクションが canonical な policy 入力 (wizard が編集)
-- `~/.hermes/.env` に Mordred 用の API キーを置く場合は `MORDRED_*` プレフィックスで統一
+- The `plugins.mordred_*` section of `~/.hermes/config.yaml` is the canonical policy input (edited by the wizard)
+- When placing API keys for Mordred in `~/.hermes/.env`, use the `MORDRED_*` prefix consistently
 
 ---
 
 ## `~/.hermes/mordred/audit.log`
 
 **Owning plugin**: `mordred_privacy_check` (Phase 1)
-**Purpose**: Access-controlled (mode `0600`)、 append-only auditable record of policy decisions, network-path switches, and keyvault operations.
+**Purpose**: Access-controlled (mode `0600`), append-only auditable record of policy decisions, network-path switches, and keyvault operations.
 
-> **H4 caveat**: v1 は **tamper-evident ではない**。 file mode `0600` は access control であって tamper detection ではない。 同一 UID で動く任意のプロセスが log を書き換えても痕跡は残らない。 tamper evidence (per-entry HMAC chain、 chain-key を keyvault DEK で wrap) は v2 で導入予定 (下記 §Tamper detection roadmap、 SPEC.md §Threat Model "does NOT defend against" 参照)。
+> **H4 caveat**: v1 is **not tamper-evident**. File mode `0600` provides access control, not tamper detection. Any process running under the same UID can rewrite the log without leaving a trace. Tamper evidence (a per-entry HMAC chain, with the chain key wrapped by the keyvault DEK) is planned for v2 (see §Tamper detection roadmap below and SPEC.md §Threat Model "does NOT defend against").
 
 ### File contract
 
@@ -57,24 +57,25 @@ Hermes config integration:
 
 Audit entries carry the following fields:
 
-- `ts`: ISO 8601 UTC timestamp (例: `2026-04-29T12:34:56.000Z`)
-- `event`: hook name (`pre_install` ラッパ呼び出し時 / `pre_tool_call` /
+- `ts`: ISO 8601 UTC timestamp (e.g. `2026-04-29T12:34:56.000Z`)
+- `event`: hook name (at `pre_install` wrapper invocation / `pre_tool_call` /
   `pre_llm_call` / `network_use` / `keyvault_*` / ...)
 - `decision`: `allow` | `block` | `override` | `warn`
-- `reason`: 固定 enum コード — canonical な完全リストは
-  [`POLICY.md` §Audit log `reason` enum (frozen)](./POLICY.md) と
+- `reason`: a fixed enum code — the canonical, complete list is
+  [`POLICY.md` §Audit log `reason` enum (frozen)](./POLICY.md) and
   `src/mordred_hermes/privacy_check/_audit_reasons.py:ReasonCode`
-  (typed `Literal`、 mypy で drift 検知)。 Phase 1 step-0 freeze 以降、 Phase 2
-  PR2 / Phase 3 PR1 / Phase 4 PR2 で incremental に追加 (16 codes Phase 1-3 +
-  Phase 4 PR2 `keyvault.recovery_digest_mismatch` /
-  `keyvault.seed_display_aborted_screenshot` を含む)
-- `origin_skill?`: `{ id, version? }` — Hermes `pre_tool_call` payload に含まれている場合のみ
+  (typed `Literal`, drift-checked by mypy). Added incrementally since the
+  Phase 1 step-0 freeze, across Phase 2 PR2 / Phase 3 PR1 / Phase 4 PR2
+  (16 codes across Phase 1-3, plus Phase 4 PR2's
+  `keyvault.recovery_digest_mismatch` /
+  `keyvault.seed_display_aborted_screenshot`)
+- `origin_skill?`: `{ id, version? }` — only when included in the Hermes `pre_tool_call` payload
 - arbitrary event-specific fields (`tool_name`, `provider_override`, `path`, ...)
 
 ### Writer layer
 
-- Single-writer 実装は `plugins/mordred_privacy_check/audit.py` (Python)
-- Writer 抽象は `class Writer(Protocol): def append(self, entry: dict) -> None: ...`
+- The single-writer implementation is `plugins/mordred_privacy_check/audit.py` (Python)
+- The Writer abstraction is `class Writer(Protocol): def append(self, entry: dict) -> None: ...`
   - Phase 1: identity Writer (plaintext NDJSON)
   - Phase 4: factory swap to AES-GCM Writer in
     `plugins/mordred_keyvault/log_encryption.py`
@@ -88,23 +89,23 @@ Audit entries carry the following fields:
 
 ### Tamper detection roadmap (v2)
 
-v1 は tamper-evident ではない (上記 H4 caveat 参照)。 v2 で以下を追加予定:
+v1 is not tamper-evident (see the H4 caveat above). Planned additions for v2:
 
-- **Per-entry HMAC chain**: 各 NDJSON entry に `hmac` field を追加。 `hmac_n = HMAC-SHA256(chain_key, hmac_{n-1} || entry_n_canonical_json)`。 entry を後から書き換えると以降の HMAC が検証不能になる
-- **Chain key の保護**: `chain_key` は Phase 4 keyvault の DEK で wrap し `~/.hermes/mordred/audit.chain.wrap` に保存。 Hermes process 起動時に Secure Enclave authorization で unwrap、 メモリ常駐
-- **検証 CLI**: `hermes mordred audit verify [--from YYYY-MM-DD] [--to YYYY-MM-DD]` で chain を re-walk し anomaly を report
-- **Phase 4 dependency**: chain_key の安全な保管が前提。 Phase 4 keyvault が macOS-only である間、 Linux/WSL2 ユーザは tamper-detection も get できない (master-password Tier 3 が来る `v2-OS2` まで)
+- **Per-entry HMAC chain**: Add an `hmac` field to each NDJSON entry. `hmac_n = HMAC-SHA256(chain_key, hmac_{n-1} || entry_n_canonical_json)`. Rewriting an entry after the fact makes every subsequent HMAC unverifiable
+- **Chain key protection**: The `chain_key` is wrapped with the Phase 4 keyvault's DEK and stored at `~/.hermes/mordred/audit.chain.wrap`. It is unwrapped via Secure Enclave authorization at Hermes process startup and kept resident in memory
+- **Verification CLI**: `hermes mordred audit verify [--from YYYY-MM-DD] [--to YYYY-MM-DD]` re-walks the chain and reports anomalies
+- **Phase 4 dependency**: Presupposes secure storage of the chain_key. While the Phase 4 keyvault remains macOS-only, Linux/WSL2 users cannot get tamper detection either (until master-password Tier 3 arrives in `v2-OS2`)
 
-実装は v2 で着手。 v1 では `0600` access control + Phase 4 audit log encryption (rewrite を 1 entry 単位で困難化) が暫定的な防御。
+Implementation begins in v2. In v1, `0600` access control plus Phase 4 audit log encryption (which makes per-entry rewriting harder) serve as the interim defense.
 
 ### Multi-process write contention (v1 limitation, M1)
 
-`hermes mordred install <skill>` は wizard-CLI として **session process とは別プロセス** で audit entry を書く設計。 v1 は単一プロセスの in-process queue で serialize する前提なので、 別プロセスの write が並行した場合 NDJSON の interleave / 部分書き込みが起こりうる。
+`hermes mordred install <skill>` is designed so that the wizard-CLI writes audit entries from **a process separate from the session process**. Since v1 assumes serialization via a single-process in-process queue, concurrent writes from a separate process can cause NDJSON interleaving / partial writes.
 
-- **検出**: `hermes mordred audit verify` (v2) で line ごとの JSON parse を試み、 失敗行を `corrupted=true` で report
-- **暫定対応 (v1)**: 各 writer が `os.O_APPEND` mode で open + 1 line ごとに `write()` 1 回 (POSIX `O_APPEND` の atomic guarantee に依存、 PIPE_BUF 4 KiB 以下なら interleave しない)。 entry が PIPE_BUF を超える稀ケースでは破損リスク残る
-- **完全解決 (v2)**: Unix domain socket 経由の単一 daemon writer、 または `fcntl.flock` による排他ロック。 v2 で再評価
-- **運用上の注意**: `hermes mordred install` 実行中は session process で並行 audit-emitting 動作 (大量の `pre_tool_call` 等) を避ける。 install は単発 / 短時間 op なので衝突確率は実用上低い
+- **Detection**: `hermes mordred audit verify` (v2) attempts a JSON parse per line and reports failing lines with `corrupted=true`
+- **Interim mitigation (v1)**: Each writer opens the file in `os.O_APPEND` mode and issues one `write()` call per line (relying on POSIX `O_APPEND`'s atomicity guarantee; no interleaving occurs as long as the entry is under the PIPE_BUF 4 KiB limit). Corruption risk remains in the rare case where an entry exceeds PIPE_BUF
+- **Full resolution (v2)**: A single daemon writer over a Unix domain socket, or exclusive locking via `fcntl.flock`. To be re-evaluated in v2
+- **Operational note**: Avoid concurrent audit-emitting activity in the session process (e.g., a large volume of `pre_tool_call`) while `hermes mordred install` is running. Since install is a one-off, short-duration operation, the collision probability is practically low
 
 ### Cross-references
 
@@ -122,17 +123,17 @@ v1 は tamper-evident ではない (上記 H4 caveat 参照)。 v2 で以下を�
 
 ### Purpose
 
-Effective merged policy snapshot。canonical source は
-`~/.hermes/config.yaml` の `plugins.mordred_*` セクション。
-`policy.json` は wizard が書き出す debugable な mirror で一貫した shape を持つ。
+Effective merged policy snapshot. The canonical source is the
+`plugins.mordred_*` section of `~/.hermes/config.yaml`.
+`policy.json` is a debuggable mirror written out by the wizard, with a consistent shape.
 
 ### File contract
 
-- **Format**: JSON (UTF-8, 2-space indent)。Not YAML (人手編集を想定しない、これは mirror 出力)
+- **Format**: JSON (UTF-8, 2-space indent). Not YAML (not intended for manual editing — this is a mirror output)
 - **File mode**: `0600`
-- **Write exclusivity**: wizard が単独 writer。privacy_check は read-only
-- **Reload**: `hermes mordred policy reload` (内部関数呼び出し、 fs watcher は v1 で導入しない)
-- **設定の正本**: `~/.hermes/config.yaml` の `plugins.mordred_*` セクションを wizard が `ruamel.yaml` round-trip で編集 (コメント・キー順を保持)。`policy.json` はその scrubbed snapshot
+- **Write exclusivity**: the wizard is the sole writer. privacy_check is read-only
+- **Reload**: `hermes mordred policy reload` (an internal function call; a fs watcher is not introduced in v1)
+- **Canonical configuration**: The wizard edits the `plugins.mordred_*` section of `~/.hermes/config.yaml` via a `ruamel.yaml` round-trip (preserving comments and key order). `policy.json` is a scrubbed snapshot of that.
 
 ### Schema sketch (Phase 1)
 
@@ -148,7 +149,7 @@ Effective merged policy snapshot。canonical source は
   "tor_binary_path": "...",
   "tor_socks_port": 9050,
   "tor_control_port": 9051,
-  "mullvad_account_id_ref": "MORDRED_MULLVAD_ACCOUNT (env var ref, 値は ~/.hermes/.env から)",
+  "mullvad_account_id_ref": "MORDRED_MULLVAD_ACCOUNT (env var ref, value comes from ~/.hermes/.env)",
   "mullvad_killswitch": true,
   "mullvad_relay_country": "auto",
   "no_proxy": ["localhost", "127.0.0.1", "::1"],
@@ -157,11 +158,11 @@ Effective merged policy snapshot。canonical source は
 }
 ```
 
-Full schema reference は [`POLICY.md §\`plugins.mordred_privacy_check\` config schema`](./POLICY.md) を canonical source とする (Phase 1.1 / 2026-05-10 で landed)。 Phase 3 `disable_ipv6` 拡張 (2026-05-14) も同 doc §`policy.json` Phase 3 fields に追記済み。
+The full schema reference treats [`POLICY.md §\`plugins.mordred_privacy_check\` config schema`](./POLICY.md) as the canonical source (landed in Phase 1.1 / 2026-05-10). The Phase 3 `disable_ipv6` extension (2026-05-14) has also been added to that doc's §`policy.json` Phase 3 fields.
 
 ### Defaults
 
-- 新規 `configure` および既存環境 `upgrade` の default は `policy=lenient` (SPEC story 1; PLAN §1.1 configSchema)
+- The default for new `configure` and existing-environment `upgrade` is `policy=lenient` (SPEC story 1; PLAN §1.1 configSchema)
 
 ### Consumer CLI
 
@@ -181,24 +182,24 @@ Full schema reference は [`POLICY.md §\`plugins.mordred_privacy_check\` config
 ## `~/.hermes/mordred/credentials/`
 
 **Owning plugin**: `mordred_network` (Phase 3)
-**Writer**: `mordred_wizard` (`hermes mordred configure` Phase 3 質問時)
-**Readers**: 現状なし — このファイルは **write-only**。 `mordred_wizard` が書き出すが、 `network/` 配下のどのモジュールも `credentials/network.json` を読まない (`mordred_network` は Mullvad 設定を `policy.json` から読む — `network/__init__.py:270-276`)。 runtime reader は未実装で、 将来の Phase で wire される。
+**Writer**: `mordred_wizard` (during `hermes mordred configure` Phase 3 questions)
+**Readers**: none currently — this file is **write-only**. `mordred_wizard` writes it, but no module under `network/` reads `credentials/network.json` (`mordred_network` reads Mullvad settings from `policy.json` instead — `network/__init__.py:270-276`). A runtime reader is not yet implemented and will be wired up in a future phase.
 
 ### Purpose
 
-Phase 3 で必要な Mullvad アカウント番号、Tor binary path、 等の機密情報を保管。Phase 4 が利用可能になったら `mordred_keyvault` 経由で AES-GCM 暗号化に移行可能 (interface は `Writer` 抽象と類似のもの)。
+Stores sensitive information needed in Phase 3, such as the Mullvad account number and Tor binary path. Once Phase 4 becomes available, this can migrate to AES-GCM encryption via `mordred_keyvault` (the interface is similar to the `Writer` abstraction).
 
 ### File contract
 
 - **Directory mode**: `0700`
 - **File mode**: `0600`
 - **Phase 3**: plaintext JSON `~/.hermes/mordred/credentials/network.json`
-- **Phase 4**: 同 path で encrypted (DEK は keyvault wrapping)
-- **Alternative**: シンプルな機密 (例: Mullvad アカウント番号) は `~/.hermes/.env` に `MORDRED_MULLVAD_ACCOUNT=...` として置き、`policy.json` から env var ref で参照
+- **Phase 4**: encrypted at the same path (DEK is keyvault-wrapped)
+- **Alternative**: Simple secrets (e.g., the Mullvad account number) are placed in `~/.hermes/.env` as `MORDRED_MULLVAD_ACCOUNT=...` and referenced from `policy.json` via an env var ref
 
-### Schema sketch (v1、 Phase 3 PR3a / 2026-05-14 で確定)
+### Schema sketch (v1, finalized in Phase 3 PR3a / 2026-05-14)
 
-実装は `wizard/credentials_writer.py::JSONCredentialsWriter` (canonical) — env-var REFERENCES only:
+The implementation is `wizard/credentials_writer.py::JSONCredentialsWriter` (canonical) — env-var REFERENCES only:
 
 ```json
 {
@@ -210,10 +211,10 @@ Phase 3 で必要な Mullvad アカウント番号、Tor binary path、 等の�
 }
 ```
 
-- 実 secret (16 桁アカウント番号) は `~/.hermes/.env` の `MORDRED_MULLVAD_ACCOUNT=...` (`wizard/env_file_writer.py::DotEnvFileWriter` が単独 writer、 mode `0600` / parent dir `0700`)
-- `credentials/network.json` は env-var 参照のみ保持 (POLICY.md §Mullvad credential indirection 参照)。 secret 形 (大文字英数字 etc.) の値が書かれた場合 `JSONCredentialsWriter` が `ValueError` で reject
-- Tor 関連の **設定値** (binary path、 SOCKS port、 control port) は **`policy.json`** 側に置き、 本 credentials/ には含めない (Phase 3 PR3a)。 Tor の data directory については、 *path 値* が config から参照されることはあっても、 ディレクトリ実体は Mordred 所有のファイルシステム位置であり、 本 doc の §`~/.hermes/mordred/tor-data/` に独立した owned path として記載する
-- Phase 4 で `mordred_keyvault` 経由の AES-GCM 暗号化に移行可能だが、 上記 v1 fields は env-var ref / advisory 設定のみで secret material を含まないため、 移行優先度は低い
+- The actual secret (a 16-digit account number) lives in `~/.hermes/.env` as `MORDRED_MULLVAD_ACCOUNT=...` (`wizard/env_file_writer.py::DotEnvFileWriter` is the sole writer, mode `0600` / parent dir `0700`)
+- `credentials/network.json` holds only env-var references (see POLICY.md §Mullvad credential indirection). If a value in secret-like form (uppercase alphanumeric, etc.) is written, `JSONCredentialsWriter` rejects it with a `ValueError`
+- Tor-related **configuration values** (binary path, SOCKS port, control port) live on the **`policy.json`** side and are not included in this credentials/ (Phase 3 PR3a). As for Tor's data directory, even though a *path value* may be referenced from config, the directory itself is a filesystem location owned by Mordred, and it is documented as an independent owned path in §`~/.hermes/mordred/tor-data/` of this doc
+- Migration to AES-GCM encryption via `mordred_keyvault` is possible in Phase 4, but since the v1 fields above contain only env-var refs / advisory settings and no secret material, migration priority is low
 
 ### Cross-references
 
@@ -226,18 +227,18 @@ Phase 3 で必要な Mullvad アカウント番号、Tor binary path、 等の�
 ## `~/.hermes/mordred/tor-data/`
 
 **Owning plugin**: `mordred_network` (Phase 3)
-**Writer**: bundled `tor` プロセス (Mordred が spawn する Tor サブプロセス)
-**Readers**: bundled `tor` プロセス
+**Writer**: the bundled `tor` process (a Tor subprocess spawned by Mordred)
+**Readers**: the bundled `tor` process
 
 ### Purpose
 
-`mordred_network` が起動する bundled Tor プロセスの DataDirectory。 Tor の `torrc` の `DataDirectory` ディレクティブにこのパスが渡され、 Tor 自身が consensus キャッシュ・鍵・状態ファイルをここに書き出す。 Mordred のコードはこのディレクトリの中身を直接 read/write しない — 所有はするが、 操作するのは Tor プロセスのみ。
+The DataDirectory of the bundled Tor process started by `mordred_network`. This path is passed to the `DataDirectory` directive in Tor's `torrc`, and Tor itself writes its consensus cache, keys, and state files here. Mordred's code does not directly read/write the contents of this directory — it owns the path, but only the Tor process operates on it.
 
 ### File contract
 
-- **Path 値**: `RuntimeConfig.tor_data_dir`。 `network/__init__.py:130` で `HERMES_BASE / "mordred" / "tor-data"` として解決され (`network/runtime.py:99` が `RuntimeConfig` の default を定義)、 path bring-up 時に `network/runtime.py:441,468,480` で `render_torrc` / `TorHandle` に渡される
-- **Created**: `mordred_network` が初めて Tor path を bring-up した時に Tor プロセスが作成する
-- **Lifecycle**: Tor プロセスが管理。 Mordred は path 値の供給のみ担当
+- **Path value**: `RuntimeConfig.tor_data_dir`. Resolved as `HERMES_BASE / "mordred" / "tor-data"` in `network/__init__.py:130` (with `network/runtime.py:99` defining the `RuntimeConfig` default), and passed to `render_torrc` / `TorHandle` at `network/runtime.py:441,468,480` during path bring-up
+- **Created**: created by the Tor process the first time `mordred_network` brings up the Tor path
+- **Lifecycle**: managed by the Tor process. Mordred is responsible only for supplying the path value
 
 ### Cross-references
 
@@ -250,9 +251,8 @@ Phase 3 で必要な Mullvad アカウント番号、Tor binary path、 等の�
 
 **Owning plugin**: `mordred_keyvault` (Phase 4)
 **Writer**: keyvault plugin only (single writer)
-**Readers**: keyvault plugin only。他 plugin は内部 Python API
-`mordred_keyvault.api.{generate,encrypt,decrypt,export_backup,import_backup,verify_digest}`
-経由でアクセス。
+**Readers**: keyvault plugin only. Other plugins access it only via the internal Python API
+`mordred_keyvault.api.{generate,encrypt,decrypt,export_backup,import_backup,verify_digest}`.
 
 ### Purpose
 
@@ -261,18 +261,18 @@ Local persistence of keyvault state:
 - wrapping-key identifiers (handles into Secure Enclave)
 - wrapped DEK ciphertext
 - metadata (key-ID list, generation timestamps, initial digest commitment)
-- backup export 用の temporary file (作成直後に削除)
+- temporary file for backup export (deleted immediately after creation)
 
-**Important**: plaintext Seed Phrase / Passphrase / PoW / unwrapped DEK は
-**never** disk persisted。memory のみ (Seed display は 60 秒で自動消去)。
+**Important**: the plaintext Seed Phrase / Passphrase / PoW / unwrapped DEK is
+**never** persisted to disk. Memory only (Seed display auto-clears after 60 seconds).
 
 ### File contract
 
 - **Directory mode**: `0700` (owner-only access)
 - **Subordinate file mode**: `0600`
-- **Created**: `mordred_keyvault.api.generate` 初回呼び出し時
-- **Deleted**: ユーザが明示的に `hermes mordred keyvault reset` (TBD) を実行した時のみ
-- **Encryption**: ディレクトリ内の wrapped DEK は Secure-Enclave-backed wrapping key で保護。Unwrap は `Security.framework` 経由のみ可能
+- **Created**: on the first call to `mordred_keyvault.api.generate`
+- **Deleted**: only when the user explicitly runs `hermes mordred keyvault reset` (TBD)
+- **Encryption**: the wrapped DEK inside the directory is protected by a Secure-Enclave-backed wrapping key. Unwrapping is only possible via `Security.framework`
 
 ### Expected substructure (Phase 4 PR4 step-0 freeze, 2026-05-15 — codex H3 / H4 corrected)
 
@@ -314,8 +314,8 @@ Authoritative definitions live in SPEC.md §"PR4 API contract & MREN envelope wi
 
 ### Pre-Phase-4 behavior
 
-- Phase 1-3 では `~/.hermes/mordred/keyvault/` は **作成されない**
-- `mordred_privacy_check` の skill install ガードは Phase 1 で `metadata.mordred.requires_keyvault: true` を decision record にパースするが、enforcement は Phase 4 で wired (TODO.md §1.1)
+- In Phase 1-3, `~/.hermes/mordred/keyvault/` is **not created**
+- The `mordred_privacy_check` skill install guard parses `metadata.mordred.requires_keyvault: true` into the decision record in Phase 1, but enforcement is wired in Phase 4 (TODO.md §1.1)
 
 ### Cross-references
 
@@ -325,26 +325,26 @@ Authoritative definitions live in SPEC.md §"PR4 API contract & MREN envelope wi
 
 ---
 
-## OpenClaw 旧パスからの migration
+## Migration from legacy OpenClaw paths
 
-`hermes mordred upgrade` は OpenClaw 時代の `~/.openclaw/mordred/` を検出した場合、以下のように移行する (Story 1.5)。 各エントリは衝突解決ポリシー (H5) を明示する:
+When `hermes mordred upgrade` detects `~/.openclaw/mordred/` from the OpenClaw era, it migrates as follows (Story 1.5). Each entry specifies its conflict-resolution policy (H5):
 
-| 旧パス (OpenClaw) | 新パス (Hermes) | 処理 | 衝突時の動作 (H5) |
+| Old path (OpenClaw) | New path (Hermes) | Processing | Behavior on conflict (H5) |
 |-------------------|-------------------|------|-------------------|
-| `~/.openclaw/mordred/audit.log` | `~/.hermes/mordred/audit.log` | append (旧 entries → 新 file 末尾)、 旧パスは保持しユーザが手動削除 | **append-by-timestamp-window**: 新 file が空 or 最古 `ts` が旧 file の最新 `ts` より新しい場合のみ append、 範囲が overlap する場合は abort し `--audit-merge=skip\|append-all\|abort` の明示指定を要求。 default は abort (再度 upgrade を防ぐため、 idempotent rerun は marker file `~/.hermes/mordred/.audit-migrated-from-openclaw` で skip 判定) |
-| `~/.openclaw/mordred/policy.json` | `~/.hermes/mordred/policy.json` + `~/.hermes/config.yaml` の `plugins.mordred_*` | 値を re-shape して書き込み | **diff + prompt** (Story 1 と同じ)、 `--reset` で強制上書き、 batch / CI 環境では `--policy-conflict=keep-existing\|overwrite\|abort` を明示指定 (default abort) |
-| `~/.openclaw/mordred/keyvault/` | `~/.hermes/mordred/keyvault/` | コピー (Phase 4 のみ。Secure Enclave wrapping key は同 machine ならそのまま使える、別 machine の場合は `import_backup` 経由) | **never overwrite**: 新 path が既に存在する場合は abort (key material の上書きは破壊的)、 ユーザが手動で旧 key の `export_backup` → 新 machine `import_backup` フローを取る必要あり |
-| `~/.openclaw/credentials/mordred-network.json` | `~/.hermes/mordred/credentials/network.json` | コピー、必要に応じて env var 参照に分解 | **never overwrite**: 新 path 既存時は abort、 マニュアル merge を要求 |
-| `~/.openclaw/openclaw.json` の `plugins.entries.mordred-*.config` | `~/.hermes/config.yaml` の `plugins.mordred_*` | JSON5→YAML 変換、コメント保持 (`ruamel.yaml`) | **diff + prompt** (Story 1 と同じ)、 `--reset` で強制上書き、 batch では `--policy-conflict` フラグ |
+| `~/.openclaw/mordred/audit.log` | `~/.hermes/mordred/audit.log` | append (old entries → appended to end of new file); the old path is kept and the user deletes it manually | **append-by-timestamp-window**: append only if the new file is empty or its oldest `ts` is newer than the old file's newest `ts`; if the ranges overlap, abort and require an explicit `--audit-merge=skip\|append-all\|abort` choice. Default is abort (to prevent duplicate append on a re-run, the idempotent rerun is detected via the marker file `~/.hermes/mordred/.audit-migrated-from-openclaw` and skipped) |
+| `~/.openclaw/mordred/policy.json` | `~/.hermes/mordred/policy.json` + `plugins.mordred_*` in `~/.hermes/config.yaml` | re-shape the values and write them | **diff + prompt** (same as Story 1); `--reset` forces an overwrite; in batch / CI environments, explicitly specify `--policy-conflict=keep-existing\|overwrite\|abort` (default abort) |
+| `~/.openclaw/mordred/keyvault/` | `~/.hermes/mordred/keyvault/` | copy (Phase 4 only. The Secure Enclave wrapping key can be used as-is on the same machine; on a different machine, go via `import_backup`) | **never overwrite**: abort if the new path already exists (overwriting key material is destructive); the user must manually take the old key through an `export_backup` → new-machine `import_backup` flow |
+| `~/.openclaw/credentials/mordred-network.json` | `~/.hermes/mordred/credentials/network.json` | copy, decomposing into env var references as needed | **never overwrite**: abort if the new path already exists, requiring a manual merge |
+| `plugins.entries.mordred-*.config` in `~/.openclaw/openclaw.json` | `plugins.mordred_*` in `~/.hermes/config.yaml` | JSON5→YAML conversion, preserving comments (`ruamel.yaml`) | **diff + prompt** (same as Story 1); `--reset` forces an overwrite; in batch, the `--policy-conflict` flag |
 
-**Idempotency contract (H5)**: `hermes mordred upgrade` を 2 回目に実行した時、 marker file `~/.hermes/mordred/.audit-migrated-from-openclaw` (1 回目に書かれる) が存在する場合は audit migration を skip する (no-op)。 これで同じ entries の重複 append を防ぐ。 ユーザが意図的に再実行したい場合は marker を削除するか `--reset --audit-merge=append-all` を指定。
+**Idempotency contract (H5)**: When `hermes mordred upgrade` is run a second time, if the marker file `~/.hermes/mordred/.audit-migrated-from-openclaw` (written on the first run) exists, audit migration is skipped (a no-op). This prevents duplicate appending of the same entries. If the user intentionally wants to re-run it, they should delete the marker or specify `--reset --audit-merge=append-all`.
 
-`--reset` フラグはすべての conflict-policy を `overwrite` で強制上書き (破壊的、 旧データは削除される)。 CI / 自動化環境では interactive prompt が出ない非対話モードを `--non-interactive` で要求し、 conflict-policy フラグが未指定なら fail-fast。
+The `--reset` flag forces every conflict-policy to `overwrite` (destructive — old data is deleted). In CI / automation environments, request a non-interactive mode that suppresses interactive prompts via `--non-interactive`; if a conflict-policy flag is not specified, fail fast.
 
 ---
 
 ## Access boundary discipline
 
-- Mordred plugins は他の plugin が own する path を **直接 read/write しない**。常に内部 Python API (`mordred_network.api.*`, `mordred_keyvault.api.*` 等) または共有ファイル契約 (例: wizard が audit.log を `audit tail` 経由で読む、書いているのは privacy_check) を経由する
-- Hermes core (`agent/`, `hermes_cli/`, `gateway/` 等) は Mordred-owned path を一切参照しない (zero-PR commitment、 `MIGRATION.md` §5)。 v2 で hard-enforce が必要になり vendored fork extra (`mordred-hermes[hard-lock]`、 `vendor/hermes/<version>/`) を導入した場合でも、 patch 範囲は Hermes 既存モジュールの局所変更にとどめ、 Mordred-specific id・default・recovery policy は core (vendored モジュール含む) に入れず plugin 側に保持する
-- 各 plugin の `README.md` で own する path / 内部 API を明記する責務がある (TODO.md §0.4 plugin scaffold)
+- Mordred plugins **never directly read/write** a path owned by another plugin. They always go through internal Python APIs (`mordred_network.api.*`, `mordred_keyvault.api.*`, etc.) or shared file contracts (e.g., the wizard reads audit.log via `audit tail`, while privacy_check is the one writing it)
+- Hermes core (`agent/`, `hermes_cli/`, `gateway/`, etc.) never references a Mordred-owned path at all (zero-PR commitment, `MIGRATION.md` §5). Even if hard-enforcement becomes necessary in v2 and a vendored fork extra (`mordred-hermes[hard-lock]`, `vendor/hermes/<version>/`) is introduced, the patch scope is kept to localized changes in existing Hermes modules, and Mordred-specific IDs, defaults, and recovery policy are kept on the plugin side rather than placed into core (including the vendored module)
+- Each plugin is responsible for documenting the paths it owns / its internal API in its `README.md` (TODO.md §0.4 plugin scaffold)

@@ -1,36 +1,36 @@
 # Mordred — Upstream Tracking (Hermes-base)
 
-> **Note**: 本ドキュメントは `Hermes (NousResearch/hermes-agent)` 基盤での upstream 追跡戦略を記述します。OpenClaw 基準の旧版は `../../mordred/mordred-mvp-docs/UPSTREAM.md` (deprecated) に残置。
+> **Note**: This document describes the upstream tracking strategy on the `Hermes (NousResearch/hermes-agent)` foundation. The old OpenClaw-based version remains at `../../mordred/mordred-mvp-docs/UPSTREAM.md` (deprecated).
 
-戦略の確定事項は `MIGRATION.md` §5 (`案 C + Vendored-fork escape hatch`、 zero-PR commitment、 2026-05-07 revise)。本ファイルは具体的な操作手順を記録する。
+The finalized strategy decisions are in `MIGRATION.md` §5 (`Option C + Vendored-fork escape hatch`, zero-PR commitment, revised 2026-05-07). This file records the concrete operational procedures.
 
 ## Repository position
 
-`Mordred-Hermes/` は **Hermes plugin 開発リポジトリ** (純粋な plugin bundle) であり、 Hermes upstream のフォークではない。
-配布形態は `pip install mordred-hermes` の単一パッケージ (entry-point `hermes_agent.plugins`)。
+`Mordred-Hermes/` is a **Hermes plugin development repository** (a pure plugin bundle), not a fork of the Hermes upstream.
+The distribution form is a single package via `pip install mordred-hermes` (entry-point `hermes_agent.plugins`).
 
-そのため:
+Therefore:
 
-- **Mordred 自身のコード** は `src/mordred_hermes/<plugin>/` に landing
-- **Hermes upstream** は `Mordred-Hermes/` 直下のクローンとして開発時のテストに使うだけで、 Mordred 用の git remote としては optional
-- 通常の Mordred 開発では Hermes upstream を **rebase する必要はない** (plugin のみ管理しているため)
-- v2 で **vendored fork extra** (Tier B、 §後述) を導入する場合のみ、 該当 Hermes バージョンの一部モジュールを `vendor/hermes/<version>/` にコピー保持。 plugin 配布レイアウトには影響しない
+- **Mordred's own code** lands in `src/mordred_hermes/<plugin>/`
+- **Hermes upstream** is only used as a clone directly under `Mordred-Hermes/` for testing during development; it's optional as a git remote for Mordred
+- In normal Mordred development, there is **no need to rebase** Hermes upstream (because only plugins are managed)
+- Only if the **vendored fork extra** (Tier B, described below) is introduced in v2, some modules of the relevant Hermes version are copied and kept under `vendor/hermes/<version>/`. This does not affect the plugin distribution layout
 
-この前提が成立する限り、 旧 OpenClaw 時代の "weekly rebase" や "manual handoff" は不要。
+As long as this premise holds, the "weekly rebase" and "manual handoff" from the old OpenClaw era are unnecessary.
 
 ## Zero-PR commitment
 
-**Mordred は `NousResearch/hermes-agent` 上流に PR を提出しない**。 理由は `MIGRATION.md` §5 を参照。
+**Mordred does not submit PRs upstream to `NousResearch/hermes-agent`**. See `MIGRATION.md` §5 for the rationale.
 
-- 旧 SPEC が "core seam" としていた箇所 (旧 S1–S3) は **plugin 側で吸収** する (Tier A)
-- 真に hard-enforce が必要な箇所のみ **vendored fork extra** (Tier B、 v2) で対応する
-- 上流 PR の draft 作成・提出・レビュー追跡は v1 ロードマップから完全に除去
+- The spots that the old SPEC treated as "core seams" (old S1–S3) are **absorbed on the plugin side** (Tier A)
+- Only the spots where hard-enforce is truly necessary are handled via the **vendored fork extra** (Tier B, v2)
+- Drafting, submitting, and tracking review of upstream PRs is completely removed from the v1 roadmap
 
-`PR ステータス: 提出待ち / submitted / accepted` のような追跡項目は不要。 上流の readme 文言や release ノートを参照する read-only 関係のみ維持する。
+Tracking items like `PR status: pending submission / submitted / accepted` are unnecessary. Only a read-only relationship referencing upstream's readme wording and release notes is maintained.
 
-## Optional remote (任意)
+## Optional remote
 
-Mordred 開発中に Hermes upstream の最新を追跡したい場合のみ:
+Only if you want to track the latest Hermes upstream during Mordred development:
 
 ```sh
 git remote add hermes-upstream https://github.com/NousResearch/hermes-agent.git
@@ -38,77 +38,77 @@ git fetch hermes-upstream
 git log --oneline hermes-upstream/main -5
 ```
 
-clone を fast-forward したい場合:
+If you want to fast-forward the clone:
 
 ```sh
 git fetch hermes-upstream
 git checkout main
-git merge --ff-only hermes-upstream/main   # ローカル変更が無いことを前提
+git merge --ff-only hermes-upstream/main   # assumes there are no local changes
 ```
 
-ローカルに Mordred plugin の開発ファイルがある場合、 `git stash` して `merge --ff-only` してから `git stash pop` する。
+If you have local Mordred plugin development files, `git stash` them, then `merge --ff-only`, then `git stash pop`.
 
 ## Hook signature drift detection (informational only)
 
-Hermes 上流の急速な進化に追従するため、 plugin が依存している hook payload (例: `pre_tool_call`、 `pre_llm_call`) の signature drift を CI で検知する。
+To keep up with Hermes upstream's rapid evolution, CI detects signature drift in the hook payloads (e.g., `pre_tool_call`, `pre_llm_call`) that plugins depend on.
 
-詳細は [`CI.md`](./CI.md) の `upstream-check.yml` workflow を参照。本 workflow は週次に Hermes 最新の `hermes_cli/plugins.py:VALID_HOOKS` 列挙を fetch し、 Mordred plugin が登録している hook 名と照合する。差分発生時に GitHub issue を自動起票。
+See the `upstream-check.yml` workflow in [`CI.md`](./CI.md) for details. This workflow fetches the latest `hermes_cli/plugins.py:VALID_HOOKS` enumeration from Hermes weekly, and cross-checks it against the hook names registered by Mordred plugins. When a discrepancy occurs, a GitHub issue is automatically filed.
 
-- このシグナル検知は **informational**: 上流に PR を出すためではなく、 vendored fork extra (Tier B) が必要かを判断する材料、 および Mordred plugin 側の `mordred-min-hermes-version` / `mordred-max-hermes-version` レンジを更新するためのトリガとして使う
-- 検知された drift がリリースを block することは無い
+- This signal detection is **informational**: it's not for submitting a PR upstream, but is used as material for judging whether the vendored fork extra (Tier B) is needed, and as a trigger for updating the `mordred-min-hermes-version` / `mordred-max-hermes-version` range on the Mordred plugin side
+- Detected drift never blocks a release
 
-## Privacy-lock guard (旧 HSeam-1 の置き換え)
+## Privacy-lock guard (replacement for the old HSeam-1)
 
-旧 SPEC は `plugin.yaml` に `privacy_lock: bool` フィールドを追加し、 `hermes plugins disable` 側で `--unlock` フラグを要求する小改修を Hermes 上流に PR 提出する計画だった (旧 HSeam-1)。
+The old SPEC planned to add a `privacy_lock: bool` field to `plugin.yaml` and submit a small PR upstream to Hermes requiring a `--unlock` flag on the `hermes plugins disable` side (old HSeam-1).
 
-revised 戦略では Hermes 上流に PR を提出せず、 以下の二段構えで privacy-lock を実現する:
+In the revised strategy, we do not submit a PR upstream to Hermes, and instead realize privacy-lock via the following two-tier approach:
 
-### Tier A: Plugin-side guard (v1 default、 zero core change)
+### Tier A: Plugin-side guard (v1 default, zero core change)
 
-> **2026-05-07 確定 (H3 Path B)**: Tier A は **strict mode で fail-closed (RuntimeError raise + session abort)** がデフォルト。 audit-only な仕様ではない。 SPEC.md §Plugin-disable protection §Tier A / TODO §1.1 H3 Path B と同一定義。
+> **Decided 2026-05-07 (H3 Path B)**: For Tier A, **fail-closed under strict mode (RuntimeError raise + session abort)** is the default. It is not an audit-only spec. Same definition as SPEC.md §Plugin-disable protection §Tier A / TODO §1.1 H3 Path B.
 
-- 各 Mordred plugin の `plugin.yaml` で `privacy_lock: true` を declare (Hermes 本体は当該フィールドを無視するが、 Mordred plugin 側で互いに参照する)
-- `mordred_wizard` が `hermes mordred plugins disable <plugin>` ラッパ CLI を提供し、 `mordred_*` 配下の plugin は `--unlock` フラグ無しで disable しようとした時に refuse (UX 層の defense-in-depth)
-- **各 Mordred plugin の `on_session_start` 冒頭で sibling list (`mordred_network` / `mordred_privacy_check` / `mordred_llm_guard` / `mordred_keyvault` / `mordred_wizard`) を scan**:
-  - **`policy=strict` かつ sibling が 1 つでも disable されている場合**: `RuntimeError("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` 相当の refusal exception を raise してセッション abort。 同時に audit log `mordred.degraded.disable_unprotected` (decision=`block`) を記録。 **派生クラスの選択は SPEC.md §Plugin-disable protection §Tier A の Exception propagation contract に従う** (`privacy_check` legacy = `SystemExit` 派生、 `llm_guard` 以降 = `BaseException` 直接派生)
-  - **`policy=lenient` / `off` の場合**: warning のみ (audit `mordred.degraded.disable_unprotected` (decision=`warn`) は同様に記録、 互換性確保)
-- ユーザが Hermes 標準の `hermes plugins disable mordred_*` を使えば Hermes 側の disable 自体は通るが、 **次回 strict セッション開始時に上記 fail-closed が発動して block する設計**
-- **重要 caveat**: Tier A は **次回セッション開始時** に block する。 「実行中に disable された場合の即時停止」 は v1 範囲外 (Hermes は plugin の動的 disable を session-running 中に反映しない前提、 Phase 0.8 で verify)
+- Each Mordred plugin declares `privacy_lock: true` in its `plugin.yaml` (the Hermes core ignores this field, but Mordred plugins reference it among themselves)
+- `mordred_wizard` provides the `hermes mordred plugins disable <plugin>` wrapper CLI, and plugins under `mordred_*` refuse when an attempt is made to disable them without the `--unlock` flag (defense-in-depth at the UX layer)
+- **At the start of each Mordred plugin's `on_session_start`, scan the sibling list (`mordred_network` / `mordred_privacy_check` / `mordred_llm_guard` / `mordred_keyvault` / `mordred_wizard`)**:
+  - **If `policy=strict` and even one sibling is disabled**: raise a refusal exception equivalent to `RuntimeError("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` and abort the session. At the same time, record an audit log entry `mordred.degraded.disable_unprotected` (decision=`block`). **The choice of derived class follows the Exception propagation contract in SPEC.md §Plugin-disable protection §Tier A** (`privacy_check` legacy = derives from `SystemExit`, `llm_guard` onward = derives directly from `BaseException`)
+  - **If `policy=lenient` / `off`**: warning only (the audit `mordred.degraded.disable_unprotected` (decision=`warn`) is likewise recorded, to ensure compatibility)
+- If a user uses Hermes's standard `hermes plugins disable mordred_*`, the disable itself goes through on the Hermes side, but **the design is such that the fail-closed behavior above fires and blocks at the next strict session start**
+- **Important caveat**: Tier A blocks **at the next session start**. "Immediate stop when disabled during execution" is out of scope for v1 (on the assumption that Hermes does not reflect dynamic plugin disabling while a session is running; to be verified in Phase 0.8)
 
-### Tier B: Vendored fork extra (v2、 deferred)
+### Tier B: Vendored fork extra (v2, deferred)
 
-真に hard-enforce が必要になったとき (例: Tier A の defense-in-depth では足りないと判断したとき) のみ:
+Only when hard-enforce truly becomes necessary (e.g., when it's judged that Tier A's defense-in-depth is insufficient):
 
-- `vendor/hermes/<version>/hermes_cli/plugins_cmd.py` に Hermes 該当バージョンの `plugins_cmd.py` をコピー、 `disable` 内部関数で `privacy_lock` をチェックするパッチを当てる
-- `pyproject.toml` の `[project.optional-dependencies]` に `hard-lock = ["mordred-hermes-core==<pinned>"]` 等の extra を追加 (具体的な配布形態は v2 設計時に確定)
-- ユーザは `pip install mordred-hermes[hard-lock]` で hard-enforce 版を取得
-- Hermes 特定バージョン (例: `hermes-agent==0.5.0`) に pin、 上流リリースの度にパッチを再適用
-- v1 リリースには含まれない
+- Copy the relevant Hermes version's `plugins_cmd.py` into `vendor/hermes/<version>/hermes_cli/plugins_cmd.py`, and apply a patch that checks `privacy_lock` inside the `disable` internal function
+- Add an extra such as `hard-lock = ["mordred-hermes-core==<pinned>"]` to `[project.optional-dependencies]` in `pyproject.toml` (the concrete distribution form will be finalized during v2 design)
+- Users obtain the hard-enforce version via `pip install mordred-hermes[hard-lock]`
+- Pinned to a specific Hermes version (e.g., `hermes-agent==0.5.0`); the patch is reapplied with each upstream release
+- Not included in the v1 release
 
-## Conflict resolution (もし vendored fork で衝突したら)
+## Conflict resolution (if a conflict occurs in the vendored fork)
 
-通常、 plugin-only な Mordred では衝突は発生しない (Mordred は `src/mordred_hermes/*` のみ触る、 Hermes upstream は触らない)。
+Normally, conflicts don't occur for a plugin-only Mordred (Mordred only touches `src/mordred_hermes/*`, and doesn't touch Hermes upstream).
 
-万一 v2 以降に vendored fork extra が導入された後に衝突した場合の方針:
+The policy in the unlikely event of a conflict after the vendored fork extra is introduced in v2 or later:
 
-- `src/mordred_hermes/*` の変更は **常に Mordred 側を保持**
-- `vendor/hermes/<version>/*` の Mordred パッチは Hermes 該当バージョンに pin。 Hermes 上流の新バージョンと merge せず、 別 vendored ディレクトリ (`vendor/hermes/<new-version>/`) を新規に作って migrate
-- Hermes upstream に PR を出すことは **しない** (zero-PR commitment)
+- Changes to `src/mordred_hermes/*` **always keep the Mordred side**
+- Mordred patches under `vendor/hermes/<version>/*` are pinned to the relevant Hermes version. Rather than merging with a new Hermes upstream version, create a new separate vendored directory (`vendor/hermes/<new-version>/`) and migrate into it
+- We **do not** submit a PR to Hermes upstream (zero-PR commitment)
 
 ## Future migration
 
-以下の状況になった場合は、 戦略を再評価する:
+Reevaluate the strategy if any of the following situations arise:
 
-- Mordred plugin の Tier A guard (CLI ラッパ + audit log) では defense-in-depth として不十分との判断 → **Tier B (vendored fork extra)** へ進む
-- vendored fork が複数の Hermes モジュールに広がり、 patch carry コストが過大化 → 案 B (ソフトフォーク) または案 A (ハードフォーク) を再検討
-- Mordred が独自ブランディングを強化する必要が出てきた → **案 A (ハードフォーク)** を再検討
+- A determination that the Mordred plugin's Tier A guard (CLI wrapper + audit log) is insufficient as defense-in-depth → proceed to **Tier B (vendored fork extra)**
+- The vendored fork spreads across multiple Hermes modules and the patch-carry cost becomes excessive → reconsider Option B (soft fork) or Option A (hard fork)
+- A need arises for Mordred to strengthen its independent branding → reconsider **Option A (hard fork)**
 
-その時 `MIGRATION.md` §5 を更新する。
+At that point, update `MIGRATION.md` §5.
 
 ## Quick reference
 
 - Hermes upstream URL: `https://github.com/NousResearch/hermes-agent`
-- Mordred plugin リポジトリ: `Mordred-Hermes/` (本リポジトリ)
-- Mordred 配布パッケージ: `mordred-hermes` (PyPI 予定、 v1 は plugin-only)
-- v2 候補 extra: `mordred-hermes[hard-lock]` (vendored fork、 Tier B)
-- Hermes 上流 PR ステータス: **提出しない (zero-PR commitment、 §Zero-PR commitment)**
+- Mordred plugin repository: `Mordred-Hermes/` (this repository)
+- Mordred distribution package: `mordred-hermes` (planned for PyPI; v1 is plugin-only)
+- v2 candidate extra: `mordred-hermes[hard-lock]` (vendored fork, Tier B)
+- Hermes upstream PR status: **Not submitted (zero-PR commitment, §Zero-PR commitment)**
