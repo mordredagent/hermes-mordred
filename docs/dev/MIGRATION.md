@@ -1,229 +1,229 @@
-# Mordred — OpenClaw → Hermes 移行ガイド (叩き台 / DRAFT)
+# Mordred — OpenClaw → Hermes Migration Guide (Draft)
 
-> このファイルは、`mordred-mvp-docs` を `OpenClaw` 基準から `Hermes` (NousResearch/hermes-agent) 基準へ書き換えるための **基本方針書** です。
-> 用語マッピング、戦略、確定事項、未決事項を一覧化し、SPEC/PLAN/PATHS/TODO 等の本体書き換えのリファレンスとして使います。
-> **Status: DECIDED — 推奨案が確定 (§10 参照)。 v1 戦略は `案 C + Vendored-fork escape hatch` (zero upstream PR)、 詳細は §5。 2026-05-07 に B+C ハイブリッドから revise。**
-
----
-
-## 0. 背景と動機
-
-旧 SPEC は `Fork OpenClaw + 5プラグイン + 3 core seams (S1–S3)` という構成。基盤が `OpenClaw` (TypeScript / Node.js) だった。
-
-現在の作業リポジトリは `Mordred-Hermes/` で、**Hermes (Python / NousResearch)** をベースとしている。Hermes は OpenClaw からの移行を一級市民としてサポートしており (`hermes claw migrate` 既存)、エコシステムとしての成熟度・モデル選択の柔軟性・配布チャネルの広さで優位。
-
-**目的**: Mordred のプライバシー強化レイヤを Hermes 上で再構築し、文書群をそれに整合させる。
+> This file is the **foundational policy document** for rewriting `mordred-mvp-docs` from an `OpenClaw`-based standard to a `Hermes` (NousResearch/hermes-agent)-based standard.
+> It catalogs terminology mappings, strategy, decided items, and open items, and serves as the reference for rewriting the main documents such as SPEC/PLAN/PATHS/TODO.
+> **Status: DECIDED — the recommended approach has been finalized (see §10). The v1 strategy is `Option C + Vendored-fork escape hatch` (zero upstream PR); details in §5. Revised from the B+C hybrid on 2026-05-07.**
 
 ---
 
-## 1. アーキテクチャ差分マトリクス (検証済み)
+## 0. Background and Motivation
 
-| 領域 | OpenClaw | Hermes |
+The old SPEC used a `Fork OpenClaw + 5 plugins + 3 core seams (S1–S3)` structure. The foundation was `OpenClaw` (TypeScript / Node.js).
+
+The current working repository is `Mordred-Hermes/`, based on **Hermes (Python / NousResearch)**. Hermes supports migration from OpenClaw as a first-class citizen (`hermes claw migrate` already exists), and has the advantage in ecosystem maturity, model-selection flexibility, and breadth of distribution channels.
+
+**Goal**: Rebuild Mordred's privacy-hardening layer on top of Hermes, and align the documentation set with it.
+
+---
+
+## 1. Architecture Difference Matrix (Verified)
+
+| Area | OpenClaw | Hermes |
 |------|----------|--------|
-| 言語/ランタイム | TypeScript / Node.js (pnpm) | Python (pyproject.toml, pytest) |
-| プラグイン場所 | `extensions/<name>/` | `plugins/<name>/` (bundled) または `~/.hermes/plugins/<name>/` (user) または `./.hermes/plugins/<name>/` (project) または `pip` entry-point `hermes_agent.plugins` |
-| プラグイン マニフェスト | `openclaw.plugin.json` (JSON) | `plugin.yaml` (YAML) + `__init__.py` の `register(ctx)` |
-| 登録 API | `api.on`, `api.registerCli`, `api.registerProvider`, `api.registerGatewayMethod` | `ctx.register_hook`, `ctx.register_cli_command`, `ctx.register_command` (スラッシュ), `ctx.register_tool`, `ctx.register_platform`, `ctx.register_context_engine`, `ctx.register_image_gen_provider`, `ctx.register_skill`, `ctx.dispatch_tool`, `ctx.inject_message` |
-| ライフサイクルフック | `before_install`, `before_tool_call`, `before_model_resolve`, `gateway_start`, `gateway_stop` | `pre_tool_call`, `post_tool_call`, `pre_llm_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `pre_gateway_dispatch`, `pre_approval_request`, `post_approval_response`, `subagent_stop`, `transform_terminal_output`, `transform_tool_result` |
-| ユーザーパス | `~/.openclaw/mordred/` | `~/.hermes/mordred/` |
-| 設定ファイル | `~/.openclaw/openclaw.json` (JSON5) | `~/.hermes/config.yaml` (YAML) + `~/.hermes/.env` (API キーのみ) |
+| Language/Runtime | TypeScript / Node.js (pnpm) | Python (pyproject.toml, pytest) |
+| Plugin location | `extensions/<name>/` | `plugins/<name>/` (bundled) or `~/.hermes/plugins/<name>/` (user) or `./.hermes/plugins/<name>/` (project) or `pip` entry-point `hermes_agent.plugins` |
+| Plugin manifest | `openclaw.plugin.json` (JSON) | `plugin.yaml` (YAML) + `register(ctx)` in `__init__.py` |
+| Registration API | `api.on`, `api.registerCli`, `api.registerProvider`, `api.registerGatewayMethod` | `ctx.register_hook`, `ctx.register_cli_command`, `ctx.register_command` (slash), `ctx.register_tool`, `ctx.register_platform`, `ctx.register_context_engine`, `ctx.register_image_gen_provider`, `ctx.register_skill`, `ctx.dispatch_tool`, `ctx.inject_message` |
+| Lifecycle hooks | `before_install`, `before_tool_call`, `before_model_resolve`, `gateway_start`, `gateway_stop` | `pre_tool_call`, `post_tool_call`, `pre_llm_call`, `post_llm_call`, `pre_api_request`, `post_api_request`, `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`, `pre_gateway_dispatch`, `pre_approval_request`, `post_approval_response`, `subagent_stop`, `transform_terminal_output`, `transform_tool_result` |
+| User path | `~/.openclaw/mordred/` | `~/.hermes/mordred/` |
+| Config file | `~/.openclaw/openclaw.json` (JSON5) | `~/.hermes/config.yaml` (YAML) + `~/.hermes/.env` (API keys only) |
 | CLI | `openclaw mordred ...` | `hermes mordred ...` |
-| プロバイダ参照実装 | `extensions/lmstudio/` | `agent/*_adapter.py` (anthropic, bedrock, gemini_native, codex_responses, lmstudio_reasoning 等) |
-| サブエージェント | `agent` 概念 | `subagent_stop` フック + delegate_task ツール |
-| Secure Enclave 結合 | node-addon-api / node-gyp | pyobjc または cffi+Swift bridge または PyO3 |
-| テスト | Vitest (`*.test.ts`) | pytest (`tests/test_*.py`) — `scripts/run_tests.sh` |
-| フォーマッタ | oxfmt | ruff (推定) |
-| 型チェック | tsgo | mypy (推定) |
+| Provider reference implementation | `extensions/lmstudio/` | `agent/*_adapter.py` (anthropic, bedrock, gemini_native, codex_responses, lmstudio_reasoning, etc.) |
+| Subagent | `agent` concept | `subagent_stop` hook + delegate_task tool |
+| Secure Enclave binding | node-addon-api / node-gyp | pyobjc or cffi+Swift bridge or PyO3 |
+| Tests | Vitest (`*.test.ts`) | pytest (`tests/test_*.py`) — `scripts/run_tests.sh` |
+| Formatter | oxfmt | ruff (presumed) |
+| Type checking | tsgo | mypy (presumed) |
 | Upstream | `github.com/openclaw/openclaw` (MIT) | `github.com/NousResearch/hermes-agent` (MIT) |
-| スキルレジストリ | `clawhub.ai` | Skills Hub (組み込み) + `agentskills.io` 規格、`hermes_cli/skills_hub.py` |
-| 既存 OpenClaw 移行ツール | n/a | `hermes claw migrate` 既存 |
+| Skill registry | `clawhub.ai` | Skills Hub (built-in) + `agentskills.io` spec, `hermes_cli/skills_hub.py` |
+| Existing OpenClaw migration tool | n/a | `hermes claw migrate` already exists |
 
 ---
 
-## 2. フックとシグナルの正確なマッピング
+## 2. Precise Mapping of Hooks and Signals
 
-旧 SPEC が依存していた 3 つのフックを Hermes 等価に対応付けると以下:
+Mapping the 3 hooks that the old SPEC depended on to their Hermes equivalents yields the following:
 
-| 旧フック (OpenClaw) | 新フック (Hermes) | payload 等価性 | 備考 |
+| Old hook (OpenClaw) | New hook (Hermes) | Payload equivalence | Notes |
 |---------------------|---------------------|-----------------|------|
-| `before_install` | **存在しない** | × | Hermes はスキルインストールを `hermes_cli/skills_hub.py` 経由で行うので、相当する hook ポイントを **新規追加** する必要あり ⇒ **新 Core Seam H1** 候補 |
-| `before_tool_call` | `pre_tool_call` | ◯ (調査要) | payload に `originSkill` 相当が含まれるかは要 verify |
-| `before_model_resolve` | `pre_llm_call` (or `pre_api_request`) | ◯ (調査要) | provider/model 情報は `pre_llm_call` の方が早い段階で見える |
-| `gateway_start` / `gateway_stop` | `on_session_start` / `on_session_end` (個別セッション) | ✗ (粒度が違う) | Hermes の gateway は messaging gateway (Telegram/Discord/...) を指すので、**プロセス全体の起動/終了** に相当するフックは別に必要 ⇒ **新 Core Seam H2** 候補 (例: `on_agent_init` / `on_agent_shutdown`) |
-| `before_install` (スキルメタデータ抽出) | n/a | × | Hermes に skill installer ガード機構を追加するか、CLI ラッパで実現 |
+| `before_install` | **Does not exist** | × | Hermes performs skill installation via `hermes_cli/skills_hub.py`, so a corresponding hook point needs to be **newly added** ⇒ candidate for **new Core Seam H1** |
+| `before_tool_call` | `pre_tool_call` | ◯ (needs investigation) | Whether the payload includes an `originSkill` equivalent needs to be verified |
+| `before_model_resolve` | `pre_llm_call` (or `pre_api_request`) | ◯ (needs investigation) | provider/model information is visible at an earlier stage in `pre_llm_call` |
+| `gateway_start` / `gateway_stop` | `on_session_start` / `on_session_end` (individual session) | ✗ (different granularity) | In Hermes, "gateway" refers to the messaging gateway (Telegram/Discord/...), so a separate hook corresponding to **whole-process startup/shutdown** is needed ⇒ candidate for **new Core Seam H2** (e.g., `on_agent_init` / `on_agent_shutdown`) |
+| `before_install` (skill metadata extraction) | n/a | × | Either add a skill installer guard mechanism to Hermes, or realize it via a CLI wrapper |
 
-### 旧 S1–S3 を Hermes に対応付けると
+### Mapping the Old S1–S3 to Hermes
 
-| 旧 Seam | 概要 | Hermes 対応 |
+| Old Seam | Overview | Hermes equivalent |
 |--------|------|--------------|
-| S1: `pluginManifest.privacyLock?: boolean` | プラグイン disable から守る | v1 default は **plugin-side のみ** (`hermes mordred plugins disable` ラッパ CLI が `--unlock` を要求 + `mordred.degraded.disable_unprotected` audit log)。 hard-enforce が必要なら v2 で **vendored fork extra** (`pip install mordred-hermes[hard-lock]` で `hermes_cli/plugins_cmd.py` のパッチ版を再配布)。 **Hermes 上流への PR は提出しない** |
-| S2: `originSkill?` を `before_tool_call` に追加 | スキル単位の per-tool ポリシー | `pre_tool_call` payload に origin skill を含める。Hermes の skill サブシステム経由で tool が呼ばれるパスがあるか要 verify。もしなければ **新 Seam H3** |
-| S3: `resolvedProvider?` を `before_model_resolve` に追加 | strict mode 下でも cloud allow-list を許す | `pre_llm_call` payload には provider/model が含まれる可能性が高い (要 verify)。含まれていれば S3 は **upstream に存在する** とみなせて Mordred 側は単に消費するだけ |
+| S1: `pluginManifest.privacyLock?: boolean` | Protects against plugin disable | The v1 default is **plugin-side only** (the `hermes mordred plugins disable` wrapper CLI requires `--unlock` + a `mordred.degraded.disable_unprotected` audit log). If hard-enforce is needed, in v2 a **vendored fork extra** (`pip install mordred-hermes[hard-lock]` redistributes a patched version of `hermes_cli/plugins_cmd.py`). **No PR will be submitted upstream to Hermes** |
+| S2: Add `originSkill?` to `before_tool_call` | Per-tool policy at the skill level | Include the origin skill in the `pre_tool_call` payload. Needs verification of whether there's a path where tools are invoked via Hermes's skill subsystem. If not, **new Seam H3** |
+| S3: Add `resolvedProvider?` to `before_model_resolve` | Allow a cloud allow-list even under strict mode | The `pre_llm_call` payload likely includes provider/model (needs verification). If it does, S3 can be considered **already present upstream**, and the Mordred side simply consumes it |
 
-→ S1–S3 を **「H1–H4」(仮)** として Hermes 用に再設計する必要あり。具体は SPEC 書き換えで詳細化。
+→ S1–S3 need to be redesigned for Hermes as **"H1–H4" (tentative)**. Details will be worked out in the SPEC rewrite.
 
 ---
 
-## 3. プラグイン 5 種の Hermes 化マッピング
+## 3. Hermes Mapping for the 5 Plugins
 
-> **Note (L3、 2026-05-07 更新)**: 配布レイアウトは F4 fix で **`src/mordred_hermes/<name>/`** (pip 配布レイアウト、 entry-point `hermes_agent.plugins` 経由ロード) に統一済み。 `plugins/mordred_*/` (bundled-style、 OpenClaw 系統の旧表記) は使わない。 §0 〜 §2 の議論段階ではまだ揺れていたため記載が残っていたが、 §10 (DECIDED) と SPEC/PLAN/PATHS は `src/mordred_hermes/<name>/` で確定済み。
+> **Note (L3, updated 2026-05-07)**: The distribution layout has been unified to **`src/mordred_hermes/<name>/`** (pip distribution layout, loaded via the `hermes_agent.plugins` entry-point) by the F4 fix. `plugins/mordred_*/` (bundled-style, the old OpenClaw-lineage notation) is not used. The wording still varied during the discussion phase of §0–§2, which is why references to it remained, but §10 (DECIDED) and SPEC/PLAN/PATHS are finalized on `src/mordred_hermes/<name>/`.
 
-| 旧プラグイン | Hermes 実装パス (src layout) | 主要 register API | 備考 |
+| Old plugin | Hermes implementation path (src layout) | Primary register API | Notes |
 |-------------|--------------------|----------------------|------|
-| `mordred-network` | `src/mordred_hermes/network/__init__.py` | `register_hook("on_session_start")`, `register_hook("pre_tool_call")`, `register_cli_command("mordred")` | サブプロセス管理 (`tor`/`arti`/Mullvad WireGuard) は Python `subprocess` モジュール。プロキシ環境変数注入は子プロセス起動箇所への配慮が必要。 mid-session の path switch は transitive な穴あり (PLAN §3.1 M3 参照) |
-| `mordred-privacy-check` | `src/mordred_hermes/privacy_check/__init__.py` | `register_hook("pre_tool_call")`, `register_hook("on_session_start")`, スキルインストールフック (新規) | **既存スキルインストール経路にフックする手段が無い** ことが課題。CLI ラッパ `hermes mordred install <skill>` を提供するか、Hermes core に新フックを追加するか |
-| `mordred-llm-guard` | `src/mordred_hermes/llm_guard/__init__.py` + 同 dir 内 `local_adapter.py` | `register_hook("pre_llm_call")`、 provider adapter は plugin 同梱 (Phase 0.8 verify 結果次第で `plugins/model-providers/<name>/` 系統への移設も検討) | Hermes provider adapter pattern を踏襲。 `pre_llm_call` の override semantics は Phase 0.8 で実コード verify 必要 (Story 4 caveat) |
-| `mordred-keyvault` | `src/mordred_hermes/keyvault/__init__.py` (`pyobjc-framework-Security` を `[macos]` extra で同梱) | `register_cli_command("mordred")` 経由で `keyvault` サブツリー登録 | Native binding は **pyobjc** (Security.framework 直バインディング) を最有力候補に。`pip install mordred-hermes[macos]` で導入可能なため node-gyp より単純 |
-| `mordred-wizard` | `src/mordred_hermes/wizard/__init__.py` | `register_cli_command("mordred", help, setup_fn, handler_fn)` | `setup_fn(subparser)` 内で `argparse` のサブパーサ階層 (`hermes mordred configure`, `hermes mordred network use ...`, `hermes mordred policy show` 等) を構築 |
+| `mordred-network` | `src/mordred_hermes/network/__init__.py` | `register_hook("on_session_start")`, `register_hook("pre_tool_call")`, `register_cli_command("mordred")` | Subprocess management (`tor`/`arti`/Mullvad WireGuard) uses the Python `subprocess` module. Proxy environment variable injection needs care at child-process launch points. Mid-session path switching has a transitive gap (see PLAN §3.1 M3) |
+| `mordred-privacy-check` | `src/mordred_hermes/privacy_check/__init__.py` | `register_hook("pre_tool_call")`, `register_hook("on_session_start")`, skill install hook (new) | The challenge is that **there is no way to hook into the existing skill install path**. Either provide a CLI wrapper `hermes mordred install <skill>`, or add a new hook to Hermes core |
+| `mordred-llm-guard` | `src/mordred_hermes/llm_guard/__init__.py` + `local_adapter.py` in the same dir | `register_hook("pre_llm_call")`, the provider adapter is bundled with the plugin (depending on the Phase 0.8 verify results, moving it to the `plugins/model-providers/<name>/` lineage is also under consideration) | Follows the Hermes provider adapter pattern. The override semantics of `pre_llm_call` need to be verified against actual code in Phase 0.8 (Story 4 caveat) |
+| `mordred-keyvault` | `src/mordred_hermes/keyvault/__init__.py` (bundles `pyobjc-framework-Security` via the `[macos]` extra) | Register the `keyvault` subtree via `register_cli_command("mordred")` | **pyobjc** (direct Security.framework binding) is the leading candidate for the native binding. It's installable via `pip install mordred-hermes[macos]`, making it simpler than node-gyp |
+| `mordred-wizard` | `src/mordred_hermes/wizard/__init__.py` | `register_cli_command("mordred", help, setup_fn, handler_fn)` | Build the `argparse` subparser hierarchy (`hermes mordred configure`, `hermes mordred network use ...`, `hermes mordred policy show`, etc.) inside `setup_fn(subparser)` |
 
 ---
 
-## 4. Mordred 所有パスのマッピング
+## 4. Mapping of Mordred-Owned Paths
 
-| 旧パス | 新パス | オーナー (Hermes) |
+| Old path | New path | Owner (Hermes) |
 |--------|--------|--------------------|
 | `~/.openclaw/mordred/audit.log` | `~/.hermes/mordred/audit.log` | `mordred_privacy_check` |
-| `~/.openclaw/mordred/policy.json` | `~/.hermes/mordred/policy.json` | `mordred_privacy_check` (writer は `mordred_wizard`) |
+| `~/.openclaw/mordred/policy.json` | `~/.hermes/mordred/policy.json` | `mordred_privacy_check` (writer is `mordred_wizard`) |
 | `~/.openclaw/mordred/keyvault/` | `~/.hermes/mordred/keyvault/` | `mordred_keyvault` (Phase 4) |
-| `~/.openclaw/credentials/mordred-network.json` | `~/.hermes/mordred/credentials/network.json` または `~/.hermes/.env` の Mordred 用キー (例: `MORDRED_MULLVAD_ACCOUNT=...`) | `mordred_network` |
-| `~/.openclaw/openclaw.json` の `plugins.entries.mordred-*.config` | `~/.hermes/config.yaml` の `plugins.mordred-*` セクション | wizard が JSON5 round-trip → YAML round-trip (pyyaml は roundtrip が弱いので **`ruamel.yaml`** 採用検討) |
+| `~/.openclaw/credentials/mordred-network.json` | `~/.hermes/mordred/credentials/network.json` or a Mordred-specific key in `~/.hermes/.env` (e.g., `MORDRED_MULLVAD_ACCOUNT=...`) | `mordred_network` |
+| `plugins.entries.mordred-*.config` in `~/.openclaw/openclaw.json` | the `plugins.mordred-*` section in `~/.hermes/config.yaml` | wizard goes from JSON5 round-trip → YAML round-trip (pyyaml's round-trip support is weak, so adoption of **`ruamel.yaml`** is under consideration) |
 
-> Hermes の `get_hermes_home()` は profile-aware (デフォルト `~/.hermes/`)。Mordred も同じ profile 解決を再利用する。
-
----
-
-## 5. 戦略候補 (3案 → 確定)
-
-### 案 A: ハードフォーク
-
-`NousResearch/hermes-agent` をフォークし、Mordred 専用の long-lived ブランチで開発。Core 改変も自由。
-
-- ◯ Pros: 拘束なし、UX も独自ブランディング可能
-- × Cons: upstream 同期コスト最大、メンテ人員依存、Hermes 側の急速な進化に追従しにくい
-
-### 案 B: ソフトフォーク + Hermes Core Seams (旧 SPEC と同じ思想)
-
-`Mordred-Hermes/` をフォークとして残しつつ、core 改変は **最小・追加・汎用 (H1–H4 仮)** に限定。週次 rebase で upstream を吸収。
-
-- ◯ Pros: 旧 SPEC と整合、Hermes 進化を吸収しやすい
-- × Cons: Hermes 側に PR を出す必要があり (受理されないと永遠に fork 維持)、レビュー遅延が phase ブロッカーになりうる
-
-### 案 C: 純プラグインバンドル + 必要時のみ patch
-
-5プラグインを **`pip install mordred-hermes`** で配布。Hermes 本体には触れない。`hermes_agent.plugins` entry-point で自動ロード。
-
-- ◯ Pros: Mordred-Hermes リポジトリは upstream rebase 不要、配布が極めて簡単、ユーザは `pip install mordred-hermes` だけ
-- × Cons: core 側のガードが効かない (ユーザが手動で plugin disable するとセキュリティ層が消える)。core 改変が必要なシーンが将来出てきた場合の逃げ道が無い
-
-### 確定: 案 C + Vendored-fork escape hatch [DECIDED, revised 2026-05-07]
-
-**案 C (純プラグインバンドル) をベースに、core 改変が真に必要になった項目のみ vendored fork で対応する**。**Hermes 上流への PR は提出しない (zero-PR commitment)**。
-
-理由:
-
-1. Hermes 上流への PR 提出はレビュー時間と受理リスクが phase ブロッカーになり得る。Mordred は上流のスピードに依存せず単独でリリース可能であるべき
-2. Plugin-only 配布で MVP (Phase 1–3) は成立する。Privacy-lock 等の "core seam" 相当は plugin-side wrapper + audit log で defense-in-depth を達成
-3. それでも core 改変が真に必要になった項目 (将来の seam) は、 Hermes 上流に PR を出さず、 **vendored fork** (Hermes core モジュールのコピーを Mordred-Hermes 配下に保持し、 必要箇所のみパッチを当てた版を `mordred-hermes` 配布物として再配布) で吸収する
-4. `Mordred-Hermes/` リポジトリの位置付けは「**プラグイン開発リポジトリ + (必要時に) Hermes 一部モジュールの vendored patch 保有リポ**」
-
-**実装の含意**:
-
-- `Mordred-Hermes/` は upstream `NousResearch/hermes-agent` の rebase 不要 (plugin 開発リポ + 一部 vendored modules)
-- 5 plugin は `src/mordred_hermes/<name>/` (pip 配布レイアウト) で開発、`pip install mordred-hermes` (entry-point `hermes_agent.plugins`) で配布
-- 旧 SPEC の "core seam" 相当 (旧 S1–S3) は **upstream PR を出さず**、 以下の二段構えで対処:
-  - **Tier A (v1 default、 plugin-only)**: plugin-side audit log (`mordred.degraded.*` 系列) と `hermes mordred ...` ラッパ CLI で defense-in-depth
-  - **Tier B (deferred、 vendored fork extra)**: 真に hard-enforce が必要な場合のみ、 `vendor/hermes/<version>/` に該当 Hermes モジュールのパッチ版を持ち、 packaging extra (`pip install mordred-hermes[hard-lock]` 等) で再配布。 Hermes 特定バージョンに pin する。 v1 リリース範囲外
-- 上流の hook signature drift は CI (`upstream-check.yml`) で検知 (informational、 リリースを block しない)
-- "Vendored module を持つ" ことと "上流に PR を出す" ことは別物。 後者は **行わない**
+> Hermes's `get_hermes_home()` is profile-aware (default `~/.hermes/`). Mordred reuses the same profile resolution.
 
 ---
 
-## 6. 命名規約
+## 5. Candidate Strategies (3 options → Decision)
 
-| 項目 | 旧 (OpenClaw) | 新 (Hermes) | 備考 |
+### Option A: Hard fork
+
+Fork `NousResearch/hermes-agent` and develop on a Mordred-dedicated long-lived branch. Core modifications are unrestricted.
+
+- ◯ Pros: No constraints; independent UX branding is also possible
+- × Cons: Highest upstream sync cost, dependent on maintainer headcount, hard to keep up with Hermes's rapid evolution
+
+### Option B: Soft fork + Hermes Core Seams (same philosophy as the old SPEC)
+
+Keep `Mordred-Hermes/` as a fork, while limiting core modifications to **minimal, additive, general-purpose (H1–H4, tentative)**. Absorb upstream via weekly rebase.
+
+- ◯ Pros: Consistent with the old SPEC, easy to absorb Hermes's evolution
+- × Cons: Requires submitting PRs to Hermes (if not accepted, the fork must be maintained forever); review delays can become a phase blocker
+
+### Option C: Pure plugin bundle + patch only when necessary
+
+Distribute the 5 plugins via **`pip install mordred-hermes`**. Don't touch the Hermes core itself. Auto-loaded via the `hermes_agent.plugins` entry-point.
+
+- ◯ Pros: The Mordred-Hermes repository needs no upstream rebase, distribution is extremely simple, users only need `pip install mordred-hermes`
+- × Cons: Core-side guards don't work (if a user manually disables a plugin, the security layer disappears). There's no escape hatch if a scenario requiring core modification arises in the future
+
+### Decision: Option C + Vendored-fork escape hatch [DECIDED, revised 2026-05-07]
+
+**Based on Option C (pure plugin bundle), handle only the items where core modification truly becomes necessary via a vendored fork**. **No PR will be submitted upstream to Hermes (zero-PR commitment)**.
+
+Rationale:
+
+1. Submitting PRs upstream to Hermes carries review-time and acceptance-risk that can become a phase blocker. Mordred should be able to release independently, without depending on upstream's pace
+2. The MVP (Phase 1–3) is achievable with plugin-only distribution. "Core seam" equivalents such as privacy-lock achieve defense-in-depth via a plugin-side wrapper + audit log
+3. Even so, for items where core modification truly becomes necessary (future seams), we will not submit a PR upstream to Hermes; instead we absorb them via a **vendored fork** (keeping a copy of the Hermes core module under Mordred-Hermes, patching only the necessary spots, and redistributing that version as part of the `mordred-hermes` distribution)
+4. The `Mordred-Hermes/` repository is positioned as "**a plugin development repository + (when necessary) a repository holding vendored patches to some Hermes modules**"
+
+**Implementation implications**:
+
+- `Mordred-Hermes/` requires no rebase of the upstream `NousResearch/hermes-agent` (a plugin development repo + some vendored modules)
+- The 5 plugins are developed under `src/mordred_hermes/<name>/` (pip distribution layout) and distributed via `pip install mordred-hermes` (entry-point `hermes_agent.plugins`)
+- "Core seam" equivalents from the old SPEC (old S1–S3) are handled **without submitting an upstream PR**, via the following two-tier approach:
+  - **Tier A (v1 default, plugin-only)**: defense-in-depth via a plugin-side audit log (the `mordred.degraded.*` family) and the `hermes mordred ...` wrapper CLI
+  - **Tier B (deferred, vendored fork extra)**: Only when hard-enforce is truly necessary, keep a patched version of the relevant Hermes module in `vendor/hermes/<version>/` and redistribute it via a packaging extra (e.g., `pip install mordred-hermes[hard-lock]`). Pinned to a specific Hermes version. Out of scope for the v1 release
+- Upstream hook signature drift is detected via CI (`upstream-check.yml`) (informational; does not block releases)
+- "Holding a vendored module" and "submitting a PR upstream" are separate things. The latter will **not** be done
+
+---
+
+## 6. Naming Conventions
+
+| Item | Old (OpenClaw) | New (Hermes) | Notes |
 |------|---------------|-----------------|------|
-| 製品名 | Mordred | **Mordred** (維持) | 確定 |
-| CLI | `openclaw mordred ...` | **`hermes mordred ...`** (確定) | ユーザ承認済み |
-| プラグイン ID | `mordred-network` 等 (kebab-case) | `mordred_network` 等 (snake_case) ⇒ Python module 名 | Hermes プラグインは Python パッケージ名に従う必要あり |
-| pip パッケージ名 | n/a | `mordred-hermes` (kebab) または `mordred-network`, `mordred-privacy-check` 個別 | バンドル戦略に依存 |
-| 設定 namespace | `plugins.entries.mordred-*.config` | `plugins.mordred_*` または `mordred:` トップレベルキー | 命名は plugin 自由だが Hermes 既存 plugin に倣うのが望ましい |
-| スキル frontmatter | `metadata.mordred.*` | **同じ** `metadata.mordred.*` (互換維持) | agentskills.io 規格との衝突有無を要確認 |
-| Mordred-as-distribution version | `mordred-mvp-docs/VERSION` | **同じ** `docs/VERSION` | 維持 |
+| Product name | Mordred | **Mordred** (unchanged) | Decided |
+| CLI | `openclaw mordred ...` | **`hermes mordred ...`** (decided) | User-approved |
+| Plugin ID | `mordred-network`, etc. (kebab-case) | `mordred_network`, etc. (snake_case) ⇒ Python module name | Hermes plugins must follow Python package naming |
+| pip package name | n/a | `mordred-hermes` (kebab) or `mordred-network`, `mordred-privacy-check` individually | Depends on the bundling strategy |
+| Config namespace | `plugins.entries.mordred-*.config` | `plugins.mordred_*` or a `mordred:` top-level key | Naming is up to the plugin, but following existing Hermes plugins is preferable |
+| Skill frontmatter | `metadata.mordred.*` | **Same** `metadata.mordred.*` (compatibility maintained) | Need to confirm whether it conflicts with the agentskills.io spec |
+| Mordred-as-distribution version | `mordred-mvp-docs/VERSION` | **Same** `docs/VERSION` | Unchanged |
 
 ---
 
-## 7. プラットフォーム対応 [DECIDED]
+## 7. Platform Support [DECIDED]
 
-旧 SPEC は **macOS Apple Silicon only** (理由: Secure Enclave native addon) だったが、Hermes 化で Phase 1–3 を OS 非依存にできるため拡張する。
+The old SPEC was **macOS Apple Silicon only** (reason: Secure Enclave native addon), but moving to Hermes lets us make Phase 1–3 OS-independent, so we're expanding it.
 
-| Phase | プラットフォーム |
+| Phase | Platform |
 |-------|-------------------|
-| Phase 1–3 | **macOS / Linux / WSL2** (Hermes が動く全環境) |
+| Phase 1–3 | **macOS / Linux / WSL2** (all environments where Hermes runs) |
 | Phase 4 (keyvault, Tier 1) | **macOS Apple Silicon only** (Secure Enclave) |
-| Phase 4 (keyvault, Tier 2/3) | v2: Linux (TPM 2.0) / Windows (DPAPI) は ROADMAP `v2-OS2` 据え置き |
+| Phase 4 (keyvault, Tier 2/3) | v2: Linux (TPM 2.0) / Windows (DPAPI) deferred to ROADMAP `v2-OS2` |
 
-**根拠**:
-- Phase 1–3 (network/privacy-check/llm-guard/wizard) は純 Python。Tor/Mullvad CLI は Linux でむしろ動かしやすい
-- Hermes コミュニティ全体に開ける意義が大きい (Hermes は Linux/Termux/WSL2 まで支援)
-- Phase 4 のみ Secure Enclave 物理制約で macOS Apple Silicon 限定 (これは旧 SPEC 同様)
+**Rationale**:
+- Phase 1–3 (network/privacy-check/llm-guard/wizard) is pure Python. The Tor/Mullvad CLI is, if anything, easier to run on Linux
+- Opening this up to the whole Hermes community has significant value (Hermes supports as far as Linux/Termux/WSL2)
+- Only Phase 4 is limited to macOS Apple Silicon due to the physical constraint of the Secure Enclave (same as the old SPEC)
 
 ---
 
-## 8. ドキュメント書き換え フェーズ計画
+## 8. Documentation Rewrite Phase Plan
 
-| Phase | 期間 | 成果物 |
+| Phase | Duration | Deliverable |
 |-------|------|---------|
-| **A: 用語マッピング & 意思決定** | 0.5日 | この `MIGRATION.md` (本ファイル) — 意思決定後にロック |
-| **B: SPEC.md 書き換え** | 1–2日 | `SPEC.md` を Hermes 基準に全面改訂、5 plugins / H1–H4 seams を確定 |
-| **C: PLAN/PATHS/TODO 書き換え** | 1–2日 | ファイルパス、Python ツール、pytest fixture、`hermes mordred ...` CLI 列挙 |
-| **D: UPSTREAM/ROADMAP/CI 書き換え** | 0.5日 | `git remote add upstream https://github.com/NousResearch/hermes-agent.git`、Python CI に置換、`upstream-sync.yml` を Python ベースに |
-| **(後段) F: 5プラグイン scaffolding 着手** | 別計画 | コード実装は別 PR/別計画で扱う |
+| **A: Terminology mapping & decision-making** | 0.5 day | This `MIGRATION.md` (this file) — locked after decisions are made |
+| **B: SPEC.md rewrite** | 1–2 days | Fully revise `SPEC.md` to the Hermes standard, finalize the 5 plugins / H1–H4 seams |
+| **C: PLAN/PATHS/TODO rewrite** | 1–2 days | Enumerate file paths, Python tools, pytest fixtures, `hermes mordred ...` CLI |
+| **D: UPSTREAM/ROADMAP/CI rewrite** | 0.5 day | `git remote add upstream https://github.com/NousResearch/hermes-agent.git`, replace with Python CI, make `upstream-sync.yml` Python-based |
+| **(Later) F: Begin 5-plugin scaffolding** | Separate plan | Code implementation is handled in a separate PR/separate plan |
 
-合計: **4–6 日** (文書のみ、コード実装は含まない)
+Total: **4–6 days** (documentation only; does not include code implementation)
 
 ---
 
-## 9. リスクと未決事項
+## 9. Risks and Open Items
 
 ### High
 
-1. **Hermes に `before_install` 等価フックが無い** — スキルインストール時の policy 強制ができない可能性。回避案:
-   - (a) `hermes_cli/skills_hub.py` に Mordred 用フックポイントを Hermes 側に PR
-   - (b) `hermes mordred install <skill>` ラッパ CLI を Mordred wizard 経由で提供 (こちらが現実的)
+1. **Hermes has no `before_install` equivalent hook** — policy enforcement at skill install time may not be possible. Workarounds:
+   - (a) PR a Mordred hook point into `hermes_cli/skills_hub.py` on the Hermes side
+   - (b) Provide a `hermes mordred install <skill>` wrapper CLI via the Mordred wizard (this is the more realistic option)
 
-2. **`pre_llm_call` payload の中身を実コードで verify** — `resolvedProvider` 相当が見えるかで S3 (cloud allow-list) の実装容易度が変わる
+2. **Verify the contents of the `pre_llm_call` payload against actual code** — whether a `resolvedProvider` equivalent is visible affects how easy S3 (cloud allow-list) is to implement
 
-3. **Hermes プラグインから LLM provider を動的登録する正規 API が無い** — `agent/*_adapter.py` パターンは core 側に置く必要があり。`mordred-llm-guard` の `mordred-local` synthetic provider をどう統合するかの設計が必要
+3. **There is no official API for dynamically registering an LLM provider from a Hermes plugin** — the `agent/*_adapter.py` pattern needs to live on the core side. Design work is needed for how to integrate `mordred-llm-guard`'s `mordred-local` synthetic provider
 
 ### Medium
 
-4. **[RESOLVED 2026-05-07]** ~~**`hermes claw migrate` と `hermes mordred upgrade` の二段階移行 UX** — OpenClaw からの既存ユーザは 2 コマンド実行が必要になる。Story 1 を書き直す必要あり~~ → **解決済み (L4)**: §10 row 5 で「独立コマンド維持 + docs で 2-step フローを明記」 で確定。 SPEC.md Story 1.5 が 3 ステップ (`hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade`) を明示している。 統合 wrapper は v2 で再評価
+4. **[RESOLVED 2026-05-07]** ~~**Two-stage migration UX of `hermes claw migrate` and `hermes mordred upgrade`** — existing users coming from OpenClaw will need to run 2 commands. Story 1 needs to be rewritten~~ → **Resolved (L4)**: Finalized in §10 row 5 as "keep independent commands + spell out the 2-step flow in the docs". SPEC.md Story 1.5 spells out the 3 steps (`hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade`). The unified wrapper will be reevaluated in v2
 
-5. **YAML round-trip writer の選択** — `ruamel.yaml` 採用が確定なら Phase 1.3 wizard 設計に影響
+5. **Choice of YAML round-trip writer** — if adopting `ruamel.yaml` is finalized, it affects the Phase 1.3 wizard design
 
-6. **Hermes upstream の更新頻度が高い** (rapid development) — Mordred は plugin-only 配布なので **rebase は不要**。 hook signature drift は CI で informational に検知。 vendored fork extra (Tier B) が将来 v2 で導入された場合は、 該当 Hermes バージョン pin の追従コストが発生する
+6. **Hermes upstream updates frequently** (rapid development) — since Mordred is plugin-only distribution, **no rebase is needed**. Hook signature drift is detected informationally by CI. If the vendored fork extra (Tier B) is introduced in a future v2, there will be a cost to keep up with the pinned Hermes version
 
 ### Low
 
-7. **日本語版の用語ブレ** — 本ファイルに用語対応表 (§1) を載せたので、英→日翻訳時の参照点とする
+7. **Terminology inconsistency in the Japanese version** — since this file includes a terminology mapping table (§1), use it as the reference point when translating English → Japanese
 
 ---
 
-## 10. 意思決定チェックリスト [全項目 DECIDED]
+## 10. Decision Checklist [All items DECIDED]
 
-| # | 項目 | 確定内容 | 備考 |
+| # | Item | Decision | Notes |
 |---|------|------------|------|
-| 1 | 戦略 | **案 C + Vendored-fork escape hatch** (zero upstream PR) | §5 参照。`pip install mordred-hermes` 配布、 上流 PR は提出しない、 core 改変が真に必要になった項目のみ vendored fork extra で対応 (v1 範囲外) |
-| 2 | プラットフォーム | **Phase 1–3 = macOS/Linux/WSL2、Phase 4 = macOS Apple Silicon** | §7 参照。Phase 4 Tier 2/3 は v2-OS2 |
-| 3 | YAML writer | **`ruamel.yaml`** | round-trip でユーザのコメント・キー順を保持 (旧 SPEC の JSON5 round-trip と同等の保証) |
-| 4 | Hermes 上流 PR | **提出しない (zero-PR commitment)** | 旧 S1 (privacy_lock) は plugin-side wrapper + audit log で defense-in-depth。 `H1` (before_install 等価) と `H2` (agent init/shutdown) も plugin 側 fallback (CLI ラッパ・既存 hook) で対応。 v2 で hard-enforce が必要になれば vendored fork extra に進む |
-| 5 | `hermes claw migrate` との関係 | **独立コマンド維持** (`hermes mordred upgrade`)、ただし docs で 2 ステップフロー明記 | OpenClaw + Mordred 出身ユーザは `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade` の 3 ステップ |
-| 6 | 配布形態 | **単一パッケージ `mordred-hermes`** (5 plugin 同梱) | 5 plugin は密結合 (例: keyvault → network blackout assert)。版ズレ回避のため一括配布。各 plugin の有効/無効は config で個別制御可 |
-| 7 | 旧 `mordred-mvp-docs/` の扱い | **deprecation marker 追加して残置** | `../../mordred/mordred-mvp-docs/README.md` を新設し移行先を明記。検索性のため削除はしない |
+| 1 | Strategy | **Option C + Vendored-fork escape hatch** (zero upstream PR) | See §5. Distributed via `pip install mordred-hermes`, no upstream PR submitted, only items where core modification truly becomes necessary are handled via a vendored fork extra (out of scope for v1) |
+| 2 | Platform | **Phase 1–3 = macOS/Linux/WSL2, Phase 4 = macOS Apple Silicon** | See §7. Phase 4 Tier 2/3 is v2-OS2 |
+| 3 | YAML writer | **`ruamel.yaml`** | Preserves user comments and key order via round-trip (an equivalent guarantee to the old SPEC's JSON5 round-trip) |
+| 4 | Hermes upstream PR | **Not submitted (zero-PR commitment)** | Old S1 (privacy_lock) achieves defense-in-depth via a plugin-side wrapper + audit log. `H1` (before_install equivalent) and `H2` (agent init/shutdown) are also handled with a plugin-side fallback (CLI wrapper, existing hooks). If hard-enforce becomes necessary in v2, we proceed to the vendored fork extra |
+| 5 | Relationship with `hermes claw migrate` | **Keep it as an independent command** (`hermes mordred upgrade`), but spell out the 2-step flow in the docs | Users coming from OpenClaw + Mordred go through 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade` |
+| 6 | Distribution form | **Single package `mordred-hermes`** (bundles the 5 plugins) | The 5 plugins are tightly coupled (e.g., keyvault → network blackout assert). Distributed together to avoid version skew. Each plugin's enabled/disabled state can be controlled individually via config |
+| 7 | Treatment of the old `mordred-mvp-docs/` | **Left in place with a deprecation marker added** | Create `../../mordred/mordred-mvp-docs/README.md` and note the migration destination. Not deleted, for discoverability |
 
 ---
 
-## 11. 参考: Hermes プラグイン実装の最小例
+## 11. Reference: Minimal Example of a Hermes Plugin Implementation
 
 ```python
 # plugins/mordred_privacy_check/__init__.py
@@ -238,12 +238,12 @@ def register(ctx: PluginContext) -> None:
 
 
 def _on_pre_tool_call(tool_name: str, params: dict, **kwargs):
-    # ポリシー判定。ブロックする場合は例外 or 戻り値で制御 (要 verify)
+    # Policy decision. If blocking, control via exception or return value (needs verify)
     ...
 
 
 def _on_session_start(**kwargs):
-    # policy snapshot を memory に load
+    # Load policy snapshot into memory
     ...
 ```
 
@@ -253,7 +253,7 @@ name: mordred_privacy_check
 version: 0.1.0
 description: Privacy policy enforcement for Mordred
 author: InternetMaximalism
-privacy_lock: true   # ← 旧 S1 等価のフィールド。 v1 では plugin 側で参照するヒント (実 enforce は `hermes mordred plugins disable` ラッパ + audit log)。 Hermes 上流への PR は出さない。 hard-enforce は将来の `[hard-lock]` extra で vendored fork が担う
+privacy_lock: true   # ← Field equivalent to old S1. In v1 it's a hint referenced on the plugin side (actual enforcement is via the `hermes mordred plugins disable` wrapper + audit log). No PR submitted upstream to Hermes. Hard-enforce will be handled by a vendored fork in a future `[hard-lock]` extra
 config_schema:
   type: object
   properties:
@@ -271,24 +271,24 @@ config_schema:
 
 ---
 
-## 付録: 検証済み Hermes API リファレンス
+## Appendix: Verified Hermes API Reference
 
-`hermes_cli/plugins.py` (line 78–114, 233–600+) で確認済み:
+Confirmed in `hermes_cli/plugins.py` (lines 78–114, 233–600+):
 
 - **Plugin discovery**: 4 sources (bundled / user / project / pip entry-point `hermes_agent.plugins`)
-- **Manifest**: `plugin.yaml` (YAML), `__init__.py` の `register(ctx)` 関数
+- **Manifest**: `plugin.yaml` (YAML), the `register(ctx)` function in `__init__.py`
 - **`PluginContext` API**:
   - `register_tool(name, toolset, schema, handler, check_fn=None, requires_env=None, is_async=False, description="", emoji="")`
-  - `register_hook(hook_name, callback)` — `VALID_HOOKS` のいずれか
-  - `register_cli_command(name, help, setup_fn, handler_fn=None, description="")` — `hermes <name> ...` を作る
-  - `register_command(name, handler, description="", args_hint="")` — スラッシュコマンド `/<name>`
-  - `register_context_engine(engine)` — 単一 plugin のみ可
+  - `register_hook(hook_name, callback)` — one of `VALID_HOOKS`
+  - `register_cli_command(name, help, setup_fn, handler_fn=None, description="")` — creates `hermes <name> ...`
+  - `register_command(name, handler, description="", args_hint="")` — slash command `/<name>`
+  - `register_context_engine(engine)` — only a single plugin may do this
   - `register_image_gen_provider(provider)`
   - `register_platform(name, label, adapter_factory, check_fn, ...)` — gateway platform adapter
   - `register_skill(name, path, description="")`
   - `dispatch_tool(tool_name, args, **kwargs)`
   - `inject_message(content, role="user")`
-- **`VALID_HOOKS`** (16 種):
+- **`VALID_HOOKS`** (16 types):
   - tool: `pre_tool_call`, `post_tool_call`, `transform_tool_result`, `transform_terminal_output`
   - llm: `pre_llm_call`, `post_llm_call`, `pre_api_request`, `post_api_request`
   - session: `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset`
