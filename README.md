@@ -9,7 +9,11 @@ key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
 **Status: active alpha** — current release `0.1.0a4`
-([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-10).
+([PyPI](https://pypi.org/project/mordred-hermes/) has the release history and dates).
+
+New here? The step-by-step
+**[QUICKSTART](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**
+takes you from zero to a protected install.
 
 > **⭐ Recommended: set up with an AI coding agent.** The first-run setup
 > (`configure`, `network init`, `keyvault init`) is a series of interactive
@@ -112,7 +116,6 @@ M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 
 # First run — set up, in order:
 $M configure                     # interactive setup — policy / LLM / harness
-$M configure --skip-hermes-setup # re-run but skip the upstream `hermes setup` step
 $M network init                  # optional — pick a privacy route (Tor / VPN / clearnet)
 $M keyvault enable-se --unattended  # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
 $M keyvault init                 # create the hardware-backed key (interactive ceremony)
@@ -269,9 +272,10 @@ standalone — they only touch `~/.hermes` and the keyvault.
   second terminal while `extension serve` is running — both sides share
   `~/.hermes/extension/pending.json`, so codes are also consumable by a full
   Hermes gateway hosting the WS server.
-- **`GET http://127.0.0.1:7788/` returns 503**: the server serves the bundled
-  localhost web app from `extension_web/`, but the built page ships in `web/`.
-  The WS endpoint `/ext` is unaffected.
+- **`GET http://127.0.0.1:7788/` serves the bundled localhost web app** — a
+  browser page over the same WS API (the startup log prints both URLs; the
+  extension's WS endpoint is `/ext`). A 503 "web app not built" response
+  appears only if the bundled page is missing — the PyPI wheel ships it.
 
 ## Install (development)
 
