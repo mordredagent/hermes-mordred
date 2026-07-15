@@ -33,10 +33,11 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 
 ## Requirements
 
-- Python ≥ 3.11 (CI tests 3.11 and 3.12)
-- `hermes-agent` ≥ 0.11.0 — this is the declared floor; CI always resolves to the
-  latest PyPI release (0.18.2 as of 2026-07-08), so the floor itself is not
-  continuously tested — older 0.1x pins are best-effort
+- Python ≥ 3.11 (CI tests 3.11–3.13)
+- `hermes-agent` ≥ 0.13.0 (its first PyPI release — older versions were never
+  published and are not installable). The floor is exercised in CI on every PR
+  (the `hermes-floor` job pins it exactly); behavior against the latest release
+  was last verified on 0.18.2, 2026-07-08
 - macOS or Linux. No special hardware required — without a Secure Enclave / TPM,
   the keyvault degrades to a software-protected key automatically.
 

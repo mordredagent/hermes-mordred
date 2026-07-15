@@ -33,15 +33,24 @@ state but you must **never change it or read its secrets** from a conversation.
 | Network path + liveness | `MORDRED network status` |
 | Discovered Mordred plugins | `MORDRED plugins list` |
 
-where `MORDRED` =
-`/Users/kazuko/dev/work/intmax/Mordred-Hermes/mordred-hermes/.venv/bin/hermes-mordred`
+where `MORDRED` is resolved by trying, in order (the CLI's real location is
+environment-specific — never hardcode one developer's machine path):
+
+1. `command -v hermes-mordred` — use it if it resolves on `PATH`.
+2. Otherwise try the Hermes-managed venv, the documented install target per
+   this repo's `README.md` ("Install (users, from PyPI)" section):
+   `~/.hermes/hermes-agent/venv/bin/hermes-mordred`.
+3. Otherwise **ask the operator** for the path to their `mordred-hermes` venv
+   (e.g. "I can't find `hermes-mordred` on PATH or at the default Hermes venv
+   location — what path did you install it to?"). Only conclude "not
+   installed" (see below) once the operator confirms there is no such install.
 
 Run these via the code-execution / shell tool and report the output.
 
 **FORBIDDEN** — never run from this skill. If the user wants any of these, print
 the exact command and tell them to run it themselves in their shell:
 
-- Any mutation: `configure`, `upgrade`, `keyvault init|recover|enable-se|enable-tpm`,
+- Any mutation: `configure`, `upgrade`, `keyvault init|recover|reset|enable-se|enable-tpm`,
   `encryption enable|disable|purge`, `network init|use`, `vault *`, `install`.
 - Any secret read-out: `audit decrypt`, `vault cat`.
 - Even read-only `audit tail|grep` — it can surface install decisions into the
@@ -54,7 +63,14 @@ These rules preserve the "domain separation" principle in
 on/off state, but secrets (recovery passphrase, `.env` contents, decrypted audit)
 and control actions must stay on the operator's shell, outside the transcript.
 
+> **Residual risk**: the FORBIDDEN list above is a prompt-level instruction,
+> not an enforcement mechanism — it does not technically prevent this agent
+> from running a mutating command. Hard enforcement of what the agent may
+> execute belongs to the Hermes exec-tool approval settings, not to this
+> skill (see `README.md` § "Conversational read-only access").
+
 ## If the CLI is missing
 
-If `MORDRED` is not found, tell the user the Mordred venv is not present at the
-path above and stop — do not try to install or build anything.
+If none of the three resolution steps above find `hermes-mordred` —
+including after asking the operator — tell the user no Mordred install was
+found and stop. Do not try to install or build anything.
