@@ -320,7 +320,7 @@ module = [
     # extension chat bridge imports AIAgent from it lazily at runtime.
     "run_agent",
     "run_agent.*",
-    # requests lives in the optional `network` extra (not installed for the mypy
+    # requests lives in the `integration` extra (not installed for the mypy
     # job); the extension RPC client imports it lazily.
     "requests",
     "requests.*",

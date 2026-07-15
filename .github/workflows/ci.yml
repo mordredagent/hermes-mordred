@@ -33,13 +33,23 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Only one of the 5 workflows without a top-level permissions block; every
+# job here only reads the checked-out source (lint/type-check/test/build),
+# so the default GITHUB_TOKEN is scoped down to read-only least privilege.
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
-        python-version: ["3.11", "3.12"]
+        # 3.13 added 2026-07-15 (newly added cell — watch for a cycle: wheels
+        # for pyobjc>=10 / blake3 are expected to exist already, but a fresh
+        # CPython release can still lag on some platform). fail-fast is
+        # already false, so a 3.13-only failure won't block 3.11/3.12.
+        python-version: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +57,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
 
       # hermes-agent is a normal PyPI dependency (pyproject.toml pins
       # `hermes-agent>=0.11.0`) so `pip install -e .` resolves it directly —
@@ -62,6 +73,12 @@ jobs:
         if: runner.os == 'macOS'
         run: pip install -e ".[macos]"
 
+      - name: SKILL.md drift guard (mordred-status)
+        # Nothing else validates skills/mordred-status/SKILL.md against the
+        # live CLI, so a wizard/_cli_parsers.py rename would regress
+        # silently; exit code 2 (policy would block it) also fails this step.
+        run: hermes-mordred policy dry-run skills/mordred-status
+
       - name: ruff check
         run: ruff check src tests
 
@@ -69,7 +86,7 @@ jobs:
         run: ruff format --check src tests
 
       - name: mypy --strict
-        run: mypy --strict src
+        run: mypy --strict src tools
 
       - name: pytest
         env:
@@ -85,6 +102,50 @@ jobs:
           name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
           path: coverage.xml
           if-no-files-found: ignore
+
+  # H1 floor guarantee: pyproject.toml declares `hermes-agent>=0.11.0`, but
+  # every other job in this workflow resolves the latest PyPI hermes-agent,
+  # so the declared floor itself is never actually exercised — a Mordred
+  # API usage that only works on a newer hermes-agent could silently
+  # violate the floor. Pin hermes-agent to exactly 0.11.0 first, install
+  # mordred-hermes on top of it, verify the resolver left the pin alone
+  # (pip could otherwise "helpfully" upgrade it while still satisfying the
+  # >=0.11.0 constraint), and run the unit suite against that exact
+  # combination. Standalone job (no `needs:`) so it runs in parallel with
+  # `test` for fast feedback; it is not a required branch-protection check.
+  hermes-floor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Pin hermes-agent to the declared floor (0.11.0)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "hermes-agent==0.11.0"
+
+      - name: Install mordred-hermes (dev + keyvault + extension extras)
+        run: pip install -e ".[dev,keyvault,extension]"
+
+      - name: Guard — resolver must not have upgraded hermes-agent off the floor
+        run: |
+          set -euo pipefail
+          INSTALLED_VERSION="$(python -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
+          if [ "$INSTALLED_VERSION" != "0.11.0" ]; then
+            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.11.0, so pyproject.toml's declared floor was not actually exercised."
+            exit 1
+          fi
+
+      - name: pytest against the hermes-agent floor
+        env:
+          # Isolate _home.py's HERMES_BASE from the runner's real $HOME
+          # (same rationale as the test job above).
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        run: pytest -q
 
   # Hermetic Tor integration tests (Docker-backed; Linux only — macOS
   # runners have no Docker). The socks5h / provider-transport suites are
@@ -155,6 +216,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GitHub-owned actions/cache@v4 only (this repo deliberately avoids
+      # third-party actions like Swatinem/rust-cache for supply-chain
+      # reasons — same stance as gating `stem` behind the `tor-control`
+      # extra). Without this, both legs of the matrix recompile the crate
+      # from scratch every run, including bindgen against libtss2 on Linux.
+      - name: Cache cargo registry + target (tpmkey-helper)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/tpmkey-helper/target
+          key: ${{ runner.os }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tpmkey-helper-
+
       # The tss-esapi TPM backend only compiles on Linux and needs the libtss2
       # headers + libclang (bindgen). macOS excludes it via cfg, so skip there.
       - name: Install libtss2 (Linux — tss-esapi backend)
@@ -190,6 +267,20 @@ jobs:
         working-directory: native/tpmkey-helper
     steps:
       - uses: actions/checkout@v4
+
+      # Same rationale + key scheme as the tpmkey-helper job above (a
+      # distinct key suffix so the two jobs don't race to save the same
+      # cache entry when they finish around the same time).
+      - name: Cache cargo registry + target (tpmkey-helper-tpm)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/tpmkey-helper/target
+          key: ${{ runner.os }}-cargo-tpmkey-helper-tpm-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tpmkey-helper-tpm-
 
       - name: Install libtss2 + swtpm
         run: |
