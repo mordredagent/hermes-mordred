@@ -159,7 +159,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "mordred-hermes[macos]==0.1.0a3"   # ← substitute the current PyPI version here
+  --reinstall "mordred-hermes[macos]==0.1.0a4"   # ← substitute the current PyPI version here
 ```
 
 ## (Optional) Hermes upstream remote
