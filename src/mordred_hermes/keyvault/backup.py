@@ -115,26 +115,6 @@ class ParsedHeader:
     aad: bytes  # the 66-byte AAD that was bound at encrypt time
 
 
-def _build_header_bytes(
-    *,
-    salt: bytes,
-    verification_digest: bytes,
-    aes_blob_len: int,
-) -> bytes:
-    """Pack the 70-byte header."""
-    return (
-        MAGIC
-        + bytes([VERSION])
-        + bytes([KDF_ID_ARGON2ID])
-        + _ARGON2_M_COST_KIB.to_bytes(4, "big")
-        + _ARGON2_T_COST.to_bytes(4, "big")
-        + _ARGON2_P_COST.to_bytes(4, "big")
-        + salt
-        + verification_digest
-        + aes_blob_len.to_bytes(4, "big")
-    )
-
-
 def _derive_kek(passphrase: str, *, salt: bytes, m_cost: int, t_cost: int, p_cost: int) -> bytes:
     """Run Argon2id with the given parameters and return the 32-byte KEK."""
     return hash_secret_raw(
@@ -193,6 +173,17 @@ def export(secret: bytes, passphrase: str, *, verification_digest: bytes) -> byt
         p_cost=_ARGON2_P_COST,
     )
     # AAD = magic || version || kdf_id || m || t || p || salt || digest (66 bytes).
+    #
+    # Built ONCE here and reused verbatim as the header prefix below
+    # (``header == aad + aes_blob_len``). A previous revision hand-packed
+    # this same 66-byte prefix a second time to build the header — the two
+    # copies could silently drift apart on a future edit to one but not the
+    # other, which would make every NEWLY-written backup fail
+    # ``decrypt_body`` with ``InvalidTag`` (``parse_header`` recovers the
+    # bound AAD as ``blob[:66]``) while previously-written blobs kept
+    # verifying fine — a nasty split-brain. Deriving ``header`` from ``aad``
+    # makes the byte-identity structural instead of "must remember to keep
+    # in sync."
     aad = (
         MAGIC
         + bytes([VERSION])
@@ -204,11 +195,7 @@ def export(secret: bytes, passphrase: str, *, verification_digest: bytes) -> byt
         + verification_digest
     )
     aes_blob = crypto.encrypt(kek, secret, aad=aad)
-    header = _build_header_bytes(
-        salt=salt,
-        verification_digest=verification_digest,
-        aes_blob_len=len(aes_blob),
-    )
+    header = aad + len(aes_blob).to_bytes(4, "big")
     return header + aes_blob
 
 

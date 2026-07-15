@@ -97,6 +97,50 @@ class TestWireFormat:
         parsed = backup.parse_header(blob)
         assert blob[70:] == parsed.aes_blob
 
+    def test_aad_prefix_equals_header_bytes_0_to_66(self) -> None:
+        """Regression test for the AAD/header double-packing refactor
+        (LOW refactor finding): ``export()`` used to hand-serialize the
+        66-byte AAD prefix TWICE — once for ``aad`` and again inside
+        ``_build_header_bytes`` — which had to stay byte-identical by
+        convention only. A future edit to one packing but not the other
+        would make every NEWLY-written backup fail ``decrypt_body`` with
+        ``InvalidTag`` while old blobs kept verifying (split-brain). This
+        pins ``parsed.aad == blob[:66]`` and independently rebuilds the
+        expected AAD to prove the two are provably byte-identical, not
+        just coincidentally so."""
+        from mordred_hermes.keyvault import backup
+
+        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        parsed = backup.parse_header(blob)
+
+        assert parsed.aad == blob[:66]
+        assert len(parsed.aad) == backup._AAD_LEN
+
+        # Independently rebuild the AAD (mirrors export()'s own construction
+        # formula) and confirm it matches what parse_header recovered.
+        expected_aad = (
+            backup.MAGIC
+            + bytes([backup.VERSION])
+            + bytes([backup.KDF_ID_ARGON2ID])
+            + backup._ARGON2_M_COST_KIB.to_bytes(4, "big")
+            + backup._ARGON2_T_COST.to_bytes(4, "big")
+            + backup._ARGON2_P_COST.to_bytes(4, "big")
+            + blob[18:34]  # salt
+            + DIGEST_FIXTURE
+        )
+        assert parsed.aad == expected_aad
+
+    def test_header_equals_aad_plus_aes_blob_len(self) -> None:
+        """``header == aad + aes_blob_len(4 BE)`` is now structural:
+        ``export()`` derives the header from ``aad`` instead of
+        re-packing it via a second helper."""
+        from mordred_hermes.keyvault import backup
+
+        blob = backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE)
+        parsed = backup.parse_header(blob)
+        header = blob[: backup.HEADER_LEN]
+        assert header == parsed.aad + len(parsed.aes_blob).to_bytes(4, "big")
+
 
 class TestKdfParams:
     """Codex review (cryptographic soundness): the Argon2id cost params

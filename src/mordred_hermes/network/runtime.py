@@ -176,7 +176,18 @@ class Runtime:
         self._tor_start = tor_start_process or tor_mod.start_process
         self._tor_wait = tor_wait_for_bootstrap or tor_mod.wait_for_bootstrap
         self._tor_stop = tor_stop or tor_mod.stop
-        self._tor_health = tor_health or tor_mod.health
+        # Deep-by-default liveness (2026-07-13): circuit_status_health probes
+        # the Tor ControlPort (GETINFO circuit-status) and reports unhealthy
+        # when the daemon is running but has NO BUILT circuit — a
+        # dead-but-alive Tor the shallow process.poll() check (tor_mod.health)
+        # can never detect. It is signature-compatible with health(handle) and
+        # SELF-DEGRADES to that shallow check when the optional [tor-control]
+        # extra (stem) is absent or the control cookie is missing, so this is a
+        # safe drop-in: without stem it behaves exactly as before; WITH stem +
+        # the cookie (render_torrc already emits ControlPort +
+        # CookieAuthentication 1) it catches the running-but-no-circuit case.
+        # Tests still override via the tor_health= injection param.
+        self._tor_health = tor_health or tor_mod.circuit_status_health
         # The "vpn" path delegates to a selectable provider (Mullvad by
         # default). Production constructs the runtime without a provider,
         # so it is resolved from config here; tests inject a fake.
@@ -469,6 +480,7 @@ class Runtime:
             socks_port=port,
             control_port=control_port,
             data_dir=self._config.tor_data_dir,
+            disable_ipv6=self._config.disable_ipv6,
         )
         try:
             proc = self._tor_start(binary=self._config.tor_binary, torrc=torrc)
@@ -496,13 +508,26 @@ class Runtime:
         )
         try:
             self._tor_wait(proc)
-        except BringupFailed:
+        except Exception as wait_err:
             # Half-started process must not leak even when bring-up fails.
+            #
+            # The catch is deliberately wider than BringupFailed (mirroring the
+            # VPN path's ``except (BringupFailed, OSError)``): ``_tor_wait``
+            # tails the daemon's stdout, which is opened in text mode, so a
+            # non-UTF-8 byte in Tor's log output raises UnicodeDecodeError — not
+            # BringupFailed. Left uncaught that would (a) orphan the spawned tor
+            # child, since nothing terminates it, and (b) unwind past _switch's
+            # ``except BringupFailed`` with ``_state`` still at BRINGING_UP,
+            # bricking the instance so every later use() raises AlreadySwitching
+            # forever. Translating to BringupFailed also keeps the strict-mode
+            # escalation in _switch reachable, so strict cannot fail open here.
             try:
                 self._tor_stop(tor_handle)
             except Exception as cleanup_err:
                 _LOG.warning("tor cleanup after bring-up failure: %s", cleanup_err)
-            raise
+            if isinstance(wait_err, BringupFailed):
+                raise
+            raise BringupFailed(f"tor bootstrap failed: {wait_err}") from wait_err
         return _ActiveHandle("tor", tor_handle)
 
     def _bring_up_vpn(self) -> _ActiveHandle:
@@ -603,8 +628,6 @@ class Runtime:
         managed = proxy_env_mod.managed_var_names()
         if self._env_snapshot is None:
             self._env_snapshot = {k: self._env.get(k) for k in managed}
-        for k in managed:
-            self._env.pop(k, None)
         port = self._config.tor_socks_port or proxy_env_mod.DEFAULT_TOR_SOCKS_PORT
         if self._handle is not None and self._handle.path == "tor":
             tor_handle = self._handle.handle
@@ -615,8 +638,21 @@ class Runtime:
             no_proxy_extra=self._config.no_proxy_extra,
             isolation_token=self._config.isolation_token,
         )
+        # Set-then-prune, never pop-then-set. ``self._env`` is the process-global
+        # ``os.environ``, and ``_lock`` only serialises the runtime's OWN writers
+        # — it cannot stop another thread in this process (a tool-call handler,
+        # an httpx worker, another plugin) from calling subprocess.Popen, which
+        # snapshots the environment at spawn time. A pop-all-then-set-all
+        # sequence therefore leaves a real window in which a child inherits NO
+        # proxy vars at all and goes out direct/clearnet — exactly the fail-open
+        # leak the strict path exists to prevent. Writing the desired values
+        # first and only then dropping the now-unwanted keys means the managed
+        # vars are never all-absent mid-switch.
         for k, v in desired.items():
             self._env[k] = v
+        for k in managed:
+            if k not in desired:
+                self._env.pop(k, None)
 
     def _restore_env(self) -> None:
         if self._env_snapshot is None:

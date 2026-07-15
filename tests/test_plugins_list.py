@@ -172,6 +172,59 @@ class TestYAMLFallback:
             or "no config" in captured.out.lower()
         )
 
+    def test_reuses_shared_load_yaml_mapping_helper(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedup guard (Codex review): the fallback must delegate to the
+        shared ``_yaml_io.load_yaml_mapping`` -- the same "read config.yaml
+        as a mapping, or degrade to {}" core hand-rolled here that the helper
+        was built to consolidate (its docstring names 5 other sites; this
+        was the missed 6th)."""
+        config = tmp_path / "config.yaml"
+        config.write_text("plugins:\n  enabled:\n    - mordred_x\n", encoding="utf-8")
+        calls: list[Path] = []
+        original = plugins_list.load_yaml_mapping
+
+        def spy(path: Path, **kwargs: Any) -> dict[str, Any]:
+            calls.append(path)
+            return original(path, **kwargs)
+
+        monkeypatch.setattr(plugins_list, "load_yaml_mapping", spy)
+        rc = plugins_list._print_from_yaml_fallback(config)
+        assert rc == 0
+        assert calls == [config], "fallback must call the shared load_yaml_mapping helper exactly once"
+
+    def test_parse_failure_still_reports_error_via_emit_error(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A malformed config.yaml must still surface via ``_term.emit_error``
+        with a "Failed to read ..." message, not silently collapse to "No
+        Mordred plugins discovered". ``load_yaml_mapping``'s own default
+        ``catch=(OSError, YAMLError)`` would swallow the parse failure into
+        ``{}`` with only a *logger* warning (this call site wires no ``log=``
+        to a visible destination) -- confirming the reporting survives the
+        dedup onto the shared helper (finding: catch= semantics must be
+        chosen to match this call site, not just defaulted)."""
+        config = tmp_path / "config.yaml"
+        config.write_text("plugins: [this is not, valid: yaml: at all\n", encoding="utf-8")
+
+        def raise_import() -> Any:
+            raise ImportError("hermes_cli.plugins not available")
+
+        monkeypatch.setattr(plugins_list, "_get_manager", raise_import)
+
+        rc = plugins_list.run(config_path=config)
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "Failed to read" in captured.err
+        assert "no mordred plugins" not in captured.out.lower()
+
 
 class TestCLIHandler:
     def test_cli_handler_returns_run_rc(

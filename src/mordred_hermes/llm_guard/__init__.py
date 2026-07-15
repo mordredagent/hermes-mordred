@@ -29,14 +29,13 @@ invariant (``test_llm_guard_register.py``).
 from __future__ import annotations
 
 import functools
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
-from .._policy_io import read_policy_mode_fail_closed
+from .._policy_io import load_policy_mapping, read_policy_mode_fail_closed
 from .._provider_identity import canonicalize_provider
 from .._yaml_io import load_yaml_mapping
 from . import enforce, harness_detect, local_adapter
@@ -214,17 +213,19 @@ def _resolve_active_provider(*, auth_json_path: Path, config_path: Path) -> str 
 
 
 def _read_auth_active_provider(auth_json_path: Path) -> str | None:
-    if not auth_json_path.exists():
-        return None
-    try:
-        with auth_json_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        _LOG.warning("could not read %s: %s", auth_json_path, e)
-        return None
-    if not isinstance(data, dict):
-        return None
-    value = data.get("active_provider")
+    """Read ``active_provider`` from ``auth.json``, normalized to lowercase.
+
+    Codex duplication finding: this used to hand-roll the exact
+    exists()/open/json.load/except(OSError, JSONDecodeError)/warning/
+    isinstance(dict) shape that ``_policy_io.load_policy_mapping`` already
+    centralizes for the other ``policy.json`` readers in this module.
+    ``load_policy_mapping`` collapses a missing, unreadable, malformed, or
+    non-object file to ``{}`` (logging the same "could not read ..."
+    warning on read/parse failure), so ``.get("active_provider")`` reproduces
+    exactly the ``None`` this function returned in all of those cases before
+    falling through to the string normalization below.
+    """
+    value = load_policy_mapping(auth_json_path, log=_LOG).get("active_provider")
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized:

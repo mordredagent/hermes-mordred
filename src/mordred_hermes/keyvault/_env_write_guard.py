@@ -11,9 +11,15 @@ re-enrolled.
 
 This module wraps the host writer so that, on macOS, every successful write while
 the env target is *sealed* is immediately reconciled back into the vault — merged,
-not clobbered (see :func:`...wizard.env_decrypt_cli.reseal`) — and the plaintext
+not clobbered (see :func:`._env_reseal.reseal_env`) — and the plaintext
 removed. So the read path (runtime injection) and the write path (config set)
 agree: no plaintext secret persists, and no enrolled secret is lost.
+
+The reseal core lives in :mod:`._env_reseal`, not
+:mod:`mordred_hermes.wizard.env_decrypt_cli` (which merely calls the same core
+now) — this module is reached from the ``on_session_start`` / ``on_session_end``
+plugin hooks (:func:`mordred_hermes.keyvault.register`), so it must not carry a
+runtime dependency on the wizard layer being importable.
 
 ``hermes_cli`` is a private, unstable host module — it ships no API stability
 guarantee (the plugin deliberately *replicates* host metadata rather than
@@ -155,9 +161,9 @@ def reseal_stray_env_if_present(
         return False  # no stray plaintext → nothing to reseal
 
     try:
-        from ..wizard import env_decrypt_cli
+        from ._env_reseal import reseal_env
 
-        env_decrypt_cli.reseal(home=home, root=default_vault_root())
+        reseal_env(home=home, root=default_vault_root())
     except Exception as exc:
         # Surface a stranded plaintext rather than crashing the session boundary,
         # and let `encryption status` flag it as exposed.

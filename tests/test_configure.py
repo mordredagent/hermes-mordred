@@ -256,17 +256,15 @@ class TestRun:
         run(setup_runner=runner, prompt_io=prompts, policy_writer=w, skip_hermes_setup=True)
         assert runner.calls == [], "skip_hermes_setup must not invoke the runner"
 
-    def test_setup_failure_warns_but_continues(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    def test_setup_failure_warns_but_continues(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         prompts = _ScriptedPromptIO(answers=_core_answers())
         runner = _SetupRunnerSpy(returncode=42)
         w = _writer(tmp_path)
 
-        import logging
-
-        with caplog.at_level(logging.WARNING, logger="mordred.wizard.configure"):
-            result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
+        result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
         assert result.snapshot.policy == "lenient"
-        assert any("hermes setup" in r.getMessage() and "42" in r.getMessage() for r in caplog.records)
+        err = capsys.readouterr().err
+        assert "hermes setup" in err and "42" in err
 
     def test_non_interactive_forwarded_to_runner(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=_core_answers())
@@ -491,21 +489,19 @@ class TestSubprocessSetupRunner:
         assert called == [["hermes", "setup"]]
 
     def test_missing_hermes_binary_returns_1_and_warns(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """``hermes`` not on PATH must not propagate FileNotFoundError."""
 
         def _raise(cmd: list[str], check: bool = False) -> object:
             raise FileNotFoundError(2, "No such file or directory: 'hermes'")
 
-        import logging
         import subprocess
 
         monkeypatch.setattr(subprocess, "run", _raise)
-        with caplog.at_level(logging.WARNING, logger="mordred.wizard.configure"):
-            rc = configure.SubprocessSetupRunner().run(non_interactive=False)
+        rc = configure.SubprocessSetupRunner().run(non_interactive=False)
         assert rc == 1
-        assert any("not found on PATH" in r.getMessage() for r in caplog.records)
+        assert "not found on PATH" in capsys.readouterr().err
 
 
 # -----------------------------------------------------------------------------
@@ -729,6 +725,32 @@ class TestSnapshotFromArgsHardening:
 
         monkeypatch.setattr(configure, "PolicyWriter", _FailingWriter)
         rc = cli_handler(argparse.Namespace(non_interactive=True, policy="lenient"))
+        assert rc == 1
+        assert "read-only filesystem" in capsys.readouterr().err
+
+    def test_interactive_write_failure_reports_cleanly(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Codex review: run()'s policy_writer.write() call was UNGUARDED, unlike
+        the --non-interactive branch above -- cli.dispatch() only catches
+        KeyboardInterrupt / EOFError / NonInteractiveAbort / ModuleNotFoundError,
+        so the same disk-write failure hit during interactive `configure` used to
+        surface as a raw traceback instead of this clean error: + rc 1."""
+        scripted = _ScriptedPromptIO(answers=_core_answers(policy="lenient"))
+        _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
+
+        class _FailingWriter:
+            policy_json_path = tmp_path / "mordred" / "policy.json"
+            config_path = tmp_path / "config.yaml"
+
+            def write(self, snapshot: object) -> None:
+                raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(configure, "PolicyWriter", _FailingWriter)
+        rc = cli_handler(argparse.Namespace(non_interactive=False))
         assert rc == 1
         assert "read-only filesystem" in capsys.readouterr().err
 

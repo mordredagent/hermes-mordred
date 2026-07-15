@@ -27,6 +27,7 @@ real Keychain are stubbed.
 
 from __future__ import annotations
 
+import fcntl
 from pathlib import Path
 
 import pytest
@@ -800,3 +801,106 @@ def test_recover_to_device_wmk_substitution_raises(
             tmp_path, _PASSPHRASE, backend=new_backend, store=new_store, key_id=_KEY_ID, anchor_label=_LABEL
         )
     assert new_store.read(_LABEL) is None  # no anchor flipped on rejection
+
+
+# ---------------------------------------------------------------------------
+# change_passphrase locking (device path must unwrap BEFORE the vault lock)
+# ---------------------------------------------------------------------------
+
+_ROTATED_PASSPHRASE = "an entirely different passphrase"
+
+
+def _probe_lock_free(root: Path) -> bool:
+    """True if ``<root>/.lock`` can be flock'd right now (non-blocking probe).
+
+    flock contention is per open-file-description, so a fresh fd in the SAME
+    process still conflicts with a held lock — exactly what a second CLI or
+    the extension gateway would experience.
+    """
+    with open(root / ".lock", "r+b") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return True
+
+
+def test_change_passphrase_device_path_unwraps_before_lock(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    """The device unwrap can block indefinitely on an interactive Touch ID /
+    passcode prompt, so it must run BEFORE the vault flock is taken (mirroring
+    open_vault) — a prompt left unanswered would otherwise starve every other
+    lock contender with no timeout and no diagnostic."""
+    _init(tmp_path, backend, store).close()
+
+    lock_free_during_ecdh: list[bool] = []
+    real_ecdh = backend.enclave_ecdh
+
+    def probing_ecdh(key_id: str, peer_pub: bytes) -> bytes:
+        lock_free_during_ecdh.append(_probe_lock_free(tmp_path))
+        return real_ecdh(key_id, peer_pub)
+
+    backend.enclave_ecdh = probing_ecdh  # type: ignore[method-assign]
+    vault.change_passphrase(
+        tmp_path,
+        new_passphrase=_ROTATED_PASSPHRASE,
+        key_id=_KEY_ID,
+        backend=backend,
+        store=store,
+        anchor_label=_LABEL,
+    )
+    # Exactly one unwrap happened, and the lock was free while it waited.
+    assert lock_free_during_ecdh == [True]
+    vault.recover_vault(tmp_path, _ROTATED_PASSPHRASE).close()  # rotation took effect
+
+
+def test_change_passphrase_rekey_race_fails_closed(
+    tmp_path: Path, backend: FakeBackend, store: FakeAnchorStore
+) -> None:
+    """A re-key (recover_to_device) landing while the rotation waits on the
+    device prompt mints a new wmk + sidecar. Committing the stale rotation
+    would replace that sidecar with one digest-bound to the superseded (and
+    GC'd) wmk — bricking the cold path. The rotation must detect the moved
+    wmk under the lock and fail closed instead."""
+    v = _init(tmp_path, backend, store)
+    v.enroll_file(".env", b"KEEP=1\n")
+    v.close()
+
+    raced: list[bool] = []
+    real_ecdh = backend.enclave_ecdh
+
+    def racing_ecdh(key_id: str, peer_pub: bytes) -> bytes:
+        secret = real_ecdh(key_id, peer_pub)
+        if not raced:
+            raced.append(True)
+            if not _probe_lock_free(tmp_path):
+                pytest.fail("vault lock held across the device unwrap (a concurrent re-key would deadlock)")
+            # The concurrent re-key wins the race during the prompt window.
+            vault.recover_to_device(
+                tmp_path, _PASSPHRASE, backend=backend, store=store, key_id=_KEY_ID, anchor_label=_LABEL
+            ).close()
+        return secret
+
+    backend.enclave_ecdh = racing_ecdh  # type: ignore[method-assign]
+    with pytest.raises(vault.VaultError, match="re-key"):
+        vault.change_passphrase(
+            tmp_path,
+            new_passphrase=_ROTATED_PASSPHRASE,
+            key_id=_KEY_ID,
+            backend=backend,
+            store=store,
+            anchor_label=_LABEL,
+        )
+
+    # The winning re-key's sidecar survived: the passphrase it re-minted (the
+    # original) still cold-opens the vault with every file intact...
+    opened = vault.recover_vault(tmp_path, _PASSPHRASE)
+    try:
+        assert opened.read_file(".env") == b"KEEP=1\n"
+    finally:
+        opened.close()
+    # ...and the aborted rotation's passphrase never took effect.
+    with pytest.raises(InvalidTag):
+        vault.recover_vault(tmp_path, _ROTATED_PASSPHRASE)

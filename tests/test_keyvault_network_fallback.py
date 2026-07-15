@@ -89,6 +89,16 @@ def test_exception_taxonomy() -> None:
     assert not issubclass(nf.BlackoutNotAsserted, nf.NetworkFallbackUnavailable)
 
 
+def test_probe_host_backward_compat_alias_removed() -> None:
+    """LOW dead-code finding: ``_PROBE_HOST`` was a "backward-compat alias"
+    for ``_PROBE_HOST_V4`` with zero remaining consumers (the real probe in
+    ``_os_reachability_probe`` uses ``_PROBE_HOST_V4`` / ``_PROBE_HOST_V6``
+    directly). Pin its removal so it does not silently creep back in as
+    dead state — the two live constants must still be defined and distinct."""
+    assert not hasattr(nf, "_PROBE_HOST")
+    assert nf._PROBE_HOST_V4 != nf._PROBE_HOST_V6
+
+
 # --------------------------------------------------------------------------
 # _interpret_reachability_flags — pure flag logic
 # --------------------------------------------------------------------------

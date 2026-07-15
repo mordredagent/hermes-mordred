@@ -148,9 +148,24 @@ def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, 
         _LOG.error("config file %s has a non-mapping root; failing closed to strict", config_path)
         return "strict", {}
     plugins = data.get("plugins")
-    section_raw = plugins.get("mordred_privacy_check") if isinstance(plugins, dict) else None
-    if not isinstance(section_raw, dict):
+    if plugins is not None and not isinstance(plugins, dict):
+        # A PRESENT but wrong-typed ``plugins`` (e.g. a hand-edited or corrupted
+        # ``plugins: "oops"``) is damage, not "plugin not configured yet". It is
+        # the same class of corruption as the non-mapping root above, so it must
+        # fail closed to strict — collapsing it into the absent-key branch below
+        # would silently downgrade enforcement on a damaged config.
+        _LOG.error("config file %s has a non-mapping 'plugins' key; failing closed to strict", config_path)
+        return "strict", {}
+    section_raw = plugins.get("mordred_privacy_check") if plugins is not None else None
+    if section_raw is None:
         return "lenient", {}  # plugin not configured — must stay lenient
+    if not isinstance(section_raw, dict):
+        # Present but wrong-typed OUR section: damage again, not absence.
+        _LOG.error(
+            "config file %s has a non-mapping 'plugins.mordred_privacy_check'; failing closed to strict",
+            config_path,
+        )
+        return "strict", {}
     section: dict[str, Any] = section_raw
     raw = section.get("policy", "lenient")
     # isinstance before membership mirrors the shared reader; tuple keeps

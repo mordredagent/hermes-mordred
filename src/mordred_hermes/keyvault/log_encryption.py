@@ -61,12 +61,15 @@ import os
 import shutil
 import threading
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from cryptography.exceptions import InvalidTag
 
+from .._log_rotation import next_rotation_target
+from .._log_rotation import sweep_retention as _sweep_retention
+from .._log_rotation import today_utc_date as _today_utc_date
+from .._log_rotation import utcnow_iso as _utcnow_iso
 from ._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
 from .crypto import decrypt as _aes_decrypt
 from .crypto import encrypt as _aes_encrypt
@@ -116,22 +119,6 @@ class AuditLogDecryptError(Exception):
       audit-log wrapping key is gone (different device, or revoked); the
       log is unrecoverable, not corrupt.
     """
-
-
-def _utcnow_iso() -> str:
-    """ISO-8601 UTC timestamp with 3-digit millisecond precision.
-
-    Matches the Phase 1 ``Writer`` Protocol invariant #1 exactly:
-    ``"%Y-%m-%dT%H:%M:%S." + "{ms:03d}" + "Z"``. Built by hand because
-    ``strftime`` ``%f`` yields 6-digit microseconds.
-    """
-    now = datetime.now(UTC)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
-
-
-def _today_utc_date() -> str:
-    """Current UTC date as ``YYYY-MM-DD`` (rotation suffix source)."""
-    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def _serialize(entry: Mapping[str, Any]) -> bytes:
@@ -232,10 +219,15 @@ class EncryptedWriter:
     def close(self) -> None:
         """Zero and drop the in-memory DEK.
 
-        The DEK lives in a ``bytearray`` (see :meth:`_active`) so it is wiped
-        in place here — the long-lived audit-log key is scrubbed from the heap
-        rather than merely dereferenced. Kept for the ``Writer`` Protocol
-        contract — each ``append`` already opens and closes its own fd.
+        The DEK's authoritative buffer is a ``bytearray`` (see :meth:`_active`),
+        so it is wiped in place here rather than merely dereferenced — better
+        than leaving the long-lived audit-log key for the GC. Note this cannot
+        be a total heap scrub: :meth:`_active` hands callers an immutable
+        ``bytes`` snapshot per append and AES-GCM copies the key into OpenSSL,
+        and those transient copies live until GC — wiping the ``bytearray``
+        bounds the key's lifetime, it does not erase every copy. Kept for the
+        ``Writer`` Protocol contract — each ``append`` already opens and closes
+        its own fd.
         """
         with self._lock:
             self._wipe_dek()
@@ -243,8 +235,10 @@ class EncryptedWriter:
     def _wipe_dek(self) -> None:
         """Zero the DEK buffer in place (it is a ``bytearray``), then drop it.
 
-        Caller must hold ``self._lock``. Mirrors ``kek.MasterKey``'s wipe so
-        the audit-log DEK is scrubbed, not just dereferenced.
+        Caller must hold ``self._lock``. Mirrors ``kek.MasterKey``'s wipe so the
+        DEK's authoritative buffer is zeroed, not just dereferenced (transient
+        ``bytes``/OpenSSL copies are inherent and out of scope — see
+        :meth:`close`).
         """
         if self._dek is not None:
             self._dek[:] = bytes(len(self._dek))
@@ -322,11 +316,7 @@ class EncryptedWriter:
         if not self.path.exists():
             return
 
-        target = self.path.with_name(f"{self.path.name}.{date_suffix}")
-        n = 0
-        while target.exists() or target.with_suffix(target.suffix + ".gz").exists():
-            n += 1
-            target = self.path.with_name(f"{self.path.name}.{date_suffix}.{n}")
+        target = next_rotation_target(self.path, date_suffix)
         os.replace(self.path, target)
 
         gz_target = target.with_suffix(target.suffix + ".gz")
@@ -342,21 +332,7 @@ class EncryptedWriter:
             with contextlib.suppress(OSError):
                 os.chmod(gz_target, 0o600)
 
-        self._sweep_retention()
-
-    def _sweep_retention(self) -> None:
-        """Delete rotated files older than :attr:`retention_days`."""
-        cutoff = datetime.now(UTC) - timedelta(days=self.retention_days)
-        prefix = self.path.name + "."
-        for child in self.path.parent.iterdir():
-            if not child.name.startswith(prefix):
-                continue
-            try:
-                mtime = datetime.fromtimestamp(child.stat().st_mtime, tz=UTC)
-            except FileNotFoundError:
-                continue
-            if mtime < cutoff:
-                child.unlink(missing_ok=True)
+        _sweep_retention(self.path, self.retention_days)
 
 
 def _unwrap_log_dek(

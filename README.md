@@ -33,8 +33,11 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 
 ## Requirements
 
-- Python ≥ 3.11
-- `hermes-agent` ≥ 0.11.0 (behavior last verified against 0.18.2, 2026-07-08)
+- Python ≥ 3.11 (CI tests 3.11–3.13)
+- `hermes-agent` ≥ 0.13.0 (its first PyPI release — older versions were never
+  published and are not installable). The floor is exercised in CI on every PR
+  (the `hermes-floor` job pins it exactly); behavior against the latest release
+  was last verified on 0.18.2, 2026-07-08
 - macOS or Linux. No special hardware required — without a Secure Enclave / TPM,
   the keyvault degrades to a software-protected key automatically.
 
@@ -43,7 +46,9 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 Install into the **same environment that runs `hermes-agent`** (usually
 `~/.hermes/hermes-agent/venv`) so its plugin loader can discover the entry points.
 Hermes-managed venvs are often created by uv and ship no `pip`, so the robust
-form is `uv pip install --python …`:
+form is `uv pip install --python …` (no `uv` on your machine? Install it first —
+`brew install uv` on macOS, or see the
+[uv installation guide](https://docs.astral.sh/uv/getting-started/installation/)):
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
@@ -54,9 +59,17 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
-the same.) **Pin the version explicitly** or pass `--pre`: every release is
-currently a pre-release, so an unpinned `pip install mordred-hermes` only resolves
-via pip's all-prereleases fallback.
+the same.) **The pinned form above is the recommended default** — it's
+deterministic and reproducible. Prefer not to look up the current version? The
+unpinned `--upgrade` form resolves to the newest pre-release — every release is
+currently a pre-release, so the all-prereleases fallback applies (the same goes
+for plain `pip`, which also accepts an explicit `--pre`; see
+[Upgrading](#upgrading) for the same command used to update later):
+
+```sh
+# macOS — newest release without a version lookup; use [keyvault] on Linux
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --upgrade "mordred-hermes[macos]"
+```
 
 Optional extras, all opt-in:
 
@@ -71,7 +84,10 @@ Optional extras, all opt-in:
 
 ### Enable the plugins
 
-Add them to `~/.hermes/config.yaml`:
+Running `hermes-mordred configure` (next section) does this for you — every
+run back-fills all five `mordred_*` entries into `plugins.enabled` in
+`~/.hermes/config.yaml` if they're missing, so there's no manual step.
+Afterwards `~/.hermes/config.yaml` should contain:
 
 ```yaml
 plugins:
@@ -82,6 +98,9 @@ plugins:
     - mordred_network
     - mordred_keyvault
 ```
+
+Only edit this by hand if you want the plugins enabled *before* the first
+`configure` run — otherwise there's nothing to do here.
 
 ### Use it
 
@@ -95,6 +114,7 @@ M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 $M configure                     # interactive setup — policy / LLM / harness
 $M configure --skip-hermes-setup # re-run but skip the upstream `hermes setup` step
 $M network init                  # optional — pick a privacy route (Tor / VPN / clearnet)
+$M keyvault enable-se --unattended  # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
 $M keyvault init                 # create the hardware-backed key (interactive ceremony)
 $M encryption enable env         # encrypt your .env at rest
 $M status                        # verify — the `env` row reads [on] enrolled
@@ -109,6 +129,14 @@ $M encryption change-passphrase    # rotate the vault recovery passphrase
 $M configure                       # re-run interactive setup anytime
 $M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
 ```
+
+> **Why `enable-se --unattended` is recommended (macOS).** The default
+> **attended** device key asks for Touch ID on every vault unwrap — a
+> **background** process (a launchd-started gateway, `extension serve`) can
+> never answer that prompt and silently starts without the vault-managed
+> secrets. Run it **before** `keyvault init`: the attended/unattended choice
+> is fixed at key creation. Already hit this, or want the full trade-off?
+> See [Troubleshooting](#troubleshooting) below.
 
 > **Network troubleshooting.** If network communication drops out now and then,
 > check the active privacy path first — `network status` tells you whether Tor /
@@ -191,23 +219,39 @@ Nothing starts the server automatically yet: Hermes exposes no gateway-boot
 hook a plugin could use, so `register(ctx)` cannot launch a long-running server
 (see `docs/dev/ROADMAP.md` § browser-extension gateway counterpart). Until that
 lands, start it in the foreground with one command — it needs the `extension`
-extra:
+extra (see the [extras table](#install-users-from-pypi) above).
+
+**PyPI install** — make sure the `extension` extra is included (swap `macos`
+for `keyvault` on Linux):
+
+```sh
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a3"
+```
+
+Then use the `$M` alias from [Use it](#use-it):
+
+```sh
+$M extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
+# equivalent module form, same --host/--port flags:
+~/.hermes/hermes-agent/venv/bin/python3 -m mordred_hermes.extension
+```
+
+**From a dev checkout** instead:
 
 ```sh
 uv sync --extra extension     # or: uv pip install -e ".[extension]"
 
 .venv/bin/hermes-mordred extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
-# equivalent module form, same --host/--port flags:
 .venv/bin/python -m mordred_hermes.extension
 ```
 
 Bind failures (port already in use, bad host, privileged port) exit with a
-one-line error instead of a traceback — a bound 7788 usually means a full
-Hermes gateway is already hosting the extension API, in which case there is
-nothing to start. Both Ctrl+C and SIGTERM (systemd, `docker stop`) shut down
-cleanly. One divergence between the two forms: with the `extension` extra
-missing, only `hermes-mordred extension serve` prints the install hint — the
-module form fails on the package import itself with a plain `ImportError`.
+one-line error instead of a traceback — see
+[Troubleshooting](#troubleshooting) if you hit a bound-port error. Both
+Ctrl+C and SIGTERM (systemd, `docker stop`) shut down cleanly. One divergence
+between the two forms: with the `extension` extra missing, only
+`hermes-mordred extension serve` prints the install hint — the module form
+fails on the package import itself with a plain `ImportError`.
 
 Pairing, auth (incl. WebAuthn), `encrypt`/`decrypt`, history, and the
 keyvault-backed `accounts_request` / `sign_request` flows are fully functional
@@ -250,7 +294,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --reinstall --no
 ```
 
 `--reinstall` is required whenever the version string is unchanged (two builds
-both reporting `0.1.0a1`, say): without it uv treats the requirement as already
+both reporting the same version, say): without it uv treats the requirement as already
 satisfied and no-ops, leaving the binary on stale code — the symptom is a newly
 added flag such as `configure --skip-hermes-setup` failing with `unrecognized
 arguments`. `--no-deps` keeps the live editable `hermes-agent` checkout
@@ -282,6 +326,66 @@ Both live suites were last validated on real devices on 2026-05-25.
 Releases are cut via the `release.yml` workflow (PyPI Trusted Publishing);
 bump versions in lockstep with `tools/bump_version.py`. Runbook:
 [CI.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/CI.md).
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Slack integration silently off after a Touch ID prompt at login | Attended Secure Enclave device key + a launchd-started background process (gateway, `extension serve`) racing for Touch ID — a background process can never answer the prompt, so it blocks until the helper's 120 s timeout and starts **without** the vault-managed secrets (a sealed Slack bot token silently drops the platform, with only a `Failed to load plugin 'mordred_keyvault': auth_failed` warning in the logs). | Run `$M keyvault enable-se --unattended` **before** `$M keyvault init` — the attended/unattended choice is fixed at key creation. Already affected? See [`USAGE.md` §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) for re-keying onto an unattended key without destroying your sealed secrets — do **not** use `keyvault reset`. |
+| `~/.hermes/mordred/audit.log` is plaintext NDJSON whose entries say `mordred.degraded.audit_encryption_unavailable` | A Mordred process started somewhere the Keychain / Secure Enclave helper is unreachable (a sandboxed shell, a pre-unlock launchd start, a container). The audit-writer factory probes the audit-log wrapping key once per process; on failure it rotates the encrypted log aside and that process writes plaintext for its whole lifetime — fail-open by design, so auditing never stops (each downgrade leaves one `warn` marker in the trail). | A healthy log starts with `{"fmt":"MRAL"` — check with `head -c 20 ~/.hermes/mordred/audit.log`. Recovery is automatic: the next audit write from a healthy context (a normal login shell) rotates the plaintext file aside and starts a fresh encrypted log; long-lived services pick that up on restart. Rotated plaintext siblings remain as dated `audit.log.<date>` files — remove them with `$M audit purge --yes` if they must not persist. |
+| `extension serve` fails to start, citing port 7788 in use | Something else already owns `127.0.0.1:7788` — usually a full Hermes gateway already hosting the extension API (nothing to start), occasionally a stale `extension serve` process from an earlier run. | Check what's listening: `lsof -i :7788`. A full Hermes gateway there means there's nothing to do — the API is already up. A stale `extension serve` should be stopped, or bind a different port instead with `$M extension serve --port 7799` (see the [`extension` command reference](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#extension--browser-extension-pairing-and-server-preview)). |
+| `extension serve` logs show the extension reconnecting roughly every ~30s | Expected: Chrome kills an idle Manifest V3 service-worker after about 30s, so the extension's background context reconnects — this is Chrome's extension lifecycle, not a server bug. The server already sends an app-level keepalive under that window to help keep the connection alive. | Nothing to fix. If chats or signing requests are actually being dropped (not just reconnect log lines), that's a different problem — file an issue. |
+| Network communication drops out now and then | The active privacy path (Tor / VPN) is down or flagged unhealthy. | See the network-troubleshooting note under [Use it](#use-it) above — run `$M network status` to check `state` / `last_health`, then `$M network use <tor\|vpn\|clearnet>` to re-establish the path. |
+| Lost the vault recovery passphrase | The passphrase is the cold-path key and is never stored anywhere by design. | Still on the same device, with its device key intact? Run `$M encryption change-passphrase` — it tries this device's key first, so you can set a new passphrase without knowing the old one (see [`USAGE.md` — `encryption`](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#encryption--the-recommended-onoff-switch)). If the device key is also gone (new machine, `keyvault reset`, hardware failure), there is no documented recovery path — data sealed only behind that passphrase is permanently lost. |
+
+## Upgrading
+
+Two different things go by "upgrade": the installed **package**, and your
+existing **config** (Mordred / OpenClaw settings).
+
+### Upgrade the installed package
+
+Same command as [Install](#install-users-from-pypi), with the version bumped
+— a different pinned version is never "already satisfied", so this
+reinstalls in place without needing `--upgrade`:
+
+```sh
+# macOS
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==<new-version>"
+
+# Linux
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==<new-version>"
+```
+
+Check [PyPI](https://pypi.org/project/mordred-hermes/) (or the badge at the
+top of this file) for the latest version. Prefer not to pin?
+
+```sh
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --upgrade "mordred-hermes[macos]"
+```
+
+This resolves to the newest pre-release without extra flags — every release
+is currently a pre-release, so the all-prereleases fallback applies (see
+[Install](#install-users-from-pypi) above; the same goes for plain `pip`, if
+your venv has it — the reference setup's venv ships without one).
+
+### Migrate config with `hermes-mordred upgrade`
+
+Different command, different job: `$M upgrade` is an idempotent migration of
+an *existing* Hermes / OpenClaw setup onto Mordred's `config.yaml`
+conventions — it back-fills the `plugins.mordred_privacy_check` section if
+it's missing, no-ops if it already matches Mordred's defaults, and
+auto-detects and migrates a legacy `~/.openclaw` install. Safe to re-run.
+
+```sh
+$M upgrade
+$M upgrade --non-interactive --policy-conflict keep-existing
+```
+
+See [`USAGE.md` — `upgrade`](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#upgrade--migrate-an-existing-install)
+for the full flag reference (`--reset`, `--audit-merge`, `--policy-conflict`).
+Setting up fresh instead of migrating an existing install? Use `configure`
+(above), not `upgrade`.
 
 ## Uninstall
 

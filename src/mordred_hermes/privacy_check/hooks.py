@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .._audit_support import safe_audit_append
 from . import _runtime
 from .policy import evaluate_pre_tool_call
 
@@ -40,13 +41,22 @@ def on_session_start(**kwargs: Any) -> None:
 
     if disabled:
         decision = "block" if state.policy_mode == "strict" else "warn"
-        state.audit.append(
+        # safe_audit_append, not a bare append: Hermes wraps every hook callback
+        # in ``except Exception`` and logs-and-continues. A plain Exception from
+        # the audit write (disk full, permission flip, an over-long entry) would
+        # therefore be swallowed BEFORE the SystemExit below ever fires, and the
+        # session would proceed unprotected — a fail-open bypass of the very gate
+        # this hook exists to enforce. The refusal must outrank the audit write,
+        # so audit-side errors are logged and swallowed here instead.
+        safe_audit_append(
+            state.audit,
             {
                 "event": "on_session_start",
                 "decision": decision,
                 "reason": "mordred.degraded.disable_unprotected",
                 "disabled_siblings": sorted(disabled),
-            }
+            },
+            logger=_LOG,
         )
         if state.policy_mode == "strict":
             msg = (
@@ -59,12 +69,14 @@ def on_session_start(**kwargs: Any) -> None:
         _LOG.warning("Mordred siblings disabled in %s mode: %s", state.policy_mode, sorted(disabled))
 
     if _runtime.claim_no_origin_skill_emit():
-        state.audit.append(
+        safe_audit_append(
+            state.audit,
             {
                 "event": "on_session_start",
                 "decision": "warn",
                 "reason": "mordred.degraded.no_origin_skill",
-            }
+            },
+            logger=_LOG,
         )
 
 
@@ -79,13 +91,17 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     tool_name = str(kwargs.get("tool_name") or "")
 
     if _runtime.is_poisoned():
-        state.audit.append(
+        # Same fail-open reasoning as on_session_start: the block decision must
+        # survive an audit-write failure, so the append can never raise past us.
+        safe_audit_append(
+            state.audit,
             {
                 "event": "pre_tool_call",
                 "decision": "block",
                 "reason": "mordred.degraded.disable_unprotected",
                 "tool_name": tool_name,
-            }
+            },
+            logger=_LOG,
         )
         return {
             "action": "block",
@@ -98,13 +114,15 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         active_path=None,
     )
     if outcome.decision == "block":
-        state.audit.append(
+        safe_audit_append(
+            state.audit,
             {
                 "event": "pre_tool_call",
                 "decision": "block",
                 "reason": outcome.reason,
                 "tool_name": tool_name,
-            }
+            },
+            logger=_LOG,
         )
         return {
             "action": "block",

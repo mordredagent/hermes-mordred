@@ -1,20 +1,20 @@
 # Mordred — CI Policy (Hermes-base)
 
-> **Note**: 本ドキュメントは Mordred plugin 開発リポジトリ (`Mordred-Hermes/`) の CI 戦略を記述します。OpenClaw 基準の旧版は `../../mordred/mordred-mvp-docs/CI.md` (deprecated) に残置。
+> **Note**: This document describes the CI strategy of the Mordred plugin development repository (`Mordred-Hermes/`). The old OpenClaw-based version remains at `../../mordred/mordred-mvp-docs/CI.md` (deprecated).
 
-旧版は OpenClaw upstream 由来の 42 個の workflow を fork で disable する複雑な構成だった。Hermes 化により Mordred は **plugin 開発リポジトリ** へ位置付けが変わったため、 CI も大幅に簡素化される。
+The old version had a complex setup that disabled 42 workflows inherited from OpenClaw upstream in the fork. With the move to Hermes, Mordred's positioning changed to a **plugin development repository**, so CI is dramatically simplified as well.
 
-## なぜシンプルになったか
+## Why it got simpler
 
-`Mordred-Hermes/` は Hermes upstream のフォークではなく、 **Mordred plugin 専用リポジトリ**。Hermes upstream の release lane / signing keys / Blacksmith runner / CodeQL enterprise tier 等は一切持たないし、 模倣する必要もない。
+`Mordred-Hermes/` is not a fork of Hermes upstream — it's a **repository dedicated to the Mordred plugin**. It has none of Hermes upstream's release lane / signing keys / Blacksmith runner / CodeQL enterprise tier, and doesn't need to imitate any of it.
 
-CI が果たすべき責務:
+Responsibilities CI must fulfill:
 
-1. Mordred plugin (`src/mordred_hermes/*`) のテストが green
-2. Lint / format / type check が green
-3. (Optional) Hermes upstream の hook signature drift 検知
+1. Mordred plugin (`src/mordred_hermes/*`) tests are green
+2. Lint / format / type check are green
+3. (Optional) Detecting Hermes upstream hook-signature drift
 
-それ以外は upstream の責務であり、 upstream の CI で実行される。
+Everything else is upstream's responsibility, and runs in upstream's CI.
 
 ## Standalone-repo adaptations (2026-07-01)
 
@@ -23,7 +23,7 @@ When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Brows
 - **`hermes-agent` is now published on PyPI** (confirmed `hermes-agent==0.14.0`, 2026-07-01). The old design's premises — "`hermes-agent` isn't on PyPI so a root install is required" and "the `fresh-venv-resolution` job (H1) asserts install **fails** without it" — no longer hold. `pip install -e .` resolves `hermes-agent` on its own. The `fresh-venv-resolution` job is **retired**: H1's purpose (fail-fast when `hermes-agent` is absent) is moot now that it's always resolvable from PyPI
 - **`upstream-check.yml` no longer needs `git clone`**: `pip install hermes-agent` unpacks its source (plain `.py` files, not compiled) into site-packages, so `tools/check_hook_payload_drift.py --hermes-root <site-packages>` works directly (verified locally)
 - The following were initially left out of the 2026-07-01 restoration and were **restored on 2026-07-06** (same adaptation pattern: PyPI install, flat repo-root paths, `HERMES_HOME` isolation on pytest steps):
-  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — workflow restored (`reserve` builds `packaging/name-reservation/`, `release` builds the repo root). The one-time external operator setup (pending publishers + GitHub Environments, see §"`release.yml` 詳細" §"初回 setup") was **completed on 2026-07-07** and the M7 name reservation (`mode=reserve`) was dispatched and verified on both TestPyPI and PyPI (`mordred-hermes 0.0.0.dev0`)
+  - `.github/workflows/release.yml` (PyPI Trusted Publishing) — workflow restored (`reserve` builds `packaging/name-reservation/`, `release` builds the repo root). The one-time external operator setup (pending publishers + GitHub Environments, see §"`release.yml` details" §"Initial setup") was **completed on 2026-07-07** and the M7 name reservation (`mode=reserve`) was dispatched and verified on both TestPyPI and PyPI (`mordred-hermes 0.0.0.dev0`)
   - `.github/workflows/integration-vpn.yml` — restored; still `workflow_dispatch`-only and requires the `MORDRED_MULLVAD_ACCOUNT` repo secret (paid resource) before it can be dispatched
   - the `integration-tor` / `tpmkey-helper` / `tpmkey-helper-tpm` jobs inside `ci.yml` — restored; `native/**` was added to the `ci.yml` paths filter so Rust-crate changes trigger CI. These jobs are not branch-protection required checks (required checks stay the two `test` 3.12 cells)
 
@@ -31,77 +31,79 @@ When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Brows
 
 | Path | Purpose | Status |
 |------|---------|--------|
-| `.github/workflows/ci.yml` | Per-PR / push: `test` (matrix; ruff + mypy + pytest) + `integration-tor` + `tpmkey-helper` + `tpmkey-helper-tpm` jobs | **restored** (all 4 jobs; `fresh-venv-resolution` is retired) |
+| `.github/workflows/ci.yml` | Per-PR / push: `test` (matrix; ruff + mypy + pytest) + `hermes-floor` + `integration-tor` + `tpmkey-helper` + `tpmkey-helper-tpm` jobs | **restored** (5 jobs) |
 | `.github/workflows/upstream-check.yml` | Weekly detection of Hermes hook signature + payload drift | **restored** (simplified `git clone` to `pip install hermes-agent`) |
 | `.github/workflows/labeler.yml` | Auto-labels PRs by path (mordred-* paths) | **restored** |
 | `.github/workflows/integration-vpn.yml` | `workflow_dispatch`-only: live Mullvad VPN integration test (PR3b, pairs with the `integration-tor` job) | **restored** (needs `MORDRED_MULLVAD_ACCOUNT` secret before dispatch) |
-| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | **restored** (operator setup + M7 name reservation completed 2026-07-07, §初回 setup) |
+| `.github/workflows/release.yml` | `workflow_dispatch`-only: PyPI publish for `mordred-hermes` (M7) | **restored** (operator setup + M7 name reservation completed 2026-07-07, §Initial setup) |
 
 The detail sections below are left as they were in the pre-split design (historical record). Where they conflict, the "Standalone-repo adaptations" note above takes precedence.
 
-## `ci.yml` 詳細
+## `ci.yml` details
 
-実装は `.github/workflows/ci.yml` を参照。 `ci.yml` は **5 つの job** で構成される:
+See `.github/workflows/ci.yml` for the implementation. `ci.yml` consists of **5 jobs**:
 
-1. **`test`** — matrix (OS × Python) の unit-test job。 ruff + mypy + pytest
-2. **`fresh-venv-resolution`** — H1 fail-fast 契約の検証 job。 `hermes-agent` を root install せずに `mordred-hermes` を install し、 依存解決が **失敗する** ことを assert する (`hermes-agent` 未公開時に install が fail-fast する保証)
-3. **`integration-tor`** — hermetic な Tor Docker 統合テスト job (Linux 限定; macOS runner に Docker がないため)
-4. **`tpmkey-helper`** — `native/tpmkey-helper` Rust crate (Linux TPM 2.0 helper) を ubuntu + macOS で `cargo fmt --check` / `cargo clippy -D warnings` / `cargo test` 検証する。 純粋関数層 (wire / SEC1 codec / 32-byte ECDH-Z left-pad / blob store / neutral error taxonomy) を両 OS で build し「macOS dev host では検証できない Linux build」を実 Linux で担保する。 Linux leg は v2-OS2 Phase 2b の `tss-esapi` TPM backend (`cfg(target_os="linux")`) も build するため libtss2-dev + libclang を install する; backend の live テストは `MORDRED_TPM_TEST` で gate され job 5 で走る
-5. **`tpmkey-helper-tpm`** — v2-OS2 Phase 2b。 ubuntu で `swtpm` software TPM を起動し `MORDRED_TPM_TEST=1` で `tss-esapi` backend を end-to-end 検証する (generate / public_key / delete / software P-256 との ECDH parity)。 テストは単一の swtpm command server を共有するため `--test-threads=1`
+1. **`test`** — the unit-test job across the matrix (OS × Python). ruff + mypy + pytest, plus a cheap `hermes-mordred policy dry-run skills/mordred-status` step that guards against `skills/mordred-status/SKILL.md` drifting out of sync with the live CLI
+2. **`hermes-floor`** — pins `hermes-agent==0.13.0` (the floor declared by `pyproject.toml`'s `hermes-agent>=0.13.0`; 0.13.0 is hermes-agent's first PyPI release — the job's own first run proved the old 0.11.0 floor was never installable), installs `mordred-hermes` on top of it, asserts the resolver did not silently upgrade it off the pin, then runs the unit suite against that exact combination. Every other job resolves the latest PyPI `hermes-agent`, so without this job the declared floor is never actually exercised
+3. **`integration-tor`** — hermetic Tor Docker integration-test job (Linux-only; macOS runners have no Docker)
+4. **`tpmkey-helper`** — verifies the `native/tpmkey-helper` Rust crate (the Linux TPM 2.0 helper) on both ubuntu and macOS with `cargo fmt --check` / `cargo clippy -D warnings` / `cargo test`. Builds the pure-function layer (wire / SEC1 codec / 32-byte ECDH-Z left-pad / blob store / neutral error taxonomy) on both OSes to guarantee, on real Linux, "a Linux build that can't be verified on a macOS dev host." The Linux leg also builds the v2-OS2 Phase 2b `tss-esapi` TPM backend (`cfg(target_os="linux")`), so it installs libtss2-dev + libclang; the backend's live tests are gated behind `MORDRED_TPM_TEST` and run in job 5
+5. **`tpmkey-helper-tpm`** — v2-OS2 Phase 2b. Starts a `swtpm` software TPM on ubuntu and verifies the `tss-esapi` backend end-to-end with `MORDRED_TPM_TEST=1` (generate / public_key / delete / ECDH parity against software P-256). Tests share a single swtpm command server, so `--test-threads=1`
 
-主要ポイント:
+Key points:
 
-- **paths filter (trigger 種別で異なる)**:
-  - `pull_request` trigger: `mordred-hermes/**`, `pyproject.toml`, `hermes_cli/**`, `.github/workflows/ci.yml`, `docs/dev/CI.md`
-  - `push` (`main`) trigger: `mordred-hermes/**`, `pyproject.toml`, `hermes_cli/**`, `.github/workflows/ci.yml` のみ。 **CI.md は push trigger には含まれない** (docs-only の変更は PR で検査され、 `main` への push では再実行しない)
-- **concurrency**: `ci-${{ github.ref }}` group + `cancel-in-progress: true` で同一 PR の旧 run を自動 cancel
-- **`test` job — install order**: `pip install -e .` (Hermes upstream を root から install) → `pip install -e './mordred-hermes[dev]'` → `pip install -e './mordred-hermes[keyvault]'`。 Hermes upstream (`hermes-agent`) は現時点で PyPI 未公開のため root install が必須 (`hermes-agent` 自体が PyPI 公開された後に root install を削除予定)。 M7 の `release.yml` が publish するのは `mordred-hermes` であって `hermes-agent` ではない点に注意 (Mordred のマイルストーンタグ `v0.1.0-mvp.0` と `hermes-agent` のバージョンは別物 — Mordred の `hermes-agent` 依存 pin は `hermes-agent>=0.11.0`、 `pyproject.toml` 参照)
-- **`keyvault` extra (全 platform)**: cross-platform な crypto スタック (`cryptography` / `argon2-cffi` / `blake3`) を全 runner で install。 keyvault モジュール群を Linux でも `mypy --strict src` / pytest が解決できるようにするため (これらの package 自体は cross-platform; keyvault *機能* の macOS 限定は下記 pyobjc bridge が gating)
-- **macOS のみ**: `pip install -e './mordred-hermes[macos]'` を追加で実行 (`macos` extra = `keyvault` extra + Phase 4 keyvault 用 pyobjc bridge: `pyobjc-framework-Security` / `-SystemConfiguration` / `-Quartz`)
-- **`test` job — steps**: ruff lint → ruff format check → mypy strict → pytest (coverage XML)
-- **Matrix**: macOS Apple Silicon (Phase 4 keyvault 動作確認)、 Ubuntu (Phase 1-3 multi-platform 確認) × Python 3.11 / 3.12 (Hermes upstream の `requires-python = ">=3.11"` に整合、 mordred-hermes 側も同 pin)
-- **`fresh-venv-resolution` job**: `needs: test`。 `pip install -e .` を意図的に skip し、 `pip install -e './mordred-hermes'` の依存解決が `hermes-agent` 不在で失敗することを検証 (単なる非ゼロ終了では不十分なので、 `install.log` に `hermes-agent` の dependency-resolution エラーが出ていることまで grep で確認)
-- **`integration-tor` job**: `needs: test`。 `mordred-hermes[dev,integration]` を install し、 `tests/integration/docker/tor/` で Docker image を build、 `pytest -m integration` で Tor + SOCKS5h + provider-transport の統合テストを実行
-- **coverage**: `actions/upload-artifact@v4` で `coverage-${os}-py${version}` 名のアーティファクトに保存。 Codecov 連携は別 PR (token を Repo secret に追加してから有効化)
-- **Live tests** (`MORDRED_LIVE_LLM_TEST=1` / `MORDRED_KEYVAULT_LIVE=1` / `MORDRED_LIVE_TOR_TEST=1`) は default では実行しない。明示的にトリガーする workflow_dispatch を別途用意
+- **paths filter (differs by trigger type)**:
+  - `pull_request` trigger: `src/**`, `tests/**`, `tools/**`, `native/**`, `pyproject.toml`, `uv.lock`, `.github/workflows/ci.yml`, `docs/dev/CI.md`
+  - `push` (`main`, `dev`) trigger: the same list minus `docs/dev/CI.md` (docs-only changes are checked in the PR and not re-run on push)
+- **concurrency**: the `ci-${{ github.ref }}` group + `cancel-in-progress: true` automatically cancels older runs on the same PR
+- **permissions**: top-level `contents: read` — every job in this workflow only reads the checked-out source; nothing here needs to write anywhere
+- **`test` job — install**: `pip install -e ".[dev,keyvault,extension]"` resolves `hermes-agent` directly from PyPI (no monorepo root install step); macOS runners additionally install the `macos` extra (pyobjc Security/SystemConfiguration/Quartz bridges)
+- **`keyvault` extra (all platforms)**: installs the cross-platform crypto stack (`cryptography` / `argon2-cffi` / `blake3`) on every runner, so that `mypy --strict src tools` / pytest can resolve the keyvault modules on Linux too (these packages themselves are cross-platform; the macOS-only restriction on keyvault *functionality* is gated by the pyobjc bridge below)
+- **`test` job — steps**: ruff lint → ruff format check → `mypy --strict src tools` → pytest (coverage XML) → SKILL.md drift guard. `mypy` covers `tools/` as well as `src/` to match `pyproject.toml`'s `[tool.mypy] files` setting — CLI args override config `files`, so omitting `tools` here would silently stop checking it
+- **Matrix**: macOS Apple Silicon (confirms Phase 4 keyvault behavior) × Ubuntu (confirms Phase 1-3 multi-platform behavior) × Python 3.11 / 3.12 / 3.13 (aligned with Hermes upstream's `requires-python = ">=3.11"`). 3.13 was added as a new cell and should be watched for a cycle — `fail-fast: false` means a 3.13-only failure (e.g. a lagging pyobjc/blake3 wheel) won't block the 3.11/3.12 cells
+- **pip caching**: `test`, `hermes-floor`, and `integration-tor` all pass `cache: pip` to `actions/setup-python@v5`
+- **`hermes-floor` job**: standalone (no `needs:`), Python 3.12 on ubuntu-24.04. Pins `hermes-agent==0.13.0`, installs `mordred-hermes[dev,keyvault,extension]` on top of it, then a guard step reads back the installed `hermes-agent` version via `importlib.metadata` and fails the job if it isn't still `0.13.0` (which would mean the floor itself went untested). Runs the default unit suite (`pytest`; `pyproject.toml`'s `addopts` already excludes `-m integration`) **minus two deselected latest-tracking drift detectors** (`test_replica_matches_hermes_source` — the provider replica byte-matches the *installed* hermes and deliberately tracks PyPI-latest; `test_known_provider_slugs_are_real_hermes_ids` — requires provider ids only recognised from hermes-agent 0.18.0). Including them would force floor == latest forever; both still run at latest in the `test` job
+- **`integration-tor` job**: `needs: test`. Installs `mordred-hermes[dev,integration]`, builds the Docker image under `tests/integration/docker/tor/`, and runs the Tor + SOCKS5h + provider-transport integration tests with `pytest -m integration`
+- **`tpmkey-helper` / `tpmkey-helper-tpm` caching**: both jobs cache `~/.cargo/registry`, `~/.cargo/git`, and `native/tpmkey-helper/target` via the GitHub-owned `actions/cache@v4` (not the third-party `Swatinem/rust-cache`, consistent with this repo's supply-chain stance — see the `tor-control` extra's `stem`-gating rationale in `pyproject.toml`), keyed on `${{ runner.os }}-...-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}`
+- **coverage**: saved as an artifact named `coverage-${os}-py${version}` via `actions/upload-artifact@v4`. Codecov integration is a separate PR (to be enabled after adding the token as a repo secret)
+- **Live tests** (`MORDRED_LIVE_LLM_TEST=1` / `MORDRED_KEYVAULT_LIVE=1`) do not run by default and have **no** CI workflow automation — there is no `workflow_dispatch` for either suite. The only live-gated suite with a `workflow_dispatch` is VPN (`MORDRED_LIVE_VPN_TEST=1`, `integration-vpn.yml`, see below). For the keyvault/LLM suites, the compensating control is the manual on-device validation log below (§Manual live-device validation log)
 
-## `integration-vpn.yml` 詳細
+## `integration-vpn.yml` details
 
-実装は `.github/workflows/integration-vpn.yml` を参照。 `ci.yml` の `integration-tor` job と対をなす live 統合テスト workflow で、 Tor 側が CI で常時走る (`integration-tor` job) のに対し VPN 側はこの独立 workflow に切り出されている。
+See `.github/workflows/integration-vpn.yml` for the implementation. This is the live integration-test workflow that pairs with `ci.yml`'s `integration-tor` job — while the Tor side always runs in CI (the `integration-tor` job), the VPN side is split out into this separate workflow.
 
-- **trigger**: `workflow_dispatch` 限定 — push / PR では決して自動実行しない。 Mullvad アカウント番号は有料リソースであり、 bring-up が runner の実ネットワーク状態を mutate するため
-- **input**: `mullvad_version` (Mullvad client のバージョン; semver または `latest`)
-- **secrets**: `MORDRED_MULLVAD_ACCOUNT` (16 桁アカウント番号) を repo secret として要求
-- **手順**: `hermes-agent` (root) + `mordred-hermes[dev]` を install → 公式 Mullvad daemon を runner に install → `MORDRED_LIVE_VPN_TEST=1` で `pytest -m integration tests/integration/test_vpn.py` を実行 → teardown で必ず `mullvad disconnect` / `account logout`
+- **trigger**: `workflow_dispatch` only — never runs automatically on push / PR. The Mullvad account number is a paid resource, and bring-up mutates the runner's actual network state
+- **input**: `mullvad_version` (the Mullvad client version; semver or `latest`)
+- **secrets**: requires `MORDRED_MULLVAD_ACCOUNT` (the 16-digit account number) as a repo secret
+- **Procedure**: install `hermes-agent` (root) + `mordred-hermes[dev]` → install the official Mullvad daemon on the runner → run `pytest -m integration tests/integration/test_vpn.py` with `MORDRED_LIVE_VPN_TEST=1` → always `mullvad disconnect` / `account logout` in teardown
 
 ## Manual live-device validation log
 
-- **2026-05-25**: operator により、 default PR CI から除外される hardware / network gated suite の実機検証成功が報告された:
-  - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v` — macOS Secure Enclave hardware 上で実行。
-  - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v` — real Mullvad CLI / daemon session に対して実行。
+- **2026-05-25**: the operator reported successful on-device validation of the hardware/network-gated suite that's excluded from the default PR CI:
+  - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v` — run on actual macOS Secure Enclave hardware.
+  - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v` — run against a real Mullvad CLI / daemon session.
 
-Tor path は hermetic Docker-based `integration-tor` CI job で別途カバーする。 host VPN state や Secure Enclave hardware は要求しない。
+The Tor path is covered separately by the hermetic Docker-based `integration-tor` CI job. It requires neither host VPN state nor Secure Enclave hardware.
 
-## `upstream-check.yml` 詳細
+## `upstream-check.yml` details
 
-実装は `.github/workflows/upstream-check.yml` を参照 (DECIDE 0.1: v1 で導入確定、 2026-05-09)。 主要ポイント:
+See `.github/workflows/upstream-check.yml` for the implementation (DECIDE 0.1: confirmed for introduction in v1, 2026-05-09). Key points:
 
-- **schedule**: 週次 月曜 03:00 UTC (`cron: "0 3 * * 1"`) + `workflow_dispatch`
-- **permissions**: `contents: read` + `issues: write` (drift 検出時の自動 issue 起票用)
-- **drift 検知**: Hermes upstream を `git clone --depth 1` した後、 `pip install -e ./hermes-upstream` で transitive deps (PyYAML 等) を確実に入れてから `hermes_cli.plugins.VALID_HOOKS` を import (sys.path hack で済ませると runner の dep 不在を `__MISSING__` と誤検出する)。 取得した hook 一覧を Mordred plugin の `register_hook("...")` grep 結果と比較
-- **Phase 0 caveat**: Phase 0 plugin は no-op stub のため `register_hook` 呼出 = 0 件。 required-set が空でも fail させない (Phase 1.x で hook を呼ぶようになってから drift detection が有意義になる)
-- **VALID_HOOKS が消えた場合**: Hermes upstream 側の constant rename も drift signal として `__VALID_HOOKS_REMOVED__` で issue 起票
-- **issue 起票**: 差分発生時に `actionable` + `upstream-drift` ラベル付きで自動起票。 既に open な `upstream-drift` issue があれば**新規起票せず comment を追記**する dedup (週次再実行での issue 量産を防ぐ)。 payload field drift 検出時は issue 本文に per-site の欠落フィールド一覧を併記
-- **payload field drift 検知 (2026-06-12 追加、 TODO L474)**: hook **名** (`VALID_HOOKS` membership) に加えて、 `tools/check_hook_payload_drift.py` が upstream ソースを pure-`ast` で走査し、 core の `invoke_hook("<name>", key=value, ...)` 全 dispatch site に Mordred が消費する payload フィールド (`tools/hook_payload_contract.json`) が渡っているかを照合する (import / install 不要)。 contract キーが plugin の `register_hook` 呼出と完全一致することは `tests/test_hook_payload_drift.py` が強制し、 同テストの canary が vendored fork (リポジトリ自身の Hermes ツリー) へ同じ照合を毎 CI 実行する
+- **schedule**: weekly on Monday 03:00 UTC (`cron: "0 3 * * 1"`) + `workflow_dispatch`
+- **permissions**: `contents: read` + `issues: write` (for automatically filing an issue when drift is detected)
+- **Drift detection**: after `git clone --depth 1` of Hermes upstream, run `pip install -e ./hermes-upstream` to reliably pull in transitive deps (PyYAML, etc.) before importing `hermes_cli.plugins.VALID_HOOKS` (relying on a sys.path hack instead would misdetect the runner's missing deps as `__MISSING__`). Compares the retrieved hook list against the results of grepping the Mordred plugin's `register_hook("...")` calls
+- **Phase 0 caveat**: since the Phase 0 plugin is a no-op stub, there are 0 `register_hook` calls. Don't fail even when the required-set is empty (drift detection becomes meaningful once Phase 1.x starts calling hooks)
+- **If `VALID_HOOKS` disappears**: a constant rename on the Hermes upstream side is also treated as a drift signal, and an issue is filed as `__VALID_HOOKS_REMOVED__`
+- **Issue filing**: when a diff occurs, an issue is automatically filed with the `actionable` + `upstream-drift` labels. If an `upstream-drift` issue is already open, dedup logic **appends a comment instead of filing a new issue** (preventing issue pile-up from weekly reruns). When payload field drift is detected, the issue body also lists the missing fields per call site
+- **Payload field drift detection (added 2026-06-12, TODO L474)**: in addition to hook **names** (`VALID_HOOKS` membership), `tools/check_hook_payload_drift.py` scans the upstream source with pure `ast` and cross-checks whether every `invoke_hook("<name>", key=value, ...)` dispatch site in core passes the payload fields Mordred consumes (`tools/hook_payload_contract.json`) — no import or install required. `tests/test_hook_payload_drift.py` enforces that the contract keys exactly match the plugin's `register_hook` calls, and that same test's canary runs the identical check against the vendored fork (this repository's own Hermes tree) on every CI run
 
-## `labeler.yml` 詳細
+## `labeler.yml` details
 
-実装は 2 ファイル構成:
+The implementation consists of 2 files:
 
-- `.github/labeler.yml` — label と path glob の対応表 (`actions/labeler@v5` schema)
-- `.github/workflows/labeler.yml` — `on: pull_request_target` で `actions/labeler@v5` を駆動
+- `.github/labeler.yml` — the mapping table between labels and path globs (`actions/labeler@v5` schema)
+- `.github/workflows/labeler.yml` — drives `actions/labeler@v5` on `on: pull_request_target`
 
-label はリポジトリに事前作成しておく必要あり (one-time `gh label create`):
+Labels need to be created in the repository ahead of time (one-time `gh label create`):
 
 ```sh
 gh label create plugins/mordred-network        --color 1F77B4 --description "mordred_network plugin"
@@ -115,85 +117,85 @@ gh label create docs                           --color 0E8A16 --description "Doc
 gh label create ci                             --color 6F42C1 --description "CI/CD configuration"
 ```
 
-`pull_request_target` を使うため、 fork からの PR でも label が付与される。 permissions は `contents: read` + `pull-requests: write` のみ (PR HEAD コードは checkout しない、 label mutation のみ)。
+Because it uses `pull_request_target`, labels are applied even to PRs from forks. Permissions are only `contents: read` + `pull-requests: write` (it never checks out the PR HEAD code — label mutation only).
 
-## `release.yml` 詳細
+## `release.yml` details
 
-実装は `.github/workflows/release.yml` を参照 (M7、 TODO §0.5 L70)。 `mordred-hermes` を PyPI / TestPyPI に publish する。 **`workflow_dispatch` 限定** — PyPI publish は不可逆 (削除した version / ファイル名は二度と再アップロード不可) のため自動実行しない。
+See `.github/workflows/release.yml` for the implementation (M7, TODO §0.5 L70). Publishes `mordred-hermes` to PyPI / TestPyPI. **`workflow_dispatch` only** — since a PyPI publish is irreversible (a deleted version/filename can never be re-uploaded), it doesn't run automatically.
 
-- **認証**: PyPI Trusted Publishing (OIDC)。 API トークンは一切保存しない。 `publish` job が `id-token: write` 権限で短命の OIDC トークンを取得し、 `pypa/gh-action-pypi-publish` がそれで認証する
-- **`target` input**: `testpypi` / `pypi` の choice。 GitHub Environment (`testpypi` / `pypi`) で gating — `pypi` Environment に required reviewers を設定すれば本番 publish に人手承認が挟まる
+- **Authentication**: PyPI Trusted Publishing (OIDC). No API tokens are stored at all. The `publish` job obtains a short-lived OIDC token with `id-token: write` permission, and `pypa/gh-action-pypi-publish` authenticates with it
+- **`target` input**: a choice of `testpypi` / `pypi`. Gated via GitHub Environments (`testpypi` / `pypi`) — setting required reviewers on the `pypi` Environment inserts a manual approval step before production publishing
 - **`mode` input**:
-  - `reserve` — `packaging/name-reservation/` の空 stub (`0.0.0.dev0`) を build。 v1 docs 公開前に名前を squat から守るための一度きりの予約
-  - `release` — 本体 (`mordred-hermes/`、 `0.1.0a0`+) を build。 名前予約後の通常リリースで使う
-- **build job の guard**: `reserve` モードは成果物が `0.0.0.dev0` であることを、 `release` モードは逆に `0.0.0.dev0` *でない* ことを検証してモード取り違えを防ぐ
-- **version 順序の不変条件**: `0.0.0.dev0 < 0.1.0a0` (PEP 440)。 stub が本体より小さいことで、 予約 stub が後続の本リリースを塞がない。 `tests/test_packaging_versions.py` がこの不変条件を pin
+  - `reserve` — builds the empty stub in `packaging/name-reservation/` (`0.0.0.dev0`). A one-time reservation to protect the name from squatting before v1 docs go public
+  - `release` — builds the real package (`mordred-hermes/`, `0.1.0a0`+). Used for normal releases after the name reservation
+- **build job guard**: `reserve` mode verifies the artifact is `0.0.0.dev0`, and `release` mode conversely verifies it is *not* `0.0.0.dev0`, preventing mode mix-ups
+- **Version-ordering invariant**: `0.0.0.dev0 < 0.1.0a0` (PEP 440). Because the stub sorts lower than the real package, the reservation stub never blocks a subsequent real release. `tests/test_packaging_versions.py` pins this invariant
 
-### 初回 setup (one-time、 operator 手動)
+### Initial setup (one-time, manual by the operator)
 
-> **2026-07-07 完了**: 全 6 ステップ実施済み。 TestPyPI / PyPI とも `mordred-hermes 0.0.0.dev0` の予約を live 確認 (runs `28832255704` / `28832311414`)。 **Deviation**: step 4 の `pypi` Environment への required reviewers は現行 billing plan (private repo) では設定不可 (HTTP 422) のため未設定 — `workflow_dispatch` 限定であることが手動ゲートの代替。 repo public 化または plan 変更時に required reviewers を追加すること。
+> **Completed 2026-07-07**: all 6 steps have been carried out. Reservation of `mordred-hermes 0.0.0.dev0` was confirmed live on both TestPyPI and PyPI (runs `28832255704` / `28832311414`). **Deviation**: step 4's required reviewers on the `pypi` Environment could not be configured under the current billing plan (private repo) (HTTP 422), so it's unset — being `workflow_dispatch`-only substitutes for the manual gate. Add required reviewers once the repo goes public or the plan changes.
 
-PyPI への upload は不可逆な外部公開のため、 以下は **operator が手動で実施** する (CI 自動化対象外):
+Because uploading to PyPI is an irreversible public release, the operator **performs the following manually** (out of scope for CI automation):
 
-1. **PyPI 名の空き確認**: <https://pypi.org/project/mordred-hermes/> と <https://test.pypi.org/project/mordred-hermes/> が未登録であることを確認
-2. **pending publisher 登録 (TestPyPI)**: TestPyPI → Account settings → Publishing → "Add a new pending publisher":
+1. **Confirm the PyPI name is available**: verify that <https://pypi.org/project/mordred-hermes/> and <https://test.pypi.org/project/mordred-hermes/> are unregistered
+2. **Register a pending publisher (TestPyPI)**: TestPyPI → Account settings → Publishing → "Add a new pending publisher":
    - PyPI Project Name: `mordred-hermes`
    - Owner: `InternetMaximalism` / Repository: `mordred-hermes`
    - Workflow name: `release.yml` / Environment name: `testpypi`
-3. **pending publisher 登録 (PyPI)**: 同様に PyPI 側で Environment name = `pypi`
-4. **GitHub Environment 作成**: リポジトリ Settings → Environments で `testpypi` と `pypi` を作成。 `pypi` には required reviewers の設定を推奨
-5. **name reservation 実行**: Actions → "Release (PyPI publish)" → Run workflow → `target=testpypi, mode=reserve` で検証 → 成功確認後 `target=pypi, mode=reserve` で本予約
-6. 予約完了後、 `TODO.md` §0.5 L70 (M7) の checkbox を `[x]` 化
+3. **Register a pending publisher (PyPI)**: likewise on the PyPI side, with Environment name = `pypi`
+4. **Create GitHub Environments**: create `testpypi` and `pypi` under repository Settings → Environments. Configuring required reviewers on `pypi` is recommended
+5. **Run the name reservation**: Actions → "Release (PyPI publish)" → Run workflow → verify with `target=testpypi, mode=reserve` → after confirming success, do the real reservation with `target=pypi, mode=reserve`
+6. After the reservation is complete, mark the checkbox at `TODO.md` §0.5 L70 (M7) as `[x]`
 
-### 通常リリース (runbook)
+### Normal release (runbook)
 
-名前予約後の実リリースは毎回この手順で行う (初回 `0.1.0a0` で検証済みの流れ):
+After the name reservation, every real release follows this procedure (the flow verified with the initial `0.1.0a0`):
 
-1. **version bump (必須)** — `python tools/bump_version.py <new-version>` で `src/mordred_hermes/__about__.py` (正準) + `docs/dev/VERSION` + 全 `plugin.yaml` を一括更新。 PEP 440 準拠 (`0.1.0a1` / `0.1.0b0` / `0.1.0rc0` / `0.1.0` GA / `0.1.1` patch 等)。 **PyPI は一度使ったファイル名を永久に再利用不可** (yank/削除しても再 upload 不可) のため、 publish 済み version の再リリースは物理的に不可能 — 必ず bump する。 `tests/test_packaging_versions.py` が 7 surface の一致と stub < real を CI で保証
-2. bump を通常 PR で `dev` へ merge
-3. **dev→main リリース PR** — 集約 release notes (各 PR の `### Changes` / `### Fixes`、 §Changelog 規約) を PR 説明に記載し、 CI green を確認して merge。 `release.yml` の dispatch は `main` ref から行う (リリース成果物は main の内容)
-4. **TestPyPI で予行**: `gh workflow run release.yml --ref main -f target=testpypi -f mode=release` → run 成功確認
-5. **TestPyPI install 検証**: fresh venv で `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "mordred-hermes==<version>"` (extra-index は `hermes-agent` 等の依存解決用) → entry-point discovery 5/5 (`PluginManager.discover_and_load`) + `hermes-mordred --version` を確認
-6. **本番 publish**: `gh workflow run release.yml --ref main -f target=pypi -f mode=release` → PyPI JSON / simple index で live 確認。 **注意**: `pypi` Environment に required reviewers が未設定の間 (billing plan 制約、 §初回 setup の deviation) は dispatch ≈ 即公開
-7. **本番 install 検証**: fresh venv で pin 付き install → discovery + CLI を再確認
-8. **tag + GitHub Release**: main のリリース merge commit に annotated tag `v<version>` → GitHub Release 作成 (pre-release 版は `--prerelease`、 notes は手順 3 の集約を転記)
+1. **Version bump (mandatory)** — `python tools/bump_version.py <new-version>` bulk-updates `src/mordred_hermes/__about__.py` (canonical) + `docs/dev/VERSION` + every `plugin.yaml` + the README.md / docs/dev/setup.md install pins. PEP 440-compliant (`0.1.0a1` / `0.1.0b0` / `0.1.0rc0` / `0.1.0` GA / `0.1.1` patch, etc.). **PyPI can never reuse a filename once it's been used** (yanking/deleting doesn't allow re-upload), so re-releasing a version that's already been published is physically impossible — always bump. `tests/test_packaging_versions.py` guarantees in CI that all 9 surfaces (including the README / docs/dev/setup.md install pins) agree and that stub < real
+2. Merge the bump into `dev` via a normal PR
+3. **dev→main release PR** — write the aggregated release notes (each PR's `### Changes` / `### Fixes`, per §Changelog convention) in the PR description, confirm CI is green, and merge. Dispatch `release.yml` from the `main` ref (the release artifact reflects main's content)
+4. **Dry run on TestPyPI**: `gh workflow run release.yml --ref main -f target=testpypi -f mode=release` → confirm the run succeeds
+5. **Verify the TestPyPI install**: in a fresh venv, `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "mordred-hermes==<version>"` (the extra-index is for resolving dependencies like `hermes-agent`) → confirm entry-point discovery 5/5 (`PluginManager.discover_and_load`) + `hermes-mordred --version`
+6. **Production publish**: `gh workflow run release.yml --ref main -f target=pypi -f mode=release` → confirm it's live via the PyPI JSON / simple index. **Note**: while the `pypi` Environment has no required reviewers configured (a billing-plan constraint, the deviation noted in §Initial setup), dispatch ≈ immediate publication
+7. **Verify the production install**: in a fresh venv, install with a pin → re-confirm discovery + CLI
+8. **Tag + GitHub Release**: put an annotated tag `v<version>` on main's release merge commit → create a GitHub Release (use `--prerelease` for pre-release versions; copy the notes from the aggregation done in step 3)
 
-> **2026-07-08 完了 (初回 `mode=release`)**: `0.1.0a0` を publish 済み — dev→main merge (PR #12) → `main` ref から `target=testpypi` (run `28942410646`) → fresh-venv install 検証 (entry-point discovery 5/5 + `hermes-mordred` CLI、 hermes-agent 0.18.2) → `target=pypi` (run `28942564707`) → 本番 PyPI からの e2e install 検証、 の順で実施。 tag `v0.1.0a0`。 初回のみ version bump なし (`0.1.0a0` が未公開だったため)。 注意: 全リリースが pre-release の間は、 unpinned `pip install mordred-hermes` は pip の all-prereleases fallback 頼みになるため、 ユーザー向け手順は `==0.1.0a0` の pin (または `--pre`) を案内する (README §Install (PyPI))。 dirty checkout からの local `uv build` が nested `.gitignore` 非尊重で cargo `target/` を sdist に混入させる件は、 sdist config への明示 exclude 追加で解消済み (2026-07-09、 pyproject `[tool.hatch.build.targets.sdist] exclude`)。
+> **Completed 2026-07-08 (first `mode=release`)**: `0.1.0a0` has been published — carried out in the order: dev→main merge (PR #12) → `target=testpypi` from the `main` ref (run `28942410646`) → fresh-venv install verification (entry-point discovery 5/5 + `hermes-mordred` CLI, hermes-agent 0.18.2) → `target=pypi` (run `28942564707`) → e2e install verification from production PyPI. Tag `v0.1.0a0`. No version bump only for this first release (since `0.1.0a0` hadn't been published yet). Note: while all releases remain pre-release, an unpinned `pip install mordred-hermes` depends on pip's all-prereleases fallback, so user-facing instructions recommend pinning `==0.1.0a0` (or `--pre`) (README §Install (PyPI)). The issue where a local `uv build` from a dirty checkout doesn't respect nested `.gitignore` and pulls the cargo `target/` directory into the sdist has been resolved by adding an explicit exclude to the sdist config (2026-07-09, pyproject `[tool.hatch.build.targets.sdist] exclude`).
 
-## Changelog 規約
+## Changelog convention
 
-Mordred は専用の `CHANGELOG.md` ファイルを**持たない**。変更履歴は **各 PR の説明文**に記述する (`PLAN.md` / `TODO.md` の cross-cutting 運用規律):
+Mordred **does not** have a dedicated `CHANGELOG.md` file. Change history is recorded **in each PR's description** (a cross-cutting operational convention shared with `PLAN.md` / `TODO.md`):
 
-- 各 PR 説明に `### Changes` (機能追加・変更) / `### Fixes` (バグ修正) の見出しで **1 行ずつ** entry を書く
-- 外部コントリビュータの貢献には `Thanks @<author>` を併記する
-- リリース時は、 当該リリースに含まれる PR 群の `### Changes` / `### Fixes` を集約して GitHub Release / タグ注釈のリリースノートへ転記する
+- Write **one entry per line** in each PR description under the `### Changes` (features added/changed) / `### Fixes` (bug fixes) headings
+- For contributions from external contributors, append `Thanks @<author>`
+- At release time, aggregate the `### Changes` / `### Fixes` entries from the PRs included in that release and transcribe them into the GitHub Release / tag-annotation release notes
 
-**共有 PR テンプレートは編集しない**: リポジトリ root の `.github/PULL_REQUEST_TEMPLATE.md` は Hermes upstream 所有でモノレポ全体に適用されるため、 Mordred 固有の見出しを注入しない (soft-fork 規律、 `ROADMAP.md` "Forever out of scope")。 本規約は Mordred PR の author が手動で踏襲する。
+**Don't edit the shared PR template**: `.github/PULL_REQUEST_TEMPLATE.md` at the repository root is owned by Hermes upstream and applies across the whole monorepo, so Mordred-specific headings are not injected into it (soft-fork discipline, `ROADMAP.md` "Forever out of scope"). This convention is followed manually by the author of each Mordred PR.
 
-## Branching model (dev / main、 2026-07-07 導入)
+## Branching model (dev / main, introduced 2026-07-07)
 
-- `dev` — **default branch**。 日常開発の統合ブランチ: feature branch → PR → `dev`
-- `main` — リリース/安定ブランチ。 `dev` → `main` の PR でのみ更新する (直接 push・ feature PR の直接 target は行わない)
-- `ci.yml` の `push` トリガーは `main` / `dev` 両方が対象 (post-merge CI)。 `pull_request` トリガーは branch filter なしのため dev 向け PR でも従来どおり実行される
-- schedule 系 workflow (`upstream-check.yml` 週次 cron) は default branch (`dev`) 上の workflow 定義で実行される
-- `release.yml` の dispatch は原則 `main` ref から実行する (リリース成果物は main の内容)
+- `dev` — the **default branch**. The integration branch for day-to-day development: feature branch → PR → `dev`
+- `main` — the release/stable branch. Updated only via `dev` → `main` PRs (never a direct push, and never a direct target for feature PRs)
+- `ci.yml`'s `push` trigger covers both `main` and `dev` (post-merge CI). The `pull_request` trigger has no branch filter, so it still runs as before on PRs targeting dev
+- Schedule-based workflows (`upstream-check.yml`'s weekly cron) run using the workflow definition on the default branch (`dev`)
+- Dispatch of `release.yml` is, in principle, done from the `main` ref (the release artifact reflects main's content)
 
 ## Branch protection (one-time setup)
 
-> **2026-07-07 注記**: 現行 billing plan (private repo) では branch protection / rulesets が利用不可 (API 403)。 以下は repo public 化または plan upgrade 後に有効化する予定の設定で、 それまでは §Branching model の運用規律 (convention) で代替する。 有効化時は `main` に加えて `dev` にも同等の protection を適用する。
+> **Note (2026-07-07)**: under the current billing plan (private repo), branch protection / rulesets are unavailable (API 403). The settings below are planned to be enabled once the repo goes public or the plan is upgraded; until then, the operational convention in §Branching model substitutes for them. When enabled, apply equivalent protection to `dev` in addition to `main`.
 
-Phase 0 完了後、 `main` ブランチで以下を有効化:
+After Phase 0 completes, enable the following on the `main` branch:
 
 - Required status checks:
   - `CI / test (ubuntu-24.04, 3.12)`
   - `CI / test (macos-latest, 3.12)`
 - Require strict mode (branches must be up to date)
-- Allow force pushes from maintainers (rebase workflow 用)
-- Linear history は **任意** (Mordred plugin 開発では merge commit を許容する場合あり)
+- Allow force pushes from maintainers (for the rebase workflow)
+- Linear history is **optional** (Mordred plugin development may permit merge commits)
 
 ## Auditing
 
-Mordred plugin リポジトリは upstream OpenClaw のような大量の workflow を持たないため、 旧版にあった `workflow-allowlist-audit` job は不要。
+Since the Mordred plugin repository doesn't have the large number of workflows that upstream OpenClaw does, the `workflow-allowlist-audit` job from the old version is unnecessary.
 
 ```sh
 gh api -X GET /repos/InternetMaximalism/mordred-hermes/actions/workflows --paginate \
@@ -214,9 +216,9 @@ Expected output (as of 2026-07-06, all 5 Mordred-owned workflows restored under 
 
 ## Future expansion
 
-将来必要になった時に追加検討する workflow:
+Workflows to consider adding when the need arises in the future:
 
-- `docs.yml` — `docs/` を Sphinx / mkdocs で公開
-- `e2e.yml` — Hermes 実環境を Docker で起動して end-to-end test
+- `docs.yml` — publish `docs/` via Sphinx / mkdocs
+- `e2e.yml` — spin up a real Hermes environment in Docker for end-to-end testing
 
-これらは v1 リリース後に Phase 1 として優先度判定する。
+These will be prioritized as Phase 1 after the v1 release.

@@ -162,7 +162,7 @@ def _add_network(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     nsub = p.add_subparsers(dest="network_command", required=True, metavar="COMMAND")
 
     p_use = nsub.add_parser("use", help="Switch active network path")
-    p_use.add_argument("path", choices=ACTIVE_PATHS)
+    p_use.add_argument("path", choices=ACTIVE_PATHS, help="Network path to use (tor, vpn, or clearnet)")
     p_use.set_defaults(func=_handle_network_use)
 
     p_status = nsub.add_parser("status", help="Show active path and liveness")
@@ -207,14 +207,14 @@ def _add_policy(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
         "explain",
         help="Explain the install decision for a known skill id (exit code 2 when the decision is block)",
     )
-    p_explain.add_argument("skill_id")
+    p_explain.add_argument("skill_id", help="Skill id to explain")
     p_explain.set_defaults(func=_handle_policy_explain)
 
     p_dry = psub.add_parser(
         "dry-run",
         help="Evaluate install policy against a SKILL.md path without installing (exit code 2 = would block)",
     )
-    p_dry.add_argument("skill_path")
+    p_dry.add_argument("skill_path", help="Path to SKILL.md file to evaluate")
     p_dry.set_defaults(func=_handle_policy_dry_run)
 
     p_reload = psub.add_parser("reload", help="Re-read policy from config.yaml (in-process state reset)")
@@ -226,11 +226,11 @@ def _add_audit(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     asub = p.add_subparsers(dest="audit_command", required=True, metavar="COMMAND")
 
     p_tail = asub.add_parser("tail", help="Tail the most recent audit entries")
-    p_tail.add_argument("-n", "--lines", type=int, default=20)
+    p_tail.add_argument("-n", "--lines", type=int, default=20, help="Number of recent entries to show (default: 20)")
     p_tail.set_defaults(func=_handle_audit_tail)
 
     p_grep = asub.add_parser("grep", help="Grep audit entries (line-wise regex)")
-    p_grep.add_argument("pattern")
+    p_grep.add_argument("pattern", help="Regex pattern to match against audit entries")
     p_grep.set_defaults(func=_handle_audit_grep)
 
     p_decrypt = asub.add_parser("decrypt", help="Decrypt encrypted audit entries")
@@ -270,7 +270,7 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         func=_handle_keyvault_verify_digest
     )
     p_recover = ksub.add_parser("recover", help="Restore from a backup blob")
-    p_recover.add_argument("--blob", required=True)
+    p_recover.add_argument("--blob", required=True, help="Path to the backup blob file")
     p_recover.set_defaults(func=_handle_keyvault_recover)
     p_reset = ksub.add_parser(
         "reset",
@@ -355,7 +355,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
 
     p_status = vsub.add_parser(
         "status",
-        help="Show a vault's generation and enrolled file names (opens read-only via passphrase recovery)",
+        help="Show a vault's generation and enrolled file names (never prompts; reads the manifest unverified)",
     )
     p_status.add_argument(
         "--root",
@@ -444,7 +444,9 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     _toggle_targets = ["env", "config", "memory", "workspace", "all"]
 
     p_enable = esub.add_parser("enable", help="Turn on at-rest encryption for a target")
-    p_enable.add_argument("target", choices=_toggle_targets)
+    p_enable.add_argument(
+        "target", choices=_toggle_targets, help="Encryption target (env, config, memory, workspace, or all)"
+    )
     p_enable.add_argument("--non-interactive", action="store_true", help="Apply without prompting (CI / scripted use)")
     p_enable.add_argument(
         "--force-runtime-unverified",
@@ -456,12 +458,16 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p_enable.set_defaults(func=_handle_encryption_enable)
 
     p_disable = esub.add_parser("disable", help="Turn off encryption for a target (reversible; keeps the vault copy)")
-    p_disable.add_argument("target", choices=_toggle_targets)
+    p_disable.add_argument(
+        "target", choices=_toggle_targets, help="Encryption target (env, config, memory, workspace, or all)"
+    )
     p_disable.add_argument("--non-interactive", action="store_true", help="Apply without prompting (CI / scripted use)")
     p_disable.set_defaults(func=_handle_encryption_disable)
 
     p_purge = esub.add_parser("purge", help="Remove the encrypted copy for a target (destructive; needs --yes)")
-    p_purge.add_argument("target", choices=_toggle_targets)
+    p_purge.add_argument(
+        "target", choices=_toggle_targets, help="Encryption target (env, config, memory, workspace, or all)"
+    )
     p_purge.add_argument("-y", "--yes", action="store_true", help="Confirm the destructive purge")
     p_purge.set_defaults(func=_handle_encryption_purge)
 

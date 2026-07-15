@@ -30,10 +30,10 @@ import json
 import logging
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._log_rotation import utcnow_iso as _utcnow_iso
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section
 from .policy_writer import PolicySnapshot, PolicyWriter, _atomic_write_text, _section_matches_dict
@@ -71,12 +71,6 @@ def detect(openclaw_base: Path) -> OpenClawState:
 # -----------------------------------------------------------------------------
 # Audit-log migration -- append-by-timestamp-window + idempotency marker
 # -----------------------------------------------------------------------------
-
-
-def _utcnow_iso() -> str:
-    """ISO-8601 UTC ms-precision -- matches privacy_check.audit format."""
-    now = datetime.now(UTC)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def _read_audit_lines(path: Path) -> list[str]:
@@ -382,7 +376,13 @@ def migrate(
     3. audit.log + marker file (marker is the LAST write so a crashed
        migration safely retries).
 
-    Returns one of: ``noop``, ``migrated``, ``skipped-marker``.
+    Returns one of: ``noop``, ``migrated``, ``skipped-marker``. ``noop`` covers
+    both "no ``openclaw_base`` at all" and "``openclaw_base`` exists but holds
+    none of the recognized artifacts" (no audit.log, no keyvault/, no
+    credentials/, no sibling openclaw.json, or an openclaw.json with no
+    recognisable ``mordred-privacy-check`` section) -- in either case nothing
+    was actually copied or written, so reporting ``migrated`` would mislead
+    the ``hermes-mordred upgrade`` summary.
     """
     if not openclaw_base.exists():
         return "noop"
@@ -395,19 +395,27 @@ def migrate(
 
     state = detect(openclaw_base)
 
-    # 1. Never-overwrite copies (fail fast)
+    # 1. Never-overwrite copies (fail fast). Track whether each sub-step
+    # actually did something -- an openclaw_base directory that exists but is
+    # empty (or an openclaw.json with no recognisable section) must not report
+    # "migrated" when nothing was copied or written.
+    keyvault_migrated = False
     if state.has_keyvault:
-        _migrate_directory(openclaw_base / "keyvault", dest_keyvault, kind="keyvault")
+        keyvault_migrated = _migrate_directory(openclaw_base / "keyvault", dest_keyvault, kind="keyvault")
+    credentials_migrated = False
     if state.has_credentials:
-        _migrate_directory(openclaw_base / "credentials", dest_credentials, kind="credentials")
+        credentials_migrated = _migrate_directory(openclaw_base / "credentials", dest_credentials, kind="credentials")
 
     # 2. Policy transform (idempotent via PolicyWriter compare-and-skip;
     # honors options.policy_conflict against the OpenClaw snapshot per Codex P1-A)
+    policy_migrated = False
     if state.has_openclaw_json:
-        _migrate_policy(openclaw_base, policy_writer, options)
+        policy_migrated = _migrate_policy(openclaw_base, policy_writer, options)
 
     # 3. Audit log -- last, with marker
     audit_migrated = _migrate_audit(openclaw_base, dest_audit, marker, options)
     if not audit_migrated and marker.exists() and state.has_audit:
         return "skipped-marker"
-    return "migrated"
+    if keyvault_migrated or credentials_migrated or policy_migrated or audit_migrated:
+        return "migrated"
+    return "noop"

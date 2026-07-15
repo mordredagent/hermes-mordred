@@ -294,8 +294,9 @@ class TestStreamIsolation:
     ride distinct exit circuits and cannot be correlated onto one circuit.
 
     Per-*skill* isolation needs ``origin_skill`` in the ``pre_tool_call``
-    payload (absent in v1 — SPEC §並列 tool_call) and is deferred to v2-H2;
-    this foundation isolates on whatever token the runtime supplies.
+    payload (absent in v1 — SPEC §"Path mismatch for parallel tool_calls")
+    and is deferred to v2-H2; this foundation isolates on whatever token the
+    runtime supplies.
     """
 
     def test_token_injects_socks_userinfo(self) -> None:

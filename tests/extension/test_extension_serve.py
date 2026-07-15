@@ -108,6 +108,11 @@ def test_serve_port_in_use_returns_one(capsys: pytest.CaptureFixture[str]) -> No
     err = capsys.readouterr().err
     assert "already in use" in err
     assert "gateway" in err
+    # Cause-neutral: names both plausible listeners rather than assuming a
+    # gateway, and gives concrete next steps instead of just diagnosing.
+    assert "extension serve" in err
+    assert f"lsof -i :{port}" in err
+    assert "--port" in err
 
 
 @pytest.mark.parametrize("bad_port", [0, -1, 99999])
@@ -120,7 +125,14 @@ def test_serve_rejects_out_of_range_port(bad_port: int, capsys: pytest.CaptureFi
 
 
 def test_serve_sigterm_clean_shutdown(tmp_path) -> None:
-    """SIGTERM (systemd / `docker stop`) must exit 0 via server.stop(), like Ctrl+C."""
+    """SIGTERM (systemd / `docker stop`) must exit 0 via server.stop(), like Ctrl+C.
+
+    Also covers the startup banner and shutdown confirmation: this is the
+    one lifecycle test that actually runs `serve()` start-to-finish (the
+    other tests only exercise failure paths), so it is the only place that
+    can observe the banner's ws:// / http:// lines and the final "Stopped."
+    line printed after server.stop() completes.
+    """
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "mordred_hermes.extension", "--port", str(port)],
@@ -146,6 +158,10 @@ def test_serve_sigterm_clean_shutdown(tmp_path) -> None:
             proc.kill()
             proc.communicate()
     assert proc.returncode == 0, out
+    assert f"ws://127.0.0.1:{port}/ext" in out
+    assert f"http://127.0.0.1:{port}/" in out
+    assert "Press Ctrl+C to stop." in out
+    assert "Stopped." in out
 
 
 def test_resolve_chat_handler_uses_gateway_runtime_when_present() -> None:

@@ -190,25 +190,7 @@ class _PyobjcSecKeyOps:
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
         sec = self._security()
         private_key = _lookup_private_key(sec, tag)
-        peer_attrs = {
-            sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
-            sec.kSecAttrKeyClass: sec.kSecAttrKeyClassPublic,
-        }
-        peer_key, err = sec.SecKeyCreateWithData(peer_pub, peer_attrs, None)
-        if peer_key is None:
-            # peer_pub is already SEC1-validated by wrap._parse_header, so
-            # this is a genuine native fault rather than a malformed point.
-            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCreateWithData(peer) failed")
-        shared, err = sec.SecKeyCopyKeyExchangeResult(
-            private_key,
-            sec.kSecKeyAlgorithmECDHKeyExchangeStandard,
-            peer_key,
-            {},
-            None,
-        )
-        if shared is None:
-            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCopyKeyExchangeResult failed")
-        return bytes(shared)
+        return _ecdh(sec, private_key, peer_pub)
 
     def probe(self) -> None:
         """Generate a throwaway ``.privateKeyUsage``-only key and delete it.
@@ -247,6 +229,44 @@ def _export_public_key(sec: Any, public_key: Any) -> bytes:
     if data is None:
         raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCopyExternalRepresentation failed")
     return bytes(data)
+
+
+def _ecdh(sec: Any, private_key: Any, peer_pub: bytes, *, variant: str = "") -> bytes:
+    """Shared ``SecKeyCreateWithData`` + ``SecKeyCopyKeyExchangeResult`` body.
+
+    :class:`_PyobjcSecKeyOps.key_exchange` (Secure-Enclave-backed keys) and
+    :class:`_SoftwareFallbackOps.key_exchange` (software-backed keys) were
+    byte-for-byte identical except for how the private-key ref was looked
+    up (``_lookup_private_key`` vs ``_sw_lookup_private_key``). Taking the
+    ALREADY-RESOLVED ``private_key`` ref here (rather than a ``tag`` +
+    lookup function) lets both callers share this body while keeping their
+    distinct lookup call sites.
+
+    ``variant`` is appended to the final error message only, so the two
+    callers keep their pre-existing, distinct diagnostic text
+    (``"SecKeyCopyKeyExchangeResult failed"`` vs
+    ``"SecKeyCopyKeyExchangeResult (software) failed"``) — behavior is
+    otherwise identical between the two call sites.
+    """
+    peer_attrs = {
+        sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
+        sec.kSecAttrKeyClass: sec.kSecAttrKeyClassPublic,
+    }
+    peer_key, err = sec.SecKeyCreateWithData(peer_pub, peer_attrs, None)
+    if peer_key is None:
+        # peer_pub is already SEC1-validated by wrap._parse_header, so
+        # this is a genuine native fault rather than a malformed point.
+        raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCreateWithData(peer) failed")
+    shared, err = sec.SecKeyCopyKeyExchangeResult(
+        private_key,
+        sec.kSecKeyAlgorithmECDHKeyExchangeStandard,
+        peer_key,
+        {},
+        None,
+    )
+    if shared is None:
+        raise _OpsError(_nserror_code(err), _nserror_domain(err), f"SecKeyCopyKeyExchangeResult{variant} failed")
+    return bytes(shared)
 
 
 def _keychain_query(sec: Any, tag: bytes) -> dict[Any, Any]:
@@ -387,23 +407,7 @@ class _SoftwareFallbackOps:
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
         sec = self._security()
         priv = _sw_lookup_private_key(sec, tag)
-        peer_attrs = {
-            sec.kSecAttrKeyType: sec.kSecAttrKeyTypeECSECPrimeRandom,
-            sec.kSecAttrKeyClass: sec.kSecAttrKeyClassPublic,
-        }
-        peer_key, err = sec.SecKeyCreateWithData(peer_pub, peer_attrs, None)
-        if peer_key is None:
-            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCreateWithData(peer) failed")
-        shared, err = sec.SecKeyCopyKeyExchangeResult(
-            priv,
-            sec.kSecKeyAlgorithmECDHKeyExchangeStandard,
-            peer_key,
-            {},
-            None,
-        )
-        if shared is None:
-            raise _OpsError(_nserror_code(err), _nserror_domain(err), "SecKeyCopyKeyExchangeResult (software) failed")
-        return bytes(shared)
+        return _ecdh(sec, priv, peer_pub, variant=" (software)")
 
     def probe(self) -> None:
         """Generate-then-delete a throwaway software key (no biometry flag)."""

@@ -102,7 +102,6 @@ _FLAG_IS_DIRECT = 1 << 17
 
 _PROBE_HOST_V4 = b"1.1.1.1"
 _PROBE_HOST_V6 = b"2606:4700:4700::1111"
-_PROBE_HOST = _PROBE_HOST_V4  # backward-compat alias for the IPv4 target
 """Reachability targets. Numeric IP literals (IPv4 + IPv6) so the probe
 never triggers a DNS lookup (which would itself be observable network
 activity). Both families are probed (security review H3): an IPv4-only

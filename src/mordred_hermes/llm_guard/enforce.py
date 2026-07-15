@@ -24,6 +24,7 @@ from typing import Any, Final, Literal, TypeAlias
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
 from .._policy_io import load_policy_mapping
+from .._provider_identity import canonicalize_provider
 from . import health
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from .local_adapter import LOCAL_PROVIDER_NAME
@@ -432,15 +433,30 @@ def _read_policy_settings(policy_json_path: Path) -> _PolicySettings:
     # failure-closed False.
     allow_cloud_llm = data.get("allow_cloud_llm") is True
     raw_allowlist = data.get("cloud_provider_allowlist", [])
-    # Codex review P2 round 5: normalize allowlist entries (strip + lower)
-    # because callers compare against ``.strip().lower()``-normalized
-    # runtime provider names (see ``__init__.py::_on_pre_api_request_enforce``).
-    # Hand-edited / wizard-collected entries like ``"OpenAI"`` or
-    # ``" anthropic "`` must still match the runtime ``"openai"`` /
-    # ``"anthropic"``. Empty strings drop out so a stray comma in the
-    # wizard CSV doesn't widen the allowlist.
+    # Codex review P2 round 5 (revised): normalize allowlist entries through
+    # the SAME alias table the runtime provider id is canonicalized through
+    # (``__init__.py::_on_pre_api_request_enforce`` /
+    # ``_resolve_active_provider`` both call ``canonicalize_provider``). A
+    # bare ``.strip().lower()`` here handled casing/whitespace but not
+    # aliases: a hand-edited ``cloud_provider_allowlist: ["claude"]`` (a real
+    # Hermes alias for ``"anthropic"``) or ``["google"]`` / ``["aws"]`` would
+    # never match the canonicalized runtime id and strict mode would refuse
+    # a provider the user clearly intended to allow. ``canonicalize_provider``
+    # already strips + lowers before the alias lookup, so this is not a
+    # double-normalization. Empty strings still drop out (``if s``) so a
+    # stray comma in the wizard CSV doesn't widen the allowlist.
+    #
+    # ``"custom"`` is dropped: it is Hermes' wildcard bucket for an arbitrary
+    # OpenAI-compatible ``base_url`` (and the canonical form of the ``ollama``
+    # local-endpoint alias). Letting an allowlist entry resolve to it would turn
+    # a narrow grant (e.g. a user writing ``["ollama"]`` meaning "allow my local
+    # model") into permission for ANY custom cloud endpoint — a fail-open
+    # widening in a strict CLOUD allowlist. Fail closed instead; a deliberate
+    # arbitrary-endpoint grant is not something strict mode should make easy.
     cloud_allowlist = (
-        frozenset(s for s in (str(x).strip().lower() for x in raw_allowlist if isinstance(x, str)) if s)
+        frozenset(
+            s for s in (canonicalize_provider(x) for x in raw_allowlist if isinstance(x, str)) if s and s != "custom"
+        )
         if isinstance(raw_allowlist, list)
         else frozenset()
     )

@@ -173,6 +173,36 @@ class TestEnableSE:
         assert calls["build_args"][1] == install_dir
         assert calls["verify_install_dir"] == install_dir
 
+    def test_prints_progress_notice_before_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """UX: the build can take minutes with capture_output=True (no live
+        output), so the operator must see a notice before it starts, not sit
+        looking at a blank terminal."""
+        self._patch_all_ok(monkeypatch, tmp_path)
+        rc = keyvault_native_cli.enable_se(home=tmp_path)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Building" in out
+        assert "Secure Enclave" in out
+        assert "minutes" in out
+
+    def test_no_progress_notice_when_platform_guard_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The notice must only print once the build is actually about to run,
+        not before an early guard refusal."""
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            keyvault_native_cli,
+            "_se_platform_reason",
+            lambda: "Secure Enclave requires macOS on Apple Silicon",
+            raising=False,
+        )
+        rc = keyvault_native_cli.enable_se(home=tmp_path)
+        assert rc == 1
+        assert "Building" not in capsys.readouterr().out
+
 
 class TestEnableSESeams:
     """Direct coverage tests for the enable-se seams (mocked at the stdlib edge)."""
@@ -429,6 +459,33 @@ class TestEnableTPM:
         assert rc == 0
         assert calls["build_args"][1] == install_dir
         assert calls["verify_install_dir"] == install_dir
+
+    def test_prints_progress_notice_before_build(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """UX: the build can take minutes with capture_output=True (no live
+        output), so the operator must see a notice before it starts, not sit
+        looking at a blank terminal."""
+        self._patch_all_ok(monkeypatch, tmp_path)
+        rc = keyvault_native_cli.enable_tpm(home=tmp_path)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Building" in out
+        assert "TPM" in out
+        assert "minutes" in out
+
+    def test_no_progress_notice_when_platform_guard_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The notice must only print once the build is actually about to run,
+        not before an early guard refusal."""
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            keyvault_native_cli, "_tpm_platform_reason", lambda: "TPM 2.0 keyvault requires Linux", raising=False
+        )
+        rc = keyvault_native_cli.enable_tpm(home=tmp_path)
+        assert rc == 1
+        assert "Building" not in capsys.readouterr().out
 
 
 class TestEnableTPMSeams:

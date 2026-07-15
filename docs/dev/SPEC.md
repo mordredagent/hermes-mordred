@@ -1,51 +1,51 @@
 # Mordred — Specification (Hermes-base)
 
-> **Note**: 本 SPEC は `Hermes (NousResearch/hermes-agent)` を基盤とした Mordred の仕様書です。
-> OpenClaw 基準の旧版仕様は `../../mordred/mordred-mvp-docs/SPEC.md` (deprecated) に残置。
-> Hermes 化の根拠と用語マッピングは `MIGRATION.md` を参照。
+> **Note**: This SPEC is the specification for Mordred, built on `Hermes (NousResearch/hermes-agent)`.
+> The previous OpenClaw-based spec remains at `../../mordred/mordred-mvp-docs/SPEC.md` (deprecated).
+> See `MIGRATION.md` for the rationale behind the move to Hermes and the terminology mapping.
 
 ## Vision
 
-**Hermes 上に privacy-enhancement レイヤをプラグインバンドルとして提供する**。
+**Provide a privacy-enhancement layer on top of Hermes as a plugin bundle**.
 
-Mordred は Hermes の plugin SDK と既存の機能 (4 種の plugin source、16 種の lifecycle hook、`PluginContext` 経由の登録 API) を全面的に利用し、core を改変しない (plugin 開発リポジトリとして独立) ことを基本とする。プライバシーレイヤは **5 つのプラグイン + 1 つのスキルメタデータ規約** として配布される。
+Mordred is built on the principle of fully leveraging Hermes's plugin SDK and existing capabilities (4 plugin source types, 16 lifecycle hooks, and the registration API via `PluginContext`) without modifying core (independent as a plugin development repository). The privacy layer is distributed as **5 plugins + 1 skill-metadata convention**.
 
-ユーザは `pip install mordred-hermes` だけで導入でき、`hermes mordred ...` サブコマンドで設定・運用する。
+Users can install it with just `pip install mordred-hermes`, and configure/operate it via the `hermes mordred ...` subcommands.
 
 Privacy concerns addressed:
 
-1. **network-path observability** (Phase 3、 macOS / Linux / WSL2)
-2. **cloud LLM dependency** (Phase 2、 macOS / Linux / WSL2)
-3. **local secret custody at rest** (Phase 4、 **v1 では macOS Apple Silicon のみ**。 Linux/WSL2 ユーザは Phase 1–3 の保護のみで v1 を運用し、 at-rest secret protection は OS のファイルパーミッション (`0600`) に頼る。 Linux TPM 2.0 / Windows DPAPI / master-password Tier 3 fallback は `v2-OS2`)
+1. **network-path observability** (Phase 3, macOS / Linux / WSL2)
+2. **cloud LLM dependency** (Phase 2, macOS / Linux / WSL2)
+3. **local secret custody at rest** (Phase 4, **macOS Apple Silicon only in v1**. Linux/WSL2 users run v1 with only the Phase 1-3 protections, relying on OS file permissions (`0600`) for at-rest secret protection. Linux TPM 2.0 / Windows DPAPI / master-password Tier 3 fallback is `v2-OS2`)
 
-Phase 4 が macOS-only である事実は Vision レベルでも明示する。 §Platform Support と §Threat Model の caveat を併読のこと (H2)。
+The fact that Phase 4 is macOS-only is made explicit at the Vision level too. Read together with the caveats in §Platform Support and §Threat Model (H2).
 
 ## Project Identity
 
 ### Relationship to Hermes
 
 - **Upstream**: github.com/NousResearch/hermes-agent (MIT License)
-- **Current repo**: `Mordred-Hermes/` (Mordred plugin 開発リポジトリ。 Hermes upstream の fork/clone ではない)
-- **Strategy**: **案 C + Vendored-fork escape hatch** (zero-PR commitment、 MIGRATION.md §10 row 1 / §5 確定 2026-05-07) — Hermes core は改変せず、5 plugin を `pip install mordred-hermes` で配布。 **Hermes 上流への PR は提出しない**
-  - `Mordred-Hermes/` は upstream の rebase 不要 (純粋な plugin 開発リポジトリ + 必要時の vendored modules)
-  - 5 plugin は `src/mordred_hermes/<name>/` (pip 配布レイアウト) で開発、`pyproject.toml` の `[project.entry-points."hermes_agent.plugins"]` で expose
-  - 旧 SPEC の "core seam" 相当は **plugin-side wrapper + audit log** (`mordred.degraded.*` 系列) で defense-in-depth (Tier A、 v1 default)
-  - 真に hard-enforce が必要な項目は **vendored fork extra** (Tier B、 v2): `pip install mordred-hermes[hard-lock]` 等で Hermes core モジュールのパッチ版を再配布。 v1 範囲外
-- **Compatibility goal**: 既存 Hermes ユーザは `pip install mordred-hermes && hermes mordred upgrade` だけで privacy レイヤを足せる。OpenClaw からの移行ユーザは `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade` の 3 ステップ
+- **Current repo**: `Mordred-Hermes/` (the Mordred plugin development repository; not a fork/clone of Hermes upstream)
+- **Strategy**: **Option C + Vendored-fork escape hatch** (zero-PR commitment, finalized in MIGRATION.md §10 row 1 / §5 on 2026-05-07) — Hermes core is left unmodified, and 5 plugins are distributed via `pip install mordred-hermes`. **No PRs are submitted to Hermes upstream**
+  - `Mordred-Hermes/` requires no upstream rebase (a pure plugin development repository + vendored modules when needed)
+  - The 5 plugins are developed under `src/mordred_hermes/<name>/` (the pip distribution layout) and exposed via `[project.entry-points."hermes_agent.plugins"]` in `pyproject.toml`
+  - What the old SPEC called a "core seam" is instead handled by **plugin-side wrapper + audit log** (the `mordred.degraded.*` family) for defense-in-depth (Tier A, v1 default)
+  - Items that truly need hard enforcement fall under the **vendored fork extra** (Tier B, v2): a patched version of Hermes core modules is redistributed via e.g. `pip install mordred-hermes[hard-lock]`. Out of scope for v1
+- **Compatibility goal**: Existing Hermes users can add the privacy layer with just `pip install mordred-hermes && hermes mordred upgrade`. Users migrating from OpenClaw follow 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade`
 
 ### Platform Support (v1)
 
-| Phase | プラットフォーム |
+| Phase | Platform |
 |-------|-------------------|
-| Phase 1–3 (network/privacy-check/llm-guard/wizard) | **macOS / Linux / WSL2** (Hermes が動く全環境) |
+| Phase 1-3 (network/privacy-check/llm-guard/wizard) | **macOS / Linux / WSL2** (every environment Hermes runs on) |
 | Phase 4 (keyvault, Tier 1) | **macOS Apple Silicon only** (Secure Enclave, `Security.framework`) |
-| Phase 4 (keyvault, Tier 2/3) | v2: Linux (TPM 2.0) / Windows (DPAPI) は ROADMAP `v2-OS2` 据え置き |
+| Phase 4 (keyvault, Tier 2/3) | v2: Linux (TPM 2.0) / Windows (DPAPI) deferred to ROADMAP `v2-OS2` |
 
-iOS / Android: Hermes 自体に Termux 対応があるが、Mordred Phase 4 (keyvault) は対象外。Phase 1–3 のみ Termux で動作可能 (Tor は要追加検証)。
+iOS / Android: Hermes itself has Termux support, but Mordred Phase 4 (keyvault) is out of scope. Only Phase 1-3 can run under Termux (Tor requires additional verification).
 
 ### License Note
 
-Hermes は MIT-licensed。フォーク、商用利用、派生製品は許可されている。Mordred 自身も MIT で配布する。
+Hermes is MIT-licensed. Forking, commercial use, and derivative products are permitted. Mordred itself is distributed under MIT as well.
 
 ## Threat Model & Accepted Limitations
 
@@ -64,7 +64,7 @@ Mordred does **not** defend against:
 - **`PATH` hijack of the sekey/tpmkey/winkey helper binary** — `_seckey_helper._find_named_helper()`'s third resolution tier (`shutil.which(name)`, after the `MORDRED_*_HELPER` env override and `~/.local/bin`) trusts whatever the process's `PATH` resolves to. An attacker who can already prepend a writable directory to the user's `PATH` could plant a binary that intercepts the JSON-over-stdio protocol. This requires the same "attacker can already alter the victim's shell environment" precondition as the co-resident-process item above, and the two supported install paths (env var, `~/.local/bin`) are unaffected; kept as v1 accepted risk rather than removing the documented `PATH` fallback (2026-07-07 security review)
 - **Skills Hub / agentskills.io registry compromise** — Mordred trusts the registry; no separate signature chain
 - **Side-channel timing / traffic analysis** even on Tor
-- **Silent plugin-disable** (H3、 zero-PR strategy 下の v1 mitigation) — Hermes 上流への PR を提出しない方針 (MIGRATION.md §10 row 4) のため、 v1 default は plugin-side **strict-mode startup refusal** で防御 (Tier A、 下記 §Plugin-disable protection)。 「次回セッション開始時に block」 する設計なので、 セッション running 中の disable 編集は次起動まで影響しない (Hermes が動的 disable を反映しない前提、 Phase 0.8 で verify)。 hard-enforce (disable 操作そのものを refuse) は v2 `[hard-lock]` extra (vendored fork) で対応
+- **Silent plugin-disable** (H3, a v1 mitigation under the zero-PR strategy) — because the policy is to submit no PRs to Hermes upstream (MIGRATION.md §10 row 4), the v1 default is defended via plugin-side **strict-mode startup refusal** (Tier A, see §Plugin-disable protection below). Since the design is to "block at next session start," editing the disable state while a session is running has no effect until the next startup (on the premise that Hermes does not reflect dynamic disablement live, verified in Phase 0.8). Hard enforcement (refusing the disable operation itself) is handled by the v2 `[hard-lock]` extra (vendored fork)
 - **Audit-log tampering by attacker with write access as the user** — file mode `0600` is access control, not tamper evidence. Any process running as the user can rewrite history with no detectable trace until Phase 4's HMAC-chain upgrade (v2; PATHS.md §Audit log policy)
 - **Air-gap enforcement beyond the standard network stack** — `mordred_network.api.blackout_assert()` detects routable interfaces only; physical air-gap (Bluetooth/USB tethering, hotspot, kernel-level adversaries) remains user responsibility (M4)
 - **Screen recording during Seed display** — the 60-second Seed window can be captured by macOS `screencapture`, Loom, Zoom share, OBS, etc. v1 does best-effort screenshot detection only; screen-recording detection is out of scope (M5)
@@ -73,69 +73,69 @@ These limitations are explicit; mitigation work is v2+ scope.
 
 ### Newly defended via Hermes plugin hooks (no core seam needed)
 
-Hermes は OpenClaw より hook palette が広いため、旧 SPEC で「core seam が必要」とされていた多くの項目が **plugin だけで実現可能**:
+Because Hermes has a broader hook palette than OpenClaw, many items that the old SPEC said "require a core seam" are **achievable with plugins alone**:
 
-- **Per-tool gating** (e.g. blocking `web_fetch` under strict mode without VPN/Tor active) → `pre_tool_call` で実装可能
-- **LLM provider override under strict mode** → ~~`pre_llm_call`~~ では **実装不可** (Phase 0.8 verify 完了、 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5)。 v0.11.0 の `pre_llm_call` payload は `model` のみで `provider` を含まず、 戻り値も context-injection 専用。 v1 は `on_session_start` で session-scoped enforcement に切り替え (§Story 4 / §Plugin: `mordred_llm_guard` 参照)
-- **Gateway dispatch policy** → `pre_gateway_dispatch` で実装可能 (旧 SPEC には無かった追加の防御層)
-- **Approval lifecycle observability** → `pre_approval_request` / `post_approval_response` で実装可能 (危険な tool 実行時の audit 強化)
+- **Per-tool gating** (e.g. blocking `web_fetch` under strict mode without VPN/Tor active) → implementable via `pre_tool_call`
+- **LLM provider override under strict mode** → **not implementable** via ~~`pre_llm_call`~~ (Phase 0.8 verify complete, [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). The v0.11.0 `pre_llm_call` payload carries only `model`, not `provider`, and its return value is context-injection only. v1 switches to session-scoped enforcement via `on_session_start` instead (see §Story 4 / §Plugin: `mordred_llm_guard`)
+- **Gateway dispatch policy** → implementable via `pre_gateway_dispatch` (an additional defense layer not present in the old SPEC)
+- **Approval lifecycle observability** → implementable via `pre_approval_request` / `post_approval_response` (strengthened audit for dangerous tool execution)
 
 ### Defended via plugin-side strict-mode startup refusal (zero-PR strategy)
 
-- **Silent disablement via `hermes plugins disable mordred_*`** → v1 default は **plugin-only**: `plugin.yaml` の `privacy_lock: true` は Mordred 内部 hint として機能し、 各 Mordred plugin の `on_session_start` が sibling-disabled を検出した時点で strict mode 起動を `BaseException` 派生例外で abort する (下記 §Plugin-disable protection 参照)。 Hermes 上流への PR は提出しない (MIGRATION.md §10 row 4 zero-PR commitment)。 hard-enforce が必要なら v2 で `[hard-lock]` extra に vendored fork で対応
+- **Silent disablement via `hermes plugins disable mordred_*`** → the v1 default is **plugin-only**: `privacy_lock: true` in `plugin.yaml` functions as an internal Mordred hint, and each Mordred plugin's `on_session_start` aborts strict-mode startup with a `BaseException`-derived exception as soon as it detects a sibling has been disabled (see §Plugin-disable protection below). No PR is submitted to Hermes upstream (MIGRATION.md §10 row 4 zero-PR commitment). If hard enforcement is needed, it is handled in v2 via the `[hard-lock]` extra (vendored fork)
 
 ### Plugin-only fallback for missing seams
 
-旧 SPEC の S2 (`originSkill` in tool_call) と S3 (`resolvedProvider` in model_resolve) 相当が Hermes 側で payload に含まれていない場合は、 plugin 側で degraded mode (audit log に `mordred.degraded.*` を記録、 generic な tool-name allowlist と unconditional override にフォールバック) で動かす。 zero-PR commitment (`MIGRATION.md` §5、 2026-05-07) のため **Hermes 上流への PR は出さない**。 plugin-only で実現できないと判断した場合は v2 で vendored fork extra (Tier B、 `[hard-lock]`) に escalate するか、 fallback 動作を恒久化するかを再評価する。
+When the equivalents of the old SPEC's S2 (`originSkill` in tool_call) and S3 (`resolvedProvider` in model_resolve) are not present in Hermes's payloads, the plugin runs in degraded mode (recording `mordred.degraded.*` in the audit log, and falling back to a generic tool-name allowlist and unconditional override). Because of the zero-PR commitment (`MIGRATION.md` §5, 2026-05-07), **no PR is sent to Hermes upstream**. If it's judged that plugin-only cannot achieve this, we re-evaluate whether to escalate to the v2 vendored fork extra (Tier B, `[hard-lock]`) or make the fallback behavior permanent.
 
-**Out-of-band agent harnesses** (Codex, Claude CLI, Cursor, Copilot, ACP adapter): Hermes は ACP adapter を持つので一部はハンドリング可能。strict mode 下では Mordred が enforce できない harness を primary に設定している場合 `hermes mordred` 起動を refuse する。
+**Out-of-band agent harnesses** (Codex, Claude CLI, Cursor, Copilot, ACP adapter): since Hermes has an ACP adapter, some of these can be handled. Under strict mode, if a harness that Mordred cannot enforce is configured as primary, `hermes mordred` startup is refused.
 
-## Plugin-Only Architecture (Hermes Core 改変ゼロ、 zero-PR strategy)
+## Plugin-Only Architecture (zero Hermes core modifications, zero-PR strategy)
 
-旧 SPEC の "Core Minimal-Change Policy" は **MIGRATION.md §10 row 1 / §5 確定 (2026-05-07)** で **zero upstream PR** に再定義された。 Hermes core への改変は v1 では一切提出しない:
+The old SPEC's "Core Minimal-Change Policy" was redefined as **zero upstream PR** per **MIGRATION.md §10 row 1 / §5, finalized on 2026-05-07**. No modifications to Hermes core are submitted at all in v1:
 
-| 旧改修案 | v1 戦略 | v2 escape hatch |
+| Old modification proposal | v1 strategy | v2 escape hatch |
 |----------|---------|-------------------|
-| ~~HSeam-1: `plugin.yaml` の `privacy_lock: boolean` を Hermes 上流に追加~~ | **plugin-side のみ**: `privacy_lock: true` は Mordred 内部 hint として保持、 各 Mordred plugin の `on_session_start` が sibling-disabled を検出して `RuntimeError` で abort (§Plugin-disable protection) | `pip install mordred-hermes[hard-lock]` で vendored fork (`hermes_cli/plugins_cmd.py` のパッチ版) を再配布。 v2 で hard-enforce が必要になれば導入 |
+| ~~HSeam-1: add `privacy_lock: boolean` to `plugin.yaml` in Hermes upstream~~ | **plugin-side only**: `privacy_lock: true` is kept as an internal Mordred hint, and each Mordred plugin's `on_session_start` detects a sibling being disabled and aborts with a `RuntimeError` (§Plugin-disable protection) | Redistribute a vendored fork (a patched version of `hermes_cli/plugins_cmd.py`) via `pip install mordred-hermes[hard-lock]`. Introduced in v2 if hard enforcement becomes necessary |
 
-**core 改修が必要になりそうな項目は v1 では plugin 側 fallback で動かす方針** (将来も PR は出さず、 必要なら v2 vendored fork に escape):
+**Items that would seem to need core modification run on a plugin-side fallback in v1** (no PRs will be sent in the future either; escape to the v2 vendored fork if necessary):
 
-- ~~`pre_llm_call` payload に `provider_id` / `model_id` を含める拡張~~ → **Phase 0.8 verify (2026-05-10) 完了**: v0.11.0 の `pre_llm_call` payload は `model` のみで `provider` を含まず、 戻り値は **context-injection 専用** (provider override は構造的に不可能)。 `pre_api_request` には provider/model/base_url が乗るが **observer-only** (戻り値捨てられる)。 詳細と Phase 2 再設計案は [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5 を参照。 v1 の `mordred_llm_guard` は `pre_llm_call` 経由のターン毎 override を諦め、 `on_session_start` で provider 設定 (`~/.hermes/config.yaml` または `register_provider`) を strict policy に照らして refuse-or-rewrite する設計に切り替える
-- ~~`pre_tool_call` payload に `origin_skill` を含める拡張~~ → **Phase 0.8 verify 完了**: v0.11.0 では payload に `origin_skill` は含まれない (`tool_name`/`args`/`task_id`/`session_id`/`tool_call_id` のみ、 詳細は [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4)。 per-skill ポリシーは `pre_tool_call` 経由では実装できないため、 install-time guard (`hermes mordred install` ラッパ CLI) で SKILL.md frontmatter を検査する経路を **唯一の per-skill enforcement 経路** として確定。 runtime の `pre_tool_call` は generic tool-name allowlist のみ
-- skill install 時 (`hermes_cli/skills_hub.py`) の pre-install hook → 必要なら新設、それまでは `hermes mordred install` ラッパで代替
-- agent process init / shutdown hook → 既存 `on_session_start` / `on_session_end` で代替
+- ~~extension to include `provider_id` / `model_id` in the `pre_llm_call` payload~~ → **Phase 0.8 verify (2026-05-10) complete**: the v0.11.0 `pre_llm_call` payload carries only `model`, not `provider`, and its return value is **context-injection only** (provider override is structurally impossible). `pre_api_request` does carry provider/model/base_url, but it's **observer-only** (its return value is discarded). See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5 for details and the Phase 2 redesign proposal. v1's `mordred_llm_guard` gives up on per-turn override via `pre_llm_call` and instead switches to a design that refuses-or-rewrites provider configuration (`~/.hermes/config.yaml` or `register_provider`) against strict policy in `on_session_start`
+- ~~extension to include `origin_skill` in the `pre_tool_call` payload~~ → **Phase 0.8 verify complete**: in v0.11.0 the payload does not include `origin_skill` (only `tool_name`/`args`/`task_id`/`session_id`/`tool_call_id`; see [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4 for details). Since per-skill policy cannot be implemented via `pre_tool_call`, the install-time guard (the `hermes mordred install` wrapper CLI) that inspects SKILL.md frontmatter is confirmed as the **sole per-skill enforcement path**. The runtime `pre_tool_call` provides only a generic tool-name allowlist
+- A pre-install hook at skill install time (`hermes_cli/skills_hub.py`) → create new if needed; until then, substitute with the `hermes mordred install` wrapper
+- agent process init / shutdown hook → substituted with the existing `on_session_start` / `on_session_end`
 
-各 plugin は `on_session_start` で hook payload の shape を probe し、欠落時は audit log に `mordred.degraded.<seam>` を記録して degraded mode で動作する。 Phase 0.8 verify で確定した payload 形状は [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) (canonical) に集約 — drift watch は `.github/workflows/upstream-check.yml` (週次、 hook **名** drift のみ; payload field shape の再 verify は名前 drift signal を受けた本 doc の手動 bump)。
+Each plugin probes the shape of the hook payload in `on_session_start`, and if it's missing, records `mordred.degraded.<seam>` in the audit log and runs in degraded mode. The payload shapes confirmed by the Phase 0.8 verify are consolidated in [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) (canonical) — drift watch is `.github/workflows/upstream-check.yml` (weekly, **hook name** drift only; re-verification of payload field shape is a manual bump of this doc triggered by a name-drift signal).
 
 ### What Mordred Adds (5 plugins)
 
-すべての plugin は `src/mordred_hermes/<name>/` にあり、Hermes plugin SDK (`PluginContext`) のみを使う。配布は単一 pip パッケージ `mordred-hermes` で entry-point `hermes_agent.plugins` 経由のロードに対応する。
+All plugins live under `src/mordred_hermes/<name>/` and use only the Hermes plugin SDK (`PluginContext`). Distribution is as a single pip package `mordred-hermes`, supporting loading via the `hermes_agent.plugins` entry point.
 
-1. **`mordred_network`** — dynamic 3-layer path switching across Tor / VPN / Clearnet。子プロセス (`tor`/`arti`/Mullvad WireGuard CLI) のライフサイクルを Python `subprocess` で管理。Hermes 子プロセスへの proxy 環境変数注入 (`HTTPS_PROXY`, `ALL_PROXY` 等) と内部 Python API (`mordred_network.api.use`, `status`, `blackout_assert`) を提供。
+1. **`mordred_network`** — dynamic 3-layer path switching across Tor / VPN / Clearnet. Manages the lifecycle of child processes (`tor`/`arti`/Mullvad WireGuard CLI) via Python `subprocess`. Provides proxy environment-variable injection (`HTTPS_PROXY`, `ALL_PROXY`, etc.) into Hermes child processes and an internal Python API (`mordred_network.api.use`, `status`, `blackout_assert`).
 2. **`mordred_privacy_check`** — privacy policy enforcement at two checkpoints:
-   - **Skill install ガード**: 純 hook が無い間は `hermes mordred install <skill>` ラッパ CLI 経由で frontmatter の `metadata.mordred.network_requirements` を読み policy 判定。将来 Hermes に install hook が追加された時点で hook ベースに移行
-   - `pre_tool_call` — 汎用 per-tool policy (例: strict mode 下で `web_fetch` を Clearnet で blocking)。`origin_skill` が payload にあれば per-skill ポリシーも、無ければ tool-name allowlist のみ
-3. **`mordred_llm_guard`** — Hermes provider adapter として `mordred_llm_guard/local_adapter.py` を登録 + `pre_llm_call` hook で strict mode 下に provider override。local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM) を `mordred-local` として synthetic provider 化
-4. **`mordred_keyvault`** — Apple Secure Enclave-backed AES key wrapping (Python から `pyobjc-framework-Security` 経由で `Security.framework` を呼び出し)。CLI の `hermes mordred keyvault ...` サブツリーから操作
-5. **`mordred_wizard`** — `hermes mordred ...` サブコマンドツリーを `register_cli_command` で登録。configure / upgrade / install / network / policy / audit / keyvault のすべての CLI を統括
+   - **Skill install guard**: while there's no pure hook available, policy is decided by reading `metadata.mordred.network_requirements` from the frontmatter via the `hermes mordred install <skill>` wrapper CLI. Migrates to a hook-based approach once Hermes adds an install hook in the future
+   - `pre_tool_call` — generic per-tool policy (e.g. blocking `web_fetch` over Clearnet under strict mode). Per-skill policy too if `origin_skill` is present in the payload; otherwise just a tool-name allowlist
+3. **`mordred_llm_guard`** — registers `mordred_llm_guard/local_adapter.py` as a Hermes provider adapter + provider override under strict mode via the `pre_llm_call` hook. Turns a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM) into a synthetic provider as `mordred-local`
+4. **`mordred_keyvault`** — Apple Secure Enclave-backed AES key wrapping (calling `Security.framework` from Python via `pyobjc-framework-Security`). Operated from the `hermes mordred keyvault ...` CLI subtree
+5. **`mordred_wizard`** — registers the `hermes mordred ...` subcommand tree via `register_cli_command`. Oversees all CLI for configure / upgrade / install / network / policy / audit / keyvault
 
 ### Conventions (not plugins)
 
-- **Mordred skill metadata** — additive privacy fields under the `metadata.mordred.*` namespace (e.g. `metadata.mordred.network_requirements`, `metadata.mordred.requires_keyvault`)。Hermes/agentskills.io の標準 frontmatter とは namespace が分かれているので衝突しない。Hermes 本体のスキルローダは `metadata.mordred.*` を解釈しない (privacy-check plugin が SKILL.md を再度パースして判定)。
+- **Mordred skill metadata** — additive privacy fields under the `metadata.mordred.*` namespace (e.g. `metadata.mordred.network_requirements`, `metadata.mordred.requires_keyvault`). Since the namespace is separate from Hermes/agentskills.io's standard frontmatter, there's no conflict. Hermes's own skill loader does not interpret `metadata.mordred.*` (the privacy-check plugin re-parses SKILL.md to make the determination).
 
 ### What Mordred Inherits from Hermes (never modified)
 
 - Full CLI surface: `hermes`, `hermes model`, `hermes tools`, `hermes config`, `hermes gateway`, `hermes setup`, `hermes claw migrate`, `hermes update`, `hermes doctor`, `hermes plugins`, `hermes skills`, `hermes logs`, etc.
-- `~/.hermes/config.yaml` 設定形式 (YAML) と `~/.hermes/.env` (API キー)
-- `get_hermes_home()` による profile-aware なパス解決
+- The `~/.hermes/config.yaml` configuration format (YAML) and `~/.hermes/.env` (API keys)
+- Profile-aware path resolution via `get_hermes_home()`
 - Messaging gateway (Telegram, Discord, Slack, WhatsApp, Signal, iMessage, Email, ACP, etc.)
-- Skills Hub (組み込み) と agentskills.io 規格
+- Skills Hub (built-in) and the agentskills.io standard
 - Plugin loader (4 sources: bundled / user / project / pip entry-point)
-- Plugin lifecycle hooks (16 種、`hermes_cli/plugins.py:VALID_HOOKS`)
+- Plugin lifecycle hooks (16 types, `hermes_cli/plugins.py:VALID_HOOKS`)
 - Provider adapter system (`agent/anthropic_adapter.py`, `bedrock_adapter.py`, etc.)
 - Subagent system (`subagent_stop` hook + `delegate_task` tool)
 - Cron scheduler (`cron/`)
-- Memory system (`plugins/memory/`、 honcho/mem0/supermemory)
+- Memory system (`plugins/memory/`, honcho/mem0/supermemory)
 - Context engine (`plugins/context_engine/`)
 - Terminal backends (local/docker/ssh/singularity/modal/daytona/vercel)
 
@@ -146,11 +146,11 @@ Hermes は OpenClaw より hook palette が広いため、旧 SPEC で「core se
 ### Naming Convention
 
 - Project name: **Mordred**
-- CLI command name: **`hermes mordred ...`** (Hermes の `register_cli_command` 経由)
-- Plugin Python module IDs: `mordred_network`, `mordred_privacy_check`, `mordred_keyvault`, `mordred_llm_guard`, `mordred_wizard` (snake_case、Python module 命名規則)
+- CLI command name: **`hermes mordred ...`** (via Hermes's `register_cli_command`)
+- Plugin Python module IDs: `mordred_network`, `mordred_privacy_check`, `mordred_keyvault`, `mordred_llm_guard`, `mordred_wizard` (snake_case, following Python module naming conventions)
 - pip distribution: **`mordred-hermes`** (single package, all 5 plugins included)
-- Configuration topology: per-plugin config under `plugins.mordred_<plugin-id>` in `~/.hermes/config.yaml`。Mordred plugins coordinate shared state (effective policy, active network path) via Hermes 内部 import 共有モジュール、 **not** via a single `mordred:` top-level key
-- Skill metadata: `metadata.mordred.*` (旧 SPEC と同じ、互換維持)
+- Configuration topology: per-plugin config under `plugins.mordred_<plugin-id>` in `~/.hermes/config.yaml`. Mordred plugins coordinate shared state (effective policy, active network path) via an internally-imported shared module within Hermes, **not** via a single `mordred:` top-level key
+- Skill metadata: `metadata.mordred.*` (same as the old SPEC, maintaining compatibility)
 - Mordred-owned filesystem paths: `~/.hermes/mordred/` (audit log, policy snapshot, keyvault state)
 
 ## Target User (v1)
@@ -159,8 +159,8 @@ Hermes は OpenClaw より hook palette が広いため、旧 SPEC で「core se
 
 Persona:
 
-- macOS Apple Silicon または Linux / WSL2 ユーザ (Phase 1–3 はマルチプラットフォーム、Phase 4 のみ macOS Apple Silicon)
-- Already using Hermes、または OpenClaw からの移行ユーザ (`hermes claw migrate` 経由)
+- macOS Apple Silicon or Linux / WSL2 users (Phase 1-3 is multi-platform, Phase 4 is macOS Apple Silicon only)
+- Already using Hermes, or a user migrating from OpenClaw (via `hermes claw migrate`)
 - Comfortable with the Python ecosystem
 - Has experience or willingness to learn local LLM operation (Ollama / LM Studio / vLLM)
 - _Nice-to-have, not required_: Web3 / cryptocurrency familiarity (relevant only when v2+ Payment skills land)
@@ -169,131 +169,131 @@ Out of scope (v2+): journalists, enterprise IT teams, GUI-only users, Windows na
 
 ## User Stories (v1)
 
-### Story 1: 既存 Hermes ユーザの privacy 層追加
+### Story 1: Adding the privacy layer for existing Hermes users
 
-As an existing Hermes user, I want to add the privacy layer with `pip install mordred-hermes && hermes mordred upgrade`、 reusing my existing `~/.hermes/config.yaml` and skills unchanged.
+As an existing Hermes user, I want to add the privacy layer with `pip install mordred-hermes && hermes mordred upgrade`, reusing my existing `~/.hermes/config.yaml` and skills unchanged.
 
 Behavior:
 
-- Idempotent: re-running は state が一致する場合 no-op
-- `plugins.mordred_*` セクションが既に存在する場合は diff を表示し、上書きを prompt
-- Existing skills without `metadata.mordred.*` are treated as `network_requirements: unknown`。Lenient mode (default for upgrade) では一回限りの warning、strict mode では block で listed in `hermes mordred policy explain`
-- `~/.hermes/config.yaml` のコメントとキー順は保持される (`ruamel.yaml` 経由の round-trip writer)
-- 既存 `~/.hermes/mordred/` は `--reset` 指定が無い限り保持
+- Idempotent: re-running is a no-op when state already matches
+- If the `plugins.mordred_*` section already exists, show a diff and prompt for overwrite
+- Existing skills without `metadata.mordred.*` are treated as `network_requirements: unknown`. Lenient mode (default for upgrade) gives a one-time warning; strict mode blocks, listed in `hermes mordred policy explain`
+- Comments and key order in `~/.hermes/config.yaml` are preserved (round-trip writer via `ruamel.yaml`)
+- The existing `~/.hermes/mordred/` is preserved unless `--reset` is specified
 
-### Story 1.5: OpenClaw + Mordred-OpenClaw からの移行
+### Story 1.5: Migration from OpenClaw + Mordred-OpenClaw
 
-OpenClaw 環境で旧 Mordred を使っていたユーザは以下の 3 ステップ:
+Users who were using the old Mordred in an OpenClaw environment follow these 3 steps:
 
-1. `hermes claw migrate` — Hermes 化 (workspace, config 移行)
-2. `pip install mordred-hermes` — Mordred plugin 群を入手
-3. `hermes mordred upgrade` — privacy 層を有効化
+1. `hermes claw migrate` — migrate to Hermes (workspace, config migration)
+2. `pip install mordred-hermes` — obtain the Mordred plugin suite
+3. `hermes mordred upgrade` — enable the privacy layer
 
-`hermes mordred upgrade` は OpenClaw 時代の `~/.openclaw/mordred/` を検出した場合、policy / audit log / keyvault state を `~/.hermes/mordred/` に migrate する補助機能を持つ (詳細は PLAN.md §1.3)。
+`hermes mordred upgrade` has an assist feature that, when it detects the OpenClaw-era `~/.openclaw/mordred/`, migrates policy / audit log / keyvault state to `~/.hermes/mordred/` (see PLAN.md §1.3 for details).
 
-### Story 2: 新規ユーザのセットアップ
+### Story 2: New user setup
 
 As a new user, I want `hermes mordred configure` to:
 
-1. `hermes setup` を child-process spawn (Hermes 標準セットアップを先に実行)
-2. Mordred-specific questions (network policy strict/lenient/off, local LLM endpoint, keyvault initialization opt-in) を聞く
+1. Spawn `hermes setup` as a child process (run Hermes's standard setup first)
+2. Ask Mordred-specific questions (network policy strict/lenient/off, local LLM endpoint, keyvault initialization opt-in)
 
-これにより Hermes と Mordred を 1 コマンドで設定可能。Hermes core 改変なし。
+This allows Hermes and Mordred to be configured with a single command. No Hermes core modifications.
 
-### Story 3: スキル実行と自動経路選択
+### Story 3: Skill execution and automatic path selection
 
-スキル install 時 (`hermes mordred install <skill>` ラッパ経由)、`mordred_privacy_check` が SKILL.md frontmatter の `metadata.mordred.network_requirements` を解析し user policy と照合。不適合なら install を block。Runtime では `mordred_network` が proxy 環境変数を Hermes spawn する子プロセスに inject。Active path は gateway 全体 single state (last-write-wins, audited)。
+At skill install time (via the `hermes mordred install <skill>` wrapper), `mordred_privacy_check` parses `metadata.mordred.network_requirements` from the SKILL.md frontmatter and checks it against user policy. Install is blocked on mismatch. At runtime, `mordred_network` injects proxy environment variables into child processes spawned by Hermes. The active path is a single state across the whole gateway (last-write-wins, audited).
 
-> **Note**: Hermes core に install hook が追加されたら、ラッパ CLI 廃止して直接 hook 経由に移行。それまでは ラッパ経由のみが policy enforcement 経路。
+> **Note**: Once an install hook is added to Hermes core, the wrapper CLI will be retired in favor of going directly through the hook. Until then, the wrapper is the only policy-enforcement path.
 
 ### Story 4: Local LLM enforcement (strict-mode override)
 
-> **Phase 0.8 verify (2026-05-10) 完了 — Story 4 の機構を再定義**: Hermes v0.11.0 の `pre_llm_call` payload は `model` だけで `provider` を含まず、 戻り値は **context-injection 専用** (provider override 不可)。 `pre_api_request` には provider/model/base_url が乗るが **observer-only**。 従って **「ターン毎 `pre_llm_call` で provider redirect」 は v1 では構造的に不可能** ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5)。 v1 は `on_session_start` 時の **session-scoped enforcement** に切り替える: strict policy + non-allowlisted current provider の組合せは **起動を refuse** する (v1 default、 audit `policy.strict.session_refused`)。 `register_provider` + config patch で active provider を `mordred-local` synthetic provider に swap する代替案は Codex B2 review で **v1 構造的に不可能**と確定した (Hermes は `on_session_start` 発火前に active provider を解決するため config patch は次セッションまで効かない) — v2 vendored fork (Tier B、 `[hard-lock]`) に deferred。 zero-PR commitment (`MIGRATION.md` §5) は維持。
+> **Phase 0.8 verify (2026-05-10) complete — redefining Story 4's mechanism**: Hermes v0.11.0's `pre_llm_call` payload carries only `model`, not `provider`, and its return value is **context-injection only** (provider override not possible). `pre_api_request` does carry provider/model/base_url, but it's **observer-only**. Therefore **"redirecting the provider on every turn via `pre_llm_call`" is structurally impossible in v1** ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). v1 switches to **session-scoped enforcement** at `on_session_start`: the combination of strict policy plus a current provider that isn't allowlisted causes startup to be **refused** (v1 default, audit `policy.strict.session_refused`). The alternative of swapping the active provider to the `mordred-local` synthetic provider via `register_provider` + a config patch was confirmed **structurally impossible in v1** by the Codex B2 review (Hermes resolves the active provider before `on_session_start` fires, so a config patch has no effect until the next session) — deferred to the v2 vendored fork (Tier B, `[hard-lock]`). The zero-PR commitment (`MIGRATION.md` §5) is maintained.
 
-Policy が `strict` の時、`mordred_llm_guard` は **session 開始時に** provider 設定を判定し、 `cloud_provider_allowlist` に該当しない provider が active であれば session を refuse する (v1 default)。 `mordred-local` synthetic provider への swap は Codex B2 review で v1 不可能と確定したため v2 deferred。 ターンが始まった後の provider 切替も v1 では行わない (構造的制約)。 `cloud_provider_allowlist` に該当 + `allow_cloud_llm: true` の組合せでは session 続行 (passthrough)。 詳細な audit reason code は §Audit log policy 参照 (`policy.strict.session_refused`、 および v2 deferred な `policy.strict.provider_override_at_session_start`)。
+When policy is `strict`, `mordred_llm_guard` determines the provider configuration **at session start** and refuses the session if the active provider does not match the `cloud_provider_allowlist` (v1 default). Swapping to the `mordred-local` synthetic provider was confirmed impossible in v1 by the Codex B2 review, so it's deferred to v2. Provider switching after a turn has begun is likewise not done in v1 (a structural constraint). When the provider matches `cloud_provider_allowlist` and `allow_cloud_llm: true`, the session continues (passthrough). See §Audit log policy for detailed audit reason codes (`policy.strict.session_refused`, and the v2-deferred `policy.strict.provider_override_at_session_start`).
 
-Local endpoint が unreachable な時は `MordredLocalUnreachable` を raise し、ターン abort。lenient mode では override しない。
+When the local endpoint is unreachable, `MordredLocalUnreachable` is raised and the turn is aborted. Lenient mode does not override.
 
 ### Story 5: Key management
 
-`metadata.mordred.requires_keyvault: true` を declare するスキルのために、`mordred_keyvault` が `Security.framework` (pyobjc 経由) backed AES key wrapping を提供。Keyvault 初期化は Seed Phrase + Passphrase + PoW の物理的な手書き transcribe を要求し、verification-digest flow が一致しない限り finalize されない。詳細は SPEC §Plugin: `mordred_keyvault`。
+For skills that declare `metadata.mordred.requires_keyvault: true`, `mordred_keyvault` provides `Security.framework` (via pyobjc) backed AES key wrapping. Keyvault initialization requires physically hand-transcribing the Seed Phrase + Passphrase + PoW, and is not finalized unless the verification-digest flow matches. See SPEC §Plugin: `mordred_keyvault` for details.
 
-### Story 6: Hermes 既存機能との共存
+### Story 6: Coexistence with Hermes's existing features
 
-Mordred plugin は Hermes の memory plugin (honcho/mem0)、context engine、observability (langfuse) と同居可能。各 plugin は独立しており、Mordred の hook は他の plugin の hook と並列に呼ばれる。 **Phase 0.8 verify (2026-05-10) 完了**: Hermes v0.11.0 plugin loader の hook 順序保証は **登録順** で確定 (`PluginManager.invoke_hook` at `hermes_cli/plugins.py` L968-1002、 priority システム無し)。 Plugin 読込順は bundled → user → project → entry-point の順で、 Mordred (entry-point) は **すべての hook で最後に登録される**。 詳細は [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1。
+Mordred plugins can coexist with Hermes's memory plugin (honcho/mem0), context engine, and observability (langfuse). Each plugin is independent, and Mordred's hooks are called in parallel with other plugins' hooks. **Phase 0.8 verify (2026-05-10) complete**: Hermes v0.11.0's plugin loader guarantees hook ordering by **registration order** (`PluginManager.invoke_hook` at `hermes_cli/plugins.py` L968-1002, no priority system). The plugin load order is bundled → user → project → entry-point, and Mordred (entry-point) is **registered last for every hook**. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1 for details.
 
 ## Scope (In) — what we build in v1
 
 ### Plugin: `mordred_network`
 
 - **Tor connection (v1 default = official `tor` daemon)**:
-  - `arti` (Rust) は v1 baseline 候補として残すが、 v1 default は `tor` daemon — v1 baseline は最も entry barrier が低く Linux/macOS でパッケージマネージャ install が確立しているため
-  - **torrc isolation**: Mordred は **自前の torrc** を `~/.hermes/mordred/tor-data/torrc` に生成し、 system 全体の `/etc/tor/torrc` やユーザの Tor Browser 設定には触れない
-  - **SOCKS5 listener**: 既定 `127.0.0.1:9050`。 `lsof -i :9050` で既存 listener (例: Tor Browser、 system tor service) を検出した場合、 v1 では alt port `9150` (Tor Browser default 衝突) を経て **policy.json `tor_socks_port` で明示指定** された port に shift。 衝突解決順: 9050 → 9150 → user-specified → abort with `MordredPathBringupFailed`
-  - **ControlPort**: 既定 `127.0.0.1:9051` を有効化 (cookie auth)。 cookie file は `~/.hermes/mordred/tor-data/control_auth_cookie`。 `getinfo circuit-status` で M9 liveness probe を実装するため **必須**
-  - **Bridge / obfs4 / Snowflake**: v1 範囲外 (検閲環境での使用は v2 `v2-N3`)。 startup banner で「censorship 環境では v1 default Tor は接続失敗する可能性」 を warn
-  - **Stream isolation (per-skill SOCKS auth)**: v1 では未実装。 全 skill が同一 circuit pool を共有 (Tor 自身が circuit を rotate)。 per-skill SOCKS5 username/password で circuit 分離は v2 `v2-N1`。 **2026-06-02 追記**: per-**session** 単位の SOCKS5 isolation は landed — `proxy_env.isolation_token` (SOCKS credential) + torrc `IsolateSOCKSAuth` + `on_session_start` が Hermes `session_id` を circuit token に配線。 per-**skill** 単位は `origin_skill` (v2-H2) 待ちで据え置き
+  - `arti` (Rust) remains a candidate for the v1 baseline, but the v1 default is the `tor` daemon — because it has the lowest entry barrier for the v1 baseline, with well-established package-manager installs on Linux/macOS
+  - **torrc isolation**: Mordred generates **its own torrc** at `~/.hermes/mordred/tor-data/torrc` and does not touch the system-wide `/etc/tor/torrc` or the user's Tor Browser configuration
+  - **SOCKS5 listener**: defaults to `127.0.0.1:9050`. If an existing listener (e.g. Tor Browser, the system tor service) is detected via `lsof -i :9050`, v1 shifts through alt port `9150` (colliding with the Tor Browser default) to the port **explicitly specified in `policy.json`'s `tor_socks_port`**. Collision-resolution order: 9050 -> 9150 -> user-specified -> abort with `MordredPathBringupFailed`
+  - **ControlPort**: enabled by default at `127.0.0.1:9051` (cookie auth). The cookie file is `~/.hermes/mordred/tor-data/control_auth_cookie`. **Required** for implementing the M9 liveness probe via `getinfo circuit-status`
+  - **Bridge / obfs4 / Snowflake**: out of scope for v1 (use in censored environments is v2 `v2-N3`). The startup banner warns that "the v1 default Tor may fail to connect in censorship environments"
+  - **Stream isolation (per-skill SOCKS auth)**: not implemented in v1. All skills share the same circuit pool (Tor itself rotates circuits). Circuit separation via per-skill SOCKS5 username/password is v2 `v2-N1`. **Added 2026-06-02**: per-**session** SOCKS5 isolation has landed — `proxy_env.isolation_token` (SOCKS credential) + torrc `IsolateSOCKSAuth` + `on_session_start` wires the Hermes `session_id` into the circuit token. Per-**skill** isolation remains deferred, pending `origin_skill` (v2-H2)
 - **Mullvad VPN integration (v1 = official `mullvad` CLI)**:
-  - **CLI 選択**: v1 は Mullvad **公式 client** (`mullvad` binary、 macOS は `/Applications/Mullvad VPN.app/Contents/Resources/mullvad`、 Linux は `apt install mullvad-vpn` 等のパッケージ) を使用。 自前 `wg-quick` 直接実行は v1 範囲外 (CAP_NET_ADMIN/sudo の取り扱いが OS 横断で複雑)
-  - **権限**: 公式 client は背後で system service (Linux: systemd unit、 macOS: LaunchDaemon) として動作、 ユーザコマンドは IPC で daemon に依頼するため **追加 sudo 不要**
-  - **Killswitch (lockdown mode)**: strict mode では `mullvad lockdown-mode set on` を bring-up 時に enforce (Mullvad CLI 2026.2 で `always-require-vpn` サブコマンドは削除され、`lockdown-mode` に統合された)。 VPN drop 時に OS が clearnet route を一切作らない。 lenient/off では user 設定を尊重 (lockdown が off なら warn のみ)
-  - **DNS leak prevention**: Mullvad client が tunnel 内 resolver を強制するため v1 で DNS leak は無し (M8 IPv6 leak と異なり mitigated)
-  - **Relay 選択**: 既定 `auto` (Mullvad が地理的最近 relay を選ぶ)。 user override は policy.json `mullvad_relay_country: "jp"` 等で。 multihop / wireguard-over-tor は v1 範囲外
-  - **Tear-down**: `on_session_end` で `mullvad disconnect` を実行。 strict mode では同時に `mullvad lockdown-mode set off` を **行わない** (lockdown 維持)、 user は次セッション開始 or 手動 disable で抜ける
-  - **Platform**: macOS Apple Silicon、 Ubuntu/Debian baseline。 Windows は v1 範囲外 (Phase 4 keyvault macOS-only と同じ platform tone)
+  - **CLI choice**: v1 uses the Mullvad **official client** (`mullvad` binary; on macOS `/Applications/Mullvad VPN.app/Contents/Resources/mullvad`, on Linux a package such as `apt install mullvad-vpn`). Running `wg-quick` directly ourselves is out of scope for v1 (handling `CAP_NET_ADMIN`/sudo is complex across OSes)
+  - **Permissions**: the official client runs in the background as a system service (Linux: systemd unit; macOS: LaunchDaemon), and user commands request the daemon via IPC, so **no additional sudo is required**
+  - **Killswitch (lockdown mode)**: under strict mode, `mullvad lockdown-mode set on` is enforced at bring-up (in Mullvad CLI 2026.2 the `always-require-vpn` subcommand was removed and folded into `lockdown-mode`). The OS creates no clearnet route at all when the VPN drops. Under lenient/off, the user's setting is respected (if lockdown is off, only a warning is issued)
+  - **DNS leak prevention**: since the Mullvad client forces resolution through the in-tunnel resolver, there is no DNS leak in v1 (mitigated, unlike the M8 IPv6 leak)
+  - **Relay selection**: defaults to `auto` (Mullvad picks the geographically nearest relay). User override via e.g. `mullvad_relay_country: "jp"` in policy.json. Multihop / wireguard-over-tor are out of scope for v1
+  - **Tear-down**: `mullvad disconnect` is run in `on_session_end`. Under strict mode, `mullvad lockdown-mode set off` is **not** run at the same time (lockdown is kept in place); the user exits it by starting the next session or disabling manually
+  - **Platform**: macOS Apple Silicon, Ubuntu/Debian baseline. Windows is out of scope for v1 (the same platform stance as Phase 4 keyvault being macOS-only)
 - Clearnet (no-op path)
-- **`provider_transport_flagger` v1 baseline allowlist** (Phase 0.8 で実機 verify):
-  - **既知 compatible (HTTPS_PROXY + SOCKS5h 尊重)**: `anthropic` SDK (httpx)、 `openai` SDK (httpx)、 `gemini` (`google-genai` SDK、 httpx baseline — Phase 0.8 実機 verify で旧 `google-generativeai`/requests から訂正、 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §Out of scope の live verify 結果)
-  - **conditional**: `mordred-local` localhost provider — NO_PROXY default で proxy 経由から除外され機能、 但し SOCKS5h 関係なし
-  - **既知 partial / 要監視**: `bedrock` (boto3) — HTTPS_PROXY 尊重するが botocore の DNS 解決経路に quirk あり、 strict + tor で DNS leak の可能性。 `vertex` (google-cloud SDK) — 一部 transport で HTTPS_PROXY を bypass、 strict mode で warning 後 user 判断
-  - **既知 incompatible (v1 strict mode で active 時 startup abort 候補)**: 上記以外で raw socket / 独自 transport を握る provider があれば Phase 0.8 verify で列挙
-  - 上記は **v1 ship 前の Phase 0.8 タスクで実機テストして確定**。 actual allowlist は plugin 同梱の Python dict (declarative module) として配布、 policy.json から user override 可能 (entry 追加のみ、 削除は不可)
-- Subprocess lifecycle: `on_session_start` hook で Tor/VPN client を起動 (policy が要求する時)、`on_session_end` で teardown
-- Dynamic path-switching via internal Python API (`mordred_network.api.use(path)` 等)
-- Path injection: spawned child processes に `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` を設定。 **NO_PROXY default**: `localhost,127.0.0.1,::1` (Phase 2 の `mordred-local` localhost 通信を proxy 経由から除外するため必須)。 ユーザ追加 entries は policy.json `no_proxy: [...]` から append
-- **Transport coverage (M8, v1)**: proxy_env が tunnel するのは **HTTP(S) traffic のみ**。 以下は v1 で防御範囲外、 SPEC §Threat Model に明記:
-  - **DNS resolution**: 通常の `HTTPS_PROXY=http://...` では Python/curl 等が **system resolver で名前解決してから** proxy に接続するため、 Tor 経路でも DNS query が ISP に漏れる。 v1 強制対応: Tor 経路では `HTTPS_PROXY=socks5h://127.0.0.1:9050` を使用 (`socks5h` は server-side resolution)。 SOCKS5h を尊重しないライブラリ (一部の旧 HTTP client) は provider_transport_flagger で warning。 VPN 経路では tunnel が DNS query 自体を握るので緩和。 v2: bundled DNS-over-Tor / `mordred-dns-resolver` で完全防御
-  - **IPv6 traffic**: 多くの HTTP client は IPv6 endpoint に対し proxy_env を bypass する。 v1 では provider が IPv6-only endpoint を持つ場合 traffic は **proxy を経由しない** (clearnet leak)。 strict mode では policy.json `disable_ipv6: true` (default true) で v1 baseline を IPv4 only に。 VPN 経路では tunnel が IPv6 を握るので緩和、 Tor 経路では強制 IPv4 (Tor 自体が IPv6 exit 限定的のため実害は少)
-  - **Non-HTTP transport (raw TCP, UDP, QUIC, gRPC, WebSocket)**: HTTPS_PROXY が効くかは client library 次第。 SSE / standard WebSocket (WS-over-HTTP upgrade) は通常尊重するが、 raw socket を握る provider plugin は bypass。 provider_transport_flagger の static allowlist で warning、 strict mode では known-incompatible provider が active 時 startup abort
+- **`provider_transport_flagger` v1 baseline allowlist** (verified on real hardware in Phase 0.8):
+  - **Known compatible (respects HTTPS_PROXY + SOCKS5h)**: `anthropic` SDK (httpx), `openai` SDK (httpx), `gemini` (`google-genai` SDK, httpx baseline — corrected from the older `google-generativeai`/requests by the Phase 0.8 real-hardware verify; see the live-verify results in [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §Out of scope)
+  - **conditional**: the `mordred-local` localhost provider — excluded from proxy routing by the NO_PROXY default and works that way, though SOCKS5h is irrelevant here
+  - **Known partial / needs monitoring**: `bedrock` (boto3) — respects HTTPS_PROXY but has a quirk in botocore's DNS-resolution path, with possible DNS leak under strict + tor. `vertex` (google-cloud SDK) — some transports bypass HTTPS_PROXY; under strict mode a warning is shown and the decision is left to the user
+  - **Known incompatible (candidates for startup abort under v1 strict mode when active)**: any provider beyond the above that holds a raw socket / its own transport is enumerated by the Phase 0.8 verify
+  - The above is **finalized via real-hardware testing in the Phase 0.8 task before v1 ships**. The actual allowlist is distributed as a Python dict (a declarative module) bundled with the plugin, and is user-overridable from policy.json (entries can only be added, not removed)
+- Subprocess lifecycle: the Tor/VPN client is started in the `on_session_start` hook (when policy requires it), torn down in `on_session_end`
+- Dynamic path-switching via internal Python API (e.g. `mordred_network.api.use(path)`)
+- Path injection: sets `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` on spawned child processes. **NO_PROXY default**: `localhost,127.0.0.1,::1` (required to exclude Phase 2's `mordred-local` localhost communication from proxy routing). User-added entries are appended from policy.json's `no_proxy: [...]`
+- **Transport coverage (M8, v1)**: proxy_env tunnels **HTTP(S) traffic only**. The following are out of the v1 defense scope, as stated explicitly in SPEC §Threat Model:
+  - **DNS resolution**: with a normal `HTTPS_PROXY=http://...`, Python/curl and similar tools **resolve the name via the system resolver before** connecting to the proxy, so even over Tor the DNS query leaks to the ISP. v1's enforced mitigation: over the Tor path, use `HTTPS_PROXY=socks5h://127.0.0.1:9050` (`socks5h` performs server-side resolution). Libraries that don't respect SOCKS5h (some older HTTP clients) get a warning from provider_transport_flagger. Over the VPN path this is mitigated because the tunnel itself handles the DNS query. v2: full defense via bundled DNS-over-Tor / `mordred-dns-resolver`
+  - **IPv6 traffic**: many HTTP clients bypass proxy_env for IPv6 endpoints. In v1, if a provider has an IPv6-only endpoint, traffic **does not go through the proxy** (a clearnet leak). Under strict mode, `disable_ipv6: true` in policy.json (default true) restricts the v1 baseline to IPv4 only. This is mitigated over the VPN path since the tunnel handles IPv6, and IPv4 is forced over the Tor path (with limited real-world impact since Tor itself has only limited IPv6 exit support)
+  - **Non-HTTP transport (raw TCP, UDP, QUIC, gRPC, WebSocket)**: whether HTTPS_PROXY takes effect depends on the client library. SSE / standard WebSocket (WS-over-HTTP upgrade) usually respect it, but provider plugins holding a raw socket bypass it. Warned via provider_transport_flagger's static allowlist; under strict mode, startup aborts if a known-incompatible provider is active
 - **Path failure semantics (M9, v1)**:
-  - **Bring-up failure** (Tor bootstrap timeout / VPN handshake fail): strict は session abort with `MordredPathBringupFailed`、 lenient は user-visible warning + clearnet fallback (audit `network.bringup_failed` emit)、 off は silent fallback
-  - **Liveness probe**: 30s interval で `mordred_network.api.health()` を内部 worker thread が実行 (Tor: SOCKS5 reachability + circuit established check、 VPN: WireGuard handshake recency + interface up)。 連続 2 回失敗で path-dropped 判定
-  - **Mid-session drop**: strict は次の `pre_tool_call` で `MordredPathDropped` を raise (tool 実行 block)、 lenient は warn + 続行 (path-dropped 状態を維持、 **clearnet 自動 fallback は行わない**。 user が `hermes mordred network use clearnet` で明示的に切り替える前提)。 audit `network.path_dropped` 必ず emit
-  - **`use(path)` failure**: `MordredNetworkError` (subclasses: `BringupFailed`, `AlreadySwitching`, `UnknownPath`) を raise。 silent fallback は禁止
+  - **Bring-up failure** (Tor bootstrap timeout / VPN handshake fail): strict aborts the session with `MordredPathBringupFailed`; lenient shows a user-visible warning + clearnet fallback (emits audit `network.bringup_failed`); off falls back silently
+  - **Liveness probe**: an internal worker thread runs `mordred_network.api.health()` at a 30s interval (Tor: SOCKS5 reachability + circuit-established check; VPN: WireGuard handshake recency + interface up). Judged path-dropped after 2 consecutive failures
+  - **Mid-session drop**: strict raises `MordredPathDropped` on the next `pre_tool_call` (blocking tool execution); lenient warns + continues (keeping the path-dropped state; **no automatic clearnet fallback** — the user is expected to switch explicitly via `hermes mordred network use clearnet`). Audit `network.path_dropped` is always emitted
+  - **`use(path)` failure**: raises `MordredNetworkError` (subclasses: `BringupFailed`, `AlreadySwitching`, `UnknownPath`). Silent fallback is prohibited
 - **Concurrency model (v1)**:
-  - Active path is **gateway-wide single state** — `mordred_network.api.use(path)` は last-write-wins、 audit-logged on switch
-  - **並列 tool_call の path mismatch**: runtime での per-skill path mismatch 判定は **v1 では行わない** — Phase 0.8 verify で `pre_tool_call` payload に `origin_skill` が **無い** ことが確定したため ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4)、 runtime での skill 単位の block は構造的に不可能。 per-skill enforcement は install-time (`hermes mordred install <skill>`) のみ。 path 自動切り替えも v1 では行わない (M3 transitive failure mode 回避のため)。 `origin_skill` payload 拡張が upstream に landing したら v2-H2 で runtime 判定を再検討
-  - **同 path 要求の並列**: 制限なし、 通常通り並列実行
-  - **異なる path 要求の並列**: serialize しない (block / warn semantics で対処)。 v2 で per-skill SOCKS5 stream isolation (Tor only) を検討
-- Provider transport flagging: 起動時に Hermes provider adapter を列挙し、proxy env vars を無視するものに warning を発出 (v1 は static known-incompatible allowlist、per-provider declaration は v2)
-- Strict-mode bootstrap order: `mordred_network` の `on_session_start` を `mordred_privacy_check` より先に登録することで active path 確定後に privacy-check が判定する。 **Phase 0.8 verify 完了** ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1): Hermes plugin loader は **登録順** で hook callback を呼出 (priority システム無し)、 entry-point plugin (Mordred 5 個すべて) は bundled/user/project の後にロードされるため、 Mordred plugin 同士の登録順は entry-point group `hermes_agent.plugins` の declaration 順序で決まる。 plugin 内 probe wait (`wait_for(api.status().ready, timeout=5s)`) を default の bootstrap 経路として採用 — 上流側の priority 制御は無いため、 register 順依存を最小化する設計
+  - Active path is **gateway-wide single state** — `mordred_network.api.use(path)` is last-write-wins, audit-logged on switch
+  - **Path mismatch for parallel tool_calls**: runtime per-skill path-mismatch detection is **not done in v1** — since the Phase 0.8 verify confirmed that `origin_skill` is **absent** from the `pre_tool_call` payload ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4), per-skill blocking at runtime is structurally impossible. Per-skill enforcement exists only at install-time (`hermes mordred install <skill>`). Automatic path switching is likewise not done in v1 (to avoid the M3 transitive failure mode). Once the `origin_skill` payload extension lands upstream, runtime detection will be reconsidered in v2-H2
+  - **Parallel requests for the same path**: no restriction, executes in parallel as usual
+  - **Parallel requests for different paths**: not serialized (handled via block / warn semantics). Per-skill SOCKS5 stream isolation (Tor only) is under consideration for v2
+- Provider transport flagging: enumerates Hermes provider adapters at startup and issues a warning for any that ignore proxy env vars (v1 uses a static known-incompatible allowlist; per-provider declaration is v2)
+- Strict-mode bootstrap order: registering `mordred_network`'s `on_session_start` before `mordred_privacy_check` ensures privacy-check makes its determination after the active path is settled. **Phase 0.8 verify complete** ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1): the Hermes plugin loader invokes hook callbacks in **registration order** (no priority system), and since entry-point plugins (all 5 of Mordred's) load after bundled/user/project, the registration order among Mordred plugins is determined by the declaration order of the `hermes_agent.plugins` entry-point group. An in-plugin probe wait (`wait_for(api.status().ready, timeout=5s)`) is adopted as the default bootstrap path — since there's no upstream priority control, the design minimizes dependence on registration order
 
 ### Plugin: `mordred_privacy_check`
 
-- **Skill install ガード** (`hermes mordred install <skill>` ラッパ経由):
-  - SKILL.md を install source path から読み、frontmatter の `metadata.mordred.network_requirements` を抽出
+- **Skill install guard** (via the `hermes mordred install <skill>` wrapper):
+  - Reads SKILL.md from the install source path and extracts `metadata.mordred.network_requirements` from the frontmatter
   - Strict + `clearnet` → block
   - Strict + missing metadata → block with `policy.strict.unknown_metadata`
   - Lenient + missing metadata → allow + warning
-- `pre_tool_call` — generic per-tool allowlist (configurable)。Default strict-mode blocklist: builtin `web_fetch`, `web_search` when active network path is Clearnet。`origin_skill` が payload にあれば per-skill 判定も、無ければ tool-name allowlist のみ
-- Policy state: `on_session_start` で `~/.hermes/config.yaml` の `plugins.mordred_privacy_check` から load、メモリキャッシュ。reload は `hermes mordred policy reload` で明示的に
-- Audit logging: §Operational Guarantees 参照
+- `pre_tool_call` — generic per-tool allowlist (configurable). Default strict-mode blocklist: builtin `web_fetch`, `web_search` when active network path is Clearnet. Per-skill determination too if `origin_skill` is present in the payload; otherwise just a tool-name allowlist
+- Policy state: loaded from `plugins.mordred_privacy_check` in `~/.hermes/config.yaml` at `on_session_start`, cached in memory. Reload is explicit via `hermes mordred policy reload`
+- Audit logging: see §Operational Guarantees
 
 ### Plugin: `mordred_llm_guard`
 
-- Synthetic provider `mordred-local` を `mordred_llm_guard/local_adapter.py` (plugin 同梱の adapter) として実装。Hermes provider adapter pattern を踏襲し、local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM) に delegate
-- **Phase 0.8 verify (2026-05-10) 完了**: v0.11.0 の `pre_llm_call` は context-injection 専用で provider override 不可、 `pre_api_request` は observer-only ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5)。 従って enforcement は **`on_session_start` で session-scoped に確定** する (ターン毎の動的 override は v1 範囲外):
-  - strict policy + current provider が `cloud_provider_allowlist` に **該当する** + `allow_cloud_llm: true` → session 続行 (passthrough)
-  - strict policy + current provider が cloud_provider_allowlist に該当しない、 または `allow_cloud_llm: false` → session を refuse して exit (v1 default、 audit `policy.strict.session_refused`)。 `register_provider` + config patch で active provider を `mordred-local` に swap する代替案 (audit `policy.strict.provider_override_at_session_start`) は Codex B2 review で v1 構造的に不可能と確定したため **v2 deferred** (Tier B `[hard-lock]` vendored fork)
-  - lenient/off → 何もしない
-- Local-unreachable fail-fast: `mordred-local` は health-check 失敗時 `MordredLocalUnreachable` を raise
-- Harness refusal: `on_session_start` で configured agents を scan、harness-based primary (Codex/Claude CLI/Cursor/ACP client) で strict mode の時は startup を abort
+- Implements the synthetic provider `mordred-local` as `mordred_llm_guard/local_adapter.py` (an adapter bundled with the plugin). Follows the Hermes provider adapter pattern and delegates to a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM)
+- **Phase 0.8 verify (2026-05-10) complete**: in v0.11.0, `pre_llm_call` is context-injection only with no provider override possible, and `pre_api_request` is observer-only ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). Enforcement is therefore **settled session-scoped at `on_session_start`** (per-turn dynamic override is out of scope for v1):
+  - strict policy + current provider **matches** `cloud_provider_allowlist` + `allow_cloud_llm: true` -> session continues (passthrough)
+  - strict policy + current provider does not match cloud_provider_allowlist, or `allow_cloud_llm: false` -> session is refused and exits (v1 default, audit `policy.strict.session_refused`). The alternative of swapping the active provider to `mordred-local` via `register_provider` + a config patch (audit `policy.strict.provider_override_at_session_start`) was confirmed structurally impossible in v1 by the Codex B2 review, so it's **deferred to v2** (Tier B `[hard-lock]` vendored fork)
+  - lenient/off -> do nothing
+- Local-unreachable fail-fast: `mordred-local` raises `MordredLocalUnreachable` on health-check failure
+- Harness refusal: scans configured agents at `on_session_start`; aborts startup under strict mode when a harness-based primary (Codex/Claude CLI/Cursor/ACP client) is configured
 
 ### Plugin: `mordred_keyvault`
 
 #### Key hierarchy
 
-`mordred_keyvault` protects the combination of **Seed Phrase + Passphrase + PoW**。BIP39 標準準拠、ユーザは 24-word Seed と Passphrase を物理的に手書き。
+`mordred_keyvault` protects the combination of **Seed Phrase + Passphrase + PoW**. Complies with the BIP39 standard; the user physically hand-writes the 24-word Seed and Passphrase.
 
 ```
 secret      = SeedPhrase (24 words) + Passphrase + PoW       ← protected (user transcribes by hand)
@@ -305,21 +305,21 @@ wrappedDek  = wrap(dek, wrappingKey)                         ← stored next to 
 
 Design decisions:
 
-- **Withdrawn**: Secure Enclave が signing key を保持/derive する設計は v1 では採用しない
-- **Adopted**: Secure Enclave は AES DEK の wrapping/unwrapping authorization 境界としてのみ使用
-- `dek` は plaintext 保存しない (encryption/decryption 中のみメモリに存在)
-- `Passphrase + PoW` は `secret` の一部、`dek` 派生材料ではない (Enclave 破壊時、ユーザが書き留めた secret から別 machine で再 wrap 可能)
-- Biometric 認証は cryptographic operation ではなく authorization mechanism のみ
+- **Withdrawn**: a design where the Secure Enclave holds/derives the signing key is not adopted in v1
+- **Adopted**: the Secure Enclave is used only as the authorization boundary for wrapping/unwrapping the AES DEK
+- `dek` is never stored in plaintext (exists in memory only during encryption/decryption)
+- `Passphrase + PoW` is part of `secret`, not derivation material for `dek` (if the Enclave is destroyed, the secret the user wrote down allows re-wrapping on a different machine)
+- Biometric authentication is only an authorization mechanism, not a cryptographic operation
 
 Limitations:
 
-- Local secrets at rest 保護: disk theft, backup, accidental plaintext disclosure を防ぐ
-- Compromised running gateway が unwrap 後の secret を扱う場合は保護できない
-- Runtime signing isolation は v1 範囲外、 future Payment work (`v3-P1`) で扱う
+- Local secrets at rest protection: guards against disk theft, backup exposure, and accidental plaintext disclosure
+- Cannot protect against a compromised running gateway handling the secret after it has been unwrapped
+- Runtime signing isolation is out of scope for v1; addressed by future Payment work (`v3-P1`)
 
 #### Key generation and verification digest
 
-Key generation は **mandatory and one-shot**。mis-transcribe を防ぐため verification digest 一致まで finalize しない。
+Key generation is **mandatory and one-shot**. To prevent mis-transcription, it is not finalized until the verification digest matches.
 
 Conceptual formula:
 
@@ -366,7 +366,7 @@ This vector is pinned in `tests/test_keyvault_digest.py::TestSpecFixedVector` an
 
 **Operator tooling**: The standalone `scripts/keyvault_offline_digest.py` (stdlib + `blake3` only, no `mordred_hermes` import) is the canonical implementation an operator runs on the air-gapped second device. It reproduces the algorithm above plus the seed/passphrase normalization defined in §"PR4 API contract". The script's `--self-test` flag validates the same fixed vector pinned above. Operator preparation and step-by-step recipe live in `setup.md` §"Offline verification digest".
 
-Confirmation flow (PC = Hermes process が動く machine):
+Confirmation flow (PC = the machine running the Hermes process):
 
 | Input location                 | Input       | Output                                             |
 | ------------------------------ | ----------- | -------------------------------------------------- |
@@ -374,37 +374,37 @@ Confirmation flow (PC = Hermes process が動く machine):
 | Separate offline medium/device | Passphrase  | `hash(Passphrase) ⊕ top4(PoW)`                     |
 | Combine                        | Both halves | verify `digest` matches the locally computed value |
 
-- v1 default は offline/manual verification while PC is in network blackout。QR + local LAN pairing は v2 (`v2-F7`)
-- PoW (BLAKE3 ベース) は real-time phishing replication を deter — 具体的アルゴリズムは次節 §"Proof-of-Work (PoW) algorithm" で freeze
-- Cross-machine recovery 時は backup blob に embedded された first-generation digest と比較し mis-transcription を検出
+- The v1 default is offline/manual verification while PC is in network blackout. QR + local LAN pairing is v2 (`v2-F7`)
+- PoW (BLAKE3-based) deters real-time phishing replication — the concrete algorithm is frozen in the next section, §"Proof-of-Work (PoW) algorithm"
+- During cross-machine recovery, mis-transcription is detected by comparing against the first-generation digest embedded in the backup blob
 
 #### Proof-of-Work (PoW) algorithm (Phase 4 PR10 step-0 freeze, 2026-05-16)
 
-`compute_digest` の `pow_bytes` 入力は caller が用意する。PR10 で `keyvault init` がこの artifact を生成する必要が生じたため、 v1 アルゴリズムをここで freeze する。
+The `pow_bytes` input to `compute_digest` is prepared by the caller. Since PR10 required `keyvault init` to generate this artifact, the v1 algorithm is frozen here.
 
-**目的**: PoW は **seed-bound な計算成果物** であり、 init 時に一回だけ固定コストを支払わせる。 seed に bind しているため別マシンでの recovery 時に同じ seed から決定的に再計算でき、 PoW を別途手書き transcribe する必要がない (offline medium に渡すのは `top4(PoW)` の 4 byte のみ — §"Key generation and verification digest" の `⊕` narrow-mask 根拠と整合)。
+**Purpose**: PoW is a **seed-bound computational artifact**, forcing a one-time fixed cost to be paid at init. Because it's bound to the seed, it can be deterministically recomputed from the same seed during recovery on a different machine, so there's no need to separately hand-transcribe the PoW (only the 4 bytes of `top4(PoW)` are passed to the offline medium — consistent with the rationale for the `⊕` narrow mask in §"Key generation and verification digest").
 
 **Concrete algorithm (canonical)**:
 
 ```
-H                    := BLAKE3 (32-byte digest mode; unkeyed — digest.py と同一)
+H                    := BLAKE3 (32-byte digest mode; unkeyed — same as digest.py)
 POW_PREFIX           := b"MRPOW\x01"          # 6 bytes: domain-separation tag ‖ version 1
-POW_DIFFICULTY_BITS  := 20                     # v1 baseline (tunable; 下記 caveat 参照)
+POW_DIFFICULTY_BITS  := 20                     # v1 baseline (tunable; see caveat below)
 
 preimage(n)  := POW_PREFIX ‖ normalized_seed_utf8 ‖ n.to_bytes(8, "little")
-                # normalized_seed は api._normalize_seed_phrase の出力 (NFKD + casefold
-                # + whitespace-collapse)。n は 0 から始まる uint64 カウンタ
+                # normalized_seed is the output of api._normalize_seed_phrase (NFKD + casefold
+                # + whitespace-collapse). n is a uint64 counter starting from 0
 find smallest n such that leading_zero_bits(H(preimage(n))) >= POW_DIFFICULTY_BITS
-pow_bytes    := H(preimage(n))                 # 32 bytes — 勝った preimage の BLAKE3 digest
+pow_bytes    := H(preimage(n))                 # 32 bytes — the BLAKE3 digest of the winning preimage
 ```
 
-- `top4(PoW) = pow_bytes[:4]` (digest 式と整合)。 difficulty が高いほど `top4` の先頭 bit は 0 が増えるが、 `top4` は passphrase 半分の **mis-transcription 検出**用であって security 境界ではない (digest 全 32 byte の `hmac.compare_digest` が一次検出)。
-- 決定的: `pow_bytes` は normalized seed のみの関数。 recovery は transcribe された seed から同じ値を再計算する。
-- `n` が `2**64` に達した場合 (天文学的に起こらない) は `PowExhausted` を raise。
+- `top4(PoW) = pow_bytes[:4]` (consistent with the digest formula). The higher the difficulty, the more leading zero bits `top4` has, but `top4` is for **mis-transcription detection** on the passphrase half, not a security boundary (the primary detection is the `hmac.compare_digest` over the full 32-byte digest).
+- Deterministic: `pow_bytes` is a function of the normalized seed only. Recovery recomputes the same value from the transcribed seed.
+- If `n` reaches `2**64` (astronomically unlikely), `PowExhausted` is raised.
 
-**Caveat (codex step-0 review 対象)**: `POW_DIFFICULTY_BITS = 20` (≈ 1.4M BLAKE3 hashes、 最新ハードで 1 秒未満) は conservative baseline。 real-time phishing に対する厳密な difficulty 解析は v1 範囲外で、 security review / v2 に deferred。 定数は `mordred_keyvault.pow` 内 module-level で 1 箇所に集約し将来 tune 可能とする。 recovery も PoW を再計算するため difficulty 引き上げは recovery 時間にも比例して効く点に注意。
+**Caveat (subject to codex step-0 review)**: `POW_DIFFICULTY_BITS = 20` (≈1.4M BLAKE3 hashes, under 1 second on modern hardware) is a conservative baseline. Rigorous difficulty analysis against real-time phishing is out of scope for v1 and deferred to security review / v2. The constant is consolidated in one place at module level in `mordred_keyvault.pow` so it can be tuned in the future. Note that since recovery also recomputes the PoW, raising the difficulty proportionally affects recovery time as well.
 
-**Fixed test vectors** (BLAKE3 1.x、 `tests/test_keyvault_pow.py` に pin):
+**Fixed test vectors** (BLAKE3 1.x, pinned in `tests/test_keyvault_pow.py`):
 
 | Field                 | Value                                                              |
 | --------------------- | ------------------------------------------------------------------ |
@@ -417,37 +417,37 @@ pow_bytes    := H(preimage(n))                 # 32 bytes — 勝った preimage
 | → `pow_bytes`         | `00000df459e58f525449c530a547d48ba70e488f7ed15f9c810ae7a76bd0e7c9` |
 | → `top4`              | `00000df4`                                                         |
 
-difficulty 8 vector は手計算検証用 (`n = 519` で到達)、 difficulty 20 vector が v1 production の regression anchor。 いずれかが変わる変更は SPEC 更新 + PR 理由必須。
+The difficulty-8 vector is for hand-calculation verification (reached at `n = 519`); the difficulty-20 vector is the v1 production regression anchor. Any change that alters either requires a SPEC update + a reason in the PR.
 
 #### `keyvault init` flow (Phase 4 PR10)
 
-`hermes mordred keyvault init` は one-shot の鍵生成 flow を以下の順で実行する:
+`hermes mordred keyvault init` runs the one-shot key-generation flow in the following order:
 
-1. **生成**: `keyvault` が 24-word BIP39 mnemonic (256-bit entropy + SHA-256 checksum) を生成、 `pow.compute_pow(normalized_seed)` で PoW を計算。 Passphrase は user が対話入力 (PC 画面に echo しない)。
-2. **prepare**: `api.prepare_generate(seed, passphrase, pow_bytes)` → `(SeedDisplayHandle, expected_digest)` (in-memory のみ、 disk mutation なし)。
-3. **display**: `seed_display.display_seed(handle, surface)` — network blackout assert (fail-closed) → M4/M5 banner → 60s timer 付きで **Seed のみ** を端末に表示 (Passphrase は絶対 render しない)。
-4. **offline confirm**: user が seed + passphrase + `top4(PoW)` を offline medium に transcribe し digest を独立計算、 その digest を CLI に入力。
-5. **finalize**: `api.confirm_generate(handle, user_digest, backend=_SecKeyBackend())` — digest 一致時のみ Secure Enclave key + `meta.json` を durable 化、 mismatch 時は state 変更ゼロで `keyvault.init_denied`。
+1. **Generate**: `keyvault` generates a 24-word BIP39 mnemonic (256-bit entropy + SHA-256 checksum) and computes the PoW via `pow.compute_pow(normalized_seed)`. The Passphrase is entered interactively by the user (not echoed to the PC screen).
+2. **prepare**: `api.prepare_generate(seed, passphrase, pow_bytes)` → `(SeedDisplayHandle, expected_digest)` (in-memory only, no disk mutation).
+3. **display**: `seed_display.display_seed(handle, surface)` — network blackout assert (fail-closed) → M4/M5 banner → displays **only the Seed** on the terminal with a 60s timer (the Passphrase is never rendered).
+4. **offline confirm**: the user transcribes the seed + passphrase + `top4(PoW)` onto an offline medium, independently computes the digest, and enters that digest into the CLI.
+5. **finalize**: `api.confirm_generate(handle, user_digest, backend=_SecKeyBackend())` — only on digest match does it durably persist the Secure Enclave key + `meta.json`; on mismatch, zero state change and `keyvault.init_denied`.
 
 #### Seed phrase display security
 
-1. **Network blackout (M4 caveat)**: 表示前に `mordred_network.api.blackout_assert()` で host が disconnected であることを verify。macOS では `SCNetworkReachability` / `nw_path_monitor` (pyobjc 経由)。Linux では `ip link show` / `nmcli` で代替 (Phase 4 が macOS only なので Linux fallback は v2)
-   - **Fallback**: `mordred_network` 不在時は keyvault が直接 OS API を呼ぶ薄い wrapper にフォールバック
-   - **検出範囲の限界 (M4)**: `blackout_assert` は **OS の標準ネットワークスタックに見える経路** だけを検出する。 以下は検出できないため、 物理的な air-gap はユーザの責任で確保すること:
-     - Bluetooth / USB tethering / personal hotspot (OS が WAN として認識しない / させていない場合)
-     - 仮想マシン / コンテナの外側で動く NIC、 ホスト側 VPN、 仮想スイッチ
-     - 悪意ある kernel モジュールや ring-0 ローダー (root compromise 環境)
-     - Thunderbolt / DMA 経路で接続された外部 NIC が OS から hidden になっているケース
-   - 表示前に `keyvault init` の startup banner で「物理的に Wi-Fi/Ethernet/Bluetooth/USB tether が切れていることを目視確認してください」 と user prompt を出す
-2. **Show only the Seed on the PC**。Passphrase は PC 画面に絶対 render しない
-3. **Verification は v1 では offline by default**: Passphrase 半分は別 device で入力 or 手書き
-4. **Display timeout & capture caveats (M5)**: Seed は 60 秒で自動消去。 capture 関連の v1 防御範囲は以下:
-   - **Screenshot 検出**: best-effort のみ (macOS `CGDisplayRegisterReconfigurationCallback` + `CGScreenIsBeingCaptured` の polling)。 検出した瞬間に Seed display を即時クリア + audit log `keyvault.seed_display_aborted_screenshot` (Phase 4 reason enum で freeze)
-   - **Screen recording (M5、 v1 検出範囲外)**: macOS `screencapture -v`、 Loom、 Zoom share、 OBS、 QuickTime Player の screen recording は **検出しない**。 `CGDisplayStream` ベースの検出 API は API stability の観点で v1 採用見送り、 v2 で再評価
-   - **Remote desktop (VNC / Screen Sharing / SSH X11 forwarding / `tmate` / `mosh`)**: 検出しない。 ユーザは Seed display 前に remote session を切る責任がある
-   - **Camera / 物理 shoulder-surfing**: 当然検出範囲外
-   - 表示前 startup banner で「ローカル機の物理画面のみで Seed を見てください。 screen recorder / 画面共有ツール / remote desktop を停止してください」 と warn
-   - 60 秒タイマーは monotonic clock (`time.monotonic()`) ベース。 wall-clock 改ざんに耐性
+1. **Network blackout (M4 caveat)**: before display, `mordred_network.api.blackout_assert()` verifies the host is disconnected. On macOS via `SCNetworkReachability` / `nw_path_monitor` (through pyobjc). On Linux, substituted with `ip link show` / `nmcli` (since Phase 4 is macOS-only, the Linux fallback is v2)
+   - **Fallback**: when `mordred_network` is absent, keyvault falls back to a thin wrapper that calls the OS API directly
+   - **Detection scope limits (M4)**: `blackout_assert` detects only **paths visible to the OS's standard network stack**. The following cannot be detected, so physical air-gapping is the user's responsibility:
+     - Bluetooth / USB tethering / personal hotspot (when the OS does not, or is not made to, recognize it as WAN)
+     - NICs running outside a virtual machine / container, host-side VPNs, virtual switches
+     - Malicious kernel modules or ring-0 loaders (a root-compromised environment)
+     - Cases where an external NIC connected via Thunderbolt / DMA is hidden from the OS
+   - Before display, the `keyvault init` startup banner prompts the user to "visually confirm that Wi-Fi/Ethernet/Bluetooth/USB tethering is physically disconnected"
+2. **Show only the Seed on the PC**. The Passphrase is never rendered on the PC screen
+3. **Verification is offline by default in v1**: the Passphrase half is entered on a separate device or hand-written
+4. **Display timeout & capture caveats (M5)**: the Seed auto-clears after 60 seconds. The v1 defense scope regarding capture is as follows:
+   - **Screenshot detection**: best-effort only (polling macOS `CGDisplayRegisterReconfigurationCallback` + `CGScreenIsBeingCaptured`). The Seed display is cleared immediately upon detection + audit log `keyvault.seed_display_aborted_screenshot` (frozen in the Phase 4 reason enum)
+   - **Screen recording (M5, out of v1 detection scope)**: screen recording via macOS `screencapture -v`, Loom, Zoom share, OBS, QuickTime Player is **not detected**. Adoption of the `CGDisplayStream`-based detection API is deferred in v1 on API-stability grounds, to be re-evaluated in v2
+   - **Remote desktop (VNC / Screen Sharing / SSH X11 forwarding / `tmate` / `mosh`)**: not detected. The user is responsible for closing remote sessions before the Seed display
+   - **Camera / physical shoulder-surfing**: naturally out of detection scope
+   - The pre-display startup banner warns: "view the Seed only on the local machine's physical screen; stop any screen recorder / screen-sharing tool / remote desktop"
+   - The 60-second timer is based on a monotonic clock (`time.monotonic()`), resistant to wall-clock tampering
 
 #### Protection-tier hierarchy (fallback)
 
@@ -459,18 +459,18 @@ difficulty 8 vector は手計算検証用 (`n = 519` で到達)、 difficulty 20
 
 #### Implementation interface
 
-- `pyobjc-framework-Security` を `mordred-hermes` の macOS extra に追加 (`pip install mordred-hermes[macos]`)
-- `mordred_keyvault/native.py` で `Security.framework` ラッパー実装、import は lazy (Linux/WSL2 で import 時 ImportError にならないよう `_lazy_import` パターン)
-- 内部 Python API (Mordred plugin 間で共有) — PR4 step-0 freeze (2026-05-15) の正準形は §"PR4 API contract & MREN envelope wire format" 参照:
-  - `mordred_keyvault.api.prepare_generate(seed, passphrase, pow_bytes) -> (SeedDisplayHandle, expected_digest)` — in-memory only、 no persistence
-  - `mordred_keyvault.api.confirm_generate(handle, user_confirmed_digest, *, ...) -> GenerateResult` — digest 一致時のみ Keychain + meta.json mutation; mismatch 時 rollback (codex BLOCKER #2)
-  - `mordred_keyvault.api.generate(seed, passphrase, pow_bytes, expected_digest, *, ...) -> GenerateResult` — non-interactive convenience (tests / automation 用); wizard CLI は two-phase form 必須
-  - `mordred_keyvault.api.encrypt(key_id, plaintext, purpose, *, ...) -> envelope_id` — managed storage; AES-GCM encrypt + persist `.gcm` envelope; envelope_id 返却
-  - `mordred_keyvault.api.decrypt(key_id, envelope_id, purpose, *, ...) -> bytes` — caller-supplied `purpose` 必須 (cross-purpose replay 防御、 codex HIGH #2); unwrap authorization 後に復号
-  - `mordred_keyvault.api.export_backup(key_id, passphrase, *, ...) -> bytes` — 全 ciphertext を Argon2id-KEK で再 wrap した manifest 入り MRKV blob (codex BLOCKER #1)
-  - `mordred_keyvault.api.import_backup(blob, passphrase, *, seed_phrase, pow_bytes, ...) -> str` — digest 検証 → manifest 復号 → 新 Enclave key で各 DEK を再 wrap
-  - `mordred_keyvault.api.verify_digest(seed, passphrase, pow_bytes, *, expected) -> None` — split normalization 適用後の digest 一致確認
-- スキル opt-in: `metadata.mordred.requires_keyvault: true` を declare、`mordred_privacy_check` が install 時 enforce
+- Add `pyobjc-framework-Security` to `mordred-hermes`'s macOS extra (`pip install mordred-hermes[macos]`)
+- The `Security.framework` wrapper is implemented in `mordred_keyvault/native.py`, with lazy import (using the `_lazy_import` pattern so it doesn't raise `ImportError` at import time on Linux/WSL2)
+- Internal Python API (shared across Mordred plugins) — see §"PR4 API contract & MREN envelope wire format" for the canonical form frozen at PR4 step-0 (2026-05-15):
+  - `mordred_keyvault.api.prepare_generate(seed, passphrase, pow_bytes) -> (SeedDisplayHandle, expected_digest)` — in-memory only, no persistence
+  - `mordred_keyvault.api.confirm_generate(handle, user_confirmed_digest, *, ...) -> GenerateResult` — Keychain + meta.json mutation only on digest match; rollback on mismatch (codex BLOCKER #2)
+  - `mordred_keyvault.api.generate(seed, passphrase, pow_bytes, expected_digest, *, ...) -> GenerateResult` — non-interactive convenience (for tests / automation); the wizard CLI requires the two-phase form
+  - `mordred_keyvault.api.encrypt(key_id, plaintext, purpose, *, ...) -> envelope_id` — managed storage; AES-GCM encrypt + persist `.gcm` envelope; returns envelope_id
+  - `mordred_keyvault.api.decrypt(key_id, envelope_id, purpose, *, ...) -> bytes` — a caller-supplied `purpose` is required (defends against cross-purpose replay, codex HIGH #2); decrypts after unwrap authorization
+  - `mordred_keyvault.api.export_backup(key_id, passphrase, *, ...) -> bytes` — an MRKV blob containing a manifest with all ciphertext re-wrapped under an Argon2id-KEK (codex BLOCKER #1)
+  - `mordred_keyvault.api.import_backup(blob, passphrase, *, seed_phrase, pow_bytes, ...) -> str` — verifies the digest → decrypts the manifest → re-wraps each DEK under a new Enclave key
+  - `mordred_keyvault.api.verify_digest(seed, passphrase, pow_bytes, *, expected) -> None` — confirms digest match after applying split normalization
+- Skill opt-in: declares `metadata.mordred.requires_keyvault: true`; enforced by `mordred_privacy_check` at install time
 
 #### Backup wire format versioning (Phase 4 PR2 freeze, 2026-05-14)
 
@@ -982,20 +982,20 @@ See `POLICY.md` §"Phase 4 PR4 step-0 freeze" for the full table. Summary:
 
 #### Explicitly out of v1
 
-- バイナリ/フォルダ名/ファイル名の暗号化 → `v2-F6`
+- Encryption of binaries/folder names/file names → `v2-F6`
 - per-skill file-encryption mapping → `v2-F6`
 - HSM/TPM/master-password fallback → `v2-OS2`
 - Secure Enclave-backed signing isolation, Payment signing → `v3-P1`
-- Session log encryption → Hermes 側に session-log writer seam が必要
+- Session log encryption → requires a session-log writer seam on the Hermes side
 
 ### Plugin: `mordred_wizard` (CLI Extension)
 
-`PluginContext.register_cli_command("mordred", help, setup_fn, handler_fn)` で `hermes mordred ...` サブコマンドツリーを登録。`setup_fn(subparser)` 内で argparse subparser 階層を構築。
+Registers the `hermes mordred ...` subcommand tree via `PluginContext.register_cli_command("mordred", help, setup_fn, handler_fn)`. Builds the argparse subparser hierarchy inside `setup_fn(subparser)`.
 
-サブコマンド:
-- `hermes mordred configure` — `hermes setup` を child-process spawn し、Mordred-specific questions
+Subcommands:
+- `hermes mordred configure` — spawns `hermes setup` as a child process, then asks Mordred-specific questions
 - `hermes mordred upgrade` — Story 1 / 1.5 single-command migration
-- `hermes mordred install <skill>` — privacy-check 経由のスキルインストール (Hermes core にスキル install hook が追加されるまでの代替)
+- `hermes mordred install <skill>` — skill installation via privacy-check (a substitute until a skill install hook is added to Hermes core)
 - `hermes mordred network init` — on-demand network-privacy setup (Tor / VPN / clearnet + Mullvad); separate from `configure`, re-runnable (blank Mullvad answer keeps the current secret). `--non-interactive` is flag-driven (`--path` / `--tor-binary` / `--tor-socks-port` / `--mullvad-relay` / `--mullvad-killswitch`); `--clear-mullvad` removes the stored secret. The Mullvad secret is never accepted as a CLI flag.
 - `hermes mordred network use <tor|vpn|clearnet>` — manual override
 - `hermes mordred network status` — show current active path
@@ -1009,7 +1009,7 @@ See `POLICY.md` §"Phase 4 PR4 step-0 freeze" for the full table. Summary:
 - `hermes mordred keyvault list` — list key IDs (no key material)
 - `hermes mordred keyvault verify-digest` — re-display digest
 - `hermes mordred keyvault recover --blob <path>` — recovery on different machine
-- `hermes mordred audit decrypt --date YYYY-MM-DD` — Phase 4 以降、encrypted historical logs を Secure Enclave authorization で復号
+- `hermes mordred audit decrypt --date YYYY-MM-DD` — from Phase 4 onward, decrypts encrypted historical logs via Secure Enclave authorization
 
 ## Operational Guarantees & Caveats
 
@@ -1018,13 +1018,13 @@ See `POLICY.md` §"Phase 4 PR4 step-0 freeze" for the full table. Summary:
 - Path: `~/.hermes/mordred/audit.log`
 - File mode: `0600` (user-only)
 - Format: newline-delimited JSON (NDJSON), single writer per Hermes process, append-only
-- Concurrency: in-process write queue で serialize、multi-process scenario は v1 unsupported
-- Rotation: daily roll to `audit.log.YYYY-MM-DD`、gzip after rotation、size cap 10 MB per current file (force-rotate)、retention 30 days
-- Redaction: `reason` strings は固定 enum (free-text params / 完全な skill content は never logged)。 enum は `src/mordred_hermes/privacy_check/_audit_reasons.py` の `ReasonCode` `Literal` が型レベルの source of truth、 人間可読の canonical 一覧は [`POLICY.md`](./POLICY.md) §Audit log `reason` enum を参照。 Phase 1.1 step-0 で 12 code を freeze し、 以降 phase ごとに closed-set 拡張のみで追加 (Phase 3 PR1 で `network.*` +4 → Phase 4 PR2–§4.1 で `keyvault.*`/`policy.*` +10 → PR #39 follow-up で `mordred.degraded.audit_encryption_unavailable` +1、 **現在 27 code**)。 既存 code の削除・改名はしない
-- Encryption: Phase 1–3 は plaintext NDJSON at file mode `0600`。Phase 4 以降は AES-GCM (DEK は keyvault wrapping、メモリのみ保持) で新規 entry を暗号化
-- Phase staging: `audit.py` writer は swappable Writer interface を Phase 1 で freeze、Phase 4 で `EncryptedWriter` に factory swap
+- Concurrency: serialized via an in-process write queue; multi-process scenarios are unsupported in v1
+- Rotation: daily roll to `audit.log.YYYY-MM-DD`, gzip after rotation, size cap 10 MB per current file (force-rotate), retention 30 days
+- Redaction: `reason` strings are a fixed enum (free-text params / full skill content are never logged). The `ReasonCode` `Literal` in `src/mordred_hermes/privacy_check/_audit_reasons.py` is the type-level source of truth for the enum; see [`POLICY.md`](./POLICY.md) §Audit log `reason` enum for the human-readable canonical list. 12 codes were frozen at Phase 1.1 step-0, with only closed-set additions per phase thereafter (Phase 3 PR1 added `network.*` +4 → Phase 4 PR2-§4.1 added `keyvault.*`/`policy.*` +10 → the PR #39 follow-up added `mordred.degraded.audit_encryption_unavailable` +1, **27 codes currently**). Existing codes are never removed or renamed
+- Encryption: Phase 1-3 is plaintext NDJSON at file mode `0600`. From Phase 4 onward, new entries are encrypted with AES-GCM (the DEK is keyvault-wrapped, held in memory only)
+- Phase staging: the `audit.py` writer freezes a swappable Writer interface in Phase 1, factory-swapped to `EncryptedWriter` in Phase 4
 
-Audit entry シェイプ (synthetic example):
+Audit entry shape (synthetic example):
 
 ```json
 {
@@ -1037,60 +1037,60 @@ Audit entry シェイプ (synthetic example):
 }
 ```
 
-フィールド: `ts` (ISO-8601 UTC), `event` (hook 名), `decision` (`allow`/`block`/`override`/`warn`), `reason` (固定 enum), `skill_id`/`tool_name`/`provider_id` (event に応じていずれか), 任意の event 固有フィールド。
+Fields: `ts` (ISO-8601 UTC), `event` (hook name), `decision` (`allow`/`block`/`override`/`warn`), `reason` (fixed enum), `skill_id`/`tool_name`/`provider_id` (one or another depending on the event), and optional event-specific fields.
 
-#### Encrypted audit-log wire format (`MRAL` v1、 Phase 4 PR6 freeze)
+#### Encrypted audit-log wire format (`MRAL` v1, Phase 4 PR6 freeze)
 
-Phase 4 以降、 `keyvault/log_encryption.py` の `EncryptedWriter` (Phase 1 `Writer` Protocol 実装) が新規 entry を AES-GCM で暗号化する。 ファイルは行指向 — 1 entry = 1 行で、 `O_APPEND` の whole-entry atomicity を保ちつつ全ファイル再暗号化を不要にする:
+From Phase 4 onward, `EncryptedWriter` in `keyvault/log_encryption.py` (a Phase 1 `Writer` Protocol implementation) encrypts new entries with AES-GCM. The file is line-oriented — 1 entry = 1 line, preserving `O_APPEND`'s whole-entry atomicity while avoiding the need to re-encrypt the entire file:
 
 ```
-行 0   header   {"fmt":"MRAL","ver":1,"key_id":<str>,"wdek":<base64>}
-行 1+  entry    base64( nonce(12) ‖ AES-GCM-ciphertext ‖ tag(16) )
+Line 0   header   {"fmt":"MRAL","ver":1,"key_id":<str>,"wdek":<base64>}
+Line 1+  entry    base64( nonce(12) ‖ AES-GCM-ciphertext ‖ tag(16) )
 ```
 
-- `wdek` は audit-log DEK を `keyvault.wrap.wrap_dek` で wrap した 127-byte `MRKW` blob。 ディスクに載るのは **wrapped DEK のみ**、 平文 32-byte DEK は writer のメモリ上のみ (`close()` で参照破棄)。
-- DEK は writer 生成時ではなく **最初の append 時に lazy 生成**、 file ごとに fresh。 `wrap_dek` は Enclave public key を使う offline 操作で biometric prompt 無し — **書き込みは authorization boundary を踏まない**。
-- 各 entry の AES-GCM AAD = `MAGIC ‖ version ‖ SHA-256(header 行)`。 header 行は file 固有のランダム `wdek` を含むため digest が file ごとに異なり、 別 file からの entry splice / header 改竄後の replay は tag check で失敗する。
-- atomicity caveat: 最大サイズ (4000 byte plaintext) の暗号化行は約 5.4 KiB で POSIX `PIPE_BUF` (4096) を超える。 multi-process 並行 writer での `O_APPEND` atomicity は保証されないが、 v1 は multi-process audit 書き込みを未サポート (§1.1 M1) のため single-process 単一 writer-lock で invariant #2 は成立。
-- rotation は Phase 1 NDJSONWriter と同じ (日次 + size cap + gzip + 30 日 retention)。 rotation ごとに fresh file + DEK + header。 既存 foreign file (pre-Phase-4 plaintext log、 または DEK を prompt 無しで unwrap できない別セッションの暗号化 file) は **overwrite せず rotate aside**。
-- 復号は `keyvault.log_encryption.decrypt_log_file` — `wrap.unwrap_dek` (Secure Enclave authorization boundary、 `keyvault.unwrap_authorized` を emit) 経由で DEK を unwrap し、 gzip rotated file も透過処理。 構造 / 整合性エラーは `AuditLogDecryptError`、 prompt 拒否 (`WrapAuthCancelled`) と鍵欠落 (`WrapKeyNotFound`) は CLI が区別できるよう unwrapped で propagate。
-- audit-log wrapping key の Keychain key id は `mordred.audit-log` (`AUDIT_LOG_KEY_ID`)。 audit code 追加なし — unwrap の audit は `wrap.unwrap_dek` が既に emit する。
+- `wdek` is a 127-byte `MRKW` blob produced by wrapping the audit-log DEK with `keyvault.wrap.wrap_dek`. Only the **wrapped DEK** goes to disk; the plaintext 32-byte DEK exists only in the writer's memory (its reference is discarded on `close()`).
+- The DEK is **lazily generated on the first append**, not at writer creation, fresh per file. `wrap_dek` is an offline operation using the Enclave public key with no biometric prompt — **writing does not cross the authorization boundary**.
+- Each entry's AES-GCM AAD = `MAGIC ‖ version ‖ SHA-256(header line)`. Since the header line contains a file-specific random `wdek`, the digest differs per file, so splicing entries from another file, or replay after tampering with the header, fails the tag check.
+- Atomicity caveat: an encrypted line at maximum size (4000-byte plaintext) is about 5.4 KiB, exceeding POSIX `PIPE_BUF` (4096). `O_APPEND` atomicity is not guaranteed with concurrent multi-process writers, but since v1 does not support multi-process audit writes (§1.1 M1), invariant #2 holds under the single-process, single writer-lock model.
+- Rotation is the same as the Phase 1 NDJSONWriter (daily + size cap + gzip + 30-day retention). Each rotation gets a fresh file + DEK + header. Existing foreign files (pre-Phase-4 plaintext logs, or encrypted files from another session whose DEK cannot be unwrapped without a prompt) are **rotated aside rather than overwritten**.
+- Decryption is `keyvault.log_encryption.decrypt_log_file` — it unwraps the DEK via `wrap.unwrap_dek` (the Secure Enclave authorization boundary, emitting `keyvault.unwrap_authorized`), and transparently handles gzip-rotated files too. Structural / integrity errors raise `AuditLogDecryptError`; prompt rejection (`WrapAuthCancelled`) and missing key (`WrapKeyNotFound`) are propagated unwrapped so the CLI can distinguish them.
+- The Keychain key id for the audit-log wrapping key is `mordred.audit-log` (`AUDIT_LOG_KEY_ID`). No new audit code — the unwrap audit is already emitted by `wrap.unwrap_dek`.
 
-### Plugin-disable protection (plugin-side only、 zero-PR strategy)
+### Plugin-disable protection (plugin-side only, zero-PR strategy)
 
-ユーザが `hermes plugins disable mordred_privacy_check` 等を実行すると enforcement が silent disable されるリスク。
+There is a risk that enforcement gets silently disabled if the user runs e.g. `hermes plugins disable mordred_privacy_check`.
 
-**Tier A (v1 default、 plugin-only strict-mode startup refusal、 H3)**:
+**Tier A (v1 default, plugin-only strict-mode startup refusal, H3)**:
 
-MIGRATION.md §10 row 4 で **zero upstream PR** が確定したため (2026-05-07)、 v1 では plugin 側で fail-closed な startup refusal を行う。 これは「警告に留める」 のではなく `BaseException` 派生例外を raise して strict-mode のセッション開始そのものを止める防御:
+Because **zero upstream PR** was finalized in MIGRATION.md §10 row 4 (2026-05-07), v1 performs a fail-closed startup refusal on the plugin side. This is not "limited to a warning" — it is a defense that raises a `BaseException`-derived exception to stop strict-mode session startup itself:
 
-1. 各 Mordred plugin の `on_session_start` 冒頭で sibling list `["mordred_network", "mordred_privacy_check", "mordred_llm_guard", "mordred_keyvault", "mordred_wizard"]` のうち disabled-plugins リスト (`hermes plugins list --disabled` 相当 — Phase 0.8 で実 API verify) に含まれるものを scan
-2. policy が `strict` かつ sibling が 1 つでも disable されている場合: `MordredSiblingDisabled("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` 相当の refusal exception (`BaseException` 直接派生 — `RuntimeError` 等の `Exception` 派生は Hermes `invoke_hook` の `except Exception:` wrapper に握り潰されセッションが止まらないため不可) を raise してセッションを abort
+1. At the start of each Mordred plugin's `on_session_start`, scan the sibling list `["mordred_network", "mordred_privacy_check", "mordred_llm_guard", "mordred_keyvault", "mordred_wizard"]` for any that appear in the disabled-plugins list (the equivalent of `hermes plugins list --disabled` — verified against the real API in Phase 0.8)
+2. If policy is `strict` and even one sibling is disabled: raise a refusal exception equivalent to `MordredSiblingDisabled("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` (a direct `BaseException` subclass — an `Exception` subclass such as `RuntimeError` won't work, since it would be swallowed by Hermes `invoke_hook`'s `except Exception:` wrapper and fail to stop the session), aborting the session
 
-   > **Exception propagation contract** (2026-05-13): refusal exception は Hermes `invoke_hook` の `except Exception:` wrapper を escape する必要がある。 `privacy_check/hooks.py` は legacy で **`SystemExit` 派生**、 Phase 2 `llm_guard` 以降の新規 refusal class (`MordredHarnessRefused` / `MordredSessionRefused`) は **`BaseException` 直接派生** (cleanup-style `except SystemExit:` で policy refusal が CLI exit として誤検出されないため、 `src/mordred_hermes/llm_guard/_exceptions.py` 参照)。 後者が canonical で、 `privacy_check` は follow-up で `BaseException` 派生 (`MordredSiblingDisabled` 想定) へ統一する候補。 上記の例外名・メッセージ例は illustrative — 実装は phase ごとに上記の派生規則に従う。
-3. 同時に audit log に `mordred.degraded.disable_unprotected` (decision=`block`) を記録
-4. `policy=lenient` / `off` の場合は warning のみ (互換性確保)
-5. `plugin.yaml` の `privacy_lock: true` は Mordred 内部 hint として保持 (sibling list の自動拡張に活用、 Hermes 上流側の意味は持たない)
+   > **Exception propagation contract** (2026-05-13): the refusal exception must escape Hermes `invoke_hook`'s `except Exception:` wrapper. `privacy_check/hooks.py` is legacy and **derives from `SystemExit`**; the new refusal classes from Phase 2 `llm_guard` onward (`MordredHarnessRefused` / `MordredSessionRefused`) **derive directly from `BaseException`** (so that cleanup-style `except SystemExit:` doesn't misdetect a policy refusal as a CLI exit — see `src/mordred_hermes/llm_guard/_exceptions.py`). The latter is canonical, and `privacy_check` is a candidate for unifying onto a `BaseException` subclass (`MordredSiblingDisabled` envisioned) in a follow-up. The exception names/message examples above are illustrative — the implementation follows the derivation rule above, phase by phase.
+3. Simultaneously records `mordred.degraded.disable_unprotected` (decision=`block`) in the audit log
+4. For `policy=lenient` / `off`, only a warning is issued (for compatibility)
+5. `privacy_lock: true` in `plugin.yaml` is kept as an internal Mordred hint (used to auto-expand the sibling list; it carries no meaning on the Hermes upstream side)
 
-**Tier B (v2 deferred、 vendored fork extra)**:
+**Tier B (v2 deferred, vendored fork extra)**:
 
-hard-enforce が真に必要になった時点で `pip install mordred-hermes[hard-lock]` extra を提供。 内容は `hermes_cli/plugins_cmd.py` のパッチ版を `vendor/hermes/<version>/` 配下に持ち、 `mordred-hermes[hard-lock]` インストール時に `pyproject.toml` の `dependencies` で Hermes 特定バージョンに pin したまま、 disable 操作そのものを core-side で refuse する。 Hermes 上流への PR は提出せず、 vendored fork として配布する。 v1 範囲外。
+Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock]` extra is provided. It carries a patched version of `hermes_cli/plugins_cmd.py` under `vendor/hermes/<version>/`, and while `mordred-hermes[hard-lock]` pins to a specific Hermes version via `dependencies` in `pyproject.toml` at install time, it refuses the disable operation itself on the core side. No PR is submitted to Hermes upstream; it is distributed as a vendored fork. Out of scope for v1.
 
-**重要な caveat (§Threat Model "does NOT defend against" 参照)**: Tier A は **次回セッション開始時** に block する設計。 「実行中に disable された場合の即時停止」 は v1 範囲外 (Hermes は plugin の動的 disable を session-running 中に反映しない前提、 Phase 0.8 で verify)。 セッション間で disable 編集 → 次セッション strict 起動 → block というフローで防御する。
+**Important caveat (see §Threat Model "does NOT defend against")**: Tier A is designed to block **at the next session start**. "Immediate stop if disabled while running" is out of scope for v1 (on the premise that Hermes does not reflect a plugin's dynamic disablement while a session is running, verified in Phase 0.8). The defense flow is: disable edited between sessions → next session's strict startup → block.
 
 ### Policy file caching
 
-- Loaded at `on_session_start` (Hermes session 開始時)
+- Loaded at `on_session_start` (when the Hermes session starts)
 - Cached in-memory for the session lifetime
-- Reload via `hermes mordred policy reload` (内部関数呼び出し、fs watcher は v1 で導入しない)
-- 意図的 tradeoff: hot-path file reads を防ぐ、policy 編集は明示的 reload
+- Reload via `hermes mordred policy reload` (an internal function call; a fs watcher is not introduced in v1)
+- Intentional tradeoff: prevents hot-path file reads; policy edits require an explicit reload
 
 ### Plugin Versioning & Compatibility
 
-- 5 plugin はすべて単一 pip パッケージ `mordred-hermes` に同梱、共通バージョン
-- `pyproject.toml` の `[project.metadata]` で `mordred-min-hermes-version` を declare、各 plugin の `on_session_start` で Hermes version 検証
-- Hermes upstream の hook payload type 変更を CI (GitHub Actions) で検知し、互換性壊れた時に issue 自動起票
-- `mordred-hermes` 自身のバージョンは `docs/VERSION` で管理 (旧 SPEC 同様)
+- All 5 plugins are bundled in the single pip package `mordred-hermes`, sharing a common version
+- Declares `mordred-min-hermes-version` in `[project.metadata]` of `pyproject.toml`; each plugin verifies the Hermes version in `on_session_start`
+- Detects changes to Hermes upstream's hook payload types via CI (GitHub Actions), automatically filing an issue when compatibility breaks
+- `mordred-hermes`'s own version is managed in `docs/VERSION` (same as the old SPEC)
 
 ### Observability
 
@@ -1098,48 +1098,48 @@ hard-enforce が真に必要になった時点で `pip install mordred-hermes[ha
 - `hermes mordred policy explain <skill-id>` gives a per-skill decision trace
 - `hermes mordred policy dry-run <skill-path>` predicts install-time decision without filesystem mutation
 - `hermes mordred network status` reports active path + health
-- LLM Guard は startup banner で active provider override target を出力
-- Hermes の observability plugin (langfuse 等) と並列に動作、衝突しない
+- LLM Guard prints the active provider override target in the startup banner
+- Operates in parallel with Hermes's observability plugins (langfuse, etc.) without conflict
 
 ## Scope (Out) — explicitly deferred
 
 > Motivation, dependencies, and priorities for post-v1 work live in [`ROADMAP.md`](./ROADMAP.md). This section only enumerates what is **excluded** from v1.
 
-- Linux / Windows native での Phase 4 keyvault (v2-OS2)
+- Phase 4 keyvault on Linux / Windows native (v2-OS2)
 - Harness-aware LLM Guard enforcement (v2)
 - GUI controls (v2)
 - Payment skills using `mordred_keyvault` (v3-P1)
 - Per-skill independent network paths (v2; v1 is gateway-wide single-state)
 - Skill metadata signing / integrity verification (v2)
 - Multi-user / multi-tenant on a single machine (v2)
-- Mordred-specific telemetry or crash reporting (v2; Hermes 既存 telemetry 動作を継承)
-- iOS / Android native Mordred apps (v2; Hermes Termux 対応のみ Phase 1–3 で利用可能)
-- Hermes core への大規模変更 (永久 out of scope。 v1 では Hermes 上流への PR を一切提出しない zero-PR commitment、 v2 で hard-enforce が必要なら `[hard-lock]` extra に vendored fork で対応; MIGRATION.md §10 row 4)
+- Mordred-specific telemetry or crash reporting (v2; inherits Hermes's existing telemetry behavior)
+- iOS / Android native Mordred apps (v2; only Hermes's Termux support is usable, for Phase 1-3)
+- Large-scale changes to Hermes core (permanently out of scope. The zero-PR commitment means no PRs are submitted to Hermes upstream at all in v1; if hard enforcement becomes necessary in v2, it's handled via a vendored fork in the `[hard-lock]` extra; MIGRATION.md §10 row 4)
 
 ## MVP Phasing
 
 If full v1 scope is too large for a single milestone, ship in this order. Each phase is independently usable.
 
-1. **Phase 1 — Privacy primitives**: `mordred_privacy_check` (with skill install wrapper) + `metadata.mordred.network_requirements` + `mordred_wizard configure/upgrade/policy`。Story 2 と Story 3 部分達成
-2. **Phase 2 — LLM enforcement**: `mordred_llm_guard` + `mordred-local` synthetic provider (full Hermes adapter surface)。Story 4 達成。`pre_tool_call` generic allowlist を privacy-check に追加
-3. **Phase 3 — Network paths**: `mordred_network` (Tor + VPN + Clearnet switching, on_session_start/end lifecycle, provider transport flagging)。Story 3 完了
-4. **Phase 4 — Key management**: `mordred_keyvault` (Secure Enclave-backed AES key wrapping via pyobjc)。Story 5 達成。最大の engineering risk、defer 可能
+1. **Phase 1 — Privacy primitives**: `mordred_privacy_check` (with skill install wrapper) + `metadata.mordred.network_requirements` + `mordred_wizard configure/upgrade/policy`. Partially achieves Story 2 and Story 3
+2. **Phase 2 — LLM enforcement**: `mordred_llm_guard` + `mordred-local` synthetic provider (full Hermes adapter surface). Achieves Story 4. Adds a `pre_tool_call` generic allowlist to privacy-check
+3. **Phase 3 — Network paths**: `mordred_network` (Tor + VPN + Clearnet switching, on_session_start/end lifecycle, provider transport flagging). Completes Story 3
+4. **Phase 4 — Key management**: `mordred_keyvault` (Secure Enclave-backed AES key wrapping via pyobjc). Achieves Story 5. The largest engineering risk; deferrable
 
-User-visible MVP = Phase 1 + Phase 2。これが最小の "Hermes with Privacy" 配信。
+User-visible MVP = Phase 1 + Phase 2. This is the minimal "Hermes with Privacy" delivery.
 
 ## Operational Setup (one-time)
 
-開発開始前に必要:
+Required before starting development:
 
-1. `Mordred-Hermes/` リポジトリ確認 (Mordred plugin 開発リポ; Hermes 本体は `pip install hermes-agent` 済み環境であること)
-2. `~/.hermes/` プロファイル作成 (`hermes setup` 実行で自動)
-3. 5 plugin の scaffold: `src/mordred_hermes/<name>/` ディレクトリで以下を作成
+1. Confirm the `Mordred-Hermes/` repository (the Mordred plugin development repo; the environment must already have Hermes itself via `pip install hermes-agent`)
+2. Create the `~/.hermes/` profile (automatic when running `hermes setup`)
+3. Scaffold the 5 plugins: create the following in each `src/mordred_hermes/<name>/` directory
    - `plugin.yaml` — manifest (`name`, `version`, `description`, `author`, `privacy_lock`, `config_schema`)
    - `__init__.py` — entry, defines `register(ctx: PluginContext) -> None`
    - `*.py` — runtime modules (lazy import for native/heavy deps)
    - `tests/test_*.py` — pytest, colocated
    - `README.md` — Mordred-owned paths, config keys, internal API surface
-4. `pyproject.toml` (`mordred-hermes` package) に entry-point `hermes_agent.plugins` を declare:
+4. Declare the `hermes_agent.plugins` entry point in `pyproject.toml` (the `mordred-hermes` package):
    ```toml
    [project.entry-points."hermes_agent.plugins"]
    mordred_network = "mordred_hermes.network"
@@ -1148,5 +1148,5 @@ User-visible MVP = Phase 1 + Phase 2。これが最小の "Hermes with Privacy" 
    mordred_keyvault = "mordred_hermes.keyvault"
    mordred_wizard = "mordred_hermes.wizard"
    ```
-5. CI workflow: `.github/workflows/ci.yml` (pytest + ruff + mypy)、`.github/workflows/upstream-check.yml` (Hermes hook **名** drift 検知; payload field shape の diff は v2)
-6. ~~HSeam-1 PR の提出~~ → **削除**: zero-PR commitment (MIGRATION.md §10 row 4、 2026-05-07 確定) のため Hermes 上流への PR は提出しない。 disable 防御は plugin-side strict-mode startup refusal (§Plugin-disable protection Tier A) で完結。 v2 で hard-enforce が必要になれば `[hard-lock]` extra (vendored fork) を追加
+5. CI workflow: `.github/workflows/ci.yml` (pytest + ruff + mypy), `.github/workflows/upstream-check.yml` (detects Hermes hook **name** drift; diffing payload field shape is v2)
+6. ~~Submitting the HSeam-1 PR~~ → **Removed**: because of the zero-PR commitment (MIGRATION.md §10 row 4, finalized 2026-05-07), no PR is submitted to Hermes upstream. Disable protection is fully handled by the plugin-side strict-mode startup refusal (§Plugin-disable protection Tier A). If hard enforcement becomes necessary in v2, the `[hard-lock]` extra (vendored fork) is added

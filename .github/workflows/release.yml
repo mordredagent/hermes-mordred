@@ -42,6 +42,20 @@ on:
           - reserve
           - release
         default: reserve
+      skip-ci-gate:
+        description: >-
+          Escape hatch: skip the "ci.yml passed on this SHA" gate below.
+          Branch protection and the pypi Environment's required-reviewer gate
+          are both unavailable on the current billing plan (private repo,
+          docs/dev/CI.md §"Initial setup" deviation note), so this gate is
+          the only thing stopping a workflow_dispatch from publishing an
+          untested commit to production PyPI. Only flip this for a
+          deliberate re-release of an old SHA whose ci.yml check-runs have
+          expired from GitHub's retention window (verify the commit
+          out-of-band first).
+        required: false
+        type: boolean
+        default: false
 
 # Never publish two builds to the same index concurrently. Not cancelled
 # in-progress: an interrupted upload could leave a half-published release.
@@ -53,7 +67,51 @@ permissions:
   contents: read
 
 jobs:
+  # Fail-closed CI gate. Branch protection and the `pypi` Environment's
+  # required-reviewer gate are both unavailable on the current billing plan
+  # (private repo; see docs/dev/CI.md §"Initial setup" deviation note), so
+  # without this job a single workflow_dispatch could build and publish an
+  # untested commit straight to production PyPI. This job blocks `build`
+  # (and transitively `publish`, via `needs`) unless a completed ci.yml run
+  # with conclusion == "success" exists for the exact SHA being released.
+  ci-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # Narrowest possible grant: only this job needs to read workflow-run
+      # history via the Actions API. A job-level `permissions:` block
+      # overrides (does not merge with) the workflow-level one, so `build`
+      # and `publish` are unaffected and stay at their existing scopes.
+      actions: read
+    steps:
+      - name: Warn loudly when the CI gate is being skipped
+        if: ${{ inputs.skip-ci-gate }}
+        run: |
+          echo "::warning::skip-ci-gate=true — BYPASSING the ci.yml success gate for $GITHUB_SHA. Publishing WITHOUT confirming CI passed on this commit. Only use this for a deliberate re-release of an old SHA whose ci.yml check-runs expired from GitHub's retention window — the operator is responsible for having verified the commit out-of-band."
+
+      - name: Require a green ci.yml run on this exact SHA
+        if: ${{ !inputs.skip-ci-gate }}
+        env:
+          # gh CLI reads GH_TOKEN automatically; env indirection (not inline
+          # ${{ }} in the script body) matches the pattern integration-vpn.yml
+          # uses for MULLVAD_VERSION — untrusted-shaped values never get
+          # interpolated directly into the shell command.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "Checking for a successful ci.yml run on $REPO @ $SHA ..."
+          success_count=$(gh api "/repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&status=completed" \
+            --paginate --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | wc -l | tr -d ' ')
+          if [ "$success_count" -lt 1 ]; then
+            echo "::error::No completed ci.yml run with conclusion=success found for commit $SHA. Refusing to build/publish an unverified commit to PyPI. Ensure ci.yml has run (and passed) on this exact ref/SHA before dispatching release.yml again, or use the skip-ci-gate input for a deliberate re-release of an old SHA whose checks have expired."
+            exit 1
+          fi
+          echo "Found $success_count successful ci.yml run(s) for $SHA — proceeding."
+
   build:
+    needs: ci-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

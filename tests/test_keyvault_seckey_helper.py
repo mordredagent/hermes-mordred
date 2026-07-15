@@ -55,8 +55,13 @@ def err(status, domain="OSStatus", message="fake error"):
 
 mode = os.environ.get("FAKE_MODE", "")
 if mode == "nonzero_no_error":
+    sys.stderr.write("diagnostic-marker: real cause printed to stderr\n")
+    sys.exit(3)
+if mode == "nonzero_long_stderr":
+    sys.stderr.write("X" * 5000)
     sys.exit(3)
 if mode == "garbage":
+    sys.stderr.write("diagnostic-marker: real cause printed to stderr\n")
     sys.stdout.write("this is not json")
     sys.exit(0)
 if mode == "hang":
@@ -263,6 +268,10 @@ def test_nonzero_exit_without_error_object(fake_helper: str, monkeypatch: pytest
     with pytest.raises(_OpsError) as exc:
         _run_helper(fake_helper, {"cmd": "probe"})
     assert exc.value.domain == "helper"
+    # Regression test for the LOW diagnostics finding: the exception message
+    # must surface stderr (where the real helper prints its failure cause),
+    # not just the (usually empty) stdout snippet and return code.
+    assert "diagnostic-marker: real cause printed to stderr" in str(exc.value)
 
 
 def test_non_json_output(fake_helper: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +279,22 @@ def test_non_json_output(fake_helper: str, monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(_OpsError) as exc:
         _run_helper(fake_helper, {"cmd": "probe"})
     assert exc.value.domain == "helper"
+    # Same regression as above, for the non-JSON-stdout failure mode.
+    assert "diagnostic-marker: real cause printed to stderr" in str(exc.value)
+
+
+def test_nonzero_exit_stderr_is_truncated_not_included_verbatim(
+    fake_helper: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Helper stderr could conceivably contain sensitive material, so it
+    must be truncated to a modest length in the exception message rather
+    than included verbatim (mirrors the existing stdout-snippet policy)."""
+    monkeypatch.setenv("FAKE_MODE", "nonzero_long_stderr")
+    with pytest.raises(_OpsError) as exc:
+        _run_helper(fake_helper, {"cmd": "probe"})
+    message = str(exc.value)
+    assert "X" * 5000 not in message
+    assert "X" * 200 in message  # the truncated 200-byte snippet is present
 
 
 def test_timeout(fake_helper: str, monkeypatch: pytest.MonkeyPatch) -> None:
