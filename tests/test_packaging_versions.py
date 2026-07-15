@@ -15,11 +15,14 @@ Two invariants are pinned here:
    longer hardcodes its version in pyproject. It is sourced dynamically from
    ``src/mordred_hermes/__about__.py`` (Hatch ``[tool.hatch.version] path``),
    which lives inside the importable package so sdist->wheel builds resolve it
-   without the docs tree. The docs marker (``docs/dev/VERSION``)
-   and every ``plugin.yaml`` must match that single source — otherwise a
-   release bump that touches only some of them ships an inconsistent version.
-   ``tools/bump_version.py`` rewrites all of them in lockstep; these tests are
-   the net that catches a hand-edit that forgets one.
+   without the docs tree. The docs marker (``docs/dev/VERSION``), every
+   ``plugin.yaml``, and the copy-paste install commands in ``README.md``
+   (the status line + every ``mordred-hermes[...]==`` install pin) and
+   ``docs/dev/setup.md`` (the ``--reinstall`` pin) must all match that single
+   source — otherwise a release bump that touches only some of them ships an
+   inconsistent version. ``tools/bump_version.py`` rewrites all of them in
+   lockstep; these tests are the net that catches a hand-edit that forgets
+   one.
 """
 
 from __future__ import annotations
@@ -46,6 +49,22 @@ _ABOUT = _PKG_ROOT / "src" / "mordred_hermes" / "__about__.py"
 
 #: Human-facing version marker in the docs tree (a mirror of ``_ABOUT``).
 _DOC_VERSION = _PKG_ROOT / "docs" / "dev" / "VERSION"
+
+#: The top-level README — ships copy-paste install commands pinned to a
+#: version. Part of the sdist/repo, so unlike the docs tree it is always
+#: present.
+_README = _PKG_ROOT / "README.md"
+
+#: Dev-setup doc with a version-pinned ``--reinstall`` example. Absent from
+#: the installed-package context (docs tree not shipped), same as
+#: ``_DOC_VERSION``.
+_SETUP_MD = _PKG_ROOT / "docs" / "dev" / "setup.md"
+
+#: Matches ``mordred-hermes[extra1,extra2]==<version>`` install pins and
+#: captures the version. Requiring the version to start with a digit
+#: deliberately excludes the ``==<new-version>`` placeholder in README's
+#: Upgrading section — that's prose, not a real pin to check.
+_INSTALL_PIN_RE = re.compile(r"mordred-hermes\[[^\]]*\]==([0-9][^\s\"'#]*)")
 
 
 def _read(pyproject: Path) -> dict[str, object]:
@@ -141,4 +160,47 @@ def test_plugin_manifest_versions_match_package_version() -> None:
     assert not mismatched, (
         f"plugin manifests out of sync with package version {version!r}: {mismatched}; "
         "run tools/bump_version.py to sync"
+    )
+
+
+def test_install_doc_pins_match_package_version() -> None:
+    """Copy-paste install commands in the docs must pin the real version.
+
+    ``_INSTALL_PIN_RE`` requires the captured version to start with a digit,
+    which deliberately skips the ``==<new-version>`` placeholders in
+    README's Upgrading section — those are prose showing the shape of the
+    command, not a pin that should track the current release.
+    """
+    assert _README.exists(), "README.md ships in the sdist and must be present"
+    version = _real_version()
+
+    readme_pins = _INSTALL_PIN_RE.findall(_README.read_text(encoding="utf-8"))
+    # A minimum-count guard: if the docs are ever rewritten to drop the pins
+    # entirely, ``findall`` would silently return `[]` and the mismatch
+    # assertion below would vacuously pass. Requiring at least 3 (macOS,
+    # keyvault, and the extension-serve pin) keeps this test honest.
+    assert len(readme_pins) >= 3, f"expected >=3 install pins in README.md, found {len(readme_pins)}"
+    mismatched_readme = [p for p in readme_pins if p != version]
+    assert not mismatched_readme, (
+        f"README.md install pins out of sync with package version {version!r}: {mismatched_readme}; "
+        "run tools/bump_version.py to sync"
+    )
+
+    if not _SETUP_MD.exists():
+        pytest.skip("docs tree absent (installed-package context, not a source checkout)")
+    setup_pins = _INSTALL_PIN_RE.findall(_SETUP_MD.read_text(encoding="utf-8"))
+    assert len(setup_pins) >= 1, f"expected >=1 install pin in docs/dev/setup.md, found {len(setup_pins)}"
+    mismatched_setup = [p for p in setup_pins if p != version]
+    assert not mismatched_setup, (
+        f"docs/dev/setup.md install pin out of sync with package version {version!r}: {mismatched_setup}; "
+        "run tools/bump_version.py to sync"
+    )
+
+
+def test_readme_status_line_matches_package_version() -> None:
+    """The README status line's ``current release`` marker must match the package."""
+    match = re.search(r"current release `([^`]+)`", _README.read_text(encoding="utf-8"))
+    assert match is not None, "README.md missing the `current release `...`` status marker"
+    assert match.group(1) == _real_version(), (
+        f"README status line {match.group(1)!r} != package {_real_version()!r}; run tools/bump_version.py to sync"
     )
