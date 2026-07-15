@@ -60,7 +60,7 @@ jobs:
           cache: pip
 
       # hermes-agent is a normal PyPI dependency (pyproject.toml pins
-      # `hermes-agent>=0.11.0`) so `pip install -e .` resolves it directly —
+      # `hermes-agent>=0.13.0`) so `pip install -e .` resolves it directly —
       # no monorepo root install step needed.
       - name: Install mordred-hermes (dev + keyvault + extension extras)
         run: |
@@ -103,16 +103,22 @@ jobs:
           path: coverage.xml
           if-no-files-found: ignore
 
-  # H1 floor guarantee: pyproject.toml declares `hermes-agent>=0.11.0`, but
+  # H1 floor guarantee: pyproject.toml declares `hermes-agent>=0.13.0`, but
   # every other job in this workflow resolves the latest PyPI hermes-agent,
   # so the declared floor itself is never actually exercised — a Mordred
   # API usage that only works on a newer hermes-agent could silently
-  # violate the floor. Pin hermes-agent to exactly 0.11.0 first, install
+  # violate the floor. Pin hermes-agent to exactly 0.13.0 first, install
   # mordred-hermes on top of it, verify the resolver left the pin alone
   # (pip could otherwise "helpfully" upgrade it while still satisfying the
-  # >=0.11.0 constraint), and run the unit suite against that exact
+  # >=0.13.0 constraint), and run the unit suite against that exact
   # combination. Standalone job (no `needs:`) so it runs in parallel with
   # `test` for fast feedback; it is not a required branch-protection check.
+  #
+  # Why 0.13.0: this job's own first run (2026-07-15) proved the previous
+  # declared floor of 0.11.0 was uninstallable — hermes-agent's PyPI
+  # history starts at 0.13.0 (0.11.x/0.12.x were source-install-era
+  # versions, never published). 0.13.0 passes the full compat suite
+  # (verified locally before raising the floor in pyproject.toml).
   hermes-floor:
     runs-on: ubuntu-24.04
     steps:
@@ -123,10 +129,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Pin hermes-agent to the declared floor (0.11.0)
+      - name: Pin hermes-agent to the declared floor (0.13.0)
         run: |
           python -m pip install --upgrade pip
-          pip install "hermes-agent==0.11.0"
+          pip install "hermes-agent==0.13.0"
 
       - name: Install mordred-hermes (dev + keyvault + extension extras)
         run: pip install -e ".[dev,keyvault,extension]"
@@ -135,8 +141,8 @@ jobs:
         run: |
           set -euo pipefail
           INSTALLED_VERSION="$(python -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
-          if [ "$INSTALLED_VERSION" != "0.11.0" ]; then
-            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.11.0, so pyproject.toml's declared floor was not actually exercised."
+          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
+            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
             exit 1
           fi
 
@@ -145,7 +151,23 @@ jobs:
           # Isolate _home.py's HERMES_BASE from the runner's real $HOME
           # (same rationale as the test job above).
           HERMES_HOME: /tmp/hermes-mordred-ci-home
-        run: pytest -q
+        # Two tests are deselected because they are latest-tracking drift
+        # detectors, not compatibility tests — including them would force
+        # floor == latest forever (a treadmill, defeating this job):
+        #   - test_replica_matches_hermes_source requires the vendored
+        #     provider replica to byte-match the INSTALLED hermes source;
+        #     the replica deliberately tracks PyPI-latest, so it can never
+        #     match a pinned old floor.
+        #   - test_known_provider_slugs_are_real_hermes_ids requires
+        #     provider ids (vertex/novita) that hermes-agent only
+        #     recognises from 0.18.0 (per its own docstring).
+        # Both still run at latest in the `test` job. If either is renamed,
+        # pytest silently re-includes it here and this job goes red —
+        # loud in the right direction.
+        run: >-
+          pytest -q
+          --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source
+          --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
 
   # Hermetic Tor integration tests (Docker-backed; Linux only — macOS
   # runners have no Docker). The socks5h / provider-transport suites are

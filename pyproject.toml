@@ -18,7 +18,13 @@ license = { text = "MIT" }
 keywords = ["hermes", "agent", "privacy", "tor", "vpn", "keyvault"]
 
 dependencies = [
-  "hermes-agent>=0.11.0",
+  # 0.13.0 is hermes-agent's first PyPI release — the old 0.11.0 floor
+  # predates PyPI publication (source-install era) and is not installable
+  # (`pip install hermes-agent==0.11.0` → "No matching distribution";
+  # discovered by the hermes-floor CI job's first run, 2026-07-15). The
+  # floor is exercised in CI: hermes-floor pins ==0.13.0 and runs the unit
+  # suite minus the two latest-tracking drift detectors (see ci.yml).
+  "hermes-agent>=0.13.0",
   "ruamel.yaml>=0.18",
 ]
 
@@ -144,7 +150,7 @@ Documentation = "https://github.com/InternetMaximalism/mordred-hermes/tree/main/
 Source = "https://github.com/InternetMaximalism/mordred-hermes"
 
 [tool.mordred]
-min-hermes-version = "0.11.0"
+min-hermes-version = "0.13.0"
 
 # Dynamic version source. Hatchling's built-in regex source reads the
 # `__version__ = "..."` assignment from the file below. It must live under
