@@ -18,3 +18,10 @@ htmlcov/
 # Local dev-only keyvault init helper (bypasses safety controls, prints seed).
 # Must never be committed.
 dev_init_keyvault.py
+
+# Claude Code: ignore session-local files (lock files, review notes,
+# settings.local.json) but track the shared project settings and hooks.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/skills/
