@@ -46,7 +46,9 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 Install into the **same environment that runs `hermes-agent`** (usually
 `~/.hermes/hermes-agent/venv`) so its plugin loader can discover the entry points.
 Hermes-managed venvs are often created by uv and ship no `pip`, so the robust
-form is `uv pip install --python …`:
+form is `uv pip install --python …` (no `uv` on your machine? Install it first —
+`brew install uv` on macOS, or see the
+[uv installation guide](https://docs.astral.sh/uv/getting-started/installation/)):
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
@@ -57,9 +59,17 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
-the same.) **Pin the version explicitly** or pass `--pre`: every release is
-currently a pre-release, so an unpinned `pip install mordred-hermes` only resolves
-via pip's all-prereleases fallback.
+the same.) **The pinned form above is the recommended default** — it's
+deterministic and reproducible. Prefer not to look up the current version? The
+unpinned `--upgrade` form resolves to the newest pre-release — every release is
+currently a pre-release, so the all-prereleases fallback applies (the same goes
+for plain `pip`, which also accepts an explicit `--pre`; see
+[Upgrading](#upgrading) for the same command used to update later):
+
+```sh
+# macOS — newest release without a version lookup; use [keyvault] on Linux
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --upgrade "mordred-hermes[macos]"
+```
 
 Optional extras, all opt-in:
 
