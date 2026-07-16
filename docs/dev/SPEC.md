@@ -195,8 +195,8 @@ Users who were using the old Mordred in an OpenClaw environment follow these 3 s
 
 As a new user, I want `hermes mordred configure` to:
 
-1. Ask Mordred-specific questions (network policy strict/lenient/off, local LLM endpoint, keyvault initialization opt-in)
-2. Optionally, with `--with-hermes-setup`, first spawn `hermes setup` as a child process (run Hermes's standard setup) before step 1 — opt-in, skipped by default (2026-07-16)
+1. Optionally spawn `hermes setup` as a child process when `--with-hermes-setup` is passed (run Hermes's standard setup first — opt-in, skipped by default since 2026-07-16)
+2. Ask Mordred-specific questions (network policy strict/lenient/off, local LLM endpoint, keyvault initialization opt-in)
 
 This allows Hermes and Mordred to be configured with a single command by passing `--with-hermes-setup`. No Hermes core modifications.
 

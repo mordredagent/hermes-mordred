@@ -96,6 +96,7 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         action="store_true",
         help="Apply from flags without prompting (CI / scripted use); unspecified flags keep existing settings",
     )
+    p.set_defaults(with_hermes_setup=False)
     setup_group = p.add_mutually_exclusive_group()
     setup_group.add_argument(
         "--with-hermes-setup",
@@ -104,11 +105,13 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     # Deprecated no-op: skipping `hermes setup` became the default (2026-07-16).
     # Kept so existing documented/scripted invocations keep parsing; hidden from
-    # --help. Mutually exclusive with --with-hermes-setup so contradictory
-    # flags error instead of silently picking a winner.
+    # --help. Shares the dest (store_false) so no vestigial attribute hangs off
+    # the Namespace — mirrors keyvault init's seed_storage group — while the
+    # mutually exclusive group still errors when both flags are passed.
     setup_group.add_argument(
         "--skip-hermes-setup",
-        action="store_true",
+        dest="with_hermes_setup",
+        action="store_false",
         help=argparse.SUPPRESS,
     )
     p.add_argument("--policy", choices=POLICY_MODES, help="Mordred policy mode")

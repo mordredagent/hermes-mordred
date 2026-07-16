@@ -142,12 +142,14 @@ class TestSubcommandTree:
         assert ns.with_hermes_setup is True
 
     def test_configure_skip_hermes_setup_parses_as_noop(self) -> None:
-        # Deprecated flag (2026-07-16): still parses for backward compat, but
-        # no longer sets a dest that cli_handler consults -- it just
-        # reaffirms the (now default) skip behavior.
+        # Deprecated flag (2026-07-16): still parses for backward compat and
+        # resolves into the same shared dest as the default (store_false), so
+        # it just reaffirms the (now default) skip behavior and leaves no
+        # vestigial attribute on the Namespace.
         parser = _build_parser()
         ns = parser.parse_args(["mordred", "configure", "--skip-hermes-setup"])
         assert ns.with_hermes_setup is False
+        assert not hasattr(ns, "skip_hermes_setup")
 
     def test_configure_with_and_skip_hermes_setup_conflict(self) -> None:
         # Mutually exclusive: passing both must error rather than silently

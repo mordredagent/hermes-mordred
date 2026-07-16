@@ -258,6 +258,16 @@ class TestRun:
         run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
         assert runner.calls == [], "default run() must not invoke `hermes setup` (opt-in since 2026-07-16)"
 
+    def test_non_interactive_default_does_not_call_runner(self, tmp_path: Path) -> None:
+        """Crosses the flag matrix at the run() level: the skip default must
+        hold regardless of non_interactive (the guard is independent of it)."""
+        prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+
+        run(setup_runner=runner, prompt_io=prompts, policy_writer=w, non_interactive=True)
+        assert runner.calls == []
+
     def test_with_hermes_setup_calls_runner(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
         runner = _SetupRunnerSpy()
@@ -441,7 +451,7 @@ class TestCliHandler:
         assert body["policy"] == "off"
 
     def test_non_interactive_with_hermes_setup_runs_runner(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """--with-hermes-setup in flag-driven mode still spawns `hermes setup`
         while writing the policy from the CLI flags."""
@@ -455,9 +465,7 @@ class TestCliHandler:
         body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
         assert body["policy"] == "strict"
 
-    def test_non_interactive_default_skips_runner(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_non_interactive_default_skips_runner(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Flag-driven mode with no setup attr must not spawn `hermes setup`."""
         spy = _SetupRunnerSpy()
         _patch_for_cli(monkeypatch, tmp_path)

@@ -35,7 +35,10 @@ Run interactive Mordred setup. Writes `~/.hermes/config.yaml`
 `--allow-cloud-llm` / `--cloud-allowlist` / `--local-llm-endpoint` /
 `--local-llm-model-id` / `--cloud-attempt-action` / `--harness`, each
 seeded from the existing policy.json + config.yaml so a bare re-run
-keeps prior answers.
+keeps prior answers. The upstream `hermes setup` wizard is not part
+of a bare run: pass `--with-hermes-setup` to delegate to it before
+the Mordred prompts (the old `--skip-hermes-setup` is a hidden,
+deprecated no-op).
 
 Implementation: `configure.py`.
 
