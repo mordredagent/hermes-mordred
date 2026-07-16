@@ -75,6 +75,7 @@ class TestSubcommandTree:
         [
             ["mordred", "configure"],
             ["mordred", "configure", "--skip-hermes-setup"],
+            ["mordred", "configure", "--with-hermes-setup"],
             ["mordred", "upgrade"],
             ["mordred", "upgrade", "--reset"],
             ["mordred", "upgrade", "--non-interactive"],
@@ -127,18 +128,33 @@ class TestSubcommandTree:
         ns = parser.parse_args(["mordred", "keyvault", "init", "--paper-only"])
         assert ns.store_seed_for_hd is False
 
-    def test_configure_skip_hermes_setup_defaults_false(self) -> None:
+    def test_configure_with_hermes_setup_defaults_false(self) -> None:
         parser = _build_parser()
         ns = parser.parse_args(["mordred", "configure"])
-        assert ns.skip_hermes_setup is False
+        assert ns.with_hermes_setup is False
 
-    def test_configure_skip_hermes_setup_flag_sets_true(self) -> None:
+    def test_configure_with_hermes_setup_flag_sets_true(self) -> None:
         # Guards the flag-name -> dest mapping that cli_handler reads via
-        # getattr(args, "skip_hermes_setup", ...); a rename would break the CLI
+        # getattr(args, "with_hermes_setup", ...); a rename would break the CLI
         # while leaving the Namespace-based handler tests green.
         parser = _build_parser()
+        ns = parser.parse_args(["mordred", "configure", "--with-hermes-setup"])
+        assert ns.with_hermes_setup is True
+
+    def test_configure_skip_hermes_setup_parses_as_noop(self) -> None:
+        # Deprecated flag (2026-07-16): still parses for backward compat, but
+        # no longer sets a dest that cli_handler consults -- it just
+        # reaffirms the (now default) skip behavior.
+        parser = _build_parser()
         ns = parser.parse_args(["mordred", "configure", "--skip-hermes-setup"])
-        assert ns.skip_hermes_setup is True
+        assert ns.with_hermes_setup is False
+
+    def test_configure_with_and_skip_hermes_setup_conflict(self) -> None:
+        # Mutually exclusive: passing both must error rather than silently
+        # picking a winner.
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mordred", "configure", "--with-hermes-setup", "--skip-hermes-setup"])
 
 
 class TestUpgradeFlagShape:

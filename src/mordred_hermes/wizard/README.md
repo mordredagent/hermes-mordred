@@ -191,7 +191,7 @@ after `*,`); `detect()` is the only positional entry.
 
 | Module | Surface |
 |---|---|
-| `configure` | `run(*, setup_runner, prompt_io, policy_writer, non_interactive=False, skip_hermes_setup=False) -> ConfigureResult`; `cli_handler(ns)` |
+| `configure` | `run(*, setup_runner, prompt_io, policy_writer, non_interactive=False, with_hermes_setup=False) -> ConfigureResult`; `cli_handler(ns)` |
 | `upgrade` | `UpgradeOptions`; `UpgradeReport`; `run(*, options, policy_writer, target_snapshot=None, openclaw_base=DEFAULT_OPENCLAW_BASE) -> UpgradeReport`; `cli_handler(ns)` |
 | `openclaw_migration` | `OpenClawState`; `detect(openclaw_base: Path) -> OpenClawState`; `migrate(*, openclaw_base, policy_writer, options) -> Story1_5Action` |
 | `install_dispatch` | `run(*, skill_arg, state, runner=_default_runner) -> int`; `cli_handler(ns)` |

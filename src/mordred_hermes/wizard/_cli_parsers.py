@@ -96,10 +96,20 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         action="store_true",
         help="Apply from flags without prompting (CI / scripted use); unspecified flags keep existing settings",
     )
-    p.add_argument(
+    setup_group = p.add_mutually_exclusive_group()
+    setup_group.add_argument(
+        "--with-hermes-setup",
+        action="store_true",
+        help="Also run the upstream `hermes setup` wizard before the Mordred prompts (skipped by default)",
+    )
+    # Deprecated no-op: skipping `hermes setup` became the default (2026-07-16).
+    # Kept so existing documented/scripted invocations keep parsing; hidden from
+    # --help. Mutually exclusive with --with-hermes-setup so contradictory
+    # flags error instead of silently picking a winner.
+    setup_group.add_argument(
         "--skip-hermes-setup",
         action="store_true",
-        help="Skip the `hermes setup` delegation; configure only the Mordred policy",
+        help=argparse.SUPPRESS,
     )
     p.add_argument("--policy", choices=POLICY_MODES, help="Mordred policy mode")
     p.add_argument(
