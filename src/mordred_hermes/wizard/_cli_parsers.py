@@ -96,10 +96,23 @@ def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         action="store_true",
         help="Apply from flags without prompting (CI / scripted use); unspecified flags keep existing settings",
     )
-    p.add_argument(
-        "--skip-hermes-setup",
+    p.set_defaults(with_hermes_setup=False)
+    setup_group = p.add_mutually_exclusive_group()
+    setup_group.add_argument(
+        "--with-hermes-setup",
         action="store_true",
-        help="Skip the `hermes setup` delegation; configure only the Mordred policy",
+        help="Also run the upstream `hermes setup` wizard before the Mordred prompts (skipped by default)",
+    )
+    # Deprecated no-op: skipping `hermes setup` became the default (2026-07-16).
+    # Kept so existing documented/scripted invocations keep parsing; hidden from
+    # --help. Shares the dest (store_false) so no vestigial attribute hangs off
+    # the Namespace — mirrors keyvault init's seed_storage group — while the
+    # mutually exclusive group still errors when both flags are passed.
+    setup_group.add_argument(
+        "--skip-hermes-setup",
+        dest="with_hermes_setup",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
     p.add_argument("--policy", choices=POLICY_MODES, help="Mordred policy mode")
     p.add_argument(

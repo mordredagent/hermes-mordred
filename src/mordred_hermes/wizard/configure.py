@@ -4,8 +4,10 @@ Two-step flow:
 
 1. Delegate first-run Hermes setup via ``subprocess.run(["hermes", "setup", ...])``
    (Hermes uses its own curses TUI -- ``hermes_cli/main.py:8704``). This step
-   runs on every invocation; ``--skip-hermes-setup`` suppresses it so a re-run
-   can touch only the Mordred policy (step 2/3 still run).
+   is opt-in: it is skipped by default (2026-07-16) so a bare ``configure``
+   touches only the Mordred policy, and ``--with-hermes-setup`` runs it before
+   step 2. The old ``--skip-hermes-setup`` flag is now a deprecated no-op,
+   kept only so existing invocations keep parsing.
 2. Collect Mordred-specific prompts (policy mode, cloud allowlist, local LLM
    endpoint, agent harness) via :class:`PromptIO`.
 3. Persist via :class:`PolicyWriter` (writes ``~/.hermes/mordred/policy.json``
@@ -405,7 +407,7 @@ def run(
     prompt_io: PromptIO,
     policy_writer: PolicyWriter,
     non_interactive: bool = False,
-    skip_hermes_setup: bool = False,
+    with_hermes_setup: bool = False,
 ) -> ConfigureResult:
     """Top-level configure entry point.
 
@@ -419,13 +421,14 @@ def run(
         non_interactive: Forwarded to :class:`SetupRunner`. Mordred prompts
             still run -- pass a :class:`_RefusingPromptIO` to abort on any
             prompt requirement.
-        skip_hermes_setup: Tests use this to avoid spawning ``hermes setup``
-            entirely. Production should leave it ``False``.
+        with_hermes_setup: Opt-in to spawning ``hermes setup`` before the
+            Mordred prompts. Defaults to ``False`` (skip) so a bare
+            ``configure`` touches only the Mordred policy.
 
     Returns:
         :class:`ConfigureResult` holding the resolved :class:`PolicySnapshot`.
     """
-    if not skip_hermes_setup:
+    if with_hermes_setup:
         rc = setup_runner.run(non_interactive=non_interactive)
         if rc != 0:
             _term.emit_warn(f"`hermes setup` exited with code {rc}; continuing with Mordred prompts anyway")
@@ -560,15 +563,16 @@ def cli_handler(args: argparse.Namespace) -> int:
       bare re-run keeps prior settings).
     - Otherwise: real :class:`SubprocessSetupRunner` + :class:`PromptToolkitIO`,
       then a hint pointing the user at the on-demand network-privacy command.
-    - ``--skip-hermes-setup``: suppresses the ``hermes setup`` delegation in
-      either mode (the Mordred prompts / flag application still run). Lets an
-      operator re-run ``configure`` to touch only the Mordred policy without
-      stepping through the upstream Hermes wizard every time.
+    - ``--with-hermes-setup``: opt-in delegation to the upstream ``hermes
+      setup`` wizard in either mode (the Mordred prompts / flag application
+      still run either way). A bare ``configure`` touches only the Mordred
+      policy. The old ``--skip-hermes-setup`` flag is accepted as a
+      deprecated no-op -- it just reaffirms the (now default) skip behavior.
     """
     non_interactive = bool(getattr(args, "non_interactive", False))
-    skip_hermes_setup = bool(getattr(args, "skip_hermes_setup", False))
+    with_hermes_setup = bool(getattr(args, "with_hermes_setup", False))
     if non_interactive:
-        if not skip_hermes_setup:
+        if with_hermes_setup:
             setup_rc = SubprocessSetupRunner().run(non_interactive=True)
             if setup_rc != 0:
                 _term.emit_warn(f"`hermes setup` exited with code {setup_rc}; continuing with Mordred flags anyway")
@@ -588,7 +592,7 @@ def cli_handler(args: argparse.Namespace) -> int:
             prompt_io=PromptToolkitIO(),
             policy_writer=PolicyWriter(),
             non_interactive=False,
-            skip_hermes_setup=skip_hermes_setup,
+            with_hermes_setup=with_hermes_setup,
         )
     except OSError as e:
         # cli.dispatch() only catches KeyboardInterrupt / EOFError /

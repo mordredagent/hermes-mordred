@@ -87,18 +87,19 @@ $M status --json     # machine-readable
 Writes `config.yaml` + `policy.json`. Interactive by default; scriptable with
 `--non-interactive` (unspecified flags keep existing values).
 
-Runs in two steps: it first delegates to the upstream `hermes setup` wizard,
-then collects the Mordred-specific prompts. `hermes setup` runs on **every**
-invocation (Hermes re-shows its wizard even when already configured, pre-filling
-each prompt so you can press Enter to keep it). To re-run `configure` and touch
-**only** the Mordred policy, pass `--skip-hermes-setup` to suppress that step.
+By default `configure` collects only the Mordred-specific prompts and does
+**not** run the upstream `hermes setup` wizard. Pass `--with-hermes-setup` to
+delegate to it first — useful on a fresh machine where Hermes itself is not
+configured yet (Hermes pre-fills each prompt so pressing Enter keeps existing
+values). The old `--skip-hermes-setup` flag is now the default behavior and
+is accepted as a deprecated no-op.
 ```sh
-$M configure
-$M configure --skip-hermes-setup                       # Mordred prompts only, no hermes setup
+$M configure                                           # Mordred prompts only (default)
+$M configure --with-hermes-setup                       # run `hermes setup` first, then Mordred prompts
 $M configure --non-interactive --policy strict --no-allow-cloud-llm
-$M configure --non-interactive --skip-hermes-setup --policy lenient
+$M configure --non-interactive --policy lenient
 ```
-Key flags: `--skip-hermes-setup`, `--policy {strict,lenient,off}`,
+Key flags: `--with-hermes-setup`, `--policy {strict,lenient,off}`,
 `--allow-cloud-llm/--no-allow-cloud-llm`,
 `--cloud-allowlist <csv>`, `--local-llm-endpoint <url>`, `--local-llm-model-id <id>`,
 `--cloud-attempt-action {always-block,prompt-once}`,

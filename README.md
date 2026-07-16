@@ -8,8 +8,12 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a4`
-([PyPI](https://pypi.org/project/mordred-hermes/), 2026-07-10).
+**Status: active alpha** — current release `0.1.0a5`
+([PyPI](https://pypi.org/project/mordred-hermes/) has the release history and dates).
+
+New here? The step-by-step
+**[QUICKSTART](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**
+takes you from zero to a protected install.
 
 > **⭐ Recommended: set up with an AI coding agent.** The first-run setup
 > (`configure`, `network init`, `keyvault init`) is a series of interactive
@@ -52,10 +56,10 @@ form is `uv pip install --python …` (no `uv` on your machine? Install it first
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a4"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a5"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a4"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a5"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -111,13 +115,12 @@ The CLI is the standalone `hermes-mordred` console script (installed next to
 M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 
 # First run — set up, in order:
-$M configure                     # interactive setup — policy / LLM / harness
-$M configure --skip-hermes-setup # re-run but skip the upstream `hermes setup` step
-$M network init                  # optional — pick a privacy route (Tor / VPN / clearnet)
-$M keyvault enable-se --unattended  # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
-$M keyvault init                 # create the hardware-backed key (interactive ceremony)
-$M encryption enable env         # encrypt your .env at rest
-$M status                        # verify — the `env` row reads [on] enrolled
+$M configure                       # interactive Mordred setup (policy / LLM / harness)
+$M network init                    # optional — pick a privacy route (Tor / VPN / clearnet)
+$M keyvault enable-se --unattended # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
+$M keyvault init                   # create the hardware-backed key (interactive ceremony)
+$M encryption enable env           # encrypt your .env at rest
+$M status                          # verify — the `env` row reads [on] enrolled
 
 # Everyday commands:
 $M status                          # protection at a glance
@@ -127,7 +130,7 @@ $M network use <tor|vpn|clearnet>  # switch the active privacy route
 $M network status                  # show the active route and liveness
 $M encryption change-passphrase    # rotate the vault recovery passphrase
 $M configure                       # re-run interactive setup anytime
-$M configure --skip-hermes-setup   # re-run but skip the upstream `hermes setup` step
+$M configure --with-hermes-setup   # re-run and include the upstream `hermes setup` wizard
 ```
 
 > **Why `enable-se --unattended` is recommended (macOS).** The default
@@ -225,7 +228,7 @@ extra (see the [extras table](#install-users-from-pypi) above).
 for `keyvault` on Linux):
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a4"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a5"
 ```
 
 Then use the `$M` alias from [Use it](#use-it):
@@ -269,9 +272,10 @@ standalone — they only touch `~/.hermes` and the keyvault.
   second terminal while `extension serve` is running — both sides share
   `~/.hermes/extension/pending.json`, so codes are also consumable by a full
   Hermes gateway hosting the WS server.
-- **`GET http://127.0.0.1:7788/` returns 503**: the server serves the bundled
-  localhost web app from `extension_web/`, but the built page ships in `web/`.
-  The WS endpoint `/ext` is unaffected.
+- **`GET http://127.0.0.1:7788/` serves the bundled localhost web app** — a
+  browser page over the same WS API (the startup log prints both URLs; the
+  extension's WS endpoint is `/ext`). A 503 "web app not built" response
+  appears only if the bundled page is missing — the PyPI wheel ships it.
 
 ## Install (development)
 
@@ -296,7 +300,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --reinstall --no
 `--reinstall` is required whenever the version string is unchanged (two builds
 both reporting the same version, say): without it uv treats the requirement as already
 satisfied and no-ops, leaving the binary on stale code — the symptom is a newly
-added flag such as `configure --skip-hermes-setup` failing with `unrecognized
+added flag such as `configure --with-hermes-setup` failing with `unrecognized
 arguments`. `--no-deps` keeps the live editable `hermes-agent` checkout
 untouched. Re-run the same command if Hermes rebuilds its venv and drops the
 wheel.

@@ -35,7 +35,10 @@ Run interactive Mordred setup. Writes `~/.hermes/config.yaml`
 `--allow-cloud-llm` / `--cloud-allowlist` / `--local-llm-endpoint` /
 `--local-llm-model-id` / `--cloud-attempt-action` / `--harness`, each
 seeded from the existing policy.json + config.yaml so a bare re-run
-keeps prior answers.
+keeps prior answers. The upstream `hermes setup` wizard is not part
+of a bare run: pass `--with-hermes-setup` to delegate to it before
+the Mordred prompts (the old `--skip-hermes-setup` is a hidden,
+deprecated no-op).
 
 Implementation: `configure.py`.
 
@@ -191,7 +194,7 @@ after `*,`); `detect()` is the only positional entry.
 
 | Module | Surface |
 |---|---|
-| `configure` | `run(*, setup_runner, prompt_io, policy_writer, non_interactive=False, skip_hermes_setup=False) -> ConfigureResult`; `cli_handler(ns)` |
+| `configure` | `run(*, setup_runner, prompt_io, policy_writer, non_interactive=False, with_hermes_setup=False) -> ConfigureResult`; `cli_handler(ns)` |
 | `upgrade` | `UpgradeOptions`; `UpgradeReport`; `run(*, options, policy_writer, target_snapshot=None, openclaw_base=DEFAULT_OPENCLAW_BASE) -> UpgradeReport`; `cli_handler(ns)` |
 | `openclaw_migration` | `OpenClawState`; `detect(openclaw_base: Path) -> OpenClawState`; `migrate(*, openclaw_base, policy_writer, options) -> Story1_5Action` |
 | `install_dispatch` | `run(*, skill_arg, state, runner=_default_runner) -> int`; `cli_handler(ns)` |
