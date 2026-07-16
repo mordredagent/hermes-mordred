@@ -272,9 +272,10 @@ For the full dialog walkthrough, every prompt (Tor / Mullvad), and how to use a
 
 ## 6. Tune policy (optional)
 
-`$M configure` walks through a short list of questions — Hermes setup first, then
-Mordred's own prompts. **If in doubt, press Enter through all of them**: the
-defaults are the safe, private choice.
+`$M configure` walks through a short list of Mordred questions (pass
+`--with-hermes-setup` to also run the upstream Hermes setup wizard first).
+**If in doubt, press Enter through all of them**: the defaults are the safe,
+private choice.
 
 The one setting most people care about is **policy mode**:
 

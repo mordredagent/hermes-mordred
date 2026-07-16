@@ -221,7 +221,9 @@ class TestRun:
 
         result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
 
-        assert runner.calls == [False]
+        # `hermes setup` delegation is opt-in (default False since 2026-07-16);
+        # this test is about policy persistence, not the setup runner.
+        assert runner.calls == []
         body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
         assert body == {
             "policy": "strict",
@@ -248,20 +250,38 @@ class TestRun:
         assert result.snapshot.local_llm_endpoint == "http://x/v1"
         assert result.snapshot.harness_primary == "codex"
 
-    def test_skip_hermes_setup_does_not_call_runner(self, tmp_path: Path) -> None:
+    def test_default_does_not_call_runner(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
-        run(setup_runner=runner, prompt_io=prompts, policy_writer=w, skip_hermes_setup=True)
-        assert runner.calls == [], "skip_hermes_setup must not invoke the runner"
+        run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
+        assert runner.calls == [], "default run() must not invoke `hermes setup` (opt-in since 2026-07-16)"
+
+    def test_non_interactive_default_does_not_call_runner(self, tmp_path: Path) -> None:
+        """Crosses the flag matrix at the run() level: the skip default must
+        hold regardless of non_interactive (the guard is independent of it)."""
+        prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+
+        run(setup_runner=runner, prompt_io=prompts, policy_writer=w, non_interactive=True)
+        assert runner.calls == []
+
+    def test_with_hermes_setup_calls_runner(self, tmp_path: Path) -> None:
+        prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
+        runner = _SetupRunnerSpy()
+        w = _writer(tmp_path)
+
+        run(setup_runner=runner, prompt_io=prompts, policy_writer=w, with_hermes_setup=True)
+        assert runner.calls == [False]
 
     def test_setup_failure_warns_but_continues(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         prompts = _ScriptedPromptIO(answers=_core_answers())
         runner = _SetupRunnerSpy(returncode=42)
         w = _writer(tmp_path)
 
-        result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w)
+        result = run(setup_runner=runner, prompt_io=prompts, policy_writer=w, with_hermes_setup=True)
         assert result.snapshot.policy == "lenient"
         err = capsys.readouterr().err
         assert "hermes setup" in err and "42" in err
@@ -271,7 +291,7 @@ class TestRun:
         runner = _SetupRunnerSpy()
         w = _writer(tmp_path)
 
-        run(setup_runner=runner, prompt_io=prompts, policy_writer=w, non_interactive=True)
+        run(setup_runner=runner, prompt_io=prompts, policy_writer=w, non_interactive=True, with_hermes_setup=True)
         assert runner.calls == [True]
 
 
@@ -291,7 +311,7 @@ class TestConfigureLeavesNetworkSectionIntact:
             encoding="utf-8",
         )
         prompts = _ScriptedPromptIO(answers=_core_answers(policy="strict"))
-        run(setup_runner=_SetupRunnerSpy(), prompt_io=prompts, policy_writer=_writer(tmp_path), skip_hermes_setup=True)
+        run(setup_runner=_SetupRunnerSpy(), prompt_io=prompts, policy_writer=_writer(tmp_path))
 
         from ruamel.yaml import YAML
 
@@ -406,46 +426,54 @@ class TestCliHandler:
         out = capsys.readouterr().out.lower()
         assert "network init" in out
 
-    def test_interactive_runs_hermes_setup_by_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Positive control: without --skip-hermes-setup (attr absent), the
-        interactive path still delegates to `hermes setup` exactly once."""
+    def test_interactive_skips_hermes_setup_by_default(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """A bare configure (attr absent) must NOT delegate to `hermes setup`
+        (default inverted 2026-07-16)."""
         spy = _SetupRunnerSpy()
         scripted = _ScriptedPromptIO(answers=_core_answers(policy="off"))
         _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
         monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
         rc = cli_handler(argparse.Namespace(non_interactive=False))
         assert rc == 0
-        assert spy.calls == [False], "default configure must delegate to `hermes setup`"
+        assert spy.calls == [], "default configure must not delegate to `hermes setup`"
 
-    def test_interactive_skip_hermes_setup_bypasses_runner(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """--skip-hermes-setup must not spawn `hermes setup`, yet the Mordred
+    def test_interactive_with_hermes_setup_runs_runner(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """--with-hermes-setup must spawn `hermes setup`, and the Mordred
         prompts still run and the policy is written."""
         spy = _SetupRunnerSpy()
         scripted = _ScriptedPromptIO(answers=_core_answers(policy="off"))
         _patch_for_cli(monkeypatch, tmp_path, prompt_io=scripted)
         monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
-        rc = cli_handler(argparse.Namespace(non_interactive=False, skip_hermes_setup=True))
+        rc = cli_handler(argparse.Namespace(non_interactive=False, with_hermes_setup=True))
         assert rc == 0
-        assert spy.calls == [], "skip_hermes_setup must not spawn `hermes setup`"
+        assert spy.calls == [False], "--with-hermes-setup must spawn `hermes setup`"
         body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
         assert body["policy"] == "off"
 
-    def test_non_interactive_skip_hermes_setup_bypasses_runner(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    def test_non_interactive_with_hermes_setup_runs_runner(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """--skip-hermes-setup in flag-driven mode suppresses `hermes setup`
-        while still writing the policy from the CLI flags."""
+        """--with-hermes-setup in flag-driven mode still spawns `hermes setup`
+        while writing the policy from the CLI flags."""
         spy = _SetupRunnerSpy()
         _patch_for_cli(monkeypatch, tmp_path)
         monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
-        ns = argparse.Namespace(non_interactive=True, policy="strict", skip_hermes_setup=True)
+        ns = argparse.Namespace(non_interactive=True, policy="strict", with_hermes_setup=True)
         rc = cli_handler(ns)
         assert rc == 0
-        assert spy.calls == [], "skip_hermes_setup must not spawn `hermes setup`"
+        assert spy.calls == [True], "--with-hermes-setup must spawn `hermes setup`"
         body = json.loads((tmp_path / "mordred" / "policy.json").read_text(encoding="utf-8"))
         assert body["policy"] == "strict"
+
+    def test_non_interactive_default_skips_runner(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Flag-driven mode with no setup attr must not spawn `hermes setup`."""
+        spy = _SetupRunnerSpy()
+        _patch_for_cli(monkeypatch, tmp_path)
+        monkeypatch.setattr(configure, "SubprocessSetupRunner", lambda: spy)
+        ns = argparse.Namespace(non_interactive=True, policy="strict")
+        rc = cli_handler(ns)
+        assert rc == 0
+        assert spy.calls == [], "default non-interactive configure must not spawn `hermes setup`"
 
 
 # -----------------------------------------------------------------------------

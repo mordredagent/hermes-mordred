@@ -195,10 +195,10 @@ Users who were using the old Mordred in an OpenClaw environment follow these 3 s
 
 As a new user, I want `hermes mordred configure` to:
 
-1. Spawn `hermes setup` as a child process (run Hermes's standard setup first)
+1. Optionally spawn `hermes setup` as a child process when `--with-hermes-setup` is passed (run Hermes's standard setup first — opt-in, skipped by default since 2026-07-16)
 2. Ask Mordred-specific questions (network policy strict/lenient/off, local LLM endpoint, keyvault initialization opt-in)
 
-This allows Hermes and Mordred to be configured with a single command. No Hermes core modifications.
+This allows Hermes and Mordred to be configured with a single command by passing `--with-hermes-setup`. No Hermes core modifications.
 
 ### Story 3: Skill execution and automatic path selection
 
@@ -993,7 +993,7 @@ See `POLICY.md` §"Phase 4 PR4 step-0 freeze" for the full table. Summary:
 Registers the `hermes mordred ...` subcommand tree via `PluginContext.register_cli_command("mordred", help, setup_fn, handler_fn)`. Builds the argparse subparser hierarchy inside `setup_fn(subparser)`.
 
 Subcommands:
-- `hermes mordred configure` — spawns `hermes setup` as a child process, then asks Mordred-specific questions
+- `hermes mordred configure` — asks Mordred-specific questions; with `--with-hermes-setup` it first spawns `hermes setup` as a child process (skipped by default)
 - `hermes mordred upgrade` — Story 1 / 1.5 single-command migration
 - `hermes mordred install <skill>` — skill installation via privacy-check (a substitute until a skill install hook is added to Hermes core)
 - `hermes mordred network init` — on-demand network-privacy setup (Tor / VPN / clearnet + Mullvad); separate from `configure`, re-runnable (blank Mullvad answer keeps the current secret). `--non-interactive` is flag-driven (`--path` / `--tor-binary` / `--tor-socks-port` / `--mullvad-relay` / `--mullvad-killswitch`); `--clear-mullvad` removes the stored secret. The Mullvad secret is never accepted as a CLI flag.
