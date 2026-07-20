@@ -3,5 +3,6 @@
   "on_session_start": ["session_id"],
   "on_session_end": [],
   "pre_tool_call": ["tool_name"],
-  "pre_api_request": ["base_url", "provider"]
+  "pre_api_request": ["base_url", "provider"],
+  "pre_gateway_dispatch": ["event", "gateway"]
 }

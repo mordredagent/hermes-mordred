@@ -72,6 +72,7 @@ def test_entry_points_resolve() -> None:
         "mordred_llm_guard",
         "mordred_keyvault",
         "mordred_wizard",
+        "mordred_e2e",
     }
     assert set(mordred_eps.keys()) == expected, f"missing entry points: {expected - set(mordred_eps.keys())}"
     for name, ep in mordred_eps.items():
@@ -109,6 +110,7 @@ def test_hermes_plugin_manager_discovery(tmp_path: Path, monkeypatch: pytest.Mon
         "mordred_llm_guard",
         "mordred_keyvault",
         "mordred_wizard",
+        "mordred_e2e",
     }
     assert set(mordred.keys()) == expected, f"missing: {expected - set(mordred.keys())}"
     for k, p in mordred.items():
