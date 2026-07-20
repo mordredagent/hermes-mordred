@@ -73,6 +73,24 @@ def pre_gateway_dispatch(
 
 
 def register(ctx: Any) -> None:
-    """Plugin entry point (``hermes_agent.plugins`` group)."""
+    """Plugin entry point (``hermes_agent.plugins`` group).
+
+    Wires the full E2E transport with no core fork:
+      * inbound decrypt / key-exchange drop  → ``pre_gateway_dispatch`` hook
+      * outbound reply re-encryption         → platform ``send`` wrappers
+    The browser-extension WebSocket server ships as the standalone
+    ``hermes-mordred extension serve`` command (``extension.api``); it does not
+    need the gateway process.
+    """
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     logger.debug("mordred_e2e: registered pre_gateway_dispatch hook")
+
+    # Outbound: wrap each installed platform adapter's send (best-effort).
+    try:
+        from . import outbound
+
+        installed = outbound.install_outbound_patches()
+        if installed:
+            logger.debug("mordred_e2e: outbound E2E wrapped for %s", ", ".join(installed))
+    except Exception as e:  # noqa: BLE001 — never break plugin load
+        logger.warning("mordred_e2e: outbound patch install failed: %s", e)
