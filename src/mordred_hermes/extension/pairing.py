@@ -410,42 +410,35 @@ def clear_webauthn_credential() -> None:
         _webauthn_path().unlink()
 
 
-def verify_webauthn_assertion(nonce: bytes, assertion: dict[str, Any]) -> bool:
-    """Verify a WebAuthn assertion over ``nonce`` against the stored credential.
-
-    Checks: the credential id matches, clientDataJSON is a ``webauthn.get`` whose
-    challenge equals ``nonce``, the user-verified flag is set, and the ECDSA
-    P-256 signature over ``authenticatorData || SHA256(clientDataJSON)`` is valid.
-    """
-    import hashlib
-    import json as _json
-
-    data = _read_json(_webauthn_path())
-    stored_id = data.get("credential_id")
-    pub_b64 = data.get("public_key")
-    if not stored_id or not pub_b64:
-        return False
-    if assertion.get("credential_id") != stored_id:
-        return False
-
+def _decode_webauthn_fields(assertion: dict[str, Any]) -> tuple[bytes, bytes, bytes] | None:
+    """b64u-decode ``(clientDataJSON, authenticatorData, signature)`` from an
+    assertion payload, or ``None`` if any field is missing or malformed."""
     try:
-        client_data_raw = b64u_decode(assertion["client_data_json"])
-        auth_data = b64u_decode(assertion["authenticator_data"])
-        signature = b64u_decode(assertion["signature"])
+        return (
+            b64u_decode(assertion["client_data_json"]),
+            b64u_decode(assertion["authenticator_data"]),
+            b64u_decode(assertion["signature"]),
+        )
     except Exception:
-        return False
+        return None
 
+
+def _client_data_matches(client_data_raw: bytes, nonce: bytes) -> bool:
+    """True iff ``clientDataJSON`` parses as a ``webauthn.get`` whose challenge
+    equals ``nonce``."""
     try:
-        client = _json.loads(client_data_raw.decode("utf-8"))
+        client = json.loads(client_data_raw.decode("utf-8"))
     except Exception:
         return False
     if client.get("type") != "webauthn.get":
         return False
-    if client.get("challenge") != b64u_encode(nonce):
-        return False
-    # User-verified (UV) flag must be set (bit 2 of the flags byte at offset 32).
-    if len(auth_data) < 37 or not (auth_data[32] & 0x04):
-        return False
+    return bool(client.get("challenge") == b64u_encode(nonce))
+
+
+def _signature_valid(pub_b64: str, auth_data: bytes, client_data_raw: bytes, signature: bytes) -> bool:
+    """True iff ``signature`` is a valid ES256 signature by the stored public
+    key over ``authenticatorData || SHA256(clientDataJSON)``."""
+    import hashlib
 
     try:
         pub = serialization.load_der_public_key(b64u_decode(pub_b64))
@@ -457,6 +450,36 @@ def verify_webauthn_assertion(nonce: bytes, assertion: dict[str, Any]) -> bool:
         return True
     except Exception:
         return False
+
+
+def verify_webauthn_assertion(nonce: bytes, assertion: dict[str, Any]) -> bool:
+    """Verify a WebAuthn assertion over ``nonce`` against the stored credential.
+
+    Checks: the credential id matches, clientDataJSON is a ``webauthn.get`` whose
+    challenge equals ``nonce``, the user-verified flag is set, and the ECDSA
+    P-256 signature over ``authenticatorData || SHA256(clientDataJSON)`` is valid.
+    Every failure path returns ``False`` (fail-closed).
+    """
+    data = _read_json(_webauthn_path())
+    stored_id = data.get("credential_id")
+    pub_b64 = data.get("public_key")
+    if not stored_id or not pub_b64:
+        return False
+    if assertion.get("credential_id") != stored_id:
+        return False
+
+    fields = _decode_webauthn_fields(assertion)
+    if fields is None:
+        return False
+    client_data_raw, auth_data, signature = fields
+
+    if not _client_data_matches(client_data_raw, nonce):
+        return False
+    # User-verified (UV) flag must be set (bit 2 of the flags byte at offset 32).
+    if len(auth_data) < 37 or not (auth_data[32] & 0x04):
+        return False
+
+    return _signature_valid(pub_b64, auth_data, client_data_raw, signature)
 
 
 # --------------------------------------------------------------------------- #
