@@ -24,9 +24,12 @@ import errno
 import logging
 import signal
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import _term
+
+if TYPE_CHECKING:
+    from .api import ExtensionAPIServer
 
 # Mirrors mordred_hermes.extension.api.DEFAULT_HOST / DEFAULT_PORT (protocol
 # constants, SPEC.ja.md §6). Hardcoded rather than imported at module scope so
@@ -111,6 +114,16 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     )
     server = ExtensionAPIServer(host=host, port=port, chat_handler=chat_handler)
     color = _term.should_color(sys.stdout)
+    return _run_forever(server, host, port, color)
+
+
+def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) -> int:
+    """Own the event loop for the life of the server: bind, print the startup
+    banner, block until interrupted, then shut down cleanly.
+
+    Returns ``1`` if binding failed (EADDRINUSE or another OSError), else
+    ``0`` after a clean shutdown on Ctrl+C or SIGTERM — the exit code
+    :func:`serve` passes straight through to its caller."""
     # A manually managed loop (vs. asyncio.run) so the EADDRINUSE / Ctrl+C
     # paths below can each call `server.stop()` deterministically on the same
     # loop before it closes, instead of relying on asyncio.run()'s implicit
