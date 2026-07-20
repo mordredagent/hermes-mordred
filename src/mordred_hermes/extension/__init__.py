@@ -16,7 +16,7 @@ that submodule is actually touched (``extension serve``).
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # Canonical submodules + the back-compat ``extension_*`` aliases (the original
 # full-Hermes modules were named ``extension_api`` .. ``extension_rpc``).
@@ -31,7 +31,7 @@ _ALIASES = {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Import submodules (and their ``extension_*`` aliases) on first access."""
     target = name if name in _SUBMODULES else _ALIASES.get(name)
     if target is not None:
@@ -46,7 +46,7 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:  # keep static analysers / IDEs aware of the attributes
-    from . import api, chat, crypto, history, pairing, rpc  # noqa: F401
+    from . import api, chat, crypto, history, pairing, rpc
 
     extension_api = api
     extension_chat = chat

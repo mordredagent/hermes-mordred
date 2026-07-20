@@ -25,7 +25,7 @@ PoC scope: inbound decrypt + key-exchange drop. Outbound reply re-encryption
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from . import e2e
 
@@ -42,6 +42,10 @@ _NEEDS_KEY_NOTICE = (
     "拡張機能で暗号化キーを設定または取得のうえ、暗号化して再送してください。"
 )
 
+# Strong refs to fire-and-forget notice sends: without this the event loop only
+# holds a weak reference and may garbage-collect the task mid-flight (RUF006).
+_bg_tasks: set[Any] = set()
+
 
 def _platform_name(event: Any) -> str:
     """Normalized lowercase platform id ("slack"/"discord"/...) from an event.
@@ -54,10 +58,10 @@ def _platform_name(event: Any) -> str:
     return str(getattr(raw, "value", raw) or "").lower()
 
 
-async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: Optional[dict]) -> None:
+async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: dict[str, Any] | None) -> None:
     try:
         await adapter.send(chat_id, content, reply_to=None, metadata=metadata)
-    except Exception as exc:  # noqa: BLE001 — a notice failure must never break the gateway
+    except Exception as exc:
         logger.warning("mordred_e2e: needs-key notice send failed: %s", exc)
 
 
@@ -80,7 +84,7 @@ def _notify_needs_key(gateway: Any, event: Any) -> bool:
         return False
 
     thread = getattr(src, "thread_id", None) or getattr(event, "thread_id", None)
-    metadata: Optional[dict] = None
+    metadata: dict[str, Any] | None = None
     if thread:
         # Slack threads reply via thread_ts; Discord via thread_id.
         metadata = {"thread_ts": thread} if _platform_name(event) == "slack" else {"thread_id": thread}
@@ -89,11 +93,13 @@ def _notify_needs_key(gateway: Any, event: Any) -> bool:
         loop = asyncio.get_running_loop()
     except RuntimeError:  # no running loop (e.g. unit test calling the hook directly)
         return False
-    loop.create_task(_safe_send(adapter, str(chat_id), _NEEDS_KEY_NOTICE, metadata))
+    task = loop.create_task(_safe_send(adapter, str(chat_id), _NEEDS_KEY_NOTICE, metadata))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
     return True
 
 
-def _thread_ctx(event: Any) -> tuple[str, str, Optional[str]]:
+def _thread_ctx(event: Any) -> tuple[str, str, str | None]:
     """Best-effort (platform, chat_id, thread_root) from a MessageEvent."""
     src = getattr(event, "source", None)
     platform = getattr(src, "platform", None) or getattr(event, "platform", "") or ""
@@ -109,7 +115,7 @@ def pre_gateway_dispatch(
     gateway: Any = None,
     session_store: Any = None,
     **_kw: Any,
-) -> Optional[dict]:
+) -> dict[str, Any] | None:
     """Decrypt inbound ciphertext / drop key-exchange, before the agent."""
     text = getattr(event, "text", None)
     if not isinstance(text, str) or not text:
@@ -161,5 +167,5 @@ def register(ctx: Any) -> None:
         installed = outbound.install_outbound_patches()
         if installed:
             logger.debug("mordred_e2e: outbound E2E wrapped for %s", ", ".join(installed))
-    except Exception as e:  # noqa: BLE001 — never break plugin load
+    except Exception as e:
         logger.warning("mordred_e2e: outbound patch install failed: %s", e)

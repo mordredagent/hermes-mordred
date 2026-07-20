@@ -14,15 +14,16 @@ exactly like the vendored fork's adapter edits.
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Any, List, Optional
+from typing import Any
 
 from . import e2e
 
 logger = logging.getLogger(__name__)
 
 # Adapter class names we've already wrapped (idempotent install).
-_patched: set = set()
+_patched: set[str] = set()
 
 _LOCKED_NOTICE = "🔒 (暗号化できないため本文を送信できませんでした)"
 
@@ -36,7 +37,7 @@ def _SendResult() -> Any:
 # --- Slack -----------------------------------------------------------------
 
 
-async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts: Optional[str]) -> Any:
+async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts: str | None) -> Any:
     SendResult = _SendResult()
     client = self._get_client(chat_id)
     kid = e2e.thread_key_id("slack", chat_id, thread_ts)
@@ -45,10 +46,8 @@ async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts
         kw = {"channel": chat_id, "text": _LOCKED_NOTICE, "mrkdwn": False}
         if thread_ts:
             kw["thread_ts"] = thread_ts
-        try:
+        with contextlib.suppress(Exception):
             await client.chat_postMessage(**kw)
-        except Exception:  # noqa: BLE001
-            pass
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
     chunks = e2e.encrypt_reply(key, content, self.MAX_MESSAGE_LENGTH, e2e.SLACK_MENTION_PREFIX_RE)
@@ -60,17 +59,15 @@ async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts
         last = await client.chat_postMessage(**kw)
 
     if thread_ts:
-        try:
+        with contextlib.suppress(Exception):
             await self.stop_typing(chat_id)
-        except Exception:  # noqa: BLE001
-            pass
     sent_ts = last.get("ts") if last else None
     if sent_ts:
         try:
             self._bot_message_ts.add(sent_ts)
             if thread_ts:
                 self._bot_message_ts.add(thread_ts)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return SendResult(success=True, message_id=sent_ts, raw_response={"ts": sent_ts})
 
@@ -83,7 +80,7 @@ def _wrap_slack(cls: Any) -> None:
             try:
                 thread_ts = self._resolve_thread_ts(reply_to, metadata)
                 encrypted = e2e.is_encrypted_thread("slack", chat_id, thread_ts)
-            except Exception:  # noqa: BLE001 — resolution failure → treat as plaintext
+            except Exception:
                 encrypted, thread_ts = False, None
             if encrypted:  # fail-closed: never delegate to the plaintext path
                 return await _slack_encrypted_send(self, chat_id, content, thread_ts)
@@ -96,9 +93,7 @@ def _wrap_slack(cls: Any) -> None:
 # --- Discord ---------------------------------------------------------------
 
 
-async def _discord_encrypted_send(
-    self: Any, chat_id: str, content: str, thread_id: Optional[str], ids: List[str]
-) -> Any:
+async def _discord_encrypted_send(self: Any, chat_id: str, content: str, thread_id: str | None, ids: list[str]) -> Any:
     SendResult = _SendResult()
     tid = thread_id or chat_id
     channel = self._client.get_channel(int(tid))
@@ -113,7 +108,7 @@ async def _discord_encrypted_send(
         _p = getattr(channel, "parent_id", None) or getattr(getattr(channel, "parent", None), "id", None)
         if _p:
             parent = str(_p)
-    except Exception:  # noqa: BLE001
+    except Exception:
         parent = None
     lookup = [x for x in {*ids, parent or ""} if x]
 
@@ -126,7 +121,7 @@ async def _discord_encrypted_send(
     if key is None:
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
-    mids: List[str] = []
+    mids: list[str] = []
     for chunk in e2e.encrypt_reply(key, content, self.MAX_MESSAGE_LENGTH, e2e.DISCORD_MENTION_PREFIX_RE):
         msg = await channel.send(chunk)
         mids.append(str(msg.id))
@@ -142,7 +137,7 @@ def _wrap_discord(cls: Any) -> None:
             ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
             try:
                 encrypted = any(e2e.is_encrypted_thread("discord", x, None) for x in ids)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 encrypted = False
             if encrypted:  # fail-closed
                 return await _discord_encrypted_send(self, chat_id, content, thread_id, ids)
@@ -163,7 +158,7 @@ _TARGETS = [
 ]
 
 
-def install_outbound_patches() -> list:
+def install_outbound_patches() -> list[str]:
     """Wrap each importable platform adapter's ``send`` for reply-in-kind.
 
     Best-effort: adapters whose platform deps aren't installed are skipped. Safe
@@ -187,6 +182,6 @@ def install_outbound_patches() -> list:
             _patched.add(platform)
             installed.append(platform)
             logger.debug("mordred_e2e: wrapped %s.%s.send for outbound E2E", module_path, cls_name)
-        except Exception as e:  # noqa: BLE001 — platform not installed / import shape differs
+        except Exception as e:
             logger.debug("mordred_e2e: outbound wrap skipped for %s (%s): %s", platform, module_path, e)
     return installed
