@@ -14,7 +14,7 @@ real anthropic transport facts, and the strict-mode allowlist check compares
 against the wrong identifier.
 
 ``PROVIDER_ALIASES`` is a faithful replica of
-``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.18.2). It is *replicated*
+``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes 0.19.0). It is *replicated*
 rather than imported: ``hermes_cli`` is a private module with no stability
 contract, so importing it would couple Mordred's enforcement to Hermes'
 internal layout. ``tests/test_provider_identity.py`` guards the replica's
@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from typing import Final
 
 #: Faithful replica of ``hermes_cli/models.py::_PROVIDER_ALIASES`` (Hermes
-#: 0.18.2). Identity entries (e.g. ``xai-oauth`` → ``xai-oauth``) are kept
+#: 0.19.0). Identity entries (e.g. ``xai-oauth`` → ``xai-oauth``) are kept
 #: verbatim from upstream so the replica diffs cleanly against the source.
 #: The bare ``ollama`` → ``custom`` mapping is upstream's "local endpoint"
 #: sentinel (use ``ollama-cloud`` for the hosted product); it is preserved
@@ -65,6 +65,8 @@ PROVIDER_ALIASES: Final[Mapping[str, str]] = {
     "arceeai": "arcee",
     "gmi-cloud": "gmi",
     "gmicloud": "gmi",
+    "fireworks-ai": "fireworks",
+    "fw": "fireworks",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
     "minimax-portal": "minimax-oauth",
