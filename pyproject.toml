@@ -131,6 +131,7 @@ mordred_privacy_check = "mordred_hermes.privacy_check"
 mordred_llm_guard = "mordred_hermes.llm_guard"
 mordred_keyvault = "mordred_hermes.keyvault"
 mordred_wizard = "mordred_hermes.wizard"
+mordred_e2e = "mordred_hermes.extension.gateway_plugin"
 
 # Standalone console script -- `hermes-mordred ...` works today.
 # Hermes does NOT iterate PluginManager._cli_commands when building its
@@ -320,8 +321,6 @@ module = [
     "eth_hash.*",
     "qrcode",
     "qrcode.*",
-    "gateway",
-    "gateway.*",
     # run_agent is a repo-root top-level Hermes module (like gateway); the
     # extension chat bridge imports AIAgent from it lazily at runtime.
     "run_agent",
@@ -343,5 +342,17 @@ module = [
     "stem",
     "stem.*",
 ]
+ignore_missing_imports = true
+
+# hermes-agent now ships a top-level `gateway` package, so mypy can RESOLVE it —
+# at which point `ignore_missing_imports` no longer applies and attr-defined
+# fires for members a given hermes-agent build may not expose (the lazy
+# `from gateway import extension_pairing` in wizard/extension_pair_cli.py, guarded
+# by try/except ImportError at runtime). `follow_imports = "skip"` treats gateway
+# as opaque in BOTH the installed and not-installed cases, so the same config
+# stays green whether or not the floating hermes-agent dep ships `gateway`.
+[[tool.mypy.overrides]]
+module = ["gateway", "gateway.*"]
+follow_imports = "skip"
 ignore_missing_imports = true
 
