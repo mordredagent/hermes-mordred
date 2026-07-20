@@ -31,6 +31,67 @@ from . import e2e
 
 logger = logging.getLogger(__name__)
 
+# Platforms where end-to-end encryption is mandatory across ALL channels:
+# an inbound message the plugin cannot decrypt (plaintext, or ciphertext whose
+# key we do not hold) is never handed to the agent in cleartext. Instead the
+# sender is told to set up / obtain an encryption key (see _notify_needs_key).
+_ENFORCE_ENCRYPTION_PLATFORMS = frozenset({"slack", "discord"})
+
+_NEEDS_KEY_NOTICE = (
+    "🔒 暗号化されていないメッセージには応答できません。"
+    "拡張機能で暗号化キーを設定または取得のうえ、暗号化して再送してください。"
+)
+
+
+def _platform_name(event: Any) -> str:
+    """Normalized lowercase platform id ("slack"/"discord"/...) from an event.
+
+    ``source.platform`` may be a ``Platform`` enum or a bare string; ``.value``
+    unwraps the enum, ``str`` covers the string case.
+    """
+    src = getattr(event, "source", None)
+    raw = getattr(src, "platform", None) or getattr(event, "platform", None)
+    return str(getattr(raw, "value", raw) or "").lower()
+
+
+async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: Optional[dict]) -> None:
+    try:
+        await adapter.send(chat_id, content, reply_to=None, metadata=metadata)
+    except Exception as exc:  # noqa: BLE001 — a notice failure must never break the gateway
+        logger.warning("mordred_e2e: needs-key notice send failed: %s", exc)
+
+
+def _notify_needs_key(gateway: Any, event: Any) -> bool:
+    """Reply to the originating channel/thread asking the sender to set up or
+    obtain an encryption key. Best-effort; returns True if a send was scheduled.
+
+    The send is scheduled on the running loop (the hook itself is sync and is
+    invoked from the gateway's async dispatch path) so returning ``skip`` stays
+    non-blocking.
+    """
+    import asyncio
+
+    src = getattr(event, "source", None)
+    platform = getattr(src, "platform", None)
+    chat_id = getattr(src, "chat_id", None) or getattr(event, "chat_id", None)
+    adapters = getattr(gateway, "adapters", None)
+    adapter = adapters.get(platform) if (platform is not None and isinstance(adapters, dict)) else None
+    if adapter is None or not chat_id:
+        return False
+
+    thread = getattr(src, "thread_id", None) or getattr(event, "thread_id", None)
+    metadata: Optional[dict] = None
+    if thread:
+        # Slack threads reply via thread_ts; Discord via thread_id.
+        metadata = {"thread_ts": thread} if _platform_name(event) == "slack" else {"thread_id": thread}
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # no running loop (e.g. unit test calling the hook directly)
+        return False
+    loop.create_task(_safe_send(adapter, str(chat_id), _NEEDS_KEY_NOTICE, metadata))
+    return True
+
 
 def _thread_ctx(event: Any) -> tuple[str, str, Optional[str]]:
     """Best-effort (platform, chat_id, thread_root) from a MessageEvent."""
@@ -68,6 +129,14 @@ def pre_gateway_dispatch(
         if chat_id:
             e2e.mark_encrypted_thread(platform, chat_id, thread, kid)
         return {"action": "rewrite", "text": decrypted}
+
+    # Nothing decrypted → the agent would otherwise read this as cleartext.
+    # On platforms with mandatory E2E (Slack/Discord, all channels), refuse to
+    # answer in cleartext: tell the sender to set up / obtain an encryption key
+    # and skip, so the agent never processes the plaintext.
+    if _platform_name(event) in _ENFORCE_ENCRYPTION_PLATFORMS:
+        _notify_needs_key(gateway, event)
+        return {"action": "skip", "reason": "mordred-encryption-required"}
 
     return None
 
