@@ -25,7 +25,7 @@ takes you from zero to a protected install.
 
 ## The plugins
 
-Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
+The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-point group:
 
 | Plugin | What it does |
 |---|---|
@@ -34,6 +34,7 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 | `mordred_llm_guard` | Strict-mode enforcement of local-only LLM usage |
 | `mordred_network` | Privacy-path management: Tor / VPN / clearnet |
 | `mordred_keyvault` | Hardware-backed key management — Secure Enclave (macOS), TPM 2.0 (Linux), software fallback |
+| `mordred_e2e` | End-to-end encryption for gateway messaging platforms (Slack / Discord) — decrypts inbound, re-encrypts outbound replies |
 
 ## Requirements
 
@@ -168,12 +169,12 @@ Full command reference and interactive-command walkthroughs:
 
 ### Verify discovery
 
-Use Mordred's own command — it lists the five plugins on any supported Hermes
+Use Mordred's own command — it lists the Mordred plugins on any supported Hermes
 version:
 
 ```sh
 ~/.hermes/hermes-agent/venv/bin/hermes-mordred plugins list
-# → mordred_keyvault / mordred_llm_guard / mordred_network / mordred_privacy_check / mordred_wizard
+# → mordred_e2e / mordred_keyvault / mordred_llm_guard / mordred_network / mordred_privacy_check / mordred_wizard
 ```
 
 The **host** `hermes plugins list` scans plugin *directories* only (bundled /
@@ -452,7 +453,7 @@ rm -f ~/.local/bin/mordred-hermes-tpmkey   # Linux TPM 2.0 helper
 ## Repository layout
 
 ```
-src/mordred_hermes/    the five plugins + shared internals
+src/mordred_hermes/    the Mordred entry-point plugins + shared internals
 native/                hardware-key helper sources, shipped in the wheel and built
                        on demand by `keyvault enable-se` / `enable-tpm`:
                          sekey-helper/  — Swift, Secure Enclave (macOS)

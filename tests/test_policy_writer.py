@@ -782,3 +782,30 @@ class TestAtomicWriteHardening:
             f"tmpfile names must be randomized to avoid predictable collisions; "
             f"got the same name {tmpfiles_seen[0]!r} twice"
         )
+
+
+class TestMordredE2EIsEnabledByConfigure:
+    """``mordred_e2e`` (``extension/gateway_plugin.py``, added in the
+    0.1.0a6 release as the 6th ``hermes_agent.plugins`` entry point) was
+    missing from ``MORDRED_PLUGIN_NAMES`` -- an oversight that left the E2E
+    plugin silently inert for every ``configure`` user, since Hermes only
+    invokes ``register()`` for entry-point plugins listed in
+    ``plugins.enabled`` (see the module docstring / ``_ensure_plugins_enabled``).
+    """
+
+    def test_mordred_e2e_is_a_known_plugin_name(self) -> None:
+        assert "mordred_e2e" in MORDRED_PLUGIN_NAMES
+
+    def test_fresh_write_enables_mordred_e2e(self, tmp_path: Path) -> None:
+        """``PolicyWriter.write`` (the ``configure`` code path) must list
+        ``mordred_e2e`` in ``plugins.enabled`` on a brand-new config.yaml,
+        same as every other Mordred plugin."""
+        w = _writer(tmp_path)
+        w.write(PolicySnapshot(policy="lenient"))
+
+        from ruamel.yaml import YAML
+
+        yaml = YAML(typ="safe", pure=True)
+        with (tmp_path / "config.yaml").open(encoding="utf-8") as f:
+            data = yaml.load(f)
+        assert "mordred_e2e" in data["plugins"]["enabled"]

@@ -231,6 +231,7 @@ class TestSetEncryptionFlagPreservesFormatting:
             "    - mordred_llm_guard\n"
             "    - mordred_network\n"
             "    - mordred_keyvault\n"
+            "    - mordred_e2e\n"
         )
         assert enabled_block in before, "test setup must reproduce PolicyWriter's offset-2 dash indent"
 
