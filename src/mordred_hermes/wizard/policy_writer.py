@@ -8,7 +8,7 @@ debugger-friendly mirror that other Mordred plugins read directly.
 Three core operations:
 
 - :meth:`PolicyWriter.upsert_mordred_sections` — mutate ``plugins.mordred_*``
-  blocks in ``~/.hermes/config.yaml``. Also ensures the 5 entry-point
+  blocks in ``~/.hermes/config.yaml``. Also ensures the Mordred entry-point
   plugin names appear in ``plugins.enabled`` (HOOK_PAYLOADS.md §1 mandate
   -- Hermes loader will not invoke ``register()`` otherwise).
 - :meth:`PolicyWriter.emit_policy_json` -- serialise the resolved policy
@@ -50,6 +50,7 @@ MORDRED_PLUGIN_NAMES: Final = (
     "mordred_llm_guard",
     "mordred_network",
     "mordred_keyvault",
+    "mordred_e2e",
 )
 
 
@@ -138,7 +139,7 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
 
 
 def _ensure_plugins_enabled(root: Any) -> None:
-    """Ensure all 5 Mordred plugin names appear in ``plugins.enabled``.
+    """Ensure all Mordred plugin names appear in ``plugins.enabled``.
 
     Per HOOK_PAYLOADS.md §1 / TODO.md §0.5 acceptance gate L128, Hermes's
     entry-point plugins are NOT auto-loaded; their names must be listed
@@ -351,7 +352,7 @@ class PolicyWriter:
         ``hermes mordred network use``) that must preserve sub-fields written
         by other code paths or by hand.
 
-        Also ensures all 5 Mordred plugin names appear in ``plugins.enabled``
+        Also ensures all Mordred plugin names appear in ``plugins.enabled``
         (Hermes entry-point loader requires this -- HOOK_PAYLOADS §1).
         """
         self._edit_config(sections, _upsert_mordred_section)

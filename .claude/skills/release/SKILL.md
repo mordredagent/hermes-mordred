@@ -52,7 +52,7 @@ re-read it before proceeding, and update this skill in the same PR.
      --extra-index-url https://pypi.org/simple/ "mordred-hermes==<version>"
    ```
 
-   Then confirm entry-point discovery is 5/5 (`PluginManager.discover_and_load`
+   Then confirm entry-point discovery is 6/6 (`PluginManager.discover_and_load`
    snippet in `docs/dev/setup.md`) and `hermes-mordred --version` runs.
 
 6. **Production publish — STOP and confirm with the user first** (immediate,
@@ -63,7 +63,7 @@ re-read it before proceeding, and update this skill in the same PR.
    ```
 
 7. **Verify the production install** — fresh venv, pinned install from PyPI,
-   re-confirm discovery 5/5 + CLI.
+   re-confirm discovery 6/6 + CLI.
 
 8. **Tag + GitHub Release** — annotated tag `v<version>` on main's release
    merge commit; create a GitHub Release (use `--prerelease` for pre-release

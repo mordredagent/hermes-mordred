@@ -624,7 +624,7 @@ Highest engineering risk. Native module (`pyobjc-framework-Security`), limited t
 
 ### Versioning & SDK compatibility
 
-- All 5 plugins are bundled into the single pip package `mordred-hermes`, sharing a common version
+- All Mordred plugins are bundled into the single pip package `mordred-hermes`, sharing a common version
 - `mordred-min-hermes-version` is declared in `pyproject.toml`'s `[project.metadata]`; each plugin verifies the Hermes version in `on_session_start`
 - The Mordred-as-distribution version is managed via `docs/VERSION`
 - The upstream-check workflow (`.github/workflows/upstream-check.yml`) detects Hermes hook **name** drift (`VALID_HOOKS` membership) and auto-files an issue (a deep diff of the payload field shape is v2 deferred)

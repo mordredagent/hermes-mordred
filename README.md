@@ -8,7 +8,7 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a6`
+**Status: active alpha** — current release `0.1.0a7`
 ([PyPI](https://pypi.org/project/mordred-hermes/) has the release history and dates).
 
 New here? The step-by-step
@@ -25,7 +25,7 @@ takes you from zero to a protected install.
 
 ## The plugins
 
-Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
+The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-point group:
 
 | Plugin | What it does |
 |---|---|
@@ -34,6 +34,7 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 | `mordred_llm_guard` | Strict-mode enforcement of local-only LLM usage |
 | `mordred_network` | Privacy-path management: Tor / VPN / clearnet |
 | `mordred_keyvault` | Hardware-backed key management — Secure Enclave (macOS), TPM 2.0 (Linux), software fallback |
+| `mordred_e2e` | End-to-end encryption for gateway messaging platforms (Slack / Discord) — decrypts inbound, re-encrypts outbound replies |
 
 ## Requirements
 
@@ -41,7 +42,7 @@ Five plugins, exposed via the `hermes_agent.plugins` entry-point group:
 - `hermes-agent` ≥ 0.13.0 (its first PyPI release — older versions were never
   published and are not installable). The floor is exercised in CI on every PR
   (the `hermes-floor` job pins it exactly); behavior against the latest release
-  was last verified on 0.18.2, 2026-07-08
+  was last verified on 0.19.0, 2026-07-21
 - macOS or Linux. No special hardware required — without a Secure Enclave / TPM,
   the keyvault degrades to a software-protected key automatically.
 
@@ -56,10 +57,10 @@ form is `uv pip install --python …` (no `uv` on your machine? Install it first
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a6"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a7"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a6"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a7"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -168,12 +169,12 @@ Full command reference and interactive-command walkthroughs:
 
 ### Verify discovery
 
-Use Mordred's own command — it lists the five plugins on any supported Hermes
+Use Mordred's own command — it lists the Mordred plugins on any supported Hermes
 version:
 
 ```sh
 ~/.hermes/hermes-agent/venv/bin/hermes-mordred plugins list
-# → mordred_keyvault / mordred_llm_guard / mordred_network / mordred_privacy_check / mordred_wizard
+# → mordred_e2e / mordred_keyvault / mordred_llm_guard / mordred_network / mordred_privacy_check / mordred_wizard
 ```
 
 The **host** `hermes plugins list` scans plugin *directories* only (bundled /
@@ -228,7 +229,7 @@ extra (see the [extras table](#install-users-from-pypi) above).
 for `keyvault` on Linux):
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a6"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a7"
 ```
 
 Then use the `$M` alias from [Use it](#use-it):
@@ -452,7 +453,7 @@ rm -f ~/.local/bin/mordred-hermes-tpmkey   # Linux TPM 2.0 helper
 ## Repository layout
 
 ```
-src/mordred_hermes/    the five plugins + shared internals
+src/mordred_hermes/    the Mordred entry-point plugins + shared internals
 native/                hardware-key helper sources, shipped in the wheel and built
                        on demand by `keyvault enable-se` / `enable-tpm`:
                          sekey-helper/  — Swift, Secure Enclave (macOS)
