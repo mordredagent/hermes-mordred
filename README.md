@@ -42,7 +42,7 @@ The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-po
 - `hermes-agent` ≥ 0.13.0 (its first PyPI release — older versions were never
   published and are not installable). The floor is exercised in CI on every PR
   (the `hermes-floor` job pins it exactly); behavior against the latest release
-  was last verified on 0.18.2, 2026-07-08
+  was last verified on 0.19.0, 2026-07-21
 - macOS or Linux. No special hardware required — without a Secure Enclave / TPM,
   the keyvault degrades to a software-protected key automatically.
 
