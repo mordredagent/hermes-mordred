@@ -131,6 +131,7 @@ mordred_privacy_check = "mordred_hermes.privacy_check"
 mordred_llm_guard = "mordred_hermes.llm_guard"
 mordred_keyvault = "mordred_hermes.keyvault"
 mordred_wizard = "mordred_hermes.wizard"
+mordred_e2e = "mordred_hermes.extension.gateway_plugin"
 
 # Standalone console script -- `hermes-mordred ...` works today.
 # Hermes does NOT iterate PluginManager._cli_commands when building its
