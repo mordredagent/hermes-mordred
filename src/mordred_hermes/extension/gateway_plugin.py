@@ -100,14 +100,21 @@ def _notify_needs_key(gateway: Any, event: Any) -> bool:
 
 
 def _thread_ctx(event: Any) -> tuple[str, str, str | None]:
-    """Best-effort (platform, chat_id, thread_root) from a MessageEvent."""
+    """Best-effort (platform, chat_id, thread_root) from a MessageEvent.
+
+    The platform MUST come from :func:`_platform_name` (which unwraps the
+    ``Platform`` enum via ``.value``). ``str(Platform.SLACK)`` is
+    ``"Platform.SLACK"``, not ``"slack"`` — marking a thread under that repr
+    while the outbound wrappers look it up by the literal ``"slack"`` silently
+    disables reply-in-kind, sending the agent's answer in CLEARTEXT into an
+    encrypted channel.
+    """
     src = getattr(event, "source", None)
-    platform = getattr(src, "platform", None) or getattr(event, "platform", "") or ""
     chat_id = getattr(src, "chat_id", None) or getattr(event, "chat_id", "") or ""
     thread = getattr(src, "thread_id", None)
     if thread is None:
         thread = getattr(event, "thread_id", None)
-    return str(platform), str(chat_id), thread
+    return _platform_name(event), str(chat_id), thread
 
 
 def pre_gateway_dispatch(
