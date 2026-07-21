@@ -154,17 +154,23 @@ def thread_key_id(platform: str, channel_id: str, thread_root: str | None) -> st
 
 
 def reply_key(key_id_hint: str | None) -> bytes | None:
-    """Raw key to encrypt a reply with: the remembered inbound key (by keyId),
-    else the master key. Id-format-agnostic — no channel-id matching needed."""
-    try:
-        if key_id_hint:
-            k = key_index().get(key_id_hint)
-            if k is not None:
-                return k
-        from mordred_hermes.extension.pairing import load_pairing
+    """Raw key to encrypt a reply with: the remembered inbound key, by keyId.
+    Id-format-agnostic — no channel-id matching needed.
 
-        p = load_pairing()
-        return p.aes_key if p is not None else None
+    Fail-closed: when the hint is missing or unknown this returns ``None``
+    instead of falling back to the master/pairing key. The master is NOT a
+    channel key any extension holds, so encrypting a reply with it emits
+    ciphertext nobody in the channel can read — strictly worse than refusing,
+    because the failure is silent (it looks encrypted). Callers turn ``None``
+    into a visible "could not encrypt" notice.
+
+    v1/legacy conversations are unaffected: their remembered keyId IS the
+    master's, and ``key_index()`` contains the master, so the lookup still hits.
+    """
+    try:
+        if not key_id_hint:
+            return None
+        return key_index().get(key_id_hint)
     except Exception:
         return None
 
