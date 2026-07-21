@@ -135,11 +135,21 @@ def _prune(now: float) -> None:
 
 
 def is_encrypted_thread(platform: str, channel_id: str, thread_root: str | None) -> bool:
+    """Is this conversation known-encrypted? Falls back to the channel-level mark.
+
+    The fallback must apply even when ``thread_root`` is set: a user who
+    @-mentions the agent at channel top level is recorded under
+    ``thread_root=None`` (the inbound event has no thread), but the agent
+    answers *in a thread* rooted at that mention, so the outbound lookup carries
+    a thread_ts. Without the fallback the reply is judged unencrypted and goes
+    out in CLEARTEXT. Mirrors :func:`thread_key_id`, which already scans
+    ``(thread_root, None)`` — the two must agree or the reply path leaks.
+    """
     now = time.time()
     _prune(now)
-    if _ENC_THREADS.get((platform, channel_id, thread_root), (0, None))[0] > now:
-        return True
-    return bool(thread_root is None and _ENC_THREADS.get((platform, channel_id, None), (0, None))[0] > now)
+    return any(
+        _ENC_THREADS.get((platform, channel_id, tr), (0, None))[0] > now for tr in (thread_root, None)
+    )
 
 
 def thread_key_id(platform: str, channel_id: str, thread_root: str | None) -> str | None:
