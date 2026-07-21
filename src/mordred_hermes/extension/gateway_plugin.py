@@ -124,6 +124,18 @@ def pre_gateway_dispatch(
     **_kw: Any,
 ) -> dict[str, Any] | None:
     """Decrypt inbound ciphertext / drop key-exchange, before the agent."""
+    # The concrete platform adapters are directory-based plugins that only exist
+    # once the gateway is up, so register() cannot reach them by import path.
+    # Wrap the LIVE adapter classes here (idempotent) — otherwise the reply goes
+    # out through the real, unwrapped send in cleartext.
+    if gateway is not None:
+        try:
+            from . import outbound
+
+            outbound.wrap_live_adapters(gateway)
+        except Exception as e:  # noqa: BLE001 — never break dispatch
+            logger.debug("mordred_e2e: live adapter wrap failed: %s", e)
+
     text = getattr(event, "text", None)
     if not isinstance(text, str) or not text:
         return None
