@@ -171,7 +171,19 @@ class ExtensionAPIServer:
                 text="Mordred web app not built. Run `npm run build:page` in the extension repo.",
             )
         html = index.read_text("utf-8").replace("%%MORDRED_PAGE_TOKEN%%", self._page_token)
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            headers={
+                # The HTML embeds a per-process authentication token. A cached
+                # page from the previous Hermes process cannot authenticate to
+                # the new one, so force every navigation/reload to fetch the
+                # current process's page.
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
 
     # -- connection ---------------------------------------------------------
 
@@ -541,7 +553,10 @@ class _Connection:
         try:
             address = await asyncio.get_event_loop().run_in_executor(None, _get_address)
         except Exception as exc:
-            await self._send({"id": mid, "type": "chat_error", "reason": f"wallet: {exc}"})
+            # This is an accounts RPC failure, not a chat stream failure. The
+            # generic correlated error lets every client reject immediately
+            # rather than waiting for its accounts_result timeout.
+            await self._send({"id": mid, "type": "error", "reason": f"wallet: {exc}"})
             return
         await self._send(
             {
