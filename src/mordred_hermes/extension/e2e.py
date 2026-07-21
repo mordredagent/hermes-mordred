@@ -147,9 +147,7 @@ def is_encrypted_thread(platform: str, channel_id: str, thread_root: str | None)
     """
     now = time.time()
     _prune(now)
-    return any(
-        _ENC_THREADS.get((platform, channel_id, tr), (0, None))[0] > now for tr in (thread_root, None)
-    )
+    return any(_ENC_THREADS.get((platform, channel_id, tr), (0, None))[0] > now for tr in (thread_root, None))
 
 
 def thread_key_id(platform: str, channel_id: str, thread_root: str | None) -> str | None:

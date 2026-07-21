@@ -133,7 +133,7 @@ def pre_gateway_dispatch(
             from . import outbound
 
             outbound.wrap_live_adapters(gateway)
-        except Exception as e:  # noqa: BLE001 — never break dispatch
+        except Exception as e:
             logger.debug("mordred_e2e: live adapter wrap failed: %s", e)
 
     text = getattr(event, "text", None)

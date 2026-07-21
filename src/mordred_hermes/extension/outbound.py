@@ -180,7 +180,7 @@ def wrap_live_adapters(gateway: Any) -> list[str]:
     adapters = getattr(gateway, "adapters", None) or {}
     try:
         items = list(adapters.items())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return installed
     for plat, adapter in items:
         try:
@@ -196,10 +196,8 @@ def wrap_live_adapters(gateway: Any) -> list[str]:
             wrap(cls)
             _patched.add(name)
             installed.append(name)
-            logger.info(
-                "mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__
-            )
-        except Exception as e:  # noqa: BLE001 — never break dispatch
+            logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
+        except Exception as e:
             logger.debug("mordred_e2e: could not wrap %s: %s", plat, e)
     return installed
 
