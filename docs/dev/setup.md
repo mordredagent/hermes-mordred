@@ -95,10 +95,10 @@ The extras defined by `[project.optional-dependencies]` in `pyproject.toml`. `uv
 
 > **⚠️ CI does not use `--all-extras`**: CI's `mypy --strict src` runs without the `ethereum` / `tor-control` extras. As a result, type errors around `eth_hash` / `eth_account` / `stem` **pass locally but fail in CI**. If you touch that code, reproduce it in a venv with only `.[dev,keyvault,extension]` before pushing (see `CI.md` for details).
 
-> **Verifying discovery**: `hermes plugins list` does not show entry-point plugins (upstream's `_discover_all_plugins` is designed to scan directory-based plugins only). The loader side (`PluginManager.discover_and_load`) performs discovery + `register()`. To confirm that all 5 plugins actually load:
+> **Verifying discovery**: `hermes plugins list` does not show entry-point plugins (upstream's `_discover_all_plugins` is designed to scan directory-based plugins only). The loader side (`PluginManager.discover_and_load`) performs discovery + `register()`. To confirm that all Mordred plugins actually load:
 > ```sh
 > .venv/bin/python -c "from hermes_cli.plugins import PluginManager; m=PluginManager(); m.discover_and_load(force=True); print(sorted(k for k,p in m._plugins.items() if p.manifest.source=='entrypoint'))"
-> # → ['mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
+> # → ['mordred_e2e', 'mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
 > ```
 
 ---
@@ -159,7 +159,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "mordred-hermes[macos]==0.1.0a6"   # ← substitute the current PyPI version here
+  --reinstall "mordred-hermes[macos]==0.1.0a7"   # ← substitute the current PyPI version here
 ```
 
 ## (Optional) Hermes upstream remote

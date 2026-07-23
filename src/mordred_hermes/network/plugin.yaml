@@ -2,7 +2,7 @@
 # is a Mordred-internal hint used by sibling plugins to detect peer disable
 # (TODO §1.1 H3 Path B / SPEC §Plugin-disable protection Tier A).
 name: mordred_network
-version: 0.1.0a6
+version: 0.1.0a7
 description: Mordred network plugin (Phase 0 stub)
 author: InternetMaximalism
 privacy_lock: true

@@ -185,6 +185,28 @@ def test_full_server_flow():
     assert r["signature"] == "0xstubbedsig"
 
 
+def test_page_response_is_never_cached():
+    """The HTML contains a token tied to one server process, so a browser must
+    not reuse it after Hermes restarts."""
+
+    async def _flow(port):
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/") as response:
+                return response.status, response.headers, await response.text(), server._page_token
+        finally:
+            await server.stop()
+
+    status, headers, html, token = asyncio.run(_flow(_free_port()))
+    assert status == 200
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Referrer-Policy"] == "no-referrer"
+    assert token in html
+    assert "%%MORDRED_PAGE_TOKEN%%" not in html
+
+
 def test_page_token_auth_and_history():
     """The localhost page authenticates with the per-process page token (only
     from a local origin) and can read/clear the encrypted history."""
@@ -215,6 +237,36 @@ def test_page_token_auth_and_history():
     assert auth_type == "auth_ok"
     assert hist_type == "history_result"
     assert cleared_type == "history_cleared"
+
+
+def test_accounts_failure_is_a_correlated_rpc_error(monkeypatch):
+    def _fail_address():
+        raise RuntimeError("vault unavailable")
+
+    monkeypatch.setattr(extension_api, "_get_address", _fail_address)
+
+    async def _flow(port):
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(
+                    f"http://127.0.0.1:{port}/ext",
+                    headers={"Origin": f"http://127.0.0.1:{port}"},
+                ) as ws,
+            ):
+                await _page_auth(ws, server)
+                await ws.send_str(json.dumps({"id": "a1", "type": "accounts_request"}))
+                return await _recv(ws)
+        finally:
+            await server.stop()
+
+    assert asyncio.run(_flow(_free_port())) == {
+        "id": "a1",
+        "type": "error",
+        "reason": "wallet: vault unavailable",
+    }
 
 
 def test_auth_required_before_commands():
