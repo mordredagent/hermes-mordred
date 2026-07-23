@@ -114,7 +114,7 @@ async def _discord_encrypted_send(self: Any, chat_id: str, content: str, thread_
 
     kid = None
     for cid in lookup:
-        kid = e2e.thread_key_id("discord", cid, None)
+        kid = e2e.thread_key_id("discord", cid, thread_id)
         if kid:
             break
     key = e2e.reply_key(kid)
@@ -133,10 +133,11 @@ def _wrap_discord(cls: Any) -> None:
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):  # type: ignore[no-untyped-def]
         if getattr(self, "_client", None):
-            thread_id = (metadata or {}).get("thread_id")
+            raw_thread_id = (metadata or {}).get("thread_id")
+            thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
             ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
             try:
-                encrypted = any(e2e.is_encrypted_thread("discord", x, None) for x in ids)
+                encrypted = any(e2e.is_encrypted_thread("discord", x, thread_id) for x in ids)
             except Exception:
                 encrypted = False
             if encrypted:  # fail-closed
