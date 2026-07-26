@@ -24,7 +24,9 @@ Patterns mirror ``test_harness_detect.py``:
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import os
+import socket
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,36 @@ def _write_policy_json(
     path = tmp_path / "policy.json"
     path.write_text(json.dumps(body), encoding="utf-8")
     return path
+
+
+def _check_strict_local_endpoint(
+    tmp_path: Path,
+    *,
+    source: str,
+    endpoint: str,
+    audit: _FakeAuditWriter,
+    health_probe: Callable[[str], None],
+) -> None:
+    """Exercise the policy.json or runtime-base-url local endpoint path."""
+    policy_endpoint = endpoint if source == "policy" else "http://127.0.0.1:1234/v1"
+    cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint=policy_endpoint)
+    if source == "policy":
+        enforce.check_session_provider(
+            policy_mode="strict",
+            policy_json_path=cfg,
+            active_provider="mordred-local",
+            audit=audit,
+            health_probe=health_probe,
+        )
+        return
+    enforce.check_runtime_provider(
+        policy_mode="strict",
+        policy_json_path=cfg,
+        active_provider="mordred-local",
+        audit=audit,
+        health_probe=health_probe,
+        runtime_base_url=endpoint,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -421,7 +453,7 @@ class TestStrictLocal:
         cfg = _write_policy_json(
             tmp_path,
             policy="strict",
-            local_llm_endpoint="http://example.test:9999/v1",
+            local_llm_endpoint="http://127.0.0.1:9999/v1",
         )
         seen: list[str] = []
 
@@ -436,7 +468,174 @@ class TestStrictLocal:
             audit=audit,
             health_probe=_record,
         )
-        assert seen == ["http://example.test:9999/v1"]
+        assert seen == ["http://127.0.0.1:9999/v1"]
+
+    @pytest.mark.parametrize("source", ["policy", "runtime"])
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://127.0.0.1:1234/v1",
+            "https://127.0.0.1:1234/v1",
+            "http://[::1]:1234/v1",
+            "https://localhost:1234/v1",
+        ],
+    )
+    def test_strict_local_accepts_loopback_http_endpoints(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+        endpoint: str,
+    ) -> None:
+        def _loopback_results(host: str, port: int, **_kwargs: Any) -> list[tuple[Any, ...]]:
+            assert host == "localhost"
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+                (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::1", port, 0, 0)),
+            ]
+
+        monkeypatch.setattr(enforce.socket, "getaddrinfo", _loopback_results)
+        seen: list[str] = []
+        audit = _FakeAuditWriter()
+
+        _check_strict_local_endpoint(
+            tmp_path,
+            source=source,
+            endpoint=endpoint,
+            audit=audit,
+            health_probe=seen.append,
+        )
+
+        assert seen == [endpoint]
+        assert not any(entry["decision"] == "block" for entry in audit.entries)
+
+    @pytest.mark.parametrize("source", ["policy", "runtime"])
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://192.168.1.20:1234/v1",
+            "https://8.8.8.8/v1",
+            "http://169.254.169.254/latest",
+            "http://127.0.0.2:1234/v1",
+            "http://user:secret@127.0.0.1:1234/v1",
+            "ftp://127.0.0.1:1234/v1",
+            "http://%31%32%37.0.0.1:1234/v1",
+            "http://localhost.evil:1234/v1",
+            "not-a-url",
+            "http://[::1",
+        ],
+    )
+    def test_strict_local_rejects_non_loopback_or_malformed_before_probe(
+        self,
+        tmp_path: Path,
+        source: str,
+        endpoint: str,
+    ) -> None:
+        probed: list[str] = []
+        audit = _FakeAuditWriter()
+
+        with pytest.raises(MordredSessionRefused) as excinfo:
+            _check_strict_local_endpoint(
+                tmp_path,
+                source=source,
+                endpoint=endpoint,
+                audit=audit,
+                health_probe=probed.append,
+            )
+
+        assert probed == []
+        assert len(audit.entries) == 1
+        assert audit.entries[0]["decision"] == "block"
+        assert audit.entries[0]["reason"] == "policy.strict.session_refused"
+        assert audit.entries[0]["provider_id"] == "mordred-local"
+        assert "secret" not in str(excinfo.value)
+        assert "secret" not in json.dumps(audit.entries)
+
+    @pytest.mark.parametrize("source", ["policy", "runtime"])
+    def test_strict_local_rejects_localhost_with_any_non_loopback_dns_result_before_probe(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> None:
+        def _mixed_results(_host: str, port: int, **_kwargs: Any) -> list[tuple[Any, ...]]:
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.7", port)),
+            ]
+
+        monkeypatch.setattr(enforce.socket, "getaddrinfo", _mixed_results)
+        probed: list[str] = []
+        audit = _FakeAuditWriter()
+
+        with pytest.raises(MordredSessionRefused):
+            _check_strict_local_endpoint(
+                tmp_path,
+                source=source,
+                endpoint="http://localhost:1234/v1",
+                audit=audit,
+                health_probe=probed.append,
+            )
+
+        assert probed == []
+        assert [entry["decision"] for entry in audit.entries] == ["block"]
+        assert "non-loopback" in audit.entries[0]["cause"]
+
+    @pytest.mark.parametrize("source", ["policy", "runtime"])
+    def test_strict_local_adds_exact_proxy_bypass_before_probe(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        source: str,
+    ) -> None:
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+        monkeypatch.setenv("NO_PROXY", "internal.example")
+        monkeypatch.setenv("no_proxy", "other.example,localhost")
+        seen: list[str] = []
+
+        _check_strict_local_endpoint(
+            tmp_path,
+            source=source,
+            endpoint="http://127.0.0.1:1234/v1",
+            audit=_FakeAuditWriter(),
+            health_probe=seen.append,
+        )
+
+        assert seen == ["http://127.0.0.1:1234/v1"]
+        expected = "internal.example,other.example,localhost,127.0.0.1,::1"
+        assert os.environ["NO_PROXY"] == expected
+        assert os.environ["no_proxy"] == expected
+
+    @pytest.mark.parametrize("policy_mode", ["off", "lenient", "balanced", "audit"])
+    @pytest.mark.parametrize("runtime", [False, True])
+    def test_non_strict_modes_do_not_apply_loopback_boundary(
+        self,
+        tmp_path: Path,
+        policy_mode: str,
+        runtime: bool,
+    ) -> None:
+        cfg = _write_policy_json(
+            tmp_path,
+            policy=policy_mode,
+            local_llm_endpoint="https://collector.example/v1",
+        )
+        probed: list[str] = []
+        audit = _FakeAuditWriter()
+        kwargs = {
+            "policy_mode": policy_mode,
+            "policy_json_path": cfg,
+            "active_provider": "mordred-local",
+            "audit": audit,
+            "health_probe": probed.append,
+        }
+
+        if runtime:
+            enforce.check_runtime_provider(**kwargs, runtime_base_url="https://collector.example/v1")
+        else:
+            enforce.check_session_provider(**kwargs)
+
+        assert probed == []
+        assert audit.entries == []
 
 
 # --------------------------------------------------------------------------- #

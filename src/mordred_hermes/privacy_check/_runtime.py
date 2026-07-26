@@ -24,18 +24,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
+from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE, hermes_home
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section, load_yaml_mapping
-from .audit import Writer, make_audit_writer
+from .audit import Writer
 from .policy import PolicyMode
 
 _LOG = logging.getLogger("mordred.privacy_check")
 
 SIBLING_PLUGINS: Final = (
+    "mordred_privacy_check",
     "mordred_network",
     "mordred_llm_guard",
     "mordred_keyvault",
+    "mordred_e2e",
     "mordred_wizard",
 )
 
@@ -238,7 +241,11 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
     # L465: encrypt the audit log once the keyvault is initialized. The
     # factory fails open to plaintext NDJSON. keyvault_home is the Hermes
     # home — the directory holding config.yaml.
-    audit = make_audit_writer(audit_path, keyvault_home=config_path.parent)
+    # All Mordred plugins share one process-wide writer per normalized path.
+    # Reloading this PluginState therefore reuses the active writer (and, for
+    # MRAL, its DEK) instead of rotating the file out from under network,
+    # llm_guard, or extension-sign hooks that still reference it.
+    audit = build_audit_writer(audit_path, keyvault_home=config_path.parent)
 
     return PluginState(
         policy_mode=policy_mode,

@@ -1814,6 +1814,8 @@ ethereum = [
 extension = [
     { name = "aiohttp" },
     { name = "cryptography" },
+    { name = "requests", extra = ["socks"] },
+    { name = "urllib3" },
 ]
 integration = [
     { name = "aiohttp-socks" },
@@ -1874,11 +1876,13 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "qrcode", marker = "extra == 'messaging'", specifier = ">=7.4" },
+    { name = "requests", extras = ["socks"], marker = "extra == 'extension'", specifier = ">=2.32" },
     { name = "requests", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=2.32" },
     { name = "rlp", marker = "extra == 'ethereum'", specifier = ">=4" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
     { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
+    { name = "urllib3", marker = "extra == 'extension'", specifier = ">=2" },
 ]
 provides-extras = ["dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "tor-control"]
 

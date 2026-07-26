@@ -77,21 +77,11 @@ def test_wizard_extension_serve_missing_extra(
     assert "import failed:" in err
 
 
-def test_serve_warns_on_non_loopback_host(capsys: pytest.CaptureFixture[str]) -> None:
-    # Bind a routable host but a port that is already taken, so serve() warns
-    # and then exits on EADDRINUSE without ever exposing a live socket.
-    port = _free_port()
-    blocker = socket.socket()
-    blocker.bind(("0.0.0.0", port))
-    blocker.listen(1)
-    try:
-        rc = serve(host="0.0.0.0", port=port)
-    finally:
-        blocker.close()
-
-    assert rc == 1
+def test_serve_rejects_non_loopback_host(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = serve(host="0.0.0.0", port=_free_port())
+    assert rc == 2
     err = capsys.readouterr().err
-    assert "beyond localhost" in err
+    assert "refusing non-loopback" in err
 
 
 def test_serve_port_in_use_returns_one(capsys: pytest.CaptureFixture[str]) -> None:

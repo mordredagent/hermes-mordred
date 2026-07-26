@@ -39,6 +39,11 @@ def register(ctx: Any) -> None:
     from ._runtime_env import install_vault_env_decrypt
 
     install_vault_env_decrypt()
+    from ..privacy_check.hooks import check_plugin_integrity
+
+    # This gate is intentionally not best-effort: every live runtime sibling
+    # must still detect when privacy_check itself was explicitly disabled.
+    ctx.register_hook("on_session_start", check_plugin_integrity)
 
     try:
         from ._env_write_guard import install_env_write_guard

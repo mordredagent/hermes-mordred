@@ -185,7 +185,7 @@ class TestRegisterWiring:
         ctx = _FakeCtx()
         keyvault.register(ctx)
 
-        assert "on_session_start" in ctx.hooks
+        assert ctx.hooks.count("on_session_start") == 2
         assert "on_session_end" in ctx.hooks
 
     def test_register_survives_hook_rejection(self, monkeypatch: pytest.MonkeyPatch) -> None:

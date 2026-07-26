@@ -12,6 +12,7 @@ pytest.importorskip("eth_account")
 pytest.importorskip("rlp")
 from eth_account import Account  # noqa: E402
 
+from mordred_hermes.extension import wallet as extension_wallet  # noqa: E402
 from mordred_hermes.keyvault import extension_sign  # noqa: E402
 from mordred_hermes.keyvault.ethereum import EthereumSignature  # noqa: E402
 
@@ -44,6 +45,7 @@ def test_legacy_tx_recovers_sender():
     out = extension_sign.sign_transaction(tx, chain_id=1)
     assert out["raw"].startswith("0x")
     assert Account.recover_transaction(out["raw"]) == _ADDR
+    assert extension_wallet._recover_transaction_signer(out["raw"]) == _ADDR
 
 
 def test_eip1559_tx_recovers_sender():
@@ -71,6 +73,7 @@ def test_personal_sign_recovers_signer(monkeypatch):
     msg = "Login to Mordred"
     out = extension_sign.personal_sign(msg)
     assert Account.recover_message(__import__("eth_account").messages.encode_defunct(text=msg), signature=out) == _ADDR
+    assert extension_wallet._recover_personal_signer(msg, out) == _ADDR
 
 
 def test_typed_data_sign_recovers_signer():
@@ -87,6 +90,7 @@ def test_typed_data_sign_recovers_signer():
     from eth_account.messages import encode_typed_data
 
     assert Account.recover_message(encode_typed_data(full_message=typed), signature=out) == _ADDR
+    assert extension_wallet._recover_typed_data_signer(typed, out) == _ADDR
 
 
 def test_eip191_hash_matches_eth_account_private_helper():

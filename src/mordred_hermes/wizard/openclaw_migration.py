@@ -36,7 +36,13 @@ from typing import TYPE_CHECKING, Any
 from .._log_rotation import utcnow_iso as _utcnow_iso
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section
-from .policy_writer import PolicySnapshot, PolicyWriter, _atomic_write_text, _section_matches_dict
+from .policy_writer import (
+    PolicySnapshot,
+    PolicyWriter,
+    _atomic_write_text,
+    _preserve_provider_overrides,
+    _section_matches_dict,
+)
 
 if TYPE_CHECKING:
     from .upgrade import Story1_5Action, UpgradeOptions
@@ -246,7 +252,10 @@ def _migrate_policy(
     if config is None:
         return False
 
-    snapshot = _coerce_snapshot(config)
+    snapshot = _preserve_provider_overrides(
+        _coerce_snapshot(config),
+        policy_writer.policy_json_path,
+    )
     # Apply --policy-conflict against the OpenClaw snapshot (P1-A).
     if not _should_write_policy(policy_writer, snapshot, options):
         return False

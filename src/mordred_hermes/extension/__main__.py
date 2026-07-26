@@ -92,15 +92,16 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
         print(f"error: port must be 1-65535 (got {port}).", file=sys.stderr)
         return 2
 
-    # The wire protocol is designed localhost-only and carries no TLS (SPEC
-    # §6; the Origin check is the only transport-level gate) — binding a
-    # routable interface exposes pairing/auth attempts to the whole network.
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    # The wire protocol is localhost-only and carries no TLS. Refuse a
+    # routable/wildcard bind instead of relying on a warning that can be missed.
+    from .api import _is_loopback_host
+
+    if not _is_loopback_host(host):
         print(
-            f"warning: binding {host} exposes the extension API beyond localhost — "
-            "the protocol is localhost-only by design and has no TLS.",
+            f"error: refusing non-loopback extension API host {host!r}; the protocol is localhost-only and has no TLS.",
             file=sys.stderr,
         )
+        return 2
 
     # INFO so ExtensionAPIServer.start()'s "Mordred extension API on ws://..."
     # line reaches the console; this is a foreground/CLI launcher, not a
@@ -171,7 +172,8 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
         print(_term.heading("Mordred Extension server", enabled=color))
         print()
         print(f"WebSocket:  ws://{host}:{port}/ext")
-        print(f"Web page:   http://{host}:{port}/")
+        print(f"Web page:   {server.page_url}")
+        print("            (private launch URL; do not share)")
         print()
         print("Press Ctrl+C to stop.")
 
@@ -197,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--host",
         default=_DEFAULT_HOST,
-        help=f"Bind host (default: {_DEFAULT_HOST} — non-loopback exposes the no-TLS API to your network)",
+        help=f"Loopback bind host (default: {_DEFAULT_HOST}; non-loopback values are refused)",
     )
     parser.add_argument("--port", type=int, default=_DEFAULT_PORT, help=f"Bind port (default: {_DEFAULT_PORT})")
     args = parser.parse_args(argv)

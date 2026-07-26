@@ -28,13 +28,16 @@ from .policy import evaluate_pre_tool_call
 _LOG = logging.getLogger("mordred.privacy_check")
 
 
-def on_session_start(**kwargs: Any) -> None:
-    """Load policy, detect sibling-disable, emit one-shot degraded markers.
+def check_plugin_integrity(**_kwargs: Any) -> None:
+    """Detect an explicitly disabled Mordred plugin from any live sibling.
 
     Strict + sibling-disable → audit + poison + ``SystemExit``.
     Lenient/off + sibling-disable → audit (warn) + log warning, continue.
-    Always emits ``mordred.degraded.no_origin_skill`` once per process
-    (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
+
+    Every runtime plugin registers this same callback. That is deliberate:
+    relying on ``mordred_privacy_check`` alone would make disabling that plugin
+    disable the detector too. As long as at least one runtime sibling remains
+    active, strict mode therefore fails closed.
     """
     state = _runtime.ensure_state()
     disabled = _runtime.find_disabled_siblings(config_path=state.config_path)
@@ -68,6 +71,15 @@ def on_session_start(**kwargs: Any) -> None:
             raise SystemExit(msg)
         _LOG.warning("Mordred siblings disabled in %s mode: %s", state.policy_mode, sorted(disabled))
 
+
+def on_session_start(**kwargs: Any) -> None:
+    """Run the shared integrity gate and emit one-shot degraded markers.
+
+    Always emits ``mordred.degraded.no_origin_skill`` once per process
+    (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
+    """
+    check_plugin_integrity(**kwargs)
+    state = _runtime.ensure_state()
     if _runtime.claim_no_origin_skill_emit():
         safe_audit_append(
             state.audit,

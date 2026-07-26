@@ -235,6 +235,7 @@ class TestRun:
             "cloud_attempt_action": "prompt-once",
             # strict policy → disable_ipv6=True is computed by collect_answers.
             "disable_ipv6": True,
+            "provider_overrides": {},
         }
         ytext = (tmp_path / "config.yaml").read_text(encoding="utf-8")
         assert "policy: strict" in ytext
@@ -249,6 +250,42 @@ class TestRun:
         assert result.snapshot.policy == "strict"
         assert result.snapshot.local_llm_endpoint == "http://x/v1"
         assert result.snapshot.harness_primary == "codex"
+
+    def test_interactive_rerun_preserves_provider_overrides(self, tmp_path: Path) -> None:
+        override = {
+            "corp-proxy": {
+                "transport": "httpx",
+                "respects_proxy": True,
+                "respects_socks5h": True,
+                "respects_ipv6_proxy": True,
+                "unverified_baseline": False,
+                "transport_class": "http",
+            }
+        }
+        policy_path = tmp_path / "mordred" / "policy.json"
+        policy_path.parent.mkdir(parents=True)
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "policy": "off",
+                    "provider_overrides": override,
+                    "unknown_top_level": "drop",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = run(
+            setup_runner=_SetupRunnerSpy(),
+            prompt_io=_ScriptedPromptIO(answers=_core_answers(policy="strict")),
+            policy_writer=_writer(tmp_path),
+        )
+
+        body = json.loads(policy_path.read_text(encoding="utf-8"))
+        assert result.snapshot.provider_overrides == override
+        assert body["provider_overrides"] == override
+        assert body["policy"] == "strict"
+        assert "unknown_top_level" not in body
 
     def test_default_does_not_call_runner(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=_core_answers(policy="off"))
@@ -668,6 +705,7 @@ class TestSnapshotFromArgs:
         assert snapshot.disable_ipv6 is False
 
     def test_existing_values_seed_unspecified_flags(self) -> None:
+        overrides = {"corp-proxy": {"transport": "httpx"}}
         existing = {
             "policy": "strict",
             "allow_cloud_llm": True,
@@ -676,6 +714,7 @@ class TestSnapshotFromArgs:
             "local_llm_model_id": "llama",
             "cloud_attempt_action": "prompt-once",
             "harness_primary": "cursor",
+            "provider_overrides": overrides,
         }
         snapshot = configure.snapshot_from_args(argparse.Namespace(), existing=existing).snapshot
         assert snapshot.policy == "strict"
@@ -685,6 +724,7 @@ class TestSnapshotFromArgs:
         assert snapshot.local_llm_model_id == "llama"
         assert snapshot.cloud_attempt_action == "prompt-once"
         assert snapshot.harness_primary == "cursor"
+        assert snapshot.provider_overrides == overrides
 
     def test_flags_override_existing(self) -> None:
         existing = {"policy": "strict"}
@@ -734,6 +774,14 @@ class TestSnapshotFromArgsHardening:
         ns = argparse.Namespace(allow_cloud_llm=False)  # --no-allow-cloud-llm
         snapshot = configure.snapshot_from_args(ns, existing={"allow_cloud_llm": True}).snapshot
         assert snapshot.allow_cloud_llm is False
+
+    @pytest.mark.parametrize("raw", [None, ["bad"], "bad"])
+    def test_malformed_provider_overrides_are_not_sanitized(self, raw: object) -> None:
+        snapshot = configure.snapshot_from_args(
+            argparse.Namespace(),
+            existing={"provider_overrides": raw},
+        ).snapshot
+        assert snapshot.provider_overrides == raw
 
     def test_non_interactive_write_failure_reports_cleanly(
         self,

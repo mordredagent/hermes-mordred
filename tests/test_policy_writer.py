@@ -52,6 +52,7 @@ class TestEmitPolicyJson:
             "local_llm_model_id": "",
             "cloud_attempt_action": "always-block",
             "disable_ipv6": True,
+            "provider_overrides": {},
         }
         st_mode = stat.S_IMODE(os.stat(path).st_mode)
         assert st_mode == 0o600, f"expected 0o600, got 0o{st_mode:o}"
@@ -73,6 +74,8 @@ class TestEmitPolicyJson:
             < text.index('"local_llm_endpoint"')
             < text.index('"local_llm_model_id"')
             < text.index('"cloud_attempt_action"')
+            < text.index('"disable_ipv6"')
+            < text.index('"provider_overrides"')
         )
 
     def test_idempotent(self, tmp_path: Path) -> None:
@@ -83,6 +86,83 @@ class TestEmitPolicyJson:
         first_mtime = path.stat().st_mtime_ns
         w.emit_policy_json(snap)
         assert path.stat().st_mtime_ns == first_mtime, "no-op write must not touch mtime"
+
+    def test_preserves_hand_edited_provider_overrides_only(self, tmp_path: Path) -> None:
+        """Configure-owned fields update, while the opaque extension survives."""
+        w = _writer(tmp_path)
+        path = tmp_path / "mordred" / "policy.json"
+        path.parent.mkdir(parents=True)
+        override = {
+            "corp-proxy": {
+                "transport": "httpx",
+                "respects_proxy": True,
+                "respects_socks5h": True,
+                "respects_ipv6_proxy": True,
+                "unverified_baseline": False,
+                "transport_class": "http",
+            }
+        }
+        path.write_text(
+            json.dumps(
+                {
+                    "policy": "off",
+                    "allow_cloud_llm": True,
+                    "provider_overrides": override,
+                    "unknown_top_level": "scrub me",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        w.emit_policy_json(
+            PolicySnapshot(
+                policy="strict",
+                allow_cloud_llm=False,
+                local_llm_model_id="qwen",
+                disable_ipv6=False,
+            )
+        )
+
+        body = json.loads(path.read_text(encoding="utf-8"))
+        assert body["provider_overrides"] == override
+        assert body["policy"] == "strict"
+        assert body["allow_cloud_llm"] is False
+        assert body["local_llm_model_id"] == "qwen"
+        assert body["disable_ipv6"] is False
+        # policy.json remains a scrubbed wizard snapshot: preservation is
+        # deliberately scoped to provider_overrides, not arbitrary root keys.
+        assert "unknown_top_level" not in body
+
+    @pytest.mark.parametrize(
+        "malformed",
+        [
+            None,
+            ["not", "an", "object"],
+            {"corp-proxy": {"transport": "httpx", "future_unsafe_fact": True}},
+        ],
+    )
+    def test_preserves_malformed_overrides_for_fail_closed_reader(
+        self,
+        tmp_path: Path,
+        malformed: object,
+    ) -> None:
+        """Never repair malformed evidence into an allowed empty mapping."""
+        from mordred_hermes.network.hooks import _read_provider_overrides
+
+        w = _writer(tmp_path)
+        path = tmp_path / "mordred" / "policy.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"policy": "strict", "provider_overrides": malformed}),
+            encoding="utf-8",
+        )
+
+        w.emit_policy_json(PolicySnapshot(policy="strict"))
+
+        body = json.loads(path.read_text(encoding="utf-8"))
+        assert body["provider_overrides"] == malformed
+        with pytest.raises(ValueError):
+            _read_provider_overrides(path)
 
 
 class TestPolicySnapshotPhase2Fields:
@@ -145,6 +225,13 @@ class TestPolicySnapshotPhase2Fields:
         assert snap.local_llm_endpoint == "http://localhost:1234/v1"
         assert snap.local_llm_model_id == ""
         assert snap.cloud_attempt_action == "always-block"
+        assert snap.provider_overrides == {}
+        assert isinstance(hash(snap), int)
+
+    def test_explicit_provider_overrides_round_trip(self) -> None:
+        override = {"corp-proxy": {"transport": "httpx"}}
+        snap = PolicySnapshot(policy="strict", provider_overrides=override)
+        assert snap.to_json_dict()["provider_overrides"] == override
 
     def test_cloud_attempt_action_only_accepts_known_values(self) -> None:
         """No validation at the dataclass level — schema is documented but

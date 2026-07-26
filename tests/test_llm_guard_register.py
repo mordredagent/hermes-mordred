@@ -113,14 +113,16 @@ class TestRegisterEntryPoint:
             _on_session_start_harness,
             register,
         )
+        from mordred_hermes.privacy_check.hooks import check_plugin_integrity
 
         ctx = _FakeCtx()
         register(ctx)
 
         session_start_callbacks = [cb for name, cb in ctx.hooks if name == "on_session_start"]
-        assert len(session_start_callbacks) == 2, "PR2 wires two on_session_start callbacks"
-        assert session_start_callbacks[0] is _on_session_start_harness
-        assert session_start_callbacks[1] is _on_session_start_enforce
+        assert len(session_start_callbacks) == 3
+        assert session_start_callbacks[0] is check_plugin_integrity
+        assert session_start_callbacks[1] is _on_session_start_harness
+        assert session_start_callbacks[2] is _on_session_start_enforce
 
     def test_register_does_not_wire_pre_llm_call(self) -> None:
         """PR1 does NOT touch ``pre_llm_call``.
@@ -480,6 +482,6 @@ class TestRegisterIsIdempotent:
         import providers
 
         assert providers._REGISTRY.get("mordred-local") is not None
-        # 2 on_session_start (harness + enforce) + 1 pre_api_request = 3
-        assert len(ctx1.hooks) == 3
-        assert len(ctx2.hooks) == 3
+        # 3 on_session_start (integrity + harness + enforce) + pre_api_request.
+        assert len(ctx1.hooks) == 4
+        assert len(ctx2.hooks) == 4

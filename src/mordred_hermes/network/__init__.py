@@ -7,7 +7,7 @@ Phase 3 PR2 wiring:
    ``~/.hermes/mordred/policy.json``.
 2. Register it process-wide via :func:`api.set_runtime`.
 3. Register :mod:`hooks` callbacks for ``on_session_start`` /
-   ``on_session_end`` / ``pre_tool_call``.
+   ``on_session_end`` / ``pre_api_request`` / ``pre_tool_call``.
 
 Side-effect-free at module import: provider, hook, and runtime
 registration all happen inside :func:`register`. Tests verify this via
@@ -52,7 +52,7 @@ class PluginContext(Protocol):
 
 
 def register(ctx: PluginContext) -> None:
-    """Hermes plugin entry point. Wires the runtime + 3 hooks.
+    """Hermes plugin entry point. Wires the runtime + enforcement hooks.
 
     Codex P1 fix (2026-05-14): build :class:`RuntimeConfig` from
     ``policy.json`` + ``config.yaml`` rather than the always-``off``
@@ -70,6 +70,7 @@ def register(ctx: PluginContext) -> None:
     )
     runtime = Runtime(config=config, audit=audit)
     api.set_runtime(runtime)
+    from ..privacy_check.hooks import check_plugin_integrity
 
     def _on_session_start(**kwargs: Any) -> None:
         hooks.on_session_start(
@@ -87,8 +88,20 @@ def register(ctx: PluginContext) -> None:
             **kwargs,
         )
 
+    def _pre_api_request(**kwargs: Any) -> None:
+        hooks.pre_api_request(
+            policy_json_path=DEFAULT_POLICY_JSON_PATH,
+            audit=audit,
+            **kwargs,
+        )
+
+    # Register the cross-plugin integrity gate from every runtime sibling.
+    # Otherwise explicitly disabling privacy_check would also disable its own
+    # sibling-disable detector.
+    ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end", hooks.on_session_end)
+    ctx.register_hook("pre_api_request", _pre_api_request)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
 
 
@@ -288,15 +301,14 @@ def _resolve_custom_health_cmd(network: dict[str, Any]) -> tuple[str, ...] | Non
 
 @functools.lru_cache(maxsize=1)
 def _build_audit_writer(path: Path) -> Writer:
-    """Per-process cached audit writer (one ``mkdir`` + ``chmod`` per path).
+    """Module-local reference to the process-wide writer for ``path``.
 
-    The module-local ``lru_cache`` keeps this cache -- and the
-    ``cache_clear()`` the tests drive -- separate from ``llm_guard``'s
-    identically-pathed writer; construction is delegated to the shared
+    The module-local ``lru_cache`` preserves the cheap repeated-call and
+    ``cache_clear()`` behavior tests rely on. The authoritative ownership is
+    delegated to the shared
     :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
-    encryption-aware writer ``privacy_check`` uses for ``audit.log`` (an
-    ``EncryptedWriter`` once the keyvault is initialized, else an
-    ``NDJSONWriter``), doing the lazy ``privacy_check`` import to keep
-    ``register`` cheap.
+    same normalized-path singleton used by privacy_check, llm_guard and
+    extension-sign. Clearing this local cache cannot close or replace a writer
+    still used by another plugin.
     """
     return build_audit_writer(path)

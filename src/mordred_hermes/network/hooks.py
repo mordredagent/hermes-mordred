@@ -12,6 +12,9 @@ Return-shape contracts (HOOK_PAYLOADS.md §1, §4):
   so a strict-mode bring-up failure actually aborts the session.
 - ``on_session_end`` - return ignored. We tear down the active path
   via :func:`api.stop`.
+- ``pre_api_request`` - return ignored. Strict + Tor revalidates the
+  request-resolved provider and raises :class:`MordredPathBringupFailed`
+  before egress when its transport is not verified compatible.
 - ``pre_tool_call`` - return ``None`` to allow. Strict + dropped path
   raises :class:`MordredPathDropped` (``BaseException``) for the same
   escape reason.
@@ -27,7 +30,7 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
@@ -41,7 +44,7 @@ from ._exceptions import (
     MordredPathBringupFailed,
     MordredPathDropped,
 )
-from .provider_transport_flagger import evaluate
+from .provider_transport_flagger import ProviderEntry, TransportClass, evaluate
 
 _LOG = logging.getLogger("mordred.network.hooks")
 
@@ -51,6 +54,20 @@ _DEFAULT_NETWORK_PATH: Final[str] = "clearnet"
 # 2026-07-13). ``decision`` is ``block`` for an abort-severity flag (strict
 # refusal) and ``warn`` for a warning-severity one (audited, session continues).
 _REASON_TRANSPORT_FLAG: Final[str] = "network.transport_incompatible"
+_UNRESOLVED_PROVIDER: Final[str] = "<unresolved>"
+_OVERRIDE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "transport",
+        "respects_proxy",
+        "respects_socks5h",
+        "localhost_only",
+        "dns_quirk",
+        "unverified_baseline",
+        "transport_class",
+        "respects_ipv6_proxy",
+    }
+)
+_TRANSPORT_CLASSES: Final[frozenset[str]] = frozenset({"http", "tcp", "udp", "quic", "grpc", "websocket"})
 
 
 # --------------------------------------------------------------------------- #
@@ -126,6 +143,11 @@ def on_session_start(
       Lenient-mode failure is absorbed by the runtime (fallback to
       clearnet + ``network.bringup_failed`` audit there); the hook
       itself returns normally.
+    - After bring-up, resolve the active provider and run the transport gate.
+      Strict + Tor fails closed for unsafe/unresolved providers, malformed
+      overrides, or an internal gate error. Lenient downgrades provider flags;
+      off skips them. Malformed overrides and internal errors warn and continue
+      in lenient/off.
     """
     policy_mode = _read_policy_mode(policy_json_path)
     target = _read_default_network_path(config_path)
@@ -189,23 +211,43 @@ def on_session_start(
     # FIX 1 (2026-07-13): provider-vs-transport compatibility gate. Once the
     # path is up (or fell back to clearnet in lenient), verify the provider
     # Hermes will use can actually reach the upstream API over the active
-    # transport. A strict Tor session talking to a SOCKS5h-ignoring provider
-    # (e.g. bedrock) is refused HERE — the abort the flagger always promised
-    # but that nothing in production ever invoked. Fail-safe: a bug in
-    # resolution or flagging must never crash a normal session, so it is
-    # wrapped in ``except Exception``; the strict refusal is raised as
-    # :class:`MordredPathBringupFailed` (a ``BaseException``) which escapes
-    # that handler by design (same escape the bring-up refusal relies on).
+    # transport. A strict Tor session talking to an incompatible, unknown, or
+    # unverified provider is refused HERE. Internal errors are also
+    # policy-sensitive: strict + Tor tears down and refuses because continuing
+    # would silently drop the anonymity gate; lenient/off warn and continue.
+    gate_stage = "status"
+    gate_active_path = cast(ActivePath, target)
+    gate_providers = [_UNRESOLVED_PROVIDER]
     try:
+        raw_active_path = api.status().active_path
+        if raw_active_path not in VALID_ACTIVE_PATHS:
+            raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
+        gate_active_path = cast(ActivePath, raw_active_path)
+        gate_stage = "provider_resolution"
+        gate_providers = _resolve_active_providers(config_path=config_path, auth_json_path=auth_json_path)
+        gate_stage = "provider_overrides"
+        overrides = _read_provider_overrides(policy_json_path)
+        gate_stage = "policy_config"
+        disable_ipv6 = _read_disable_ipv6(policy_json_path, policy_mode)
+        gate_stage = "evaluate"
         _flag_transport_compat(
-            active_path=cast(ActivePath, api.status().active_path),
-            providers=_resolve_active_providers(config_path=config_path, auth_json_path=auth_json_path),
+            active_path=gate_active_path,
+            providers=gate_providers,
             policy_mode=policy_mode,
-            disable_ipv6=_read_disable_ipv6(policy_json_path, policy_mode),
+            disable_ipv6=disable_ipv6,
+            overrides=overrides,
             audit=audit,
         )
     except Exception as flag_err:
-        _LOG.warning("on_session_start: transport-compat flagging failed: %s", flag_err)
+        _handle_transport_gate_error(
+            error=flag_err,
+            stage=gate_stage,
+            target_path=cast(ActivePath, target),
+            active_path=gate_active_path,
+            providers=gate_providers,
+            policy_mode=policy_mode,
+            audit=audit,
+        )
 
 
 def on_session_end(**_kwargs: Any) -> None:
@@ -217,6 +259,78 @@ def on_session_end(**_kwargs: Any) -> None:
         # regardless. Log so operators can see if Tor / Mullvad cleanup
         # is misbehaving.
         _LOG.warning("on_session_end: api.stop raised %s", e)
+
+
+def pre_api_request(
+    *,
+    policy_json_path: Path,
+    audit: _AuditWriter | None = None,
+    provider: Any = None,
+    **_kwargs: Any,
+) -> None:
+    """Authoritatively gate the resolved runtime provider on strict Tor.
+
+    ``on_session_start`` can only inspect the provider persisted in
+    ``config.yaml`` / ``auth.json``. Hermes can override that provider later
+    through CLI flags, environment variables, one-shot calls, or gateway model
+    switches. ``pre_api_request`` carries the provider that is actually about
+    to receive the request, so strict Tor re-runs the transport evidence gate
+    here immediately before egress.
+
+    Missing provider evidence, malformed overrides, invalid runtime state, and
+    internal evaluation errors all fail closed. A refusal tears down the live
+    path and raises :class:`MordredPathBringupFailed`, whose ``BaseException``
+    inheritance escapes Hermes's ``except Exception`` hook wrappers.
+    """
+    policy_mode = _read_policy_mode(policy_json_path)
+    if policy_mode != "strict":
+        return
+
+    runtime_provider = (
+        provider.strip().lower() if isinstance(provider, str) and provider.strip() else _UNRESOLVED_PROVIDER
+    )
+    active_path: ActivePath = "tor"
+    stage = "status"
+    try:
+        raw_active_path = api.status().active_path
+        if raw_active_path not in VALID_ACTIVE_PATHS:
+            raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
+        active_path = cast(ActivePath, raw_active_path)
+        if active_path != "tor":
+            return
+
+        stage = "provider_overrides"
+        overrides = _read_provider_overrides(policy_json_path)
+        stage = "policy_config"
+        disable_ipv6 = _read_disable_ipv6(policy_json_path, policy_mode)
+        stage = "evaluate"
+        _flag_transport_compat(
+            active_path=active_path,
+            providers=[runtime_provider],
+            policy_mode=policy_mode,
+            disable_ipv6=disable_ipv6,
+            overrides=overrides,
+            audit=audit,
+            event="pre_api_request",
+            refusal_context="outbound API request",
+            teardown_on_refusal=False,
+        )
+    except Exception as gate_error:
+        # Under strict policy an unreadable runtime status cannot establish
+        # that the request is outside Tor. Treat it as a Tor-gate failure
+        # rather than guessing clearnet and allowing egress.
+        _handle_transport_gate_error(
+            error=gate_error,
+            stage=stage,
+            target_path="tor",
+            active_path=active_path,
+            providers=[runtime_provider],
+            policy_mode=policy_mode,
+            audit=audit,
+            event="pre_api_request",
+            refusal_context="outbound API request",
+            teardown_on_refusal=False,
+        )
 
 
 def pre_tool_call(
@@ -337,8 +451,9 @@ def _read_auth_active_provider(auth_json_path: Path) -> str | None:
 
     Mirrors ``llm_guard._read_auth_active_provider`` — the shared
     ``load_policy_mapping`` reader collapses a missing / unreadable / malformed
-    file to ``{}`` so this degrades to ``None`` (no provider) rather than
-    raising out of the session-start hook.
+    file to ``{}`` so this reader degrades to ``None``. The caller then sends
+    the explicit unresolved-provider sentinel through the normal transport
+    severity matrix (strict + Tor refuses; lenient warns).
     """
     value = load_policy_mapping(auth_json_path, log=_LOG).get("active_provider")
     if isinstance(value, str):
@@ -356,9 +471,10 @@ def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None)
     single active provider is enough for the transport gate. Returns the RAW
     (lower-cased) id — :func:`provider_transport_flagger.evaluate` applies
     ``canonicalize_provider`` itself and preserves the raw id in the
-    unknown-provider Flag message. Returns ``[]`` when neither source yields a
-    provider, so ``evaluate`` simply emits no provider-specific flags
-    (fail-safe: a provider-less session is never refused by this gate).
+    unknown-provider Flag message. When neither source yields a provider, the
+    explicit ``<unresolved>`` sentinel is returned. That sentinel follows the
+    normal unknown-provider severity matrix: strict + Tor aborts, lenient +
+    Tor warns, and clearnet remains informational.
     """
     configured = _read_config_model_provider(config_path)
     if configured:
@@ -367,21 +483,99 @@ def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None)
         resolved = _read_auth_active_provider(auth_json_path)
         if resolved:
             return [resolved]
-    return []
+    return [_UNRESOLVED_PROVIDER]
+
+
+def _read_provider_overrides(policy_json_path: Path) -> dict[str, ProviderEntry]:
+    """Parse additive transport facts from ``policy.json``.
+
+    Missing fields take conservative defaults so an incomplete entry cannot
+    accidentally satisfy strict Tor: SOCKS5h/IPv6 support default false and
+    ``unverified_baseline`` defaults true. Invalid types and unknown fields
+    raise ``ValueError``; the caller turns that into a strict-Tor refusal or a
+    lenient/off warning. Baseline replacement remains prohibited by
+    :func:`provider_transport_flagger.evaluate`.
+    """
+    data = load_policy_mapping(policy_json_path, log=_LOG)
+    if "provider_overrides" not in data:
+        return {}
+    raw_overrides = data["provider_overrides"]
+    if not isinstance(raw_overrides, dict):
+        raise ValueError("policy.json provider_overrides must be an object")
+
+    overrides: dict[str, ProviderEntry] = {}
+    for raw_name, raw_entry in raw_overrides.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("provider_overrides keys must be non-empty strings")
+        name = raw_name.strip().lower()
+        if name in overrides:
+            raise ValueError(f"provider_overrides contains duplicate normalized provider {name!r}")
+        overrides[name] = _parse_provider_override(name, raw_entry)
+    return overrides
+
+
+def _parse_provider_override(name: str, raw_entry: Any) -> ProviderEntry:
+    if not isinstance(raw_entry, dict):
+        raise ValueError(f"provider override {name!r} must be an object")
+    unknown_fields = [field for field in raw_entry if field not in _OVERRIDE_FIELDS]
+    if unknown_fields:
+        raise ValueError(f"provider override {name!r} has unsupported field {unknown_fields[0]!r}")
+
+    raw_transport = raw_entry.get("transport", "unknown")
+    if not isinstance(raw_transport, str) or not raw_transport.strip():
+        raise ValueError(f"provider override {name!r} transport must be a non-empty string")
+
+    raw_respects_proxy = raw_entry.get("respects_proxy", False)
+    if not isinstance(raw_respects_proxy, bool) and raw_respects_proxy != "partial":
+        raise ValueError(f"provider override {name!r} respects_proxy must be boolean or 'partial'")
+    respects_proxy = cast(bool | Literal["partial"], raw_respects_proxy)
+
+    raw_transport_class = raw_entry.get("transport_class", "http")
+    if not isinstance(raw_transport_class, str) or raw_transport_class not in _TRANSPORT_CLASSES:
+        raise ValueError(f"provider override {name!r} transport_class must be one of {sorted(_TRANSPORT_CLASSES)!r}")
+
+    return ProviderEntry(
+        name=name,
+        transport=raw_transport.strip(),
+        respects_proxy=respects_proxy,
+        respects_socks5h=_read_override_bool(raw_entry, name=name, field="respects_socks5h", default=False),
+        localhost_only=_read_override_bool(raw_entry, name=name, field="localhost_only", default=False),
+        dns_quirk=_read_override_bool(raw_entry, name=name, field="dns_quirk", default=False),
+        unverified_baseline=_read_override_bool(
+            raw_entry,
+            name=name,
+            field="unverified_baseline",
+            default=True,
+        ),
+        transport_class=cast(TransportClass, raw_transport_class),
+        respects_ipv6_proxy=_read_override_bool(
+            raw_entry,
+            name=name,
+            field="respects_ipv6_proxy",
+            default=False,
+        ),
+    )
+
+
+def _read_override_bool(entry: Mapping[str, Any], *, name: str, field: str, default: bool) -> bool:
+    value = entry.get(field, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"provider override {name!r} {field} must be boolean")
+    return value
 
 
 def _read_disable_ipv6(policy_json_path: Path, policy_mode: str) -> bool:
     """Reproduce ``RuntimeConfig.disable_ipv6`` for the transport flagger.
 
-    The flagger's IPv6-leak branch must run with the SAME ``disable_ipv6`` the
-    runtime rendered into the torrc (``ClientUseIPv6 0``): otherwise a strict
-    session could abort on an IPv6 dimension the runtime already neutralised
-    (strict default ``True`` masks the unverified IPv6 seeds on the OpenAI-
-    compatible providers), or fail to surface it when it didn't. Reuses the
-    runtime's own resolver (``network.__init__._resolve_disable_ipv6``) against
-    the same ``policy.json`` so the two derivations cannot drift. The import is
-    function-local because ``network.__init__`` imports this module at package
-    load time (a top-level import would be circular).
+    The flagger receives the SAME ``disable_ipv6`` the runtime rendered into
+    torrc (``ClientUseIPv6 0``), but that Tor option is advisory from the
+    provider SDK's perspective: it neither disables host IPv6 nor filters AAAA
+    answers. The flagger includes it in diagnostics but never treats it as
+    host-level enforcement. Reuses the runtime's own resolver
+    (``network.__init__._resolve_disable_ipv6``) against the same
+    ``policy.json`` so diagnostics cannot drift. The import is function-local
+    because ``network.__init__`` imports this module at package load time (a
+    top-level import would be circular).
     """
     from . import _resolve_disable_ipv6
 
@@ -395,16 +589,22 @@ def _flag_transport_compat(
     providers: list[str],
     policy_mode: str,
     disable_ipv6: bool,
+    overrides: Mapping[str, ProviderEntry] | None = None,
     audit: _AuditWriter | None,
+    event: str = "on_session_start",
+    refusal_context: str = "session",
+    teardown_on_refusal: bool = True,
 ) -> None:
     """Run the provider-vs-transport flagger and enforce its severity.
 
-    Strict + an ``abort``-severity flag refuses the session by raising
+    Strict + an ``abort``-severity flag refuses the guarded operation by raising
     :class:`MordredPathBringupFailed` (``BaseException``), the same escape the
     bring-up refusal uses so Hermes' ``except Exception`` wrapper cannot
-    swallow it. A ``warning`` flag (an unknown provider, a lenient-downgraded
-    abort, or a clearnet informational) is audited and the session continues.
-    ``off`` mode never reaches the abort branch: ``evaluate`` returns ``[]``.
+    swallow it. A ``warning`` flag (a lenient-downgraded abort or a clearnet
+    informational) is audited and the guarded operation continues. Unknown and
+    unverified providers abort on strict Tor because they have no transport
+    evidence for the anonymity contract. ``off`` mode never reaches the abort
+    branch: ``evaluate`` returns ``[]``.
 
     An ``abort`` severity only survives ``evaluate`` under strict policy
     (lenient downgrades abort→warning, off returns ``[]``), so the explicit
@@ -414,6 +614,7 @@ def _flag_transport_compat(
         active_path=active_path,
         providers=providers,
         policy_mode=cast(PolicyMode, policy_mode),
+        overrides=overrides,
         disable_ipv6=disable_ipv6,
     )
     if not flags:
@@ -424,7 +625,7 @@ def _flag_transport_compat(
             _safe_audit_append(
                 audit,
                 {
-                    "event": "on_session_start",
+                    "event": event,
                     "decision": "block" if flag.severity == "abort" else "warn",
                     "reason": _REASON_TRANSPORT_FLAG,
                     "active_path": active_path,
@@ -439,21 +640,68 @@ def _flag_transport_compat(
     if abort_reasons and policy_mode == "strict":
         msg = (
             f"Mordred strict mode: provider transport is incompatible with network path "
-            f"{active_path!r}: {'; '.join(abort_reasons)}; refusing the session."
+            f"{active_path!r}: {'; '.join(abort_reasons)}; refusing the {refusal_context}."
         )
         _LOG.error(msg)
-        # Tear the path down BEFORE refusing. Unlike the bring-up-failure refusal
-        # (runtime._switch restores env + resets active_path when it raises), this
-        # gate runs AFTER a SUCCESSFUL switch — the Tor daemon is spawned, the
-        # SOCKS proxy is written into os.environ, and the liveness thread is
-        # running. Raising without teardown would orphan all three if the host
-        # doesn't call on_session_end after on_session_start raises. Best-effort:
-        # a stop() failure must not mask the refusal.
-        try:
-            api.stop()
-        except Exception as stop_err:
-            _LOG.warning("transport-compat abort: api.stop() during teardown raised %s", stop_err)
+        # Session-start failures tear down a path that otherwise has no owner.
+        # Request-time refusals deliberately KEEP Tor active: Runtime.stop()
+        # resets active_path to clearnet, which would let a long-lived gateway's
+        # next request skip the strict-Tor transport gate. Keeping the path means
+        # every subsequent request is re-evaluated until the operator explicitly
+        # chooses a different path or provider.
+        if teardown_on_refusal:
+            _stop_after_transport_gate_failure("transport-compat abort")
         raise MordredPathBringupFailed(msg)
 
 
-__all__ = ["on_session_end", "on_session_start", "pre_tool_call", "wait_until_ready"]
+def _handle_transport_gate_error(
+    *,
+    error: Exception,
+    stage: str,
+    target_path: ActivePath,
+    active_path: ActivePath,
+    providers: list[str],
+    policy_mode: str,
+    audit: _AuditWriter | None,
+    event: str = "on_session_start",
+    refusal_context: str = "session",
+    teardown_on_refusal: bool = True,
+) -> None:
+    """Apply fail-closed semantics to an internal transport-gate error."""
+    strict_tor = policy_mode == "strict" and (target_path == "tor" or active_path == "tor")
+    detail = f"transport gate {stage} failed ({type(error).__name__}: {error})"
+    if audit is not None:
+        _safe_audit_append(
+            audit,
+            {
+                "event": event,
+                "decision": "block" if strict_tor else "warn",
+                "reason": _REASON_TRANSPORT_FLAG,
+                "active_path": active_path,
+                "provider": providers[0] if len(providers) == 1 else ",".join(providers),
+                "severity": "abort" if strict_tor else "warning",
+                "detail": detail,
+                "policy_mode": policy_mode,
+                "stage": stage,
+            },
+        )
+    if not strict_tor:
+        _LOG.warning("%s: %s; continuing in %s mode", event, detail, policy_mode)
+        return
+
+    if teardown_on_refusal:
+        _stop_after_transport_gate_failure(f"transport gate {stage} failure")
+    msg = f"Mordred strict mode: {detail}; refusing the {refusal_context}."
+    _LOG.error(msg)
+    raise MordredPathBringupFailed(msg) from error
+
+
+def _stop_after_transport_gate_failure(context: str) -> None:
+    """Best-effort teardown that never masks a strict policy refusal."""
+    try:
+        api.stop()
+    except Exception as stop_err:
+        _LOG.warning("%s: api.stop() during teardown raised %s", context, stop_err)
+
+
+__all__ = ["on_session_end", "on_session_start", "pre_api_request", "pre_tool_call", "wait_until_ready"]

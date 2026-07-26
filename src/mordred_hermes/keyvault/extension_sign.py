@@ -95,13 +95,14 @@ def _audit_log_path() -> Path:
 
 @functools.lru_cache(maxsize=1)
 def _audit_writer() -> Writer:
-    """Per-process memoized audit writer for extension-driven signs.
+    """Module-local reference to the shared extension-sign audit writer.
 
     Zero-arg (unlike ``network`` / ``llm_guard``'s ``_build_audit_writer(path)``)
     because this module deliberately never freezes ``HERMES_BASE`` at import
     time (see :func:`_audit_log_path`); the path is recomputed on the first
-    call instead, then the resulting writer is cached for the process the same
-    way ``network`` / ``llm_guard`` cache theirs. The
+    call. The local cache preserves the test ``cache_clear()`` API, while
+    :mod:`mordred_hermes._audit_support` owns the normalized-path singleton so
+    clearing this cache never closes a writer another plugin is using. The
     :mod:`mordred_hermes._audit_support` import happens here, at first call,
     not at module scope, so plugin discovery stays cheap.
     """

@@ -35,7 +35,12 @@ from typing import Any, Literal
 from .._yaml_io import load_plugin_section
 from . import openclaw_migration
 from ._runtime import DEFAULT_OPENCLAW_BASE
-from .policy_writer import PolicySnapshot, PolicyWriter, _section_matches_dict
+from .policy_writer import (
+    PolicySnapshot,
+    PolicyWriter,
+    _preserve_provider_overrides,
+    _section_matches_dict,
+)
 
 _LOG = logging.getLogger("mordred.wizard.upgrade")
 
@@ -213,6 +218,12 @@ def run(
     """
     if target_snapshot is None:
         target_snapshot = PolicySnapshot(policy="lenient")
+    # Upgrade rewrites the wizard-owned snapshot fields, but must not erase the
+    # operator-managed provider transport evidence already in policy.json.
+    target_snapshot = _preserve_provider_overrides(
+        target_snapshot,
+        policy_writer.policy_json_path,
+    )
 
     story1 = _resolve_story1(options, policy_writer, target_snapshot)
     story1_5 = _resolve_story1_5(options, policy_writer, openclaw_base)

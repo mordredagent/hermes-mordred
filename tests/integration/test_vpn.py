@@ -188,11 +188,11 @@ class TestMullvadHandshakeFreshness:
 class TestMullvadIPv6Behaviour:
     """IPv6 egress gate (TODO §3.1 L346 v1 caveat / Codex 2026-05-20 must-fix).
 
-    ``RuntimeConfig.disable_ipv6`` is **advisory only** in v1: it flips
-    IPv4-only resolver hints and the ``provider_transport_flagger`` IPv6
-    warning, but kernel-level IPv6 firewalling is v2-N2 deferred. On a
-    dual-stack host with ``disable_ipv6=false`` (lenient default) the
-    OS may route IPv6 traffic around the Mullvad tunnel.
+    ``RuntimeConfig.disable_ipv6`` is **advisory only** in v1: on the Tor
+    path it renders ``ClientUseIPv6 0``, but it does not alter host routes or
+    suppress provider transport warnings. Kernel-level IPv6 firewalling is
+    v2-N2 deferred. On a dual-stack host the OS may route IPv6 traffic around
+    a misconfigured Mullvad tunnel regardless of this setting.
 
     This gate compares the host's IPv6 egress address pre-tunnel against
     during-tunnel and documents three acceptable outcomes:

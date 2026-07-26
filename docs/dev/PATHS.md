@@ -154,11 +154,20 @@ Effective merged policy snapshot. The canonical source is the
   "mullvad_relay_country": "auto",
   "no_proxy": ["localhost", "127.0.0.1", "::1"],
   "disable_ipv6": true,
-  "provider_overrides": {}
+  "provider_overrides": {
+    "my-internal": {
+      "transport": "httpx",
+      "respects_proxy": true,
+      "respects_socks5h": true,
+      "respects_ipv6_proxy": true,
+      "unverified_baseline": false,
+      "transport_class": "http"
+    }
+  }
 }
 ```
 
-The full schema reference treats [`POLICY.md §\`plugins.mordred_privacy_check\` config schema`](./POLICY.md) as the canonical source (landed in Phase 1.1 / 2026-05-10). The Phase 3 `disable_ipv6` extension (2026-05-14) has also been added to that doc's §`policy.json` Phase 3 fields.
+The full schema reference treats [`POLICY.md §\`plugins.mordred_privacy_check\` config schema`](./POLICY.md) as the canonical source (landed in Phase 1.1 / 2026-05-10). The Phase 3 `disable_ipv6` and `provider_overrides` extensions are documented in that file's §`policy.json` Phase 3 fields. `provider_overrides` may only add internal providers; bundled baseline entries cannot be changed. Missing safety facts default conservatively, and malformed entries refuse strict + Tor startup or outbound API requests. The request-time check uses the provider in Hermes's `pre_api_request` payload, covering runtime overrides that are not present on disk.
 
 ### Defaults
 

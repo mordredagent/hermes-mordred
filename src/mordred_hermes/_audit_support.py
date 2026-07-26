@@ -1,7 +1,6 @@
-"""Shared audit-writer plumbing for the ``network`` / ``llm_guard`` plugins.
+"""Process-wide audit-writer plumbing shared by every Mordred plugin.
 
-Single-sources three things that were independently copy-pasted across
-``network`` and ``llm_guard`` (and had begun to drift in their docstrings):
+Single-sources the following audit-log concerns:
 
 * :class:`AuditWriter` -- the structural Protocol mirroring
   :class:`mordred_hermes.privacy_check.audit.Writer`. Declared here (rather
@@ -19,15 +18,30 @@ Single-sources three things that were independently copy-pasted across
   ``privacy_check.audit.make_audit_writer`` so ``network`` / ``llm_guard`` get
   the SAME encryption-aware writer ``privacy_check`` uses for the shared
   ``audit.log`` (``EncryptedWriter`` when the keyvault is initialized, else
-  ``NDJSONWriter``). The import is inside the call so plugin discovery stays
-  cheap. Callers wrap this in their own ``functools.lru_cache`` so the
-  per-process cache (and the ``cache_clear()`` the tests drive) stays
-  module-local rather than shared across plugins.
+  ``NDJSONWriter``). A process-wide registry, keyed by the resolved absolute
+  path, owns exactly one writer for that file. Module-local ``lru_cache``
+  wrappers remain useful as cheap references and preserve their test
+  ``cache_clear()`` API, but clearing one never closes or replaces the shared
+  writer that another plugin may still be using.
+
+The registry deliberately retains writers until process shutdown. In
+particular, policy reloads must not wipe an ``EncryptedWriter``'s active DEK
+while network, LLM-guard, or extension-sign hooks still hold the same writer.
+If a keyvault is initialized inside an already-running process whose shared
+writer is plaintext, the registry records and logs a restart-required warning;
+it cannot swap the writer behind existing references safely. Normal
+``hermes-mordred keyvault init`` runs in its own CLI process, so the next
+Hermes process selects encryption immediately.
+An ``atexit`` hook closes each unique writer once, after normal plugin work has
+quiesced.
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -61,8 +75,32 @@ def safe_audit_append(audit: AuditWriter, entry: Mapping[str, Any], *, logger: l
         logger.error("audit append failed for entry %r: %s", entry, e)
 
 
-def build_audit_writer(path: Path) -> Writer:
-    """Construct the encryption-aware audit writer ``privacy_check`` provides.
+_WRITER_REGISTRY: dict[Path, tuple[Path, Writer]] = {}
+_WRITER_REGISTRY_LOCK = threading.Lock()
+_PLAINTEXT_RESTART_WARNED: set[Path] = set()
+
+
+def _normalized_audit_path(path: Path) -> Path:
+    """Return a stable process-local registry key for ``path``.
+
+    ``resolve(strict=False)`` folds relative paths, ``..`` components and
+    existing symlinks without requiring the log to exist yet. The lexical
+    ``abspath`` fallback handles pathological symlink loops or platforms where
+    ``resolve`` fails; it is still safer than allowing two spellings of the
+    same ordinary path to create competing writers.
+    """
+    try:
+        expanded = path.expanduser()
+    except (OSError, RuntimeError):
+        expanded = path
+    try:
+        return expanded.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(os.fspath(expanded)))
+
+
+def build_audit_writer(path: Path, *, keyvault_home: Path | None = None) -> Writer:
+    """Return the process-wide encryption-aware writer for ``path``.
 
     Delegates to :func:`mordred_hermes.privacy_check.audit.make_audit_writer`
     so ``network`` / ``llm_guard`` obtain the SAME writer kind ``privacy_check``
@@ -75,16 +113,99 @@ def build_audit_writer(path: Path) -> Writer:
     The import is local so ``privacy_check`` — and, only when the keyvault is
     actually initialized, the keyvault crypto stack — is not loaded at
     plugin-discovery time (keeps each plugin's ``register`` cheap and
-    side-effect-free until invoked). Callers memoise the result themselves.
+    side-effect-free until invoked).
 
-    ``path`` is ``<HERMES_BASE>/mordred/audit.log``, so the keyvault home is
-    ``<HERMES_BASE>`` == ``path.parent.parent``. We pass it explicitly — the
-    same way privacy_check does (``make_audit_writer(keyvault_home=
-    config_path.parent)``) — so the encryption decision is bound to the
-    keyvault that owns THIS log, not the ambient default home. That keeps the
-    three plugins in agreement in production and keeps the choice deterministic
-    under tests that redirect the audit path to a scratch directory.
+    The normalized absolute path is both the registry key and the path handed
+    to the writer. Consequently ``audit.log``, ``./audit.log`` and a symlinked
+    spelling cannot acquire independent DEKs and splice mutually
+    unauthenticatable ciphertext into one active MRAL file.
+
+    The default log is ``<HERMES_BASE>/mordred/audit.log``, so its keyvault
+    home is ``path.parent.parent``. Privacy-check passes ``keyvault_home``
+    explicitly because it permits a custom audit path while the keyvault still
+    belongs to the directory containing ``config.yaml``.
     """
     from .privacy_check.audit import make_audit_writer
 
-    return make_audit_writer(path, keyvault_home=path.parent.parent)
+    normalized = _normalized_audit_path(path)
+    normalized_home = _normalized_audit_path(keyvault_home) if keyvault_home is not None else normalized.parent.parent
+    with _WRITER_REGISTRY_LOCK:
+        registered = _WRITER_REGISTRY.get(normalized)
+        if registered is None:
+            writer = make_audit_writer(normalized, keyvault_home=normalized_home)
+            _WRITER_REGISTRY[normalized] = (normalized_home, writer)
+        else:
+            registered_home, writer = registered
+            if registered_home != normalized_home:
+                raise ValueError(
+                    f"audit path {normalized} is already bound to keyvault home "
+                    f"{registered_home}, not {normalized_home}"
+                )
+            _warn_if_plaintext_restart_required(normalized, normalized_home, writer)
+        return writer
+
+
+def _warn_if_plaintext_restart_required(path: Path, keyvault_home: Path, writer: Writer) -> None:
+    """Warn once if in-process keyvault init cannot upgrade live references."""
+    from .privacy_check._keyvault_probe import keyvault_initialized
+    from .privacy_check.audit import NDJSONWriter
+
+    if path in _PLAINTEXT_RESTART_WARNED or not isinstance(writer, NDJSONWriter):
+        return
+    try:
+        initialized = keyvault_initialized(keyvault_home)
+    except Exception:
+        return
+    if not initialized:
+        return
+
+    _PLAINTEXT_RESTART_WARNED.add(path)
+    detail = (
+        "keyvault became initialized after the shared plaintext audit writer "
+        "was created; restart Hermes to enable MRAL audit encryption safely"
+    )
+    logger = logging.getLogger("mordred.audit")
+    logger.warning("%s (%s)", detail, path)
+    safe_audit_append(
+        writer,
+        {
+            "event": "mordred.audit_writer",
+            "decision": "warn",
+            "reason": "mordred.degraded.audit_encryption_unavailable",
+            "detail": detail,
+        },
+        logger=logger,
+    )
+
+
+def _close_registered_audit_writers() -> None:
+    """Close and forget every registered writer.
+
+    Production calls this only from ``atexit``, after normal plugin activity
+    has stopped. Tests may call
+    :func:`_reset_audit_writer_registry_for_tests` after clearing their
+    module-local memoizers. Clearing the registry during live plugin activity
+    is intentionally not a public lifecycle operation: doing so could create a
+    second writer while another component still owns the first one's DEK.
+    """
+    with _WRITER_REGISTRY_LOCK:
+        writers = tuple({id(writer): writer for _keyvault_home, writer in _WRITER_REGISTRY.values()}.values())
+        _WRITER_REGISTRY.clear()
+        _PLAINTEXT_RESTART_WARNED.clear()
+
+    for writer in writers:
+        close = getattr(writer, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception as exc:  # pragma: no cover - defensive shutdown path
+            logging.getLogger("mordred.audit").warning("audit writer close failed during shutdown: %s", exc)
+
+
+def _reset_audit_writer_registry_for_tests() -> None:
+    """Test-only reset after callers clear module-local writer memoizers."""
+    _close_registered_audit_writers()
+
+
+atexit.register(_close_registered_audit_writers)

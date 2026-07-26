@@ -39,8 +39,8 @@ keyvault = [
   "cryptography>=42",
   "blake3>=0.4",
 ]
-# Browser-extension WebSocket API server (mordred_hermes.extension). aiohttp is
-# the only extra dependency; it's kept out of the base install so users who only
+# Browser-extension WebSocket API server and wallet RPC transport
+# (mordred_hermes.extension). Kept out of the base install so users who only
 # want the tor/keyvault plugins don't pull it. CI installs this extra so
 # `mypy --strict src` and pytest can resolve the extension modules.
 extension = [
@@ -49,6 +49,13 @@ extension = [
   # rode along transitively via hermes-agent's own pin, which this extra must
   # not silently depend on.
   "cryptography>=42",
+  # Wallet JSON-RPC uses requests for an explicit gateway-selected proxy and
+  # urllib3 directly for DNS-pinned HTTPS. Both are direct runtime imports;
+  # do not rely on hermes-agent's transitive dependency graph.
+  # Tor routes use socks5h://. Requests requires its own PySocks backend;
+  # hermes-agent's httpx/socksio dependency does not satisfy that import.
+  "requests[socks]>=2.32",
+  "urllib3>=2",
 ]
 macos = [
   # Everything keyvault needs on a Mac = the cross-platform crypto stack
@@ -355,4 +362,3 @@ ignore_missing_imports = true
 module = ["gateway", "gateway.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
-

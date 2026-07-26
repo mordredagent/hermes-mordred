@@ -404,8 +404,8 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
         "vertex": {"transport": "google-cloud", "respects_proxy": "partial", "respects_socks5h": False},
     }
     ```
-  - **strict mode behavior**: if active path = `tor` and a `respects_socks5h=False` provider is enabled, startup abort; if active path = `clearnet` (with `policy=strict + cloud_provider_allowlist`) and a `respects_proxy=False` provider is enabled, warning only
-  - **user override**: entries can be added via `provider_overrides: {"<provider>": {"respects_proxy": true}}` in policy.json (no removal possible; the baseline is immutable)
+  - **strict mode behavior**: if active path = `tor` and a provider is incompatible, unverified, unknown, or cannot be resolved from config/auth, startup aborts. An internal transport-gate error also fails closed after best-effort path teardown. Lenient warns and continues. If active path = `clearnet` (with `policy=strict + cloud_provider_allowlist`) and a `respects_proxy=False` provider is enabled, warning only
+  - **user override**: policy.json may add internal providers, for example `provider_overrides: {"my-internal": {"transport": "httpx", "respects_proxy": true, "respects_socks5h": true, "respects_ipv6_proxy": true, "unverified_baseline": false, "transport_class": "http"}}`. Entries are additive only; the bundled baseline is immutable. Missing safety fields default conservatively. Malformed entries fail closed under strict + Tor and become warnings under lenient/off
 - `src/mordred_hermes/network/api.py` — internal Python API:
   - `mordred_network.api.use(path: str)` — switch active path
   - `mordred_network.api.status()` — current state
@@ -451,7 +451,7 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
 Tunneling all traffic with proxy_env alone cannot be achieved in v1. Document the following alongside SPEC §Threat Model M8, and reflect it in the acceptance gate as well:
 
 - **DNS leak (most critical on the Tor path)**: a non-SOCKS5h HTTP_PROXY URL performs name resolution via the system resolver first → even when using Tor, the query reaches the ISP. v1 enforcement: the Tor path only supports the `socks5h://` URL scheme + major HTTP clients (urllib3 / httpx / requests[socks]). Clients without SOCKS5h support (old `aiohttp` versions, providers that directly manipulate sockets) get a startup warning via a static allowlist, and in strict mode, abort when active
-- **IPv6 leak**: many implementations don't respect the HTTPS_PROXY env var. Add a v1 default of `disable_ipv6: true` (strict), `false` (lenient/off) to policy.json. Since enforcement via the `socket.has_ipv6` flag isn't effective, v1 is limited to **IPv4-only resolver configuration + a `provider_transport_flagger` warning for connections to IPv6 endpoints**. Full protection is v2 (`v2-N2`: bundled IPv6 firewall rule injection)
+- **IPv6 leak**: many implementations don't respect the HTTPS_PROXY env var. Keep the v1 `disable_ipv6: true` (strict), `false` (lenient/off) policy field, but treat it only as Tor's `ClientUseIPv6 0` preference — it is not host-level enforcement. `provider_transport_flagger` must still abort strict + Tor for providers without verified IPv6 proxy support (lenient warns). Full protection is v2 (`v2-N2`: bundled IPv6 firewall rule injection).
 - **Non-HTTP transport (raw TCP/UDP/QUIC/gRPC native)**: enumerated in the v1 baseline via `provider_transport_flagger`'s static allowlist (existing Hermes providers were tested on real hardware in Phase 0.8 verify). In strict mode, session abort when a known-incompatible provider is active
 
 **Path failure & liveness (M9)**

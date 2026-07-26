@@ -2,7 +2,7 @@
 
 Demonstrates that `mordred_hermes.extension.gateway_plugin.pre_gateway_dispatch`
 — the single hook that replaces the fork's per-adapter edits — decrypts an
-inbound 🔒ENC:v2 ciphertext and drops a 🔑 key-exchange token, using ONLY the
+inbound context-bound 🔒ENC:v3 ciphertext and drops a 🔑 key-exchange token, using ONLY the
 plugin's own crypto + local channel keyring. No gateway/adapter edits involved.
 
 Run:  HERMES_HOME=$(mktemp -d) PYTHONPATH=src python scripts/poc_pre_gateway_dispatch.py
@@ -14,14 +14,14 @@ import os
 import secrets
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from types import SimpleNamespace
 
 
 @dataclass
 class FakeSource:
     platform: str = "slack"
     chat_id: str = "C0BG9QTCNKE"
-    thread_id: Optional[str] = None
+    thread_id: str | None = None
 
 
 @dataclass
@@ -30,6 +30,13 @@ class FakeEvent:
 
     text: str
     source: FakeSource = None  # type: ignore[assignment]
+
+
+class FakeSlackAdapter:
+    """Live-adapter shape needed to prove reply-in-kind is available."""
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        return SimpleNamespace(success=True)
 
 
 def main() -> int:
@@ -52,18 +59,28 @@ def main() -> int:
             paired_at=0.0,
         )
     )
-    chan_id = "slack:T0B9PPN818F:C0BG9QTCNKE"
+    chan_id = FakeSource.chat_id
     chan_key = secrets.token_bytes(32)
     pairing.save_channel_key(chan_id, chan_key)
     kid = crypto.key_id(chan_key)
 
-    # 2. Encrypt a secret with the channel key → the 🔒ENC:v2 wire token.
+    # 2. Encrypt a secret with the channel key → the 🔒ENC:v3 wire token.
     plaintext = "deploy the prod build tonight"
-    token = crypto.encrypt_message_v2(chan_key, plaintext, kid)
-    inbound = f"<@U0BA8SC0JJ0> {token}"  # leading mention stays plaintext
+    token = crypto.encrypt_message_v3(
+        chan_key,
+        plaintext,
+        kid,
+        direction="command",
+        platform="slack",
+        chat_id=chan_id,
+        thread_root=None,
+    )
+    inbound = f"<@U0BA8SC0JJ0> {token}"  # mention stays plaintext on the wire
 
-    # 3. Run the hook exactly as the gateway would.
-    res = gp.pre_gateway_dispatch(event=FakeEvent(text=inbound, source=FakeSource()))
+    # 3. Run the hook with the gateway's live adapter. Plaintext is released
+    # only after the plugin verifies that replies can take the encrypted path.
+    gateway = SimpleNamespace(adapters={"slack": FakeSlackAdapter()})
+    res = gp.pre_gateway_dispatch(event=FakeEvent(text=inbound, source=FakeSource()), gateway=gateway)
 
     ok = (
         isinstance(res, dict)
@@ -83,10 +100,10 @@ def main() -> int:
     print("  hook out:", kx)
     print("  PASS" if kx_ok else "  FAIL")
 
-    # 5. Plaintext message → untouched (hook returns None).
+    # 5. Plaintext on mandatory-E2E Slack → dropped before the agent.
     passthru = gp.pre_gateway_dispatch(event=FakeEvent(text="hello there", source=FakeSource()))
-    pt_ok = passthru is None
-    print("\n[plaintext passthrough]")
+    pt_ok = isinstance(passthru, dict) and passthru.get("reason") == "mordred-encryption-required"
+    print("\n[plaintext refusal]")
     print("  hook out:", passthru)
     print("  PASS" if pt_ok else "  FAIL")
 

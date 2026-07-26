@@ -139,7 +139,8 @@ def _print_paired(*, color: bool, ascii_only: bool, assumed: bool = False) -> in
     print(f"{_term.success(mark, enabled=color)} Paired ({time.strftime('%Y-%m-%d %H:%M:%S')}).")
     print(
         "Next: chat from the extension, or open the local page served by "
-        "`hermes-mordred extension serve` (http://127.0.0.1:7788/ by default)."
+        "`hermes-mordred extension serve` using the private `Web page:` URL "
+        "printed at startup."
     )
     if assumed:
         _term.emit_note(

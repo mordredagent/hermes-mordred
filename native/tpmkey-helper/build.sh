@@ -17,8 +17,8 @@ cd "$SCRIPT_DIR"
 INSTALL_DIR="${MORDRED_TPMKEY_INSTALL_DIR:-$HOME/.local/bin}"
 BINARY_NAME="mordred-hermes-tpmkey"
 
-echo "==> cargo build --release"
-cargo build --release
+echo "==> cargo build --release --locked"
+cargo build --release --locked
 
 BUILT_BIN="target/release/$BINARY_NAME"
 if [[ ! -f "$BUILT_BIN" ]]; then

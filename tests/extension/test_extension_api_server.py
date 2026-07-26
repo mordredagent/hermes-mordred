@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import stat
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -142,28 +143,38 @@ async def _run_flow(port: int) -> dict:
 
                 # --- sign flow (stub the keyvault signer) ---
                 import mordred_hermes.extension.api as api_mod
+                from mordred_hermes.keyvault import extension_sign
 
-                api_mod._do_sign = lambda method, params, *a: "0xstubbedsig"  # type: ignore[assignment]
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "id": "s1",
-                            "type": "sign_request",
-                            "request_id": "r1",
-                            "method": "personal_sign",
-                            "params": ["0xdeadbeef", "0xabc"],
-                            "origin": "https://app.uniswap.org",
-                        }
+                original_do_sign = api_mod._do_sign
+                original_get_address = extension_sign.get_address
+                signer = "0x" + "ab" * 20
+                try:
+                    api_mod._do_sign = lambda method, params, *a: "0xstubbedsig"  # type: ignore[assignment]
+                    extension_sign.get_address = lambda: signer
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "id": "s1",
+                                "type": "sign_request",
+                                "request_id": "r1",
+                                "method": "personal_sign",
+                                "params": ["0xdeadbeef", signer.upper()],
+                                "origin": "https://app.uniswap.org",
+                            }
+                        )
                     )
-                )
-                prompt = json.loads((await ws.receive()).data)
-                results["sign_prompt_type"] = prompt["type"]
-                results["sign_risk"] = prompt["analysis"]["risk"]
-                await ws.send_str(
-                    json.dumps({"id": "s2", "type": "sign_approve", "request_id": "r1", "approved": True})
-                )
-                sresult = json.loads((await ws.receive()).data)
-                results["signature"] = sresult.get("signature")
+                    prompt = json.loads((await ws.receive()).data)
+                    results["sign_prompt_type"] = prompt["type"]
+                    results["sign_risk"] = prompt["analysis"]["risk"]
+                    results["signer"] = prompt["decoded"]["signer"]
+                    await ws.send_str(
+                        json.dumps({"id": "s2", "type": "sign_approve", "request_id": "r1", "approved": True})
+                    )
+                    sresult = json.loads((await ws.receive()).data)
+                    results["signature"] = sresult.get("signature")
+                finally:
+                    api_mod._do_sign = original_do_sign
+                    extension_sign.get_address = original_get_address
     finally:
         await server.stop()
     return results
@@ -182,12 +193,12 @@ def test_full_server_flow():
     assert r["chat"] == "こんにちは、受け取りました: 状態"
     assert r["sign_prompt_type"] == "sign_prompt"
     assert r["sign_risk"] == "low"
+    assert r["signer"] == "0x" + "ab" * 20
     assert r["signature"] == "0xstubbedsig"
 
 
 def test_page_response_is_never_cached():
-    """The HTML contains a token tied to one server process, so a browser must
-    not reuse it after Hermes restarts."""
+    """The anonymous HTML shell never discloses the page bearer token."""
 
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)
@@ -203,8 +214,64 @@ def test_page_response_is_never_cached():
     assert headers["Cache-Control"] == "no-store"
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Referrer-Policy"] == "no-referrer"
-    assert token in html
+    assert token not in html
     assert "%%MORDRED_PAGE_TOKEN%%" not in html
+    assert "window.location.hash" in html
+    bootstrap = html.split("</script>", 1)[0]
+    assert bootstrap.index("sessionStorage.setItem(pageTokenStorageKey, launchToken)") < bootstrap.index(
+        "history.replaceState"
+    )
+    assert "sessionStorage.getItem(pageTokenStorageKey)" in bootstrap
+    assert "sessionStorage.removeItem(pageTokenStorageKey)" in bootstrap
+    assert "nativeSetTimeout(window.__MORDRED_HANDLE_AUTH_FAILURE__" in bootstrap
+    assert "private URL を開き直してください" in bootstrap
+
+
+def test_page_launch_url_keeps_token_out_of_http_url():
+    server = extension_api.ExtensionAPIServer(port=7788)
+    assert server.page_url.startswith("http://127.0.0.1:7788/#token=")
+    assert server._page_token in server.page_url
+    assert "?" not in server.page_url
+
+
+def test_noncanonical_loopback_bind_origin_is_a_page_principal():
+    """Every validated loopback bind address can authenticate its own page."""
+    server = extension_api.ExtensionAPIServer(host="127.0.0.2", port=7788)
+    origin = "http://127.0.0.2:7788"
+    assert server.page_url.startswith(f"{origin}/#token=")
+    assert server._origin_allowed(origin) is True
+    assert origin in server._local_origins
+
+
+def test_server_constructor_rejects_non_loopback_bind():
+    with pytest.raises(ValueError, match="loopback-only"):
+        extension_api.ExtensionAPIServer(host="0.0.0.0")
+
+
+@pytest.mark.parametrize(
+    ("remote", "host", "allowed"),
+    [
+        ("127.0.0.1", "127.0.0.1:7788", True),
+        ("::1", "[::1]:7788", True),
+        ("127.0.0.1", "evil.example:7788", False),
+        ("10.0.0.8", "127.0.0.1:7788", False),
+    ],
+)
+def test_request_loopback_gate_checks_peer_and_host(remote, host, allowed):
+    request = SimpleNamespace(remote=remote, host=host)
+    assert extension_api._request_is_loopback(request) is allowed
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "chrome-extension://good-id/path",
+        "chrome-extension://good-id@evil.example",
+        "moz-extension://good-id?redirect=evil",
+    ],
+)
+def test_extension_origin_parser_rejects_lookalikes(origin):
+    assert extension_api._is_extension_origin(origin) is False
 
 
 def test_page_token_auth_and_history():
@@ -339,6 +406,100 @@ def test_reconnect_reauths_with_persisted_token():
     assert asyncio.run(_flow(_free_port()))["type"] == "auth_ok"
 
 
+@pytest.mark.parametrize("state_change", ["replace", "clear"])
+def test_open_extension_socket_is_revoked_when_pairing_changes(state_change):
+    """A live socket must never inherit replacement pairing keys or privileges."""
+    old_token = "old-extension-token"
+    old_key = b"\x11" * 32
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=old_key,
+            ext_token=old_token,
+            ext_pubkey_b64="old-extension",
+            hermes_pubkey_b64="old-hermes",
+            paired_at=1.0,
+        )
+    )
+    conn = extension_api._Connection(_FakeWS(), _chat_handler)
+    asyncio.run(conn._on_auth({"type": "auth", "ext_token": old_token}))
+    assert conn.ws.sent[-1]["type"] == "auth_ok"
+    conn._pending_sign["approved-under-old-pairing"] = {"method": "personal_sign"}
+
+    if state_change == "replace":
+        pairing._save_pairing(
+            pairing.Pairing(
+                aes_key=b"\x22" * 32,
+                ext_token="replacement-extension-token",
+                ext_pubkey_b64="new-extension",
+                hermes_pubkey_b64="new-hermes",
+                paired_at=2.0,
+            )
+        )
+    else:
+        pairing.clear_pairing()
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "e1",
+                    "type": "encrypt",
+                    "plaintext": "must not cross pairing generations",
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent[-1] == {"type": "auth_fail", "reason": "pairing_changed"}
+    assert conn.authed is False
+    assert conn._pending_sign == {}
+    assert not any(frame.get("type") == "encrypt_result" for frame in conn.ws.sent)
+
+
+def test_socket_authenticated_before_webauthn_enable_cannot_unregister_it():
+    """Credential generation changes revoke token-only sessions immediately."""
+    token = "extension-token"
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x11" * 32,
+            ext_token=token,
+            ext_pubkey_b64="extension",
+            hermes_pubkey_b64="hermes",
+            paired_at=1.0,
+        )
+    )
+    conn = extension_api._Connection(
+        _FakeWS(),
+        _chat_handler,
+        client_origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    )
+    asyncio.run(conn._on_auth({"type": "auth", "ext_token": token}))
+    assert conn.ws.sent[-1]["type"] == "auth_ok"
+
+    priv = ec.generate_private_key(ec.SECP256R1())
+    spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    pairing.save_webauthn_credential(
+        "cred-1",
+        xc.b64u_encode(spki),
+        origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    )
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "w1",
+                    "type": "webauthn_register",
+                    # Empty credential fields request unregister.
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent[-1] == {"type": "auth_fail", "reason": "pairing_changed"}
+    assert conn.authed is False
+    assert pairing.has_webauthn_credential() is True
+
+
 def test_malformed_frames_get_error_and_connection_survives():
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)
@@ -394,10 +555,18 @@ def test_crashed_handler_replies_error(monkeypatch):
 
 
 def test_page_session_cannot_touch_credentials(tmp_path):
-    """The page token is served in cleartext by ``_handle_page`` to any local
-    client and a page session is exempt from WebAuthn (``_on_auth``) — so a page
-    session must not reach the credential/key-writing handlers. Above all it must
-    not be able to clear the extension's registered second factor."""
+    """The launch-fragment page principal is exempt from WebAuthn, so its
+    allowlist must not reach credential/key-writing handlers or clear the
+    extension's registered second factor."""
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="page-test-extension-token",
+            ext_pubkey_b64="test-extension",
+            hermes_pubkey_b64="test-hermes",
+            paired_at=1.0,
+        )
+    )
     priv = ec.generate_private_key(ec.SECP256R1())
     spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
     pairing.save_webauthn_credential("cred-1", xc.b64u_encode(spki))
@@ -689,6 +858,38 @@ def test_chat_undecryptable_ciphertext_is_not_forwarded_to_the_agent():
     assert seen == ["hi"]  # the agent never saw the undecryptable blob
 
 
+@pytest.mark.parametrize("pairing_failure", ["missing", "unreadable"])
+def test_encrypted_chat_without_a_derived_key_fails_closed(monkeypatch, pairing_failure):
+    """Pairing loss/corruption must never downgrade ciphertext to agent input."""
+    seen: list[str] = []
+
+    async def _recording_handler(content, _context):
+        seen.append(content)
+        yield "must not run"
+
+    conn = extension_api._Connection(_FakeWS(), _recording_handler)
+    if pairing_failure == "missing":
+        monkeypatch.setattr(conn, "_extchat_key", lambda: None)
+    else:
+
+        def _unreadable():
+            raise OSError("pairing file unreadable")
+
+        monkeypatch.setattr(conn, "_extchat_key", _unreadable)
+
+    ciphertext = xc.encrypt_message(b"\x03" * 32, "never forward me")
+    asyncio.run(conn._on_chat({"id": "c1", "type": "chat", "content": ciphertext}))
+
+    assert seen == []
+    assert conn.ws.sent == [
+        {
+            "id": "c1",
+            "type": "chat_error",
+            "reason": "encryption_key_unavailable",
+        }
+    ]
+
+
 class _FakeWS:
     """Minimal stand-in for ``web.WebSocketResponse`` — ``_Connection`` only ever
     touches ``closed`` and ``send_str``."""
@@ -702,9 +903,80 @@ class _FakeWS:
 
 
 def _authed_conn() -> extension_api._Connection:
+    token = "direct-test-extension-token"
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token=token,
+            ext_pubkey_b64="test-extension",
+            hermes_pubkey_b64="test-hermes",
+            paired_at=1.0,
+        )
+    )
     conn = extension_api._Connection(_FakeWS(), _chat_handler)
     conn.authed = True
+    conn._authentication_generation = pairing.authentication_generation_fingerprint(token)
+    assert conn._authentication_generation is not None
     return conn
+
+
+def test_webauthn_registration_binds_chromium_origin_as_rp_id(tmp_path):
+    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="registration-test-token",
+            ext_pubkey_b64="test-extension",
+            hermes_pubkey_b64="test-hermes",
+            paired_at=1.0,
+        )
+    )
+    conn = extension_api._Connection(_FakeWS(), _chat_handler, client_origin=origin)
+    conn.authed = True
+
+    asyncio.run(
+        conn._on_webauthn_register(
+            {
+                "id": "w1",
+                "credential_id": "cred-1",
+                "public_key": xc.b64u_encode(b"public-key"),
+            }
+        )
+    )
+
+    stored = json.loads((tmp_path / "extension" / "webauthn.json").read_text("utf-8"))
+    assert stored["origin"] == origin
+    assert stored["rp_id"] == origin
+    assert conn.ws.sent == [{"id": "w1", "type": "webauthn_registered", "ok": True}]
+
+
+def test_webauthn_registration_rejects_firefox_until_binding_is_in_protocol(tmp_path):
+    conn = extension_api._Connection(
+        _FakeWS(),
+        _chat_handler,
+        client_origin="moz-extension://random-document-uuid",
+    )
+    conn.authed = True
+
+    asyncio.run(
+        conn._on_webauthn_register(
+            {
+                "id": "w1",
+                "credential_id": "cred-1",
+                "public_key": xc.b64u_encode(b"public-key"),
+            }
+        )
+    )
+
+    assert conn.ws.sent == [
+        {
+            "id": "w1",
+            "type": "webauthn_registered",
+            "ok": False,
+            "error": "webauthn_browser_unsupported",
+        }
+    ]
+    assert not (tmp_path / "extension" / "webauthn.json").exists()
 
 
 def test_on_encrypt_not_paired_replies_encrypt_fail(monkeypatch):
@@ -734,15 +1006,19 @@ def test_sign_request_without_request_id_is_rejected():
     assert conn._pending_sign == {}
 
 
-def test_sign_request_duplicate_request_id_is_rejected():
+def test_sign_request_duplicate_request_id_is_rejected(monkeypatch):
     """Wallet "approve A, sign B" defense: re-using a ``request_id`` that is
     still pending must be refused outright, not silently overwrite the frozen
     params of the prompt already shown to the user — otherwise a dapp could
     display a benign tx, then swap in a draining tx under the same id before
     the user clicks approve."""
+    from mordred_hermes.keyvault import extension_sign
+
+    signer = "0x" + "aa" * 20
+    monkeypatch.setattr(extension_sign, "get_address", lambda: signer)
     conn = _authed_conn()
-    first_params = ["0xfirst"]
-    second_params = ["0xsecond"]
+    first_params = ["0xfirst", signer]
+    second_params = ["0xsecond", signer]
 
     asyncio.run(
         conn.dispatch(
@@ -776,9 +1052,320 @@ def test_sign_request_duplicate_request_id_is_rejected():
     assert conn._pending_sign["dup"]["params"] == first_params
 
 
-def test_pending_sign_table_is_bounded():
+def test_transaction_sign_request_rejects_unsafe_rpc_before_prompt():
+    conn = _authed_conn()
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx1",
+                    "method": "eth_sendTransaction",
+                    "params": [{"to": "0x" + "11" * 20}],
+                    "rpc_url": "http://169.254.169.254/latest/meta-data",
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent == [
+        {
+            "id": "s1",
+            "type": "sign_result",
+            "request_id": "tx1",
+            "error": "transaction_prepare_failed: invalid_rpc_url: RPC endpoints must use HTTPS",
+        }
+    ]
+    assert conn._pending_sign == {}
+
+
+def test_transaction_sign_prompt_freezes_rpc_fields_and_signs_exact_snapshot(monkeypatch):
+    from mordred_hermes.extension import extension_rpc
+    from mordred_hermes.keyvault import extension_sign
+
+    monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
+    monkeypatch.setattr(extension_sign, "get_address", lambda: "0x" + "aa" * 20)
+    rpc_url = "https://rpc.example.com:8443/v1/secret-api-key?token=hidden"
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: rpc_url)
+
+    def fill_transaction(_rpc_url, tx, _from_address, _chain_id):
+        return {
+            **tx,
+            "nonce": "0x7",
+            "gas": "0x5208",
+            "maxPriorityFeePerGas": "0x3b9aca00",
+            "maxFeePerGas": "0x77359400",
+        }
+
+    monkeypatch.setattr(extension_rpc, "fill_transaction", fill_transaction)
+    signed = {}
+
+    def do_sign(method, params, chain_id, rpc_url, expected_signer):
+        signed.update(
+            method=method,
+            params=params,
+            chain_id=chain_id,
+            rpc_url=rpc_url,
+            expected_signer=expected_signer,
+        )
+        return "0xfrozen"
+
+    monkeypatch.setattr(extension_api, "_do_sign", do_sign)
+    conn = _authed_conn()
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx1",
+                    "method": "eth_sendTransaction",
+                    "params": [{"to": "0x" + "11" * 20}],
+                    "rpc_url": rpc_url,
+                }
+            )
+        )
+    )
+
+    prompt = conn.ws.sent[-1]
+    assert prompt["type"] == "sign_prompt"
+    assert prompt["decoded"]["rpc_endpoint"] == "https://rpc.example.com:8443"
+    assert prompt["decoded"]["chain_id"] == "0x1"
+    assert prompt["decoded"]["transaction"]["nonce"] == "0x7"
+    assert prompt["decoded"]["transaction"]["gas"] == "0x5208"
+    assert prompt["decoded"]["transaction"]["maxFeePerGas"] == "0x77359400"
+    assert prompt["decoded"]["transaction"]["from"] == "0x" + "aa" * 20
+    assert prompt["decoded"]["signer"] == "0x" + "aa" * 20
+    assert prompt["params"] == [prompt["decoded"]["transaction"]]
+    assert "RPC 接続先: https://rpc.example.com:8443" in prompt["analysis"]["warnings"]
+    assert "secret-api-key" not in json.dumps(prompt)
+    assert "token=hidden" not in json.dumps(prompt)
+    assert conn._pending_sign["tx1"]["rpc_url"] == rpc_url
+    assert conn._pending_sign["tx1"]["expected_signer"] == "0x" + "aa" * 20
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_approve",
+                    "request_id": "tx1",
+                    "approved": True,
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent[-1]["signature"] == "0xfrozen"
+    assert signed == {
+        "method": "eth_sendTransaction",
+        "params": prompt["params"],
+        "chain_id": "0x1",
+        "rpc_url": rpc_url,
+        "expected_signer": "0x" + "aa" * 20,
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "account_index"),
+    [
+        ("personal_sign", 1),
+        ("eth_signTypedData_v4", 0),
+    ],
+)
+def test_message_approval_rejects_wallet_switch_before_signing(monkeypatch, method, account_index):
+    from mordred_hermes.extension.wallet import _do_sign as wallet_do_sign
+    from mordred_hermes.keyvault import extension_sign
+
+    approved_signer = "0x" + "aa" * 20
+    replacement_signer = "0x" + "bb" * 20
+    addresses = iter((approved_signer, replacement_signer))
+    params = (
+        ["0xdeadbeef", approved_signer.upper()]
+        if method == "personal_sign"
+        else [approved_signer.upper(), {"types": {}, "primaryType": "Test", "domain": {}, "message": {}}]
+    )
+    monkeypatch.setattr(extension_api, "_do_sign", wallet_do_sign)
+    monkeypatch.setattr(extension_sign, "get_address", lambda: next(addresses))
+    monkeypatch.setattr(
+        extension_sign,
+        "personal_sign",
+        lambda *_args, **_kwargs: pytest.fail("changed wallet must be rejected before personal_sign"),
+    )
+    monkeypatch.setattr(
+        extension_sign,
+        "sign_typed_data_v4",
+        lambda *_args, **_kwargs: pytest.fail("changed wallet must be rejected before typed-data signing"),
+    )
+    conn = _authed_conn()
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": f"{method}-switch",
+                    "method": method,
+                    "params": params,
+                }
+            )
+        )
+    )
+
+    prompt = conn.ws.sent[-1]
+    assert prompt["type"] == "sign_prompt"
+    assert prompt["decoded"]["signer"] == approved_signer
+    assert prompt["params"][account_index] == approved_signer
+    assert conn._pending_sign[f"{method}-switch"]["expected_signer"] == approved_signer
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_approve",
+                    "request_id": f"{method}-switch",
+                    "approved": True,
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent[-1] == {
+        "id": "s2",
+        "type": "sign_result",
+        "request_id": f"{method}-switch",
+        "error": "wallet_signer_changed",
+    }
+    assert conn._pending_sign == {}
+
+
+def test_transaction_approval_rejects_wallet_switch_before_signing(monkeypatch):
+    from mordred_hermes.extension import extension_rpc
+    from mordred_hermes.extension.wallet import _do_sign as wallet_do_sign
+    from mordred_hermes.keyvault import extension_sign
+
+    approved_signer = "0x" + "aa" * 20
+    replacement_signer = "0x" + "bb" * 20
+    addresses = iter((approved_signer, replacement_signer))
+    # ``test_full_server_flow`` stubs the imported API symbol for its real
+    # socket flow; restore the wallet implementation so this test exercises the
+    # approval-time signer recheck rather than that test-only stub.
+    monkeypatch.setattr(extension_api, "_do_sign", wallet_do_sign)
+    monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
+    monkeypatch.setattr(extension_sign, "get_address", lambda: next(addresses))
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: None)
+    monkeypatch.setattr(
+        extension_sign,
+        "sign_transaction",
+        lambda *_args, **_kwargs: pytest.fail("changed wallet must be rejected before signing"),
+    )
+    monkeypatch.setattr(
+        extension_rpc,
+        "fill_transaction",
+        lambda *_args, **_kwargs: pytest.fail("an unconfigured RPC must not fill fields"),
+    )
+    conn = _authed_conn()
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx-switch",
+                    "method": "eth_sendTransaction",
+                    "params": [
+                        {
+                            "to": "0x" + "11" * 20,
+                            "nonce": "0x1",
+                            "gas": "0x5208",
+                            "gasPrice": "0x3b9aca00",
+                        }
+                    ],
+                    "chain_id": "0x1",
+                }
+            )
+        )
+    )
+
+    prompt = conn.ws.sent[-1]
+    assert prompt["type"] == "sign_prompt"
+    assert prompt["decoded"]["signer"] == approved_signer
+    assert prompt["decoded"]["transaction"]["from"] == approved_signer
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_approve",
+                    "request_id": "tx-switch",
+                    "approved": True,
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent[-1] == {
+        "id": "s2",
+        "type": "sign_result",
+        "request_id": "tx-switch",
+        "error": "wallet_signer_changed",
+    }
+    assert conn._pending_sign == {}
+
+
+def test_transaction_sign_request_rejects_unconfigured_public_rpc(monkeypatch):
+    from mordred_hermes.keyvault import extension_sign
+
+    monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: "https://trusted.example/rpc")
+    monkeypatch.setattr(
+        extension_sign,
+        "get_address",
+        lambda: pytest.fail("unapproved endpoint must be rejected before wallet address lookup"),
+    )
+    conn = _authed_conn()
+
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx1",
+                    "method": "eth_sendTransaction",
+                    "params": [{"to": "0x" + "11" * 20}],
+                    "chain_id": "0x1",
+                    "rpc_url": "https://attacker.example/rpc",
+                }
+            )
+        )
+    )
+
+    assert conn.ws.sent == [
+        {
+            "id": "s1",
+            "type": "sign_result",
+            "request_id": "tx1",
+            "error": "transaction_prepare_failed: rpc_endpoint_not_allowed",
+        }
+    ]
+    assert conn._pending_sign == {}
+
+
+def test_pending_sign_table_is_bounded(monkeypatch):
     """Entries only leave ``_pending_sign`` on approve/reject, so an authed socket
     that never approves must not grow it without bound."""
+    from mordred_hermes.keyvault import extension_sign
+
+    signer = "0x" + "aa" * 20
+    monkeypatch.setattr(extension_sign, "get_address", lambda: signer)
     conn = _authed_conn()
     n = extension_api._MAX_PENDING_SIGN + 10
 
@@ -791,7 +1378,7 @@ def test_pending_sign_table_is_bounded():
                         "type": "sign_request",
                         "request_id": f"r{i}",
                         "method": "personal_sign",
-                        "params": ["0x1"],
+                        "params": ["0x1", signer],
                     }
                 )
             )

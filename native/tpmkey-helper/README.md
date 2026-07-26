@@ -70,7 +70,7 @@ Linux build prerequisites (the `tss-esapi` backend links libtss2 and runs
 bindgen): `libtss2-dev`, `clang`/`libclang-dev`, `pkg-config`.
 
 ```sh
-./build.sh   # cargo build --release + install to ~/.local/bin
+./build.sh   # cargo build --release --locked + install to ~/.local/bin
 ```
 
 Point Python at it (if not on `PATH`):

@@ -446,6 +446,40 @@ class TestCodexFindings:
         assert body["allow_cloud_llm"] is True
         assert body["cloud_provider_allowlist"] == ["anthropic"]
 
+    def test_openclaw_policy_preserves_hermes_provider_overrides(self, tmp_path: Path) -> None:
+        """The Story 1.5 writer shares configure/upgrade preservation semantics."""
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            openclaw_json={
+                "plugins": {
+                    "entries": {
+                        "mordred-privacy-check": {
+                            "id": "mordred-privacy-check",
+                            "config": {"policy": "strict"},
+                        }
+                    }
+                }
+            },
+        )
+        w = _writer(tmp_path)
+        override = {"corp-proxy": {"transport": "httpx", "future_unsafe_fact": True}}
+        w.policy_json_path.parent.mkdir(parents=True)
+        w.policy_json_path.write_text(
+            json.dumps({"policy": "off", "provider_overrides": override}),
+            encoding="utf-8",
+        )
+
+        openclaw_migration.migrate(
+            openclaw_base=base,
+            policy_writer=w,
+            options=upgrade.UpgradeOptions(),
+        )
+
+        body = json.loads(w.policy_json_path.read_text(encoding="utf-8"))
+        assert body["policy"] == "strict"
+        assert body["provider_overrides"] == override
+
 
 # -----------------------------------------------------------------------------
 # openclaw.json policy block -- transform + upsert via PolicyWriter

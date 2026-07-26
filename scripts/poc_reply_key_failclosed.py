@@ -76,7 +76,7 @@ async def main() -> int:
     await a.send("C", "sensitive answer", metadata={"thread_ts": "t1"})
     posts = a._client.posts
     leaked_plain = any(p.get("PLAINTEXT") for p in posts)
-    unreadable = any("ENC:v2:" in p.get("text", "") for p in posts)
+    unreadable = any("ENC:v3:" in p.get("text", "") for p in posts)
     noticed = any("暗号化できない" in p.get("text", "") for p in posts)
     print("send with unknown kid   ->", posts)
     if leaked_plain: ok = False; print("   FAIL: plaintext leak")

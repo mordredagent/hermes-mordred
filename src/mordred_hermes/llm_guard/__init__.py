@@ -72,6 +72,9 @@ def register(ctx: PluginContext) -> None:
        harness refusals propagate first).
     """
     local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
+    from ..privacy_check.hooks import check_plugin_integrity
+
+    ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("on_session_start", _on_session_start_harness)
     ctx.register_hook("on_session_start", _on_session_start_enforce)
     # Codex review P1 round 3: ``on_session_start`` only sees disk-based
@@ -272,22 +275,16 @@ def _read_policy_mode(policy_json_path: Path) -> str:
 
 @functools.lru_cache(maxsize=1)
 def _build_audit_writer(path: Path) -> Writer:
-    """Construct the encryption-aware audit writer privacy_check uses.
+    """Module-local reference to the process-wide writer for ``path``.
 
-    Codex M2 follow-up: cached so the ``__post_init__`` ``mkdir`` + ``chmod``
-    only fire once per process per path. Module-scoped ``lru_cache`` is
-    safe — a single cached writer instance is appended to sequentially by this
-    plugin's hooks, so it can be shared across every ``on_session_start``
-    invocation.
+    The local ``lru_cache`` avoids repeated registry lookups and preserves the
+    ``cache_clear()`` test API. It does not own writer lifecycle.
 
     Construction is delegated to the shared
     :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
-    encryption-aware writer ``privacy_check`` uses for ``audit.log`` (an
-    ``EncryptedWriter`` once the keyvault is initialized, else an
-    ``NDJSONWriter``), doing the lazy ``privacy_check`` import so ``register``
-    stays cheap. The module-local ``lru_cache`` keeps this cache -- and the
-    ``cache_clear()`` the tests drive -- separate from ``network``'s
-    identically-pathed writer. The ``TYPE_CHECKING`` import at the top
-    preserves the return type for static checkers.
+    same normalized-path singleton used by privacy_check, network and
+    extension-sign. Clearing this local cache therefore cannot wipe an active
+    MRAL DEK or create a competing writer. The lazy privacy_check import keeps
+    ``register`` cheap.
     """
     return build_audit_writer(path)

@@ -75,14 +75,12 @@ def render_torrc(*, socks_port: int, control_port: int, data_dir: Path, disable_
     rely on Tor's silent default-on behaviour — a future Tor release could
     change the SOCKSPort default flags.
 
-    ``disable_ipv6`` emits ``ClientUseIPv6 0`` (the IPv6-leak defence the
-    ``policy.json`` field of the same name advertises: strict defaults it to
-    True, lenient/off to False — see ``network.__init__._resolve_disable_ipv6``).
-    It defaults to False here so the parameter is purely additive for callers
-    that don't pass it. Until this was wired, the flag was resolved into
-    ``RuntimeConfig`` and then dropped on the floor — every torrc was rendered
-    identically regardless of policy, so the documented strict-mode IPv6
-    defence was a silent no-op.
+    ``disable_ipv6`` emits ``ClientUseIPv6 0`` (strict defaults it to True,
+    lenient/off to False — see ``network.__init__._resolve_disable_ipv6``).
+    This only controls Tor's own client connections; it does not disable host
+    IPv6 or constrain provider SDK sockets, so the transport flagger cannot
+    treat it as leak prevention. It defaults to False here so the parameter is
+    purely additive for callers that don't pass it.
     """
     lines = [
         f"SOCKSPort 127.0.0.1:{socks_port} IsolateSOCKSAuth",
