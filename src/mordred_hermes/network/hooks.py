@@ -10,8 +10,8 @@ Return-shape contracts (HOOK_PAYLOADS.md §1, §4):
   :class:`MordredPathBringupFailed` (``BaseException``) escapes the
   ``except Exception`` wrapper inside ``hermes_cli.plugins.invoke_hook``
   so a strict-mode bring-up failure actually aborts the session.
-- ``on_session_end`` - return ignored. We tear down the active path
-  via :func:`api.stop`.
+- ``on_session_end`` - return ignored. Hermes fires this after every turn, so
+  the active path is deliberately retained for the next turn.
 - ``pre_api_request`` - return ignored. Strict + Tor revalidates the
   request-resolved provider and raises :class:`MordredPathBringupFailed`
   before egress when its transport is not verified compatible.
@@ -113,6 +113,48 @@ def _read_default_network_path(config_path: Path) -> str:
     Wizard PR2-C is the writer.
     """
     return resolve_default_path(load_plugin_section(config_path, "mordred_network", log=_LOG))
+
+
+def _read_default_network_path_strict(config_path: Path) -> str:
+    """Read ``default_path`` without hiding damage to an existing config.
+
+    A missing file, absent ``plugins`` key, absent ``mordred_network`` section,
+    or absent ``default_path`` is a legitimate unconfigured state and resolves
+    to clearnet. Existing malformed YAML, non-mapping container shapes, and an
+    invalid explicit ``default_path`` raise so strict request-time enforcement
+    can fail closed rather than misclassifying damaged Tor configuration as
+    intentional clearnet.
+    """
+    from ruamel.yaml import YAML
+
+    try:
+        f = config_path.open(encoding="utf-8")
+    except FileNotFoundError:
+        return _DEFAULT_NETWORK_PATH
+    with f:
+        data = YAML(typ="safe", pure=True).load(f)
+    if data is None:
+        return _DEFAULT_NETWORK_PATH
+    if not isinstance(data, dict):
+        raise ValueError("config.yaml must contain a top-level mapping")
+    if "plugins" not in data:
+        return _DEFAULT_NETWORK_PATH
+    plugins = data["plugins"]
+    if not isinstance(plugins, dict):
+        raise ValueError("config.yaml plugins must be a mapping")
+    if "mordred_network" not in plugins:
+        return _DEFAULT_NETWORK_PATH
+    section = plugins["mordred_network"]
+    if not isinstance(section, dict):
+        raise ValueError("config.yaml plugins.mordred_network must be a mapping")
+    if "default_path" not in section:
+        return _DEFAULT_NETWORK_PATH
+    value = section["default_path"]
+    if not isinstance(value, str) or value not in VALID_ACTIVE_PATHS:
+        raise ValueError(
+            f"config.yaml plugins.mordred_network.default_path must be one of {sorted(VALID_ACTIVE_PATHS)!r}"
+        )
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -251,19 +293,24 @@ def on_session_start(
 
 
 def on_session_end(**_kwargs: Any) -> None:
-    """Tear down the active path. Always safe to call."""
-    try:
-        api.stop()
-    except Exception as e:
-        # Tear-down errors must never propagate; the session is ending
-        # regardless. Log so operators can see if Tor / Mullvad cleanup
-        # is misbehaving.
-        _LOG.warning("on_session_end: api.stop raised %s", e)
+    """Keep the active path alive across Hermes conversation turns.
+
+    Hermes 0.13--0.19 fires ``on_session_end`` after every
+    ``run_conversation`` call, not only when the logical session is over.
+    Stopping here resets the runtime to clearnet, while continuation turns do
+    not fire ``on_session_start`` again. Consequently a strict Tor session
+    would send its second turn over clearnet.
+
+    The Runtime is process-global and can serve multiple gateway sessions, so
+    session-finalize/reset hooks cannot own teardown either. ``register()``
+    installs a single process-exit callback for final cleanup.
+    """
 
 
 def pre_api_request(
     *,
     policy_json_path: Path,
+    config_path: Path,
     audit: _AuditWriter | None = None,
     provider: Any = None,
     **_kwargs: Any,
@@ -277,10 +324,15 @@ def pre_api_request(
     to receive the request, so strict Tor re-runs the transport evidence gate
     here immediately before egress.
 
+    The configured path is checked again here because continuation turns do
+    not fire ``on_session_start``. Under strict policy, a configured Tor path
+    that is no longer active fails closed before provider evaluation.
+
     Missing provider evidence, malformed overrides, invalid runtime state, and
-    internal evaluation errors all fail closed. A refusal tears down the live
-    path and raises :class:`MordredPathBringupFailed`, whose ``BaseException``
-    inheritance escapes Hermes's ``except Exception`` hook wrappers.
+    internal evaluation errors all fail closed. A refusal keeps the current
+    runtime state intact and raises :class:`MordredPathBringupFailed`, whose
+    ``BaseException`` inheritance escapes Hermes's ``except Exception`` hook
+    wrappers.
     """
     policy_mode = _read_policy_mode(policy_json_path)
     if policy_mode != "strict":
@@ -289,13 +341,22 @@ def pre_api_request(
     runtime_provider = (
         provider.strip().lower() if isinstance(provider, str) and provider.strip() else _UNRESOLVED_PROVIDER
     )
+    # Default to Tor until config resolution succeeds. If the reader itself
+    # fails under strict policy, the error path must assume the protected route
+    # was Tor rather than silently allowing possible clearnet egress.
+    configured_path: ActivePath = "tor"
     active_path: ActivePath = "tor"
-    stage = "status"
+    stage = "configured_path"
     try:
+        configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
+        stage = "status"
         raw_active_path = api.status().active_path
         if raw_active_path not in VALID_ACTIVE_PATHS:
             raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
         active_path = cast(ActivePath, raw_active_path)
+        if configured_path == "tor" and active_path != "tor":
+            stage = "required_path"
+            raise RuntimeError(f"configured Tor path is not active (runtime active_path={active_path!r})")
         if active_path != "tor":
             return
 
@@ -322,7 +383,7 @@ def pre_api_request(
         _handle_transport_gate_error(
             error=gate_error,
             stage=stage,
-            target_path="tor",
+            target_path=configured_path,
             active_path=active_path,
             providers=[runtime_provider],
             policy_mode=policy_mode,
@@ -704,4 +765,10 @@ def _stop_after_transport_gate_failure(context: str) -> None:
         _LOG.warning("%s: api.stop() during teardown raised %s", context, stop_err)
 
 
-__all__ = ["on_session_end", "on_session_start", "pre_api_request", "pre_tool_call", "wait_until_ready"]
+__all__ = [
+    "on_session_end",
+    "on_session_start",
+    "pre_api_request",
+    "pre_tool_call",
+    "wait_until_ready",
+]

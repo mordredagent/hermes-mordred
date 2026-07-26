@@ -309,7 +309,7 @@ class Runtime:
     def stop(self) -> None:
         """Tear down the active path and join the liveness worker.
 
-        Idempotent: callable from ``on_session_end`` even if no path
+        Idempotent: callable from process-exit cleanup even if no path
         was ever activated.
         """
         self._stop_worker()

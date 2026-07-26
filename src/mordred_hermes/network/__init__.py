@@ -8,6 +8,7 @@ Phase 3 PR2 wiring:
 2. Register it process-wide via :func:`api.set_runtime`.
 3. Register :mod:`hooks` callbacks for ``on_session_start`` /
    ``on_session_end`` / ``pre_api_request`` / ``pre_tool_call``.
+4. Register one process-exit callback that owns final runtime teardown.
 
 Side-effect-free at module import: provider, hook, and runtime
 registration all happen inside :func:`register`. Tests verify this via
@@ -16,6 +17,7 @@ the ``register(FakeCtx)`` assertions in ``tests/test_network_hooks.py``.
 
 from __future__ import annotations
 
+import atexit
 import functools
 import logging
 from collections.abc import Callable
@@ -43,6 +45,7 @@ DEFAULT_AUDIT_PATH: Path = HERMES_BASE / "mordred" / "audit.log"
 # provider the same way llm_guard does — config.yaml model.provider first,
 # then auth.json active_provider. Same file llm_guard reads.
 DEFAULT_AUTH_JSON_PATH: Path = HERMES_BASE / "auth.json"
+_PROCESS_SHUTDOWN_REGISTERED = False
 
 
 class PluginContext(Protocol):
@@ -70,6 +73,7 @@ def register(ctx: PluginContext) -> None:
     )
     runtime = Runtime(config=config, audit=audit)
     api.set_runtime(runtime)
+    _register_process_shutdown()
     from ..privacy_check.hooks import check_plugin_integrity
 
     def _on_session_start(**kwargs: Any) -> None:
@@ -91,6 +95,7 @@ def register(ctx: PluginContext) -> None:
     def _pre_api_request(**kwargs: Any) -> None:
         hooks.pre_api_request(
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
+            config_path=DEFAULT_CONFIG_PATH,
             audit=audit,
             **kwargs,
         )
@@ -103,6 +108,30 @@ def register(ctx: PluginContext) -> None:
     ctx.register_hook("on_session_end", hooks.on_session_end)
     ctx.register_hook("pre_api_request", _pre_api_request)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
+
+
+def _stop_runtime_at_process_exit() -> None:
+    """Best-effort teardown for the process-global network runtime."""
+    try:
+        api.stop()
+    except Exception as e:
+        # Interpreter shutdown must continue even if Tor / VPN cleanup fails.
+        _LOG.warning("process-exit network teardown raised %s", e)
+
+
+def _register_process_shutdown() -> None:
+    """Register exactly one finalizer for the process-global runtime.
+
+    Hermes's session hooks have narrower ownership than this singleton:
+    ``on_session_end`` fires per turn, while ``on_session_finalize`` can fire
+    for one gateway session while other sessions remain active. The callback
+    resolves :mod:`api`'s current singleton at interpreter exit instead.
+    """
+    global _PROCESS_SHUTDOWN_REGISTERED
+    if _PROCESS_SHUTDOWN_REGISTERED:
+        return
+    atexit.register(_stop_runtime_at_process_exit)
+    _PROCESS_SHUTDOWN_REGISTERED = True
 
 
 def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> RuntimeConfig:

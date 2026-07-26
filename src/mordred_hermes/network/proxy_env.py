@@ -4,7 +4,7 @@ This module is read-only by design. It computes the ``{HTTPS_PROXY: ...}``
 dict that **should** be in ``os.environ`` for a given network path; PR2
 ``runtime`` is the sole writer that actually mutates the process
 environment (and tracks the prior values so it can restore on
-``on_session_end``).
+process exit).
 
 The Tor URL scheme is always ``socks5h://`` so DNS resolution happens
 inside the Tor circuit (TODO §3.1 L317). Plain ``http://`` proxy URLs are

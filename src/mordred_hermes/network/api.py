@@ -50,8 +50,8 @@ class Runtime(Protocol):
 
     Kept narrow so PR1 tests can satisfy it with a tiny fake and PR2
     can replace the global without surface changes. PR2 added
-    :meth:`stop` and :meth:`is_dropped` so the hooks layer can route
-    ``on_session_end`` tear-down and ``pre_tool_call`` strict-mode
+    :meth:`stop` and :meth:`is_dropped` so the plugin can route
+    process-exit teardown and ``pre_tool_call`` strict-mode
     refusals through ``api`` instead of importing the concrete class.
     The M9 liveness worker sets ``is_dropped`` after two consecutive
     health failures; ``hooks.pre_tool_call`` reads it.
@@ -164,9 +164,9 @@ def _default_probe() -> bool:
 def stop(*, runtime: Runtime | None = None) -> None:
     """Tear down the active path and stop the liveness worker.
 
-    Safe to call when no runtime is registered (no-op) - the hooks
-    layer invokes this from ``on_session_end`` and the session may
-    have ended without ``register()`` ever running (defensive idempotence).
+    Safe to call when no runtime is registered (no-op) - the process-exit
+    cleanup may run after registration failed or the singleton was cleared
+    (defensive idempotence).
     """
     rt = runtime if runtime is not None else _RUNTIME
     if rt is None:

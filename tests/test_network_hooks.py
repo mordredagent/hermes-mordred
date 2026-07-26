@@ -7,9 +7,10 @@ The hooks layer bridges Hermes's plugin lifecycle and the PR2-A
   bring the configured default path up via :func:`api.use`. Strict +
   bring-up failure raises :class:`MordredPathBringupFailed`
   (``BaseException``-derived; HOOK_PAYLOADS.md §1).
-- ``on_session_end`` - :func:`api.stop`.
+- ``on_session_end`` - retain the active path between conversation turns.
 - ``pre_api_request`` - strict + Tor revalidates the provider resolved for
-  the actual outbound request, including runtime-only overrides.
+  the actual outbound request, including runtime-only overrides, and refuses
+  egress if configured Tor is no longer active.
 - ``pre_tool_call`` - strict + :func:`api.is_dropped` raises
   :class:`MordredPathDropped`. Lenient/off return ``None`` because the
   M9 liveness worker already audited the drop with ``decision=warn``.
@@ -380,7 +381,7 @@ class TestTransportCompatibilityGate:
         assert rt.use_calls == ["tor"]
         # ...and it was torn down before the refusal escaped, so the Tor daemon /
         # SOCKS proxy env / liveness thread aren't orphaned if the host never
-        # calls on_session_end after on_session_start raises.
+        # reaches normal process-exit cleanup after on_session_start raises.
         assert rt.stop_called is True
         blocks = [e for e in self._transport_entries(audit) if e.get("decision") == "block"]
         assert blocks, "expected a block-decision transport audit entry"
@@ -804,13 +805,15 @@ class TestTransportCompatibilityGate:
 
 
 class TestOnSessionEnd:
-    def test_stops_runtime(self) -> None:
+    def test_keeps_runtime_active_for_continuation_turn(self) -> None:
         from mordred_hermes.network import api, hooks
 
         rt = _FakeRuntime()
+        rt.use("tor")
         api.set_runtime(rt)
         hooks.on_session_end()
-        assert rt.stop_called
+        assert rt.stop_called is False
+        assert rt.status().active_path == "tor"
 
     def test_idempotent_when_no_runtime_registered(self) -> None:
         from mordred_hermes.network import hooks
@@ -838,12 +841,14 @@ class TestPreApiRequestTransportGate:
         rt.use("tor")
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
         audit = _FakeAudit()
 
         for _attempt in range(2):
             with pytest.raises(MordredPathBringupFailed, match="outbound API request"):
                 hooks.pre_api_request(
                     policy_json_path=policy,
+                    config_path=config,
                     provider="bedrock",
                     audit=audit,
                 )
@@ -866,10 +871,12 @@ class TestPreApiRequestTransportGate:
         rt.use("tor")
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
         audit = _FakeAudit()
 
         hooks.pre_api_request(
             policy_json_path=policy,
+            config_path=config,
             provider="anthropic",
             audit=audit,
         )
@@ -889,11 +896,13 @@ class TestPreApiRequestTransportGate:
         rt.use("tor")
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
         audit = _FakeAudit()
 
         with pytest.raises(MordredPathBringupFailed):
             hooks.pre_api_request(
                 policy_json_path=policy,
+                config_path=config,
                 provider=provider,
                 audit=audit,
             )
@@ -911,16 +920,187 @@ class TestPreApiRequestTransportGate:
         rt.use("clearnet")
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "clearnet")
         audit = _FakeAudit()
 
         hooks.pre_api_request(
             policy_json_path=policy,
+            config_path=config,
             provider="bedrock",
             audit=audit,
         )
 
         assert rt.stop_called is False
         assert self._transport_entries(audit) == []
+
+    def test_configured_tor_missing_at_request_time_fails_closed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use("clearnet")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed, match="configured Tor path is not active"):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        assert rt.stop_called is False
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["event"] == "pre_api_request"
+        assert entries[0]["stage"] == "required_path"
+        assert entries[0]["active_path"] == "clearnet"
+        assert entries[0]["decision"] == "block"
+
+    def test_config_reader_internal_error_fails_closed_before_request(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use("clearnet")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+        audit = _FakeAudit()
+
+        def _boom(_config_path: Path) -> str:
+            raise RuntimeError("synthetic config resolution failure")
+
+        monkeypatch.setattr(hooks, "_read_default_network_path_strict", _boom)
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "configured_path"
+        assert entries[0]["decision"] == "block"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "- top-level-list\n",
+            "plugins: [not, a, mapping]\n",
+            "plugins:\n  mordred_network: not-a-mapping\n",
+            "plugins:\n  mordred_network:\n    default_path: onion\n",
+            "plugins:\n  mordred_network:\n    default_path: 7\n",
+            "plugins: [unterminated\n",
+        ],
+    )
+    def test_damaged_existing_config_fails_closed_before_request(
+        self,
+        tmp_path: Path,
+        content: str,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use("clearnet")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = tmp_path / "config.yaml"
+        config.write_text(content, encoding="utf-8")
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "configured_path"
+        assert entries[0]["decision"] == "block"
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            None,
+            "",
+            "{}\n",
+            "model:\n  provider: anthropic\n",
+            "plugins: {}\n",
+            "plugins:\n  mordred_network: {}\n",
+        ],
+    )
+    def test_legitimately_absent_network_path_defaults_to_clearnet(
+        self,
+        tmp_path: Path,
+        content: str | None,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use("clearnet")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = tmp_path / "config.yaml"
+        if content is not None:
+            config.write_text(content, encoding="utf-8")
+        audit = _FakeAudit()
+
+        hooks.pre_api_request(
+            policy_json_path=policy,
+            config_path=config,
+            provider="anthropic",
+            audit=audit,
+        )
+
+        assert self._transport_entries(audit) == []
+
+    def test_unreadable_existing_config_fails_closed_before_request(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use("clearnet")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+        audit = _FakeAudit()
+        real_open = Path.open
+
+        def _open(path: Path, *args: Any, **kwargs: Any) -> Any:
+            if path == config:
+                raise PermissionError("synthetic unreadable config")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", _open)
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "configured_path"
+        assert entries[0]["decision"] == "block"
 
     def test_internal_request_gate_error_fails_closed_on_strict_tor(
         self,
@@ -933,6 +1113,7 @@ class TestPreApiRequestTransportGate:
         rt.use("tor")
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
         audit = _FakeAudit()
 
         def _boom(**_kwargs: Any) -> Any:
@@ -942,6 +1123,7 @@ class TestPreApiRequestTransportGate:
         with pytest.raises(MordredPathBringupFailed) as excinfo:
             hooks.pre_api_request(
                 policy_json_path=policy,
+                config_path=config,
                 provider="anthropic",
                 audit=audit,
             )
@@ -954,6 +1136,66 @@ class TestPreApiRequestTransportGate:
         assert entries[0]["event"] == "pre_api_request"
         assert entries[0]["stage"] == "evaluate"
         assert entries[0]["decision"] == "block"
+
+
+# --------------------------------------------------------------------------- #
+# Hermes multi-turn lifecycle                                                 #
+# --------------------------------------------------------------------------- #
+
+
+class TestMultiTurnLifecycle:
+    def test_strict_tor_survives_turns_and_rekeys_on_new_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Model per-turn end followed by a reset/new session start."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config_with_provider(tmp_path, "tor", "anthropic")
+        audit = _FakeAudit()
+
+        hooks.on_session_start(
+            policy_json_path=policy,
+            config_path=config,
+            audit=audit,
+            session_id="session-1",
+        )
+        hooks.pre_api_request(
+            policy_json_path=policy,
+            config_path=config,
+            provider="anthropic",
+            audit=audit,
+        )
+
+        # Hermes invokes on_session_end after turn one, then continues the same
+        # session without another on_session_start.
+        hooks.on_session_end(session_id="session-1", turn_id="turn-1")
+        hooks.pre_api_request(
+            policy_json_path=policy,
+            config_path=config,
+            provider="anthropic",
+            audit=audit,
+        )
+
+        assert rt.use_calls == ["tor"]
+        assert rt.stop_called is False
+        assert rt.status().active_path == "tor"
+
+        # A reset/new session does not tear down the process-global path first.
+        # Its next on_session_start rekeys isolation and api.use re-brings up
+        # the configured path under the new identity.
+        hooks.on_session_start(
+            policy_json_path=policy,
+            config_path=config,
+            audit=audit,
+            session_id="session-2",
+        )
+        assert rt.use_calls == ["tor", "tor"]
+        assert rt.isolation_token == "session-2"
+        assert rt.stop_called is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1194,6 +1436,33 @@ class TestRegister:
         first_count = len(ctx.hooks)
         register(ctx)
         assert len(ctx.hooks) >= first_count
+
+    def test_registers_process_shutdown_cleanup_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        callbacks: list[Callable[[], None]] = []
+        monkeypatch.setattr(network.atexit, "register", callbacks.append)
+        monkeypatch.setattr(network, "_PROCESS_SHUTDOWN_REGISTERED", False)
+
+        network.register(_FakeCtx())
+        network.register(_FakeCtx())
+
+        assert callbacks == [network._stop_runtime_at_process_exit]
+
+    def test_process_shutdown_cleanup_stops_current_runtime(self) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api
+
+        rt = _FakeRuntime()
+        rt.use("tor")
+        api.set_runtime(rt)
+
+        network._stop_runtime_at_process_exit()
+
+        assert rt.stop_called is True
 
 
 # --------------------------------------------------------------------------- #

@@ -361,13 +361,15 @@ def test_prepare_sign_freezes_chain_rpc_and_filled_transaction(monkeypatch):
 
     assert prepared.params == [
         {
+            "type": "0x0",
+            "chainId": "0x1",
+            "nonce": "0x1",
+            "gasPrice": "0x3b9aca00",
+            "gas": "0x5208",
             "to": "0x" + "11" * 20,
             "value": "0x1",
+            "data": "0x",
             "from": "0x" + "aa" * 20,
-            "nonce": "0x1",
-            "gas": "0x5208",
-            "gasPrice": "0x3b9aca00",
-            "chainId": "0x1",
         }
     ]
     assert prepared.chain_id == "0x1"
@@ -390,6 +392,65 @@ def test_prepare_sign_rejects_transaction_from_other_wallet(monkeypatch):
             [{"from": "0x" + "bb" * 20, "to": "0x" + "11" * 20}],
             "0x1",
         )
+
+
+@pytest.mark.parametrize(
+    ("transaction", "error"),
+    [
+        (
+            {
+                "type": "0x1",
+                "nonce": "0x0",
+                "gasPrice": "0x1",
+                "gas": "0x5208",
+                "to": "0x" + "11" * 20,
+            },
+            "unsupported_transaction_type",
+        ),
+        (
+            {
+                "type": "0x3",
+                "nonce": "0x0",
+                "maxPriorityFeePerGas": "0x1",
+                "maxFeePerGas": "0x2",
+                "gas": "0x5208",
+                "to": "0x" + "11" * 20,
+            },
+            "unsupported_transaction_type",
+        ),
+        (
+            {
+                "type": "0x2",
+                "nonce": "0x0",
+                "maxPriorityFeePerGas": "0x1",
+                "maxFeePerGas": "0x2",
+                "gas": "0x5208",
+                "to": "0x" + "11" * 20,
+                "accessList": [{"address": "0x" + "22" * 20, "storageKeys": []}],
+            },
+            "unsupported_transaction_access_list",
+        ),
+        (
+            {
+                "nonce": -1,
+                "gasPrice": "0x1",
+                "gas": "0x5208",
+                "to": "0x" + "11" * 20,
+            },
+            "invalid_transaction_quantity:nonce",
+        ),
+    ],
+)
+def test_prepare_sign_rejects_transactions_the_serializer_cannot_match(monkeypatch, transaction, error):
+    from mordred_hermes.keyvault import extension_sign
+
+    signer = "0x" + "aa" * 20
+    monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: None)
+    monkeypatch.setattr(extension_sign, "get_address", lambda: signer)
+
+    with pytest.raises(ValueError, match=error):
+        extension_wallet._prepare_sign("eth_sendTransaction", [transaction], "0x1")
 
 
 @pytest.mark.parametrize(
@@ -453,12 +514,15 @@ def test_send_prepared_transaction_never_refills_and_checks_broadcast_hash(monke
 
     signer = "0x" + "aa" * 20
     tx = {
-        "nonce": "0x1",
-        "gas": "0x5208",
-        "gasPrice": "0x3b9aca00",
-        "from": signer,
-        "to": "0x" + "11" * 20,
+        "type": "0x0",
         "chainId": "0x1",
+        "nonce": "0x1",
+        "gasPrice": "0x3b9aca00",
+        "gas": "0x5208",
+        "to": "0x" + "11" * 20,
+        "value": "0x0",
+        "data": "0x",
+        "from": signer,
     }
     seen = {}
 
@@ -500,12 +564,15 @@ def test_transaction_sign_rejects_raw_tx_from_wallet_changed_after_precheck(monk
     expected_signer = "0x" + "aa" * 20
     actual_signer = "0x" + "bb" * 20
     tx = {
-        "nonce": "0x1",
-        "gas": "0x5208",
-        "gasPrice": "0x3b9aca00",
-        "from": expected_signer,
-        "to": "0x" + "11" * 20,
+        "type": "0x0",
         "chainId": "0x1",
+        "nonce": "0x1",
+        "gasPrice": "0x3b9aca00",
+        "gas": "0x5208",
+        "to": "0x" + "11" * 20,
+        "value": "0x0",
+        "data": "0x",
+        "from": expected_signer,
     }
     monkeypatch.setattr(extension_sign, "get_address", lambda: expected_signer)
     monkeypatch.setattr(

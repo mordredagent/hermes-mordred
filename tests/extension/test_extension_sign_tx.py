@@ -63,6 +63,93 @@ def test_eip1559_tx_recovers_sender():
     assert Account.recover_transaction(out["raw"]) == _ADDR
 
 
+def test_transaction_canonicalization_is_the_signed_representation():
+    tx = {
+        "nonce": 0,
+        "gasPrice": "1000000000",
+        "gas": "0x05208",
+        "to": "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD",
+        "from": _ADDR,
+    }
+
+    assert extension_sign.canonicalize_transaction(tx, chain_id=1) == {
+        "type": "0x0",
+        "chainId": "0x1",
+        "nonce": "0x0",
+        "gasPrice": "0x3b9aca00",
+        "gas": "0x5208",
+        "to": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        "value": "0x0",
+        "data": "0x",
+        "from": _ADDR.lower(),
+    }
+
+
+@pytest.mark.parametrize("tx_type", ["0x1", 1, "0x3", 3])
+def test_unsupported_transaction_types_are_rejected(tx_type):
+    tx = {
+        "type": tx_type,
+        "nonce": "0x0",
+        "gasPrice": "0x3b9aca00",
+        "gas": "0x5208",
+        "to": "0x" + "11" * 20,
+    }
+
+    with pytest.raises(ValueError, match="unsupported_transaction_type"):
+        extension_sign.sign_transaction(tx, chain_id=1)
+
+
+def test_nonempty_access_list_is_rejected_instead_of_silently_dropped():
+    tx = {
+        "type": "0x2",
+        "nonce": "0x0",
+        "maxPriorityFeePerGas": "0x3b9aca00",
+        "maxFeePerGas": "0x77359400",
+        "gas": "0x5208",
+        "to": "0x" + "11" * 20,
+        "accessList": [{"address": "0x" + "22" * 20, "storageKeys": []}],
+    }
+
+    with pytest.raises(ValueError, match="unsupported_transaction_access_list"):
+        extension_sign.sign_transaction(tx, chain_id=1)
+
+
+def test_negative_nonce_is_rejected_instead_of_becoming_zero():
+    tx = {
+        "nonce": -1,
+        "gasPrice": "0x3b9aca00",
+        "gas": "0x5208",
+        "to": "0x" + "11" * 20,
+    }
+
+    with pytest.raises(ValueError, match="invalid_transaction_quantity:nonce"):
+        extension_sign.sign_transaction(tx, chain_id=1)
+
+
+@pytest.mark.parametrize(
+    ("updates", "error"),
+    [
+        ({"nonce": "0xnot-hex"}, "invalid_transaction_quantity:nonce"),
+        ({"value": 1 << 256}, "invalid_transaction_quantity:value"),
+        ({"to": "0x1234"}, "invalid_transaction_address:to"),
+        ({"data": "0x123"}, "invalid_transaction_data"),
+        ({"blobVersionedHashes": []}, "unsupported_transaction_fields:blobVersionedHashes"),
+        ({"maxFeePerGas": "0x2", "maxPriorityFeePerGas": "0x1"}, "conflicting_transaction_fee_fields"),
+    ],
+)
+def test_malformed_or_unrepresentable_transactions_are_rejected(updates, error):
+    tx = {
+        "nonce": "0x0",
+        "gasPrice": "0x3b9aca00",
+        "gas": "0x5208",
+        "to": "0x" + "11" * 20,
+        **updates,
+    }
+
+    with pytest.raises(ValueError, match=error):
+        extension_sign.sign_transaction(tx, chain_id=1)
+
+
 def test_missing_fields_raises():
     with pytest.raises(extension_sign.TransactionFieldsMissing) as ei:
         extension_sign.sign_transaction({"to": "0x" + "00" * 20, "value": "0x1"}, chain_id=1)

@@ -245,11 +245,14 @@ def _prepare_transaction_sign(
         # the signer that the user is about to approve.
         tx["from"] = expected_signer
 
-    # sign_transaction takes chain_id separately and ignores tx["chainId"].
-    # Include the canonical value in the approved snapshot for the user, while
-    # freezing the separate argument that will actually enter the signature.
+    # sign_transaction takes chain_id separately and verifies tx["chainId"].
+    # Include the canonical value in the approved snapshot for the user, then
+    # run the same canonicalizer sign_transaction uses.  This removes fields
+    # the signer cannot represent only by rejecting them — never by silently
+    # dropping or coercing them after the approval prompt.
     frozen_chain_id = hex(chain_id)
     tx["chainId"] = frozen_chain_id
+    tx = extension_sign.canonicalize_transaction(tx, chain_id=chain_id)
     return _PreparedSign([tx], frozen_chain_id, resolved_rpc, rpc_endpoint, expected_signer)
 
 
@@ -275,7 +278,10 @@ def _send_prepared_transaction(
     if not isinstance(tx_signer, str) or not _addresses_match(tx_signer, expected_signer):
         raise RuntimeError("transaction_signer_mismatch")
     _assert_current_signer(expected_signer)
-    signed = extension_sign.sign_transaction(tx, chain_id=chain_id)
+    canonical_tx = extension_sign.canonicalize_transaction(tx, chain_id=chain_id)
+    if canonical_tx != tx:
+        raise RuntimeError("transaction_snapshot_not_canonical")
+    signed = extension_sign.sign_transaction(canonical_tx, chain_id=chain_id)
     try:
         actual_signer = _recover_transaction_signer(signed["raw"])
     except Exception as exc:
