@@ -114,7 +114,7 @@ async def _discord_encrypted_send(self: Any, chat_id: str, content: str, thread_
 
     kid = None
     for cid in lookup:
-        kid = e2e.thread_key_id("discord", cid, None)
+        kid = e2e.thread_key_id("discord", cid, thread_id)
         if kid:
             break
     key = e2e.reply_key(kid)
@@ -133,10 +133,11 @@ def _wrap_discord(cls: Any) -> None:
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):  # type: ignore[no-untyped-def]
         if getattr(self, "_client", None):
-            thread_id = (metadata or {}).get("thread_id")
+            raw_thread_id = (metadata or {}).get("thread_id")
+            thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
             ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
             try:
-                encrypted = any(e2e.is_encrypted_thread("discord", x, None) for x in ids)
+                encrypted = any(e2e.is_encrypted_thread("discord", x, thread_id) for x in ids)
             except Exception:
                 encrypted = False
             if encrypted:  # fail-closed
@@ -158,11 +159,56 @@ _TARGETS = [
 ]
 
 
-def install_outbound_patches() -> list[str]:
-    """Wrap each importable platform adapter's ``send`` for reply-in-kind.
+_WRAPPERS = {"slack": _wrap_slack, "discord": _wrap_discord}
 
-    Best-effort: adapters whose platform deps aren't installed are skipped. Safe
-    to call more than once (idempotent per class).
+
+def wrap_live_adapters(gateway: Any) -> list[str]:
+    """Wrap the ``send`` of the adapter classes the gateway ACTUALLY built.
+
+    This is the reliable path. Guessing import paths does not work: the concrete
+    Slack/Discord adapters are directory-based plugins loaded into a synthetic
+    package (``hermes_plugins.slack_platform.adapter``) that only resolves inside
+    a live gateway process, and the path differs between hermes builds. Patching
+    a same-named class from some other importable module silently wraps a class
+    nobody instantiates, so replies go out through the real, unwrapped adapter —
+    in cleartext.
+
+    ``GatewayRunner.adapters`` is ``Dict[Platform, BasePlatformAdapter]`` of the
+    live instances, so ``type(adapter)`` is exactly the class that will send.
+    Idempotent and cheap: safe to call on every inbound event.
+    """
+    installed: list[str] = []
+    adapters = getattr(gateway, "adapters", None) or {}
+    try:
+        items = list(adapters.items())
+    except Exception:
+        return installed
+    for plat, adapter in items:
+        try:
+            name = str(getattr(plat, "value", plat) or "").lower()
+            wrap = _WRAPPERS.get(name)
+            if wrap is None or adapter is None:
+                continue
+            cls = type(adapter)
+            send = getattr(cls, "send", None)
+            if send is None or getattr(send, "__mordred_wrapped__", False):
+                _patched.add(name)
+                continue
+            wrap(cls)
+            _patched.add(name)
+            installed.append(name)
+            logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
+        except Exception as e:
+            logger.debug("mordred_e2e: could not wrap %s: %s", plat, e)
+    return installed
+
+
+def install_outbound_patches() -> list[str]:
+    """Best-effort wrap of statically importable adapters (pre-gateway fallback).
+
+    Kept for builds that DO expose the adapters as ordinary modules. The
+    authoritative path is :func:`wrap_live_adapters`, driven from the live
+    gateway once its adapters exist.
     """
     import importlib
 
@@ -176,10 +222,8 @@ def install_outbound_patches() -> list[str]:
             if cls is None:
                 continue
             if getattr(cls.send, "__mordred_wrapped__", False):
-                _patched.add(platform)
                 continue
             wrap(cls)
-            _patched.add(platform)
             installed.append(platform)
             logger.debug("mordred_e2e: wrapped %s.%s.send for outbound E2E", module_path, cls_name)
         except Exception as e:

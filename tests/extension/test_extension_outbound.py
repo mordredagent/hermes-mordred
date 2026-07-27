@@ -22,11 +22,12 @@ from __future__ import annotations
 import asyncio
 import secrets
 import sys
+from enum import Enum
 from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes.extension import crypto, e2e, outbound, pairing
+from mordred_hermes.extension import crypto, e2e, gateway_plugin, outbound, pairing
 
 
 @pytest.fixture(autouse=True)
@@ -301,10 +302,8 @@ def test_discord_reply_in_thread_finds_key_via_parent_channel_lookup():
     # A pairing must exist for decrypt_inbound_keyed's round-trip check below
     # (it bails out early with no pairing at all) -- but its key must differ
     # from the channel key, so the assertions below can tell "found the real
-    # per-channel key via the parent lookup" apart from "silently fell back
-    # to the master key" (reply_key() falls back to the master key whenever
-    # no channel key is found, which would make this test pass for the wrong
-    # reason if the parent-id lookup ever regressed).
+    # per-channel key via the parent lookup" apart from any accidental use of
+    # the master key.
     master_key = _seed_master_key()
     chan_key = secrets.token_bytes(32)
     pairing.save_channel_key(parent_id, chan_key)
@@ -336,3 +335,127 @@ def test_discord_reply_in_thread_finds_key_via_parent_channel_lookup():
     assert back is not None
     assert reply in back
     assert res.success is True
+
+
+# --------------------------------------------------------------------------- #
+# Full inbound-hook -> live-adapter regressions
+# --------------------------------------------------------------------------- #
+
+
+class FakePlatform(Enum):
+    """Match Hermes' ``Platform`` enum string/value behaviour."""
+
+    SLACK = "slack"
+    DISCORD = "discord"
+
+
+def test_slack_enum_inbound_then_thread_reply_stays_encrypted():
+    """Reproduce the live Slack path end to end.
+
+    The inbound hook receives ``Platform.SLACK`` (whose ``str()`` is not
+    ``"slack"``), wraps the gateway's live adapter, decrypts a top-level
+    message, and the gateway replies in a newly-created Slack thread. The
+    reply must still take the ciphertext path.
+    """
+    _seed_master_key()
+    chan_key = secrets.token_bytes(32)
+    chat_id, reply_thread = "C-live-slack", "1710000099.0001"
+    pairing.save_channel_key(chat_id, chan_key)
+    kid = crypto.key_id(chan_key)
+
+    class LiveSlackAdapter:
+        MAX_MESSAGE_LENGTH = 3000
+
+        def __init__(self) -> None:
+            self._app = object()
+            self._client = FakeSlackClient()
+            self._bot_message_ts: set[str] = set()
+
+        def _get_client(self, _chat_id):
+            return self._client
+
+        def _resolve_thread_ts(self, _reply_to, metadata):
+            return (metadata or {}).get("thread_ts")
+
+        async def stop_typing(self, _chat_id):
+            return None
+
+        async def send(self, target, content, reply_to=None, metadata=None):
+            self._client.posts.append({"channel": target, "text": content, "PLAINTEXT_LEAK": True})
+            return SimpleNamespace(success=True)
+
+    adapter = LiveSlackAdapter()
+    gateway = SimpleNamespace(adapters={FakePlatform.SLACK: adapter})
+    request = "private slack question"
+    event = SimpleNamespace(
+        text=crypto.encrypt_message_v2(chan_key, request, kid),
+        source=SimpleNamespace(platform=FakePlatform.SLACK, chat_id=chat_id, thread_id=None),
+    )
+
+    hook_result = gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway)
+    assert hook_result == {"action": "rewrite", "text": request}
+
+    answer = "private slack answer"
+    result = asyncio.run(adapter.send(chat_id, answer, metadata={"thread_ts": reply_thread}))
+
+    posts = adapter._client.posts
+    assert posts
+    assert not any(post.get("PLAINTEXT_LEAK") for post in posts)
+    assert all(answer not in post["text"] and crypto.is_encrypted(post["text"]) for post in posts)
+    decrypted, _ = e2e.decrypt_inbound_keyed(" ".join(post["text"] for post in posts))
+    assert decrypted == answer
+    assert result.success is True
+
+
+def test_discord_thread_inbound_then_reply_stays_encrypted():
+    """Reproduce Hermes' live Discord auto-thread shape end to end.
+
+    Discord represents an auto-threaded inbound event with ``chat_id`` and
+    ``thread_id`` both set to the thread snowflake. The outbound adapter gets
+    the same thread in ``metadata``. The registry lookup must retain that
+    thread root instead of replacing it with ``None``.
+    """
+    _seed_master_key()
+    chan_key = secrets.token_bytes(32)
+    thread_id, parent_id = "922001", "922000"
+    pairing.save_channel_key(parent_id, chan_key)
+    kid = crypto.key_id(chan_key)
+
+    class LiveDiscordAdapter:
+        MAX_MESSAGE_LENGTH = 2000
+
+        def __init__(self, client) -> None:
+            self._client = client
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            target = str((metadata or {}).get("thread_id") or chat_id)
+            self._client.channels[int(target)].sent.append(f"PLAINTEXT_LEAK:{content}")
+            return SimpleNamespace(success=True)
+
+    client = FakeDiscordClient()
+    channel = client.add_channel(thread_id, parent_id=parent_id)
+    adapter = LiveDiscordAdapter(client)
+    gateway = SimpleNamespace(adapters={FakePlatform.DISCORD: adapter})
+    request = "private discord question"
+    event = SimpleNamespace(
+        text=crypto.encrypt_message_v2(chan_key, request, kid),
+        source=SimpleNamespace(
+            platform=FakePlatform.DISCORD,
+            chat_id=thread_id,
+            thread_id=thread_id,
+            parent_chat_id=parent_id,
+        ),
+    )
+
+    hook_result = gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway)
+    assert hook_result == {"action": "rewrite", "text": request}
+
+    answer = "private discord answer"
+    result = asyncio.run(adapter.send(thread_id, answer, metadata={"thread_id": thread_id}))
+
+    assert channel.sent
+    assert not any(message.startswith("PLAINTEXT_LEAK:") for message in channel.sent)
+    assert all(answer not in message and crypto.is_encrypted(message) for message in channel.sent)
+    decrypted, _ = e2e.decrypt_inbound_keyed(" ".join(channel.sent))
+    assert decrypted == answer
+    assert result.success is True
