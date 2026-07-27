@@ -144,3 +144,20 @@ class TestProbeContract:
             transport=httpx.MockTransport(_success_handler),
             timeout=1.0,
         )
+
+    def test_probe_never_trusts_ambient_proxy_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.llm_guard import health
+
+        seen: dict[str, object] = {}
+        real_client = health.httpx.Client
+
+        def client(**kwargs):
+            seen.update(kwargs)
+            return real_client(**kwargs)
+
+        monkeypatch.setattr(health.httpx, "Client", client)
+        health.probe(
+            endpoint="http://127.0.0.1:1234/v1",
+            transport=httpx.MockTransport(_success_handler),
+        )
+        assert seen["trust_env"] is False

@@ -14,12 +14,12 @@ internal-event guard but BEFORE auth/pairing and agent dispatch, and may return:
 which is exactly what the E2E transport needs:
   * ``🔑REQ/GRANT`` key-exchange control messages (peer-to-peer between
     extensions, SPEC-v2 §5) → skip, so the agent never reacts to them;
-  * ``🔒ENC:v1/v2`` ciphertext → rewrite with the decrypted plaintext, so the
-    agent reads cleartext while the wire stays encrypted.
-
-PoC scope: inbound decrypt + key-exchange drop. Outbound reply re-encryption
-(``transform_llm_output``) and the extension WebSocket server startup
-(``register_platform``) land in the next phases.
+  * one complete, context-bound ``🔒ENC:v3`` command → authenticate it, then
+    rewrite with decrypted plaintext, so the agent reads cleartext while the
+    wire stays encrypted. Legacy versions and arbitrary surrounding plaintext
+    are rejected on this gateway boundary;
+  * before releasing plaintext, verify and record a live fail-closed outbound
+    reply path for the same platform/channel/thread.
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ _NEEDS_KEY_NOTICE = (
 # Strong refs to fire-and-forget notice sends: without this the event loop only
 # holds a weak reference and may garbage-collect the task mid-flight (RUF006).
 _bg_tasks: set[Any] = set()
+_INVALID_PROFILE = "\x00mordred-invalid-profile"
+_MISSING = object()
 
 
 def _platform_name(event: Any) -> str:
@@ -58,6 +60,25 @@ def _platform_name(event: Any) -> str:
     return str(getattr(raw, "value", raw) or "").lower()
 
 
+def _profile_name(event: Any) -> str | None:
+    """Return the multiplex profile stamped on ``event.source``.
+
+    Hermes versions before multiplexing simply omit the field. A malformed or
+    hostile profile value gets an impossible sentinel so adapter lookup fails
+    closed instead of falling back to the active/default bot.
+    """
+    try:
+        src = getattr(event, "source", None)
+        raw = getattr(src, "profile", None)
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            return _INVALID_PROFILE
+        return raw.strip() or None
+    except BaseException:
+        return _INVALID_PROFILE
+
+
 async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: dict[str, Any] | None) -> None:
     try:
         await adapter.send(chat_id, content, reply_to=None, metadata=metadata)
@@ -65,7 +86,7 @@ async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: dict[st
         logger.warning("mordred_e2e: needs-key notice send failed: %s", exc)
 
 
-def _notify_needs_key(gateway: Any, event: Any) -> bool:
+def _notify_needs_key(gateway: Any, event: Any, outbound: Any, profile: str | None) -> bool:
     """Reply to the originating channel/thread asking the sender to set up or
     obtain an encryption key. Best-effort; returns True if a send was scheduled.
 
@@ -76,10 +97,12 @@ def _notify_needs_key(gateway: Any, event: Any) -> bool:
     import asyncio
 
     src = getattr(event, "source", None)
-    platform = getattr(src, "platform", None)
     chat_id = getattr(src, "chat_id", None) or getattr(event, "chat_id", None)
-    adapters = getattr(gateway, "adapters", None)
-    adapter = adapters.get(platform) if (platform is not None and isinstance(adapters, dict)) else None
+    adapter = (
+        outbound.live_adapter_for(gateway, _platform_name(event), profile)
+        if gateway is not None and outbound is not None
+        else None
+    )
     if adapter is None or not chat_id:
         return False
 
@@ -99,8 +122,8 @@ def _notify_needs_key(gateway: Any, event: Any) -> bool:
     return True
 
 
-def _thread_ctx(event: Any) -> tuple[str, str, str | None]:
-    """Best-effort (platform, chat_id, thread_root) from a MessageEvent.
+def _thread_ctx(event: Any) -> tuple[str, str, str | None, str | None]:
+    """Best-effort platform/channel/thread/parent context from a MessageEvent.
 
     The platform MUST come from :func:`_platform_name` (which unwraps the
     ``Platform`` enum via ``.value``). ``str(Platform.SLACK)`` is
@@ -114,7 +137,112 @@ def _thread_ctx(event: Any) -> tuple[str, str, str | None]:
     thread = getattr(src, "thread_id", None)
     if thread is None:
         thread = getattr(event, "thread_id", None)
-    return _platform_name(event), str(chat_id), thread
+    parent = getattr(src, "parent_chat_id", None)
+    if parent is None:
+        parent = getattr(event, "parent_chat_id", None)
+    thread_root = str(thread) if thread not in (None, "") else None
+    parent_chat_id = str(parent) if parent not in (None, "") else None
+    return _platform_name(event), str(chat_id), thread_root, parent_chat_id
+
+
+def _command_aad_ctx(
+    event: Any,
+    routed_context: tuple[str, str, str | None, str | None],
+) -> tuple[str, str, str | None]:
+    """Derive the context the sender knew before Discord auto-threading.
+
+    Discord creates a reply thread before ``pre_gateway_dispatch``. The routed
+    ``SessionSource`` then points at the new thread even though the extension
+    encrypted the command while posting in its parent channel. Both supported
+    Hermes generations retain the original Discord message in
+    ``event.raw_message``; 0.19 additionally stamps ``auto_thread_created``.
+
+    Reply routing must keep using ``routed_context`` (the new thread), while
+    command authentication uses the original parent channel with no thread.
+    Ambiguous floor-version thread events without the original raw channel fail
+    closed instead of guessing a context.
+    """
+    platform, chat_id, thread_root, parent_chat_id = routed_context
+    if platform != "discord":
+        return platform, chat_id, thread_root
+
+    src = getattr(event, "source", None)
+    explicit_auto = getattr(src, "auto_thread_created", _MISSING)
+    if explicit_auto is not _MISSING and not isinstance(explicit_auto, bool):
+        raise ValueError("invalid Discord auto-thread marker")
+
+    raw_message = getattr(event, "raw_message", None)
+    raw_channel = getattr(raw_message, "channel", None)
+    raw_channel_value = getattr(raw_channel, "id", None)
+    raw_channel_id = str(raw_channel_value) if raw_channel_value not in (None, "") else None
+
+    parent = parent_chat_id or ""
+    routed_thread = bool(parent and thread_root and chat_id == thread_root)
+    inferred_auto = bool(routed_thread and raw_channel_id == parent and raw_channel_id != chat_id)
+
+    if explicit_auto is True:
+        if not inferred_auto:
+            raise ValueError("inconsistent Discord auto-thread context")
+        return platform, parent, None
+    if explicit_auto is False and inferred_auto:
+        raise ValueError("inconsistent Discord auto-thread marker")
+    if inferred_auto:
+        return platform, parent, None
+
+    if routed_thread and explicit_auto is _MISSING:
+        if raw_channel_id is None:
+            raise ValueError("ambiguous Discord thread context")
+        if raw_channel_id != chat_id:
+            raise ValueError("inconsistent Discord thread context")
+
+    return platform, chat_id, thread_root
+
+
+def _rewrite_encrypted(
+    context: tuple[str, str, str | None, str | None],
+    gateway: Any,
+    outbound: Any,
+    decrypted: str,
+    kid: str | None,
+    replay: e2e.ReplayClaim | None,
+    profile: str | None,
+) -> dict[str, Any]:
+    """Authorize outbound encryption before releasing decrypted text."""
+    try:
+        platform, chat_id, thread, _parent_chat_id = context
+        if not platform or not chat_id or not kid:
+            logger.error("mordred_e2e: refusing encrypted message because reply context is incomplete")
+            return {"action": "skip", "reason": "mordred-outbound-encryption-unavailable"}
+        if gateway is None or outbound is None or not outbound.live_adapter_is_wrapped(gateway, platform, profile):
+            logger.error(
+                "mordred_e2e: refusing encrypted %s message because its live outbound adapter is not wrapped",
+                platform,
+            )
+            return {"action": "skip", "reason": "mordred-outbound-encryption-unavailable"}
+
+        # Remember this conversation is encrypted so the reply re-encrypts
+        # (§4). A context/registry failure must also stop before plaintext
+        # reaches the agent.
+        if not e2e.mark_encrypted_thread(platform, chat_id, thread, kid):
+            logger.error("mordred_e2e: refusing encrypted message because reply context was not recorded")
+            return {"action": "skip", "reason": "mordred-outbound-encryption-unavailable"}
+    except BaseException:
+        logger.error("mordred_e2e: encrypted outbound verification failed")
+        return {"action": "skip", "reason": "mordred-outbound-encryption-unavailable"}
+
+    # Replay state is committed only after the reply path and conversation
+    # registry are ready. A transient unwrappable adapter must not consume a
+    # legitimate command that was never released to the agent.
+    try:
+        if replay is None:
+            raise ValueError("missing replay claim")
+        if not e2e.claim_gateway_replay(replay):
+            logger.warning("mordred_e2e: refusing replayed encrypted envelope")
+            return {"action": "skip", "reason": "mordred-replayed-encrypted-envelope"}
+    except BaseException:
+        logger.error("mordred_e2e: encrypted replay-state verification failed")
+        return {"action": "skip", "reason": "mordred-invalid-encrypted-envelope"}
+    return {"action": "rewrite", "text": decrypted}
 
 
 def pre_gateway_dispatch(
@@ -128,13 +256,16 @@ def pre_gateway_dispatch(
     # once the gateway is up, so register() cannot reach them by import path.
     # Wrap the LIVE adapter classes here (idempotent) — otherwise the reply goes
     # out through the real, unwrapped send in cleartext.
+    outbound = None
+    profile = _profile_name(event)
     if gateway is not None:
         try:
-            from . import outbound
+            from . import outbound as outbound_module
 
-            outbound.wrap_live_adapters(gateway)
-        except Exception as e:
-            logger.debug("mordred_e2e: live adapter wrap failed: %s", e)
+            outbound_module.wrap_live_adapters(gateway, profile)
+            outbound = outbound_module
+        except BaseException:
+            logger.warning("mordred_e2e: live adapter wrap failed")
 
     text = getattr(event, "text", None)
     if not isinstance(text, str) or not text:
@@ -144,23 +275,39 @@ def pre_gateway_dispatch(
     if e2e.is_key_exchange(text):
         return {"action": "skip", "reason": "mordred-key-exchange"}
 
-    # Decrypt any 🔒ENC tokens using the local channel keyring (per-token key
-    # selection by keyId). Fail-open: on any error, decrypt_inbound_keyed
-    # returns (None, None) and we leave the message untouched.
-    decrypted, kid = e2e.decrypt_inbound_keyed(text)
-    if decrypted is not None and decrypted != text:
-        # Remember this conversation is encrypted so the reply re-encrypts (§4).
-        platform, chat_id, thread = _thread_ctx(event)
-        if chat_id:
-            e2e.mark_encrypted_thread(platform, chat_id, thread, kid)
-        return {"action": "rewrite", "text": decrypted}
+    # Treat the whole wire value as one authenticated envelope. Only a
+    # platform-valid leading mention prefix, one fully authenticated v3 token,
+    # and trailing whitespace are accepted. In particular, never decrypt a
+    # valid token embedded beside attacker-controlled plaintext.
+    try:
+        context = _thread_ctx(event)
+        platform, chat_id, thread_root = _command_aad_ctx(event, context)
+        parent_chat_id = context[3]
+        decrypted, kid, replay = e2e.decrypt_gateway_envelope(
+            text,
+            platform,
+            chat_id=chat_id,
+            thread_root=thread_root,
+            parent_chat_id=parent_chat_id,
+        )
+    except e2e.InvalidEncryptedEnvelope:
+        logger.warning("mordred_e2e: refusing malformed or unauthenticated encrypted envelope")
+        return {"action": "skip", "reason": "mordred-invalid-encrypted-envelope"}
+    except BaseException:
+        logger.error("mordred_e2e: encrypted envelope verification failed")
+        return {"action": "skip", "reason": "mordred-invalid-encrypted-envelope"}
+
+    if decrypted is not None:
+        # Decrypting commits the agent to producing a reply for an encrypted
+        # channel. Check/record the outbound path before plaintext is released.
+        return _rewrite_encrypted(context, gateway, outbound, decrypted, kid, replay, profile)
 
     # Nothing decrypted → the agent would otherwise read this as cleartext.
     # On platforms with mandatory E2E (Slack/Discord, all channels), refuse to
     # answer in cleartext: tell the sender to set up / obtain an encryption key
     # and skip, so the agent never processes the plaintext.
     if _platform_name(event) in _ENFORCE_ENCRYPTION_PLATFORMS:
-        _notify_needs_key(gateway, event)
+        _notify_needs_key(gateway, event, outbound, profile)
         return {"action": "skip", "reason": "mordred-encryption-required"}
 
     return None
@@ -176,6 +323,9 @@ def register(ctx: Any) -> None:
     ``hermes-mordred extension serve`` command (``extension.api``); it does not
     need the gateway process.
     """
+    from ..privacy_check.hooks import check_plugin_integrity
+
+    ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     logger.debug("mordred_e2e: registered pre_gateway_dispatch hook")
 

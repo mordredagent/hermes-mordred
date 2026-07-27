@@ -72,9 +72,10 @@ DEFAULT_CONFIG_PATH: Path = HERMES_BASE / "config.yaml"
 def handle_use(args: argparse.Namespace) -> int:
     """Process ``hermes mordred network use <path>``.
 
-    Always writes the choice to ``config.yaml``. If a runtime is
-    registered, also drives :func:`api.use` for live effect. Returns 0
-    on success, non-zero when the live switch raised.
+    Always writes the choice to ``config.yaml``. If a runtime is registered,
+    :func:`api.use` verifies that the frozen process route already matches.
+    A conflicting route stays persisted for the next Hermes process and the
+    live request returns non-zero with restart guidance.
     """
     target = str(getattr(args, "path", ""))
     if target not in _VALID_PATHS:
@@ -105,7 +106,7 @@ def handle_use(args: argparse.Namespace) -> int:
     except MordredNetworkError as e:
         _term.emit_error(f"switching to {target} failed: {e}")
         return 1
-    print(f"Route switched to `{target}` now (also saved to {config_path}).")
+    print(f"Route `{target}` is already active (also saved to {config_path}).")
     return 0
 
 
@@ -135,9 +136,9 @@ def handle_status(args: argparse.Namespace) -> int:
         print(f"active_path = {s.active_path}  state = {ready_label}  last_health = {last_health}")
         if api.is_dropped():
             print(
-                "  [warning] path was flagged as DROPPED by the liveness "
-                "worker. Strict-mode tool calls will refuse until the path "
-                "is re-bring-up'd via `hermes-mordred network use <path>`."
+                "  [warning] path was flagged as DROPPED by the liveness worker. "
+                "Strict-mode tool and provider calls will refuse. Restart Hermes "
+                "so the process route and provider clients are rebuilt together."
             )
         return 0
 
@@ -425,7 +426,7 @@ def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: b
     )
     if warning:
         lines.append(f"  {warning}")
-    lines.append("  Applied at the next `hermes` session, or `hermes-mordred network use <path>` to switch now.")
+    lines.append("  Applied when Hermes next starts; restart a running Hermes process to rebuild its route.")
     return "\n".join(lines)
 
 

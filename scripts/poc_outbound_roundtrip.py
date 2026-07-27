@@ -77,17 +77,26 @@ async def main() -> int:
     posts = adapter._client.posts
     leaked = any(p.get("PLAINTEXT_LEAK") for p in posts)
     texts = [p["text"] for p in posts if "text" in p and not p.get("PLAINTEXT_LEAK")]
-    encrypted = bool(texts) and all(("ENC:v2:" in t) for t in texts)
+    encrypted = bool(texts) and all(("ENC:v3:" in t) for t in texts)
     mrkdwn_off = all(p.get("mrkdwn") is False for p in posts if "text" in p and not p.get("PLAINTEXT_LEAK"))
 
-    # Round-trip: decrypt the emitted ciphertext back via the inbound path.
-    joined = " ".join(texts)
-    back, _ = e2e.decrypt_inbound_keyed(joined)
+    # Round-trip as a browser receiver (reply direction, exact destination).
+    back = "".join(
+        crypto.decrypt_message_v3(
+            chan_key,
+            text,
+            direction="reply",
+            platform="slack",
+            chat_id=chat_id,
+            thread_root=thread_ts,
+        )
+        for text in texts
+    )
 
     print("[outbound encrypt]")
     print("  posted        :", texts)
     print("  plaintext leak :", leaked)
-    print("  all ENC:v2     :", encrypted, "| mrkdwn=False:", mrkdwn_off)
+    print("  all ENC:v3     :", encrypted, "| mrkdwn=False:", mrkdwn_off)
     print("  decrypts back  :", back)
     print("  send result ok :", getattr(res, "success", None))
 

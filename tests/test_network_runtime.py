@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ import pytest
 from mordred_hermes.network._exceptions import (
     AlreadySwitching,
     BringupFailed,
+    PathSwitchRequiresRestart,
     UnknownPath,
 )
 from mordred_hermes.network.paths import tor as tor_mod
@@ -427,14 +428,22 @@ class TestTorUse:
         rt.stop()
 
     def test_set_isolation_token_then_use_applies_credential(self) -> None:
-        """``set_isolation_token`` (mirrors ``update_policy_mode``) takes effect
-        on the next path application."""
+        """A process-scoped token set before activation reaches the proxy URL."""
         env: dict[str, str] = {}
         tor = _TorFakes(pick_port_return=9050)
         rt = _make_runtime(tor_fakes=tor, env=env)
         rt.set_isolation_token("sess-9")
         rt.use("tor")
         assert env["HTTPS_PROXY"] == "socks5h://sess-9:sess-9@127.0.0.1:9050"
+        rt.stop()
+
+    def test_set_isolation_token_after_activation_requires_restart(self) -> None:
+        rt = _make_runtime(isolation_token="process-a")
+        rt.use("tor")
+
+        with pytest.raises(PathSwitchRequiresRestart, match="process-scoped"):
+            rt.set_isolation_token("session-b")
+
         rt.stop()
 
     def test_no_isolation_token_keeps_bare_url(self) -> None:
@@ -494,23 +503,17 @@ class TestApplyEnvNeverAllAbsentDuringSwitch:
     snapshot — it must never go through an all-managed-vars-absent window.
     """
 
-    def test_https_proxy_never_absent_across_tor_to_tor_reapply(self) -> None:
+    def test_ready_tor_to_tor_is_noop_without_env_reapply(self) -> None:
         env = _RecordingEnv()
         tor = _TorFakes()
         rt = _make_runtime(tor_fakes=tor, env=env)
         rt.use("tor")
         assert "HTTPS_PROXY" in env
-        # Only the SECOND switch exercises the bug: the first application
-        # has nothing pre-existing to lose, so pop-then-set and set-then-pop
-        # are indistinguishable there.
         env.snapshots.clear()
-        rt.use("tor")  # tor -> tor: teardown + re-bring-up + re-apply
-        assert env.snapshots, "expected _apply_env's mutations to be recorded"
-        assert all("HTTPS_PROXY" in snap for snap in env.snapshots), (
-            "HTTPS_PROXY was absent from the managed env at some point during "
-            "a tor->tor switch — a subprocess spawned in that window would "
-            "have gone out direct/clearnet"
-        )
+        rt.use("tor")
+        assert env.snapshots == []
+        assert len(tor.start_calls) == 1
+        assert tor.stop_calls == []
         rt.stop()
 
     def test_https_proxy_never_absent_across_clearnet_to_tor(self) -> None:
@@ -709,6 +712,83 @@ class TestPathSwitch:
         assert "HTTPS_PROXY" in env
         rt.use("vpn")
         assert "HTTPS_PROXY" not in env
+        rt.stop()
+
+    def test_frozen_process_route_rejects_live_change_but_allows_same_path(self) -> None:
+        tor = _TorFakes()
+        vpn = _VpnFakes()
+        rt = _make_runtime(tor_fakes=tor, vpn_fakes=vpn)
+        rt.use("tor")
+        rt.freeze_process_route()
+
+        rt.use("tor")
+        assert len(tor.start_calls) == 1
+        assert tor.stop_calls == []
+
+        with pytest.raises(PathSwitchRequiresRestart, match=r"[Rr]estart Hermes"):
+            rt.use("vpn")
+
+        assert rt.status().active_path == "tor"
+        assert vpn.bring_up_calls == []
+        assert tor.stop_calls == []
+
+        rt._dropped = True  # type: ignore[attr-defined]
+        with pytest.raises(PathSwitchRequiresRestart, match=r"[Rr]estart Hermes"):
+            rt.use("tor")
+        assert len(tor.start_calls) == 1
+        rt._dropped = False  # type: ignore[attr-defined]
+
+        rt.stop()
+        assert rt.process_route_frozen is True
+
+        for target in ("tor", "vpn"):
+            with pytest.raises(PathSwitchRequiresRestart, match=r"[Rr]estart Hermes"):
+                rt.use(target)
+        with pytest.raises(PathSwitchRequiresRestart, match="process-scoped"):
+            rt.set_isolation_token("replacement-token")
+
+        assert len(tor.start_calls) == 1
+        assert vpn.bring_up_calls == []
+
+    def test_frozen_lenient_fallback_reuses_original_request_without_retry(self) -> None:
+        tor = _TorFakes(wait_raises=BringupFailed("bootstrap timeout"))
+        rt = _make_runtime(tor_fakes=tor, policy_mode="lenient")
+        rt.use("tor")
+        assert rt.status().active_path == "clearnet"
+        assert rt.frozen_requested_path is None
+        rt.freeze_process_route()
+        assert rt.frozen_requested_path == "tor"
+
+        rt.use("tor")
+        assert len(tor.start_calls) == 1
+
+        with pytest.raises(PathSwitchRequiresRestart, match=r"[Rr]estart Hermes"):
+            rt.use("clearnet")
+
+        rt.stop()
+
+    @pytest.mark.parametrize(
+        ("field_name", "replacement"),
+        [
+            ("tor_binary", "/opt/other/tor"),
+            ("tor_socks_port", 19050),
+            ("disable_ipv6", False),
+            ("policy_mode", "strict"),
+        ],
+    )
+    def test_frozen_route_rejects_any_activation_config_change(
+        self,
+        field_name: str,
+        replacement: object,
+    ) -> None:
+        rt = _make_runtime(policy_mode="lenient")
+        rt.activate_and_freeze("tor")
+        changed = replace(rt._config, **{field_name: replacement})  # type: ignore[arg-type,attr-defined]
+
+        with pytest.raises(PathSwitchRequiresRestart, match="configuration changed"):
+            rt.assert_route_config(changed)
+
+        rt.assert_route_config(rt._config)  # type: ignore[attr-defined]
         rt.stop()
 
 

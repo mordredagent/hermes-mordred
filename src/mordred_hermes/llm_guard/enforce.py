@@ -15,16 +15,20 @@ audit. Refuse paths and the mordred-local branch land in later cycles.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, TypeAlias
+from urllib.parse import urlsplit
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
 from .._policy_io import load_policy_mapping
 from .._provider_identity import canonicalize_provider
+from .._proxy_bypass import ensure_loopback_proxy_bypass as _ensure_loopback_proxy_bypass
 from . import health
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from .local_adapter import LOCAL_PROVIDER_NAME
@@ -67,6 +71,11 @@ _no_resolved_provider_emitted = False
 # ``None`` verdicts (no terminal) are deliberately NOT cached. Tests reset
 # via :func:`_reset_state`.
 _cloud_prompt_decisions: dict[str, bool] = {}
+_STRICT_LOOPBACK_LITERALS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1"})
+
+
+class _InvalidLocalEndpoint(ValueError):
+    """A strict-mode ``mordred-local`` endpoint is not safely loopback-only."""
 
 
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
@@ -244,8 +253,11 @@ def _probe_local(
     Defaults to ``settings.local_endpoint`` so the ``on_session_start``
     caller still probes the configured local endpoint.
 
-    On success the local endpoint constrains traffic, so the action is
-    ``allow`` with reason ``policy.strict.cloud_allowlisted``.
+    Before probing, the endpoint must pass the strict loopback-only boundary
+    in :func:`_validate_loopback_endpoint`. Invalid endpoints are audited and
+    refused without making a network request. On success the local endpoint
+    constrains traffic, so the action is ``allow`` with reason
+    ``policy.strict.cloud_allowlisted``.
 
     On probe failure Codex review P2 round 2 / ``_exceptions.py`` H2
     contract apply: :class:`MordredLocalUnreachable` is
@@ -259,6 +271,23 @@ def _probe_local(
     later caught further up.
     """
     endpoint = probe_endpoint if probe_endpoint else settings.local_endpoint
+    try:
+        _validate_loopback_endpoint(endpoint)
+    except _InvalidLocalEndpoint as e:
+        _safe_audit_append(
+            audit,
+            {
+                "event": "on_session_start",
+                "decision": "block",
+                "reason": _REASON_SESSION_REFUSED,
+                "provider_id": _LOCAL_PROVIDER_NAME,
+                "cause": str(e),
+            },
+        )
+        msg = f"Mordred strict mode: mordred-local requires a loopback HTTP(S) endpoint ({e}); refusing the session."
+        _LOG.error(msg)
+        raise MordredSessionRefused(msg) from e
+
     try:
         health_probe(endpoint)
     except MordredLocalUnreachable as e:
@@ -286,6 +315,72 @@ def _probe_local(
     )
 
 
+def _validate_loopback_endpoint(endpoint: str) -> None:
+    """Require a strict-mode local endpoint to stay on the host loopback.
+
+    Literal IPv4/IPv6 hosts must be loopback addresses. The only accepted DNS
+    name is ``localhost``, and every address it currently resolves to must also
+    be loopback. Restricting the hostname as well as its current resolution
+    avoids treating an arbitrary self-hosted or cloud URL as ``mordred-local``.
+    """
+    if not endpoint or endpoint != endpoint.strip():
+        raise _InvalidLocalEndpoint("endpoint must be a non-empty URL without surrounding whitespace")
+
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as e:
+        raise _InvalidLocalEndpoint("endpoint URL is malformed") from e
+
+    if parsed.scheme not in {"http", "https"}:
+        raise _InvalidLocalEndpoint("endpoint scheme must be http or https")
+    if parsed.username is not None or parsed.password is not None:
+        raise _InvalidLocalEndpoint("endpoint URL must not contain userinfo")
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise _InvalidLocalEndpoint("endpoint URL must include a host")
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if hostname != "localhost":
+            raise _InvalidLocalEndpoint("endpoint host must be a loopback IP address or localhost") from None
+        _validate_localhost_resolution(port or (443 if parsed.scheme == "https" else 80))
+        _ensure_loopback_proxy_bypass()
+        return
+
+    # Network proxy bypass is portable only for these exact literal forms.
+    # Accepting e.g. 127.0.0.2 because the whole /8 is loopback would let
+    # clients whose NO_PROXY supports only exact hosts send a supposedly local
+    # request through HTTP_PROXY/Tor instead.
+    if str(address) not in _STRICT_LOOPBACK_LITERALS:
+        raise _InvalidLocalEndpoint("endpoint IP address must be 127.0.0.1 or ::1")
+    _ensure_loopback_proxy_bypass()
+
+
+def _validate_localhost_resolution(port: int) -> None:
+    """Require every current ``localhost`` DNS result to be loopback."""
+    try:
+        results = socket.getaddrinfo("localhost", port, type=socket.SOCK_STREAM)
+    except OSError as e:
+        raise _InvalidLocalEndpoint("localhost could not be resolved") from e
+    if not results:
+        raise _InvalidLocalEndpoint("localhost did not resolve to any address")
+
+    for result in results:
+        sockaddr = result[4]
+        if not isinstance(sockaddr, tuple) or not sockaddr or not isinstance(sockaddr[0], str):
+            raise _InvalidLocalEndpoint("localhost resolved to an unsupported address")
+        address_text = sockaddr[0].split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(address_text)
+        except ValueError:
+            raise _InvalidLocalEndpoint("localhost resolved to a malformed address") from None
+        if not address.is_loopback:
+            raise _InvalidLocalEndpoint("localhost resolved to a non-loopback address")
+
+
 def _default_health_probe(endpoint: str) -> None:
     """Default health probe — production binding to :func:`health.probe`."""
     health.probe(endpoint=endpoint)
@@ -299,7 +394,7 @@ def _reset_state() -> None:
 
 
 def _default_prompt(provider_id: str) -> bool | None:
-    """Ask the operator once whether to allow a one-time cloud call.
+    """Ask whether to allow this provider for the remainder of the process.
 
     Returns ``None`` when there is no interactive terminal — stdin OR
     stdout is not a TTY (the headless / harness / CI case) or input hits
@@ -309,7 +404,7 @@ def _default_prompt(provider_id: str) -> bool | None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     try:
-        answer = input(f"Mordred strict mode: allow one-time cloud call to {provider_id!r}? [y/N] ")
+        answer = input(f"Mordred strict mode: allow all cloud calls to {provider_id!r} for this Hermes process? [y/N] ")
     except (EOFError, KeyboardInterrupt, ValueError):
         # EOF / Ctrl-C, or ValueError("I/O operation on closed file") when a
         # harness closed fd 0 rather than sending EOF. All fail closed — never

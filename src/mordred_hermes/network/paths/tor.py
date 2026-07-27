@@ -70,19 +70,18 @@ class TorHandle:
 def render_torrc(*, socks_port: int, control_port: int, data_dir: Path, disable_ipv6: bool = False) -> str:
     """Render the torrc fragment we hand to ``tor -f -``.
 
-    ``IsolateSOCKSAuth`` is set explicitly so per-context circuit
-    isolation (``proxy_env`` injects a per-token SOCKS credential) does not
-    rely on Tor's silent default-on behaviour — a future Tor release could
-    change the SOCKSPort default flags.
+    ``IsolateSOCKSAuth`` is set explicitly so an optional process-scoped
+    preactivation token (``proxy_env`` injects its SOCKS credential) gets a
+    distinct circuit pool without relying on Tor's silent default-on
+    behaviour. Per-session/per-skill token changes are not supported by the
+    frozen process route.
 
-    ``disable_ipv6`` emits ``ClientUseIPv6 0`` (the IPv6-leak defence the
-    ``policy.json`` field of the same name advertises: strict defaults it to
-    True, lenient/off to False — see ``network.__init__._resolve_disable_ipv6``).
-    It defaults to False here so the parameter is purely additive for callers
-    that don't pass it. Until this was wired, the flag was resolved into
-    ``RuntimeConfig`` and then dropped on the floor — every torrc was rendered
-    identically regardless of policy, so the documented strict-mode IPv6
-    defence was a silent no-op.
+    ``disable_ipv6`` emits ``ClientUseIPv6 0`` (strict defaults it to True,
+    lenient/off to False — see ``network.__init__._resolve_disable_ipv6``).
+    This only controls Tor's own client connections; it does not disable host
+    IPv6 or constrain provider SDK sockets, so the transport flagger cannot
+    treat it as leak prevention. It defaults to False here so the parameter is
+    purely additive for callers that don't pass it.
     """
     lines = [
         f"SOCKSPort 127.0.0.1:{socks_port} IsolateSOCKSAuth",

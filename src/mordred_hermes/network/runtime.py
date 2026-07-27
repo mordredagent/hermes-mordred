@@ -35,7 +35,7 @@ import os
 import subprocess
 import threading
 from collections.abc import Callable, MutableMapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, cast
@@ -50,6 +50,7 @@ from ._exceptions import (
     AlreadySwitching,
     BringupFailed,
     MordredNetworkError,
+    PathSwitchRequiresRestart,
     UnknownPath,
 )
 from .api import NetworkStatus
@@ -99,7 +100,23 @@ class RuntimeConfig:
     no_proxy_extra: tuple[str, ...] = ()
     liveness_interval_seconds: float = 30.0
     liveness_failure_threshold: int = 2
-    isolation_token: str | None = None  # per-session Tor circuit-isolation key (v2-N1)
+    # Optional process-scoped Tor SOCKS credential. It must be fixed before
+    # first activation because provider clients snapshot proxy URLs.
+    isolation_token: str | None = None
+
+
+RouteConfigFingerprint = tuple[tuple[str, object], ...]
+
+
+def route_config_fingerprint(config: RuntimeConfig) -> RouteConfigFingerprint:
+    """Return a future-proof snapshot of every runtime configuration field.
+
+    Provider clients, Tor/VPN subprocesses, proxy environment, and liveness
+    workers are all constructed from ``RuntimeConfig``. Comparing every field
+    prevents a force re-discovery or session reload from silently reusing a
+    route built with stale binary, port, provider, policy, or leak settings.
+    """
+    return tuple((item.name, getattr(config, item.name)) for item in fields(config))
 
 
 @dataclass(slots=True)
@@ -209,6 +226,19 @@ class Runtime:
         self._handle: _ActiveHandle | None = None
         self._env_snapshot: dict[str, str | None] | None = None
         self._last_health: bool = True
+        # ``register()`` freezes the route before returning to Hermes, hence
+        # before AIAgent constructs any provider client. A different live path
+        # after that point would only rewrite os.environ; already-created
+        # clients would retain their old direct/proxy transport.
+        self._process_route_frozen: bool = False
+        self._frozen_path: ActivePath | None = None
+        # The configured request can differ from the effective path only when
+        # lenient/off bring-up deliberately degraded to clearnet. Remembering
+        # both lets session hooks reassert the original configuration as a
+        # no-op without mistaking it for a live route change.
+        self._last_requested_path: ActivePath | None = None
+        self._frozen_requested_path: ActivePath | None = None
+        self._frozen_route_config: RouteConfigFingerprint | None = None
 
         # Liveness worker state.
         self._worker_thread: threading.Thread | None = None
@@ -225,6 +255,12 @@ class Runtime:
         if path not in ACTIVE_PATHS:
             raise UnknownPath(f"unknown network path: {path!r}")
         target = cast(ActivePath, path)
+        # Fast path for the process-global route. Session-start hooks may call
+        # use() repeatedly, but a ready tor->tor/vpn->vpn request must not
+        # restart the daemon or invalidate clients already bound to its port.
+        with self._lock:
+            if not self._transition_needed(target):
+                return
         # Snapshot the subprocess count OUTSIDE the lock (review M1,
         # 2026-05-14): the default counter runs ``pgrep`` with a 2 s
         # timeout. Holding the lock that whole time would block
@@ -234,8 +270,10 @@ class Runtime:
         # as one taken at the end.
         subprocess_count = self._count_subprocesses()
         with self._lock:
-            if self._state in (State.BRINGING_UP, State.TEARING_DOWN):
-                raise AlreadySwitching(f"path switch already in progress (state={self._state.value})")
+            # State may have changed while the informational subprocess count
+            # was sampled, so repeat the complete transition check.
+            if not self._transition_needed(target):
+                return
             prev = self._active_path
             try:
                 self._switch(target)
@@ -251,6 +289,7 @@ class Runtime:
                     }
                 )
                 raise
+            self._last_requested_path = target
             self._emit_audit(
                 {
                     "event": _REASON_USE,
@@ -261,6 +300,17 @@ class Runtime:
                     "live_subprocess_count": subprocess_count,
                 }
             )
+
+    def activate_and_freeze(self, path: str) -> None:
+        """Atomically activate the initial route and seal its configuration.
+
+        Registration keeps the runtime private until this method returns. The
+        outer re-entrant lock also prevents a direct reference from interleaving
+        another ``use`` between activation and freeze.
+        """
+        with self._lock:
+            self.use(path)
+            self.freeze_process_route(expected_path=path)
 
     def status(self) -> NetworkStatus:
         with self._lock:
@@ -309,7 +359,7 @@ class Runtime:
     def stop(self) -> None:
         """Tear down the active path and join the liveness worker.
 
-        Idempotent: callable from ``on_session_end`` even if no path
+        Idempotent: callable from process-exit cleanup even if no path
         was ever activated.
         """
         self._stop_worker()
@@ -345,20 +395,78 @@ class Runtime:
             self._config.policy_mode = policy_mode
 
     def set_isolation_token(self, token: str | None) -> None:
-        """Set the per-session Tor circuit-isolation token (v2-N1).
+        """Set an optional process-scoped Tor circuit-isolation token.
 
-        The hooks layer pushes the Hermes ``session_id`` here at session
-        start so :meth:`_apply_env` injects it as the SOCKS credential and
-        Tor's ``IsolateSOCKSAuth`` gives the session its own circuit. Takes
-        effect on the next path application (``on_session_start`` sets it
-        before bring-up). Held under ``_lock`` for the same reason as
-        :meth:`update_policy_mode`.
-
-        The token must be a non-secret identifier — it lands in
-        ``os.environ`` (HTTPS_PROXY) and is inherited by child processes.
+        The value may only change before first path activation. Provider HTTP
+        clients retain the proxy URL they saw at construction, so rewriting
+        its SOCKS credential after activation would split one Hermes process
+        between stale and current transports.
         """
         with self._lock:
+            if token == self._config.isolation_token:
+                return
+            if self._process_route_frozen or self._handle is not None or self._state in (State.READY, State.DEGRADED):
+                raise PathSwitchRequiresRestart(
+                    "Tor isolation credentials are process-scoped; changing them after route activation "
+                    "would leave existing provider clients stale. Restart Hermes to apply the new credential."
+                )
             self._config.isolation_token = token
+
+    def freeze_process_route(self, *, expected_path: str | None = None) -> None:
+        """Prevent live path changes after provider clients may be constructed.
+
+        ``network.register`` calls this immediately after the configured path
+        reaches a ready/degraded state and before returning control to Hermes.
+        Reusing the same ready path remains a no-op; selecting another path
+        raises :class:`PathSwitchRequiresRestart`.
+        """
+        with self._lock:
+            if self._handle is None or self._state not in (State.READY, State.DEGRADED):
+                raise MordredNetworkError("cannot freeze a network route that is not ready")
+            if expected_path is not None and self._last_requested_path != expected_path:
+                raise MordredNetworkError(
+                    f"cannot freeze route: expected configured path {expected_path!r}, "
+                    f"but activation completed for {self._last_requested_path!r}"
+                )
+            if self._process_route_frozen and self._frozen_path != self._active_path:
+                raise PathSwitchRequiresRestart(
+                    f"process route was already frozen at {self._frozen_path!r}; "
+                    f"it cannot be re-frozen at {self._active_path!r}. Restart Hermes."
+                )
+            self._process_route_frozen = True
+            self._frozen_path = self._active_path
+            self._frozen_requested_path = self._last_requested_path or self._active_path
+            self._frozen_route_config = route_config_fingerprint(self._config)
+
+    @property
+    def process_route_frozen(self) -> bool:
+        """Whether provider-client construction has sealed this route."""
+        with self._lock:
+            return self._process_route_frozen and self._frozen_path is not None
+
+    @property
+    def frozen_requested_path(self) -> ActivePath | None:
+        """Configured path whose effective transport was frozen."""
+        with self._lock:
+            return self._frozen_requested_path
+
+    @property
+    def frozen_route_config(self) -> RouteConfigFingerprint | None:
+        """Configuration snapshot used to build the frozen route."""
+        with self._lock:
+            return self._frozen_route_config
+
+    def assert_route_config(self, config: RuntimeConfig) -> None:
+        """Require ``config`` to match the process-frozen activation snapshot."""
+        expected = route_config_fingerprint(config)
+        with self._lock:
+            if not self._process_route_frozen or self._frozen_route_config is None:
+                raise PathSwitchRequiresRestart("process route has no frozen activation configuration; restart Hermes.")
+            if expected != self._frozen_route_config:
+                raise PathSwitchRequiresRestart(
+                    "network configuration changed after the process route was activated. "
+                    "Restart Hermes so provider clients, route daemons, and leak controls use one configuration."
+                )
 
     def is_dropped(self) -> bool:
         """Sticky flag - True iff the liveness worker observed
@@ -371,6 +479,36 @@ class Runtime:
     # ------------------------------------------------------------------ #
     # Internals                                                          #
     # ------------------------------------------------------------------ #
+
+    def _transition_needed(self, target: ActivePath) -> bool:
+        """Validate a requested transition while ``_lock`` is held."""
+        if self._state in (State.BRINGING_UP, State.TEARING_DOWN):
+            raise AlreadySwitching(f"path switch already in progress (state={self._state.value})")
+        if self._process_route_frozen:
+            frozen_path = self._frozen_path
+            frozen_requested_path = self._frozen_requested_path
+            route_is_reusable = (
+                frozen_path is not None
+                and frozen_requested_path is not None
+                and target == frozen_requested_path
+                and self._active_path == frozen_path
+                and self._handle is not None
+                and self._state in (State.READY, State.DEGRADED)
+                and not self._dropped
+            )
+            if route_is_reusable:
+                return False
+            raise PathSwitchRequiresRestart(
+                f"process network route for configured path {frozen_requested_path!r} is frozen at "
+                f"effective path {frozen_path!r}, but the requested path is {target!r} and the current "
+                "route is no longer safely reusable "
+                f"(active_path={self._active_path!r}, state={self._state.value}, "
+                f"handle_present={self._handle is not None}, dropped={self._dropped}). "
+                "Restart Hermes so provider clients and the process route are rebuilt together."
+            )
+        if self._handle is not None and self._state in (State.READY, State.DEGRADED) and target == self._active_path:
+            return self._dropped
+        return True
 
     def _reset_liveness(self) -> None:
         """Zero the M9 liveness-worker counters for a fresh observation run.

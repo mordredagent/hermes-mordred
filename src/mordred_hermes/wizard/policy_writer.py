@@ -24,18 +24,20 @@ the previous file intact.
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import logging
 import os
 import tempfile
 from collections.abc import Callable, Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from ruamel.yaml import YAML
 
+from .._policy_io import load_policy_mapping
 from ._runtime import (
     DEFAULT_HERMES_CONFIG_PATH,
     DEFAULT_MORDRED_DIR,
@@ -167,10 +169,23 @@ def _ensure_plugins_enabled(root: Any) -> None:
         return
 
     if not isinstance(enabled, list):
-        # Pathological config -- leave alone, log, and bail. Wizard upgrade
-        # path will surface the conflict to the user via diff + prompt.
-        _LOG.warning("plugins.enabled is %s, not list; skipping mordred plugin auto-add", type(enabled).__name__)
-        return
+        # Hermes treats a malformed allow-list exactly like a missing one:
+        # no entry-point plugin loads.  Leaving it untouched after a successful
+        # configure therefore strands every runtime guard.  Preserve a scalar
+        # plugin name when possible, otherwise replace the unusable value, then
+        # extend the repaired list below.
+        recovered = [enabled] if isinstance(enabled, str) and enabled.strip() else []
+        _LOG.warning(
+            "plugins.enabled is %s, not list; replacing with a valid enabled list",
+            type(enabled).__name__,
+        )
+        plugins["enabled"] = recovered
+        enabled = recovered
+
+    sanitized = [item for item in enabled if isinstance(item, str) and item.strip()]
+    if len(sanitized) != len(enabled):
+        _LOG.warning("plugins.enabled contains invalid plugin names; removing non-string or empty entries")
+        enabled[:] = sanitized
 
     existing = {str(x) for x in enabled if isinstance(x, str)}
     for name in MORDRED_PLUGIN_NAMES:
@@ -276,6 +291,15 @@ class PolicySnapshot:
     # (mordred_hermes.network._resolve_disable_ipv6) can consume it.
     # Default ``True`` matches the safe-by-default in RuntimeConfig.
     disable_ipv6: bool = True
+    # Phase 3 transport facts are an intentionally opaque JSON value here.
+    # A valid value is an object keyed by provider id, but keeping the wider
+    # ``object`` type is security-significant: if a hand edit leaves a list,
+    # scalar, or malformed entry, configure/upgrade must preserve that value
+    # so the network gate continues to reject it rather than silently
+    # sanitising it to the permissive empty-object default.
+    # Exclude the opaque JSON container from the generated hash so adding the
+    # field does not make this previously-hashable frozen snapshot unhashable.
+    provider_overrides: object = field(default_factory=dict, hash=False)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +311,9 @@ class PolicySnapshot:
             "local_llm_model_id": self.local_llm_model_id,
             "cloud_attempt_action": self.cloud_attempt_action,
             "disable_ipv6": self.disable_ipv6,
+            # Defensive copy: callers receive a serialisation payload, not a
+            # mutable alias to the snapshot's preserved extension value.
+            "provider_overrides": copy.deepcopy(self.provider_overrides),
         }
 
     def to_llm_guard_section(self) -> dict[str, Any]:
@@ -316,6 +343,31 @@ class PolicySnapshot:
         if self.audit_log_path is not None:
             body["audit_log_path"] = self.audit_log_path
         return body
+
+
+def _preserve_provider_overrides(snapshot: PolicySnapshot, policy_json_path: Path) -> PolicySnapshot:
+    """Carry the existing opaque ``provider_overrides`` value into ``snapshot``.
+
+    The wizard owns all other policy.json fields, but provider overrides are
+    operator-managed transport evidence. A configure/upgrade rewrite therefore
+    preserves that one field verbatim. Crucially, this helper does *not*
+    validate or coerce it: invalid types and unknown nested fields must survive
+    so ``network.hooks._read_provider_overrides`` retains its fail-closed
+    behaviour under strict + Tor.
+
+    A non-empty/non-default value already supplied by the caller is explicit
+    and wins. Missing/unreadable/non-object policy files have no preservable
+    field and leave the snapshot unchanged.
+    """
+    if snapshot.provider_overrides != {}:
+        return snapshot
+    existing = load_policy_mapping(policy_json_path, log=_LOG)
+    if "provider_overrides" not in existing:
+        return snapshot
+    return replace(
+        snapshot,
+        provider_overrides=copy.deepcopy(existing["provider_overrides"]),
+    )
 
 
 def _section_matches_dict(existing: Mapping[str, Any], want: Mapping[str, Any]) -> bool:
@@ -406,8 +458,11 @@ class PolicyWriter:
 
         ``json.dumps`` with ``sort_keys=False`` to honour :class:`PolicySnapshot`
         field order; a 2-space indent for human readability. Idempotent --
-        rewrite is skipped if content matches.
+        rewrite is skipped if content matches. Existing operator-managed
+        ``provider_overrides`` are carried forward verbatim, including invalid
+        values that the strict transport gate must continue to reject.
         """
+        snapshot = _preserve_provider_overrides(snapshot, self.policy_json_path)
         text = json.dumps(snapshot.to_json_dict(), indent=2, sort_keys=False) + "\n"
         _atomic_write_text(self.policy_json_path, text, mode=0o600)
 

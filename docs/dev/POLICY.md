@@ -22,12 +22,23 @@ The set is closed at the type level via `Literal` in `_audit_reasons.py:ReasonCo
 | 4 | `mordred.degraded.disable_unprotected` | 1.1 | Sibling Mordred plugin disabled (deny-list or opt-in allowlist). Strict aborts (`decision=block`); lenient/off warns. |
 | 5 | `mordred.degraded.no_origin_skill` | 1.1 | One-shot per process. Emitted at `on_session_start` to record that `pre_tool_call` payload lacks `origin_skill` (HOOK_PAYLOADS §4). |
 | 6 | `mordred.degraded.no_resolved_provider` | 2 | One-shot per process. Phase 2 emits when `pre_llm_call` lacks `provider_id`/`model_id` (HOOK_PAYLOADS §5). Frozen now to avoid v1→v2 churn. |
-| 7 | `policy.strict.cloud_allowlisted` | 2 | **Action**. Strict + provider in `cloud_provider_allowlist` + `allow_cloud_llm: true` → passthrough (`decision=allow`). |
+| 7 | `policy.strict.cloud_allowlisted` | 2 | **Action**. Strict + provider in `cloud_provider_allowlist` + `allow_cloud_llm: true`, or strict + `mordred-local` with a validated loopback endpoint → passthrough (`decision=allow`). |
 | 8 | `policy.strict.cloud_not_allowlisted` | 2 | **Classification only** (Codex N1, 2026-05-13). Recorded **alongside** the action reason (#10 or #11) so audit consumers can filter on either axis. Emitted as a separate audit entry with `decision=block` (or `override` if #11 applies); the final action is in the immediately-following entry. v1 default ships only #10 (refuse). |
 | 9 | `policy.strict.unconditional_override` | 2 | **Action** (PR2 degraded path). Cloud → local override applied unconditionally because `pre_llm_call` payload lacked provider info. |
-| 10 | `policy.strict.session_refused` | 2 | **Action** (PR2 v1 default). Strict + cloud provider not allowlisted → session refused at `on_session_start` via `MordredSessionRefused(BaseException)`. |
+| 10 | `policy.strict.session_refused` | 2 | **Action** (PR2 v1 default). Strict + cloud provider not allowlisted, unreachable local endpoint, or invalid/non-loopback `mordred-local` endpoint → session refused via `MordredSessionRefused(BaseException)`. |
 | 11 | `policy.strict.provider_override_at_session_start` | 2 | **Action — v2 deferred** (Codex B2). Alternative auto-swap path: provider swapped to `mordred-local` at session start. Hermes resolves the active provider before `on_session_start` fires, so the config patch only takes effect next session. Will be reintroduced when (a) Hermes adds a pre-resolve hook upstream, or (b) Mordred ships a vendored fork (`[hard-lock]` extra, Tier B). |
 | 12 | `policy.strict.local_stream_interrupted` | 2 | **Action — v2 deferred** (Codex H1). Frozen in the enum so consumers can prepare, but **no raise site exists in v1**: Hermes core owns the streaming pipeline (`agent/error_classifier.py` handles `httpx.RemoteProtocolError`), so a plugin-side `transport.py` cannot reliably emit this. The corresponding `MordredLocalStreamInterrupted` exception class is intentionally absent from `src/mordred_hermes/llm_guard/_exceptions.py` to prevent silent half-implementations. |
+
+Under `strict`, `mordred-local` means loopback-only: both the configured
+`local_llm_endpoint` and the resolved runtime `base_url` must be HTTP(S), must
+not contain userinfo, and must use either the exact loopback IP literal
+`127.0.0.1` / `::1` or `localhost`. Every current DNS result for `localhost`
+must itself be loopback. When a process proxy is active, both `NO_PROXY`
+spellings are populated with those exact hosts before the probe/model client
+runs; the health probe independently disables ambient proxies. Validation
+failure emits #10 with `decision=block` and raises
+`MordredSessionRefused`. Lenient/off and other non-strict compatibility modes
+do not apply this boundary.
 
 ### Phase 3 step-0 freeze (added 2026-05-13, PR1)
 
@@ -35,7 +46,7 @@ The set is closed at the type level via `Literal` in `_audit_reasons.py:ReasonCo
 
 | # | Code | Phase | Notes |
 | --- | --- | --- | --- |
-| 13 | `network.use` | 3.1 | **Action**. Successful path switch via `api.use(path)`. Decision `override`. Fields: `prev_path`, `new_path`, `live_subprocess_count` (M3 transitive-failure visibility — `> 0` signals env updates won't reach already-running children). |
+| 13 | `network.use` | 3.1 | **Action**. Successful initial/unfrozen route activation via `api.use(path)`. Decision `override`. Fields: `prev_path`, `new_path`, `live_subprocess_count` (M3 transitive-failure visibility — `> 0` signals env updates would not reach already-running children). Registration freezes the route after activation; same-route reuse is a silent no-op and a conflicting live route raises `PathSwitchRequiresRestart`. |
 | 14 | `network.use_failed` | 3.1 | **Action**. `api.use(path)` raised `MordredNetworkError`. Decision `raise`. Fields: `requested_path`, `error_type`, `prev_path`. |
 | 15 | `network.bringup_failed` | 3.1 | Lenient-mode path bring-up failure with clearnet fallback. Decision `warn`. Fields: `path`, `error_type`. Strict mode pairs this entry with a `MordredPathBringupFailed` raise from the hook. |
 | 16 | `network.path_dropped` | 3.1 | M9 liveness probe detected 2 consecutive failures on active path. Decision `block` in strict (paired with `MordredPathDropped(BaseException)` raise on next `pre_tool_call`); `warn` in lenient. Fields: `path`, `consecutive_failures`, `last_health_at`. |
@@ -94,12 +105,24 @@ Found in the post-merge review of PR #39 (Phase 4 PR10): the encrypted-audit fac
 
 ### prompt-once freeze (added 2026-06-24)
 
-`cloud_attempt_action: prompt-once` was previously a reserved wizard value with no enforcement (refuse-only, behaving like `always-block`). It now has a live emit site in `mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (the `pre_api_request` authoritative path): under strict mode, when a non-allowlisted cloud provider is reached, the operator is asked once per provider at an interactive terminal whether to allow a one-time call. 2 `policy.strict.cloud_prompted_*` codes appended to `ReasonCode`; total freeze becomes 29 (12 Phase 1 + 4 Phase 3 + 8 Phase 4 PR2–step-E + 2 Phase 4 §4.1 + 1 PR #39 follow-up + 2 prompt-once). Same-PR emit site per the scope rule condition (a):
+`cloud_attempt_action: prompt-once` was previously a reserved wizard value with no enforcement (refuse-only, behaving like `always-block`). It now has a live emit site in `mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (the `pre_api_request` authoritative path): under strict mode, when a non-allowlisted cloud provider is reached, the operator is asked once per provider at an interactive terminal whether to allow that provider for the remainder of the current Hermes process. 2 `policy.strict.cloud_prompted_*` codes appended to `ReasonCode`; the freeze at this historical step became 29 (12 Phase 1 + 4 Phase 3 + 8 Phase 4 PR2–step-E + 2 Phase 4 §4.1 + 1 PR #39 follow-up + 2 prompt-once), before the network follow-up below raised the current total to 30. Same-PR emit site per the scope rule condition (a):
 
 | # | Code | Phase | Notes |
 | --- | --- | --- | --- |
-| 28 | `policy.strict.cloud_prompted_allow` | 2 | **Action**. `cloud_attempt_action: prompt-once`; operator approved a one-time call to a non-allowlisted cloud provider at an interactive terminal (`sys.stdin` and `sys.stdout` both TTY). Decision `allow`. Fields: `event="pre_api_request"`, `provider_id`. Emitted once per provider — the verdict is cached for the process, so cached re-allows stay silent (mirrors the `check_runtime_provider` allow-is-silent rule). |
+| 28 | `policy.strict.cloud_prompted_allow` | 2 | **Action**. `cloud_attempt_action: prompt-once`; operator approved a non-allowlisted cloud provider for the remainder of the current Hermes process at an interactive terminal (`sys.stdin` and `sys.stdout` both TTY). Decision `allow`. Fields: `event="pre_api_request"`, `provider_id`. Emitted once per provider — the verdict is cached for the process, so cached re-allows stay silent (mirrors the `check_runtime_provider` allow-is-silent rule). |
 | 29 | `policy.strict.cloud_prompted_deny` | 2 | **Classification**. Same precondition as #28 but the operator declined, OR no interactive terminal was available (fail-closed). Decision `block`, recorded **before** the existing action pair (#8 `cloud_not_allowlisted` → #10 `session_refused`). Fields: `event="pre_api_request"`, `provider_id`, and `prompt_unavailable: true` when the deny was the no-terminal fallback rather than an explicit decline. An explicit decline is cached (no re-prompt); a no-terminal deny is **not** cached so a later interactive call can still ask. |
+
+### Network transport-gate freeze (added 2026-07-27)
+
+The process-scoped route hardening adds one live `network.*` emit site, bringing
+the total freeze to 30. The route is activated and frozen during
+`mordred_network.register()` before provider clients are constructed. Session
+and request transport refusals preserve that shared route; they never tear down
+Tor/VPN and expose another gateway session to clearnet.
+
+| # | Code | Phase | Notes |
+| --- | --- | --- | --- |
+| 30 | `network.transport_incompatible` | 3.1 | **Action/classification**. Emitted when a provider is incompatible, unverified, unknown, or unresolved on strict + Tor; when configured Tor/VPN does not match the active ready route; or when the transport gate itself fails. Decision `block` for strict protected-route refusal and `warn` for downgraded diagnostics. Fields: `event` (`on_session_start` or `pre_api_request`), `active_path`, `provider`, `severity`, `detail`, `policy_mode`, and `stage` for internal-gate failures. A blocking entry is paired with `MordredPathBringupFailed`; the process route remains active. |
 
 ### Audit entry shape
 
@@ -112,9 +135,9 @@ Synthetic example:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `ts` | string | ISO-8601 UTC with 3-digit millisecond precision, literally `"%Y-%m-%dT%H:%M:%S." + "{ms:03d}" + "Z"` (Python's `%f` is microseconds, so the helper builds the string manually). Auto-added if caller omits. |
-| `event` | string | Hook name (`on_session_start`, `pre_tool_call`, ...) or `pre_install`. |
+| `event` | string | Hook or lifecycle name (`network.register`, `on_session_start`, `pre_tool_call`, ...) or `pre_install`. |
 | `decision` | `"allow"` \| `"block"` \| `"override"` \| `"warn"` | |
-| `reason` | one of the 29 codes currently in `ReasonCode`, or `null` | `null` only for off-mode allows. The PR4 set (#21–24) is fully frozen as of step-E; the §4.1 set (#25–26) is frozen as of `requires_keyvault` enforcement; #27 is frozen as of the PR #39 review follow-up — see §"PR #39 review follow-up freeze"; #28–29 are frozen as of the prompt-once enforcement — see §"prompt-once freeze". |
+| `reason` | one of the 30 codes currently in `ReasonCode`, or `null` | `null` only for off-mode allows. The PR4 set (#21–24) is fully frozen as of step-E; the §4.1 set (#25–26) is frozen as of `requires_keyvault` enforcement; #27 is frozen as of the PR #39 review follow-up; #28–29 are frozen as of prompt-once enforcement; #30 is frozen as of the process-scoped network transport gate. |
 | `skill_id` / `tool_name` / `provider_id` | string (event-conditional) | Skill name from frontmatter; tool name from payload; provider id (Phase 2). |
 | event-specific extras | various | e.g. `disabled_siblings: list[str]` on `mordred.degraded.disable_unprotected`. |
 
@@ -190,9 +213,54 @@ Added 2026-05-14 alongside the Phase 3 PR3a network slice.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `disable_ipv6` | bool | strict → `true`, lenient/off → `false` | Advisory IPv6-leak defence. Reader: `mordred_hermes.network._resolve_disable_ipv6`. Writer: `PolicySnapshot.disable_ipv6` (wizard computes from policy mode and writes explicitly). User pin always wins over the mode default. Non-bool values fall back to the mode default with a WARN log. |
+| `disable_ipv6` | bool | strict → `true`, lenient/off → `false` | Advisory Tor-client preference. Reader: `mordred_hermes.network._resolve_disable_ipv6`. Writer: `PolicySnapshot.disable_ipv6` (wizard computes from policy mode and writes explicitly). User pin always wins over the mode default. Non-bool values fall back to the mode default with a WARN log. |
+| `provider_overrides` | object keyed by provider id | `{}` | Additive transport facts for internal providers. Baseline provider ids are immutable and cannot be replaced. Reader: `mordred_hermes.network.hooks._read_provider_overrides`. |
 
-When `disable_ipv6=true`, the runtime requests IPv4-only resolver hints and the `provider_transport_flagger._flag_for_ipv6` branch is suppressed (since AAAA records aren't returned). When `false`, the flagger fires a Tor-only abort/warning for providers where `respects_ipv6_proxy=False`. Kernel-level enforcement is **v2-N2 deferred**.
+When `disable_ipv6=true`, the runtime renders Tor's `ClientUseIPv6 0` option. This affects Tor's own outbound client connections; it does **not** disable host IPv6, filter resolver AAAA answers, or constrain sockets opened directly by a provider SDK. Therefore `provider_transport_flagger._flag_for_ipv6` is never suppressed by this setting: strict + Tor aborts for `respects_ipv6_proxy=False`, while lenient warns. Host-level enforcement is **v2-N2 deferred**.
+
+`provider_overrides` entries accept `transport` (non-empty string),
+`respects_proxy` (boolean or `"partial"`), `respects_socks5h`,
+`localhost_only`, `dns_quirk`, `unverified_baseline`, and
+`respects_ipv6_proxy` (booleans), plus `transport_class` (`"http"`, `"tcp"`,
+`"udp"`, `"quic"`, `"grpc"`, or `"websocket"`). A verified internal HTTP
+provider can be declared as:
+
+```json
+{
+  "provider_overrides": {
+    "my-internal": {
+      "transport": "httpx",
+      "respects_proxy": true,
+      "respects_socks5h": true,
+      "respects_ipv6_proxy": true,
+      "unverified_baseline": false,
+      "transport_class": "http"
+    }
+  }
+}
+```
+
+Omitted safety fields use conservative defaults (`respects_socks5h=false`,
+`respects_ipv6_proxy=false`, `unverified_baseline=true`). Unknown fields,
+invalid types, and attempts to replace a baseline entry are rejected by the
+transport gate. Under strict + Tor, malformed overrides and any internal gate
+error are audited as `network.transport_incompatible` and refused with
+`MordredPathBringupFailed`; lenient/off audit a warning and continue. A
+startup or request-time refusal keeps the process-scoped route active so a
+long-lived gateway or another concurrent session cannot fall through to
+clearnet; every later request is re-evaluated. The startup gate checks
+the provider persisted in `config.yaml model.provider` or
+`auth.json active_provider`; the `pre_api_request` gate repeats the check
+against Hermes's request-resolved `provider`, so CLI, environment, one-shot,
+and gateway overrides cannot bypass it. Missing runtime provider evidence is
+treated as unknown and aborts under strict + Tor.
+
+`provider_overrides` is the one operator-managed extension carried verbatim
+through `configure`, `upgrade`, and OpenClaw migration rewrites. The wizard
+does not validate, discard unknown nested fields, or coerce a non-object value
+to `{}`; preserving malformed evidence is intentional so the transport gate
+continues to reject it. Other unknown top-level `policy.json` keys remain
+outside the snapshot schema and are scrubbed on rewrite.
 
 ---
 

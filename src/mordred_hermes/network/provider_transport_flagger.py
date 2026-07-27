@@ -16,15 +16,16 @@ IPv6 facts still need a real AWS packet capture. ``vertex`` is untested
 
 Severity policy:
 
-============ =========================== ======== ==============================================
-mode          provider state              flag     notes
-============ =========================== ======== ==============================================
-off           any                         —        no flags emitted
-strict        tor + respects_socks5h=False abort   prevent the strict-mode session from starting
-strict        clearnet + respects_proxy=False warning informational
-strict        unknown provider            warning   no data; surface for user investigation
-lenient       any abortable flag          warning   downgraded; user is informed but continues
-============ =========================== ======== ==============================================
+============ =================================== ======== ==============================================
+mode          provider state                      flag     notes
+============ =================================== ======== ==============================================
+off           any                                 —        no flags emitted
+strict        tor + respects_socks5h=False        abort    prevent the strict-mode session from starting
+strict        tor + respects_ipv6_proxy=False     abort    no host-level IPv6 enforcement exists in v1
+strict        tor + unknown/unverified provider   abort    absence of transport evidence is not safe
+strict        clearnet + incompatible/unknown     warning  informational; no anonymity contract
+lenient       any abortable flag                  warning  downgraded; user is informed but continues
+============ =================================== ======== ==============================================
 
 Localhost-only providers (``mordred-local``) are exempt — Phase 2
 ``proxy_env.NO_PROXY`` keeps ``localhost`` out of the proxy regardless of
@@ -162,9 +163,10 @@ KNOWN_PROVIDERS: Final[Mapping[str, ProviderEntry]] = {
     # ``respects_socks5h`` are seeded ``True`` with HIGH confidence. They are
     # NOT yet packet-capture verified, so ``unverified_baseline`` stays ``True``
     # and the lower-confidence IPv6-routing dimension is seeded conservatively
-    # (``respects_ipv6_proxy=False``) — under strict mode ``disable_ipv6`` masks
-    # it; under lenient it surfaces an honest "unverified IPv6" warning until a
-    # real capture flips the entry (mirrors the bedrock/vertex stance). The
+    # (``respects_ipv6_proxy=False``). ``disable_ipv6`` only configures Tor's
+    # own client connections, so strict mode still refuses these providers;
+    # lenient surfaces honest unverified/IPv6 warnings until a real capture
+    # flips the entry (mirrors the bedrock/vertex stance). The
     # slugs match Hermes' canonical ids (asserted by the drift test).
     "openrouter": ProviderEntry(
         name="openrouter",
@@ -243,10 +245,11 @@ def evaluate(
 ) -> list[Flag]:
     """Inspect each provider and return any compatibility flags.
 
-    See module docstring for the severity matrix. ``disable_ipv6`` is the
-    runtime's policy-level IPv6-leak defence: when ``True`` (strict
-    default), the kernel resolver is hinted to drop AAAA records so
-    ``respects_ipv6_proxy=False`` providers no longer produce a leak flag.
+    See module docstring for the severity matrix. ``disable_ipv6`` is retained
+    for API/config compatibility, but it only renders Tor's
+    ``ClientUseIPv6 0`` option. That option does not disable host IPv6, filter
+    AAAA answers, or constrain provider SDK sockets, so it never suppresses an
+    IPv6 compatibility flag.
     """
     if policy_mode == "off":
         return []
@@ -259,10 +262,11 @@ def evaluate(
         # in the unknown-provider Flag below for an accurate message.
         entry = catalog.get(canonicalize_provider(provider))
         if entry is None:
+            severity: Severity = "abort" if active_path == "tor" else "warning"
             flags.append(
                 Flag(
                     provider=provider,
-                    severity=_downgrade("warning", policy_mode),
+                    severity=_downgrade(severity, policy_mode),
                     reason="unknown provider; not in baseline allowlist",
                 )
             )
@@ -302,6 +306,9 @@ def _flag_for_all(
     proxy_flag = _flag_for_clearnet_proxy(entry, active_path)
     if proxy_flag is not None:
         flags.append(proxy_flag)
+    verification_flag = _flag_for_unverified(entry, active_path, policy_mode)
+    if verification_flag is not None:
+        flags.append(verification_flag)
     ipv6_flag = _flag_for_ipv6(entry, active_path, policy_mode, disable_ipv6=disable_ipv6)
     if ipv6_flag is not None:
         flags.append(ipv6_flag)
@@ -335,6 +342,26 @@ def _flag_for_clearnet_proxy(entry: ProviderEntry, active_path: ActivePath) -> F
     return None
 
 
+def _flag_for_unverified(
+    entry: ProviderEntry,
+    active_path: ActivePath,
+    policy_mode: PolicyMode,
+) -> Flag | None:
+    """Refuse unverified transport baselines on Tor under strict policy.
+
+    A seeded SDK assumption is useful in lenient mode, but it is not evidence
+    that DNS and every socket family traverse SOCKS5h. Until packet-capture
+    verification clears ``unverified_baseline``, strict Tor must fail closed.
+    """
+    if active_path != "tor" or not entry.unverified_baseline:
+        return None
+    return Flag(
+        provider=entry.name,
+        severity=_downgrade("abort", policy_mode),
+        reason=f"{entry.name} transport baseline is not packet-capture verified",
+    )
+
+
 def _flag_for_ipv6(
     entry: ProviderEntry,
     active_path: ActivePath,
@@ -344,21 +371,25 @@ def _flag_for_ipv6(
 ) -> Flag | None:
     """Flag SDKs whose IPv6 path bypasses HTTPS_PROXY.
 
-    Only fires on Tor (clearnet has no anonymity contract) and only when
-    IPv6 is not disabled at the resolver hint level. If the user pinned
-    ``disable_ipv6=True`` (strict default) we trust that downstream AAAA
-    queries return nothing and skip the flag.
+    Only fires on Tor (clearnet has no anonymity contract). ``disable_ipv6``
+    currently maps to Tor's ``ClientUseIPv6 0`` setting, which controls Tor's
+    own directory/entry connections; it does not disable host IPv6 or prevent
+    a provider SDK from opening a direct IPv6 socket. Therefore the setting
+    changes the explanatory text but cannot suppress this flag.
     """
     if active_path != "tor":
         return None
-    if disable_ipv6:
-        return None
     if entry.respects_ipv6_proxy:
         return None
+    configured_note = (
+        "; disable_ipv6=True only sets Tor ClientUseIPv6 0 and does not enforce host/SDK IPv6 routing"
+        if disable_ipv6
+        else ""
+    )
     return Flag(
         provider=entry.name,
         severity=_downgrade("abort", policy_mode),
-        reason=(f"{entry.name} may resolve IPv6 endpoints and bypass socks5h (disable_ipv6=False; v1 advisory only)"),
+        reason=f"{entry.name} may resolve IPv6 endpoints and bypass socks5h{configured_note}",
     )
 
 

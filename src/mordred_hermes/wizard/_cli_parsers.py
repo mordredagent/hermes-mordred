@@ -71,7 +71,7 @@ def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p_serve.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Bind host (default: 127.0.0.1 — non-loopback exposes the no-TLS API to your network)",
+        help="Loopback bind host (default: 127.0.0.1; non-loopback values are refused)",
     )
     p_serve.add_argument("--port", type=int, default=7788, help="Bind port (default: 7788)")
     p_serve.set_defaults(func=_handle_extension_serve)

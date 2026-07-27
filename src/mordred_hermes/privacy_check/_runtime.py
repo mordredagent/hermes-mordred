@@ -24,18 +24,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
+from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE, hermes_home
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section, load_yaml_mapping
-from .audit import Writer, make_audit_writer
+from .audit import Writer
 from .policy import PolicyMode
 
 _LOG = logging.getLogger("mordred.privacy_check")
 
 SIBLING_PLUGINS: Final = (
+    "mordred_privacy_check",
     "mordred_network",
     "mordred_llm_guard",
     "mordred_keyvault",
+    "mordred_e2e",
     "mordred_wizard",
 )
 
@@ -238,7 +241,11 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
     # L465: encrypt the audit log once the keyvault is initialized. The
     # factory fails open to plaintext NDJSON. keyvault_home is the Hermes
     # home — the directory holding config.yaml.
-    audit = make_audit_writer(audit_path, keyvault_home=config_path.parent)
+    # All Mordred plugins share one process-wide writer per normalized path.
+    # Reloading this PluginState therefore reuses the active writer (and, for
+    # MRAL, its DEK) instead of rotating the file out from under network,
+    # llm_guard, or extension-sign hooks that still reference it.
+    audit = build_audit_writer(audit_path, keyvault_home=config_path.parent)
 
     return PluginState(
         policy_mode=policy_mode,
@@ -340,7 +347,7 @@ def get_disabled_plugins(config_path: Path | None = None) -> set[str]:
 
 
 def get_enabled_plugins(config_path: Path | None = None) -> set[str] | None:
-    """Return opt-in allow-list (``None`` = key missing = "all loadable").
+    """Return opt-in allow-list (``None`` = key missing/malformed = nothing enabled).
 
     Path-resolution rules mirror :func:`get_disabled_plugins`.
     """
@@ -367,15 +374,20 @@ def find_disabled_siblings(
 ) -> set[str]:
     """Return Mordred sibling plugins that are not loadable.
 
-    A sibling is considered disabled if it appears in ``plugins.disabled``
-    OR if ``plugins.enabled`` is set (not ``None``) and the sibling is not in it.
+    A sibling is considered disabled if it appears in ``plugins.disabled`` or
+    is absent from the opt-in ``plugins.enabled`` list.  Hermes 0.13+ treats a
+    missing or malformed allow-list (reported here as ``None``) as "nothing
+    enabled", not "everything loadable", so every sibling is disabled in that
+    case.
 
     ``config_path=None`` uses production resolution (Hermes API + default YAML).
     Explicit paths read only that YAML — never the user's real config.
     """
     deny = get_disabled_plugins(config_path)
     allow = get_enabled_plugins(config_path)
-    return {s for s in siblings if s in deny or (allow is not None and s not in allow)}
+    if allow is None:
+        return set(siblings)
+    return {s for s in siblings if s in deny or s not in allow}
 
 
 def poison(reason: str) -> None:

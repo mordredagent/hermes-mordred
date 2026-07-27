@@ -37,6 +37,13 @@ def strict_config(tmp_path: Path) -> Path:
         tmp_path / "config.yaml",
         """\
 plugins:
+  enabled:
+    - mordred_privacy_check
+    - mordred_wizard
+    - mordred_llm_guard
+    - mordred_network
+    - mordred_keyvault
+    - mordred_e2e
   mordred_privacy_check:
     policy: strict
 """,
@@ -130,6 +137,38 @@ plugins:
         _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
         with pytest.raises(SystemExit):
             hooks.on_session_start()
+
+    def test_shared_integrity_hook_detects_disabled_privacy_plugin(self, tmp_path: Path) -> None:
+        """Another runtime sibling still protects strict mode when privacy is disabled."""
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_privacy_check
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        with pytest.raises(SystemExit):
+            hooks.check_plugin_integrity()
+        assert _runtime.is_poisoned()
+
+    def test_shared_integrity_hook_detects_disabled_e2e_plugin(self, tmp_path: Path) -> None:
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_e2e
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        with pytest.raises(SystemExit):
+            hooks.check_plugin_integrity()
 
 
 class TestOnSessionStartLenientWithDisabled:

@@ -57,7 +57,7 @@ async def main() -> int:
     posts = a._client.posts
     leaked = any(p.get("PLAINTEXT") for p in posts)
     enc = [p["text"] for p in posts if not p.get("PLAINTEXT")]
-    ok = (not leaked) and enc and all("ENC:v2:" in t for t in enc)
+    ok = (not leaked) and enc and all("ENC:v3:" in t for t in enc)
     print("posts:", posts)
     print("\n" + ("PASS — threaded reply encrypted" if ok else "FAIL — CLEARTEXT reply in an encrypted channel"))
     return 0 if ok else 1

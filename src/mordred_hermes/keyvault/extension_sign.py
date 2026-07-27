@@ -95,13 +95,14 @@ def _audit_log_path() -> Path:
 
 @functools.lru_cache(maxsize=1)
 def _audit_writer() -> Writer:
-    """Per-process memoized audit writer for extension-driven signs.
+    """Module-local reference to the shared extension-sign audit writer.
 
     Zero-arg (unlike ``network`` / ``llm_guard``'s ``_build_audit_writer(path)``)
     because this module deliberately never freezes ``HERMES_BASE`` at import
     time (see :func:`_audit_log_path`); the path is recomputed on the first
-    call instead, then the resulting writer is cached for the process the same
-    way ``network`` / ``llm_guard`` cache theirs. The
+    call. The local cache preserves the test ``cache_clear()`` API, while
+    :mod:`mordred_hermes._audit_support` owns the normalized-path singleton so
+    clearing this cache never closes a writer another plugin is using. The
     :mod:`mordred_hermes._audit_support` import happens here, at first call,
     not at module scope, so plugin discovery stays cheap.
     """
@@ -294,60 +295,251 @@ def sign_typed_data_v4(typed_data: str | dict[str, Any]) -> str:
 # Transaction signing (raw signed tx; broadcasting is out of scope in v1)
 # --------------------------------------------------------------------------- #
 
+_MAX_TRANSACTION_QUANTITY = (1 << 256) - 1
+_TRANSACTION_FIELDS = frozenset(
+    {
+        "type",
+        "chainId",
+        "nonce",
+        "gas",
+        "gasPrice",
+        "maxPriorityFeePerGas",
+        "maxFeePerGas",
+        "to",
+        "value",
+        "data",
+        "accessList",
+        "from",
+    }
+)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
-def _to_int(v: Any) -> int:
-    if v is None or v == "":
-        return 0
-    if isinstance(v, int):
-        return v
-    s = str(v)
-    return int(s, 16) if s.startswith("0x") else int(s)
+
+def _transaction_quantity(field: str, value: Any) -> int:
+    """Parse one unsigned Ethereum JSON-RPC quantity without coercion.
+
+    ``bool``, floats, signed strings and objects with a surprising ``__str__``
+    are deliberately rejected.  The old permissive conversion made negative
+    values serialize as zero and let the approval prompt describe a different
+    transaction from the bytes that were ultimately signed.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"invalid_transaction_quantity:{field}")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str):
+        if value.startswith("0x"):
+            digits = value[2:]
+            if not digits or any(char not in _HEX_DIGITS for char in digits):
+                raise ValueError(f"invalid_transaction_quantity:{field}")
+            number = int(digits, 16)
+        else:
+            if not value or not value.isascii() or not value.isdecimal():
+                raise ValueError(f"invalid_transaction_quantity:{field}")
+            number = int(value, 10)
+    else:
+        raise ValueError(f"invalid_transaction_quantity:{field}")
+    if number < 0 or number > _MAX_TRANSACTION_QUANTITY:
+        raise ValueError(f"invalid_transaction_quantity:{field}")
+    return number
+
+
+def _canonical_address(field: str, value: Any, *, allow_empty: bool) -> str | None:
+    if allow_empty and value in (None, ""):
+        return None
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise ValueError(f"invalid_transaction_address:{field}")
+    digits = value[2:]
+    if len(digits) != 40 or any(char not in _HEX_DIGITS for char in digits):
+        raise ValueError(f"invalid_transaction_address:{field}")
+    return "0x" + digits.lower()
+
+
+def _canonical_data(value: Any) -> str:
+    if value in (None, ""):
+        return "0x"
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise ValueError("invalid_transaction_data")
+    digits = value[2:]
+    if len(digits) % 2 or any(char not in _HEX_DIGITS for char in digits):
+        raise ValueError("invalid_transaction_data")
+    return "0x" + digits.lower()
+
+
+def _validated_transaction_chain_id(tx: dict[str, Any], chain_id: int) -> int:
+    parsed_chain_id = _transaction_quantity("chainId", chain_id)
+    if parsed_chain_id == 0:
+        raise ValueError("invalid_transaction_chain_id")
+    supplied_chain_id = tx.get("chainId")
+    if supplied_chain_id not in (None, "") and _transaction_quantity("chainId", supplied_chain_id) != parsed_chain_id:
+        raise ValueError("transaction_chain_id_mismatch")
+    return parsed_chain_id
+
+
+def _transaction_fee_mode(tx: dict[str, Any]) -> str | None:
+    """Return ``legacy`` / ``eip1559`` or ``None`` when fees are unspecified."""
+    supplied_type = tx.get("type")
+    explicit_type: int | None = None
+    if supplied_type not in (None, ""):
+        explicit_type = _transaction_quantity("type", supplied_type)
+        if explicit_type not in (0, 2):
+            raise ValueError("unsupported_transaction_type")
+
+    has_legacy_fee = tx.get("gasPrice") not in (None, "")
+    has_max_fee = tx.get("maxFeePerGas") not in (None, "")
+    has_priority_fee = tx.get("maxPriorityFeePerGas") not in (None, "")
+    has_eip1559_fee = has_max_fee or has_priority_fee
+    if has_legacy_fee and has_eip1559_fee:
+        raise ValueError("conflicting_transaction_fee_fields")
+    if explicit_type == 0 and has_eip1559_fee:
+        raise ValueError("conflicting_transaction_fee_fields")
+    if explicit_type == 2 and has_legacy_fee:
+        raise ValueError("conflicting_transaction_fee_fields")
+    if explicit_type == 2 or (explicit_type is None and has_eip1559_fee):
+        return "eip1559"
+    if explicit_type == 0 or has_legacy_fee:
+        return "legacy"
+    return None
+
+
+def _validate_present_transaction_values(tx: dict[str, Any]) -> None:
+    if "accessList" in tx and tx["accessList"] != []:
+        raise ValueError("unsupported_transaction_access_list")
+    for field in ("nonce", "gas", "gasPrice", "maxPriorityFeePerGas", "maxFeePerGas"):
+        if tx.get(field) not in (None, ""):
+            _transaction_quantity(field, tx[field])
+    if "value" in tx:
+        _transaction_quantity("value", tx["value"])
+    if tx.get("to") not in (None, ""):
+        _canonical_address("to", tx["to"], allow_empty=True)
+    if tx.get("from") not in (None, ""):
+        _canonical_address("from", tx["from"], allow_empty=False)
+    if "data" in tx:
+        _canonical_data(tx["data"])
+
+    if tx.get("maxPriorityFeePerGas") not in (None, "") and tx.get("maxFeePerGas") not in (None, ""):
+        max_priority_fee = _transaction_quantity("maxPriorityFeePerGas", tx["maxPriorityFeePerGas"])
+        max_fee = _transaction_quantity("maxFeePerGas", tx["maxFeePerGas"])
+        if max_priority_fee > max_fee:
+            raise ValueError("transaction_priority_fee_exceeds_max_fee")
+
+
+def validate_transaction_request(tx: dict[str, Any], *, chain_id: int) -> str | None:
+    """Validate every caller-supplied field without requiring RPC-filled ones.
+
+    This preflight is shared by the RPC filler and final canonicalizer so an
+    unsupported type, conflicting fee model, malformed quantity/address/data,
+    or ignored field is rejected before any request reaches the configured RPC.
+    """
+    if not isinstance(tx, dict):
+        raise ValueError("invalid_transaction")
+    unknown = sorted(field for field in tx if field not in _TRANSACTION_FIELDS)
+    if unknown:
+        raise ValueError("unsupported_transaction_fields:" + ",".join(unknown))
+
+    _validated_transaction_chain_id(tx, chain_id)
+    fee_mode = _transaction_fee_mode(tx)
+    _validate_present_transaction_values(tx)
+    if "accessList" in tx and fee_mode != "eip1559":
+        raise ValueError("transaction_access_list_requires_type_2")
+    return fee_mode
+
+
+def _validate_transaction_shape(tx: dict[str, Any], *, is_eip1559: bool) -> None:
+    required = ["nonce", "gas"]
+    if is_eip1559:
+        required.extend(("maxFeePerGas", "maxPriorityFeePerGas"))
+    else:
+        required.append("gasPrice")
+    missing = [field for field in required if tx.get(field) in (None, "")]
+    if missing:
+        raise TransactionFieldsMissing(missing)
+
+
+def _canonical_fee_fields(tx: dict[str, Any], *, is_eip1559: bool) -> dict[str, str]:
+    if not is_eip1559:
+        return {"gasPrice": hex(_transaction_quantity("gasPrice", tx["gasPrice"]))}
+    max_priority_fee = _transaction_quantity("maxPriorityFeePerGas", tx["maxPriorityFeePerGas"])
+    max_fee = _transaction_quantity("maxFeePerGas", tx["maxFeePerGas"])
+    if max_priority_fee > max_fee:
+        raise ValueError("transaction_priority_fee_exceeds_max_fee")
+    return {
+        "maxPriorityFeePerGas": hex(max_priority_fee),
+        "maxFeePerGas": hex(max_fee),
+    }
+
+
+def canonicalize_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, Any]:
+    """Validate and freeze the exact transaction representation Hermes signs.
+
+    Only legacy EIP-155 transactions and type-2 EIP-1559 transactions with an
+    empty access list are supported.  Returning a JSON-friendly canonical dict
+    gives the approval UI and :func:`sign_transaction` one shared source of
+    truth: unsupported or ignored fields can no longer appear in the prompt and
+    then disappear from the signed bytes.
+    """
+    fee_mode = validate_transaction_request(tx, chain_id=chain_id)
+    parsed_chain_id = _transaction_quantity("chainId", chain_id)
+    is_eip1559 = fee_mode == "eip1559"
+    _validate_transaction_shape(tx, is_eip1559=is_eip1559)
+
+    canonical: dict[str, Any] = {
+        "type": "0x2" if is_eip1559 else "0x0",
+        "chainId": hex(parsed_chain_id),
+        "nonce": hex(_transaction_quantity("nonce", tx["nonce"])),
+        **_canonical_fee_fields(tx, is_eip1559=is_eip1559),
+    }
+    canonical.update(
+        {
+            "gas": hex(_transaction_quantity("gas", tx["gas"])),
+            "to": _canonical_address("to", tx.get("to"), allow_empty=True),
+            "value": hex(_transaction_quantity("value", tx.get("value", 0))),
+            "data": _canonical_data(tx.get("data")),
+        }
+    )
+    if is_eip1559:
+        canonical["accessList"] = []
+    supplied_from = tx.get("from")
+    if supplied_from not in (None, ""):
+        canonical["from"] = _canonical_address("from", supplied_from, allow_empty=False)
+    return canonical
 
 
 def _rlp_int(n: int) -> bytes:
-    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n > 0 else b""
-
-
-def _addr_bytes(to: Any) -> bytes:
-    if not to:
-        return b""  # contract creation
-    return bytes.fromhex(str(to).removeprefix("0x"))
-
-
-def _data_bytes(data: Any) -> bytes:
-    if not data:
+    if n < 0:
+        raise ValueError("negative_transaction_quantity")
+    if n == 0:
         return b""
-    return bytes.fromhex(str(data).removeprefix("0x"))
+    return n.to_bytes((n.bit_length() + 7) // 8, "big")
 
 
 def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]:
     """Sign a transaction, returning ``{"raw": "0x..", "hash": "0x.."}``.
 
-    Hermes has no RPC node wired in v1, so ``nonce``/``gas``/fee fields must be
-    present in ``tx`` (most DApps that call ``eth_sendTransaction`` supply them).
-    EIP-1559 (``maxFeePerGas``) and legacy (``gasPrice``) are both supported.
-    Broadcasting the returned raw tx over Tor is a follow-up (SPEC §5.3).
+    All nonce/gas/fee fields must already be present. The extension wallet fills
+    and freezes them through its configured RPC before user approval, then
+    broadcasts the returned bytes only after rechecking the chain. Direct
+    callers remain responsible for filling those fields. EIP-1559
+    (``maxFeePerGas``) and legacy (``gasPrice``) are both supported.
     """
     import rlp
     from eth_hash.auto import keccak
 
-    is_1559 = "maxFeePerGas" in tx or tx.get("type") in (2, "0x2")
-    required = ["nonce", "gas"] + (["maxFeePerGas", "maxPriorityFeePerGas"] if is_1559 else ["gasPrice"])
-    missing = [f for f in required if tx.get(f) in (None, "")]
-    if missing:
-        raise TransactionFieldsMissing(missing)
-
-    nonce = _to_int(tx["nonce"])
-    gas = _to_int(tx["gas"])
-    to = _addr_bytes(tx.get("to"))
-    value = _to_int(tx.get("value"))
-    data = _data_bytes(tx.get("data"))
+    canonical = canonicalize_transaction(tx, chain_id=chain_id)
+    is_1559 = canonical["type"] == "0x2"
+    signing_chain_id = int(canonical["chainId"], 16)
+    nonce = int(canonical["nonce"], 16)
+    gas = int(canonical["gas"], 16)
+    to_value = canonical["to"]
+    to = b"" if to_value is None else bytes.fromhex(to_value[2:])
+    value = int(canonical["value"], 16)
+    data = bytes.fromhex(canonical["data"][2:])
 
     if is_1559:
-        max_prio = _to_int(tx["maxPriorityFeePerGas"])
-        max_fee = _to_int(tx["maxFeePerGas"])
+        max_prio = int(canonical["maxPriorityFeePerGas"], 16)
+        max_fee = int(canonical["maxFeePerGas"], 16)
         unsigned = [
-            _rlp_int(chain_id),
+            _rlp_int(signing_chain_id),
             _rlp_int(nonce),
             _rlp_int(max_prio),
             _rlp_int(max_fee),
@@ -355,7 +547,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             to,
             _rlp_int(value),
             data,
-            [],
+            canonical["accessList"],
         ]
         sighash = keccak(b"\x02" + rlp.encode(unsigned))
         sig = _sign_hash(sighash)
@@ -365,7 +557,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
         signed = [*unsigned, _rlp_int(y), _rlp_int(r), _rlp_int(s_int)]
         raw = b"\x02" + rlp.encode(signed)
     else:
-        gas_price = _to_int(tx["gasPrice"])
+        gas_price = int(canonical["gasPrice"], 16)
         unsigned = [
             _rlp_int(nonce),
             _rlp_int(gas_price),
@@ -373,13 +565,13 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             to,
             _rlp_int(value),
             data,
-            _rlp_int(chain_id),
+            _rlp_int(signing_chain_id),
             b"",
             b"",
         ]
         sighash = keccak(rlp.encode(unsigned))
         sig = _sign_hash(sighash)
-        v = (sig.v - 27) + 35 + 2 * chain_id
+        v = (sig.v - 27) + 35 + 2 * signing_chain_id
         signed = [
             _rlp_int(nonce),
             _rlp_int(gas_price),

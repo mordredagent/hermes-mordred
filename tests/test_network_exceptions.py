@@ -45,6 +45,12 @@ def test_already_switching_subclass() -> None:
     assert issubclass(AlreadySwitching, MordredNetworkError)
 
 
+def test_path_switch_requires_restart_subclass() -> None:
+    from mordred_hermes.network._exceptions import MordredNetworkError, PathSwitchRequiresRestart
+
+    assert issubclass(PathSwitchRequiresRestart, MordredNetworkError)
+
+
 def test_unknown_path_subclass() -> None:
     from mordred_hermes.network._exceptions import MordredNetworkError, UnknownPath
 
@@ -57,10 +63,11 @@ def test_subclasses_caught_by_except_network_error() -> None:
         AlreadySwitching,
         BringupFailed,
         MordredNetworkError,
+        PathSwitchRequiresRestart,
         UnknownPath,
     )
 
-    for cls in (BringupFailed, AlreadySwitching, UnknownPath):
+    for cls in (BringupFailed, AlreadySwitching, PathSwitchRequiresRestart, UnknownPath):
         try:
             raise cls("test")
         except MordredNetworkError:

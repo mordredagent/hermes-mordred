@@ -46,7 +46,10 @@ def probe(
             or timeout. The exception message includes a short reason.
     """
     url = endpoint.rstrip("/") + "/models"
-    client_kwargs: dict[str, object] = {"timeout": timeout}
+    # This module probes only a previously validated local endpoint. Ambient
+    # HTTP(S)_PROXY must never receive even the health request, regardless of
+    # hook ordering or a user's pre-existing proxy environment.
+    client_kwargs: dict[str, object] = {"timeout": timeout, "trust_env": False}
     if transport is not None:
         client_kwargs["transport"] = transport
     try:

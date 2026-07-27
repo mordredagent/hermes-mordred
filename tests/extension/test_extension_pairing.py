@@ -71,6 +71,46 @@ def test_code_single_use():
     assert ei.value.reason == "already_used"
 
 
+def test_successful_repair_revokes_previous_webauthn_credential():
+    """A replacement extension must not be locked behind the old device's MFA."""
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    challenge = xc.b64u_encode(b"\x12" * 32)
+
+    first_code, _ = pairing.generate_code()
+    first = pairing.handle_pair_init(first_code, ext_pub, challenge)
+    pairing.save_webauthn_credential(
+        "old-credential",
+        "old-public-key",
+        origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    )
+    assert pairing.has_webauthn_credential() is True
+
+    second_code, _ = pairing.generate_code()
+    second = pairing.handle_pair_init(second_code, ext_pub, challenge)
+
+    assert pairing.validate_token(first["ext_token"]) is False
+    assert pairing.validate_token(second["ext_token"]) is True
+    assert pairing.has_webauthn_credential() is False
+    assert not pairing._webauthn_path().exists()
+
+
+def test_clear_pairing_clears_webauthn_credential():
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    code, _ = pairing.generate_code()
+    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x13" * 32))
+    pairing.save_webauthn_credential(
+        "credential",
+        "public-key",
+        origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    )
+
+    pairing.clear_pairing()
+
+    assert pairing.load_pairing() is None
+    assert pairing.has_webauthn_credential() is False
+    assert not pairing._webauthn_path().exists()
+
+
 def test_invalid_code():
     ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
     with pytest.raises(pairing.PairError) as ei:

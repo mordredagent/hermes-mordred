@@ -2,20 +2,21 @@
 
 > **Audience**: operators running Mordred locally. For the design rationale see [`SPEC.md`](../dev/SPEC.md), [`POLICY.md`](../dev/POLICY.md), [`SECRETS_ENV_ENCRYPTION.md`](../dev/SECRETS_ENV_ENCRYPTION.md), [`KEYVAULT_BACKENDS.md`](../dev/KEYVAULT_BACKENDS.md). For developer environment setup see [`setup.md`](../dev/setup.md).
 >
-> **Scope**: the `mordred_wizard` CLI surface — `hermes-mordred …` (standalone) and `hermes mordred …` (once wired into the host Hermes CLI).
+> **Scope**: the `mordred_wizard` CLI surface exposed today through the standalone `hermes-mordred …` command.
 
 ---
 
 ## 1. How to invoke
 
-Mordred ships two equivalent entry points to the same subcommand tree:
+Mordred currently ships one working command entry point:
 
 | Form | When it works | Notes |
 |------|---------------|-------|
-| `hermes-mordred <cmd>` | Always, once the package is installed in a venv | Standalone console script. **Recommended** for this dev repo. |
-| `hermes mordred <cmd>` | Only when the plugin is **enabled** in `~/.hermes/config.yaml` | The `mordred` subcommand is registered by the plugin loader at CLI init. |
+| `hermes-mordred <cmd>` | Once the package is installed in a venv | Standalone console script. |
 
-In this development checkout the fully-wired venv is `.venv`:
+Hermes does not yet add entry-point plugin CLI registrations to its top-level
+argparse tree, so `hermes mordred …` is not currently available even when the
+plugin is enabled. In this development checkout the fully-wired venv is `.venv`:
 
 ```sh
 cd <repo-root>            # /Users/.../Mordred-Hermes
@@ -29,10 +30,10 @@ M=.venv/bin/hermes-mordred
 $M status
 ```
 
-### Wiring `hermes mordred …` into the host CLI (optional)
+### Enabling all Mordred plugins
 
-The plugin is discovered by the loader but the `mordred` subcommand only appears
-after you enable it. Edit `~/.hermes/config.yaml`:
+`hermes-mordred configure` manages this automatically. The resulting
+`~/.hermes/config.yaml` includes:
 
 ```yaml
 plugins:
@@ -42,11 +43,11 @@ plugins:
     - mordred_llm_guard
     - mordred_network
     - mordred_keyvault
+    - mordred_e2e
 ```
 
-Then `hermes mordred status` works from the same venv. Until then, use
-`hermes-mordred` directly. (`hermes plugins list` does not surface entry-point
-plugins; use `hermes-mordred plugins list`.)
+Use `hermes-mordred` for commands. (`hermes plugins list` does not surface
+entry-point plugins; use `hermes-mordred plugins list`.)
 
 ---
 
@@ -242,7 +243,9 @@ $M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:77
 > real agent replies (a stub reply appears only if that runtime is missing);
 > see the README's "Browser-extension WebSocket gateway" section.
 > Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
-> with a one-line error.
+> with a one-line error. Non-loopback `--host` values are refused. To open the
+> localhost web app, copy the complete private `Web page:` URL printed at
+> startup, including its `#token=…` fragment.
 
 ---
 
@@ -386,8 +389,9 @@ unlocked.
 ```
 
 It picks the **default** route written to config — `(*)` marks the current
-choice (`clearnet` on a fresh setup). This is just the default; you can still
-switch any time later with `network use`.
+choice (`clearnet` on a fresh setup). `network use` can change that saved
+choice later; restart Hermes to activate the route before provider clients are
+built. A running Hermes process never switches its frozen route live.
 
 **How to operate it**: **↑ / ↓** move the highlight, **Space** selects (moves
 the `*`), **Tab** jumps to the `< Ok >` / `< Cancel >` buttons, **Enter**
@@ -483,15 +487,22 @@ through all of them**: the defaults are the safe, private choice.
 | 1 | Mordred policy mode | `lenient` | How strictly rules are enforced (detail below). | Enter |
 | 2 | Allow cloud LLM providers? | `N` | Permit cloud LLMs at all. | Enter |
 | 3 | Cloud provider allowlist | (hidden) | Only shown if you answered `y` above. Pick providers from a checkbox list (Space to toggle, Enter to confirm). | Skipped on `N` |
-| 4 | Local LLM endpoint URL | `http://localhost:1234/v1` | Where your local LLM is reached. | Enter |
+| 4 | Local LLM endpoint URL | `http://localhost:1234/v1` | Where your local LLM is reached. Under strict mode this must be loopback HTTP(S). | Enter |
 | 5 | Local LLM model id | empty | Local LLM model name. | Enter |
 | 6 | On cloud LLM attempt under strict mode | `always-block` | What to do when a cloud LLM is attempted under strict. | Enter |
 | 7 | Agent harness | `none` | Which agent tool drives Hermes (Claude CLI / Codex / Cursor / …). | Enter |
 
 > - Questions 2–7 only change runtime behaviour under **strict** mode; with the
 >   default `lenient`, nothing is blocked.
-> - `prompt-once` (Q6) asks once per provider whether to allow a one-time call to
->   a non-allowlisted cloud provider under strict mode — but only at an
+> - Under `strict`, `mordred-local` accepts only the exact HTTP(S) loopback IP
+>   `127.0.0.1` / `::1`, or `localhost` whose DNS results are all loopback.
+>   URLs containing credentials are refused. This check applies equally to the
+>   configured endpoint and Hermes's resolved runtime URL, before any health
+>   probe or model request. Active process proxies are bypassed for these exact
+>   hosts, and the health probe never trusts ambient proxy variables.
+>   Non-strict modes keep their existing behaviour.
+> - `prompt-once` (Q6) asks once per provider whether to allow that provider for
+>   the remainder of the current Hermes process under strict mode — but only at an
 >   interactive terminal. Headless / harness / CI sessions have no TTY, so it
 >   fails closed to `always-block` there. The decision is cached for the session
 >   and audited as `policy.strict.cloud_prompted_allow` / `_deny`.

@@ -85,12 +85,12 @@ Optional extras, all opt-in:
 | `ethereum` | `eth-keys` / `eth-hash` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
 | `tor-control` | `stem` | Deep Tor liveness probing for strict-mode operators |
 | `messaging` | `qrcode` | Terminal QR rendering for `extension pair` |
-| `extension` | `aiohttp` / `cryptography` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview) and pairing (since `0.1.0a2`) |
+| `extension` | `aiohttp` / `cryptography` / `requests[socks]` / `urllib3` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview), pairing, and Tor-routed RPC transport |
 
 ### Enable the plugins
 
 Running `hermes-mordred configure` (next section) does this for you — every
-run back-fills all five `mordred_*` entries into `plugins.enabled` in
+run back-fills all six `mordred_*` entries into `plugins.enabled` in
 `~/.hermes/config.yaml` if they're missing, so there's no manual step.
 Afterwards `~/.hermes/config.yaml` should contain:
 
@@ -102,6 +102,7 @@ plugins:
     - mordred_llm_guard
     - mordred_network
     - mordred_keyvault
+    - mordred_e2e
 ```
 
 Only edit this by hand if you want the plugins enabled *before* the first
@@ -187,7 +188,7 @@ from hermes_cli.plugins import PluginManager
 mgr = PluginManager(); mgr.discover_and_load(force=True)
 print(sorted(k for k, p in mgr._plugins.items() if p.manifest.source == 'entrypoint'))
 "
-# → ['mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
+# → ['mordred_e2e', 'mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
 ```
 
 ## Browser-extension WebSocket gateway (preview)
@@ -197,13 +198,28 @@ extension talks to — `ws://127.0.0.1:7788/ext`, localhost-only, no TLS. It was
 ported from the full-Hermes gateway layer in #30 and ships on PyPI since
 `0.1.0a2` (install the `extension` extra).
 
+Gateway messaging E2E (Slack / Discord) uses the context-bound `ENC:v3`
+wire. This is a deliberate breaking change from gateway command/reply v1/v2:
+deploy a v3-capable Mordred Extension at the same time. Legacy v1/v2 crypto
+remains available to the WebSocket API and stored-history helpers, but is not
+accepted as an agent command. See [the gateway E2E wire specification](docs/dev/SLACK_E2E.md).
+
 ### How it works
 
-An Origin check admits only `chrome-extension://` / `moz-extension://` clients,
-header-less local processes, and the server's own localhost page. On connect
+The server refuses non-loopback binds and validates the TCP peer, Host, and
+Origin. It admits only `chrome-extension://` / `moz-extension://` clients,
+header-less loopback processes, and its own localhost page. On connect
 the server sends an `auth_challenge`; the extension authenticates with its
-paired `ext_token` (plus a WebAuthn assertion once a credential is registered),
-the localhost page with a per-process page token. After auth:
+paired `ext_token` (plus a WebAuthn assertion once a Chromium-extension
+credential is registered), the localhost page with a per-process page token
+delivered only in the private launch URL's fragment. The fragment is not sent
+over HTTP and is removed from browser history before the app starts. Extension
+WebSocket sessions remain bound to the pairing token generation that
+authenticated them; re-pairing or clearing pairing state immediately revokes
+their next privileged frame and discards pending approvals. Firefox
+transport remains supported, but Firefox WebAuthn registration is refused
+until the wire protocol carries its browser-specific stable ceremony origin
+and RP ID. After auth:
 
 | Message | What it does |
 |---|---|
@@ -211,8 +227,17 @@ the localhost page with a per-process page token. After auth:
 | `chat` | Stream one conversation turn as `chat_chunk*` + `chat_end`; replies-in-kind E2E with `K_extchat` (encrypted in → encrypted out) |
 | `encrypt` / `decrypt` | Slack-message crypto with the paired key |
 | `accounts_request` | Wallet address + chain id from the keyvault |
-| `sign_request` → `sign_prompt`, then `sign_approve` → `sign_result` | Deterministic risk analysis, user approval, then keyvault signing (`personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction` incl. RPC fill + broadcast) |
+| `sign_request` → `sign_prompt`, then `sign_approve` → `sign_result` | Deterministic risk analysis and keyvault signing. Every prompt freezes the exact requested signer; transactions additionally freeze chain, nonce, gas, fees, and RPC origin after filling. If the selected wallet changes before approval, signing fails |
 | `history_get` / `history_clear` | Encrypted-at-rest conversation history |
+
+For `eth_sendTransaction`, the extension cannot introduce an arbitrary RPC
+endpoint or chain: both must match the operator-selected values in
+`~/.hermes/extension/wallet.json` (or the built-in endpoint for that configured
+chain). RPC transport rejects local/private targets and redirects, pins
+validated direct DNS answers, and never bypasses the route selected by the
+network gateway. Before returning any message signature or broadcasting a raw
+transaction, Hermes recovers its actual signer and verifies that it is still
+the address shown in the approval prompt.
 
 Wire protocol: the extension repo's `SPEC.ja.md` §6 / `src/lib/protocol.ts`;
 server side in [`src/mordred_hermes/extension/api.py`](src/mordred_hermes/extension/api.py).
@@ -225,11 +250,11 @@ hook a plugin could use, so `register(ctx)` cannot launch a long-running server
 lands, start it in the foreground with one command — it needs the `extension`
 extra (see the [extras table](#install-users-from-pypi) above).
 
-**PyPI install** — make sure the `extension` extra is included (swap `macos`
-for `keyvault` on Linux):
+**PyPI install** — include `extension`; add `ethereum` for the wallet signing
+flows shown below (swap `macos` for `keyvault` on Linux):
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a8"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension,ethereum]==0.1.0a8"
 ```
 
 Then use the `$M` alias from [Use it](#use-it):
@@ -243,7 +268,8 @@ $M extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
 **From a dev checkout** instead:
 
 ```sh
-uv sync --extra extension     # or: uv pip install -e ".[extension]"
+uv sync --extra extension --extra ethereum
+# or: uv pip install -e ".[extension,ethereum]"
 
 .venv/bin/hermes-mordred extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
 .venv/bin/python -m mordred_hermes.extension
@@ -257,7 +283,7 @@ between the two forms: with the `extension` extra missing, only
 `hermes-mordred extension serve` prints the install hint — the module form
 fails on the package import itself with a plain `ImportError`.
 
-Pairing, auth (incl. WebAuthn), `encrypt`/`decrypt`, history, and the
+Pairing, auth (incl. Chromium WebAuthn), `encrypt`/`decrypt`, history, and the
 keyvault-backed `accounts_request` / `sign_request` flows are fully functional
 standalone — they only touch `~/.hermes` and the keyvault.
 
@@ -273,9 +299,10 @@ standalone — they only touch `~/.hermes` and the keyvault.
   second terminal while `extension serve` is running — both sides share
   `~/.hermes/extension/pending.json`, so codes are also consumable by a full
   Hermes gateway hosting the WS server.
-- **`GET http://127.0.0.1:7788/` serves the bundled localhost web app** — a
-  browser page over the same WS API (the startup log prints both URLs; the
-  extension's WS endpoint is `/ext`). A 503 "web app not built" response
+- **The private `Web page:` URL printed by `extension serve` opens the bundled
+  localhost web app** — use the complete URL including its `#token=…` fragment;
+  a plain anonymous GET serves only the token-free shell. The extension's WS
+  endpoint is `/ext`. A 503 "web app not built" response
   appears only if the bundled page is missing — the PyPI wheel ships it.
 
 ## Install (development)

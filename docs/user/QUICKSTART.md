@@ -254,15 +254,19 @@ settings, separate from at-rest encryption (§3–4). Run `network init` once be
 
 | Do (command) | Purpose | Result |
 |---|---|---|
-| `$M network init` | One-time setup of the privacy paths (Tor / VPN / clearnet; VPN works with any provider, Mullvad recommended). | Paths become available to switch between. |
-| `$M network use tor` | Route traffic through Tor — strongest anonymity. | Active path = Tor (slower, highest privacy). |
-| `$M network use vpn` | Route traffic through your VPN (Mullvad by default) — IP privacy with better speed. | Active path = VPN. |
-| `$M network use clearnet` | No privacy routing — direct connection. | Active path = clearnet (fastest, no anonymity). |
+| `$M network init` | One-time setup of the privacy paths (Tor / VPN / clearnet; VPN works with any provider, Mullvad recommended). | Saves the route for the next Hermes start. |
+| `$M network use tor` | Select Tor — strongest anonymity. | Saves Tor; restart Hermes to activate it before provider clients are built. |
+| `$M network use vpn` | Select your VPN (Mullvad by default) — IP privacy with better speed. | Saves VPN; restart Hermes to activate it before provider clients are built. |
+| `$M network use clearnet` | Select direct networking with no privacy route. | Saves clearnet; restart Hermes to rebuild clients without a proxy. |
 | `$M network status` | Show which path is active and whether it is live. | Prints active path + liveness check. |
 
 `network init` is interactive: it shows a **Network privacy path** radio dialog
 to set your default route, then a few per-route prompts. **If you just want
 clearnet (the default), press Enter through everything.**
+
+The route is process-scoped. Changing it while Hermes is running is saved but
+not switched live; restart Hermes so the route and provider clients are built
+together.
 
 For the full dialog walkthrough, every prompt (Tor / Mullvad), and how to use a
 **non-Mullvad VPN** (Proton VPN, ExpressVPN, …), see

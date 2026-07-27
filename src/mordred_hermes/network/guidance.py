@@ -32,8 +32,8 @@ def mullvad_install_guidance() -> str:
         "Install the official Mullvad VPN app/CLI, log in with "
         "`mullvad account login`, and make sure `mullvad` is on PATH. "
         f"On macOS Mordred also checks `{MACOS_MULLVAD_APP_CLI}`. "
-        "Then rerun `hermes-mordred network init --path vpn` or switch to "
-        "`tor` / `clearnet` with `hermes-mordred network use <path>`."
+        "Then rerun `hermes-mordred network init --path vpn`, or select "
+        "`tor` / `clearnet` with `hermes-mordred network use <path>` and restart Hermes."
     )
 
 
@@ -49,8 +49,8 @@ def custom_vpn_install_guidance(up_cmd: tuple[str, ...]) -> str:
     return (
         f"Install the VPN's CLI so `{binary}` is on PATH (or give an absolute path in "
         "`plugins.mordred_network.custom_up_cmd`), then rerun "
-        "`hermes-mordred network init --path vpn` or switch to `tor` / `clearnet` with "
-        "`hermes-mordred network use <path>`."
+        "`hermes-mordred network init --path vpn`, or select `tor` / `clearnet` with "
+        "`hermes-mordred network use <path>` and restart Hermes."
     )
 
 
@@ -60,8 +60,8 @@ def wireguard_config_guidance(config_path: str) -> str:
     return (
         "Point `plugins.mordred_network.wireguard_config_path` at an existing WireGuard "
         f"`.conf` (current: `{current}`) — export one from your VPN's portal — then rerun "
-        "`hermes-mordred network init --path vpn` or switch to `tor` / `clearnet` with "
-        "`hermes-mordred network use <path>`."
+        "`hermes-mordred network init --path vpn`, or select `tor` / `clearnet` with "
+        "`hermes-mordred network use <path>` and restart Hermes."
     )
 
 

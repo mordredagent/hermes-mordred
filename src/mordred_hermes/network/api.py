@@ -50,8 +50,8 @@ class Runtime(Protocol):
 
     Kept narrow so PR1 tests can satisfy it with a tiny fake and PR2
     can replace the global without surface changes. PR2 added
-    :meth:`stop` and :meth:`is_dropped` so the hooks layer can route
-    ``on_session_end`` tear-down and ``pre_tool_call`` strict-mode
+    :meth:`stop` and :meth:`is_dropped` so the plugin can route
+    process-exit teardown and ``pre_tool_call`` strict-mode
     refusals through ``api`` instead of importing the concrete class.
     The M9 liveness worker sets ``is_dropped`` after two consecutive
     health failures; ``hooks.pre_tool_call`` reads it.
@@ -95,6 +95,17 @@ def reset_runtime_for_tests() -> None:
     """
     global _RUNTIME
     _RUNTIME = None
+
+
+def _clear_runtime_if_current(runtime: Runtime) -> None:
+    """Forget ``runtime`` only when it is still the registered singleton.
+
+    Registration uses this after a pre-client activation failure. The identity
+    check prevents a delayed cleanup path from clearing a newer runtime.
+    """
+    global _RUNTIME
+    if _RUNTIME is runtime:
+        _RUNTIME = None
 
 
 def _resolve_runtime(runtime: Runtime | None) -> Runtime:
@@ -164,9 +175,9 @@ def _default_probe() -> bool:
 def stop(*, runtime: Runtime | None = None) -> None:
     """Tear down the active path and stop the liveness worker.
 
-    Safe to call when no runtime is registered (no-op) - the hooks
-    layer invokes this from ``on_session_end`` and the session may
-    have ended without ``register()`` ever running (defensive idempotence).
+    Safe to call when no runtime is registered (no-op) - the process-exit
+    cleanup may run after registration failed or the singleton was cleared
+    (defensive idempotence).
     """
     rt = runtime if runtime is not None else _RUNTIME
     if rt is None:
@@ -188,16 +199,30 @@ def update_policy_mode(policy_mode: str, *, runtime: Runtime | None = None) -> N
 
 
 def set_isolation_token(token: str | None, *, runtime: Runtime | None = None) -> None:
-    """Set the per-session Tor circuit-isolation token (v2-N1).
+    """Set an optional process-scoped Tor circuit-isolation token.
 
-    ``hooks.on_session_start`` calls this with the Hermes ``session_id`` so
-    each session rides its own Tor circuit (``IsolateSOCKSAuth``). No-op when
-    no runtime is registered, mirroring :func:`update_policy_mode`.
+    The token must be set before first path activation. Concrete runtimes
+    reject a live change because provider clients snapshot the proxy URL and
+    would otherwise retain stale SOCKS credentials. No-op when no runtime is
+    registered, mirroring :func:`update_policy_mode`.
     """
     rt = runtime if runtime is not None else _RUNTIME
     if rt is None:
         return
     rt.set_isolation_token(token)
+
+
+def assert_route_config(config: Any, *, runtime: Runtime | None = None) -> None:
+    """Require disk-derived route config to match the frozen activation.
+
+    The concrete runtime provides ``assert_route_config``. Protocol fakes and
+    older embedders without that optional method remain compatible; production
+    registration always installs the concrete implementation.
+    """
+    rt = _resolve_runtime(runtime)
+    assertion = getattr(rt, "assert_route_config", None)
+    if callable(assertion):
+        assertion(config)
 
 
 def is_dropped(*, runtime: Runtime | None = None) -> bool:

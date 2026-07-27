@@ -55,7 +55,7 @@ async def main() -> int:
     await adapter.send("C0BG9QTCNKE", "the answer", metadata={"thread_ts": "1784629318.603409"})
     leaked = any(p.get("PLAINTEXT") for p in adapter.posts)
     enc = [p["text"] for p in adapter.posts if not p.get("PLAINTEXT")]
-    ok = (not leaked) and enc and all("ENC:v2:" in t for t in enc)
+    ok = (not leaked) and enc and all("ENC:v3:" in t for t in enc)
     print("posts:", adapter.posts)
     print("\n" + ("PASS — live adapter wrapped, reply encrypted" if ok else "FAIL — cleartext"))
     return 0 if ok else 1
