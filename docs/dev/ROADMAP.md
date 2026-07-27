@@ -95,9 +95,9 @@ Increases the granularity and coverage of the existing plugins.
 
 ### v2-F1: Per-skill independent network paths
 
-- **Motivation**: in v1 the gateway has a single global state (last-write-wins). Concurrent skills can end up issuing requests over an unintended path
-- **Depends on**: v2-H2 (`origin_skill` in `pre_tool_call`) + injecting per-subprocess proxy env vars via the Hermes child-process spawn API
-- **Scope**: `mordred_network` switches paths per skill, enforcing them as declared in skill metadata
+- **Motivation**: v1 activates one process-wide route before provider clients are constructed and freezes it for the process lifetime. Same-route reuse is idempotent; a conflicting route is refused and requires a Hermes restart. Concurrent skills therefore intentionally share that route and cannot request independent transports
+- **Depends on**: v2-H2 (`origin_skill` in `pre_tool_call`) + independent per-request/provider-client transports + per-subprocess proxy env injection via the Hermes child-process spawn API
+- **Scope**: `mordred_network` provisions independent paths per skill and enforces the path declared in skill metadata, without mutating the process-global transport captured by other clients
 - **Priority**: M
 
 ### v2-F2: Skill metadata signing / integrity verification

@@ -310,6 +310,27 @@ def _to_int(hexstr: Any) -> int:
     return int(s, 16) if s.startswith("0x") else int(s)
 
 
+def _rpc_quantity(value: Any, *, field: str) -> int:
+    """Parse a JSON-RPC quantity without accepting bools or decimal coercion."""
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise JsonRpcError(f"rpc_invalid_response: {field} must be a hex quantity")
+    digits = value[2:]
+    if not digits or any(char not in "0123456789abcdefABCDEF" for char in digits):
+        raise JsonRpcError(f"rpc_invalid_response: {field} must be a hex quantity")
+    return int(digits, 16)
+
+
+def get_chain_id(rpc_url: str) -> int:
+    return _rpc_quantity(call(rpc_url, "eth_chainId", []), field="eth_chainId")
+
+
+def assert_rpc_chain_id(rpc_url: str, expected_chain_id: int) -> None:
+    """Fail closed unless *rpc_url* still serves the approved chain."""
+    actual_chain_id = get_chain_id(rpc_url)
+    if actual_chain_id != expected_chain_id:
+        raise JsonRpcError(f"rpc_chain_id_mismatch: expected {hex(expected_chain_id)}, got {hex(actual_chain_id)}")
+
+
 # --------------------------------------------------------------------------- #
 # Field filling
 # --------------------------------------------------------------------------- #
@@ -342,20 +363,52 @@ def fee_data(rpc_url: str) -> dict[str, int]:
     return {"gasPrice": gas_price}
 
 
+def get_gas_price(rpc_url: str) -> int:
+    return _to_int(call(rpc_url, "eth_gasPrice", []))
+
+
+def _fill_eip1559_fees(rpc_url: str, out: dict[str, Any]) -> None:
+    missing_priority = out.get("maxPriorityFeePerGas") in (None, "")
+    missing_max = out.get("maxFeePerGas") in (None, "")
+    if not missing_priority and not missing_max:
+        return
+
+    suggested = fee_data(rpc_url)
+    if "maxPriorityFeePerGas" not in suggested or "maxFeePerGas" not in suggested:
+        raise JsonRpcError("rpc_eip1559_unavailable: RPC did not return EIP-1559 fee data")
+    suggested_priority = suggested["maxPriorityFeePerGas"]
+    suggested_max = suggested["maxFeePerGas"]
+    if missing_priority:
+        if not missing_max:
+            suggested_priority = min(suggested_priority, _to_int(out["maxFeePerGas"]))
+        out["maxPriorityFeePerGas"] = hex(suggested_priority)
+    if missing_max:
+        priority = _to_int(out["maxPriorityFeePerGas"])
+        out["maxFeePerGas"] = hex(max(suggested_max, priority))
+
+
 def fill_transaction(rpc_url: str, tx: dict[str, Any], from_address: str, chain_id: int) -> dict[str, Any]:
     """Return a copy of ``tx`` with nonce/gas/fee fields filled where missing."""
+    from mordred_hermes.keyvault import extension_sign
+
     out = dict(tx)
+    fee_mode = extension_sign.validate_transaction_request(out, chain_id=chain_id)
+    assert_rpc_chain_id(rpc_url, chain_id)
     if out.get("nonce") in (None, ""):
         out["nonce"] = hex(get_nonce(rpc_url, from_address))
-    has_1559 = out.get("maxFeePerGas") not in (None, "")
-    has_legacy = out.get("gasPrice") not in (None, "")
-    if not has_1559 and not has_legacy:
+    if fee_mode == "legacy":
+        if out.get("gasPrice") in (None, ""):
+            out["gasPrice"] = hex(get_gas_price(rpc_url))
+    elif fee_mode == "eip1559":
+        _fill_eip1559_fees(rpc_url, out)
+    else:
         out.update({k: hex(v) for k, v in fee_data(rpc_url).items()})
     if out.get("gas") in (None, ""):
         out["gas"] = hex(estimate_gas(rpc_url, out, from_address))
     return out
 
 
-def send_raw_transaction(rpc_url: str, raw_hex: str) -> str:
-    """Broadcast and return the transaction hash."""
+def send_raw_transaction(rpc_url: str, raw_hex: str, *, expected_chain_id: int) -> str:
+    """Re-verify the approved chain, then broadcast and return its hash."""
+    assert_rpc_chain_id(rpc_url, expected_chain_id)
     return str(call(rpc_url, "eth_sendRawTransaction", [raw_hex]))

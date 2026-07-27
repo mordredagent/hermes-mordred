@@ -426,6 +426,63 @@ def channel_key(channel_id: str) -> bytes | None:
         return None
 
 
+def _unpadded_b64_length(raw_length: int) -> int:
+    """Return the exact unpadded base64url length for ``raw_length`` bytes."""
+    return (4 * raw_length + 2) // 3
+
+
+def _v3_plaintext_budget(max_len: int, prefix: str = "") -> int:
+    """Maximum UTF-8 plaintext bytes whose complete v3 wire fits ``max_len``."""
+    from mordred_hermes.extension.crypto import ENC_PREFIX_V3
+
+    # Key id (8), message id (22), sequence/total (one digit each), nonce
+    # (12 bytes -> 16 base64url chars), their separators, and an optional
+    # plaintext routing prefix. AES-GCM adds a 16-byte tag to the plaintext.
+    fixed = len(prefix) + (1 if prefix else 0) + len(ENC_PREFIX_V3) + 8 + 1 + 22 + 1 + 1 + 1 + 1 + 1 + 16 + 1
+    if fixed + _unpadded_b64_length(16) > max_len:
+        return -1
+
+    low, high = 0, max_len
+    while low < high:
+        candidate = (low + high + 1) // 2
+        wire_length = fixed + _unpadded_b64_length(candidate + 16)
+        if wire_length <= max_len:
+            low = candidate
+        else:
+            high = candidate - 1
+    return low
+
+
+def _split_utf8(body: str, first_budget: int, later_budget: int) -> list[str]:
+    """Split at Unicode boundaries without exceeding per-chunk byte budgets."""
+    if first_budget < 0 or later_budget < 0:
+        raise ValueError("platform message limit is too small for an encrypted reply")
+    if not body:
+        return [""]
+
+    pieces: list[str] = []
+    current: list[str] = []
+    used = 0
+    budget = first_budget
+    for character in body:
+        size = len(character.encode("utf-8"))
+        if used + size > budget:
+            # A long plaintext mention prefix can leave no room for the first
+            # body character. Emit an authenticated empty first message, then
+            # continue with the normal no-prefix budget.
+            pieces.append("".join(current))
+            current = []
+            used = 0
+            budget = later_budget
+        if size > budget:
+            raise ValueError("platform message limit cannot fit one encrypted character")
+        current.append(character)
+        used += size
+    if current:
+        pieces.append("".join(current))
+    return pieces
+
+
 def encrypt_reply(
     raw_key: bytes,
     content: str,
@@ -451,8 +508,9 @@ def encrypt_reply(
     prefix = _SLACK_FREE_TEXT_LABEL_RE.sub(r"\1\2", prefix)
     prefix = _TEAMS_FREE_TEXT_MENTION_RE.sub("", prefix).strip()
     body = content[m.end() :] if m else content
-    safe = max(512, int(max_len * 0.6))
-    pieces = [body[i : i + safe] for i in range(0, len(body), safe)] or [""]
+    first_budget = _v3_plaintext_budget(max_len, prefix)
+    later_budget = _v3_plaintext_budget(max_len)
+    pieces = _split_utf8(body, first_budget, later_budget)
     out: list[str] = []
     for i, piece in enumerate(pieces):
         enc = encrypt_message_v3(
@@ -464,5 +522,8 @@ def encrypt_reply(
             chat_id=chat_id,
             thread_root=thread_root,
         )
-        out.append(f"{prefix} {enc}" if (i == 0 and prefix) else enc)
+        wire = f"{prefix} {enc}" if (i == 0 and prefix) else enc
+        if len(wire) > max_len:  # Defensive assertion against wire-format drift.
+            raise ValueError("encrypted reply exceeds the platform message limit")
+        out.append(wire)
     return out

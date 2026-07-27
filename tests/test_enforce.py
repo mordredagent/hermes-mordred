@@ -602,7 +602,9 @@ class TestStrictLocal:
         )
 
         assert seen == ["http://127.0.0.1:1234/v1"]
-        expected = "internal.example,other.example,localhost,127.0.0.1,::1"
+        # Lowercase proxy variables take precedence on POSIX/httpx. Do not
+        # union the stale uppercase entry: that can broaden direct egress.
+        expected = "other.example,localhost,127.0.0.1,::1"
         assert os.environ["NO_PROXY"] == expected
         assert os.environ["no_proxy"] == expected
 

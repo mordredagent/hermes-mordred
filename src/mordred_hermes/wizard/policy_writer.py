@@ -169,10 +169,23 @@ def _ensure_plugins_enabled(root: Any) -> None:
         return
 
     if not isinstance(enabled, list):
-        # Pathological config -- leave alone, log, and bail. Wizard upgrade
-        # path will surface the conflict to the user via diff + prompt.
-        _LOG.warning("plugins.enabled is %s, not list; skipping mordred plugin auto-add", type(enabled).__name__)
-        return
+        # Hermes treats a malformed allow-list exactly like a missing one:
+        # no entry-point plugin loads.  Leaving it untouched after a successful
+        # configure therefore strands every runtime guard.  Preserve a scalar
+        # plugin name when possible, otherwise replace the unusable value, then
+        # extend the repaired list below.
+        recovered = [enabled] if isinstance(enabled, str) and enabled.strip() else []
+        _LOG.warning(
+            "plugins.enabled is %s, not list; replacing with a valid enabled list",
+            type(enabled).__name__,
+        )
+        plugins["enabled"] = recovered
+        enabled = recovered
+
+    sanitized = [item for item in enabled if isinstance(item, str) and item.strip()]
+    if len(sanitized) != len(enabled):
+        _LOG.warning("plugins.enabled contains invalid plugin names; removing non-string or empty entries")
+        enabled[:] = sanitized
 
     existing = {str(x) for x in enabled if isinstance(x, str)}
     for name in MORDRED_PLUGIN_NAMES:

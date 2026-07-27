@@ -30,7 +30,7 @@ Hermes config integration:
 ## `~/.hermes/mordred/audit.log`
 
 **Owning plugin**: `mordred_privacy_check` (Phase 1)
-**Purpose**: Access-controlled (mode `0600`), append-only auditable record of policy decisions, network-path switches, and keyvault operations.
+**Purpose**: Access-controlled (mode `0600`), append-only auditable record of policy decisions, process-route activation/refusal, and keyvault operations.
 
 > **H4 caveat**: v1 is **not tamper-evident**. File mode `0600` provides access control, not tamper detection. Any process running under the same UID can rewrite the log without leaving a trace. Tamper evidence (a per-entry HMAC chain, with the chain key wrapped by the keyvault DEK) is planned for v2 (see §Tamper detection roadmap below and SPEC.md §Threat Model "does NOT defend against").
 
@@ -58,17 +58,22 @@ Hermes config integration:
 Audit entries carry the following fields:
 
 - `ts`: ISO 8601 UTC timestamp (e.g. `2026-04-29T12:34:56.000Z`)
-- `event`: hook name (at `pre_install` wrapper invocation / `pre_tool_call` /
-  `pre_llm_call` / `network_use` / `keyvault_*` / ...)
+- `event`: hook or lifecycle name (at `pre_install` wrapper invocation /
+  `pre_tool_call` / `pre_api_request` / `network.register` / `network.use` /
+  `keyvault_*` / ...). Registration activates and freezes the configured
+  process route before provider-client construction (`network.use` records the
+  activation; `network.register` records a fail-closed registration refusal).
+  Session hooks only validate/reuse it, and final teardown belongs to the
+  process-exit callback
 - `decision`: `allow` | `block` | `override` | `warn`
 - `reason`: a fixed enum code — the canonical, complete list is
   [`POLICY.md` §Audit log `reason` enum (frozen)](./POLICY.md) and
   `src/mordred_hermes/privacy_check/_audit_reasons.py:ReasonCode`
   (typed `Literal`, drift-checked by mypy). Added incrementally since the
-  Phase 1 step-0 freeze, across Phase 2 PR2 / Phase 3 PR1 / Phase 4 PR2
-  (16 codes across Phase 1-3, plus Phase 4 PR2's
-  `keyvault.recovery_digest_mismatch` /
-  `keyvault.seed_display_aborted_screenshot`)
+  Phase 1 step-0 freeze. The current closed enum contains **30 codes** across
+  the Phase 1-4 additions and later hardening follow-ups; the latest addition
+  is `network.transport_incompatible` for protected-route/provider transport
+  refusal
 - `origin_skill?`: `{ id, version? }` — only when included in the Hermes `pre_tool_call` payload
 - arbitrary event-specific fields (`tool_name`, `provider_override`, `path`, ...)
 

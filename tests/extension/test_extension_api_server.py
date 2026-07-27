@@ -1258,7 +1258,7 @@ def test_transaction_approval_rejects_wallet_switch_before_signing(monkeypatch):
     monkeypatch.setattr(extension_api, "_do_sign", wallet_do_sign)
     monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
     monkeypatch.setattr(extension_sign, "get_address", lambda: next(addresses))
-    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: None)
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: "https://rpc.example.com")
     monkeypatch.setattr(
         extension_sign,
         "sign_transaction",
@@ -1267,7 +1267,7 @@ def test_transaction_approval_rejects_wallet_switch_before_signing(monkeypatch):
     monkeypatch.setattr(
         extension_rpc,
         "fill_transaction",
-        lambda *_args, **_kwargs: pytest.fail("an unconfigured RPC must not fill fields"),
+        lambda _rpc_url, tx, _from_address, _chain_id: dict(tx),
     )
     conn = _authed_conn()
 

@@ -46,7 +46,7 @@ do not apply this boundary.
 
 | # | Code | Phase | Notes |
 | --- | --- | --- | --- |
-| 13 | `network.use` | 3.1 | **Action**. Successful path switch via `api.use(path)`. Decision `override`. Fields: `prev_path`, `new_path`, `live_subprocess_count` (M3 transitive-failure visibility — `> 0` signals env updates won't reach already-running children). |
+| 13 | `network.use` | 3.1 | **Action**. Successful initial/unfrozen route activation via `api.use(path)`. Decision `override`. Fields: `prev_path`, `new_path`, `live_subprocess_count` (M3 transitive-failure visibility — `> 0` signals env updates would not reach already-running children). Registration freezes the route after activation; same-route reuse is a silent no-op and a conflicting live route raises `PathSwitchRequiresRestart`. |
 | 14 | `network.use_failed` | 3.1 | **Action**. `api.use(path)` raised `MordredNetworkError`. Decision `raise`. Fields: `requested_path`, `error_type`, `prev_path`. |
 | 15 | `network.bringup_failed` | 3.1 | Lenient-mode path bring-up failure with clearnet fallback. Decision `warn`. Fields: `path`, `error_type`. Strict mode pairs this entry with a `MordredPathBringupFailed` raise from the hook. |
 | 16 | `network.path_dropped` | 3.1 | M9 liveness probe detected 2 consecutive failures on active path. Decision `block` in strict (paired with `MordredPathDropped(BaseException)` raise on next `pre_tool_call`); `warn` in lenient. Fields: `path`, `consecutive_failures`, `last_health_at`. |
@@ -105,12 +105,24 @@ Found in the post-merge review of PR #39 (Phase 4 PR10): the encrypted-audit fac
 
 ### prompt-once freeze (added 2026-06-24)
 
-`cloud_attempt_action: prompt-once` was previously a reserved wizard value with no enforcement (refuse-only, behaving like `always-block`). It now has a live emit site in `mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (the `pre_api_request` authoritative path): under strict mode, when a non-allowlisted cloud provider is reached, the operator is asked once per provider at an interactive terminal whether to allow that provider for the remainder of the current Hermes process. 2 `policy.strict.cloud_prompted_*` codes appended to `ReasonCode`; total freeze becomes 29 (12 Phase 1 + 4 Phase 3 + 8 Phase 4 PR2–step-E + 2 Phase 4 §4.1 + 1 PR #39 follow-up + 2 prompt-once). Same-PR emit site per the scope rule condition (a):
+`cloud_attempt_action: prompt-once` was previously a reserved wizard value with no enforcement (refuse-only, behaving like `always-block`). It now has a live emit site in `mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (the `pre_api_request` authoritative path): under strict mode, when a non-allowlisted cloud provider is reached, the operator is asked once per provider at an interactive terminal whether to allow that provider for the remainder of the current Hermes process. 2 `policy.strict.cloud_prompted_*` codes appended to `ReasonCode`; the freeze at this historical step became 29 (12 Phase 1 + 4 Phase 3 + 8 Phase 4 PR2–step-E + 2 Phase 4 §4.1 + 1 PR #39 follow-up + 2 prompt-once), before the network follow-up below raised the current total to 30. Same-PR emit site per the scope rule condition (a):
 
 | # | Code | Phase | Notes |
 | --- | --- | --- | --- |
 | 28 | `policy.strict.cloud_prompted_allow` | 2 | **Action**. `cloud_attempt_action: prompt-once`; operator approved a non-allowlisted cloud provider for the remainder of the current Hermes process at an interactive terminal (`sys.stdin` and `sys.stdout` both TTY). Decision `allow`. Fields: `event="pre_api_request"`, `provider_id`. Emitted once per provider — the verdict is cached for the process, so cached re-allows stay silent (mirrors the `check_runtime_provider` allow-is-silent rule). |
 | 29 | `policy.strict.cloud_prompted_deny` | 2 | **Classification**. Same precondition as #28 but the operator declined, OR no interactive terminal was available (fail-closed). Decision `block`, recorded **before** the existing action pair (#8 `cloud_not_allowlisted` → #10 `session_refused`). Fields: `event="pre_api_request"`, `provider_id`, and `prompt_unavailable: true` when the deny was the no-terminal fallback rather than an explicit decline. An explicit decline is cached (no re-prompt); a no-terminal deny is **not** cached so a later interactive call can still ask. |
+
+### Network transport-gate freeze (added 2026-07-27)
+
+The process-scoped route hardening adds one live `network.*` emit site, bringing
+the total freeze to 30. The route is activated and frozen during
+`mordred_network.register()` before provider clients are constructed. Session
+and request transport refusals preserve that shared route; they never tear down
+Tor/VPN and expose another gateway session to clearnet.
+
+| # | Code | Phase | Notes |
+| --- | --- | --- | --- |
+| 30 | `network.transport_incompatible` | 3.1 | **Action/classification**. Emitted when a provider is incompatible, unverified, unknown, or unresolved on strict + Tor; when configured Tor/VPN does not match the active ready route; or when the transport gate itself fails. Decision `block` for strict protected-route refusal and `warn` for downgraded diagnostics. Fields: `event` (`on_session_start` or `pre_api_request`), `active_path`, `provider`, `severity`, `detail`, `policy_mode`, and `stage` for internal-gate failures. A blocking entry is paired with `MordredPathBringupFailed`; the process route remains active. |
 
 ### Audit entry shape
 
@@ -123,9 +135,9 @@ Synthetic example:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `ts` | string | ISO-8601 UTC with 3-digit millisecond precision, literally `"%Y-%m-%dT%H:%M:%S." + "{ms:03d}" + "Z"` (Python's `%f` is microseconds, so the helper builds the string manually). Auto-added if caller omits. |
-| `event` | string | Hook name (`on_session_start`, `pre_tool_call`, ...) or `pre_install`. |
+| `event` | string | Hook or lifecycle name (`network.register`, `on_session_start`, `pre_tool_call`, ...) or `pre_install`. |
 | `decision` | `"allow"` \| `"block"` \| `"override"` \| `"warn"` | |
-| `reason` | one of the 29 codes currently in `ReasonCode`, or `null` | `null` only for off-mode allows. The PR4 set (#21–24) is fully frozen as of step-E; the §4.1 set (#25–26) is frozen as of `requires_keyvault` enforcement; #27 is frozen as of the PR #39 review follow-up — see §"PR #39 review follow-up freeze"; #28–29 are frozen as of the prompt-once enforcement — see §"prompt-once freeze". |
+| `reason` | one of the 30 codes currently in `ReasonCode`, or `null` | `null` only for off-mode allows. The PR4 set (#21–24) is fully frozen as of step-E; the §4.1 set (#25–26) is frozen as of `requires_keyvault` enforcement; #27 is frozen as of the PR #39 review follow-up; #28–29 are frozen as of prompt-once enforcement; #30 is frozen as of the process-scoped network transport gate. |
 | `skill_id` / `tool_name` / `provider_id` | string (event-conditional) | Skill name from frontmatter; tool name from payload; provider id (Phase 2). |
 | event-specific extras | various | e.g. `disabled_siblings: list[str]` on `mordred.degraded.disable_unprotected`. |
 
@@ -234,9 +246,9 @@ invalid types, and attempts to replace a baseline entry are rejected by the
 transport gate. Under strict + Tor, malformed overrides and any internal gate
 error are audited as `network.transport_incompatible` and refused with
 `MordredPathBringupFailed`; lenient/off audit a warning and continue. A
-startup refusal stops the just-started path best-effort. A request-time refusal
-keeps Tor active so a long-lived gateway cannot fall through to clearnet on
-its next event; every later request is re-evaluated. The startup gate checks
+startup or request-time refusal keeps the process-scoped route active so a
+long-lived gateway or another concurrent session cannot fall through to
+clearnet; every later request is re-evaluated. The startup gate checks
 the provider persisted in `config.yaml model.provider` or
 `auth.json active_provider`; the `pre_api_request` gate repeats the check
 against Hermes's request-resolved `provider`, so CLI, environment, one-shot,

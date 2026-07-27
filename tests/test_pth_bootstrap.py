@@ -30,6 +30,8 @@ class TestLooksLikeHermes:
         [
             ["/usr/local/bin/hermes"],
             ["/usr/local/bin/hermes", "mordred", "vault", "status"],
+            ["/opt/venv/bin/hermes-agent", "--query", "hello"],
+            ["/opt/venv/bin/hermes-acp"],
             ["/opt/venv/bin/hermes-mordred", "vault", "status"],
             [
                 "/opt/venv/lib/python3.11/site-packages/hermes_cli/cli.py"
@@ -197,6 +199,8 @@ class TestPthGateParity:
         "argv0,expected",
         [
             ("/opt/venv/bin/hermes", True),
+            ("/opt/venv/bin/hermes-agent", True),
+            ("/opt/venv/bin/hermes-acp", True),
             ("/opt/venv/bin/hermes-mordred", True),
             ("/x/site-packages/hermes_cli/cli.py", True),
             ("/x/site-packages/hermes_cli", True),  # endswith('/hermes_cli') — the FIX 6 branch

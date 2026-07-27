@@ -37,6 +37,7 @@ from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping, read_policy_mode_fail_closed
 from .._provider_identity import canonicalize_provider
+from .._proxy_bypass import ensure_loopback_proxy_bypass
 from .._yaml_io import load_yaml_mapping
 from . import enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
@@ -71,6 +72,12 @@ def register(ctx: PluginContext) -> None:
     3. Register the enforce handler on the same hook (after step 2 so
        harness refusals propagate first).
     """
+    # Hermes discovers plugins before constructing AIAgent, while the later
+    # on_session_start/pre_api_request hooks run after its shared httpx client
+    # has already captured ambient proxy settings.  Establish the bypass here
+    # as a defense-in-depth path for embedded callers that do not execute the
+    # wheel's interpreter-startup .pth hook.
+    ensure_loopback_proxy_bypass()
     local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
     from ..privacy_check.hooks import check_plugin_integrity
 

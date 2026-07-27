@@ -22,6 +22,9 @@ Phase 3 PR1 step-0 freeze (2026-05-13) adds 4 ``network.*`` codes:
   raise
 - ``network.path_dropped`` — M9 liveness probe detected 2 consecutive
   failures (decision=``block`` in strict, ``warn`` in lenient)
+- ``network.transport_incompatible`` — configured protected-route integrity
+  or provider transport evidence failed (decision=``block`` in strict Tor/VPN,
+  ``warn`` in lenient/off)
 
 Naming normalized to dotted form (``network.use`` rather than ``network_use``
 as in TODO.md L331) to match the existing ``policy.*`` / ``mordred.*``
@@ -132,6 +135,11 @@ scope rule condition (a)):
   ``session_refused`` action pair. Fields: ``event="pre_api_request"``,
   ``provider_id``, and ``prompt_unavailable: true`` when the deny was the
   no-terminal fallback rather than an explicit decline.
+
+Phase 3 transport-gate follow-up (2026-07-27) adds
+``network.transport_incompatible``, bringing the total to 30. The emit sites
+live in :mod:`mordred_hermes.network.hooks` at both process/session startup and
+immediately before provider egress.
 """
 
 from typing import Literal
@@ -155,6 +163,7 @@ ReasonCode = Literal[
     "network.use_failed",
     "network.bringup_failed",
     "network.path_dropped",
+    "network.transport_incompatible",
     "keyvault.recovery_digest_mismatch",
     "keyvault.seed_display_aborted_screenshot",
     "keyvault.unwrap_authorized",

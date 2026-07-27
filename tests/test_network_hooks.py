@@ -4,16 +4,16 @@ The hooks layer bridges Hermes's plugin lifecycle and the PR2-A
 :class:`Runtime`. Four handlers map directly to the Hermes lifecycle:
 
 - ``on_session_start`` - read policy + network config from disk and
-  bring the configured default path up via :func:`api.use`. Strict +
-  bring-up failure raises :class:`MordredPathBringupFailed`
+  validate/reuse the process-frozen path via :func:`api.use`. A live path
+  change or strict bring-up failure raises :class:`MordredPathBringupFailed`
   (``BaseException``-derived; HOOK_PAYLOADS.md §1).
 - ``on_session_end`` - retain the active path between conversation turns.
-- ``pre_api_request`` - strict + Tor revalidates the provider resolved for
-  the actual outbound request, including runtime-only overrides, and refuses
-  egress if configured Tor is no longer active.
-- ``pre_tool_call`` - strict + :func:`api.is_dropped` raises
-  :class:`MordredPathDropped`. Lenient/off return ``None`` because the
-  M9 liveness worker already audited the drop with ``decision=warn``.
+- ``pre_api_request`` - strict protected routes must remain active, ready, and
+  not dropped; Tor additionally revalidates the request-resolved provider.
+- ``pre_tool_call`` - strict protected routes must still match the frozen
+  activation config and remain active/ready/not-dropped. Route validation
+  failures escape as a ``BaseException`` refusal; lenient/off retain the
+  previous policy result.
 
 A tiny ``_FakeCtx`` records ``register_hook`` calls so we can assert
 :func:`register` wires the four handlers. Disk I/O is faked via the
@@ -23,6 +23,8 @@ A tiny ``_FakeCtx`` records ``register_hook`` calls so we can assert
 from __future__ import annotations
 
 import json
+import os
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -31,8 +33,10 @@ import pytest
 
 from mordred_hermes.network._exceptions import (
     BringupFailed,
+    MordredNetworkError,
     MordredPathBringupFailed,
     MordredPathDropped,
+    PathSwitchRequiresRestart,
 )
 
 # --------------------------------------------------------------------------- #
@@ -59,8 +63,15 @@ class _FakeRuntime:
         self._active_path: str = "clearnet"
         self._ready: bool = False
         self.isolation_token: str | None = None
+        self.isolation_token_calls: list[str | None] = []
+        self.process_route_frozen = False
+        self.frozen_requested_path: str | None = None
+        self.frozen_route_config: Any = None
+        self.activation_config_fingerprint: Any = None
 
     def use(self, path: str) -> None:
+        if self._ready and self._active_path == path:
+            return
         self.use_calls.append(path)
         if self.use_raises is not None:
             raise self.use_raises
@@ -93,9 +104,25 @@ class _FakeRuntime:
         self.policy_mode = policy_mode
 
     def set_isolation_token(self, token: str | None) -> None:
-        # v2-N1 wiring: on_session_start pushes the session_id as the
-        # per-session circuit-isolation token before bring-up.
+        self.isolation_token_calls.append(token)
         self.isolation_token = token
+
+    def freeze_process_route(self, *, expected_path: str | None = None) -> None:
+        self.process_route_frozen = True
+        self.frozen_requested_path = expected_path or self._active_path
+        self.frozen_route_config = self.activation_config_fingerprint
+
+    def activate_and_freeze(self, path: str) -> None:
+        self.use(path)
+        self.freeze_process_route(expected_path=path)
+
+    def assert_route_config(self, config: Any) -> None:
+        if self.frozen_route_config is None:
+            return
+        from mordred_hermes.network.runtime import route_config_fingerprint
+
+        if route_config_fingerprint(config) != self.frozen_route_config:
+            raise PathSwitchRequiresRestart("activation configuration changed; restart Hermes")
 
 
 class _FakeCtx:
@@ -136,6 +163,22 @@ def _write_config(tmp_path: Path, default_path: str = "clearnet") -> Path:
     return p
 
 
+def _write_config_with_network_fields(
+    tmp_path: Path,
+    default_path: str,
+    **fields: Any,
+) -> Path:
+    p = tmp_path / "config.yaml"
+    lines = [
+        "plugins:",
+        "  mordred_network:",
+        f"    default_path: {default_path}",
+        *(f"    {key}: {json.dumps(value)}" for key, value in fields.items()),
+    ]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
 def _write_config_with_provider(tmp_path: Path, default_path: str, provider: str) -> Path:
     """config.yaml carrying both the network default_path and a
     ``model.provider`` (the transport gate resolves the provider from there)."""
@@ -151,7 +194,17 @@ def _reset_api() -> Any:
 
     api.reset_runtime_for_tests()
     yield
+    api.stop()
     api.reset_runtime_for_tests()
+
+
+@pytest.fixture
+def _skip_process_route_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config-reader tests should not start real Tor/VPN subprocesses."""
+    monkeypatch.setattr(
+        "mordred_hermes.network._activate_process_route",
+        lambda **_kwargs: None,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -160,10 +213,12 @@ def _reset_api() -> Any:
 
 
 class TestOnSessionStart:
-    def test_off_does_not_bring_up_when_default_clearnet(self, tmp_path: Path) -> None:
+    def test_off_reuses_ready_default_clearnet(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api, hooks
 
         rt = _FakeRuntime()
+        rt.use("clearnet")
+        rt.use_calls.clear()
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "off")
         config = _write_config(tmp_path, "clearnet")
@@ -175,12 +230,78 @@ class TestOnSessionStart:
         )
         assert rt.use_calls == []
 
-    def test_sets_isolation_token_from_session_id(self, tmp_path: Path) -> None:
-        """v2-N1 wiring: the session_id becomes the per-session circuit token,
-        pushed to the runtime before bring-up."""
+    @pytest.mark.parametrize("policy_mode", ["strict", "lenient", "off"])
+    def test_live_route_change_requires_restart_in_every_policy_mode(
+        self,
+        tmp_path: Path,
+        policy_mode: str,
+    ) -> None:
         from mordred_hermes.network import api, hooks
 
         rt = _FakeRuntime()
+        rt.use_raises = PathSwitchRequiresRestart("provider clients captured the first route")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, policy_mode)
+        config = _write_config(tmp_path, "tor")
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed, match="restart Hermes"):
+            hooks.on_session_start(
+                policy_json_path=policy,
+                config_path=config,
+                audit=audit,
+            )
+
+        assert rt.stop_called is False
+        assert any(
+            entry.get("reason") == "network.bringup_failed" and entry.get("decision") == "block"
+            for entry in audit.entries
+        )
+
+    @pytest.mark.parametrize(
+        ("configured_path", "effective_path"),
+        [("tor", "clearnet"), ("vpn", "vpn")],
+    )
+    def test_lenient_protected_route_policy_upgrade_requires_restart_before_reuse(
+        self,
+        tmp_path: Path,
+        configured_path: str,
+        effective_path: str,
+    ) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api, hooks
+
+        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, configured_path)
+        initial_config = network._load_runtime_config(
+            policy_json_path=policy,
+            config_path=config,
+        )
+        rt = _FakeRuntime()
+        rt._active_path = effective_path
+        rt._ready = True
+        rt.process_route_frozen = True
+        rt.frozen_requested_path = configured_path
+        rt.frozen_route_config = network.route_config_fingerprint(initial_config)
+        api.set_runtime(rt)
+        _write_policy(tmp_path, "strict")
+
+        with pytest.raises(MordredPathBringupFailed, match="restart Hermes"):
+            hooks.on_session_start(
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
+
+        assert rt.use_calls == []
+        assert not hasattr(rt, "policy_mode")
+
+    def test_session_id_does_not_overwrite_process_isolation_token(self, tmp_path: Path) -> None:
+        """Gateway session ids must not mutate process-global proxy credentials."""
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.isolation_token = "process-token"
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
         config = _write_config_with_provider(tmp_path, "tor", "anthropic")
@@ -191,60 +312,9 @@ class TestOnSessionStart:
             audit=_FakeAudit(),
             session_id="abc-123",
         )
-        assert rt.isolation_token == "abc-123"
+        assert rt.isolation_token == "process-token"
+        assert rt.isolation_token_calls == []
         assert rt.use_calls == ["tor"]
-
-    def test_without_session_id_leaves_token_unset(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api, hooks
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        policy = _write_policy(tmp_path, "strict")
-        config = _write_config_with_provider(tmp_path, "tor", "anthropic")
-
-        hooks.on_session_start(
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
-        assert rt.isolation_token is None
-
-    def test_without_session_id_clears_stale_token(self, tmp_path: Path) -> None:
-        """A reused Runtime must not leak a prior session's circuit token into a
-        session that supplies no session_id — clear it rather than inherit."""
-        from mordred_hermes.network import api, hooks
-
-        rt = _FakeRuntime()
-        rt.isolation_token = "stale-from-prev-session"
-        api.set_runtime(rt)
-        policy = _write_policy(tmp_path, "strict")
-        config = _write_config_with_provider(tmp_path, "tor", "anthropic")
-
-        hooks.on_session_start(
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-        )
-        assert rt.isolation_token is None
-
-    def test_sets_isolation_token_even_when_clearnet_off(self, tmp_path: Path) -> None:
-        """Session identity is established regardless of the initial path, so a
-        later manual ``network use tor`` rides the session's circuit."""
-        from mordred_hermes.network import api, hooks
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        policy = _write_policy(tmp_path, "off")
-        config = _write_config(tmp_path, "clearnet")
-
-        hooks.on_session_start(
-            policy_json_path=policy,
-            config_path=config,
-            audit=_FakeAudit(),
-            session_id="xyz-789",
-        )
-        assert rt.isolation_token == "xyz-789"
-        assert rt.use_calls == []
 
     def test_strict_default_tor_brings_up_tor(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api, hooks
@@ -379,10 +449,10 @@ class TestTransportCompatibilityGate:
 
         # The path DID come up — the refusal is the transport gate, not bring-up.
         assert rt.use_calls == ["tor"]
-        # ...and it was torn down before the refusal escaped, so the Tor daemon /
-        # SOCKS proxy env / liveness thread aren't orphaned if the host never
-        # reaches normal process-exit cleanup after on_session_start raises.
-        assert rt.stop_called is True
+        # The route is process-global and may already serve another gateway
+        # session, so this session-scoped provider refusal must not stop it.
+        assert rt.stop_called is False
+        assert rt.status().active_path == "tor"
         blocks = [e for e in self._transport_entries(audit) if e.get("decision") == "block"]
         assert blocks, "expected a block-decision transport audit entry"
         assert blocks[0]["provider"] == "bedrock"
@@ -402,7 +472,7 @@ class TestTransportCompatibilityGate:
         assert rt.use_calls == ["tor"]
         assert self._transport_entries(audit) == []
 
-    def test_strict_tor_unknown_provider_aborts_and_tears_down(self, tmp_path: Path) -> None:
+    def test_strict_tor_unknown_provider_aborts_without_stopping_route(self, tmp_path: Path) -> None:
         """No compatibility evidence is not safe enough for strict Tor."""
         from mordred_hermes.network import api, hooks
 
@@ -415,13 +485,13 @@ class TestTransportCompatibilityGate:
         with pytest.raises(MordredPathBringupFailed):
             hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
         assert rt.use_calls == ["tor"]
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert entries, "unknown provider should be audited as a block"
         assert all(e.get("decision") == "block" for e in entries)
         assert all(e.get("severity") == "abort" for e in entries)
 
-    def test_strict_tor_unverified_provider_aborts_and_tears_down(self, tmp_path: Path) -> None:
+    def test_strict_tor_unverified_provider_aborts_without_stopping_route(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api, hooks
 
         rt = _FakeRuntime()
@@ -433,7 +503,7 @@ class TestTransportCompatibilityGate:
         with pytest.raises(MordredPathBringupFailed):
             hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
         assert rt.use_calls == ["tor"]
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert any("not packet-capture verified" in str(e.get("detail")) for e in entries)
         assert all(e.get("decision") == "block" for e in entries)
@@ -492,7 +562,7 @@ class TestTransportCompatibilityGate:
         blocks = [e for e in self._transport_entries(audit) if e.get("decision") == "block"]
         assert blocks and blocks[0]["provider"] == "bedrock"
 
-    def test_strict_tor_no_provider_configured_aborts_and_tears_down(self, tmp_path: Path) -> None:
+    def test_strict_tor_no_provider_configured_aborts_without_stopping_route(self, tmp_path: Path) -> None:
         """Missing provider evidence is an unknown transport under strict Tor."""
         from mordred_hermes.network import api, hooks
 
@@ -505,7 +575,7 @@ class TestTransportCompatibilityGate:
         with pytest.raises(MordredPathBringupFailed):
             hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
         assert rt.use_calls == ["tor"]
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert entries
         assert entries[0]["provider"] == "<unresolved>"
@@ -530,7 +600,7 @@ class TestTransportCompatibilityGate:
                 audit=audit,
             )
 
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert entries and entries[0]["provider"] == "<unresolved>"
         assert entries[0]["decision"] == "block"
@@ -553,7 +623,7 @@ class TestTransportCompatibilityGate:
         assert entries[0]["severity"] == "warning"
 
     @pytest.mark.parametrize("stage", ["status", "provider_config", "auth", "evaluate"])
-    def test_strict_tor_internal_gate_exception_audits_stops_and_refuses(
+    def test_strict_tor_internal_gate_exception_audits_without_stopping_and_refuses(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -591,7 +661,7 @@ class TestTransportCompatibilityGate:
             )
 
         assert isinstance(excinfo.value.__cause__, RuntimeError)
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert len(entries) == 1
         assert entries[0]["decision"] == "block"
@@ -668,9 +738,9 @@ class TestTransportCompatibilityGate:
                 config_path=config,
                 audit=_ExplodingAudit(),
             )
-        assert rt.stop_called is True
+        assert rt.stop_called is False
 
-    def test_strict_tor_gate_refusal_survives_stop_failure(
+    def test_strict_tor_gate_refusal_never_calls_process_stop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from mordred_hermes.network import api, hooks
@@ -685,7 +755,7 @@ class TestTransportCompatibilityGate:
             raise RuntimeError("synthetic evaluate failure")
 
         def _stop_boom() -> None:
-            raise OSError("synthetic stop failure")
+            raise AssertionError("session-scoped refusal must not stop the process route")
 
         monkeypatch.setattr(hooks, "evaluate", _gate_boom)
         monkeypatch.setattr(api, "stop", _stop_boom)
@@ -742,7 +812,7 @@ class TestTransportCompatibilityGate:
             hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
 
         assert isinstance(excinfo.value.__cause__, ValueError)
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert entries and entries[0]["stage"] == "evaluate"
         assert entries[0]["decision"] == "block"
@@ -772,7 +842,7 @@ class TestTransportCompatibilityGate:
         with pytest.raises(MordredPathBringupFailed):
             hooks.on_session_start(policy_json_path=policy, config_path=config, audit=audit)
 
-        assert rt.stop_called is True
+        assert rt.stop_called is False
         entries = self._transport_entries(audit)
         assert entries and entries[0]["stage"] == "provider_overrides"
         assert entries[0]["decision"] == "block"
@@ -946,7 +1016,7 @@ class TestPreApiRequestTransportGate:
         config = _write_config(tmp_path, "tor")
         audit = _FakeAudit()
 
-        with pytest.raises(MordredPathBringupFailed, match="configured Tor path is not active"):
+        with pytest.raises(MordredPathBringupFailed, match="configured protected path 'tor' is not active"):
             hooks.pre_api_request(
                 policy_json_path=policy,
                 config_path=config,
@@ -961,6 +1031,172 @@ class TestPreApiRequestTransportGate:
         assert entries[0]["stage"] == "required_path"
         assert entries[0]["active_path"] == "clearnet"
         assert entries[0]["decision"] == "block"
+
+    def test_configured_vpn_missing_at_request_time_fails_closed(self, tmp_path: Path) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt.use("clearnet")
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "vpn")
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed, match="configured protected path 'vpn' is not active"):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        assert rt.stop_called is False
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "required_path"
+        assert entries[0]["active_path"] == "clearnet"
+        assert entries[0]["decision"] == "block"
+
+    @pytest.mark.parametrize("protected_path", ["tor", "vpn"])
+    def test_active_protected_path_not_ready_fails_closed(
+        self,
+        tmp_path: Path,
+        protected_path: str,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt._active_path = protected_path
+        rt._ready = False
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, protected_path)
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed, match="is not ready"):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "path_readiness"
+        assert entries[0]["decision"] == "block"
+
+    @pytest.mark.parametrize("protected_path", ["tor", "vpn"])
+    def test_active_protected_path_dropped_fails_closed_before_provider_request(
+        self,
+        tmp_path: Path,
+        protected_path: str,
+    ) -> None:
+        from mordred_hermes.network import api, hooks
+
+        rt = _FakeRuntime()
+        rt._active_path = protected_path
+        rt._ready = True
+        rt.dropped = True
+        api.set_runtime(rt)
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, protected_path)
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed, match="was dropped"):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        assert rt.stop_called is False
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "path_readiness"
+        assert entries[0]["decision"] == "block"
+
+    @pytest.mark.parametrize("config_change", ["disable_ipv6", "vpn_provider"])
+    def test_same_path_activation_config_change_fails_closed_on_continuation(
+        self,
+        tmp_path: Path,
+        config_change: str,
+    ) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api, hooks
+
+        policy = _write_policy(tmp_path, "strict", disable_ipv6=True)
+        protected_path = "tor" if config_change == "disable_ipv6" else "vpn"
+        config = _write_config(tmp_path, protected_path)
+        initial_config = network._load_runtime_config(
+            policy_json_path=policy,
+            config_path=config,
+        )
+        rt = _FakeRuntime()
+        rt._active_path = protected_path
+        rt._ready = True
+        rt.process_route_frozen = True
+        rt.frozen_requested_path = protected_path
+        rt.frozen_route_config = network.route_config_fingerprint(initial_config)
+        api.set_runtime(rt)
+
+        if config_change == "disable_ipv6":
+            _write_policy(tmp_path, "strict", disable_ipv6=False)
+        else:
+            _write_config_with_network_fields(
+                tmp_path,
+                "vpn",
+                vpn_provider="custom",
+                custom_up_cmd=["custom-vpn", "connect"],
+                custom_down_cmd=["custom-vpn", "disconnect"],
+            )
+        audit = _FakeAudit()
+
+        with pytest.raises(MordredPathBringupFailed, match="activation configuration changed"):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=audit,
+            )
+
+        entries = self._transport_entries(audit)
+        assert len(entries) == 1
+        assert entries[0]["stage"] == "activation_config"
+        assert rt.stop_called is False
+
+    def test_lenient_vpn_to_strict_fails_closed_on_continuation_request(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api, hooks
+
+        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, "vpn")
+        initial_config = network._load_runtime_config(
+            policy_json_path=policy,
+            config_path=config,
+        )
+        rt = _FakeRuntime()
+        rt._active_path = "vpn"
+        rt._ready = True
+        rt.process_route_frozen = True
+        rt.frozen_requested_path = "vpn"
+        rt.frozen_route_config = network.route_config_fingerprint(initial_config)
+        api.set_runtime(rt)
+        _write_policy(tmp_path, "strict")
+
+        with pytest.raises(MordredPathBringupFailed, match="activation configuration changed"):
+            hooks.pre_api_request(
+                policy_json_path=policy,
+                config_path=config,
+                provider="anthropic",
+                audit=_FakeAudit(),
+            )
+
+        assert rt.stop_called is False
 
     def test_config_reader_internal_error_fails_closed_before_request(
         self,
@@ -1144,7 +1380,7 @@ class TestPreApiRequestTransportGate:
 
 
 class TestMultiTurnLifecycle:
-    def test_strict_tor_survives_turns_and_rekeys_on_new_session(
+    def test_strict_tor_survives_turns_without_session_rekey(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1184,17 +1420,17 @@ class TestMultiTurnLifecycle:
         assert rt.stop_called is False
         assert rt.status().active_path == "tor"
 
-        # A reset/new session does not tear down the process-global path first.
-        # Its next on_session_start rekeys isolation and api.use re-brings up
-        # the configured path under the new identity.
+        # A reset/new session reuses the same process-global path. The fake
+        # mirrors Runtime.use's same-ready-path no-op, and the hook must not
+        # rewrite process-global SOCKS credentials from a session id.
         hooks.on_session_start(
             policy_json_path=policy,
             config_path=config,
             audit=audit,
             session_id="session-2",
         )
-        assert rt.use_calls == ["tor", "tor"]
-        assert rt.isolation_token == "session-2"
+        assert rt.use_calls == ["tor"]
+        assert rt.isolation_token_calls == []
         assert rt.stop_called is False
 
 
@@ -1204,18 +1440,110 @@ class TestMultiTurnLifecycle:
 
 
 class TestPreToolCall:
+    @pytest.mark.parametrize("protected_path", ["tor", "vpn"])
+    def test_strict_ready_protected_route_preserves_allow_result(
+        self,
+        tmp_path: Path,
+        protected_path: str,
+    ) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api, hooks
+
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, protected_path)
+        current_config = network._load_runtime_config(
+            policy_json_path=policy,
+            config_path=config,
+        )
+        rt = _FakeRuntime()
+        rt.activation_config_fingerprint = network.route_config_fingerprint(current_config)
+        rt.activate_and_freeze(protected_path)
+        api.set_runtime(rt)
+
+        result = hooks.pre_tool_call(
+            tool_name="web_fetch",
+            policy_json_path=policy,
+            config_path=config,
+            audit=_FakeAudit(),
+        )
+
+        assert result is None
+        assert rt.stop_called is False
+
+    def test_frozen_tor_stopped_before_tool_call_fails_closed(self, tmp_path: Path) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api, hooks
+
+        policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
+        current_config = network._load_runtime_config(
+            policy_json_path=policy,
+            config_path=config,
+        )
+
+        class _StoppingRuntime(_FakeRuntime):
+            def stop(self) -> None:
+                super().stop()
+                # Match concrete Runtime.stop(): teardown restores clearnet.
+                self._active_path = "clearnet"
+
+        rt = _StoppingRuntime()
+        rt.activation_config_fingerprint = network.route_config_fingerprint(current_config)
+        rt.activate_and_freeze("tor")
+        api.set_runtime(rt)
+        api.stop()
+
+        with pytest.raises(MordredPathBringupFailed, match="is not active") as exc_info:
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
+
+        assert isinstance(exc_info.value, BaseException)
+
+    def test_lenient_vpn_to_strict_tool_call_requires_restart(self, tmp_path: Path) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api, hooks
+
+        policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, "vpn")
+        initial_config = network._load_runtime_config(
+            policy_json_path=policy,
+            config_path=config,
+        )
+        rt = _FakeRuntime()
+        rt.activation_config_fingerprint = network.route_config_fingerprint(initial_config)
+        rt.activate_and_freeze("vpn")
+        api.set_runtime(rt)
+        _write_policy(tmp_path, "strict")
+
+        with pytest.raises(MordredPathBringupFailed, match="activation configuration changed"):
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
+
+        assert rt.stop_called is False
+
     def test_strict_dropped_raises_MordredPathDropped(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api, hooks
 
         rt = _FakeRuntime()
+        rt.use("tor")
         rt.dropped = True
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
 
         with pytest.raises(MordredPathDropped):
             hooks.pre_tool_call(
                 tool_name="web_fetch",
                 policy_json_path=policy,
+                config_path=config,
                 audit=_FakeAudit(),
             )
 
@@ -1223,13 +1551,16 @@ class TestPreToolCall:
         from mordred_hermes.network import api, hooks
 
         rt = _FakeRuntime()
+        rt.use("tor")
         rt.dropped = False
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "strict")
+        config = _write_config(tmp_path, "tor")
 
         result = hooks.pre_tool_call(
             tool_name="web_fetch",
             policy_json_path=policy,
+            config_path=config,
             audit=_FakeAudit(),
         )
         assert result is None
@@ -1241,10 +1572,12 @@ class TestPreToolCall:
         rt.dropped = True
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "lenient")
+        config = _write_config(tmp_path, "tor")
 
         result = hooks.pre_tool_call(
             tool_name="web_fetch",
             policy_json_path=policy,
+            config_path=config,
             audit=_FakeAudit(),
         )
         assert result is None
@@ -1256,24 +1589,28 @@ class TestPreToolCall:
         rt.dropped = True
         api.set_runtime(rt)
         policy = _write_policy(tmp_path, "off")
+        config = _write_config(tmp_path, "tor")
 
         result = hooks.pre_tool_call(
             tool_name="web_fetch",
             policy_json_path=policy,
+            config_path=config,
             audit=_FakeAudit(),
         )
         assert result is None
 
-    def test_no_runtime_registered_returns_none(self, tmp_path: Path) -> None:
+    def test_strict_protected_path_without_runtime_fails_closed(self, tmp_path: Path) -> None:
         from mordred_hermes.network import hooks
 
         policy = _write_policy(tmp_path, "strict")
-        result = hooks.pre_tool_call(
-            tool_name="web_fetch",
-            policy_json_path=policy,
-            audit=_FakeAudit(),
-        )
-        assert result is None
+        config = _write_config(tmp_path, "tor")
+        with pytest.raises(MordredPathBringupFailed):
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
 
 
 class TestPolicyReadFailClosed:
@@ -1287,6 +1624,7 @@ class TestPolicyReadFailClosed:
         from mordred_hermes.network import api
 
         rt = _FakeRuntime()
+        rt.use("tor")
         rt.dropped = True
         api.set_runtime(rt)
 
@@ -1296,8 +1634,14 @@ class TestPolicyReadFailClosed:
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.write_text("{not json", encoding="utf-8")
+        config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
 
     def test_unreadable_policy_path_dropped_refuses(self, tmp_path: Path) -> None:
         """A directory at the policy path raises OSError on open()."""
@@ -1306,8 +1650,14 @@ class TestPolicyReadFailClosed:
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.mkdir()
+        config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
 
     def test_non_dict_root_dropped_refuses(self, tmp_path: Path) -> None:
         from mordred_hermes.network import hooks
@@ -1315,8 +1665,14 @@ class TestPolicyReadFailClosed:
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.write_text('["strict"]', encoding="utf-8")
+        config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
 
     def test_invalid_mode_value_dropped_refuses(self, tmp_path: Path) -> None:
         from mordred_hermes.network import hooks
@@ -1324,17 +1680,25 @@ class TestPolicyReadFailClosed:
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.write_text('{"policy": "bogus"}', encoding="utf-8")
+        config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(tool_name="web_fetch", policy_json_path=policy, audit=_FakeAudit())
+            hooks.pre_tool_call(
+                tool_name="web_fetch",
+                policy_json_path=policy,
+                config_path=config,
+                audit=_FakeAudit(),
+            )
 
     def test_missing_file_still_defaults_off(self, tmp_path: Path) -> None:
         """Fresh install: no policy.json at all keeps the historical "off"."""
         from mordred_hermes.network import hooks
 
         self._dropped_runtime()
+        config = _write_config(tmp_path, "tor")
         result = hooks.pre_tool_call(
             tool_name="web_fetch",
             policy_json_path=tmp_path / "nope.json",
+            config_path=config,
             audit=_FakeAudit(),
         )
         assert result is None
@@ -1348,9 +1712,11 @@ class TestPolicyReadFailClosed:
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
         policy.symlink_to(tmp_path / "gone.json")
+        config = _write_config(tmp_path, "tor")
         result = hooks.pre_tool_call(
             tool_name="web_fetch",
             policy_json_path=policy,
+            config_path=config,
             audit=_FakeAudit(),
         )
         assert result is None
@@ -1403,6 +1769,17 @@ class TestWaitUntilReady:
 
 
 class TestRegister:
+    @pytest.fixture(autouse=True)
+    def _isolated_clearnet_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mordred_hermes.network as network
+
+        policy = _write_policy(tmp_path, "off")
+        config = _write_config(tmp_path, "clearnet")
+        monkeypatch.setattr(network, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(network, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(network, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        network._build_audit_writer.cache_clear()
+
     def test_register_wires_integrity_and_network_hooks(self) -> None:
         from mordred_hermes.network import register
         from mordred_hermes.privacy_check.hooks import check_plugin_integrity
@@ -1426,16 +1803,68 @@ class TestRegister:
         register(ctx)
         s = api.status()
         assert s.active_path == "clearnet"
-        assert s.ready is False
+        assert s.ready is True
 
-    def test_register_is_idempotent(self) -> None:
-        from mordred_hermes.network import register
+    def test_registered_pre_tool_call_passes_default_config_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
 
         ctx = _FakeCtx()
-        register(ctx)
-        first_count = len(ctx.hooks)
-        register(ctx)
-        assert len(ctx.hooks) >= first_count
+        network.register(ctx)
+        received: dict[str, Any] = {}
+
+        def _pre_tool_call_spy(**kwargs: Any) -> dict[str, Any]:
+            received.update(kwargs)
+            return {"action": "block", "message": "sentinel"}
+
+        monkeypatch.setattr(network.hooks, "pre_tool_call", _pre_tool_call_spy)
+        result = ctx.hooks[-1][1](tool_name="web_fetch")
+
+        assert result == {"action": "block", "message": "sentinel"}
+        assert received["config_path"] == network.DEFAULT_CONFIG_PATH
+        assert received["policy_json_path"] == network.DEFAULT_POLICY_JSON_PATH
+
+    def test_register_is_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network import api
+
+        class _ReusableRuntime(_FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self.process_route_frozen = False
+                self.use_attempts: list[str] = []
+                self.freeze_calls = 0
+
+            def use(self, path: str) -> None:
+                self.use_attempts.append(path)
+                super().use(path)
+
+            def freeze_process_route(self, *, expected_path: str | None = None) -> None:
+                self.freeze_calls += 1
+                super().freeze_process_route(expected_path=expected_path)
+
+        runtime = _ReusableRuntime()
+        construction_calls = 0
+
+        def _build_runtime(**_kwargs: Any) -> _ReusableRuntime:
+            nonlocal construction_calls
+            construction_calls += 1
+            runtime.activation_config_fingerprint = network.route_config_fingerprint(_kwargs["config"])
+            return runtime
+
+        monkeypatch.setattr(network, "Runtime", _build_runtime)
+        first_ctx = _FakeCtx()
+        second_ctx = _FakeCtx()
+        network.register(first_ctx)
+        network.register(second_ctx)
+
+        assert construction_calls == 1
+        assert runtime.use_attempts == ["clearnet"]
+        assert runtime.freeze_calls == 1
+        assert api._RUNTIME is runtime
+        assert len(first_ctx.hooks) == len(second_ctx.hooks) == 5
 
     def test_registers_process_shutdown_cleanup_once(
         self,
@@ -1465,11 +1894,505 @@ class TestRegister:
         assert rt.stop_called is True
 
 
+class TestRegisterProcessRouteActivation:
+    def _seed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        path: str = "tor",
+        policy_mode: str = "strict",
+    ) -> None:
+        import mordred_hermes.network as network
+
+        policy = _write_policy(tmp_path, policy_mode)
+        config = _write_config(tmp_path, path)
+        monkeypatch.setattr(network, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(network, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(network, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        network._build_audit_writer.cache_clear()
+
+    def test_register_activates_and_freezes_route_before_provider_construction(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import httpx
+
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        events: list[str] = []
+        for proxy_var in (
+            "ALL_PROXY",
+            "all_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+        ):
+            monkeypatch.delenv(proxy_var, raising=False)
+
+        class _RegisterRuntime(_FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__()
+                self.frozen = False
+
+            def use(self, path: str) -> None:
+                events.append(f"use:{path}")
+                super().use(path)
+                # Model Runtime._apply_env: a provider client built after
+                # register() returns must see the protected transport.
+                monkeypatch.setenv("HTTPS_PROXY", "socks5h://127.0.0.1:9050")
+
+            def freeze_process_route(self, *, expected_path: str | None = None) -> None:
+                assert self.status().ready is True
+                super().freeze_process_route(expected_path=expected_path)
+                self.frozen = True
+                events.append("freeze")
+
+        runtime = _RegisterRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+
+        class _OrderingCtx(_FakeCtx):
+            def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
+                events.append(f"hook:{hook_name}")
+                super().register_hook(hook_name, callback)
+
+        network.register(_OrderingCtx())
+        provider_client_proxy = os.environ.get("HTTPS_PROXY")
+        with httpx.Client() as provider_client:
+            provider_proxy_pools = {
+                type(transport._pool).__name__  # type: ignore[attr-defined]
+                for transport in provider_client._mounts.values()  # type: ignore[attr-defined]
+                if transport is not None
+            }
+
+        assert events[:2] == ["use:tor", "freeze"]
+        assert events[2].startswith("hook:")
+        assert provider_client_proxy == "socks5h://127.0.0.1:9050"
+        assert "SOCKSProxy" in provider_proxy_pools
+        assert runtime.frozen is True
+
+    def test_strict_registration_bringup_failure_refuses_before_hooks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        runtime = _FakeRuntime()
+        runtime.use_raises = BringupFailed("tor bootstrap failed")
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="before provider client construction"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert runtime.use_calls == ["tor"]
+        assert runtime.stop_called is True
+        assert network.api._RUNTIME is None
+
+    @pytest.mark.parametrize("failure_stage", ["use", "freeze"])
+    def test_unexpected_activation_exception_fails_closed_and_discards_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_stage: str,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+
+        class _UnexpectedFailureRuntime(_FakeRuntime):
+            def use(self, path: str) -> None:
+                if failure_stage == "use":
+                    raise RuntimeError("synthetic use failure")
+                super().use(path)
+
+            def freeze_process_route(self, *, expected_path: str | None = None) -> None:
+                if failure_stage == "freeze":
+                    raise RuntimeError("synthetic freeze failure")
+                super().freeze_process_route(expected_path=expected_path)
+
+        runtime = _UnexpectedFailureRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="before provider client construction"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert runtime.stop_called is True
+        assert network.api._RUNTIME is None
+
+    def test_runtime_constructor_exception_fails_closed_before_hooks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+
+        def _constructor_boom(**_kwargs: Any) -> None:
+            raise RuntimeError("synthetic constructor failure")
+
+        monkeypatch.setattr(network, "Runtime", _constructor_boom)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="before provider client construction"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert network.api._RUNTIME is None
+
+    def test_activation_refusal_survives_cleanup_failure_and_clears_singleton(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+
+        class _CleanupFailureRuntime(_FakeRuntime):
+            def use(self, path: str) -> None:
+                super().use(path)
+                raise RuntimeError("synthetic post-bring-up failure")
+
+            def stop(self) -> None:
+                self.stop_called = True
+                raise OSError("synthetic cleanup failure")
+
+        runtime = _CleanupFailureRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="synthetic post-bring-up failure"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert runtime.stop_called is True
+        assert network.api._RUNTIME is None
+
+    def test_audit_writer_initialization_exception_fails_closed_before_hooks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+
+        def _audit_boom(_path: Path) -> None:
+            raise RuntimeError("synthetic audit factory failure")
+
+        monkeypatch.setattr(network, "_build_audit_writer", _audit_boom)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="before audit initialization"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert network.api._RUNTIME is None
+
+    def test_atexit_registration_exception_fails_closed_and_discards_unpublished_runtime(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network, "_PROCESS_SHUTDOWN_REGISTERED", False)
+        monkeypatch.setattr(
+            network.atexit,
+            "register",
+            lambda _callback: (_ for _ in ()).throw(RuntimeError("synthetic atexit failure")),
+        )
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="process-shutdown cleanup"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert runtime.stop_called is True
+        assert runtime.use_calls == []
+        assert network.api._RUNTIME is None
+
+    def test_integrity_hook_import_exception_fails_closed_and_discards_new_route(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+
+        def _import_boom() -> None:
+            raise RuntimeError("synthetic integrity-hook import failure")
+
+        monkeypatch.setattr(network, "_load_integrity_hook", _import_boom)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="mandatory network hooks"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert runtime.stop_called is True
+        assert network.api._RUNTIME is None
+
+    @pytest.mark.parametrize("failure_position", range(5))
+    def test_each_hook_registration_exception_fails_closed_and_discards_new_route(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_position: int,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        runtime = _FakeRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+
+        class _FailingCtx(_FakeCtx):
+            def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
+                if len(self.hooks) == failure_position:
+                    raise RuntimeError(f"synthetic hook failure at {failure_position}")
+                super().register_hook(hook_name, callback)
+
+        ctx = _FailingCtx()
+        with pytest.raises(MordredPathBringupFailed, match="mandatory network hooks"):
+            network.register(ctx)
+
+        assert len(ctx.hooks) == failure_position
+        assert runtime.stop_called is True
+        assert network.api._RUNTIME is None
+
+    def test_reregistration_hook_failure_preserves_existing_process_route(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        current_config = network._load_runtime_config(
+            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
+            config_path=network.DEFAULT_CONFIG_PATH,
+        )
+        runtime = _FakeRuntime()
+        runtime._active_path = "tor"
+        runtime._ready = True
+        runtime.process_route_frozen = True
+        runtime.frozen_requested_path = "tor"
+        runtime.frozen_route_config = network.route_config_fingerprint(current_config)
+        network.api.set_runtime(runtime)
+
+        class _FailingCtx(_FakeCtx):
+            def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
+                raise RuntimeError(f"cannot register {hook_name}")
+
+        with pytest.raises(MordredPathBringupFailed, match="mandatory network hooks"):
+            network.register(_FailingCtx())
+
+        assert runtime.stop_called is False
+        assert network.api._RUNTIME is runtime
+
+    def test_runtime_is_not_published_until_atomic_activation_and_freeze_complete(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        activation_started = threading.Event()
+        allow_activation = threading.Event()
+        failures: list[BaseException] = []
+
+        class _BlockingRuntime(_FakeRuntime):
+            def activate_and_freeze(self, path: str) -> None:
+                activation_started.set()
+                assert allow_activation.wait(timeout=2.0)
+                super().activate_and_freeze(path)
+
+        runtime = _BlockingRuntime()
+        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+
+        def _register() -> None:
+            try:
+                network.register(_FakeCtx())
+            except BaseException as error:
+                failures.append(error)
+
+        worker = threading.Thread(target=_register)
+        worker.start()
+        assert activation_started.wait(timeout=2.0)
+        assert network.api._RUNTIME is None
+        with pytest.raises(MordredNetworkError):
+            network.api.use("vpn")
+
+        allow_activation.set()
+        worker.join(timeout=2.0)
+
+        assert not worker.is_alive()
+        assert failures == []
+        assert network.api._RUNTIME is runtime
+        assert runtime.process_route_frozen is True
+        assert runtime.frozen_requested_path == "tor"
+
+    @pytest.mark.parametrize(
+        "invalid_state",
+        ["not_ready", "invalid_path", "mismatched_path", "dropped", "not_frozen", "status_error"],
+    )
+    def test_reregistration_rejects_invalid_existing_runtime_without_replacing_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_state: str,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch)
+        runtime = _FakeRuntime()
+        runtime._active_path = "tor"
+        runtime._ready = True
+        runtime.process_route_frozen = True
+        current_config = network._load_runtime_config(
+            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
+            config_path=network.DEFAULT_CONFIG_PATH,
+        )
+        runtime.frozen_route_config = network.route_config_fingerprint(current_config)
+        if invalid_state == "not_ready":
+            runtime._ready = False
+        elif invalid_state == "invalid_path":
+            runtime._active_path = "invalid"
+        elif invalid_state == "mismatched_path":
+            runtime._active_path = "clearnet"
+        elif invalid_state == "dropped":
+            runtime.dropped = True
+        elif invalid_state == "not_frozen":
+            runtime.process_route_frozen = False
+        elif invalid_state == "status_error":
+
+            def _status_boom() -> Any:
+                raise RuntimeError("synthetic status failure")
+
+            monkeypatch.setattr(runtime, "status", _status_boom)
+        network.api.set_runtime(runtime)
+
+        def _must_not_construct(**_kwargs: Any) -> None:
+            raise AssertionError("re-registration must not construct a replacement runtime")
+
+        monkeypatch.setattr(network, "Runtime", _must_not_construct)
+        ctx = _FakeCtx()
+
+        with pytest.raises(MordredPathBringupFailed, match="during plugin re-registration"):
+            network.register(ctx)
+
+        assert ctx.hooks == []
+        assert runtime.stop_called is False
+        assert network.api._RUNTIME is runtime
+
+    @pytest.mark.parametrize(
+        ("path", "config_change"),
+        [
+            ("tor", "tor_binary"),
+            ("tor", "tor_port"),
+            ("tor", "disable_ipv6"),
+            ("vpn", "vpn_provider"),
+        ],
+    )
+    def test_reregistration_rejects_same_path_activation_config_change(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        path: str,
+        config_change: str,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch, path=path)
+        initial_config = network._load_runtime_config(
+            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
+            config_path=network.DEFAULT_CONFIG_PATH,
+        )
+        runtime = _FakeRuntime()
+        runtime._active_path = path
+        runtime._ready = True
+        runtime.process_route_frozen = True
+        runtime.frozen_requested_path = path
+        runtime.frozen_route_config = network.route_config_fingerprint(initial_config)
+        network.api.set_runtime(runtime)
+
+        if config_change == "tor_binary":
+            _write_config_with_network_fields(tmp_path, "tor", tor_binary_path="/opt/other/tor")
+        elif config_change == "tor_port":
+            _write_config_with_network_fields(tmp_path, "tor", tor_socks_port=19050)
+        elif config_change == "disable_ipv6":
+            _write_policy(tmp_path, "strict", disable_ipv6=False)
+        else:
+            _write_config_with_network_fields(
+                tmp_path,
+                "vpn",
+                vpn_provider="custom",
+                custom_up_cmd=["custom-vpn", "connect"],
+                custom_down_cmd=["custom-vpn", "disconnect"],
+            )
+
+        with pytest.raises(MordredPathBringupFailed, match="different activation configuration"):
+            network.register(_FakeCtx())
+
+        assert runtime.stop_called is False
+        assert network.api._RUNTIME is runtime
+
+    def test_reregistration_reuses_healthy_lenient_fallback_for_same_configured_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import mordred_hermes.network as network
+
+        self._seed(tmp_path, monkeypatch, policy_mode="lenient")
+        runtime = _FakeRuntime()
+        runtime._active_path = "clearnet"
+        runtime._ready = True
+        runtime.process_route_frozen = True
+        runtime.frozen_requested_path = "tor"
+        current_config = network._load_runtime_config(
+            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
+            config_path=network.DEFAULT_CONFIG_PATH,
+        )
+        runtime.frozen_route_config = network.route_config_fingerprint(current_config)
+        network.api.set_runtime(runtime)
+
+        def _must_not_construct(**_kwargs: Any) -> None:
+            raise AssertionError("healthy fallback must reuse its existing runtime")
+
+        monkeypatch.setattr(network, "Runtime", _must_not_construct)
+        ctx = _FakeCtx()
+
+        network.register(ctx)
+
+        assert len(ctx.hooks) == 5
+        assert runtime.use_calls == []
+        assert network.api._RUNTIME is runtime
+
+
 # --------------------------------------------------------------------------- #
 # api.is_dropped / api.stop helpers                                           #
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("_skip_process_route_activation")
 class TestRegisterLoadsPolicyFromDisk:
     """Codex P1 fix (2026-05-14): the registered Runtime must inherit
     ``policy_mode`` (+ ``default_path`` / ``mullvad_region``) from
@@ -1556,16 +2479,10 @@ class TestRegisterLoadsPolicyFromDisk:
             f"expected {expected!r} under HERMES_BASE"
         )
 
-    def test_register_unhashable_policy_value_falls_back_to_off(
+    def test_register_unhashable_policy_value_fails_closed_to_strict(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Codex round 3 P2 (2026-05-14): a corrupted ``policy.json``
-        with ``policy: []`` or ``policy: {}`` must collapse to the safe
-        ``off`` default. The pre-fix code used ``mode in _VALID_MODES``
-        against a frozenset which raises ``TypeError`` on unhashable
-        values — that would crash plugin registration before the
-        runtime and hooks were ever installed.
-        """
+        """Damaged existing policy must not disable pre-client activation."""
         from mordred_hermes import network as net_pkg
         from mordred_hermes.network import api
 
@@ -1579,11 +2496,11 @@ class TestRegisterLoadsPolicyFromDisk:
         net_pkg._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
-        net_pkg.register(ctx)  # must not raise TypeError
+        net_pkg.register(ctx)
 
         runtime = api._RUNTIME
         assert runtime is not None
-        assert runtime._config.policy_mode == "off"  # type: ignore[attr-defined]
+        assert runtime._config.policy_mode == "strict"  # type: ignore[attr-defined]
 
     def test_register_missing_policy_defaults_to_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Defensive default: no policy.json -> policy_mode='off' (safe)."""
@@ -1604,6 +2521,7 @@ class TestRegisterLoadsPolicyFromDisk:
         assert runtime._config.policy_mode == "off"  # type: ignore[attr-defined]
 
 
+@pytest.mark.usefixtures("_skip_process_route_activation")
 class TestRegisterLoadsWizardNetworkSettings:
     """Codex review (2026-05-14, P2): the wizard persists
     ``tor_binary_path`` / ``tor_socks_port`` / ``mullvad_relay_country``
@@ -1718,6 +2636,7 @@ class TestRegisterLoadsWizardNetworkSettings:
         assert runtime._config.mullvad_region == "auto"  # type: ignore[attr-defined]
 
 
+@pytest.mark.usefixtures("_skip_process_route_activation")
 class TestRegisterLoadsVpnProvider:
     """The pluggable-VPN config keys (vpn_provider + provider-specific
     settings) persisted under ``plugins.mordred_network`` must reach
@@ -1790,6 +2709,7 @@ class TestRegisterLoadsVpnProvider:
         assert runtime._config.vpn_provider == "mullvad"  # type: ignore[attr-defined]
 
 
+@pytest.mark.usefixtures("_skip_process_route_activation")
 class TestRegisterLoadsDisableIPv6FromDisk:
     """Phase 3 PR3a Task #2: ``disable_ipv6`` schema in ``policy.json``.
 
@@ -1899,42 +2819,33 @@ class TestSessionStartRefreshesRuntimePolicy:
     instead of raising :class:`MordredPathBringupFailed`.
     """
 
-    def test_session_start_pushes_fresh_policy_to_runtime(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_session_start_refuses_changed_activation_config_before_mutating_policy(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api, hooks
         from mordred_hermes.network.runtime import Runtime, RuntimeConfig
 
-        # Build a real Runtime with stale lenient policy.
         cfg = RuntimeConfig(policy_mode="lenient", default_path="clearnet")
-
-        # Tor bring-up always fails for this test.
-        def fail_wait(*_: Any, **__: Any) -> None:
-            raise BringupFailed("synthetic tor bootstrap failure")
-
         rt = Runtime(
             config=cfg,
             audit=_FakeAudit(),
             env={},
-            tor_wait_for_bootstrap=fail_wait,
         )
+        rt.activate_and_freeze("clearnet")
         api.set_runtime(rt)
 
-        # Disk policy has since been bumped to strict.
+        # Disk policy and route changed after provider-client construction.
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, "tor")
 
-        # on_session_start must refresh the runtime's policy_mode and
-        # then escalate the strict bring-up failure.
-        with pytest.raises(MordredPathBringupFailed):
+        with pytest.raises(MordredPathBringupFailed, match="restart Hermes"):
             hooks.on_session_start(
                 policy_json_path=policy,
                 config_path=config,
                 audit=_FakeAudit(),
             )
 
-        # And the runtime should now reflect the fresh policy.
-        assert rt._config.policy_mode == "strict"  # type: ignore[attr-defined]
+        # Do not partially mutate policy on a route whose activation snapshot
+        # was rejected; the process must restart as one unit.
+        assert rt._config.policy_mode == "lenient"  # type: ignore[attr-defined]
         rt.stop()
 
 

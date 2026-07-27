@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import os
 import socket
 import sys
 from collections.abc import Callable, Mapping
@@ -29,6 +28,7 @@ from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
 from .._policy_io import load_policy_mapping
 from .._provider_identity import canonicalize_provider
+from .._proxy_bypass import ensure_loopback_proxy_bypass as _ensure_loopback_proxy_bypass
 from . import health
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from .local_adapter import LOCAL_PROVIDER_NAME
@@ -72,16 +72,6 @@ _no_resolved_provider_emitted = False
 # via :func:`_reset_state`.
 _cloud_prompt_decisions: dict[str, bool] = {}
 _STRICT_LOOPBACK_LITERALS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1"})
-_PROXY_ENV_KEYS: Final[tuple[str, ...]] = (
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "ALL_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "all_proxy",
-)
-_NO_PROXY_KEYS: Final[tuple[str, ...]] = ("NO_PROXY", "no_proxy")
-_NO_PROXY_LOOPBACK_DEFAULTS: Final[tuple[str, ...]] = ("localhost", "127.0.0.1", "::1")
 
 
 class _InvalidLocalEndpoint(ValueError):
@@ -367,37 +357,6 @@ def _validate_loopback_endpoint(endpoint: str) -> None:
     if str(address) not in _STRICT_LOOPBACK_LITERALS:
         raise _InvalidLocalEndpoint("endpoint IP address must be 127.0.0.1 or ::1")
     _ensure_loopback_proxy_bypass()
-
-
-def _ensure_loopback_proxy_bypass() -> None:
-    """Keep strict-local model traffic out of ambient/process proxies.
-
-    Hermes's OpenAI-compatible client resolves proxy routing from the process
-    environment when it is constructed.  If a proxy is active, populate both
-    NO_PROXY spellings with the exact loopback hosts accepted above before the
-    health probe and model client are used.  With no proxy configured this is
-    a no-op, avoiding unnecessary process-environment mutation.
-    """
-    if not any(os.environ.get(key, "").strip() for key in _PROXY_ENV_KEYS):
-        return
-
-    values: list[str] = []
-    seen: set[str] = set()
-    for key in _NO_PROXY_KEYS:
-        for raw_value in os.environ.get(key, "").split(","):
-            value = raw_value.strip()
-            folded = value.casefold()
-            if value and folded not in seen:
-                values.append(value)
-                seen.add(folded)
-    for value in _NO_PROXY_LOOPBACK_DEFAULTS:
-        if value.casefold() not in seen:
-            values.append(value)
-            seen.add(value.casefold())
-
-    combined = ",".join(values)
-    for key in _NO_PROXY_KEYS:
-        os.environ[key] = combined
 
 
 def _validate_localhost_resolution(port: int) -> None:

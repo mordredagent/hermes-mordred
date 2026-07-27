@@ -347,7 +347,7 @@ def get_disabled_plugins(config_path: Path | None = None) -> set[str]:
 
 
 def get_enabled_plugins(config_path: Path | None = None) -> set[str] | None:
-    """Return opt-in allow-list (``None`` = key missing = "all loadable").
+    """Return opt-in allow-list (``None`` = key missing/malformed = nothing enabled).
 
     Path-resolution rules mirror :func:`get_disabled_plugins`.
     """
@@ -374,15 +374,20 @@ def find_disabled_siblings(
 ) -> set[str]:
     """Return Mordred sibling plugins that are not loadable.
 
-    A sibling is considered disabled if it appears in ``plugins.disabled``
-    OR if ``plugins.enabled`` is set (not ``None``) and the sibling is not in it.
+    A sibling is considered disabled if it appears in ``plugins.disabled`` or
+    is absent from the opt-in ``plugins.enabled`` list.  Hermes 0.13+ treats a
+    missing or malformed allow-list (reported here as ``None``) as "nothing
+    enabled", not "everything loadable", so every sibling is disabled in that
+    case.
 
     ``config_path=None`` uses production resolution (Hermes API + default YAML).
     Explicit paths read only that YAML — never the user's real config.
     """
     deny = get_disabled_plugins(config_path)
     allow = get_enabled_plugins(config_path)
-    return {s for s in siblings if s in deny or (allow is not None and s not in allow)}
+    if allow is None:
+        return set(siblings)
+    return {s for s in siblings if s in deny or s not in allow}
 
 
 def poison(reason: str) -> None:

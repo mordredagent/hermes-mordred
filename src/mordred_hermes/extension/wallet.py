@@ -225,6 +225,14 @@ def _prepare_transaction_sign(
         if supplied_chain_id != chain_id:
             raise ValueError("transaction_chain_id_mismatch")
 
+    # Reject unsupported transaction types/fields and conflicting fee models
+    # before a malformed request can trigger any configured-RPC traffic.
+    preflight_tx = dict(tx)
+    # ``from`` is compared case-insensitively with the keyvault address and
+    # replaced by that canonical address below; validate the frozen value, not
+    # a harmless alternate spelling supplied by the extension.
+    preflight_tx.pop("from", None)
+    extension_sign.validate_transaction_request(preflight_tx, chain_id=chain_id)
     configured_rpc = extension_sign.rpc_url_for(chain_id)
     if rpc_url:
         # A paired extension may report the dapp's selected RPC, but it cannot
@@ -234,16 +242,19 @@ def _prepare_transaction_sign(
         if configured_rpc is None or not secrets.compare_digest(rpc_url, configured_rpc):
             raise ValueError("rpc_endpoint_not_allowed")
     resolved_rpc = configured_rpc
-    rpc_endpoint: str | None = None
+    if resolved_rpc is None:
+        # ``eth_sendTransaction`` promises a broadcast transaction hash. A raw
+        # signed RLP blob is not a compatible success result; sign-only needs a
+        # separate protocol method.
+        raise ValueError("transaction_rpc_required")
+    rpc_endpoint = extension_rpc._rpc_endpoint_display(resolved_rpc)
     expected_signer = extension_sign.get_address()
     _freeze_transaction_signer(tx, expected_signer)
-    if resolved_rpc:
-        rpc_endpoint = extension_rpc._rpc_endpoint_display(resolved_rpc)
-        tx = extension_rpc.fill_transaction(resolved_rpc, tx, expected_signer, chain_id)
-        # The RPC filler currently preserves all caller fields. Canonicalize
-        # again at the boundary so even a future implementation cannot replace
-        # the signer that the user is about to approve.
-        tx["from"] = expected_signer
+    tx = extension_rpc.fill_transaction(resolved_rpc, tx, expected_signer, chain_id)
+    # The RPC filler currently preserves all caller fields. Canonicalize again
+    # at the boundary so even a future implementation cannot replace the signer
+    # that the user is about to approve.
+    tx["from"] = expected_signer
 
     # sign_transaction takes chain_id separately and verifies tx["chainId"].
     # Include the canonical value in the approved snapshot for the user, then
@@ -263,17 +274,20 @@ def _send_prepared_transaction(
     *,
     expected_signer: str,
 ) -> str:
-    """Sign an already-approved transaction and optionally broadcast it.
+    """Sign an already-approved transaction and broadcast it.
 
     Missing nonce/gas/fee fields are never filled here: doing so after the
     approval prompt would sign content the user did not review. The keyvault
     address is re-resolved immediately before signing so changing wallet.json
-    or its selected account cannot turn approval for one signer into a
-    signature from another.
+    or its selected account cannot turn approval for one signer into a signature
+    from another. ``eth_sendTransaction`` has no raw-transaction success mode:
+    the frozen RPC must still serve the approved chain immediately before send.
     """
     from mordred_hermes.keyvault import extension_sign
 
     chain_id = _resolve_chain_id(chain_id_hex)
+    if not rpc_url:
+        raise RuntimeError("transaction_rpc_required")
     tx_signer = tx.get("from")
     if not isinstance(tx_signer, str) or not _addresses_match(tx_signer, expected_signer):
         raise RuntimeError("transaction_signer_mismatch")
@@ -287,13 +301,14 @@ def _send_prepared_transaction(
     except Exception as exc:
         raise RuntimeError("signature_signer_verification_failed") from exc
     _assert_recovered_signer(actual_signer, expected_signer)
-    if not rpc_url:
-        return signed["raw"]
-
     from . import rpc as extension_rpc
 
     try:
-        remote_hash = extension_rpc.send_raw_transaction(rpc_url, signed["raw"])
+        remote_hash = extension_rpc.send_raw_transaction(
+            rpc_url,
+            signed["raw"],
+            expected_chain_id=chain_id,
+        )
     except Exception as exc:
         raise RuntimeError(f"broadcast_failed: {exc}") from exc
     if remote_hash.casefold() != signed["hash"].casefold():
@@ -317,7 +332,13 @@ def _wallet_chain_id_hex() -> str:
 
 _ERC20_TRANSFER = "a9059cbb"
 _ERC20_APPROVE = "095ea7b3"
+_ERC20_CALLDATA_HEX_LEN = 8 + 64 + 64
 _MAX_UINT = (1 << 256) - 1
+
+
+def _is_canonical_erc20_call(data: str, selector: str) -> bool:
+    """Recognize the exact selector/length with a canonical ABI address word."""
+    return len(data) == _ERC20_CALLDATA_HEX_LEN and data[:8] == selector and data[8:32] == "0" * 24
 
 
 def analyze_sign(method: str, params: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -341,28 +362,52 @@ def _analyze_tx(tx: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     decoded: dict[str, Any] = {}
     risk = "low"
 
-    if data[:8] == _ERC20_TRANSFER and len(data) >= 8 + 128:
+    contract_context = {
+        "contract": to,
+        "native_value_wei": str(value),
+    }
+    context_summary = f"contract: {to}; native value: {value} wei"
+    context_warning = f"呼び出し先コントラクト: {to} / ネイティブETH: {value} wei"
+
+    if to is not None and _is_canonical_erc20_call(data, _ERC20_TRANSFER):
         recipient = "0x" + data[8 + 24 : 8 + 64]
         amount = int(data[8 + 64 : 8 + 128], 16)
-        decoded = {"function": "transfer(address,uint256)", "args": {"to": recipient, "amount": str(amount)}}
-        risk = "medium"
-        summary = f"ERC-20 transfer: {amount} → {recipient}"
-    elif data[:8] == _ERC20_APPROVE and len(data) >= 8 + 128:
+        decoded = {
+            "function": "transfer(address,uint256)",
+            **contract_context,
+            "args": {"to": recipient, "amount": str(amount)},
+        }
+        warnings.append(context_warning)
+        risk = "high" if value > 0 else "medium"
+        if value > 0:
+            warnings.append("ERC-20呼び出しと同時にネイティブETHを送金します")
+        summary = f"ERC-20 transfer: {amount} → {recipient} ({context_summary})"
+    elif to is not None and _is_canonical_erc20_call(data, _ERC20_APPROVE):
         spender = "0x" + data[8 + 24 : 8 + 64]
         amount = int(data[8 + 64 : 8 + 128], 16)
-        decoded = {"function": "approve(address,uint256)", "args": {"spender": spender, "amount": str(amount)}}
+        decoded = {
+            "function": "approve(address,uint256)",
+            **contract_context,
+            "args": {"spender": spender, "amount": str(amount)},
+        }
+        warnings.append(context_warning)
         if amount >= _MAX_UINT:
             risk = "high"
             warnings.append("無制限の approve(残高全額を引き出せる権限)です")
         else:
             risk = "medium"
-        summary = f"ERC-20 approve: {spender}"
+        if value > 0:
+            risk = "high"
+            warnings.append("ERC-20呼び出しと同時にネイティブETHを送金します")
+        summary = f"ERC-20 approve: {spender} ({context_summary})"
+    elif data:
+        decoded = contract_context
+        warnings.append(context_warning)
+        risk = "high" if value > 0 else "medium"
+        summary = f"コントラクト呼び出し ({context_summary})"
     elif value > 0:
         risk = "medium" if value >= 10**18 else "low"
-        summary = f"ETH 送金: {value / 10**18:g} ETH → {to}"
-    elif data:
-        risk = "medium"
-        summary = f"コントラクト呼び出し: {to}"
+        summary = f"ETH 送金: {value} wei → {to}"
     else:
         summary = f"トランザクション → {to}"
 

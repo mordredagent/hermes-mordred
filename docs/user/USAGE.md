@@ -389,8 +389,9 @@ unlocked.
 ```
 
 It picks the **default** route written to config — `(*)` marks the current
-choice (`clearnet` on a fresh setup). This is just the default; you can still
-switch any time later with `network use`.
+choice (`clearnet` on a fresh setup). `network use` can change that saved
+choice later; restart Hermes to activate the route before provider clients are
+built. A running Hermes process never switches its frozen route live.
 
 **How to operate it**: **↑ / ↓** move the highlight, **Space** selects (moves
 the `*`), **Tab** jumps to the `< Ok >` / `< Cancel >` buttons, **Enter**

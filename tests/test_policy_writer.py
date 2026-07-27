@@ -12,6 +12,8 @@ import contextlib
 import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -359,6 +361,99 @@ plugins:
         assert "some_user_plugin" in result, "non-Mordred entries must be preserved"
         for name in MORDRED_PLUGIN_NAMES:
             assert name in result
+
+    @pytest.mark.parametrize(
+        "raw_enabled,preserved",
+        [
+            ("mordred_wizard", "mordred_wizard"),
+            ("{broken: true}", None),
+        ],
+    )
+    def test_malformed_plugins_enabled_is_repaired(
+        self,
+        tmp_path: Path,
+        raw_enabled: str,
+        preserved: str | None,
+    ) -> None:
+        """A successful configure must not leave Hermes's opt-in list unusable."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(f"plugins:\n  enabled: {raw_enabled}\n", encoding="utf-8")
+
+        w = _writer(tmp_path)
+        w.upsert_mordred_sections({"mordred_privacy_check": {"policy": "strict", "allow_cloud_llm": False}})
+
+        from ruamel.yaml import YAML
+
+        with config_path.open(encoding="utf-8") as f:
+            data = YAML(typ="safe", pure=True).load(f)
+        enabled = data["plugins"]["enabled"]
+        assert isinstance(enabled, list)
+        if preserved is not None:
+            assert preserved in enabled
+        for name in MORDRED_PLUGIN_NAMES:
+            assert name in enabled
+
+    def test_unhashable_enabled_items_are_removed_before_real_hermes_discovery(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            """\
+plugins:
+  enabled:
+    - {broken: true}
+    - [also, broken]
+    - ""
+    - some_user_plugin
+""",
+            encoding="utf-8",
+        )
+
+        w = _writer(tmp_path)
+        w.upsert_mordred_sections({"mordred_privacy_check": {"policy": "strict", "allow_cloud_llm": False}})
+
+        from ruamel.yaml import YAML
+
+        with config_path.open(encoding="utf-8") as f:
+            data = YAML(typ="safe", pure=True).load(f)
+        enabled = data["plugins"]["enabled"]
+        assert enabled == ["some_user_plugin", *MORDRED_PLUGIN_NAMES]
+
+        source_path = str(Path(__file__).resolve().parent.parent / "src")
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(tmp_path)
+        env.pop("HERMES_SAFE_MODE", None)
+        prior_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = source_path if not prior_pythonpath else source_path + os.pathsep + prior_pythonpath
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                """\
+import json
+from hermes_cli.plugins import PluginManager, _get_enabled_plugins
+enabled = _get_enabled_plugins()
+manager = PluginManager()
+manager.discover_and_load(force=True)
+print(json.dumps({
+    "enabled": sorted(enabled) if enabled is not None else None,
+    "wizard_discovered": "mordred_wizard" in manager._plugins,
+}))
+""",
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        result = json.loads(completed.stdout.splitlines()[-1])
+        assert result["enabled"] == sorted(["some_user_plugin", *MORDRED_PLUGIN_NAMES])
+        assert result["wizard_discovered"] is True
 
 
 class TestMergeMordredSections:

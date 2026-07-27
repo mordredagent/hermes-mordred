@@ -195,6 +195,11 @@ packages = ["src/mordred_hermes"]
 # Opt-in at runtime via `hermes-mordred vault enable-config-decrypt` (the marker);
 # absent that marker the hook is a no-op even for Hermes.
 "packaging/pth/mordred_hermes_config_decrypt.pth" = "mordred_hermes_config_decrypt.pth"
+# Runtime guards that must precede model-client construction and must not
+# depend on any entry-point plugin being present in ``plugins.enabled``.
+# The inline .pth gate engages only for a Hermes console process; the imported
+# module installs a loopback proxy bypass and the mandatory integrity hook.
+"packaging/pth/mordred_hermes_runtime.pth" = "mordred_hermes_runtime.pth"
 # The offline verification-digest tool for `keyvault init`. Deliberately a
 # standalone file (stdlib + blake3 only) the operator copies to the air-gapped
 # second device; shipped in the wheel so the init banner can print a path that

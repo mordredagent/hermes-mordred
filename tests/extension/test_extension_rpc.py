@@ -16,6 +16,8 @@ def fake_rpc(monkeypatch):
     sent = {}
 
     def fake_call(rpc_url, method, params, timeout=30.0):
+        if method == "eth_chainId":
+            return "0x1"
         if method == "eth_getTransactionCount":
             return "0x5"
         if method == "eth_getBlockByNumber":
@@ -24,6 +26,8 @@ def fake_rpc(monkeypatch):
             return hex(1_000_000_000)  # 1 gwei tip
         if method == "eth_estimateGas":
             return hex(21000)
+        if method == "eth_gasPrice":
+            return "0x3b9aca00"
         if method == "eth_sendRawTransaction":
             sent["raw"] = params[0]
             return "0xtxhash"
@@ -45,7 +49,7 @@ def test_fill_transaction_1559(fake_rpc):
 
 
 def test_fill_preserves_explicit_fields(fake_rpc):
-    tx = {"to": "0x0", "nonce": "0x9", "gas": "0x5208", "gasPrice": "0x3b9aca00"}
+    tx = {"to": "0x" + "11" * 20, "nonce": "0x9", "gas": "0x5208", "gasPrice": "0x3b9aca00"}
     filled = extension_rpc.fill_transaction("http://rpc", tx, "0xabc", 1)
     assert filled["nonce"] == "0x9"
     assert filled["gas"] == "0x5208"
@@ -53,9 +57,148 @@ def test_fill_preserves_explicit_fields(fake_rpc):
     assert "maxFeePerGas" not in filled  # legacy preserved, no 1559 injected
 
 
+def test_fill_explicit_legacy_fetches_only_missing_gas_price(monkeypatch):
+    methods = []
+
+    def fake_call(_rpc_url, method, _params, timeout=30.0):
+        methods.append(method)
+        if method == "eth_chainId":
+            return "0x1"
+        if method == "eth_gasPrice":
+            return "0x2a"
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(extension_rpc, "call", fake_call)
+    filled = extension_rpc.fill_transaction(
+        "https://rpc.example.com",
+        {
+            "type": "0x0",
+            "nonce": "0x1",
+            "gas": "0x5208",
+            "to": "0x" + "11" * 20,
+        },
+        "0x" + "aa" * 20,
+        1,
+    )
+
+    assert filled["gasPrice"] == "0x2a"
+    assert "maxFeePerGas" not in filled
+    assert methods == ["eth_chainId", "eth_gasPrice"]
+
+
+def test_fill_eip1559_preserves_supplied_priority_and_fills_only_max(monkeypatch):
+    monkeypatch.setattr(extension_rpc, "assert_rpc_chain_id", lambda _url, _chain_id: None)
+    monkeypatch.setattr(
+        extension_rpc,
+        "fee_data",
+        lambda _url: {"maxPriorityFeePerGas": 9, "maxFeePerGas": 10},
+    )
+    filled = extension_rpc.fill_transaction(
+        "https://rpc.example.com",
+        {
+            "nonce": "0x1",
+            "gas": "0x5208",
+            "maxPriorityFeePerGas": "0x20",
+            "to": "0x" + "11" * 20,
+        },
+        "0x" + "aa" * 20,
+        1,
+    )
+
+    assert filled["maxPriorityFeePerGas"] == "0x20"
+    assert filled["maxFeePerGas"] == "0x20"
+
+
+def test_fill_eip1559_preserves_supplied_max_and_clamps_suggested_priority(monkeypatch):
+    monkeypatch.setattr(extension_rpc, "assert_rpc_chain_id", lambda _url, _chain_id: None)
+    monkeypatch.setattr(
+        extension_rpc,
+        "fee_data",
+        lambda _url: {"maxPriorityFeePerGas": 9, "maxFeePerGas": 10},
+    )
+    filled = extension_rpc.fill_transaction(
+        "https://rpc.example.com",
+        {
+            "type": "0x2",
+            "nonce": "0x1",
+            "gas": "0x5208",
+            "maxFeePerGas": "0x5",
+            "to": "0x" + "11" * 20,
+        },
+        "0x" + "aa" * 20,
+        1,
+    )
+
+    assert filled["maxFeePerGas"] == "0x5"
+    assert filled["maxPriorityFeePerGas"] == "0x5"
+
+
+@pytest.mark.parametrize(
+    "tx",
+    [
+        {"type": "0x1"},
+        {"gasPrice": "0x1", "maxFeePerGas": "0x2"},
+        {"blobVersionedHashes": []},
+    ],
+)
+def test_fill_rejects_unsupported_or_conflicting_transaction_before_rpc(monkeypatch, tx):
+    monkeypatch.setattr(
+        extension_rpc,
+        "call",
+        lambda *_args, **_kwargs: pytest.fail("invalid transaction must be rejected before RPC"),
+    )
+
+    with pytest.raises(ValueError):
+        extension_rpc.fill_transaction(
+            "https://rpc.example.com",
+            tx,
+            "0x" + "aa" * 20,
+            1,
+        )
+
+
+def test_fill_rejects_rpc_chain_mismatch_before_field_queries(monkeypatch):
+    methods = []
+
+    def fake_call(_rpc_url, method, _params, timeout=30.0):
+        methods.append(method)
+        if method == "eth_chainId":
+            return "0x5"
+        raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(extension_rpc, "call", fake_call)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_chain_id_mismatch"):
+        extension_rpc.fill_transaction(
+            "https://rpc.example.com",
+            {"to": "0x" + "11" * 20},
+            "0x" + "aa" * 20,
+            1,
+        )
+    assert methods == ["eth_chainId"]
+
+
 def test_send_raw(fake_rpc):
-    assert extension_rpc.send_raw_transaction("http://rpc", "0xdeadbeef") == "0xtxhash"
+    assert extension_rpc.send_raw_transaction("http://rpc", "0xdeadbeef", expected_chain_id=1) == "0xtxhash"
     assert fake_rpc["raw"] == "0xdeadbeef"
+
+
+def test_send_raw_rechecks_chain_before_broadcast(monkeypatch):
+    methods = []
+
+    def fake_call(_rpc_url, method, _params, timeout=30.0):
+        methods.append(method)
+        return "0x5" if method == "eth_chainId" else pytest.fail("must not broadcast on chain mismatch")
+
+    monkeypatch.setattr(extension_rpc, "call", fake_call)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_chain_id_mismatch"):
+        extension_rpc.send_raw_transaction(
+            "https://rpc.example.com",
+            "0xdeadbeef",
+            expected_chain_id=1,
+        )
+    assert methods == ["eth_chainId"]
 
 
 # --------------------------------------------------------------------------- #
@@ -383,14 +526,45 @@ def test_prepare_sign_rejects_transaction_from_other_wallet(monkeypatch):
 
     signer = "0x" + "aa" * 20
     monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 1)
-    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: None)
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: "https://rpc.example.com")
     monkeypatch.setattr(extension_sign, "get_address", lambda: signer)
+    monkeypatch.setattr(
+        extension_rpc,
+        "fill_transaction",
+        lambda *_args, **_kwargs: pytest.fail("from mismatch must be rejected before RPC filling"),
+    )
 
     with pytest.raises(ValueError, match="transaction_from_mismatch"):
         extension_wallet._prepare_sign(
             "eth_sendTransaction",
             [{"from": "0x" + "bb" * 20, "to": "0x" + "11" * 20}],
             "0x1",
+        )
+
+
+def test_prepare_send_transaction_requires_configured_rpc_before_wallet_lookup(monkeypatch):
+    from mordred_hermes.keyvault import extension_sign
+
+    monkeypatch.setattr(extension_sign, "chain_id_int", lambda: 137)
+    monkeypatch.setattr(extension_sign, "rpc_url_for", lambda _chain_id: None)
+    monkeypatch.setattr(
+        extension_sign,
+        "get_address",
+        lambda: pytest.fail("missing broadcast RPC must fail before wallet access"),
+    )
+
+    with pytest.raises(ValueError, match="transaction_rpc_required"):
+        extension_wallet._prepare_sign(
+            "eth_sendTransaction",
+            [
+                {
+                    "nonce": "0x1",
+                    "gasPrice": "0x1",
+                    "gas": "0x5208",
+                    "to": "0x" + "11" * 20,
+                }
+            ],
+            hex(137),
         )
 
 
@@ -531,11 +705,19 @@ def test_send_prepared_transaction_never_refills_and_checks_broadcast_hash(monke
         seen["chain_id"] = chain_id
         return {"raw": "0xraw", "hash": "0xabc"}
 
+    def send_raw_transaction(rpc_url, raw, *, expected_chain_id):
+        seen["broadcast"] = (rpc_url, raw, expected_chain_id)
+        return "0xAbC"
+
     monkeypatch.setattr(extension_sign, "get_address", lambda: signer.upper())
     monkeypatch.setattr(extension_sign, "sign_transaction", sign_transaction)
     monkeypatch.setattr(extension_wallet, "_recover_transaction_signer", lambda _raw: signer.upper())
     monkeypatch.setattr(extension_rpc, "fill_transaction", lambda *args, **kwargs: pytest.fail("must not refill"))
-    monkeypatch.setattr(extension_rpc, "send_raw_transaction", lambda rpc_url, raw: "0xAbC")
+    monkeypatch.setattr(
+        extension_rpc,
+        "send_raw_transaction",
+        send_raw_transaction,
+    )
 
     assert (
         extension_wallet._send_prepared_transaction(
@@ -546,15 +728,41 @@ def test_send_prepared_transaction_never_refills_and_checks_broadcast_hash(monke
         )
         == "0xAbC"
     )
-    assert seen == {"tx": tx, "chain_id": 1}
+    assert seen == {
+        "tx": tx,
+        "chain_id": 1,
+        "broadcast": ("https://rpc.example.com", "0xraw", 1),
+    }
 
-    monkeypatch.setattr(extension_rpc, "send_raw_transaction", lambda rpc_url, raw: "0xdef")
+    monkeypatch.setattr(
+        extension_rpc,
+        "send_raw_transaction",
+        lambda rpc_url, raw, *, expected_chain_id: "0xdef",
+    )
     with pytest.raises(RuntimeError, match="mismatched transaction hash"):
         extension_wallet._send_prepared_transaction(
             tx,
             "0x1",
             "https://rpc.example.com",
             expected_signer=signer,
+        )
+
+
+def test_send_prepared_transaction_never_returns_raw_without_rpc(monkeypatch):
+    from mordred_hermes.keyvault import extension_sign
+
+    monkeypatch.setattr(
+        extension_sign,
+        "get_address",
+        lambda: pytest.fail("missing RPC must fail before wallet access"),
+    )
+
+    with pytest.raises(RuntimeError, match="transaction_rpc_required"):
+        extension_wallet._send_prepared_transaction(
+            {},
+            "0x1",
+            None,
+            expected_signer="0x" + "aa" * 20,
         )
 
 

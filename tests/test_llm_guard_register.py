@@ -91,6 +91,65 @@ class TestRegisterEntryPoint:
         assert profile is not None
         assert profile.name == "mordred-local"
 
+    def test_register_bypasses_ambient_proxy_before_real_client_construction(
+        self,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The health hook is too late to change an already-built httpx client.
+
+        Exercise Hermes's real shared-client factory after plugin registration
+        and use a second loopback HTTP server as an ambient proxy.  The request
+        must reach the model endpoint directly and never touch the proxy.
+        """
+        import json
+        from pathlib import Path
+
+        from agent.process_bootstrap import build_keepalive_http_client
+
+        import mordred_hermes.llm_guard as guard
+        from tests.integration._http_target import http_target
+
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        with http_target(host="127.0.0.1") as model_endpoint, http_target(host="127.0.0.1") as proxy:
+            monkeypatch.setenv("HTTP_PROXY", proxy.url)
+            policy = Path(str(tmp_path)) / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "policy": "strict",
+                        "local_llm_endpoint": model_endpoint.url,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            monkeypatch.setattr(guard, "DEFAULT_POLICY_JSON_PATH", policy)
+
+            guard.register(_FakeCtx())
+
+            import providers
+
+            profile = providers._REGISTRY["mordred-local"]
+            client = build_keepalive_http_client(profile.base_url)
+            assert client is not None
+            with client:
+                response = client.get(profile.base_url)
+            assert response.content == model_endpoint.ok_body
+
+        assert model_endpoint.hits == 1
+        assert proxy.hits == 0, "mordred-local request was captured by the ambient HTTP proxy"
+
     def test_register_wires_on_session_start_hook(self) -> None:
         from mordred_hermes.llm_guard import register
 

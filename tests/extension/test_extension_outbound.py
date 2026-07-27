@@ -1080,6 +1080,35 @@ def test_encrypt_reply_all_mention_content_still_emits_authenticated_token():
     )
 
 
+@pytest.mark.parametrize("body", ["あ" * 1200, "🔐" * 900])
+def test_encrypt_reply_chunks_multibyte_content_by_final_wire_length(body):
+    _master, first, _second = _strict_envelope_keys()
+
+    chunks = e2e.encrypt_reply(
+        first,
+        f"<@123> {body}",
+        2000,
+        e2e.DISCORD_MENTION_PREFIX_RE,
+        platform="discord",
+        chat_id="strict-first",
+        thread_root=None,
+    )
+
+    assert len(chunks) > 1
+    assert chunks[0].startswith("<@123> " + crypto.ENC_PREFIX_V3)
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+    assert (
+        _decrypt_v3_replies(
+            chunks,
+            first,
+            platform="discord",
+            chat_id="strict-first",
+            thread_root=None,
+        )
+        == body
+    )
+
+
 def test_encrypt_reply_drops_teams_free_text_mention_name():
     _master, first, _second = _strict_envelope_keys()
 

@@ -51,6 +51,16 @@ class AlreadySwitching(MordredNetworkError):
     """A path switch is in progress; concurrent ``use(path)`` rejected."""
 
 
+class PathSwitchRequiresRestart(MordredNetworkError):
+    """A live path mutation would leave provider clients on a stale transport.
+
+    Hermes constructs its provider clients once and those clients snapshot the
+    proxy environment at construction time.  Once the process route is frozen,
+    changing either the active path or its Tor SOCKS credential therefore
+    requires a process restart rather than an in-place environment rewrite.
+    """
+
+
 class UnknownPath(MordredNetworkError):
     """Path name is not one of ``tor`` / ``vpn`` / ``clearnet``."""
 

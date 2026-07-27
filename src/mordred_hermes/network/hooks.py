@@ -15,9 +15,11 @@ Return-shape contracts (HOOK_PAYLOADS.md §1, §4):
 - ``pre_api_request`` - return ignored. Strict + Tor revalidates the
   request-resolved provider and raises :class:`MordredPathBringupFailed`
   before egress when its transport is not verified compatible.
-- ``pre_tool_call`` - return ``None`` to allow. Strict + dropped path
-  raises :class:`MordredPathDropped` (``BaseException``) for the same
-  escape reason.
+- ``pre_tool_call`` - return ``None`` to allow. Strict protected routes are
+  revalidated before every tool; a missing/stale route raises
+  :class:`MordredPathBringupFailed`, while a liveness drop raises
+  :class:`MordredPathDropped` (both ``BaseException``) for the same escape
+  reason.
 
 The hooks delegate to :mod:`mordred_hermes.network.api` rather than to
 :class:`mordred_hermes.network.runtime.Runtime` directly so the test
@@ -30,7 +32,7 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, NoReturn, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
@@ -43,6 +45,7 @@ from ._exceptions import (
     MordredNetworkError,
     MordredPathBringupFailed,
     MordredPathDropped,
+    PathSwitchRequiresRestart,
 )
 from .provider_transport_flagger import ProviderEntry, TransportClass, evaluate
 
@@ -50,6 +53,7 @@ _LOG = logging.getLogger("mordred.network.hooks")
 
 _DEFAULT_POLICY_MODE: Final[str] = "off"
 _DEFAULT_NETWORK_PATH: Final[str] = "clearnet"
+_PROTECTED_NETWORK_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn"})
 # Audit reason code for a provider-vs-transport compatibility flag (FIX 1,
 # 2026-07-13). ``decision`` is ``block`` for an abort-severity flag (strict
 # refusal) and ``warn`` for a warning-severity one (audited, session continues).
@@ -168,18 +172,14 @@ def on_session_start(
     config_path: Path,
     auth_json_path: Path | None = None,
     audit: _AuditWriter | None = None,
-    **kwargs: Any,
+    **_kwargs: Any,
 ) -> None:
-    """Bring up the configured default path.
+    """Validate and reuse the configured process-global default path.
 
-    Also establishes the session's per-session Tor circuit-isolation token
-    from the Hermes ``session_id`` (v2-N1) before bring-up, clearing it when
-    no id is supplied so a reused runtime cannot leak a prior session's
-    circuit identity.
-
-    - ``off`` + clearnet default: skip - the user may manually switch
-      paths later via ``hermes-mordred network use``.
-    - Otherwise: call :func:`api.use` for the configured default.
+    - Call :func:`api.use` for the configured default in every policy mode.
+      A ready same-path call is a runtime no-op; a different process-frozen
+      route raises a fail-closed restart-required refusal rather than leaving
+      existing provider clients on a stale transport.
       Strict-mode bring-up failure raises :class:`MordredPathBringupFailed`
       (BaseException) after emitting ``network.bringup_failed`` audit.
       Lenient-mode failure is absorbed by the runtime (fallback to
@@ -193,70 +193,21 @@ def on_session_start(
     """
     policy_mode = _read_policy_mode(policy_json_path)
     target = _read_default_network_path(config_path)
-
-    # Codex round 9 P1-B (2026-05-14): refresh the runtime's policy
-    # before bring-up. ``register()`` reads policy.json once at plugin
-    # discovery; long-lived processes can outlive a configure flow that
-    # bumps the policy. Without this push, the runtime's stale
-    # ``policy_mode`` would silently downgrade a strict bring-up
-    # failure to a lenient fallback.
-    api.update_policy_mode(policy_mode)
-
-    # v2-N1: establish the session's circuit-isolation identity before any
-    # bring-up. The Hermes ``session_id`` is a non-secret identifier, so it
-    # is safe to place in ``os.environ`` (HTTPS_PROXY) where Tor reads it as
-    # the SOCKS credential (``IsolateSOCKSAuth``). Set even for the
-    # clearnet/off early-return so a later manual ``network use tor`` rides
-    # the same per-session circuit. Per-skill keying remains v2-H2-blocked.
-    #
-    # Always push (clearing to None when absent) so a reused Runtime never
-    # leaks a prior session's token into a session that supplied no id —
-    # inheriting it would correlate the two onto one circuit.
-    session_id = kwargs.get("session_id")
-    api.set_isolation_token(str(session_id) if session_id else None)
-
-    if policy_mode == "off" and target == _DEFAULT_NETWORK_PATH:
-        return
-
-    try:
-        api.use(target)  # type: ignore[arg-type]
-    except BringupFailed as e:
-        if policy_mode == "strict":
-            if audit is not None:
-                _safe_audit_append(
-                    audit,
-                    {
-                        "event": "on_session_start",
-                        "decision": "block",
-                        "reason": "network.bringup_failed",
-                        "attempted_path": target,
-                        "policy_mode": policy_mode,
-                        "error": str(e),
-                    },
-                )
-            msg = f"Mordred strict mode: network path {target!r} failed to bring up ({e}); refusing the session."
-            _LOG.error(msg)
-            raise MordredPathBringupFailed(msg) from e
-        # lenient / off: runtime fell back already; hook stays silent.
-    except MordredNetworkError as e:
-        if policy_mode == "strict":
-            msg = f"Mordred strict mode: api.use({target!r}) raised {e}; refusing the session."
-            _LOG.error(msg)
-            raise MordredPathBringupFailed(msg) from e
-        _LOG.warning(
-            "on_session_start: api.use(%r) raised %s; continuing in %s mode",
-            target,
-            e,
-            policy_mode,
-        )
+    _reuse_frozen_route(
+        policy_json_path=policy_json_path,
+        config_path=config_path,
+        policy_mode=policy_mode,
+        target=target,
+        audit=audit,
+    )
 
     # FIX 1 (2026-07-13): provider-vs-transport compatibility gate. Once the
     # path is up (or fell back to clearnet in lenient), verify the provider
     # Hermes will use can actually reach the upstream API over the active
     # transport. A strict Tor session talking to an incompatible, unknown, or
     # unverified provider is refused HERE. Internal errors are also
-    # policy-sensitive: strict + Tor tears down and refuses because continuing
-    # would silently drop the anonymity gate; lenient/off warn and continue.
+    # policy-sensitive: strict + Tor refuses while preserving the process route;
+    # lenient/off warn and continue.
     gate_stage = "status"
     gate_active_path = cast(ActivePath, target)
     gate_providers = [_UNRESOLVED_PROVIDER]
@@ -292,6 +243,145 @@ def on_session_start(
         )
 
 
+def _reuse_frozen_route(
+    *,
+    policy_json_path: Path,
+    config_path: Path,
+    policy_mode: str,
+    target: str,
+    audit: _AuditWriter | None,
+) -> None:
+    """Validate the activation fingerprint and reuse the process route."""
+    try:
+        # Compare every activation input before mutating the runtime's policy.
+        from . import _load_runtime_config
+
+        current_config = _load_runtime_config(
+            policy_json_path=policy_json_path,
+            config_path=config_path,
+        )
+        api.assert_route_config(current_config)
+        api.update_policy_mode(policy_mode)
+        api.use(target)  # type: ignore[arg-type]
+    except PathSwitchRequiresRestart as error:
+        _raise_route_restart_refusal(
+            error=error,
+            target=target,
+            policy_mode=policy_mode,
+            audit=audit,
+        )
+    except BringupFailed as error:
+        _handle_route_bringup_failure(
+            error=error,
+            target=target,
+            policy_mode=policy_mode,
+            audit=audit,
+        )
+    except MordredNetworkError as error:
+        _handle_route_runtime_error(error=error, target=target, policy_mode=policy_mode)
+    except Exception as error:
+        _raise_unexpected_route_validation(
+            error=error,
+            target=target,
+            policy_mode=policy_mode,
+            audit=audit,
+        )
+
+
+def _append_route_block(
+    *,
+    audit: _AuditWriter | None,
+    target: str,
+    policy_mode: str,
+    error: Exception,
+) -> None:
+    if audit is None:
+        return
+    _safe_audit_append(
+        audit,
+        {
+            "event": "on_session_start",
+            "decision": "block",
+            "reason": "network.bringup_failed",
+            "attempted_path": target,
+            "policy_mode": policy_mode,
+            "error": str(error),
+        },
+    )
+
+
+def _raise_route_restart_refusal(
+    *,
+    error: PathSwitchRequiresRestart,
+    target: str,
+    policy_mode: str,
+    audit: _AuditWriter | None,
+) -> NoReturn:
+    _append_route_block(
+        audit=audit,
+        target=target,
+        policy_mode=policy_mode,
+        error=error,
+    )
+    msg = (
+        f"Mordred {policy_mode} mode: process network route {target!r} cannot be changed live ({error}); "
+        "restart Hermes before continuing."
+    )
+    _LOG.error(msg)
+    raise MordredPathBringupFailed(msg) from error
+
+
+def _handle_route_bringup_failure(
+    *,
+    error: BringupFailed,
+    target: str,
+    policy_mode: str,
+    audit: _AuditWriter | None,
+) -> None:
+    if policy_mode != "strict":
+        return
+    _append_route_block(
+        audit=audit,
+        target=target,
+        policy_mode=policy_mode,
+        error=error,
+    )
+    msg = f"Mordred strict mode: network path {target!r} failed to bring up ({error}); refusing the session."
+    _LOG.error(msg)
+    raise MordredPathBringupFailed(msg) from error
+
+
+def _handle_route_runtime_error(*, error: MordredNetworkError, target: str, policy_mode: str) -> None:
+    if policy_mode == "strict":
+        msg = f"Mordred strict mode: api.use({target!r}) raised {error}; refusing the session."
+        _LOG.error(msg)
+        raise MordredPathBringupFailed(msg) from error
+    _LOG.warning(
+        "on_session_start: api.use(%r) raised %s; continuing in %s mode",
+        target,
+        error,
+        policy_mode,
+    )
+
+
+def _raise_unexpected_route_validation(
+    *,
+    error: Exception,
+    target: str,
+    policy_mode: str,
+    audit: _AuditWriter | None,
+) -> NoReturn:
+    _append_route_block(
+        audit=audit,
+        target=target,
+        policy_mode=policy_mode,
+        error=error,
+    )
+    msg = f"Mordred {policy_mode} mode: process route validation failed unexpectedly ({error}); refusing the session."
+    _LOG.error(msg)
+    raise MordredPathBringupFailed(msg) from error
+
+
 def on_session_end(**_kwargs: Any) -> None:
     """Keep the active path alive across Hermes conversation turns.
 
@@ -315,7 +405,7 @@ def pre_api_request(
     provider: Any = None,
     **_kwargs: Any,
 ) -> None:
-    """Authoritatively gate the resolved runtime provider on strict Tor.
+    """Gate the configured protected route and resolved provider in strict mode.
 
     ``on_session_start`` can only inspect the provider persisted in
     ``config.yaml`` / ``auth.json``. Hermes can override that provider later
@@ -325,8 +415,8 @@ def pre_api_request(
     here immediately before egress.
 
     The configured path is checked again here because continuation turns do
-    not fire ``on_session_start``. Under strict policy, a configured Tor path
-    that is no longer active fails closed before provider evaluation.
+    not fire ``on_session_start``. Under strict policy, configured Tor and VPN
+    paths must both be active and ready before any provider evaluation.
 
     Missing provider evidence, malformed overrides, invalid runtime state, and
     internal evaluation errors all fail closed. A refusal keeps the current
@@ -349,14 +439,32 @@ def pre_api_request(
     stage = "configured_path"
     try:
         configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
+        stage = "activation_config"
+        from . import _load_runtime_config
+
+        current_config = _load_runtime_config(
+            policy_json_path=policy_json_path,
+            config_path=config_path,
+        )
+        api.assert_route_config(current_config)
         stage = "status"
-        raw_active_path = api.status().active_path
+        runtime_status = api.status()
+        raw_active_path = runtime_status.active_path
         if raw_active_path not in VALID_ACTIVE_PATHS:
             raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
         active_path = cast(ActivePath, raw_active_path)
-        if configured_path == "tor" and active_path != "tor":
+        if configured_path in _PROTECTED_NETWORK_PATHS and active_path != configured_path:
             stage = "required_path"
-            raise RuntimeError(f"configured Tor path is not active (runtime active_path={active_path!r})")
+            raise RuntimeError(
+                f"configured protected path {configured_path!r} is not active (runtime active_path={active_path!r})"
+            )
+        if active_path in _PROTECTED_NETWORK_PATHS and not runtime_status.ready:
+            stage = "path_readiness"
+            raise RuntimeError(f"active protected path {active_path!r} is not ready")
+        if active_path in _PROTECTED_NETWORK_PATHS:
+            stage = "path_readiness"
+            if api.is_dropped():
+                raise RuntimeError(f"active protected path {active_path!r} was dropped")
         if active_path != "tor":
             return
 
@@ -374,12 +482,10 @@ def pre_api_request(
             audit=audit,
             event="pre_api_request",
             refusal_context="outbound API request",
-            teardown_on_refusal=False,
         )
     except Exception as gate_error:
         # Under strict policy an unreadable runtime status cannot establish
-        # that the request is outside Tor. Treat it as a Tor-gate failure
-        # rather than guessing clearnet and allowing egress.
+        # that the request is outside a configured protected route.
         _handle_transport_gate_error(
             error=gate_error,
             stage=stage,
@@ -390,29 +496,81 @@ def pre_api_request(
             audit=audit,
             event="pre_api_request",
             refusal_context="outbound API request",
-            teardown_on_refusal=False,
         )
 
 
 def pre_tool_call(
     *,
+    policy_json_path: Path,
+    config_path: Path,
     tool_name: str = "",
-    policy_json_path: Path | None = None,
     audit: _AuditWriter | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any] | None:
-    """Refuse the tool call when strict + the active path was dropped.
+    """Revalidate the process route before every strict-mode tool call.
 
-    Lenient/off return ``None`` regardless of drop state - the M9
-    liveness worker has already emitted ``network.path_dropped`` with
-    ``decision=warn``, so the user has visibility without losing the
-    session.
+    Continuation turns do not reliably fire ``on_session_start`` and tool
+    calls need not trigger ``pre_api_request``. Therefore strict mode repeats
+    the same activation-config, configured-path, readiness, and drop checks as
+    the provider request gate. Lenient/off retain the historical ``None``
+    result; the liveness worker already audits their drops with
+    ``decision=warn``.
     """
-    if policy_json_path is None or not api.is_dropped():
-        return None
     policy_mode = _read_policy_mode(policy_json_path)
     if policy_mode != "strict":
         return None
+
+    # Assume a protected route until each disk/runtime read proves otherwise.
+    # That mirrors ``pre_api_request`` and prevents damaged strict config from
+    # being misclassified as an intentional clearnet route.
+    configured_path: ActivePath = "tor"
+    active_path: ActivePath = "tor"
+    stage = "configured_path"
+    try:
+        configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
+        stage = "activation_config"
+        from . import _load_runtime_config
+
+        current_config = _load_runtime_config(
+            policy_json_path=policy_json_path,
+            config_path=config_path,
+        )
+        api.assert_route_config(current_config)
+        stage = "status"
+        runtime_status = api.status()
+        raw_active_path = runtime_status.active_path
+        if raw_active_path not in VALID_ACTIVE_PATHS:
+            raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
+        active_path = cast(ActivePath, raw_active_path)
+        if configured_path in _PROTECTED_NETWORK_PATHS and active_path != configured_path:
+            stage = "required_path"
+            raise RuntimeError(
+                f"configured protected path {configured_path!r} is not active (runtime active_path={active_path!r})"
+            )
+        if active_path in _PROTECTED_NETWORK_PATHS and not runtime_status.ready:
+            stage = "path_readiness"
+            raise RuntimeError(f"active protected path {active_path!r} is not ready")
+        if active_path in _PROTECTED_NETWORK_PATHS:
+            stage = "path_readiness"
+            if api.is_dropped():
+                _raise_dropped_tool_refusal(tool_name=tool_name, audit=audit)
+    except Exception as gate_error:
+        _handle_transport_gate_error(
+            error=gate_error,
+            stage=stage,
+            target_path=configured_path,
+            active_path=active_path,
+            providers=[_UNRESOLVED_PROVIDER],
+            policy_mode=policy_mode,
+            audit=audit,
+            event="pre_tool_call",
+            refusal_context=f"tool {tool_name!r}",
+        )
+    return None
+
+
+def _raise_dropped_tool_refusal(*, tool_name: str, audit: _AuditWriter | None) -> NoReturn:
+    """Audit and raise the dedicated strict liveness-drop refusal."""
     if audit is not None:
         _safe_audit_append(
             audit,
@@ -425,7 +583,7 @@ def pre_tool_call(
         )
     msg = (
         f"Mordred strict mode: active network path was dropped; refusing tool {tool_name!r}. "
-        "Re-bring-up via `hermes-mordred network use <path>` or restart the session."
+        "Restart Hermes so provider clients and the process route are rebuilt together."
     )
     _LOG.error(msg)
     raise MordredPathDropped(msg)
@@ -654,7 +812,6 @@ def _flag_transport_compat(
     audit: _AuditWriter | None,
     event: str = "on_session_start",
     refusal_context: str = "session",
-    teardown_on_refusal: bool = True,
 ) -> None:
     """Run the provider-vs-transport flagger and enforce its severity.
 
@@ -704,14 +861,8 @@ def _flag_transport_compat(
             f"{active_path!r}: {'; '.join(abort_reasons)}; refusing the {refusal_context}."
         )
         _LOG.error(msg)
-        # Session-start failures tear down a path that otherwise has no owner.
-        # Request-time refusals deliberately KEEP Tor active: Runtime.stop()
-        # resets active_path to clearnet, which would let a long-lived gateway's
-        # next request skip the strict-Tor transport gate. Keeping the path means
-        # every subsequent request is re-evaluated until the operator explicitly
-        # chooses a different path or provider.
-        if teardown_on_refusal:
-            _stop_after_transport_gate_failure("transport-compat abort")
+        # The path is process-global and may serve other gateway sessions.
+        # Session-scoped provider refusal must never tear it down.
         raise MordredPathBringupFailed(msg)
 
 
@@ -726,43 +877,34 @@ def _handle_transport_gate_error(
     audit: _AuditWriter | None,
     event: str = "on_session_start",
     refusal_context: str = "session",
-    teardown_on_refusal: bool = True,
 ) -> None:
     """Apply fail-closed semantics to an internal transport-gate error."""
-    strict_tor = policy_mode == "strict" and (target_path == "tor" or active_path == "tor")
+    strict_protected = policy_mode == "strict" and (
+        target_path in _PROTECTED_NETWORK_PATHS or active_path in _PROTECTED_NETWORK_PATHS
+    )
     detail = f"transport gate {stage} failed ({type(error).__name__}: {error})"
     if audit is not None:
         _safe_audit_append(
             audit,
             {
                 "event": event,
-                "decision": "block" if strict_tor else "warn",
+                "decision": "block" if strict_protected else "warn",
                 "reason": _REASON_TRANSPORT_FLAG,
                 "active_path": active_path,
                 "provider": providers[0] if len(providers) == 1 else ",".join(providers),
-                "severity": "abort" if strict_tor else "warning",
+                "severity": "abort" if strict_protected else "warning",
                 "detail": detail,
                 "policy_mode": policy_mode,
                 "stage": stage,
             },
         )
-    if not strict_tor:
+    if not strict_protected:
         _LOG.warning("%s: %s; continuing in %s mode", event, detail, policy_mode)
         return
 
-    if teardown_on_refusal:
-        _stop_after_transport_gate_failure(f"transport gate {stage} failure")
     msg = f"Mordred strict mode: {detail}; refusing the {refusal_context}."
     _LOG.error(msg)
     raise MordredPathBringupFailed(msg) from error
-
-
-def _stop_after_transport_gate_failure(context: str) -> None:
-    """Best-effort teardown that never masks a strict policy refusal."""
-    try:
-        api.stop()
-    except Exception as stop_err:
-        _LOG.warning("%s: api.stop() during teardown raised %s", context, stop_err)
 
 
 __all__ = [

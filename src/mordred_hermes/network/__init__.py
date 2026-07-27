@@ -20,17 +20,19 @@ from __future__ import annotations
 import atexit
 import functools
 import logging
+import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 
-from .._audit_support import build_audit_writer
+from .._audit_support import build_audit_writer, safe_audit_append
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping
-from .._policy_types import VALID_POLICY_MODES
+from .._policy_types import VALID_ACTIVE_PATHS, VALID_POLICY_MODES
 from .._yaml_io import load_plugin_section
 from . import api, hooks
-from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig
+from ._exceptions import MordredPathBringupFailed
+from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig, route_config_fingerprint
 from .vpn_providers import known_providers
 
 if TYPE_CHECKING:
@@ -46,6 +48,20 @@ DEFAULT_AUDIT_PATH: Path = HERMES_BASE / "mordred" / "audit.log"
 # then auth.json active_provider. Same file llm_guard reads.
 DEFAULT_AUTH_JSON_PATH: Path = HERMES_BASE / "auth.json"
 _PROCESS_SHUTDOWN_REGISTERED = False
+_PROCESS_RUNTIME_LOCK = threading.RLock()
+
+
+class _UnavailableAuditWriter:
+    """No-op writer used only to preserve a fail-closed audit-init refusal."""
+
+    def append(self, _entry: Any) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+_UNAVAILABLE_AUDIT_WRITER = _UnavailableAuditWriter()
 
 
 class PluginContext(Protocol):
@@ -66,15 +82,136 @@ def register(ctx: PluginContext) -> None:
     ``network.path_dropped``. A stale ``"off"`` silently downgraded
     every one of those.
     """
-    audit = _build_audit_writer(DEFAULT_AUDIT_PATH)
-    config = _load_runtime_config(
-        policy_json_path=DEFAULT_POLICY_JSON_PATH,
-        config_path=DEFAULT_CONFIG_PATH,
-    )
-    runtime = Runtime(config=config, audit=audit)
-    api.set_runtime(runtime)
-    _register_process_shutdown()
-    from ..privacy_check.hooks import check_plugin_integrity
+    audit = _registration_audit()
+    config = _registration_config(audit)
+    new_runtime = _prepare_process_runtime(config=config, audit=audit)
+    try:
+        _wire_network_hooks(ctx=ctx, audit=audit)
+    except Exception as e:
+        if new_runtime is not None:
+            _discard_failed_process_runtime(new_runtime, context="network hook registration failure")
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=config.default_path,
+            policy_mode=config.policy_mode,
+            error=e,
+            lifecycle_context="while registering mandatory network hooks",
+        )
+
+
+def _registration_audit() -> Writer:
+    """Build the mandatory audit writer or refuse before runtime setup."""
+    try:
+        return _build_audit_writer(DEFAULT_AUDIT_PATH)
+    except Exception as e:
+        _raise_process_route_refusal(
+            audit=_UNAVAILABLE_AUDIT_WRITER,
+            attempted_path="<uninitialized>",
+            policy_mode="strict",
+            error=e,
+            lifecycle_context="before audit initialization",
+        )
+
+
+def _registration_config(audit: Writer) -> RuntimeConfig:
+    """Load activation config or convert an ordinary reader error to refusal."""
+    try:
+        return _load_runtime_config(
+            policy_json_path=DEFAULT_POLICY_JSON_PATH,
+            config_path=DEFAULT_CONFIG_PATH,
+        )
+    except Exception as e:
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path="<invalid-config>",
+            policy_mode=_policy_mode_for_registration_refusal(),
+            error=e,
+        )
+
+
+def _policy_mode_for_registration_refusal() -> str:
+    """Best-effort policy label; the refusal itself always remains strict."""
+    try:
+        return hooks._read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+    except Exception as error:
+        _LOG.error("policy-mode read failed while preparing network refusal: %s", error)
+        return "strict"
+
+
+def _prepare_process_runtime(*, config: RuntimeConfig, audit: Writer) -> Runtime | None:
+    """Create+publish one runtime, or validate the already-published runtime.
+
+    Returns the newly created runtime so a later hook-wiring failure can clean
+    it up. ``None`` means re-discovery reused a runtime that may already have
+    provider clients and therefore must not be session-scoped teardown.
+    """
+    with _PROCESS_RUNTIME_LOCK:
+        existing_runtime = api._RUNTIME
+        if existing_runtime is not None:
+            _register_shutdown_for_reused_runtime(config=config, audit=audit)
+            _validate_reusable_process_route(runtime=existing_runtime, config=config, audit=audit)
+            return None
+        return _create_activate_publish_runtime(config=config, audit=audit)
+
+
+def _create_activate_publish_runtime(*, config: RuntimeConfig, audit: Writer) -> Runtime:
+    """Construct a private runtime, atomically activate it, then publish it."""
+    try:
+        runtime = Runtime(config=config, audit=audit)
+    except Exception as e:
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=config.default_path,
+            policy_mode=config.policy_mode,
+            error=e,
+        )
+    _register_shutdown_for_new_runtime(runtime=runtime, config=config, audit=audit)
+    _activate_process_route(runtime=runtime, config=config, audit=audit)
+    try:
+        # Publication after freeze closes the api.use() interleaving window.
+        api.set_runtime(runtime)
+    except Exception as e:
+        _discard_failed_process_runtime(runtime, context="runtime singleton publication failure")
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=config.default_path,
+            policy_mode=config.policy_mode,
+            error=e,
+            lifecycle_context="while publishing the process runtime",
+        )
+    return runtime
+
+
+def _register_shutdown_for_new_runtime(*, runtime: Runtime, config: RuntimeConfig, audit: Writer) -> None:
+    try:
+        _register_process_shutdown()
+    except Exception as e:
+        _discard_failed_process_runtime(runtime, context="process-shutdown registration failure")
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=config.default_path,
+            policy_mode=config.policy_mode,
+            error=e,
+            lifecycle_context="while registering process-shutdown cleanup",
+        )
+
+
+def _register_shutdown_for_reused_runtime(*, config: RuntimeConfig, audit: Writer) -> None:
+    try:
+        _register_process_shutdown()
+    except Exception as e:
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=config.default_path,
+            policy_mode=config.policy_mode,
+            error=e,
+            lifecycle_context="while registering process-shutdown cleanup",
+        )
+
+
+def _wire_network_hooks(*, ctx: PluginContext, audit: Writer) -> None:
+    """Load and register every mandatory network/integrity hook."""
+    check_plugin_integrity = _load_integrity_hook()
 
     def _on_session_start(**kwargs: Any) -> None:
         hooks.on_session_start(
@@ -88,6 +225,7 @@ def register(ctx: PluginContext) -> None:
     def _pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         return hooks.pre_tool_call(
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
+            config_path=DEFAULT_CONFIG_PATH,
             audit=audit,
             **kwargs,
         )
@@ -100,14 +238,124 @@ def register(ctx: PluginContext) -> None:
             **kwargs,
         )
 
-    # Register the cross-plugin integrity gate from every runtime sibling.
-    # Otherwise explicitly disabling privacy_check would also disable its own
-    # sibling-disable detector.
+    # The integrity hook is duplicated across siblings so disabling
+    # privacy_check cannot disable its own sibling detector.
     ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end", hooks.on_session_end)
     ctx.register_hook("pre_api_request", _pre_api_request)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
+
+
+def _load_integrity_hook() -> Callable[..., Any]:
+    """Load the mandatory sibling-integrity hook behind a testable boundary."""
+    from ..privacy_check.hooks import check_plugin_integrity
+
+    return check_plugin_integrity
+
+
+def _activate_process_route(*, runtime: Runtime, config: RuntimeConfig, audit: Writer) -> None:
+    """Activate and freeze the configured route before provider construction.
+
+    Hermes creates OpenAI/Anthropic HTTP clients before ``on_session_start``;
+    those clients snapshot proxy environment variables at construction. Plugin
+    registration is the last available pre-client lifecycle point, so the
+    process route must be ready before :func:`register` returns.
+    """
+    target = config.default_path
+    try:
+        runtime.activate_and_freeze(target)
+    except Exception as e:
+        # Standard lenient/off bring-up failures are absorbed by Runtime.use()
+        # via clearnet fallback. Any propagated error means no deterministic
+        # pre-client transport exists, so process startup cannot safely proceed.
+        _discard_failed_process_runtime(runtime, context=f"route {target!r} activation failure")
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=target,
+            policy_mode=config.policy_mode,
+            error=e,
+        )
+
+
+def _discard_failed_process_runtime(runtime: Runtime, *, context: str) -> None:
+    """Best-effort cleanup for a registration-time route refusal."""
+    try:
+        runtime.stop()
+    except Exception as cleanup_error:
+        _LOG.warning("%s: runtime.stop() raised %s", context, cleanup_error)
+    finally:
+        api._clear_runtime_if_current(runtime)
+
+
+def _validate_reusable_process_route(
+    *,
+    runtime: api.Runtime,
+    config: RuntimeConfig,
+    audit: Writer,
+) -> None:
+    """Fail closed unless a re-discovered plugin can reuse its first route."""
+    target = config.default_path
+    try:
+        status = runtime.status()
+        if status.active_path not in VALID_ACTIVE_PATHS:
+            raise ValueError(f"existing runtime reported invalid active path {status.active_path!r}")
+        if type(status.ready) is not bool or type(status.last_health) is not bool:
+            raise ValueError("existing runtime reported non-boolean readiness/health state")
+        if getattr(runtime, "process_route_frozen", False) is not True:
+            raise RuntimeError("existing process route is not frozen")
+        frozen_route_config = getattr(runtime, "frozen_route_config", None)
+        if frozen_route_config != route_config_fingerprint(config):
+            raise RuntimeError("existing process route was built from different activation configuration")
+        frozen_requested_path = getattr(runtime, "frozen_requested_path", status.active_path)
+        if frozen_requested_path != target:
+            raise RuntimeError(
+                f"existing process route was frozen for {frozen_requested_path!r}, "
+                f"but configuration now requires {target!r}"
+            )
+        if not status.ready:
+            raise RuntimeError(f"existing process route {target!r} is not ready")
+        if not status.last_health:
+            raise RuntimeError(f"existing process route {target!r} is unhealthy")
+        if runtime.is_dropped():
+            raise RuntimeError(f"existing process route {target!r} was dropped")
+    except Exception as e:
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=target,
+            policy_mode=config.policy_mode,
+            error=e,
+            lifecycle_context="during plugin re-registration",
+        )
+
+
+def _raise_process_route_refusal(
+    *,
+    audit: Writer,
+    attempted_path: str,
+    policy_mode: str,
+    error: Exception,
+    lifecycle_context: str = "before provider client construction",
+) -> NoReturn:
+    """Audit and raise a fail-closed process-start refusal."""
+    safe_audit_append(
+        audit,
+        {
+            "event": "network.register",
+            "decision": "block",
+            "reason": "network.bringup_failed",
+            "attempted_path": attempted_path,
+            "policy_mode": policy_mode,
+            "error": str(error),
+        },
+        logger=_LOG,
+    )
+    msg = (
+        f"Mordred {policy_mode} mode: process network route {attempted_path!r} could not be activated "
+        f"{lifecycle_context} ({error}); refusing process startup."
+    )
+    _LOG.error(msg)
+    raise MordredPathBringupFailed(msg) from error
 
 
 def _stop_runtime_at_process_exit() -> None:
@@ -165,10 +413,20 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     follow-up.
     """
     policy_data = _load_policy_json(policy_json_path)
-    policy_mode = _resolve_policy_mode(policy_data)
+    # Registration precedes provider construction, so it must use the same
+    # fail-closed policy reader as the hook layer. A damaged existing policy
+    # cannot silently disable pre-client route activation.
+    policy_mode = hooks._read_policy_mode(policy_json_path)
     disable_ipv6 = _resolve_disable_ipv6(policy_data, policy_mode)
     network = _load_network_section(config_path)
-    default_path = hooks.resolve_default_path(network)
+    # Under strict policy, damage to an existing config must abort before a
+    # direct provider client can be constructed. Missing/unconfigured files
+    # still resolve to clearnet by the strict reader's contract.
+    default_path = (
+        hooks._read_default_network_path_strict(config_path)
+        if policy_mode == "strict"
+        else hooks.resolve_default_path(network)
+    )
     return RuntimeConfig(
         policy_mode=cast(PolicyMode, policy_mode),
         default_path=cast(ActivePath, default_path),

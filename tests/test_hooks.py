@@ -37,6 +37,13 @@ def strict_config(tmp_path: Path) -> Path:
         tmp_path / "config.yaml",
         """\
 plugins:
+  enabled:
+    - mordred_privacy_check
+    - mordred_wizard
+    - mordred_llm_guard
+    - mordred_network
+    - mordred_keyvault
+    - mordred_e2e
   mordred_privacy_check:
     policy: strict
 """,

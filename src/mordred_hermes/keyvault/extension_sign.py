@@ -376,7 +376,8 @@ def _validated_transaction_chain_id(tx: dict[str, Any], chain_id: int) -> int:
     return parsed_chain_id
 
 
-def _is_eip1559_transaction(tx: dict[str, Any]) -> bool:
+def _transaction_fee_mode(tx: dict[str, Any]) -> str | None:
+    """Return ``legacy`` / ``eip1559`` or ``None`` when fees are unspecified."""
     supplied_type = tx.get("type")
     explicit_type: int | None = None
     if supplied_type not in (None, ""):
@@ -394,16 +395,57 @@ def _is_eip1559_transaction(tx: dict[str, Any]) -> bool:
         raise ValueError("conflicting_transaction_fee_fields")
     if explicit_type == 2 and has_legacy_fee:
         raise ValueError("conflicting_transaction_fee_fields")
-    return explicit_type == 2 or (explicit_type is None and has_eip1559_fee)
+    if explicit_type == 2 or (explicit_type is None and has_eip1559_fee):
+        return "eip1559"
+    if explicit_type == 0 or has_legacy_fee:
+        return "legacy"
+    return None
+
+
+def _validate_present_transaction_values(tx: dict[str, Any]) -> None:
+    if "accessList" in tx and tx["accessList"] != []:
+        raise ValueError("unsupported_transaction_access_list")
+    for field in ("nonce", "gas", "gasPrice", "maxPriorityFeePerGas", "maxFeePerGas"):
+        if tx.get(field) not in (None, ""):
+            _transaction_quantity(field, tx[field])
+    if "value" in tx:
+        _transaction_quantity("value", tx["value"])
+    if tx.get("to") not in (None, ""):
+        _canonical_address("to", tx["to"], allow_empty=True)
+    if tx.get("from") not in (None, ""):
+        _canonical_address("from", tx["from"], allow_empty=False)
+    if "data" in tx:
+        _canonical_data(tx["data"])
+
+    if tx.get("maxPriorityFeePerGas") not in (None, "") and tx.get("maxFeePerGas") not in (None, ""):
+        max_priority_fee = _transaction_quantity("maxPriorityFeePerGas", tx["maxPriorityFeePerGas"])
+        max_fee = _transaction_quantity("maxFeePerGas", tx["maxFeePerGas"])
+        if max_priority_fee > max_fee:
+            raise ValueError("transaction_priority_fee_exceeds_max_fee")
+
+
+def validate_transaction_request(tx: dict[str, Any], *, chain_id: int) -> str | None:
+    """Validate every caller-supplied field without requiring RPC-filled ones.
+
+    This preflight is shared by the RPC filler and final canonicalizer so an
+    unsupported type, conflicting fee model, malformed quantity/address/data,
+    or ignored field is rejected before any request reaches the configured RPC.
+    """
+    if not isinstance(tx, dict):
+        raise ValueError("invalid_transaction")
+    unknown = sorted(field for field in tx if field not in _TRANSACTION_FIELDS)
+    if unknown:
+        raise ValueError("unsupported_transaction_fields:" + ",".join(unknown))
+
+    _validated_transaction_chain_id(tx, chain_id)
+    fee_mode = _transaction_fee_mode(tx)
+    _validate_present_transaction_values(tx)
+    if "accessList" in tx and fee_mode != "eip1559":
+        raise ValueError("transaction_access_list_requires_type_2")
+    return fee_mode
 
 
 def _validate_transaction_shape(tx: dict[str, Any], *, is_eip1559: bool) -> None:
-    if "accessList" in tx:
-        if tx["accessList"] != []:
-            raise ValueError("unsupported_transaction_access_list")
-        if not is_eip1559:
-            raise ValueError("transaction_access_list_requires_type_2")
-
     required = ["nonce", "gas"]
     if is_eip1559:
         required.extend(("maxFeePerGas", "maxPriorityFeePerGas"))
@@ -436,14 +478,9 @@ def canonicalize_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[s
     truth: unsupported or ignored fields can no longer appear in the prompt and
     then disappear from the signed bytes.
     """
-    if not isinstance(tx, dict):
-        raise ValueError("invalid_transaction")
-    unknown = sorted(field for field in tx if field not in _TRANSACTION_FIELDS)
-    if unknown:
-        raise ValueError("unsupported_transaction_fields:" + ",".join(unknown))
-
-    parsed_chain_id = _validated_transaction_chain_id(tx, chain_id)
-    is_eip1559 = _is_eip1559_transaction(tx)
+    fee_mode = validate_transaction_request(tx, chain_id=chain_id)
+    parsed_chain_id = _transaction_quantity("chainId", chain_id)
+    is_eip1559 = fee_mode == "eip1559"
     _validate_transaction_shape(tx, is_eip1559=is_eip1559)
 
     canonical: dict[str, Any] = {
@@ -479,10 +516,11 @@ def _rlp_int(n: int) -> bytes:
 def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]:
     """Sign a transaction, returning ``{"raw": "0x..", "hash": "0x.."}``.
 
-    Hermes has no RPC node wired in v1, so ``nonce``/``gas``/fee fields must be
-    present in ``tx`` (most DApps that call ``eth_sendTransaction`` supply them).
-    EIP-1559 (``maxFeePerGas``) and legacy (``gasPrice``) are both supported.
-    Broadcasting the returned raw tx over Tor is a follow-up (SPEC §5.3).
+    All nonce/gas/fee fields must already be present. The extension wallet fills
+    and freezes them through its configured RPC before user approval, then
+    broadcasts the returned bytes only after rechecking the chain. Direct
+    callers remain responsible for filling those fields. EIP-1559
+    (``maxFeePerGas``) and legacy (``gasPrice``) are both supported.
     """
     import rlp
     from eth_hash.auto import keccak
