@@ -23,6 +23,21 @@ from typing import Any
 import pytest
 
 
+def _build_real_hermes_http_client(base_url: str) -> Any:
+    """Build Hermes's real model HTTP client across the supported version range."""
+    try:
+        from agent.process_bootstrap import build_keepalive_http_client
+    except ModuleNotFoundError as exc:
+        # Hermes 0.13 keeps this factory as a static method on AIAgent.
+        # Do not hide failures from imports performed *inside* a newer module.
+        if exc.name != "agent.process_bootstrap":
+            raise
+        from run_agent import AIAgent
+
+        return AIAgent._build_keepalive_http_client(base_url)
+    return build_keepalive_http_client(base_url)
+
+
 class _FakeCtx:
     """Records ``register_hook`` calls so tests can assert wiring."""
 
@@ -105,8 +120,6 @@ class TestRegisterEntryPoint:
         import json
         from pathlib import Path
 
-        from agent.process_bootstrap import build_keepalive_http_client
-
         import mordred_hermes.llm_guard as guard
         from tests.integration._http_target import http_target
 
@@ -124,6 +137,9 @@ class TestRegisterEntryPoint:
 
         with http_target(host="127.0.0.1") as model_endpoint, http_target(host="127.0.0.1") as proxy:
             monkeypatch.setenv("HTTP_PROXY", proxy.url)
+            # Hermes scans uppercase spellings first, so this deliberately
+            # empty lowercase spelling must not suppress proxy detection.
+            monkeypatch.setenv("http_proxy", "")
             policy = Path(str(tmp_path)) / "policy.json"
             policy.write_text(
                 json.dumps(
@@ -141,7 +157,7 @@ class TestRegisterEntryPoint:
             import providers
 
             profile = providers._REGISTRY["mordred-local"]
-            client = build_keepalive_http_client(profile.base_url)
+            client = _build_real_hermes_http_client(profile.base_url)
             assert client is not None
             with client:
                 response = client.get(profile.base_url)

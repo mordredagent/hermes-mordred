@@ -77,6 +77,34 @@ def test_loopback_bypass_preserves_effective_lowercase_no_proxy() -> None:
     assert "api.openai.com" not in expected
 
 
+@pytest.mark.parametrize(
+    ("uppercase", "lowercase"),
+    [
+        ("HTTPS_PROXY", "https_proxy"),
+        ("HTTP_PROXY", "http_proxy"),
+        ("ALL_PROXY", "all_proxy"),
+    ],
+)
+def test_loopback_bypass_detects_hermes_uppercase_proxy_when_lowercase_is_empty(
+    uppercase: str,
+    lowercase: str,
+) -> None:
+    """Hermes scans uppercase proxy spellings before lowercase spellings."""
+    environ = {
+        uppercase: "http://proxy.example:8080",
+        lowercase: "",
+        "NO_PROXY": "api.openai.com",
+        "no_proxy": "",
+    }
+
+    ensure_loopback_proxy_bypass(environ)
+
+    expected = "localhost,127.0.0.1,::1"
+    assert environ["NO_PROXY"] == expected
+    assert environ["no_proxy"] == expected
+    assert "api.openai.com" not in expected
+
+
 def test_mandatory_integrity_evaluation_error_is_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
