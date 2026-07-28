@@ -97,9 +97,11 @@ Audit entries carry the following fields:
 v1 is not tamper-evident (see the H4 caveat above). Planned additions for v2:
 
 - **Per-entry HMAC chain**: Add an `hmac` field to each NDJSON entry. `hmac_n = HMAC-SHA256(chain_key, hmac_{n-1} || entry_n_canonical_json)`. Rewriting an entry after the fact makes every subsequent HMAC unverifiable
-- **Chain key protection**: The `chain_key` is wrapped with the Phase 4 keyvault's DEK and stored at `~/.hermes/mordred/audit.chain.wrap`. It is unwrapped via Secure Enclave authorization at Hermes process startup and kept resident in memory
+- **Chain key protection**: The `chain_key` is wrapped with the Phase 4 keyvault's DEK and stored at `~/.hermes/mordred/audit.chain.wrap`. It is unwrapped through the selected native backend at Hermes process startup and kept resident in memory
 - **Verification CLI**: `hermes mordred audit verify [--from YYYY-MM-DD] [--to YYYY-MM-DD]` re-walks the chain and reports anomalies
-- **Phase 4 dependency**: Presupposes secure storage of the chain_key. While the Phase 4 keyvault remains macOS-only, Linux/WSL2 users cannot get tamper detection either (until master-password Tier 3 arrives in `v2-OS2`)
+- **Phase 4 dependency**: Presupposes secure storage of the chain key. macOS
+  can use Secure Enclave/login Keychain and Linux can use the shipped TPM 2.0
+  helper. Windows-native custody remains deferred
 
 Implementation begins in v2. In v1, `0600` access control plus Phase 4 audit log encryption (which makes per-entry rewriting harder) serve as the interim defense.
 

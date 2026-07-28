@@ -13,7 +13,8 @@ The canonical source for the official order and task breakdown is `PLAN.md` Phas
 - Python 3.11 or later (`requires-python = ">=3.11"`, `pyproject.toml` L10 + the Hermes upstream root `pyproject.toml` is pinned to the same). The CI matrix covers both 3.11 / 3.12 (see `CI.md` §`ci.yml` details)
 - [uv](https://docs.astral.sh/uv/) — used to create the dev venv (`.venv/`) and reproduce `uv.lock`
 - git 2.30+
-- macOS / Linux (only Phase 4 `mordred_keyvault` is limited to macOS Apple Silicon, see `SPEC.md` Phase 4)
+- macOS / Linux (`mordred_keyvault` uses Secure Enclave/login Keychain on
+  macOS and the fail-closed TPM 2.0 helper on Linux; see `SPEC.md` Phase 4)
 - `hermes-agent` is **installed automatically from PyPI by `uv sync`** (it's a dependency in `pyproject.toml`; no adjacent clone is needed)
 
 ## Repository layout
@@ -22,14 +23,15 @@ This repository is a **standalone Mordred plugin package repository** — it is 
 
 ```
 mordred-hermes-plugin/
-├── pyproject.toml                    # mordred-hermes package config (5 entry point)
+├── pyproject.toml                    # mordred-hermes package config (6 entry points)
 ├── uv.lock                           # uv lockfile (for local dev use; CI resolves the latest from PyPI via pip)
-├── src/mordred_hermes/               # plugin body (5 subpackages + shared _*.py helpers)
+├── src/mordred_hermes/               # plugin body (6 entry points + shared helpers)
 │   ├── privacy_check/
 │   ├── wizard/
 │   ├── llm_guard/
 │   ├── network/
-│   └── keyvault/
+│   ├── keyvault/
+│   └── extension/                    # mordred_e2e + extension server
 ├── tests/                            # default suite + integration/ (opt-in) + fixtures/
 ├── docs/dev/                         # SPEC / PLAN / TODO / ROADMAP / CI / setup, etc.
 ├── docs/user/                        # QUICKSTART / USAGE

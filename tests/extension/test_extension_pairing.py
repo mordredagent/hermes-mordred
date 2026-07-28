@@ -11,7 +11,11 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from cryptography.hazmat.primitives.serialization import load_der_public_key
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_der_public_key,
+)
 
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
@@ -33,6 +37,11 @@ def _verify_attestation(challenge: bytes, se_pubkey_b64: str, signed_b64: str) -
         return True
     except Exception:
         return False
+
+
+def _webauthn_public_key_b64() -> str:
+    public_key = ec.generate_private_key(ec.SECP256R1()).public_key()
+    return xc.b64u_encode(public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo))
 
 
 def test_full_pairing_handshake():
@@ -80,7 +89,7 @@ def test_successful_repair_revokes_previous_webauthn_credential():
     first = pairing.handle_pair_init(first_code, ext_pub, challenge)
     pairing.save_webauthn_credential(
         "old-credential",
-        "old-public-key",
+        _webauthn_public_key_b64(),
         origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
     )
     assert pairing.has_webauthn_credential() is True
@@ -100,7 +109,7 @@ def test_clear_pairing_clears_webauthn_credential():
     pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x13" * 32))
     pairing.save_webauthn_credential(
         "credential",
-        "public-key",
+        _webauthn_public_key_b64(),
         origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
     )
 

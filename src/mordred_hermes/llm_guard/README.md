@@ -22,7 +22,7 @@ non-allowlisted cloud providers out under strict policy.
 
 ## Deferred to v2
 
-- **`transport.py`** — Hermes core owns the streaming pipeline
+- **Former `transport.py` module** — removed because Hermes core owns the streaming pipeline
   (`agent/error_classifier.py` handles `httpx.RemoteProtocolError`), so a
   plugin-side wrapper cannot reliably emit
   `policy.strict.local_stream_interrupted`. Reintroduced when upstream

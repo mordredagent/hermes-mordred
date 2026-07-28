@@ -33,14 +33,27 @@ def _isolated_home(tmp_path, monkeypatch):
 
 
 def _hide_ported_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``from mordred_hermes.extension import pairing`` raise ImportError.
+    """Make the ported pairing import raise ``ModuleNotFoundError``.
 
     Both knobs are needed: deleting the package attribute defeats the
-    from-import shortcut (the eager ``__init__`` already bound it), and the
-    ``None`` sentinel makes the fresh submodule import fail.
+    from-import shortcut cached by this test module's import above, and the
+    ``None`` sentinel makes the fresh lazy submodule import fail.
     """
     monkeypatch.delattr(mordred_hermes.extension, "pairing")
     monkeypatch.setitem(sys.modules, "mordred_hermes.extension.pairing", None)
+
+
+def _break_ported_pairing_import(monkeypatch: pytest.MonkeyPatch, error: ImportError) -> None:
+    """Make the lazy package loader surface an error from inside pairing."""
+    original_getattr = mordred_hermes.extension.__getattr__
+    monkeypatch.delattr(mordred_hermes.extension, "pairing")
+
+    def broken_getattr(name: str) -> Any:
+        if name == "pairing":
+            raise error
+        return original_getattr(name)
+
+    monkeypatch.setattr(mordred_hermes.extension, "__getattr__", broken_getattr)
 
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +75,27 @@ def test_import_pairing_falls_back_to_gateway(monkeypatch: pytest.MonkeyPatch) -
     assert extension_pair_cli._import_pairing() is fake_pairing
 
 
+def test_import_pairing_propagates_internal_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = ImportError("ported pairing implementation is broken")
+    _break_ported_pairing_import(monkeypatch, error)
+
+    with pytest.raises(ImportError, match="ported pairing implementation is broken") as exc_info:
+        extension_pair_cli._import_pairing()
+
+    assert exc_info.value is error
+
+
+def test_import_pairing_propagates_missing_internal_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = ModuleNotFoundError("No module named 'cryptography'", name="cryptography")
+    _break_ported_pairing_import(monkeypatch, error)
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        extension_pair_cli._import_pairing()
+
+    assert exc_info.value is error
+    assert exc_info.value.name == "cryptography"
+
+
 def test_extension_pair_fails_closed_without_any_backend(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -75,7 +109,7 @@ def test_extension_pair_fails_closed_without_any_backend(
     assert rc == 2
     err = capsys.readouterr().err
     assert "not available in this build" in err
-    assert "extension` extra" in err
+    assert "complete mordred-hermes build" in err
 
 
 # --------------------------------------------------------------------------- #

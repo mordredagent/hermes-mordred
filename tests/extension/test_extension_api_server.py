@@ -35,6 +35,16 @@ def _free_port() -> int:
     return port
 
 
+def _ec_public_key_b64(curve: ec.EllipticCurve) -> str:
+    public_key = ec.generate_private_key(curve).public_key()
+    spki = public_key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return xc.b64u_encode(spki)
+
+
+def _p256_public_key_b64() -> str:
+    return _ec_public_key_b64(ec.SECP256R1())
+
+
 async def _chat_handler(content, _context):
     for piece in ("こんにちは、", f"受け取りました: {content}"):
         yield piece
@@ -939,7 +949,7 @@ def test_webauthn_registration_binds_chromium_origin_as_rp_id(tmp_path):
             {
                 "id": "w1",
                 "credential_id": "cred-1",
-                "public_key": xc.b64u_encode(b"public-key"),
+                "public_key": _p256_public_key_b64(),
             }
         )
     )
@@ -948,6 +958,55 @@ def test_webauthn_registration_binds_chromium_origin_as_rp_id(tmp_path):
     assert stored["origin"] == origin
     assert stored["rp_id"] == origin
     assert conn.ws.sent == [{"id": "w1", "type": "webauthn_registered", "ok": True}]
+
+
+@pytest.mark.parametrize(
+    "invalid_public_key",
+    [
+        pytest.param(xc.b64u_encode(b"not a DER public key"), id="malformed"),
+        pytest.param(_ec_public_key_b64(ec.SECP384R1()), id="p384"),
+    ],
+)
+def test_webauthn_registration_rejects_invalid_public_key_without_replacing_credential(
+    tmp_path,
+    invalid_public_key,
+):
+    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="registration-test-token",
+            ext_pubkey_b64="test-extension",
+            hermes_pubkey_b64="test-hermes",
+            paired_at=1.0,
+        )
+    )
+    pairing.save_webauthn_credential("existing-credential", _p256_public_key_b64(), origin=origin)
+    stored_path = tmp_path / "extension" / "webauthn.json"
+    original = stored_path.read_bytes()
+    conn = extension_api._Connection(_FakeWS(), _chat_handler, client_origin=origin)
+    conn.authed = True
+
+    asyncio.run(
+        conn._on_webauthn_register(
+            {
+                "id": "w-invalid",
+                "credential_id": "replacement-credential",
+                "public_key": invalid_public_key,
+            }
+        )
+    )
+
+    assert conn.ws.sent == [
+        {
+            "id": "w-invalid",
+            "type": "webauthn_registered",
+            "ok": False,
+            "error": "invalid_public_key",
+        }
+    ]
+    assert stored_path.read_bytes() == original
+    assert json.loads(original)["credential_id"] == "existing-credential"
 
 
 def test_webauthn_registration_rejects_firefox_until_binding_is_in_protocol(tmp_path):
@@ -963,7 +1022,7 @@ def test_webauthn_registration_rejects_firefox_until_binding_is_in_protocol(tmp_
             {
                 "id": "w1",
                 "credential_id": "cred-1",
-                "public_key": xc.b64u_encode(b"public-key"),
+                "public_key": _p256_public_key_b64(),
             }
         )
     )

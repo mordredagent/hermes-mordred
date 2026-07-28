@@ -12,7 +12,7 @@ Skill metadata enforcement and audit logging.
 ### Hooks registered
 
 - **`on_session_start`** — loads policy snapshot from `~/.hermes/config.yaml plugins.mordred_privacy_check`, runs H3 Path B sibling-disable detection, emits one-shot `mordred.degraded.no_origin_skill` audit entry (per [HOOK_PAYLOADS.md §4](../../../docs/dev/HOOK_PAYLOADS.md)).
-  - Strict + sibling-disable → audit `mordred.degraded.disable_unprotected` (decision `block`) + poison process + raise `SystemExit` (bypasses Hermes's `except Exception` guard since `SystemExit` inherits `BaseException`).
+  - Strict + sibling-disable → audit `mordred.degraded.disable_unprotected` (decision `block`) + poison process + raise `MordredIntegrityRefused(BaseException)` (bypasses Hermes's `except Exception` guard without masquerading as an ordinary CLI exit).
   - Lenient/off + sibling-disable → audit warn entry, log warning, continue.
 - **`pre_tool_call`** — generic strict-mode tool-name allowlist. Default blocklist `{web_fetch, web_search}` blocks under strict mode on the clearnet path. Returns `{"action": "block", "message": str}` or `None`. Per-skill enforcement is not possible — `origin_skill` is absent from the payload (HOOK_PAYLOADS §4); per-skill checks live in `install_wrapper.py`.
 

@@ -1,10 +1,14 @@
-"""mordred_keyvault — Secure Enclave-backed key management (macOS).
+"""mordred_keyvault — hardware-backed key and at-rest secret management.
 
-Phase 0 scaffold: register() is a no-op stub. Phase 4.1 will wire:
-- public API: generate / encrypt / decrypt / export_backup / import_backup / verify_digest
-- AES-GCM DEK + Secure Enclave-wrapped KEK
-- Argon2id-wrapped backup blob with embedded verification digest
-- audit log encryption layer (slot-in to Phase 1 Writer interface)
+The public API covers key generation, envelope encryption, backup/recovery,
+vault lifecycle, audit-log encryption, and extension wallet signing. At plugin
+registration time this module installs the transparent environment decrypt
+shim, the host ``.env`` write guard, the shared integrity gate, and
+best-effort session-boundary resealing.
+
+Native protection is selected by capability: Secure Enclave on supported
+macOS systems and TPM 2.0 through the packaged helper on Linux. Pure crypto and
+storage layers remain cross-platform and accept injected backends for tests.
 """
 
 import contextlib

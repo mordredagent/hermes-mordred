@@ -7,12 +7,12 @@ H3 Path B (HOOK_PAYLOADS.md §2): sibling-disable detection prefers
 ``hermes_cli.plugins._get_disabled_plugins`` / ``_get_enabled_plugins``
 when available, falling back to direct ``~/.hermes/config.yaml`` reads.
 
-Why "poison flag" alongside ``SystemExit``: Hermes's ``invoke_hook``
-wraps every callback in ``try: ... except Exception:`` and logs as a
-warning. ``SystemExit`` (from ``BaseException``) propagates past that
-guard, but if a higher-level harness catches it, the in-process poison
-flag still forces ``pre_tool_call`` to refuse every tool — defense in
-depth for strict mode.
+Why "poison flag" alongside ``MordredIntegrityRefused``: Hermes's
+``invoke_hook`` wraps every callback in ``try: ... except Exception:``
+and logs as a warning. The direct ``BaseException`` subclass propagates
+past that guard, but if a higher-level harness catches it, the in-process
+poison flag still forces ``pre_tool_call`` to refuse every tool — defense
+in depth for strict mode.
 """
 
 from __future__ import annotations

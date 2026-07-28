@@ -119,17 +119,26 @@ unavailable.
 
 Implementation: `plugins_list.py`.
 
-### `extension pair [--timeout=SECONDS]`
+### `extension {pair,serve}`
 
-Generates a browser-extension pairing code and waits for it to be consumed.
-**Deferred in this standalone repo**: it imports `gateway.extension_pairing`,
-the Hermes-fork counterpart to this plugin (WebSocket server, chat/crypto/RPC
-bridges) — see `docs/dev/ROADMAP.md` §"Browser-extension gateway counterpart
-(deferred)". Until that ships alongside `mordred-hermes`, this command fails
-closed with exit code `2` and a clear stderr message instead of a raw
-`ImportError`.
+- `extension pair [--timeout=SECONDS]` generates a browser-extension pairing
+  code, optionally renders a terminal QR, and waits for a running server to
+  consume it. The packaged `mordred_hermes.extension.pairing` backend is the
+  primary path; `gateway.extension_pairing` remains a compatibility fallback
+  for older full-gateway checkouts.
+- `extension serve [--host=127.0.0.1] [--port=7788]` runs the packaged
+  loopback WebSocket server in the foreground. Pairing, crypto, history,
+  wallet/RPC signing, and Hermes-agent chat are available without the old
+  repo-root `gateway/extension_*.py` modules.
 
-Implementation: `extension_pair_cli.py`.
+The server requires the `extension` extra. The `messaging` extra adds QR
+rendering, but a pairing code remains usable without it. Automatic server
+startup as part of a full Hermes gateway is still deferred because upstream
+does not expose a plugin boot hook; see `docs/dev/ROADMAP.md` §"Remaining
+browser-extension gateway integration".
+
+Implementation: `extension_pair_cli.py`, `_cli_parsers.py`,
+`mordred_hermes.extension.__main__`, and `mordred_hermes.extension`.
 
 ### `keyvault {list,verify-digest}`
 

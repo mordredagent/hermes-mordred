@@ -351,7 +351,7 @@ the default requires Touch ID). If the helper is off `PATH`, point at it with
   skipped** as of 2026-06-01). `FakeBackend` performs real P-256 ECDH and
   `FakeAnchorStore` is an in-memory keychain, so the open / enroll / read paths
   run for real even in CI.
-- The vault CLI (`tests/test_wizard_vault_cli.py`) and the production Keychain
+- The vault CLI (`tests/test_wizard_vault_cli_*.py`) and the production Keychain
   `AnchorStore` (`tests/test_keyvault_anchor_keychain.py`, software `_FakeOps`
   injection) are likewise green cross-platform.
 - `ruff` + `ruff format` + `mypy --strict` clean (linters are version-pinned via

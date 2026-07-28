@@ -170,12 +170,12 @@ Encrypted volumes are a standard OS feature everywhere:
 | Windows | BitLocker / encrypted VHDX / EFS | TPM / Windows Hello |
 | Linux | LUKS/dm-crypt / gocryptfs | TPM2 (`systemd-cryptenroll`) / FIDO2 |
 
-But the **Mordred-integrated** form (volume key wrapped by Mordred's keyvault)
-is **macOS Apple Silicon only** today — see `crypto.py` ("Linux / WSL2 must not
-import this module … Tier 2 / Tier 3 platform fallbacks (TPM / DPAPI) are
-scheduled for `v2-OS2`"). On Windows/Linux you would use the OS-native mechanism,
-not Mordred. The at-rest-only limitation in §3 is identical on all three OSes —
-it is a property of encryption, not of the platform.
+The **Mordred-integrated** keyvault supports Secure Enclave/login Keychain on
+macOS and the packaged TPM 2.0 helper on Linux. This section's encrypted-volume
+integration remains a design discussion rather than a shipped volume manager;
+Windows users still use the OS-native mechanism. The at-rest-only limitation
+in §3 is identical across platforms — it is a property of encryption, not of
+the backend.
 
 ---
 

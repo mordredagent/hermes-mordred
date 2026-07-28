@@ -13,6 +13,7 @@ import pytest
 
 from mordred_hermes import _pth_bootstrap, _runtime_bootstrap
 from mordred_hermes._proxy_bypass import ensure_loopback_proxy_bypass
+from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _RUNTIME_PTH = _REPO_ROOT / "packaging" / "pth" / "mordred_hermes_runtime.pth"
@@ -120,6 +121,25 @@ def test_mandatory_integrity_evaluation_error_is_fail_closed(
     assert exc_info.value.code == 1
 
 
+def test_mandatory_integrity_policy_refusal_propagates_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy decision is not converted into an ordinary CLI exit."""
+    from mordred_hermes.privacy_check import hooks
+
+    refusal = MordredIntegrityRefused("synthetic strict-policy refusal")
+
+    def refuse(**_kwargs: object) -> None:
+        raise refusal
+
+    monkeypatch.setattr(hooks, "check_plugin_integrity", refuse)
+
+    with pytest.raises(MordredIntegrityRefused) as exc_info:
+        _runtime_bootstrap._mandatory_integrity_hook()
+    assert exc_info.value is refusal
+    assert not isinstance(exc_info.value, SystemExit)
+
+
 _PLUGIN_MANAGER_PROBE = r"""
 import json
 
@@ -130,6 +150,7 @@ from mordred_hermes._runtime_bootstrap import (
     install,
 )
 from mordred_hermes.privacy_check import _runtime
+from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 install()
 install()
@@ -163,7 +184,7 @@ bridge_count = sum(
 blocked = False
 try:
     manager.invoke_hook("on_session_start")
-except SystemExit:
+except MordredIntegrityRefused:
     blocked = True
 
 print(json.dumps({

@@ -750,22 +750,9 @@ def _handle_extension_pair(args: argparse.Namespace) -> int:
 
 
 def _handle_extension_serve(args: argparse.Namespace) -> int:
-    # The import below executes mordred_hermes/extension/__init__.py, which
-    # eagerly imports .api and therefore aiohttp — so a missing `extension`
-    # extra surfaces HERE, not inside serve()'s own lazy-import guard.
-    try:
-        from mordred_hermes.extension.__main__ import serve
-    except ImportError as exc:
-        import sys
-
-        # Echo the underlying error so a genuine import bug inside the
-        # package isn't misdiagnosed as a missing extra.
-        print(
-            "error: the extension server needs the `extension` extra (aiohttp). "
-            'Install it with `pip install "mordred-hermes[extension]"` or, inside '
-            f"this repo, `uv sync --extra extension`. (import failed: {exc})",
-            file=sys.stderr,
-        )
-        return 2
+    # The extension package and launcher are dependency-light. ``serve`` owns
+    # the optional aiohttp check so unrelated import bugs are never relabelled
+    # as a missing ``extension`` extra here.
+    from mordred_hermes.extension.__main__ import serve
 
     return serve(host=args.host, port=args.port)

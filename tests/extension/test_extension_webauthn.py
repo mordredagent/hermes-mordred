@@ -60,9 +60,13 @@ def _make_assertion(
     }
 
 
-def _register(priv: ec.EllipticCurvePrivateKey, cred_id: str):
+def _public_key_b64(priv: ec.EllipticCurvePrivateKey) -> str:
     spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    pairing.save_webauthn_credential(cred_id, xc.b64u_encode(spki), origin=_ORIGIN)
+    return xc.b64u_encode(spki)
+
+
+def _register(priv: ec.EllipticCurvePrivateKey, cred_id: str):
+    pairing.save_webauthn_credential(cred_id, _public_key_b64(priv), origin=_ORIGIN)
 
 
 def test_valid_assertion_accepted():
@@ -71,6 +75,35 @@ def test_valid_assertion_accepted():
     nonce = b"\x33" * 32
     assert pairing.has_webauthn_credential() is True
     assert pairing.verify_webauthn_assertion(nonce, _make_assertion(priv, "cred-1", nonce)) is True
+
+
+def test_malformed_public_key_rejected_before_save():
+    with pytest.raises(ValueError, match="invalid WebAuthn public key"):
+        pairing.save_webauthn_credential("cred-1", xc.b64u_encode(b"not a DER public key"), origin=_ORIGIN)
+
+    assert not pairing._webauthn_path().exists()
+
+
+def test_p384_public_key_rejected_before_save():
+    priv = ec.generate_private_key(ec.SECP384R1())
+
+    with pytest.raises(ValueError, match="must use EC P-256"):
+        pairing.save_webauthn_credential("cred-1", _public_key_b64(priv), origin=_ORIGIN)
+
+    assert not pairing._webauthn_path().exists()
+
+
+def test_p384_assertion_rejected_for_existing_record():
+    _register(ec.generate_private_key(ec.SECP256R1()), "cred-1")
+    stored_path = pairing._webauthn_path()
+    stored = json.loads(stored_path.read_text("utf-8"))
+    priv = ec.generate_private_key(ec.SECP384R1())
+    stored["public_key"] = _public_key_b64(priv)
+    pairing._write_private(stored_path, json.dumps(stored).encode("utf-8"))
+
+    nonce = b"\x33" * 32
+    assertion = _make_assertion(priv, "cred-1", nonce)
+    assert pairing.verify_webauthn_assertion(nonce, assertion) is False
 
 
 def test_wrong_nonce_rejected():

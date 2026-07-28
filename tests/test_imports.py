@@ -21,8 +21,7 @@ PLUGINS = [
 
 
 class _FakeContext:
-    """Captures register_hook calls so plugins-with-hooks (Phase 1+) can be tested
-    alongside Phase 0 stubs without spinning up a real Hermes session."""
+    """Capture plugin registration without spinning up a real Hermes session."""
 
     def __init__(self) -> None:
         self.hooks: list[tuple[str, object]] = []
@@ -56,7 +55,6 @@ def test_plugin_imports(module_path: str, tmp_path: Path, monkeypatch: pytest.Mo
     module = importlib.import_module(module_path)
     register = getattr(module, "register", None)
     assert callable(register), f"{module_path}.register must be callable"
-    # Phase 0 stubs ignore ctx; Phase 1+ call ctx.register_hook(...).
     assert register(_FakeContext()) is None
 
 

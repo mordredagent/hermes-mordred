@@ -45,7 +45,12 @@ def _raise_runtime_refusal(context: str, exc: Exception) -> NoReturn:
 
 
 def _mandatory_integrity_hook(**kwargs: Any) -> None:
-    """Lazy first-position bridge whose failures cannot be swallowed by Hermes."""
+    """Lazy first-position bridge whose failures cannot be swallowed by Hermes.
+
+    Policy refusals inherit directly from ``BaseException`` and therefore
+    propagate untouched. Ordinary evaluation failures are process-startup
+    failures and remain translated to ``SystemExit(1)``.
+    """
     try:
         from .privacy_check.hooks import check_plugin_integrity
 

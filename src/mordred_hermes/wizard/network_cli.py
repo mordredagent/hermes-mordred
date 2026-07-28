@@ -40,7 +40,7 @@ from .._yaml_io import load_plugin_section
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from ..network.guidance import dependency_warning
-from ..network.hooks import resolve_default_path
+from ..network.settings import read_default_path
 from . import _term
 from ._network_answers import (
     _VALID_PATHS,
@@ -193,10 +193,10 @@ def _write_default_path_to_config(config_path: Path, default_path: str) -> None:
 def _read_default_path_from_config(config_path: Path) -> str:
     """Read ``plugins.mordred_network.default_path`` or fall back to clearnet.
 
-    Validation delegates to ``network.hooks.resolve_default_path`` so the
+    Validation delegates to ``network.settings.read_default_path`` so the
     wizard reports exactly the path the runtime would bootstrap with.
     """
-    return resolve_default_path(load_plugin_section(config_path, "mordred_network", log=_LOG))
+    return read_default_path(config_path, log=_LOG)
 
 
 def _dependency_warning_for_configured_path(config_path: Path, target: str) -> str | None:

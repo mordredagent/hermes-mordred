@@ -37,9 +37,10 @@ You need:
 - **[uv](https://docs.astral.sh/uv/)** — used to build that venv (`brew install
   uv`, or see the uv install docs). The repo does **not** ship a ready venv; you
   build it once in [Build the venv](#build-the-venv) below.
-- **No paid account or special hardware required.** On macOS the key is guarded
-  by the Secure Enclave, on Linux by the TPM; if neither is present, Mordred
-  falls back to a software-protected key automatically.
+- **No paid account required.** On macOS the key is guarded by the Secure
+  Enclave, with a login-Keychain software fallback. Linux keyvault use requires
+  TPM 2.0 plus the helper installed by `keyvault enable-tpm`; it fails closed
+  rather than silently storing a software key.
 
 > **Which shell are you in?** The command blocks below are written for
 > `sh` / `bash` / `zsh`. If your shell is **fish** (the default on some setups),
@@ -142,7 +143,7 @@ of each spelled out. Each step is idempotent — re-running is safe.
 |---|---|---|---|
 | 1 | `$M configure` | Interactive setup of policy / LLM / harness. | Writes `config.yaml` + `policy.json`. |
 | 2 | `$M network init` 🌐 **network setting** | Set up the privacy route (Tor / VPN / clearnet). Optional. | A network path is configured (not yet encryption — see §5). |
-| 3 | `$M keyvault init` | Create the hardware-backed key store that seals the vault. | Keyvault initialised (macOS = Secure Enclave, Linux = TPM; software fallback if no hardware). |
+| 3 | `$M keyvault init` | Create the key store that seals the vault. | Keyvault initialised (macOS = Secure Enclave or Keychain fallback; Linux = TPM). |
 | 4 | `$M encryption enable env` | Turn on at-rest encryption for your `.env`. The first enable creates the vault and asks once for a recovery passphrase. | `env` target flips to `[on] enrolled`. |
 | 5 | `$M status` | Verify everything above. | Prints the summary below. |
 
@@ -184,8 +185,9 @@ If you only want your `.env` protected, three commands are the whole job:
 that needs a real terminal** (run it non-interactively — e.g. piped — and it
 aborts cleanly with a non-interactive error instead of encrypting anything).
 You'll choose a passphrase, write down a 24-word seed phrase, and confirm an
-offline verification digest. With no hardware key it degrades to a
-software-protected key automatically — the ceremony is unchanged.
+offline verification digest. macOS can use its login-Keychain fallback when
+Secure Enclave access is unavailable. Linux requires the TPM helper and aborts
+if no hardware backend is available; the ceremony itself is otherwise the same.
 
 > You don't strictly need `keyvault init` first: running `encryption enable env`
 > **directly** auto-creates the vault and device key and asks once for a recovery
@@ -495,7 +497,8 @@ Short, plain definitions for the terms used above:
   key: the hardware device key (automatic, this machine) and the passphrase you
   remember (recovery). See [`USAGE.md` §4.2](./USAGE.md#42-the-device-key-and-the-recovery-passphrase-are-different-things).
 - **Secure Enclave / TPM** — the security chip (macOS / Linux) that guards the
-  key in hardware; without one, a software-protected key is used instead.
+  key in hardware. Only macOS has the login-Keychain software fallback; Linux
+  fails closed without its TPM helper.
 - **network path** — how your traffic is routed: **Tor** (anonymity, slower),
   **VPN** (any VPN, Mullvad recommended; IP privacy with speed), or **clearnet** (direct, no privacy).
 - **policy** — the rules Mordred enforces (e.g. whether cloud LLMs are allowed,

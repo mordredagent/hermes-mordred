@@ -18,7 +18,7 @@ Unicode normalization is the caller's responsibility. Phase 4 PR4
 step-A landed split normalization in :mod:`mordred_hermes.keyvault.api`:
 seed phrase uses ``NFKD + strip-Cf + casefold + whitespace-collapse``,
 passphrase uses ``NFKD only``. See :func:`mordred_hermes.keyvault.api.verify_digest`
-(step-A) and the future :func:`mordred_hermes.keyvault.api.prepare_generate` /
+(step-A) and :func:`mordred_hermes.keyvault.api.prepare_generate` /
 :func:`mordred_hermes.keyvault.api.confirm_generate` (step-D), or SPEC.md
 §"PR4 API contract / Mordred normalization" for the canonical definitions.
 PoW is precomputed by the caller; this module does not re-hash it.

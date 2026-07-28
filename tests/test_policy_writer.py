@@ -606,7 +606,7 @@ plugins:
 class TestPolicySnapshotDisableIPv6Field:
     """Phase 3 PR3a Task #7: PolicySnapshot gains ``disable_ipv6`` so the
     wizard can persist it to ``policy.json``. The network reader (Task #2)
-    consumes it through ``_resolve_disable_ipv6``; PolicyWriter is the
+    consumes it through ``network.settings.resolve_disable_ipv6``; PolicyWriter is the
     sole writer side.
     """
 

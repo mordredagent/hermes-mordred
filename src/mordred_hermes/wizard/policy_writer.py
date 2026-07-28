@@ -288,7 +288,7 @@ class PolicySnapshot:
     # ``"none"`` is a sentinel that doesn't match any harness regex pattern.
     harness_primary: str = "none"
     # Phase 3 PR3a Task #7: persisted to policy.json so the network reader
-    # (mordred_hermes.network._resolve_disable_ipv6) can consume it.
+    # (mordred_hermes.network.settings.resolve_disable_ipv6) can consume it.
     # Default ``True`` matches the safe-by-default in RuntimeConfig.
     disable_ipv6: bool = True
     # Phase 3 transport facts are an intentionally opaque JSON value here.

@@ -36,10 +36,15 @@ from typing import Any, Final, Literal, NoReturn, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
-from .._policy_io import load_policy_mapping, read_policy_mode_fail_closed
+from .._policy_io import load_policy_mapping
 from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
-from .._yaml_io import load_plugin_section, load_yaml_mapping
+from .._provider_resolution import (
+    read_auth_active_provider,
+    read_config_model_provider,
+    resolve_disk_provider,
+)
 from . import api
+from . import settings as settings_mod
 from ._exceptions import (
     BringupFailed,
     MordredNetworkError,
@@ -51,8 +56,6 @@ from .provider_transport_flagger import ProviderEntry, TransportClass, evaluate
 
 _LOG = logging.getLogger("mordred.network.hooks")
 
-_DEFAULT_POLICY_MODE: Final[str] = "off"
-_DEFAULT_NETWORK_PATH: Final[str] = "clearnet"
 _PROTECTED_NETWORK_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn"})
 # Audit reason code for a provider-vs-transport compatibility flag (FIX 1,
 # 2026-07-13). ``decision`` is ``block`` for an abort-severity flag (strict
@@ -91,24 +94,12 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     :func:`.._policy_io.read_policy_mode_fail_closed` so llm_guard's
     reader cannot drift from this one.
     """
-    return read_policy_mode_fail_closed(policy_json_path, default=_DEFAULT_POLICY_MODE, log=_LOG)
+    return settings_mod.read_policy_mode(policy_json_path, log=_LOG)
 
 
 def resolve_default_path(section: Mapping[str, Any] | None) -> str:
-    """Validated ``default_path`` from a ``plugins.mordred_network`` section.
-
-    Missing section / missing key / invalid value all collapse to
-    ``clearnet`` (safe default). THE single definition of that validation —
-    the hook-time read (:func:`_read_default_network_path`), the
-    registration-time bootstrap (``network.__init__._load_runtime_config``)
-    and the wizard's status reader all resolve through here, so the path the
-    runtime bootstraps with and the path the other readers report cannot
-    drift.
-    """
-    value = (section or {}).get("default_path", _DEFAULT_NETWORK_PATH)
-    if isinstance(value, str) and value in VALID_ACTIVE_PATHS:
-        return value
-    return _DEFAULT_NETWORK_PATH
+    """Backward-compatible facade for :func:`network.settings.resolve_default_path`."""
+    return settings_mod.resolve_default_path(section)
 
 
 def _read_default_network_path(config_path: Path) -> str:
@@ -116,7 +107,7 @@ def _read_default_network_path(config_path: Path) -> str:
 
     Wizard PR2-C is the writer.
     """
-    return resolve_default_path(load_plugin_section(config_path, "mordred_network", log=_LOG))
+    return settings_mod.read_default_path(config_path, log=_LOG)
 
 
 def _read_default_network_path_strict(config_path: Path) -> str:
@@ -129,36 +120,7 @@ def _read_default_network_path_strict(config_path: Path) -> str:
     can fail closed rather than misclassifying damaged Tor configuration as
     intentional clearnet.
     """
-    from ruamel.yaml import YAML
-
-    try:
-        f = config_path.open(encoding="utf-8")
-    except FileNotFoundError:
-        return _DEFAULT_NETWORK_PATH
-    with f:
-        data = YAML(typ="safe", pure=True).load(f)
-    if data is None:
-        return _DEFAULT_NETWORK_PATH
-    if not isinstance(data, dict):
-        raise ValueError("config.yaml must contain a top-level mapping")
-    if "plugins" not in data:
-        return _DEFAULT_NETWORK_PATH
-    plugins = data["plugins"]
-    if not isinstance(plugins, dict):
-        raise ValueError("config.yaml plugins must be a mapping")
-    if "mordred_network" not in plugins:
-        return _DEFAULT_NETWORK_PATH
-    section = plugins["mordred_network"]
-    if not isinstance(section, dict):
-        raise ValueError("config.yaml plugins.mordred_network must be a mapping")
-    if "default_path" not in section:
-        return _DEFAULT_NETWORK_PATH
-    value = section["default_path"]
-    if not isinstance(value, str) or value not in VALID_ACTIVE_PATHS:
-        raise ValueError(
-            f"config.yaml plugins.mordred_network.default_path must be one of {sorted(VALID_ACTIVE_PATHS)!r}"
-        )
-    return value
+    return settings_mod.read_default_path_strict(config_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -651,17 +613,7 @@ def _read_config_model_provider(config_path: Path) -> str | None:
     ``llm_guard._read_config_model_provider`` — same shared ``load_yaml_mapping``
     reader — so the two plugins resolve the same provider from the same file.
     """
-    data = load_yaml_mapping(config_path, log=_LOG)
-    model = data.get("model")
-    if not isinstance(model, dict):
-        return None
-    value = model.get("provider")
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    if not normalized or normalized == "auto":
-        return None
-    return normalized
+    return read_config_model_provider(config_path, log=_LOG)
 
 
 def _read_auth_active_provider(auth_json_path: Path) -> str | None:
@@ -674,12 +626,7 @@ def _read_auth_active_provider(auth_json_path: Path) -> str | None:
     the explicit unresolved-provider sentinel through the normal transport
     severity matrix (strict + Tor refuses; lenient warns).
     """
-    value = load_policy_mapping(auth_json_path, log=_LOG).get("active_provider")
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized:
-            return normalized
-    return None
+    return read_auth_active_provider(auth_json_path, log=_LOG)
 
 
 def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None) -> list[str]:
@@ -695,14 +642,13 @@ def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None)
     normal unknown-provider severity matrix: strict + Tor aborts, lenient +
     Tor warns, and clearnet remains informational.
     """
-    configured = _read_config_model_provider(config_path)
-    if configured:
-        return [configured]
-    if auth_json_path is not None:
-        resolved = _read_auth_active_provider(auth_json_path)
-        if resolved:
-            return [resolved]
-    return [_UNRESOLVED_PROVIDER]
+    resolved = resolve_disk_provider(
+        config_path=config_path,
+        auth_json_path=auth_json_path,
+        config_reader=_read_config_model_provider,
+        auth_reader=_read_auth_active_provider,
+    )
+    return [resolved if resolved is not None else _UNRESOLVED_PROVIDER]
 
 
 def _read_provider_overrides(policy_json_path: Path) -> dict[str, ProviderEntry]:
@@ -789,17 +735,11 @@ def _read_disable_ipv6(policy_json_path: Path, policy_mode: str) -> bool:
     The flagger receives the SAME ``disable_ipv6`` the runtime rendered into
     torrc (``ClientUseIPv6 0``), but that Tor option is advisory from the
     provider SDK's perspective: it neither disables host IPv6 nor filters AAAA
-    answers. The flagger includes it in diagnostics but never treats it as
-    host-level enforcement. Reuses the runtime's own resolver
-    (``network.__init__._resolve_disable_ipv6``) against the same
-    ``policy.json`` so diagnostics cannot drift. The import is function-local
-    because ``network.__init__`` imports this module at package load time (a
-    top-level import would be circular).
+    answers. The shared settings resolver keeps registration and hook-time
+    diagnostics aligned without a circular import through ``network.__init__``.
     """
-    from . import _resolve_disable_ipv6
-
     data = load_policy_mapping(policy_json_path, log=_LOG)
-    return _resolve_disable_ipv6(data, policy_mode)
+    return settings_mod.resolve_disable_ipv6(data, policy_mode)
 
 
 def _flag_transport_compat(
