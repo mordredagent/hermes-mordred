@@ -43,7 +43,7 @@ def _hide_ported_module(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "mordred_hermes.extension.pairing", None)
 
 
-def _break_ported_pairing_import(monkeypatch: pytest.MonkeyPatch, error: ImportError) -> None:
+def _break_ported_pairing_import(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
     """Make the lazy package loader surface an error from inside pairing."""
     original_getattr = mordred_hermes.extension.__getattr__
     monkeypatch.delattr(mordred_hermes.extension, "pairing")
@@ -75,25 +75,46 @@ def test_import_pairing_falls_back_to_gateway(monkeypatch: pytest.MonkeyPatch) -
     assert extension_pair_cli._import_pairing() is fake_pairing
 
 
-def test_import_pairing_propagates_internal_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_pairing_presents_internal_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A present-but-broken ported module gets the friendly exit-2 shape.
+
+    Review 2026-07-29: re-raising the raw ImportError gave a CLI user a
+    traceback instead of the failure and the fix. The broken-install cause
+    stays attached as ``__cause__`` and the wording distinguishes it from
+    an old build, so it is still never mistaken for one.
+    """
     error = ImportError("ported pairing implementation is broken")
     _break_ported_pairing_import(monkeypatch, error)
 
-    with pytest.raises(ImportError, match="ported pairing implementation is broken") as exc_info:
+    with pytest.raises(extension_pair_cli.ExtensionGatewayUnavailable, match="broken installation") as exc_info:
         extension_pair_cli._import_pairing()
 
-    assert exc_info.value is error
+    assert exc_info.value.__cause__ is error
+    assert "ported pairing implementation is broken" in str(exc_info.value)
 
 
-def test_import_pairing_propagates_missing_internal_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_pairing_presents_missing_internal_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     error = ModuleNotFoundError("No module named 'cryptography'", name="cryptography")
     _break_ported_pairing_import(monkeypatch, error)
 
-    with pytest.raises(ModuleNotFoundError) as exc_info:
+    with pytest.raises(extension_pair_cli.ExtensionGatewayUnavailable, match="broken installation") as exc_info:
         extension_pair_cli._import_pairing()
 
-    assert exc_info.value is error
-    assert exc_info.value.name == "cryptography"
+    assert exc_info.value.__cause__ is error
+    assert "'cryptography'" in str(exc_info.value)
+
+
+def test_import_pairing_presents_syntax_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated/partially-written module raises SyntaxError at import —
+    the same broken-installation class, and it must get the same friendly
+    exit-2 shape instead of a raw traceback (review 2026-07-29)."""
+    error = SyntaxError("unexpected EOF while parsing")
+    _break_ported_pairing_import(monkeypatch, error)
+
+    with pytest.raises(extension_pair_cli.ExtensionGatewayUnavailable, match="broken installation") as exc_info:
+        extension_pair_cli._import_pairing()
+
+    assert exc_info.value.__cause__ is error
 
 
 def test_extension_pair_fails_closed_without_any_backend(

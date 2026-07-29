@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.keyvault import _storage, api, wrap
+from tests._keyvault_fakes import FakeBackend
 from tests._keyvault_lifecycle_helpers import (
     _SPEC_DIGEST,
     _SPEC_PASSPHRASE,
@@ -16,7 +17,6 @@ from tests._keyvault_lifecycle_helpers import (
     _SPEC_SEED,
     _AuditCapture,
 )
-from tests.test_keyvault_wrap import FakeBackend
 
 
 @pytest.fixture

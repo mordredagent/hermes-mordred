@@ -156,7 +156,17 @@ def _rp_id_for_origin(origin: str) -> str | None:
 
 
 def _load_p256_public_key(public_key_b64: str) -> ec.EllipticCurvePublicKey:
-    """Decode a stored WebAuthn ES256 key and enforce its P-256 curve."""
+    """Decode a stored WebAuthn ES256 key and enforce its P-256 curve.
+
+    Deliberately stricter than the pre-split verifier, which accepted any
+    EC curve: WebAuthn ES256 (COSE alg -7) is defined over P-256, and
+    :func:`save_webauthn_credential` validates new registrations through
+    this same gate. A legacy credential on another curve — storable only
+    by a non-standard client, since the extension requests ES256 — now
+    fails verification (fail closed). Recovery: delete
+    ``~/.hermes/extension/webauthn.json`` and re-register the credential
+    (accepted narrowing, review 2026-07-29).
+    """
     try:
         public_key = serialization.load_der_public_key(b64u_decode(public_key_b64))
     except Exception as exc:

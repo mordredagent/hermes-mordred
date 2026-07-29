@@ -71,11 +71,20 @@ def _import_pairing() -> Any:
        for full-gateway checkouts whose plugin copy predates the port (the
        repo root is added to sys.path when running from such a checkout).
 
-    Raises :class:`ExtensionGatewayUnavailable` when the ported module is
-    absent and neither legacy backend location is importable: e.g. the
-    published ``0.1.0a1`` wheel, which predates the extension package.
-    Import errors *inside* the ported implementation are propagated so a
-    broken installation is never mistaken for an old one.
+    Raises :class:`ExtensionGatewayUnavailable` (which the CLI presents as
+    an exit-2 error) in both failure shapes, with wording that keeps them
+    distinct so a broken installation is never mistaken for an old one:
+
+    - The ported module is *absent* and neither legacy backend location is
+      importable: e.g. the published ``0.1.0a1`` wheel, which predates the
+      extension package.
+    - The ported module is *present but fails to import* (broken
+      ``cryptography`` build, missing subdependency, or a truncated
+      source file raising ``SyntaxError``). Previously this was re-raised
+      raw; a CLI entry point should present the failure and the fix, not
+      a traceback (review 2026-07-29). The gateway fallback is
+      deliberately not attempted for this shape — it would mask the broken
+      install.
     """
     ported_exc: ModuleNotFoundError
     try:
@@ -87,8 +96,21 @@ def _import_pairing() -> Any:
             "mordred_hermes.extension",
             "mordred_hermes.extension.pairing",
         }:
-            raise
+            raise ExtensionGatewayUnavailable(
+                "extension pairing is installed but failed to import (missing "
+                f"module {exc.name!r}: {exc}). This is a broken installation, "
+                "not an old build — reinstall with "
+                '`pip install "mordred-hermes[extension]"`.'
+            ) from exc
         ported_exc = exc
+    except (ImportError, SyntaxError) as exc:
+        # SyntaxError covers a truncated/partially-written module file —
+        # the same broken-installation class, raised at compile time.
+        raise ExtensionGatewayUnavailable(
+            f"extension pairing is installed but failed to import: {exc}. "
+            "This is a broken installation, not an old build — reinstall "
+            'with `pip install "mordred-hermes[extension]"`.'
+        ) from exc
 
     try:
         from gateway import extension_pairing as pairing

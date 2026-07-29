@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 # Canonical submodules + the back-compat ``extension_*`` aliases (the original
 # full-Hermes modules were named ``extension_api`` .. ``extension_rpc``).
-_SUBMODULES = frozenset({"api", "chat", "crypto", "history", "pairing", "rpc"})
+_SUBMODULES = frozenset({"api", "chat", "crypto", "history", "pairing", "rpc", "webauthn"})
 _ALIASES = {
     "extension_api": "api",
     "extension_chat": "chat",
@@ -46,7 +46,7 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:  # keep static analysers / IDEs aware of the attributes
-    from . import api, chat, crypto, history, pairing, rpc
+    from . import api, chat, crypto, history, pairing, rpc, webauthn
 
     extension_api = api
     extension_chat = chat
@@ -68,4 +68,5 @@ __all__ = [
     "history",
     "pairing",
     "rpc",
+    "webauthn",
 ]

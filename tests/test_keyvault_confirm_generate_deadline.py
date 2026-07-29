@@ -7,13 +7,13 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.keyvault import api
+from tests._keyvault_fakes import FakeBackend
 from tests._keyvault_lifecycle_helpers import (
     _FAR_PAST,
     _PLACEHOLDER_DIGEST,
     _AuditCapture,
     _make_handle,
 )
-from tests.test_keyvault_wrap import FakeBackend
 
 
 @pytest.fixture

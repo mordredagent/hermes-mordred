@@ -36,7 +36,7 @@ from mordred_hermes.keyvault.backup import BackupCorrupt
 from mordred_hermes.keyvault.recovery import RecoveryDigestMismatch
 
 # Software Enclave stand-in — see module docstring of test_keyvault_wrap.
-from tests.test_keyvault_wrap import FakeBackend
+from tests._keyvault_fakes import FakeBackend
 
 # Canonical inputs. ASCII so the split-normalization layer is a no-op and
 # the digest is stable regardless of NFKD behavior.

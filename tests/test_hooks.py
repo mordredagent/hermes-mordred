@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -117,6 +119,33 @@ plugins:
         assert block_entries[0]["reason"] == "mordred.degraded.disable_unprotected"
         assert "mordred_network" in block_entries[0]["disabled_siblings"]
         # Process is poisoned
+        assert _runtime.is_poisoned()
+
+    def test_refusal_survives_a_broken_stderr(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The stderr presenter must never outrank the refusal.
+
+        Review 2026-07-29: in a host with a closed stderr (daemonized
+        gateway) the presenter's ``print`` raises an ordinary
+        ``ValueError``, which Hermes's except-Exception hook wrapper would
+        swallow — the session would start instead of aborting. Pin that
+        the refusal still escapes.
+        """
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_network
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        closed_stderr = io.StringIO()
+        closed_stderr.close()
+        monkeypatch.setattr(sys, "stderr", closed_stderr)
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.on_session_start()
         assert _runtime.is_poisoned()
 
     def test_strict_with_enabled_allowlist_excluding_sibling_raises(self, tmp_path: Path) -> None:

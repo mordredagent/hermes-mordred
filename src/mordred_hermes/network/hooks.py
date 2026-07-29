@@ -97,11 +97,6 @@ def _read_policy_mode(policy_json_path: Path) -> str:
     return settings_mod.read_policy_mode(policy_json_path, log=_LOG)
 
 
-def resolve_default_path(section: Mapping[str, Any] | None) -> str:
-    """Backward-compatible facade for :func:`network.settings.resolve_default_path`."""
-    return settings_mod.resolve_default_path(section)
-
-
 def _read_default_network_path(config_path: Path) -> str:
     """Read ``plugins.mordred_network.default_path`` from ``config.yaml``.
 

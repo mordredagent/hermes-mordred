@@ -195,8 +195,11 @@ class Runtime:
         self._tor_stop = tor_stop or tor_mod.stop
         # Deep-by-default liveness: circuit_status_health verifies ControlPort
         # reachability, cookie authentication, and a structurally valid
-        # GETINFO circuit-status response. A valid empty/LAUNCHED-only response
-        # is healthy because an idle Tor client builds circuits on demand;
+        # GETINFO circuit-status response. A BUILT circuit is healthy on its
+        # own; an empty/LAUNCHED-only response is inconclusive and resolves
+        # via Tor's GETINFO network-liveness verdict ("up" → healthy, "down"
+        # or query failure → unhealthy), so an idle Tor stays healthy while
+        # a running-but-circuit-less Tor whose upstream died reads unhealthy;
         # auth/control/protocol failures remain unhealthy. The probe is
         # signature-compatible with health(handle) and self-degrades to that
         # shallow process check when the optional [tor-control] extra (stem) or

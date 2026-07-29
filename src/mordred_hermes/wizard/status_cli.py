@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,6 +51,8 @@ __all__ = [
     "render_text",
     "status",
 ]
+
+_LOG = logging.getLogger("mordred.wizard.status_cli")
 
 #: Resolve the platform hardware-helper binary, or None. Injected in tests.
 HelperFinder = Callable[[str], str | None]
@@ -105,7 +108,10 @@ def _network_state(home: Path) -> tuple[str, bool, str | None, bool | None]:
     from ..network._exceptions import MordredNetworkError
     from ..network.settings import read_default_path
 
-    configured = read_default_path(home / "config.yaml")
+    # log= must be passed: with ``log=None`` the shared YAML loader swallows
+    # the malformed-config warning entirely and corrupted config.yaml would
+    # silently render as the clearnet default (review 2026-07-29).
+    configured = read_default_path(home / "config.yaml", log=_LOG)
     try:
         live_status = api.status()
     except MordredNetworkError:

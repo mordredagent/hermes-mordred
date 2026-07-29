@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import selectors
+import queue
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -135,34 +136,29 @@ A callable that, given a ``deadline_seconds`` budget, returns:
 def _make_default_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[], None]]:
     """Return ``(read_line, cleanup)`` honoring a per-call deadline.
 
-    For real ``Popen.stdout`` (has ``fileno``) we register the descriptor
-    with a :class:`selectors.DefaultSelector` and ``select(timeout=budget)``
-    — that's the only way to give ``readline()`` a deadline without
-    blocking. For test fakes (lists, generators) the next item is always
-    available so we just iterate; the deadline argument is ignored.
+    For real ``Popen.stdout`` (has ``fileno``) a daemon thread pumps
+    blocking ``readline()`` results into a queue, and ``read_line`` waits
+    on that queue with the caller's budget. An earlier version registered
+    the pipe with ``selectors.DefaultSelector``, but on Windows that is
+    ``select.select``-backed and only accepts sockets (pipes raise
+    ``OSError`` WinError 10038); the reader thread gives the same deadline
+    semantics on every platform (review 2026-07-29). For test fakes
+    (lists, generators) the next item is always available so we just
+    iterate; the deadline argument is ignored.
 
     Codex P1 / HIGH-2 fix (2026-05-13). Previously this function
     ``for line in stdout`` blocked indefinitely whenever tor stopped
     writing — that codepath is now gone.
+
+    ``cleanup()`` abandons the stream (the pump thread stops reading and
+    exits), matching the abandoned-stream semantics of the selectors
+    implementation this replaced — a later ``wait_for_bootstrap`` retry on
+    the same process is not raced by a still-draining earlier reader
+    (review 2026-07-29).
     """
     fileno_attr = getattr(stdout, "fileno", None)
     if callable(fileno_attr):
-        sel = selectors.DefaultSelector()
-        sel.register(cast(Any, stdout), selectors.EVENT_READ)
-
-        def read_line(deadline_seconds: float) -> str | None:
-            events = sel.select(timeout=max(deadline_seconds, 0.0))
-            if not events:
-                return ""
-            line = cast(Any, stdout).readline()
-            if not line:
-                return None
-            return cast(str, line)
-
-        def cleanup() -> None:
-            sel.close()
-
-        return read_line, cleanup
+        return _make_piped_read_line(stdout)
 
     iterator = iter(stdout)
 
@@ -179,6 +175,72 @@ def _make_default_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[
     return read_line_iter, cleanup_noop
 
 
+def _make_piped_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[], None]]:
+    """Reader-thread ``(read_line, cleanup)`` for a real pipe.
+
+    See :func:`_make_default_read_line` for the contract and the
+    portability rationale (selectors cannot watch pipes on Windows).
+
+    Reader-side errors are not swallowed on the pump thread: they are
+    delivered through the queue and re-raised by ``read_line``, preserving
+    the pre-thread behavior where a torn-down pipe raised on the caller's
+    thread and surfaced as ``BringupFailed`` with a real ``__cause__``
+    (review 2026-07-29). ``cleanup()`` makes the pump stop reading after
+    at most one already-in-flight line and exit.
+    """
+    lines: queue.SimpleQueue[str | BaseException | None] = queue.SimpleQueue()
+    stopped = threading.Event()
+    threading.Thread(
+        target=_pump_stdout_lines,
+        args=(stdout, lines, stopped),
+        name="mordred-tor-bootstrap-read",
+        daemon=True,
+    ).start()
+    eof_seen = False
+
+    def read_line(deadline_seconds: float) -> str | None:
+        nonlocal eof_seen
+        if eof_seen:
+            return None
+        try:
+            item = lines.get(timeout=max(deadline_seconds, 0.0))
+        except queue.Empty:
+            return ""
+        if isinstance(item, BaseException):
+            eof_seen = True
+            raise item
+        if item is None:
+            eof_seen = True
+        return item
+
+    def cleanup() -> None:
+        stopped.set()
+
+    return read_line, cleanup
+
+
+def _pump_stdout_lines(
+    stdout: Iterable[str],
+    lines: queue.SimpleQueue[str | BaseException | None],
+    stopped: threading.Event,
+) -> None:
+    """Pump thread body for :func:`_make_piped_read_line`.
+
+    Blocks in ``readline`` and forwards each line into ``lines``. Errors are
+    delivered (not swallowed) so ``read_line`` re-raises them; the trailing
+    ``None`` sentinel signals EOF or post-``cleanup`` abandonment.
+    """
+    try:
+        for line in stdout:
+            if stopped.is_set():
+                break
+            lines.put(line)
+    except Exception as exc:  # delivered, not swallowed: read_line re-raises
+        lines.put(exc)
+    finally:
+        lines.put(None)  # EOF/abandon sentinel
+
+
 def wait_for_bootstrap(
     process: _ProcessLike,
     *,
@@ -193,8 +255,8 @@ def wait_for_bootstrap(
     without producing the token.
 
     The ``read_line`` callable encapsulates "get next line, honoring a
-    per-call deadline". Default reads from ``process.stdout`` with
-    :mod:`selectors` so an idle real ``tor`` daemon cannot wedge the
+    per-call deadline". Default reads from ``process.stdout`` via a
+    reader thread so an idle real ``tor`` daemon cannot wedge the
     loop. Tests inject a fake that returns ``""`` (readiness timeout)
     or ``None`` (EOF) without touching real file descriptors.
     """
@@ -325,18 +387,31 @@ def circuit_status_health(
     """Deep liveness via Tor ControlPort ``GETINFO circuit-status``.
 
     Returns ``True`` when the ControlPort is reachable, authentication
-    succeeds, and Tor returns a structurally valid circuit-status response
-    that is empty or contains at least one non-terminal circuit. A valid
-    empty response is healthy: an idle Tor client may have no preemptive
-    circuits and will build one when the next SOCKS request arrives. A reply
-    containing only known terminal ``FAILED`` / ``CLOSED`` circuits is
-    unhealthy.
+    succeeds, and either the circuit-status reply lists at least one
+    well-formed ``BUILT`` circuit, or the reply is inconclusive (empty or
+    only in-progress / unknown non-terminal circuits) and Tor's own
+    ``GETINFO network-liveness`` verdict is ``up``. The liveness follow-up
+    keeps both prior behaviors honest at once: an idle Tor that tore down
+    its preemptive circuits stays healthy (liveness ``up``), while a
+    running-but-circuit-less Tor whose upstream died reads unhealthy
+    (liveness ``down``). FAILED/CLOSED circuits are pruned from
+    circuit-status output almost immediately, so the circuit list alone
+    cannot tell those two states apart (review 2026-07-29).
 
-    Tor may add circuit states in future protocol revisions. An unknown state
-    with a syntactically valid uppercase keyword is treated as non-terminal
-    and therefore healthy. This avoids falsely making the runtime's sticky
-    ``dropped`` decision merely because the local Tor is newer than this
-    package; malformed identifiers, state tokens, or lines remain unhealthy.
+    Tor may add circuit states in future protocol revisions. An unknown
+    state with a syntactically valid uppercase keyword is treated as
+    non-terminal (inconclusive) rather than unhealthy, so a newer local Tor
+    cannot cause a false sticky drop by itself. A reply whose well-formed
+    circuits are all terminal ``FAILED`` / ``CLOSED``, or a malformed reply
+    without a ``BUILT`` circuit, is unhealthy.
+
+    Deliberate consequence: an upstream outage sustained across the
+    runtime's consecutive-failure threshold (2 x 30s by default) latches
+    the sticky drop even though the tor daemon survives, and the operator
+    must re-activate the path. That is the strict-mode fail-closed
+    contract — the original BUILT-only probe latched in the same
+    situations (plus, wrongly, on idle), and softening the latch itself is
+    a runtime design decision, not a probe one (review 2026-07-29).
 
     Graceful degradation applies only when the deep probe is unavailable:
 
@@ -401,7 +476,18 @@ def circuit_status_health(
             response = controller.get_info("circuit-status")
         except Exception:
             return False
-        return _is_healthy_circuit_status(response)
+        verdict = _classify_circuit_status(response)
+        if verdict is not None:
+            return verdict
+        # Inconclusive circuit list: an idle Tor legitimately has no
+        # circuits, and a dead-but-alive Tor shows none either because
+        # FAILED/CLOSED entries are pruned from GETINFO output almost
+        # immediately. Tor's own reachability verdict tells them apart.
+        try:
+            liveness = controller.get_info("network-liveness")
+        except Exception:
+            return False
+        return liveness.strip() == "up"
     finally:
         with contextlib.suppress(Exception):
             controller.close()
@@ -410,11 +496,9 @@ def circuit_status_health(
 _TERMINAL_CIRCUIT_STATUSES: Final[frozenset[str]] = frozenset({"FAILED", "CLOSED"})
 
 
-def _is_healthy_circuit_status(response: str) -> bool:
-    """Validate and classify a ``GETINFO circuit-status`` value.
+def _classify_circuit_status(response: str) -> bool | None:
+    """Classify a ``GETINFO circuit-status`` value; ``None`` is inconclusive.
 
-    An empty string is Tor's valid representation of "no current circuits",
-    so successful authentication plus that response is a healthy idle probe.
     Non-empty lines follow torspec ``control-spec §4.1.1``:
 
     ``<CircuitID> <Status> [<Path>] [BUILD_FLAGS=...] ...``
@@ -422,37 +506,74 @@ def _is_healthy_circuit_status(response: str) -> bool:
     Stem strips ``250-`` / ``250+`` reply framing. We validate the circuit
     identifier and status keyword rather than treating every arbitrary string
     as a successful probe; optional trailing fields remain forward-compatible.
-    A leading standalone ``circuit-status=`` echo from older Tor versions is
-    tolerated.
+    A leading ``circuit-status=`` echo from older Tor versions is tolerated
+    in both its standalone-line and attached (``circuit-status=8 BUILT …``)
+    forms.
 
-    Empty, in-progress (``LAUNCHED`` / ``EXTENDED`` / ``GUARD_WAIT``), and
-    ready (``BUILT``) replies are healthy. A reply whose circuits are all in
-    the known terminal ``FAILED`` / ``CLOSED`` states is unhealthy. Unknown
-    uppercase state keywords are assumed non-terminal so a future Tor protocol
-    extension cannot cause a false sticky drop.
+    - ``True`` — at least one well-formed ``BUILT`` circuit. Malformed
+      sibling lines cannot veto it: a probe that proves a working circuit
+      must not sticky-drop the path over an unparseable neighbor line.
+    - ``False`` — a malformed reply with no ``BUILT`` circuit, or
+      well-formed circuits that are all in the known terminal ``FAILED`` /
+      ``CLOSED`` states.
+    - ``None`` — empty, or only in-progress (``LAUNCHED`` / ``EXTENDED`` /
+      ``GUARD_WAIT``) / unknown non-terminal circuits. The circuit list
+      alone cannot distinguish "healthy but idle" from "cannot build a
+      circuit"; :func:`circuit_status_health` resolves the tie with Tor's
+      ``network-liveness`` verdict.
     """
     if not isinstance(response, str):
         return False
 
-    lines = response.splitlines()
-    if lines and lines[0].strip() == "circuit-status=":
-        lines = lines[1:]
+    lines = _strip_circuit_status_echo(response.splitlines())
 
-    statuses: list[str] = []
+    saw_malformed = False
+    saw_terminal = False
+    saw_nonterminal = False
     for raw_line in lines:
         line = raw_line.strip()
         if not line:
             continue
-        tokens = line.split()
-        if len(tokens) < 2:
-            return False
-        circuit_id, status = tokens[:2]
-        if not (1 <= len(circuit_id) <= 16 and circuit_id.isascii() and circuit_id.isalnum()):
-            return False
-        if not _is_valid_circuit_status_keyword(status):
-            return False
-        statuses.append(status)
-    return not statuses or any(status not in _TERMINAL_CIRCUIT_STATUSES for status in statuses)
+        status = _parse_circuit_status_line(line)
+        if status is None:
+            saw_malformed = True
+        elif status == "BUILT":
+            return True
+        elif status in _TERMINAL_CIRCUIT_STATUSES:
+            saw_terminal = True
+        else:
+            saw_nonterminal = True
+    if saw_malformed:
+        return False
+    if saw_terminal and not saw_nonterminal:
+        return False
+    return None
+
+
+def _strip_circuit_status_echo(lines: list[str]) -> list[str]:
+    """Drop a leading ``circuit-status=`` echo, standalone or attached.
+
+    lstrip before matching: some Tor builds surface the echo with leading
+    whitespace, which must not read as a malformed line.
+    """
+    if lines:
+        first = lines[0].lstrip()
+        if first.startswith("circuit-status="):
+            lines[0] = first[len("circuit-status=") :]
+    return lines
+
+
+def _parse_circuit_status_line(line: str) -> str | None:
+    """The status keyword of one circuit-status line, or ``None`` if malformed."""
+    tokens = line.split()
+    if len(tokens) < 2:
+        return None
+    circuit_id, status = tokens[:2]
+    if not (1 <= len(circuit_id) <= 16 and circuit_id.isascii() and circuit_id.isalnum()):
+        return None
+    if not _is_valid_circuit_status_keyword(status):
+        return None
+    return status
 
 
 def _is_valid_circuit_status_keyword(status: str) -> bool:

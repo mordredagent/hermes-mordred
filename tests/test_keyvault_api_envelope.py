@@ -50,7 +50,7 @@ from mordred_hermes.keyvault._exceptions import (
 # Re-use FakeBackend from the wrap test module. Step-G will relocate it to a
 # shared tests._keyvault_fakes module; for now an explicit import is cleaner
 # than duplicating the fake.
-from tests.test_keyvault_wrap import FakeBackend
+from tests._keyvault_fakes import FakeBackend
 
 # ----------------------------- fixtures -----------------------------
 

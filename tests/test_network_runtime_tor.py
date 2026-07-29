@@ -68,9 +68,11 @@ class TestTorHealthDefaultIsDeepProbe:
                 return None
 
             def get_info(self, key: str) -> str:
-                del key
-                # A valid empty value means Tor is idle and will build a
-                # circuit when the next SOCKS request arrives.
+                # A valid empty circuit list means Tor is idle and will
+                # build a circuit when the next SOCKS request arrives; the
+                # probe then confirms via Tor's own liveness verdict.
+                if key == "network-liveness":
+                    return "up"
                 return ""
 
             def close(self) -> None:
