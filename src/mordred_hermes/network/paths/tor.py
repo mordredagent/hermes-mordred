@@ -77,7 +77,7 @@ def render_torrc(*, socks_port: int, control_port: int, data_dir: Path, disable_
     frozen process route.
 
     ``disable_ipv6`` emits ``ClientUseIPv6 0`` (strict defaults it to True,
-    lenient/off to False — see ``network.__init__._resolve_disable_ipv6``).
+    lenient/off to False — see ``network.settings.resolve_disable_ipv6``).
     This only controls Tor's own client connections; it does not disable host
     IPv6 or constrain provider SDK sockets, so the transport flagger cannot
     treat it as leak prevention. It defaults to False here so the parameter is
@@ -324,14 +324,21 @@ def circuit_status_health(
 ) -> bool:
     """Deep liveness via Tor ControlPort ``GETINFO circuit-status``.
 
-    Returns ``True`` if at least one circuit is in the ``BUILT`` state
-    (= the daemon can route a request right now), ``False`` if every
-    circuit is ``LAUNCHED`` / ``FAILED`` / ``CLOSED`` or the response
-    is empty.
+    Returns ``True`` when the ControlPort is reachable, authentication
+    succeeds, and Tor returns a structurally valid circuit-status response
+    that is empty or contains at least one non-terminal circuit. A valid
+    empty response is healthy: an idle Tor client may have no preemptive
+    circuits and will build one when the next SOCKS request arrives. A reply
+    containing only known terminal ``FAILED`` / ``CLOSED`` circuits is
+    unhealthy.
 
-    Graceful degradation contract: any failure short of "the probe
-    successfully said 'no BUILT circuits'" collapses to the shallow
-    :func:`health` check rather than crashing.
+    Tor may add circuit states in future protocol revisions. An unknown state
+    with a syntactically valid uppercase keyword is treated as non-terminal
+    and therefore healthy. This avoids falsely making the runtime's sticky
+    ``dropped`` decision merely because the local Tor is newer than this
+    package; malformed identifiers, state tokens, or lines remain unhealthy.
+
+    Graceful degradation applies only when the deep probe is unavailable:
 
     - Missing ``control_auth_cookie`` (Tor still bootstrapping or data
       dir wiped) → shallow fallback.
@@ -341,9 +348,9 @@ def circuit_status_health(
       ``False`` (runtime treats as drop). This is different from the
       ImportError case because a present-but-rejected cookie is a real
       Tor problem the operator should see.
-    - Any other Exception (network glitch, GETINFO syntax change) →
-      ``False``. Logging is deferred to the runtime so this stays a
-      pure boolean signal.
+    - Any other Exception (unreachable ControlPort, network glitch), or a
+      malformed ``GETINFO`` value → ``False``. Logging is deferred to the
+      runtime so this stays a pure boolean signal.
 
     The 30s liveness worker calls this every interval; the controller
     is closed on every call so the control-port socket pool doesn't
@@ -394,33 +401,68 @@ def circuit_status_health(
             response = controller.get_info("circuit-status")
         except Exception:
             return False
-        return _has_built_circuit(response)
+        return _is_healthy_circuit_status(response)
     finally:
         with contextlib.suppress(Exception):
             controller.close()
 
 
-def _has_built_circuit(response: str) -> bool:
-    """Return True if the GETINFO response lists at least one BUILT circuit.
+_TERMINAL_CIRCUIT_STATUSES: Final[frozenset[str]] = frozenset({"FAILED", "CLOSED"})
 
-    Format per torspec ``control-spec.txt §4.1.1``:
+
+def _is_healthy_circuit_status(response: str) -> bool:
+    """Validate and classify a ``GETINFO circuit-status`` value.
+
+    An empty string is Tor's valid representation of "no current circuits",
+    so successful authentication plus that response is a healthy idle probe.
+    Non-empty lines follow torspec ``control-spec §4.1.1``:
 
     ``<CircuitID> <Status> [<Path>] [BUILD_FLAGS=...] ...``
 
-    Lines starting with ``250-`` / ``250+`` (response framing) are
-    stripped by stem before the string reaches us, so the parse is just
-    "look for ``BUILT`` as the second whitespace-separated token". The
-    function tolerates a leading ``circuit-status=`` echo from older
-    Tor versions.
+    Stem strips ``250-`` / ``250+`` reply framing. We validate the circuit
+    identifier and status keyword rather than treating every arbitrary string
+    as a successful probe; optional trailing fields remain forward-compatible.
+    A leading standalone ``circuit-status=`` echo from older Tor versions is
+    tolerated.
+
+    Empty, in-progress (``LAUNCHED`` / ``EXTENDED`` / ``GUARD_WAIT``), and
+    ready (``BUILT``) replies are healthy. A reply whose circuits are all in
+    the known terminal ``FAILED`` / ``CLOSED`` states is unhealthy. Unknown
+    uppercase state keywords are assumed non-terminal so a future Tor protocol
+    extension cannot cause a false sticky drop.
     """
-    for raw_line in response.splitlines():
+    if not isinstance(response, str):
+        return False
+
+    lines = response.splitlines()
+    if lines and lines[0].strip() == "circuit-status=":
+        lines = lines[1:]
+
+    statuses: list[str] = []
+    for raw_line in lines:
         line = raw_line.strip()
-        if not line or line.startswith("circuit-status="):
+        if not line:
             continue
         tokens = line.split()
-        if len(tokens) >= 2 and tokens[1] == "BUILT":
-            return True
-    return False
+        if len(tokens) < 2:
+            return False
+        circuit_id, status = tokens[:2]
+        if not (1 <= len(circuit_id) <= 16 and circuit_id.isascii() and circuit_id.isalnum()):
+            return False
+        if not _is_valid_circuit_status_keyword(status):
+            return False
+        statuses.append(status)
+    return not statuses or any(status not in _TERMINAL_CIRCUIT_STATUSES for status in statuses)
+
+
+def _is_valid_circuit_status_keyword(status: str) -> bool:
+    """Whether ``status`` has Tor's extensible uppercase-keyword shape."""
+    return (
+        bool(status)
+        and status.isascii()
+        and status[0].isalpha()
+        and all(character.isupper() or character.isdigit() or character == "_" for character in status)
+    )
 
 
 def start_process(

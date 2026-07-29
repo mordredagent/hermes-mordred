@@ -12,7 +12,8 @@ Phase 3 PR2 wiring:
 
 Side-effect-free at module import: provider, hook, and runtime
 registration all happen inside :func:`register`. Tests verify this via
-the ``register(FakeCtx)`` assertions in ``tests/test_network_hooks.py``.
+the ``register(FakeCtx)`` assertions in
+``tests/test_network_hooks_registration.py``.
 """
 
 from __future__ import annotations
@@ -23,16 +24,17 @@ import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 from .._audit_support import build_audit_writer, safe_audit_append
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping
-from .._policy_types import VALID_ACTIVE_PATHS, VALID_POLICY_MODES
+from .._policy_types import VALID_ACTIVE_PATHS
 from .._yaml_io import load_plugin_section
 from . import api, hooks
+from . import settings as settings_mod
 from ._exceptions import MordredPathBringupFailed
-from .runtime import ActivePath, PolicyMode, Runtime, RuntimeConfig, route_config_fingerprint
+from .runtime import Runtime, RuntimeConfig, route_config_fingerprint
 from .vpn_providers import known_providers
 
 if TYPE_CHECKING:
@@ -132,7 +134,7 @@ def _registration_config(audit: Writer) -> RuntimeConfig:
 def _policy_mode_for_registration_refusal() -> str:
     """Best-effort policy label; the refusal itself always remains strict."""
     try:
-        return hooks._read_policy_mode(DEFAULT_POLICY_JSON_PATH)
+        return settings_mod.read_policy_mode(DEFAULT_POLICY_JSON_PATH, log=_LOG)
     except Exception as error:
         _LOG.error("policy-mode read failed while preparing network refusal: %s", error)
         return "strict"
@@ -402,10 +404,12 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     ``~/.hermes`` and leak Tor cookies across profiles when the user
     has ``HERMES_HOME`` set or an ``active_profile`` configured.
 
-    Falls back to safe defaults (off / clearnet / built-in
-    RuntimeConfig defaults) when the policy / config files are absent
-    or malformed -- matches the hooks-layer fallback so the two readers
-    stay in agreement.
+    Missing policy/config files use the unconfigured defaults (off /
+    clearnet / built-in ``RuntimeConfig`` values). Damaged existing policy
+    state always resolves to strict. Under strict policy, malformed config
+    structure or an invalid explicit ``default_path`` raises so registration
+    can refuse before provider construction; lenient/off retain tolerant
+    field-level defaults. These semantics match the hook layer.
 
     ``mullvad_killswitch`` is intentionally NOT wired here yet
     (RuntimeConfig has no field for it; the VPN path derives lockdown
@@ -416,20 +420,20 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     # Registration precedes provider construction, so it must use the same
     # fail-closed policy reader as the hook layer. A damaged existing policy
     # cannot silently disable pre-client route activation.
-    policy_mode = hooks._read_policy_mode(policy_json_path)
-    disable_ipv6 = _resolve_disable_ipv6(policy_data, policy_mode)
+    policy_mode = settings_mod.read_policy_mode(policy_json_path, log=_LOG)
+    disable_ipv6 = settings_mod.resolve_disable_ipv6(policy_data, policy_mode)
     network = _load_network_section(config_path)
     # Under strict policy, damage to an existing config must abort before a
     # direct provider client can be constructed. Missing/unconfigured files
     # still resolve to clearnet by the strict reader's contract.
     default_path = (
-        hooks._read_default_network_path_strict(config_path)
+        settings_mod.read_default_path_strict(config_path)
         if policy_mode == "strict"
-        else hooks.resolve_default_path(network)
+        else settings_mod.resolve_default_path(network)
     )
     return RuntimeConfig(
-        policy_mode=cast(PolicyMode, policy_mode),
-        default_path=cast(ActivePath, default_path),
+        policy_mode=policy_mode,
+        default_path=default_path,
         tor_binary=_resolve_tor_binary(network),
         tor_socks_port=_resolve_tor_socks_port(network),
         tor_data_dir=HERMES_BASE / "mordred" / "tor-data",
@@ -455,34 +459,6 @@ def _load_policy_json(policy_json_path: Path) -> dict[str, Any]:
     return load_policy_mapping(policy_json_path, log=_LOG)
 
 
-def _resolve_policy_mode(data: dict[str, Any]) -> str:
-    """Derive ``policy_mode`` from a pre-loaded ``policy.json`` dict."""
-    mode = data.get("policy", "off")
-    # Codex round 3 P2 (2026-05-14): isinstance check first; ``in`` on a
-    # frozenset raises TypeError for unhashable values like ``[]`` or
-    # ``{}``. A corrupted ``policy.json`` must collapse to ``off``, not
-    # crash plugin registration before the hooks are installed.
-    if isinstance(mode, str) and mode in VALID_POLICY_MODES:
-        return mode
-    return "off"
-
-
-def _resolve_disable_ipv6(data: dict[str, Any], policy_mode: str) -> bool:
-    """Derive ``disable_ipv6`` from a pre-loaded ``policy.json`` dict.
-
-    Phase 3 PR3a Task #2. If the user pinned a bool, honour it. Otherwise
-    default by policy mode: ``strict`` → ``True`` (safe-by-default IPv6
-    leak defence), ``lenient`` / ``off`` → ``False`` (user-friendly).
-
-    Non-bool values (``"yes"``, ``1``, ``[]``) collapse to the mode default
-    -- the contract is documented in POLICY.md §disable_ipv6 schema.
-    """
-    raw = data.get("disable_ipv6")
-    if isinstance(raw, bool):
-        return raw
-    return policy_mode == "strict"
-
-
 def _load_network_section(config_path: Path) -> dict[str, Any]:
     """Open ``config.yaml`` and return ``plugins.mordred_network`` as a dict.
 
@@ -492,8 +468,8 @@ def _load_network_section(config_path: Path) -> dict[str, Any]:
     All failure modes collapse to ``{}`` so downstream resolvers apply
     their own defaults without crashing plugin registration. The
     ``plugins.mordred_network`` extraction is shared with
-    ``hooks._read_default_network_path`` via :func:`load_plugin_section`
-    so the two readers cannot drift.
+    :func:`network.settings.read_default_path` via
+    :func:`load_plugin_section` so the readers cannot drift.
     """
     return load_plugin_section(config_path, "mordred_network", log=_LOG) or {}
 

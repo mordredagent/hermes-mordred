@@ -103,9 +103,9 @@ def _network_state(home: Path) -> tuple[str, bool, str | None, bool | None]:
     """(configured_path, live, active_path, ready) without bringing anything up."""
     from ..network import api
     from ..network._exceptions import MordredNetworkError
-    from .network_cli import _read_default_path_from_config
+    from ..network.settings import read_default_path
 
-    configured = _read_default_path_from_config(home / "config.yaml")
+    configured = read_default_path(home / "config.yaml")
     try:
         live_status = api.status()
     except MordredNetworkError:

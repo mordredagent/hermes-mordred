@@ -283,9 +283,10 @@ Three steps, in order:
    It asks for three values in order: ① the 24-word Seed Phrase, ② the Passphrase,
    ③ the top4(PoW) hex (shown on the init screen).
 
-> No hardware key? `keyvault init` degrades to a software-protected key by
-> design — at-rest encryption still holds, the hardware-binding guarantee is
-> lower. The ceremony itself is unchanged.
+> On macOS, `keyvault init` can degrade to a software P-256 key in the login
+> Keychain when Secure Enclave access is unavailable. Linux has no software
+> floor: install the TPM helper with `keyvault enable-tpm`, or initialization
+> fails closed. The ceremony itself is otherwise unchanged.
 
 > The **first** `encryption enable` creates the underlying vault and asks once
 > for a recovery passphrase (keep it safe — it is the cold-path recovery if the
@@ -639,5 +640,6 @@ including under strict mode).
   idle" only (not while mounted under the same user).
 - **Linux**: TPM 2.0 is the key backend (`keyvault enable-tpm`). MVP binding is
   machine-only (Tier 2 — no per-use PIN/PCR prompt).
-- Where there is no hardware backend, the vault degrades to a software-protected
-  key by design (still encrypted at rest, lower hardware-binding guarantee).
+- **Fallback behavior**: macOS can use a software P-256 key in the login
+  Keychain when Secure Enclave access is unavailable. Linux deliberately has no
+  software fallback and fails closed without the TPM helper.

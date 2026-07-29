@@ -65,23 +65,29 @@ def _import_pairing() -> Any:
     1. ``mordred_hermes.extension.pairing`` — ships with this plugin (#30
        port). Same ``pending.json`` contract as the full-gateway code, so
        codes generated here are consumable by either server implementation.
-       Note the package ``__init__`` eagerly imports ``.api`` (aiohttp), so
-       this import needs the ``extension`` extra installed.
+       The extension package is lazy, so this pairing-only path does not need
+       the WebSocket server's optional aiohttp dependency.
     2. ``gateway.extension_pairing`` — Hermes-fork layout, kept as a fallback
        for full-gateway checkouts whose plugin copy predates the port (the
        repo root is added to sys.path when running from such a checkout).
 
-    Raises :class:`ExtensionGatewayUnavailable` — instead of leaking the raw
-    ``ImportError`` — when neither is importable: e.g. the published
-    ``0.1.0a1`` wheel (predates the extension package) or a newer build
-    without the ``extension`` extra's dependencies.
+    Raises :class:`ExtensionGatewayUnavailable` when the ported module is
+    absent and neither legacy backend location is importable: e.g. the
+    published ``0.1.0a1`` wheel, which predates the extension package.
+    Import errors *inside* the ported implementation are propagated so a
+    broken installation is never mistaken for an old one.
     """
-    ported_exc: ImportError
+    ported_exc: ModuleNotFoundError
     try:
         from mordred_hermes.extension import pairing as ported
 
         return ported
-    except ImportError as exc:
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "mordred_hermes.extension",
+            "mordred_hermes.extension.pairing",
+        }:
+            raise
         ported_exc = exc
 
     try:
@@ -98,15 +104,13 @@ def _import_pairing() -> Any:
             from gateway import extension_pairing as pairing
         except ImportError as gw_exc:
             # Surface BOTH failures: chaining alone would suppress whichever
-            # one isn't the explicit cause, and they can differ (missing
-            # aiohttp vs. a broken fallback checkout).
+            # one isn't the explicit cause, and they can differ (a broken
+            # plugin install vs. a broken fallback checkout).
             raise ExtensionGatewayUnavailable(
                 "extension pairing is not available in this build: importing "
                 f"`mordred_hermes.extension.pairing` failed ({ported_exc}); the "
                 f"`gateway.extension_pairing` fallback also failed ({gw_exc}). "
-                'Install the `extension` extra (`pip install "mordred-hermes[extension]"` '
-                "or, inside this repo, `uv sync --extra extension`) on a build newer "
-                "than 0.1.0a1."
+                "Install a complete mordred-hermes build newer than 0.1.0a1."
             ) from ported_exc
     return pairing
 

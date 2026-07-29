@@ -213,7 +213,7 @@ Added 2026-05-14 alongside the Phase 3 PR3a network slice.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `disable_ipv6` | bool | strict → `true`, lenient/off → `false` | Advisory Tor-client preference. Reader: `mordred_hermes.network._resolve_disable_ipv6`. Writer: `PolicySnapshot.disable_ipv6` (wizard computes from policy mode and writes explicitly). User pin always wins over the mode default. Non-bool values fall back to the mode default with a WARN log. |
+| `disable_ipv6` | bool | strict → `true`, lenient/off → `false` | Advisory Tor-client preference. Reader: `mordred_hermes.network.settings.resolve_disable_ipv6`. Writer: `PolicySnapshot.disable_ipv6` (wizard computes from policy mode and writes explicitly). User pin always wins over the mode default. Non-bool values fall back to the mode default. |
 | `provider_overrides` | object keyed by provider id | `{}` | Additive transport facts for internal providers. Baseline provider ids are immutable and cannot be replaced. Reader: `mordred_hermes.network.hooks._read_provider_overrides`. |
 
 When `disable_ipv6=true`, the runtime renders Tor's `ClientUseIPv6 0` option. This affects Tor's own outbound client connections; it does **not** disable host IPv6, filter resolver AAAA answers, or constrain sockets opened directly by a provider SDK. Therefore `provider_transport_flagger._flag_for_ipv6` is never suppressed by this setting: strict + Tor aborts for `respects_ipv6_proxy=False`, while lenient warns. Host-level enforcement is **v2-N2 deferred**.
@@ -304,6 +304,16 @@ Phase 4 keyvault will replace the plaintext `.env` storage with AES-GCM-encrypte
 
 ## Tor ControlPort optional extra (Task #5)
 
-`pip install mordred-hermes[tor-control]` adds `stem>=1.8.0,<2` so `paths/tor.py::circuit_status_health(handle, *, controller_factory=None)` can perform a deep liveness check (cookie auth + `GETINFO circuit-status` → at least one `BUILT` circuit = healthy). Missing the extra collapses gracefully to the shallow `process.poll()` check. Strict-mode operators opt in via the runtime's `tor_health` injection; lenient/off operators don't need it.
+`pip install mordred-hermes[tor-control]` adds `stem>=1.8.0,<2` so
+`paths/tor.py::circuit_status_health(handle, *, controller_factory=None)` can
+perform the runtime's default deep liveness check. After successful cookie
+authentication, an empty `GETINFO circuit-status` reply or one containing at
+least one non-terminal circuit is healthy because idle Tor builds circuits on
+demand. Known terminal `FAILED`/`CLOSED`-only replies are unhealthy.
+Syntactically valid unknown uppercase statuses are treated as non-terminal so
+a newer Tor protocol cannot trigger a false sticky drop. Missing stem or a
+not-yet-created cookie falls back to the shallow `process.poll()` check;
+authentication, ControlPort, GETINFO, and malformed-response failures are
+unhealthy.
 
 `stem`'s last release was 2021-12. The optional-extra pattern bounds the supply-chain blast radius and makes future replacement (raw-socket cookie-auth) a small diff.

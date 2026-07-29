@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.privacy_check import _runtime, hooks
+from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 
 def _audit_entries(log_path: Path) -> list[dict[str, object]]:
@@ -94,7 +95,7 @@ class TestOnSessionStartNoSiblingsDisabled:
 
 
 class TestOnSessionStartStrictAbort:
-    def test_strict_with_disabled_sibling_raises_systemexit(self, tmp_path: Path) -> None:
+    def test_strict_with_disabled_sibling_raises_integrity_refusal(self, tmp_path: Path) -> None:
         config = _write_config(
             tmp_path / "config.yaml",
             """\
@@ -107,9 +108,9 @@ plugins:
         )
         audit = tmp_path / "audit.log"
         _runtime.ensure_state(config_path=config, audit_path=audit)
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
-        # Audit landed before SystemExit
+        # Audit landed before the refusal
         entries = _audit_entries(audit)
         block_entries = [e for e in entries if e.get("decision") == "block"]
         assert len(block_entries) == 1
@@ -135,7 +136,7 @@ plugins:
 """,
         )
         _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
 
     def test_shared_integrity_hook_detects_disabled_privacy_plugin(self, tmp_path: Path) -> None:
@@ -151,7 +152,7 @@ plugins:
 """,
         )
         _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.check_plugin_integrity()
         assert _runtime.is_poisoned()
 
@@ -167,7 +168,7 @@ plugins:
 """,
         )
         _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.check_plugin_integrity()
 
 
@@ -331,7 +332,7 @@ plugins:
 
 # --------------------------------------------------------------------------- #
 # safe_audit_append routing — an audit-write failure must not bypass a        #
-# refusal decision (block / SystemExit)                                      #
+# refusal decision (block / MordredIntegrityRefused)                         #
 # --------------------------------------------------------------------------- #
 
 
@@ -342,7 +343,8 @@ class _RaisingAudit:
     Hermes wraps every hook callback in ``except Exception: log & continue``.
     Before the fix, ``state.audit.append(...)`` was called directly and its
     exception propagated straight into that wrapper — swallowed BEFORE the
-    ``raise SystemExit`` / ``return {"action": "block"}`` a few lines later
+    ``raise MordredIntegrityRefused`` / ``return {"action": "block"}`` a few
+    lines later
     ever executed. That let a broken audit sink silently unblock a strict
     session. ``safe_audit_append`` must swallow this itself so the refusal
     below it is unconditionally reached.
@@ -359,7 +361,7 @@ class TestAuditWriteFailureCannotBypassEnforcement:
     even when the audit sink itself is broken.
     """
 
-    def test_on_session_start_strict_disabled_sibling_still_raises_systemexit(self, tmp_path: Path) -> None:
+    def test_on_session_start_strict_disabled_sibling_still_refuses(self, tmp_path: Path) -> None:
         config = _write_config(
             tmp_path / "config.yaml",
             """\
@@ -372,10 +374,10 @@ plugins:
         )
         state = _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
         _runtime._state = dataclasses.replace(state, audit=_RaisingAudit())
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
         # Defense in depth must still engage — the poison flag is the
-        # backstop if a higher harness swallows the SystemExit.
+        # backstop if a higher harness swallows the refusal.
         assert _runtime.is_poisoned()
 
     def test_pre_tool_call_poisoned_still_blocks(self, strict_config: Path, tmp_path: Path) -> None:

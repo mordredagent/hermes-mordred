@@ -193,16 +193,14 @@ class Runtime:
         self._tor_start = tor_start_process or tor_mod.start_process
         self._tor_wait = tor_wait_for_bootstrap or tor_mod.wait_for_bootstrap
         self._tor_stop = tor_stop or tor_mod.stop
-        # Deep-by-default liveness (2026-07-13): circuit_status_health probes
-        # the Tor ControlPort (GETINFO circuit-status) and reports unhealthy
-        # when the daemon is running but has NO BUILT circuit — a
-        # dead-but-alive Tor the shallow process.poll() check (tor_mod.health)
-        # can never detect. It is signature-compatible with health(handle) and
-        # SELF-DEGRADES to that shallow check when the optional [tor-control]
-        # extra (stem) is absent or the control cookie is missing, so this is a
-        # safe drop-in: without stem it behaves exactly as before; WITH stem +
-        # the cookie (render_torrc already emits ControlPort +
-        # CookieAuthentication 1) it catches the running-but-no-circuit case.
+        # Deep-by-default liveness: circuit_status_health verifies ControlPort
+        # reachability, cookie authentication, and a structurally valid
+        # GETINFO circuit-status response. A valid empty/LAUNCHED-only response
+        # is healthy because an idle Tor client builds circuits on demand;
+        # auth/control/protocol failures remain unhealthy. The probe is
+        # signature-compatible with health(handle) and self-degrades to that
+        # shallow process check when the optional [tor-control] extra (stem) or
+        # control cookie is absent.
         # Tests still override via the tor_health= injection param.
         self._tor_health = tor_health or tor_mod.circuit_status_health
         # The "vpn" path delegates to a selectable provider (Mullvad by

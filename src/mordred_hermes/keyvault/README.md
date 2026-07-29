@@ -1,6 +1,11 @@
 # mordred_keyvault
 
-Secure Enclave-backed key management. macOS Apple Silicon **or T2 Intel** (`pip install mordred-hermes[macos]`). Capability is determined by a runtime probe rather than chip-class checking — `is_secure_enclave_available()` returns False on Linux / Windows without ever loading pyobjc (codex review MEDIUM-1).
+Hardware-backed key management: Secure Enclave on supported macOS systems
+(`pip install mordred-hermes[macos]`) and the packaged TPM 2.0 helper on
+Linux. macOS can fall back to a software P-256 key in the login Keychain when
+Secure Enclave access is unavailable; Linux fails closed without its TPM
+helper. Capabilities are selected by runtime probes rather than chip-class
+checks, and probing another platform never imports macOS-only pyobjc.
 
 ## Owned filesystem paths (see `docs/dev/PATHS.md`)
 
@@ -17,13 +22,16 @@ Secure Enclave-backed key management. macOS Apple Silicon **or T2 Intel** (`pip 
 | `_exceptions.py` | PR3 (this) | **landed** | `WrapError` base + 5 sibling subclasses (Parse, Integrity, NativeUnavailable, AuthCancelled, KeyNotFound) — codex NIT-1 split of the originally-proposed single `WrapAuthFailed` |
 | `native.py` | PR3 (this) | **landed** | Lazy `Security.framework` boundary; `_lazy_import_security()` (cached, non-Darwin short-circuit), `is_secure_enclave_available()` (infallible capability probe) |
 | `wrap.py` | PR3 (this) | **landed** | DEK wrap/unwrap via raw P-256 ECDH + HKDF-SHA256 + AES-KW (RFC 3394); `NativeBackend` Protocol for Keychain/SecKey ops only (HKDF/AES-KW/wire parsing in pure Python, tested with real crypto) |
-| `api.py` | PR4 | placeholder | Public Python API (generate / encrypt / decrypt / export_backup / import_backup / verify_digest); BIP39 Unicode normalization gates here; production `_SecKeyBackend` (pyobjc) lands with this PR |
+| `api.py` | PR4 | **landed** | Public Python API (`prepare_generate` / `confirm_generate` / encrypt / decrypt / backup import/export / digest verification); BIP39 Unicode normalization and the two-phase durable-init gate live here |
 | `seed_display.py` | PR7 | **landed** | `display_seed()` orchestrator: blackout assert → M4 banner → screenshot pre-check → `SeedDisplayHandle.consume()` → 60s monotonic timer + capture polling → auto-clear; `_default_capture_probe` wraps macOS `CGScreenIsBeingCaptured` (best-effort, fails open); `SeedDisplaySurface` Protocol abstracts rendering |
 | `network_fallback.py` | PR5 | **landed** | OS-API blackout fallback: `resolve_blackout_assert()` delegates to `mordred_network` when importable, else probes macOS `SCNetworkReachability` (pyobjc, lazy import); `blackout_assert` fails closed when the probe cannot run |
 | `log_encryption.py` | PR6 | **landed** | `EncryptedWriter` (Phase 1 `Writer` Protocol) + `decrypt_log_file`; `MRAL` v1 line-oriented AES-GCM wire format, keyvault-wrapped DEK in the header, per-entry AAD bound to `SHA-256(header)` |
-| `extension_sign.py` | #204 | **landed, unreachable** | `personal_sign` / `sign_typed_data_v4` / `sign_transaction` for the browser extension. Pure Python API — no `gateway` import — but nothing in this repo calls it yet: the caller is the gateway WebSocket server, which lives in the Hermes-fork counterpart to this plugin and isn't published alongside `mordred-hermes` (see `docs/dev/ROADMAP.md` §"Browser-extension gateway counterpart (deferred)"). Requires the `ethereum` extra. |
+| `extension_sign.py` | #204 | **landed** | `personal_sign` / `sign_typed_data_v4` / `sign_transaction`, called by the packaged `mordred_hermes.extension.wallet` and RPC bridge. Requires the `ethereum` extra. |
 
-`register(ctx)` remains a no-op until Phase 4 PR4 wires the public surface to Hermes.
+`register(ctx)` installs transparent environment decrypt, the host `.env`
+write guard, the shared integrity hook, and best-effort session-boundary
+resealing. Public crypto APIs are invoked explicitly by the wizard and
+extension layers rather than registered as Hermes hooks.
 
 ## Wire format (Phase 4 PR2 baseline, frozen 2026-05-14)
 

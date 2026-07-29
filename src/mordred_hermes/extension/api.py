@@ -47,6 +47,7 @@ from .crypto import (
     key_id,
 )
 from .wallet import _do_sign, _get_address, _prepare_sign, _wallet_chain_id_hex, analyze_sign
+from .webauthn import InvalidWebAuthnPublicKey
 
 # K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
 _EXTCHAT_SALT = "mordred-extchat-v1"
@@ -543,7 +544,20 @@ class _Connection:
                     }
                 )
                 return
-            pairing.save_webauthn_credential(cred_id, pub, origin=self.client_origin)
+            try:
+                pairing.save_webauthn_credential(cred_id, pub, origin=self.client_origin)
+            except InvalidWebAuthnPublicKey:
+                # The public wire error is deliberately stable and does not
+                # expose parser/backend details from the rejected DER key.
+                await self._send(
+                    {
+                        "id": mid,
+                        "type": "webauthn_registered",
+                        "ok": False,
+                        "error": "invalid_public_key",
+                    }
+                )
+                return
         else:
             pairing.clear_webauthn_credential()  # unregister
         await self._send({"id": mid, "type": "webauthn_registered", "ok": True})

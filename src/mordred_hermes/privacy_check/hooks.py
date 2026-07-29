@@ -7,10 +7,11 @@ ignore unknown kwargs.
 
 Return shape contracts (HOOK_PAYLOADS.md §1, §4):
 
-- ``on_session_start`` — return value ignored. ``SystemExit`` propagates
-  past Hermes's ``except Exception`` wrapper (because ``SystemExit``
-  inherits ``BaseException``), letting strict mode actually abort the
-  session. Defense in depth: also poisons the process so any
+- ``on_session_start`` — return value ignored.
+  :class:`MordredIntegrityRefused` propagates past Hermes's
+  ``except Exception`` wrapper, letting strict mode actually abort the
+  session without masquerading as an ordinary process exit. Defense in
+  depth: also poisons the process so any
   subsequent ``pre_tool_call`` blocks unconditionally.
 - ``pre_tool_call`` — return ``None`` to allow, or
   ``{"action": "block", "message": str}`` to block.
@@ -23,6 +24,7 @@ from typing import Any
 
 from .._audit_support import safe_audit_append
 from . import _runtime
+from ._exceptions import MordredIntegrityRefused
 from .policy import evaluate_pre_tool_call
 
 _LOG = logging.getLogger("mordred.privacy_check")
@@ -31,7 +33,7 @@ _LOG = logging.getLogger("mordred.privacy_check")
 def check_plugin_integrity(**_kwargs: Any) -> None:
     """Detect an explicitly disabled Mordred plugin from any live sibling.
 
-    Strict + sibling-disable → audit + poison + ``SystemExit``.
+    Strict + sibling-disable → audit + poison + integrity refusal.
     Lenient/off + sibling-disable → audit (warn) + log warning, continue.
 
     Every runtime plugin registers this same callback. That is deliberate:
@@ -47,10 +49,10 @@ def check_plugin_integrity(**_kwargs: Any) -> None:
         # safe_audit_append, not a bare append: Hermes wraps every hook callback
         # in ``except Exception`` and logs-and-continues. A plain Exception from
         # the audit write (disk full, permission flip, an over-long entry) would
-        # therefore be swallowed BEFORE the SystemExit below ever fires, and the
-        # session would proceed unprotected — a fail-open bypass of the very gate
-        # this hook exists to enforce. The refusal must outrank the audit write,
-        # so audit-side errors are logged and swallowed here instead.
+        # therefore be swallowed BEFORE the refusal below ever fires, and the
+        # session would proceed unprotected — a fail-open bypass of the very
+        # gate this hook exists to enforce. The refusal must outrank the audit
+        # write, so audit-side errors are logged and swallowed here instead.
         safe_audit_append(
             state.audit,
             {
@@ -68,7 +70,7 @@ def check_plugin_integrity(**_kwargs: Any) -> None:
             )
             _runtime.poison(msg)
             _LOG.error(msg)
-            raise SystemExit(msg)
+            raise MordredIntegrityRefused(msg)
         _LOG.warning("Mordred siblings disabled in %s mode: %s", state.policy_mode, sorted(disabled))
 
 

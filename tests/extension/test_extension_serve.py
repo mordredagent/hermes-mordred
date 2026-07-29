@@ -12,6 +12,7 @@ cannot hang.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import signal
 import socket
@@ -23,6 +24,64 @@ import pytest
 
 from mordred_hermes.extension.__main__ import main, serve
 from mordred_hermes.wizard.cli import _setup_subparser
+
+_NO_AIOHTTP_IMPORT_PROBE = """\
+import sys
+
+sys.modules["aiohttp"] = None
+
+import mordred_hermes.extension
+from mordred_hermes.extension import pairing
+from mordred_hermes.extension.__main__ import main
+
+try:
+    main(["--help"])
+except SystemExit as exc:
+    assert exc.code == 0
+else:
+    raise AssertionError("--help did not exit")
+
+print(f"PAIRING={pairing.__name__}")
+"""
+
+_BROKEN_API_IMPORT_PROBE = """\
+import contextlib
+import importlib.util
+import io
+import sys
+
+
+class BrokenApiFinder:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "mordred_hermes.extension.api":
+            return importlib.util.spec_from_loader(fullname, self)
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        raise ModuleNotFoundError(
+            "No module named 'extension_internal_dependency'",
+            name="extension_internal_dependency",
+        )
+
+
+sys.meta_path.insert(0, BrokenApiFinder())
+
+from mordred_hermes.extension.__main__ import serve
+
+stderr = io.StringIO()
+try:
+    with contextlib.redirect_stderr(stderr):
+        serve()
+except ModuleNotFoundError as exc:
+    assert exc.name == "extension_internal_dependency"
+else:
+    raise AssertionError("API import failure was swallowed")
+
+assert "extension` extra" not in stderr.getvalue()
+"""
 
 
 @pytest.fixture(autouse=True)
@@ -49,32 +108,69 @@ def _build_wizard_parser() -> argparse.ArgumentParser:
 
 
 def test_main_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
-    # NOTE: this cannot prove `--help` works without aiohttp — the package
-    # __init__ eagerly imports .api (and thus aiohttp) before __main__ ever
-    # runs; the friendly missing-extra path lives in the wizard handler and
-    # is covered by test_wizard_extension_serve_missing_extra below.
+    # Argument parsing is dependency-light; aiohttp is checked only once
+    # ``serve`` is called.
     with pytest.raises(SystemExit) as exc_info:
         main(["--help"])
     assert exc_info.value.code == 0
     assert "ws://127.0.0.1:7788/ext" in capsys.readouterr().out
 
 
+def test_package_pairing_and_help_import_without_aiohttp() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", _NO_AIOHTTP_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ws://127.0.0.1:7788/ext" in completed.stdout
+    assert "PAIRING=mordred_hermes.extension.pairing" in completed.stdout
+
+
 def test_wizard_extension_serve_missing_extra(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Simulate the `extension` extra being absent: a None entry in sys.modules
-    # makes `from mordred_hermes.extension.__main__ import serve` raise
-    # ImportError exactly as an uninstalled aiohttp would.
-    import sys
-
     from mordred_hermes.wizard._cli_parsers import _handle_extension_serve
 
-    monkeypatch.setitem(sys.modules, "mordred_hermes.extension.__main__", None)
+    real_import_module = importlib.import_module
+
+    def import_without_aiohttp(name: str, package: str | None = None):
+        if name == "aiohttp":
+            raise ModuleNotFoundError("No module named 'aiohttp'", name="aiohttp")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", import_without_aiohttp)
     rc = _handle_extension_serve(argparse.Namespace(host="127.0.0.1", port=7788))
     assert rc == 2
     err = capsys.readouterr().err
     assert "extension` extra" in err
-    assert "import failed:" in err
+    assert "import failed:" not in err
+
+
+def test_wizard_extension_serve_does_not_misclassify_launcher_import_bug(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.wizard._cli_parsers import _handle_extension_serve
+
+    monkeypatch.setitem(sys.modules, "mordred_hermes.extension.__main__", None)
+    with pytest.raises(ModuleNotFoundError):
+        _handle_extension_serve(argparse.Namespace(host="127.0.0.1", port=7788))
+    assert "extension` extra" not in capsys.readouterr().err
+
+
+def test_serve_does_not_misclassify_api_internal_import_bug() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", _BROKEN_API_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_serve_rejects_non_loopback_host(capsys: pytest.CaptureFixture[str]) -> None:

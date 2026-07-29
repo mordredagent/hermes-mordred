@@ -1,1 +1,1 @@
-"""mordred_network.paths — Phase 0 placeholder."""
+"""Concrete clearnet, Tor, and VPN path implementations."""

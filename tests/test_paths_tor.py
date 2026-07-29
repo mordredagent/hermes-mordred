@@ -393,11 +393,18 @@ class _FakeController:
     masked the production API mismatch.
     """
 
-    def __init__(self, *, get_info_response: str = "", auth_raises: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        get_info_response: str = "",
+        auth_raises: BaseException | None = None,
+        get_info_raises: BaseException | None = None,
+    ) -> None:
         self.authenticated: bool = False
         self.closed: bool = False
         self._get_info_response = get_info_response
         self._auth_raises = auth_raises
+        self._get_info_raises = get_info_raises
 
     def authenticate(self) -> None:
         if self._auth_raises is not None:
@@ -408,6 +415,8 @@ class _FakeController:
         assert self.authenticated, "controller used before authenticate()"
         if key != "circuit-status":
             raise KeyError(key)
+        if self._get_info_raises is not None:
+            raise self._get_info_raises
         return self._get_info_response
 
     def close(self) -> None:
@@ -448,18 +457,21 @@ class TestCircuitStatusHealth:
         # fake no longer tracks them. The cookie *file* existence is still
         # a precondition asserted by _make_handle's setUp.
 
-    def test_only_launched_circuits_returns_false(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("status", ["LAUNCHED", "EXTENDED", "GUARD_WAIT", "BUILT"])
+    def test_active_or_progress_circuit_returns_true(self, tmp_path: Path, status: str) -> None:
+        """A successful probe is healthy before or after circuit construction."""
         from mordred_hermes.network.paths import tor
 
         handle = self._make_handle(tmp_path)
-        fake = _FakeController(get_info_response="42 LAUNCHED $abc\n43 LAUNCHED $def")
+        fake = _FakeController(get_info_response=f"42 {status} $abc")
 
         def factory(*, host: str, port: int) -> _FakeController:
             return fake
 
-        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+        assert tor.circuit_status_health(handle, controller_factory=factory) is True
 
-    def test_no_circuits_returns_false(self, tmp_path: Path) -> None:
+    def test_no_circuits_returns_true_for_healthy_idle_tor(self, tmp_path: Path) -> None:
+        """Tor tears down unused preemptive circuits after a long idle period."""
         from mordred_hermes.network.paths import tor
 
         handle = self._make_handle(tmp_path)
@@ -467,6 +479,78 @@ class TestCircuitStatusHealth:
 
         def factory(*, host: str, port: int) -> _FakeController:
             return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            "42 FAILED $abc REASON=TIMEOUT",
+            "42 CLOSED $abc REASON=FINISHED",
+            "42 FAILED $abc REASON=TIMEOUT\n43 CLOSED $def REASON=FINISHED",
+        ],
+    )
+    def test_only_terminal_circuits_return_false(self, tmp_path: Path, response: str) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response=response)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+
+    def test_terminal_and_healthy_circuits_return_true(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response="42 FAILED $abc REASON=TIMEOUT\n43 BUILT $def")
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+
+    def test_future_well_formed_status_returns_true(self, tmp_path: Path) -> None:
+        """A newer Tor status must not create a sticky false drop."""
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response="42 PATH_BIAS_RECOVERY $abc")
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is True
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            "not-a-circuit-status",
+            "42 lower_case_status $abc",
+            "42 INVALID-STATUS $abc",
+            "circuit-status=garbage",
+        ],
+    )
+    def test_malformed_response_returns_false(self, tmp_path: Path, response: str) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+        fake = _FakeController(get_info_response=response)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return fake
+
+        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+
+    def test_unreachable_control_port_returns_false(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            raise ConnectionRefusedError(f"{host}:{port}")
 
         assert tor.circuit_status_health(handle, controller_factory=factory) is False
 
@@ -503,6 +587,16 @@ class TestCircuitStatusHealth:
         # Authentication failure does NOT raise to the caller; it returns
         # False so the runtime treats it as "Tor unhealthy" and surfaces a
         # clean MordredPathDropped at the next pre_tool_call.
+        assert tor.circuit_status_health(handle, controller_factory=factory) is False
+
+    def test_get_info_failure_returns_false(self, tmp_path: Path) -> None:
+        from mordred_hermes.network.paths import tor
+
+        handle = self._make_handle(tmp_path)
+
+        def factory(*, host: str, port: int) -> _FakeController:
+            return _FakeController(get_info_raises=RuntimeError("control reply failed"))
+
         assert tor.circuit_status_health(handle, controller_factory=factory) is False
 
     def test_no_stem_installed_falls_back_to_shallow(self, tmp_path: Path) -> None:

@@ -33,7 +33,7 @@ The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-po
 | `mordred_wizard` | The CLI surface — `configure`, `status`, `encryption`, `keyvault`, `network`, `audit`, … |
 | `mordred_llm_guard` | Strict-mode enforcement of local-only LLM usage |
 | `mordred_network` | Privacy-path management: Tor / VPN / clearnet |
-| `mordred_keyvault` | Hardware-backed key management — Secure Enclave (macOS), TPM 2.0 (Linux), software fallback |
+| `mordred_keyvault` | Hardware-backed key management — Secure Enclave with Keychain fallback (macOS), TPM 2.0 (Linux) |
 | `mordred_e2e` | End-to-end encryption for gateway messaging platforms (Slack / Discord) — decrypts inbound, re-encrypts outbound replies |
 
 ## Requirements
@@ -43,8 +43,9 @@ The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-po
   published and are not installable). The floor is exercised in CI on every PR
   (the `hermes-floor` job pins it exactly); behavior against the latest release
   was last verified on 0.19.0, 2026-07-21
-- macOS or Linux. No special hardware required — without a Secure Enclave / TPM,
-  the keyvault degrades to a software-protected key automatically.
+- macOS or Linux. macOS can fall back to a software P-256 key in the login
+  Keychain when Secure Enclave access is unavailable. Linux keyvault setup
+  requires the TPM 2.0 helper and fails closed when it is absent.
 
 ## Install (users, from PyPI)
 

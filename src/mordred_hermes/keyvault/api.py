@@ -494,11 +494,10 @@ def confirm_generate(
           so a sink failure is suppressed (POLICY.md #22); a line is
           written to stderr for the operator.
 
-    ``backend`` is keyword-only and required (no default), matching the
-    merged ``encrypt`` / ``decrypt`` surface. SPEC.md sketches it as
-    ``NativeBackend | None = None``; api.py standardizes on a required
-    backend — the production ``_SecKeyBackend`` is a later step and does
-    not exist yet, so there is no sensible ``None`` fallback.
+    ``backend`` is keyword-only and required, matching the ``encrypt`` /
+    ``decrypt`` surface. Keeping backend selection outside this pure API makes
+    the hardware trust boundary explicit and lets callers choose the supported
+    Secure-Enclave, TPM-helper, or test implementation deliberately.
     """
     resolved_key_id = key_id if key_id is not None else _DEFAULT_KEY_ID
 

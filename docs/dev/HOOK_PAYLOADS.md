@@ -35,7 +35,10 @@ All findings are the result of reading **`~/.hermes/hermes-agent/`** (v0.11.0). 
 **Mordred opt-in caveat** (TODO §0.5 acceptance gate L124 reaffirmed):
 - Entry-point plugins are gated by `plugins.enabled` allow-list in `~/.hermes/config.yaml` (`plugins.py` L598, L641-655).
 - A Mordred plugin loaded via entry-point but absent from `plugins.enabled` is recorded with `enabled=False` and **`register()` is not called**.
-- `hermes mordred upgrade` (Phase 1.3) **must** add the 5 keys (`mordred_network`, `mordred_privacy_check`, `mordred_llm_guard`, `mordred_keyvault`, `mordred_wizard`) to `plugins.enabled` for the system to function.
+- `hermes mordred upgrade` (Phase 1.3) **must** add all 6 keys
+  (`mordred_privacy_check`, `mordred_wizard`, `mordred_llm_guard`,
+  `mordred_network`, `mordred_keyvault`, `mordred_e2e`) to
+  `plugins.enabled` for the system to function.
 
 ## 2. Plugin disable detection (`hermes plugins list --disabled` equivalent API)
 
@@ -50,13 +53,17 @@ All findings are the result of reading **`~/.hermes/hermes-agent/`** (v0.11.0). 
 ```python
 # In each Mordred plugin's on_session_start
 from hermes_cli.plugins import _get_disabled_plugins
+from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
+
 disabled = _get_disabled_plugins()
 SIBLINGS = {"mordred_network", "mordred_privacy_check", "mordred_llm_guard",
             "mordred_keyvault", "mordred_wizard"}
 disabled_siblings = SIBLINGS & disabled
 if policy == "strict" and disabled_siblings:
     audit("mordred.degraded.disable_unprotected", disabled=sorted(disabled_siblings))
-    raise RuntimeError(f"Mordred strict mode: sibling plugins disabled: {sorted(disabled_siblings)}")
+    raise MordredIntegrityRefused(
+        f"Mordred strict mode: sibling plugins disabled: {sorted(disabled_siblings)}"
+    )
 ```
 
 This works without a wrapper — `_get_disabled_plugins` is module-level (single underscore). For defensive isolation Mordred can also read the config directly:

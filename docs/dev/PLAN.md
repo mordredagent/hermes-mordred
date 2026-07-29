@@ -116,8 +116,8 @@ Each Mordred plugin has the following under `src/mordred_hermes/<name>/` (pip di
 
 In v1, the Phase 0.7 tasks are only the following:
 
-- [x] Declare `privacy_lock: true` in `plugin.yaml` as a Mordred-internal hint across all 5 plugins (it has no meaning on Hermes upstream's side, but is used for automatic sibling-list expansion) — **Done**: all 5 plugins (`keyvault`/`network`/`wizard`/`privacy_check`/`llm_guard`) already declare `privacy_lock: true` in `src/mordred_hermes/<name>/plugin.yaml`
-- [x] The implementation of H3 plugin-side strict-mode startup refusal happens in Phase 1.1 (`mordred_privacy_check.on_session_start`) — **Done**: `privacy_check/hooks.on_session_start` detects sibling-disable via `_runtime.find_disabled_siblings`, and in strict mode performs audit + poison + `SystemExit` (H3 Path B, SPEC.md §Plugin-disable protection Tier A). The hook is registered in `privacy_check/__init__.py` and covered by `tests/test_hooks.py`
+- [x] Declare `privacy_lock: true` as a declarative marker in the five manifest-backed plugins (`keyvault` / `network` / `wizard` / `privacy_check` / `llm_guard`) — **Done**. Hermes ignores the field; runtime enforcement uses the explicit six-entry `SIBLING_PLUGINS` canonical list, including the manifest-less `mordred_e2e` entry point. The marker does not auto-expand that list
+- [x] The implementation of H3 plugin-side strict-mode startup refusal happens in Phase 1.1 (`mordred_privacy_check.on_session_start`) — **Done**: `privacy_check/hooks.on_session_start` detects sibling-disable via `_runtime.find_disabled_siblings`, and in strict mode performs audit + poison + `MordredIntegrityRefused(BaseException)` (H3 Path B, SPEC.md §Plugin-disable protection Tier A). The hook is registered in `privacy_check/__init__.py` and covered by `tests/test_hooks.py`
 
 Only if hard-enforce becomes necessary in the future (v2), introduce the vendored fork extra:
 
@@ -128,8 +128,8 @@ Only if hard-enforce becomes necessary in the future (v2), introduce the vendore
 
 **Phase 0 acceptance**:
 
-- `pip install -e ./mordred-hermes` succeeds, and `PluginManager.discover_and_load()` detects the 5 mordred_* entries via the entry-point
-- ~~`hermes plugins list` shows the 5 mordred_* entries~~ → Phase 1.3 wizard provides the `hermes mordred plugins list` wrapper CLI (a known gap where Hermes 0.11.0's `_discover_all_plugins()` doesn't display entry-point plugins; see TODO.md §Acceptance gate L126)
+- `pip install -e ./mordred-hermes` succeeds, and `PluginManager.discover_and_load()` detects the 6 mordred_* entries via the entry-point
+- ~~`hermes plugins list` shows the mordred_* entries~~ → Phase 1.3 wizard provides the `hermes mordred plugins list` wrapper CLI (a known gap where Hermes 0.11.0's `_discover_all_plugins()` doesn't display entry-point plugins; see TODO.md §Acceptance gate L126)
 - pytest is green even with no tests, ruff/mypy are also green (enforced in CI, landed in PR #8. See `docs/dev/CI.md` §`ci.yml` details for specifics)
 - ~~HSeam-1 PR draft~~ → not needed (zero-PR commitment)
 
@@ -139,7 +139,15 @@ Only if hard-enforce becomes necessary in the future (v2), introduce the vendore
 
 Minimal end-to-end slice. Partially achieves Story 2 and Story 3. No network code / native modules whatsoever.
 
-**Privacy-lock guard (Tier A, zero-PR commitment)**: `privacy_lock: true` is declared as a Mordred-internal hint in all 5 plugins' `plugin.yaml`. Since Hermes core ignores this field, each plugin's `on_session_start` aborts strict-mode session startup with a `RuntimeError` and records the audit log `mordred.degraded.disable_unprotected` as soon as a sibling Mordred plugin's disable is detected. If hard-enforce becomes necessary in v2, escalate to the `[hard-lock]` extra (vendored fork).
+**Privacy-lock guard (Tier A, zero-PR commitment)**: `privacy_lock: true`
+is a declarative marker on the five manifest-backed plugins; Hermes ignores
+it. The five runtime plugins (`privacy_check`, `network`, `llm_guard`,
+`keyvault`, and `e2e`) register the shared integrity callback, which checks
+the fixed canonical list of all six Mordred entry points (including
+`wizard`). Under strict policy it records
+`mordred.degraded.disable_unprotected` and raises
+`MordredIntegrityRefused(BaseException)`. If hard-enforce becomes necessary
+in v2, escalate to the `[hard-lock]` extra (vendored fork).
 
 ### 1.1 Plugin: `mordred_privacy_check`
 
@@ -294,7 +302,7 @@ session-scoped LLM enforcement and harness-startup refuse. Achieves Story 4.
 - `plugin.yaml` — config under `plugins.mordred_llm_guard`, `privacy_lock: true`
 - `__init__.py` — in `register(ctx)`, **explicitly registers** the provider adapter (`register_mordred_local`) + 3 hooks (`on_session_start` × 2 + `pre_api_request`) (Codex B1: since `providers._discover_providers()` doesn't scan entry-point plugins, a module-import side effect isn't possible)
 - `local_adapter.py` — **declarative `ProviderProfile` subclass only** (Codex H1: the SPI list the old PLAN version enumerated — `auth/discovery/resolve_synthetic_auth/normalize_config/prepare_dynamic_model/resolve_dynamic_model/augment_model_catalog/wrap_stream_fn/wizard` — doesn't exist in Hermes v0.11.0 and is stale). `name="mordred-local"` / `api_mode="chat_completions"` / `base_url` are dynamically read from `policy.json`. Streaming is owned by Hermes core (`agent/error_classifier.py`)
-- ~~`transport.py`~~ → **out of scope for v1** (Codex H1; only a placeholder remains). Will be revived once a streaming hook lands upstream in v2
+- ~~`transport.py`~~ → **removed from v1** (Codex H1). It will be recreated once a streaming hook lands upstream in v2
 - `health.py` — endpoint health probe (`/models` GET, default timeout 2.0s); raises `MordredLocalUnreachable` on failure
 - `enforce.py` (PR2) — `on_session_start` + `pre_api_request` handler, **v1 = refuse-only** (Codex B2):
   - lenient/off → no-op (audit silent — per-session allow audit will be reconsidered in v2)
@@ -310,7 +318,7 @@ session-scoped LLM enforcement and harness-startup refuse. Achieves Story 4.
   - strict → `MordredHarnessRefused(BaseException)` raise + audit `mordred.degraded.disable_unprotected` (decision=`block`)
   - lenient → audit (decision=`warn`) + log warning + continue (Codex M2)
   - off → no-op
-- `_exceptions.py` — `MordredLocalUnreachable(Exception)` + `MordredHarnessRefused(BaseException)` + `MordredSessionRefused(BaseException)`. The latter two derive directly from `BaseException` so they escape Hermes `invoke_hook`'s `except Exception:` wrapper. They don't derive from `SystemExit` so that a policy refusal isn't misdetected as a CLI exit by a cleanup-style `except SystemExit:` (vs. `privacy_check/hooks.py`, which legacy-derives from `SystemExit` — a candidate for a follow-up refactor to align it with `BaseException` derivation)
+- `_exceptions.py` — `MordredLocalUnreachable(Exception)` + `MordredHarnessRefused(BaseException)` + `MordredSessionRefused(BaseException)`. The latter two derive directly from `BaseException` so they escape Hermes `invoke_hook`'s `except Exception:` wrapper without being misdetected as CLI exits. `privacy_check` now follows the same regime with `MordredIntegrityRefused(BaseException)`.
 - `_typing.py` — `PluginContext` Protocol narrow surface (`register_hook` only)
 - `tests/test_enforce.py`, `tests/test_enforce_audit.py`, `tests/test_harness_detect.py`, `tests/test_health.py`, `tests/test_local_adapter.py`, `tests/test_exceptions.py`, `tests/test_llm_guard_register.py`, `tests/test_llm_guard_typing.py`, `tests/integration/test_llm_local.py` (`MORDRED_LIVE_LLM_TEST=1` gated)
 
@@ -324,7 +332,7 @@ session-scoped LLM enforcement and harness-startup refuse. Achieves Story 4.
 
 Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the streaming pipeline, and the plugin side cannot reliably capture `httpx.RemoteProtocolError` / `httpx.ReadError`." As a result:
 
-- `transport.py` is only a placeholder; stream interrupt detection is not implemented on the plugin side
+- The former `transport.py` placeholder was removed; stream interrupt detection is not implemented on the plugin side
 - The `MordredLocalStreamInterrupted` exception class is **intentionally left undefined** (see `_exceptions.py` docstring)
 - The `policy.strict.local_stream_interrupted` audit reason is already frozen into the 12-code enum (forward-compat reservation, POLICY.md row 12); there's no emit site in v1
 - Once a streaming hook lands upstream in v2, revive the class + implement the emit site + reintroduce `tests/test_enforce.py::test_mid_stream_disconnect` (currently deleted)
@@ -464,7 +472,12 @@ Tunneling all traffic with proxy_env alone cannot be achieved in v1. Document th
   - On failure: strict → raises `MordredPathBringupFailed` + session abort, lenient → user-visible warning + clearnet fallback + audit `network.bringup_failed`, off → silent fallback
 - **Liveness probe (mid-session)**:
   - An internal worker thread runs `mordred_network.api.health()` every 30s
-  - Tor probe: SOCKS5 listener reachable AND at least one BUILT circuit via `getinfo circuit-status` (over ControlPort)
+  - Tor probe: ControlPort reachable + cookie authentication succeeds +
+    `GETINFO circuit-status` is structurally valid. Empty or any reply with a
+    non-terminal circuit is healthy; known `FAILED`/`CLOSED`-only replies are
+    unhealthy. Unknown syntactically valid uppercase statuses are assumed
+    non-terminal for forward compatibility. Auth/control/protocol failures
+    remain unhealthy
   - VPN probe: WireGuard `latest handshake` is < 180s ago AND interface state UP
   - Judged path-dropped after 2 consecutive failures (absorbing transient Tor circuit rebuilds)
 - **On mid-session drop detection**:
@@ -515,13 +528,20 @@ update:
 
 ## Phase 4 — Key Management (`mordred_keyvault`)
 
-Highest engineering risk. Native module (`pyobjc-framework-Security`), limited to macOS Apple Silicon. Can ship independently of Phase 1-3. v1 only authorizes AES DEK wrapping/unwrapping via the Secure Enclave (it does not hold a signing key or perform signing).
+Highest engineering risk. AES DEK wrapping/unwrapping is backed by Secure
+Enclave or a login-Keychain software key on macOS and by the packaged TPM 2.0
+helper on Linux. The Linux backend is machine-bound and fails closed when the
+helper is absent; it has no software fallback. Transparent startup environment
+injection and the direct OS blackout fallback remain macOS-only integration
+features.
 
 ### 4.1 Plugin: `mordred_keyvault`
 
 **Files**
 
-- `src/mordred_hermes/keyvault/plugin.yaml` — `privacy_lock: true`, depends on the macOS extra
+- `src/mordred_hermes/keyvault/plugin.yaml` — `privacy_lock: true`; the
+  cross-platform crypto stack is in the `keyvault` extra, macOS bridges in
+  `macos`, and Linux builds the packaged TPM helper via `keyvault enable-tpm`
 - `src/mordred_hermes/keyvault/__init__.py` — registers the CLI in `register(ctx)`, exposes the internal API
 - `src/mordred_hermes/keyvault/native.py` — `Security.framework` wrapper (via pyobjc-framework-Security), lazy import (the `_lazy_import` pattern prevents an ImportError on import for non-macOS)
 - `src/mordred_hermes/keyvault/api.py` — public Python API:

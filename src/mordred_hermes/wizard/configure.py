@@ -380,8 +380,8 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         local_llm_model_id=local_llm_model_id,
         cloud_attempt_action=cloud_attempt_action,
         harness_primary=harness_primary,
-        # strict → disable IPv6 by default (mirrors the network reader's
-        # ``_resolve_disable_ipv6``: strict → True, lenient/off → False).
+        # strict → disable IPv6 by default (mirrors the network settings
+        # resolver: strict → True, lenient/off → False).
         disable_ipv6=(policy == "strict"),
     )
     return ConfigureResult(snapshot=snapshot)
