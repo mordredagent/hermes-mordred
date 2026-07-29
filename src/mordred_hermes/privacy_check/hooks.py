@@ -19,7 +19,9 @@ Return shape contracts (HOOK_PAYLOADS.md §1, §4):
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import sys
 from typing import Any
 
 from .._audit_support import safe_audit_append
@@ -70,6 +72,18 @@ def check_plugin_integrity(**_kwargs: Any) -> None:
             )
             _runtime.poison(msg)
             _LOG.error(msg)
+            # The refusal is a bare BaseException by design (_exceptions.py)
+            # and typically surfaces in the host as an unhandled-exception
+            # traceback. Print the policy line to stderr first so the
+            # operator always sees the documented strict-policy abort, not
+            # just a crash dump (review 2026-07-29: the pre-refactor
+            # ``SystemExit(msg)`` printed exactly this one line). The print
+            # itself must never outrank the refusal: with a closed or absent
+            # stderr (daemonized gateway, pythonw) it raises an ordinary
+            # Exception that Hermes's hook wrapper would swallow — a
+            # fail-open — so any presenter error is suppressed.
+            with contextlib.suppress(Exception):
+                print(f"mordred: {msg}", file=sys.stderr)
             raise MordredIntegrityRefused(msg)
         _LOG.warning("Mordred siblings disabled in %s mode: %s", state.policy_mode, sorted(disabled))
 

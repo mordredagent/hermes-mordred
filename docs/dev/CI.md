@@ -18,7 +18,7 @@ Everything else is upstream's responsibility, and runs in upstream's CI.
 
 ## Standalone-repo adaptations (2026-07-01)
 
-When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Browser-extension gateway counterpart (deferred)"), `.github/workflows/` was left out entirely, and this document was the only thing that survived the split — still describing workflows that no longer existed. Restoring them requires reflecting the following changed assumptions:
+When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Remaining browser-extension gateway integration"), `.github/workflows/` was left out entirely, and this document was the only thing that survived the split — still describing workflows that no longer existed. Restoring them requires reflecting the following changed assumptions:
 
 - **`hermes-agent` is now published on PyPI** (confirmed `hermes-agent==0.14.0`, 2026-07-01). The old design's premises — "`hermes-agent` isn't on PyPI so a root install is required" and "the `fresh-venv-resolution` job (H1) asserts install **fails** without it" — no longer hold. `pip install -e .` resolves `hermes-agent` on its own. The `fresh-venv-resolution` job is **retired**: H1's purpose (fail-fast when `hermes-agent` is absent) is moot now that it's always resolvable from PyPI
 - **`upstream-check.yml` no longer needs `git clone`**: `pip install hermes-agent` unpacks its source (plain `.py` files, not compiled) into site-packages, so `tools/check_hook_payload_drift.py --hermes-root <site-packages>` works directly (verified locally)

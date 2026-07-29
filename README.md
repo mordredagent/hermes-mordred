@@ -247,7 +247,7 @@ server side in [`src/mordred_hermes/extension/api.py`](src/mordred_hermes/extens
 
 Nothing starts the server automatically yet: Hermes exposes no gateway-boot
 hook a plugin could use, so `register(ctx)` cannot launch a long-running server
-(see `docs/dev/ROADMAP.md` § browser-extension gateway counterpart). Until that
+(see `docs/dev/ROADMAP.md` §"Remaining browser-extension gateway integration"). Until that
 lands, start it in the foreground with one command — it needs the `extension`
 extra (see the [extras table](#install-users-from-pypi) above).
 

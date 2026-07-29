@@ -189,6 +189,47 @@ class _RecordingEnv(dict[str, str]):
         self._record()
         return result
 
+    # dict's C-implemented bulk mutators do NOT call the overridden dunders
+    # above, so without these overrides a runtime refactor to e.g.
+    # ``env.update(...)`` / ``env.clear()`` would mutate invisibly and the
+    # leak-window assertions would pass vacuously (review 2026-07-29).
+    # Bulk operations are routed key-by-key through __setitem__/__delitem__
+    # so every intermediate state lands in ``snapshots``.
+    def update(self, *args: Any, **kwargs: str) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def __ior__(self, other: Any) -> _RecordingEnv:
+        self.update(other)
+        return self
+
+    def clear(self) -> None:
+        for key in list(self):
+            del self[key]
+
+    def setdefault(self, key: str, default: str | None = None) -> str:
+        # os.environ (os._Environ) rejects non-str values via putenv, so a
+        # bare ``setdefault(key)`` raises TypeError in production. Mirror
+        # that instead of dict's silent ``None`` default so this fake cannot
+        # mask a real crash (review 2026-07-29).
+        if key in self:
+            return self[key]
+        if not isinstance(default, str):
+            raise TypeError(f"str expected, not {type(default).__name__}")
+        self[key] = default  # records via __setitem__
+        return default
+
+    def popitem(self) -> tuple[str, str]:
+        # os._Environ inherits MutableMapping.popitem, which removes the
+        # FIRST-iterated key — not dict's C-level last-inserted choice.
+        # Mirror it so recorded intermediate states match what production
+        # os.environ would produce (review 2026-07-29).
+        for key in self:
+            value = self[key]
+            del self[key]  # records via __delitem__
+            return key, value
+        raise KeyError("popitem(): dictionary is empty")
+
 
 def _make_runtime(
     *,

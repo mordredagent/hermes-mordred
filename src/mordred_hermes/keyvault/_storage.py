@@ -23,11 +23,27 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import fcntl
 import json
 import os
 import secrets
 import stat
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — non-POSIX platform (Windows)
+    # A POSIX build must never reach this branch: a shadowed or stripped
+    # ``fcntl`` there would silently downgrade every write transaction to
+    # unlocked, so genuine platform absence is the only accepted reason.
+    if os.name == "posix":
+        raise
+    # This module must stay *importable* off POSIX: extension.pairing imports
+    # ``atomic_write`` at module scope, and its own fcntl guard was defeated
+    # by a bare import here (review 2026-07-29). Keyvault write transactions
+    # off POSIX degrade to single-process best effort (no flock); the actual
+    # keyvault feature is gated far earlier by the platform helpers
+    # (_seckey_backend), so no hardware-backed state is reachable this way.
+    fcntl = None  # type: ignore[assignment]
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -37,6 +53,11 @@ from .._home import hermes_home as _hermes_home
 _META_VERSION = 1
 _FILE_MODE = 0o600
 _DIR_MODE = 0o700
+# ``O_NOFOLLOW`` does not exist on Windows; 0 is the no-op flag value. The
+# symlink-refusal posture there degrades to the explicit ``is_symlink`` /
+# ``lstat`` checks (no open-time TOCTOU defense), which is acceptable off
+# POSIX where the keyvault feature itself is gated by the platform helpers.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 class KeyvaultPermissionError(OSError):
@@ -188,7 +209,7 @@ def ensure_lock_file(path: Path) -> None:
         try:
             fd = os.open(
                 path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
                 _FILE_MODE,
             )
             os.close(fd)
@@ -273,7 +294,7 @@ def atomic_write(path: Path, data: bytes) -> None:
 
     fd = os.open(
         tmp_path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW,
         _FILE_MODE,
     )
     try:
@@ -304,11 +325,15 @@ def atomic_write(path: Path, data: bytes) -> None:
             os.unlink(tmp_path)
         raise
 
-    parent_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        _fsync_durable(parent_fd)
-    finally:
-        os.close(parent_fd)
+    if os.name == "posix":
+        parent_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            _fsync_durable(parent_fd)
+        finally:
+            os.close(parent_fd)
+    # Off POSIX a directory cannot be opened as an fd (os.open raises
+    # PermissionError on Windows), so the directory-entry flush is skipped;
+    # NTFS metadata durability is filesystem-managed there (review 2026-07-29).
 
 
 def safe_read(path: Path) -> bytes:
@@ -339,7 +364,7 @@ def safe_read(path: Path) -> bytes:
         )
 
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link", str(path)) from exc
@@ -387,9 +412,13 @@ def keyvault_lock(root: Path) -> Iterator[None]:
     file: it must be a regular file at mode ``0o600`` (verified via
     ``fstat`` on the open fd, mirroring :func:`safe_read`), or
     :exc:`KeyvaultPermissionError` is raised before any flock attempt.
+
+    Off POSIX (no :mod:`fcntl`) the posture checks still run but no lock
+    is taken — single-process best effort, mirroring
+    ``extension.pairing._state_lock``.
     """
     lock_path = root / ".lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    fd = os.open(lock_path, os.O_RDWR | _O_NOFOLLOW)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -405,6 +434,9 @@ def keyvault_lock(root: Path) -> Iterator[None]:
                 f"keyvault lock file must be mode 0o{_FILE_MODE:o}, got 0o{mode:o}",
                 str(lock_path),
             )
+        if fcntl is None:  # pragma: no cover — non-POSIX: no flock; best effort
+            yield
+            return
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield

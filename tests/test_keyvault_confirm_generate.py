@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.keyvault import _storage, api, wrap
+from tests._keyvault_fakes import FakeBackend
 from tests._keyvault_lifecycle_helpers import (
     _FAR_PAST,
     _PLACEHOLDER_DIGEST,
@@ -22,7 +23,6 @@ from tests._keyvault_lifecycle_helpers import (
     _FailingAuditCapture,
     _make_handle,
 )
-from tests.test_keyvault_wrap import FakeBackend
 
 # ============================ confirm_generate (durable phase) ============================
 #

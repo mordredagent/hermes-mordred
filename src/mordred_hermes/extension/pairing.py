@@ -29,11 +29,13 @@ import json
 import math
 import os
 import secrets
+import sys
 import time
+import types
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, Final, TypeGuard, cast
 
 try:
     import fcntl
@@ -46,6 +48,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from ..keyvault._storage import atomic_write
+from . import webauthn as _webauthn
 from .crypto import b64u_decode, b64u_encode, derive_shared_key, x25519_public_raw
 from .webauthn import (
     _active_webauthn_data as _active_webauthn_data,
@@ -107,6 +110,59 @@ from .webauthn import (
 from .webauthn import (
     verify_webauthn_assertion as verify_webauthn_assertion,
 )
+
+_WEBAUTHN_COMPAT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "_active_webauthn_data",
+        "_authenticator_data_matches",
+        "_client_data_matches",
+        "_decode_webauthn_fields",
+        "_legacy_client_origins",
+        "_legacy_signed_rp_hash",
+        "_migrate_legacy_webauthn_binding",
+        "_pairing_token_hash",
+        "_parse_client_data",
+        "_persist_legacy_webauthn_binding",
+        "_rp_id_for_origin",
+        "_serialized_extension_origin",
+        "_signature_valid",
+        "_stored_webauthn_binding",
+        "_webauthn_path",
+        "authentication_generation_fingerprint",
+        "clear_webauthn_credential",
+        "has_webauthn_credential",
+        "save_webauthn_credential",
+        "verify_webauthn_assertion",
+    }
+)
+
+
+class _WebauthnCompatModule(types.ModuleType):
+    """Mirror writes to the pre-split WebAuthn seams onto :mod:`.webauthn`.
+
+    The names in ``_WEBAUTHN_COMPAT_NAMES`` are static re-exports whose
+    implementations resolve each other through *webauthn's* module globals.
+    Before the split they lived in this module, so harnesses patched e.g.
+    ``pairing._webauthn_path`` and save/clear/verify honored the patch. A
+    static alias alone turns such a patch into a silent no-op — the real
+    ``~/.hermes/extension/webauthn.json`` would still be written while the
+    harness reads its sandbox (review 2026-07-29). Forwarding assignment
+    and deletion keeps the two modules in lockstep, in both patch and
+    restore directions.
+    """
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _WEBAUTHN_COMPAT_NAMES:
+            setattr(_webauthn, name, value)
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in _WEBAUTHN_COMPAT_NAMES and hasattr(_webauthn, name):
+            delattr(_webauthn, name)
+        super().__delattr__(name)
+
+
+cast(Any, sys.modules[__name__]).__class__ = _WebauthnCompatModule
 
 # Unambiguous alphabet (no 0/O/1/I) — matches the extension and Hermes' own
 # DM pairing (gateway/pairing.py).
@@ -406,8 +462,14 @@ def _save_pairing(p: Pairing) -> None:
         _write_private(_state_path(), json.dumps(data).encode("utf-8"))
         # Normal lifecycle cleanup. The state marker above remains the
         # authoritative revocation if unlink fails (permissions/race).
+        # Resolved through the webauthn module (the canonical seam), not this
+        # module's static alias: a harness that sandboxes the store by
+        # patching webauthn._webauthn_path must also redirect this unlink,
+        # or a pairing flow would delete the real production credential
+        # while every other patched operation uses the sandbox
+        # (review 2026-07-29).
         with _suppress_oserror():
-            _webauthn_path().unlink()
+            _webauthn._webauthn_path().unlink()
 
 
 # --- v2 key ring (SPEC-v2 §1.3): per-channel Slack keys + extension-chat key ---
