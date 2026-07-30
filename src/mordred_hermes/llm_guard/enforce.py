@@ -103,6 +103,10 @@ _POLICY_PROVIDER_EQUIVALENTS: Final[Mapping[str, str]] = {
 # would additionally let ``infer_cloud_provider`` return a non-canonical
 # identity that no allow-list entry can match.
 _CLOUD_ENDPOINT_HOSTS: Final[Mapping[str, tuple[str, ...]]] = {
+    # Present in the hermes-agent floor registry but not in the current one, so
+    # the table has to span the supported version range: a provider missing here
+    # is refused outright under strict mode.
+    "ai-gateway": ("ai-gateway.vercel.sh",),
     "alibaba": ("dashscope-intl.aliyuncs.com",),
     "alibaba-coding-plan": ("coding-intl.dashscope.aliyuncs.com",),
     "anthropic": ("api.anthropic.com",),
