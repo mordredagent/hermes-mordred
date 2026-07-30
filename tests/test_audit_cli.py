@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import textwrap
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -135,6 +137,41 @@ class TestTail:
         assert rc == 1
         assert "no audit log" in capsys.readouterr().err.lower()
 
+    def test_tail_refuses_symlink_without_reading_target(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        outside = tmp_path / "outside.log"
+        _seed_audit_log(outside, [{"event": "must-not-leak"}])
+        log = tmp_path / "audit.log"
+        log.symlink_to(outside)
+
+        rc = audit_cli.tail(n=10, log_path=log)
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "non-regular" in captured.err
+        assert outside.exists()
+
+    def test_tail_refuses_symlink_parent_directory(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        outside = tmp_path / "outside"
+        _seed_audit_log(outside / "audit.log", [{"event": "must-not-leak"}])
+        linked_directory = tmp_path / "linked-audit"
+        linked_directory.symlink_to(outside, target_is_directory=True)
+
+        rc = audit_cli.tail(n=10, log_path=linked_directory / "audit.log")
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "not a real directory" in captured.err
+
     def test_tail_encrypted_log_returns_1_with_phase4_hint(
         self,
         tmp_path: Path,
@@ -243,6 +280,21 @@ class TestGrep:
         assert rc == 1
         assert "audit decrypt" in err.lower()
         assert out == ""
+
+    def test_grep_refuses_fifo_without_blocking(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        log = tmp_path / "audit.log"
+        os.mkfifo(log)
+
+        rc = audit_cli.grep(pattern="anything", log_path=log)
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "non-regular" in captured.err
 
 
 class TestCLIHandlers:
@@ -438,10 +490,86 @@ class TestPurge:
         assert "0" in capsys.readouterr().out
 
     def test_ignores_non_dated_rotation_files(self, tmp_path: Path) -> None:
-        self._seed_rotated(tmp_path, ["audit.log.backup", "audit.log.2020-01-01.gz"])
+        self._seed_rotated(
+            tmp_path,
+            [
+                "audit.log.backup",
+                "audit.log.2020-01-01.backup",
+                "audit.log.2020-01-01.1.backup",
+                "audit.log.2020-01-01.gz",
+            ],
+        )
         audit_cli.purge(before="2030-01-01", audit_dir=tmp_path)
         assert (tmp_path / "audit.log.backup").exists()  # not a dated rotation
+        assert (tmp_path / "audit.log.2020-01-01.backup").exists()
+        assert (tmp_path / "audit.log.2020-01-01.1.backup").exists()
         assert not (tmp_path / "audit.log.2020-01-01.gz").exists()
+
+    def test_unlink_failure_returns_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "audit.log.2020-01-01.gz"
+        self._seed_rotated(tmp_path, [target.name])
+        real_unlink = audit_cli.os.unlink
+
+        def fail_target(path: str, *, dir_fd: int | None = None) -> None:
+            if path == target.name:
+                raise PermissionError("denied")
+            real_unlink(path, dir_fd=dir_fd)
+
+        monkeypatch.setattr(audit_cli.os, "unlink", fail_target)
+
+        assert audit_cli.purge(before="2030-01-01", audit_dir=tmp_path) == 1
+        assert target.exists()
+        assert "denied" in capsys.readouterr().err
+
+    def test_refuses_symlink_audit_directory_without_deleting_target(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        outside = tmp_path / "outside"
+        self._seed_rotated(outside, ["audit.log.2020-01-01.gz"])
+        audit_link = tmp_path / "audit-link"
+        audit_link.symlink_to(outside, target_is_directory=True)
+
+        rc = audit_cli.purge(before="2030-01-01", audit_dir=audit_link)
+
+        assert rc == 1
+        assert audit_link.is_symlink()
+        assert (outside / "audit.log.2020-01-01.gz").exists()
+        assert "not a real directory" in capsys.readouterr().err
+
+    def test_refuses_dangling_symlink_audit_directory(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        audit_link = tmp_path / "audit-link"
+        audit_link.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+        rc = audit_cli.purge(before="2030-01-01", audit_dir=audit_link)
+
+        assert rc == 1
+        assert audit_link.is_symlink()
+        assert "not a real directory" in capsys.readouterr().err
+
+    def test_refuses_matching_symlink_child_without_deleting_target(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        outside = tmp_path / "outside.log"
+        outside.write_bytes(b"must survive\n")
+        candidate = tmp_path / "audit.log.2020-01-01.gz"
+        candidate.symlink_to(outside)
+
+        rc = audit_cli.purge(before="2030-01-01", audit_dir=tmp_path)
+
+        assert rc == 1
+        assert candidate.is_symlink()
+        assert outside.read_bytes() == b"must survive\n"
+        assert "non-regular" in capsys.readouterr().err
 
     def test_cli_purge_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._seed_rotated(tmp_path, ["audit.log.2020-01-01.gz"])
@@ -471,6 +599,12 @@ class TestDecrypt:
     :class:`~mordred_hermes.keyvault.log_encryption.EncryptedWriter` with
     a software ``FakeBackend`` in place of the Secure Enclave.
     """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_keyvault_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault import _storage
+
+        monkeypatch.setattr(_storage, "_hermes_home", lambda: tmp_path)
 
     @staticmethod
     def _backend() -> FakeBackend:
@@ -512,6 +646,61 @@ class TestDecrypt:
         assert "policy.strict.clearnet" in out
         assert "policy.strict.tor" in out
 
+    def test_explicit_audit_dir_selects_its_profile_scoped_keyvault(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.keyvault import _native_key_id, _storage
+        from mordred_hermes.keyvault import log_encryption as le
+
+        home = tmp_path / "profile"
+        audit_dir = home / "mordred"
+        root = _storage.resolve_keyvault_dir(home)
+        _storage.ensure_layout(root)
+        native_key_id = _native_key_id.scoped_native_key_id(root, le.AUDIT_LOG_KEY_ID)
+        backend = FakeBackend()
+        backend.generate_enclave_key(native_key_id)
+        path = audit_dir / "audit.log.2026-05-10"
+        le.EncryptedWriter(path, backend=backend, native_key_id=native_key_id).append({"event": "profile-scoped"})
+
+        assert audit_cli.decrypt(date="2026-05-10", audit_dir=audit_dir, backend=backend) == 0
+        assert "profile-scoped" in capsys.readouterr().out
+
+    def test_configured_custom_audit_path_keeps_ambient_keyvault_home(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.keyvault import _native_key_id, _storage
+        from mordred_hermes.keyvault import log_encryption as le
+
+        home = tmp_path / "ambient-home"
+        root = _storage.resolve_keyvault_dir(home)
+        _storage.ensure_layout(root)
+        monkeypatch.setattr(_storage, "_hermes_home", lambda: home)
+        native_key_id = _native_key_id.scoped_native_key_id(root, le.AUDIT_LOG_KEY_ID)
+        backend = FakeBackend()
+        backend.generate_enclave_key(native_key_id)
+        custom_dir = tmp_path / "custom-audit-location"
+        path = custom_dir / "audit.log.2026-05-10"
+        le.EncryptedWriter(path, backend=backend, native_key_id=native_key_id).append({"event": "ambient-profile"})
+        monkeypatch.setattr(audit_cli, "_resolve_active_audit_path", lambda: custom_dir / "audit.log")
+
+        assert audit_cli.decrypt(date="2026-05-10", backend=backend) == 0
+        assert "ambient-profile" in capsys.readouterr().out
+
+    def test_decrypt_ignores_backup_names_that_only_share_rotation_prefix(self, tmp_path: Path) -> None:
+        canonical = tmp_path / "audit.log.2026-05-10.1.gz"
+        backup = tmp_path / "audit.log.2026-05-10.1.backup"
+        canonical.write_bytes(b"canonical")
+        backup.write_bytes(b"must-not-be-selected")
+
+        assert audit_cli._read_decrypt_targets(tmp_path, datetime(2026, 5, 10, tzinfo=UTC).date()) == [
+            (canonical, b"canonical")
+        ]
+
     def test_decrypts_active_log_for_today(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         be = self._backend()
         self._write_encrypted(tmp_path / "audit.log", be, [{"event": "keyvault.unwrap_authorized"}])
@@ -519,6 +708,39 @@ class TestDecrypt:
         rc = audit_cli.decrypt(date=today, audit_dir=tmp_path, backend=be)
         assert rc == 0
         assert "keyvault.unwrap_authorized" in capsys.readouterr().out
+
+    def test_decrypt_snapshot_waits_for_writer_sidecar(self, tmp_path: Path) -> None:
+        """Readers never snapshot an append/rotation transaction mid-write."""
+        from mordred_hermes._audit_io import exclusive_audit_lock
+
+        active = tmp_path / "audit.log"
+        active.write_bytes(b'{"fmt":"MRAL"}\ncomplete-entry\n')
+        snapshots: list[list[tuple[Path, bytes]]] = []
+        errors: list[BaseException] = []
+        reader_started = threading.Event()
+
+        def read_targets() -> None:
+            reader_started.set()
+            try:
+                snapshots.append(
+                    audit_cli._read_decrypt_targets(
+                        tmp_path,
+                        datetime.now(UTC).date(),
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with exclusive_audit_lock(active):
+            thread = threading.Thread(target=read_targets)
+            thread.start()
+            assert reader_started.wait(timeout=5)
+            assert thread.is_alive()
+
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert errors == []
+        assert snapshots == [[(active, active.read_bytes())]]
 
     def test_corrupt_file_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         be = self._backend()
@@ -528,6 +750,60 @@ class TestDecrypt:
         rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path, backend=be)
         assert rc == 1
         assert "2026-05-10" in capsys.readouterr().err
+
+    def test_decrypt_refuses_symlink_target_before_authorization(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        outside = tmp_path / "outside.log"
+        outside.write_bytes(b"must not be read")
+        target = tmp_path / "audit.log.2026-05-10"
+        target.symlink_to(outside)
+
+        rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path, backend=self._backend())
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "non-regular" in captured.err
+        assert outside.read_bytes() == b"must not be read"
+
+    def test_decrypt_refuses_fifo_without_blocking(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        os.mkfifo(tmp_path / "audit.log.2026-05-10")
+
+        rc = audit_cli.decrypt(date="2026-05-10", audit_dir=tmp_path, backend=self._backend())
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "non-regular" in captured.err
+
+    def test_decrypt_refuses_symlink_audit_directory(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "audit.log.2026-05-10").write_bytes(b"must not be read")
+        linked_directory = tmp_path / "linked-audit"
+        linked_directory.symlink_to(outside, target_is_directory=True)
+
+        rc = audit_cli.decrypt(
+            date="2026-05-10",
+            audit_dir=linked_directory,
+            backend=self._backend(),
+        )
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert captured.out == ""
+        assert "not a real directory" in captured.err
 
     def test_auth_cancelled_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         be = self._backend()
