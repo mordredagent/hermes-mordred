@@ -2,7 +2,7 @@
 # is a Mordred-internal hint used by the shared integrity gate to detect a
 # disabled sibling (SPEC §Plugin-disable protection Tier A).
 name: mordred_llm_guard
-version: 0.1.0a8
+version: 0.1.0a9
 description: Strict local-LLM and provider policy enforcement
 author: InternetMaximalism
 privacy_lock: true
