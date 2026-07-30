@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
+import re
 import socket
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, TypeAlias
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
@@ -57,6 +59,7 @@ _REASON_NO_RESOLVED_PROVIDER: Final = "mordred.degraded.no_resolved_provider"
 # prompt-once decision records (POLICY.md — emitted by _resolve_cloud_attempt).
 _REASON_CLOUD_PROMPTED_ALLOW: Final = "policy.strict.cloud_prompted_allow"
 _REASON_CLOUD_PROMPTED_DENY: Final = "policy.strict.cloud_prompted_deny"
+_REASON_CLOUD_ENDPOINT_MISMATCH: Final = "policy.strict.cloud_endpoint_mismatch"
 
 # Canonical name of the local provider — re-exported from local_adapter so
 # this module and the profile constructor share a single source of truth.
@@ -72,10 +75,124 @@ _no_resolved_provider_emitted = False
 # via :func:`_reset_state`.
 _cloud_prompt_decisions: dict[str, bool] = {}
 _STRICT_LOOPBACK_LITERALS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1"})
+_MAX_ENDPOINT_DISPLAY_LENGTH: Final = 256
+
+# Hermes 0.19 exposes a few different slugs for the same policy-level
+# provider depending on whether a route came from auth.py, models.py, or the
+# models.dev catalog. Keep the faithful models.py alias replica untouched and
+# collapse only those cross-registry identities at this enforcement boundary.
+_POLICY_PROVIDER_EQUIVALENTS: Final[Mapping[str, str]] = {
+    "deep-infra": "deepinfra",
+    "deepinfra-ai": "deepinfra",
+    "kimi-for-coding": "kimi-coding",
+    "minimax-oauth": "minimax",
+    "openai-api": "openai",
+    "solar": "upstage",
+    "xai-oauth": "xai",
+}
+
+# Provider identity is not an endpoint grant. Hermes permits ``base_url``
+# overrides for first-class providers, so checking only ``provider`` lets a
+# process label an arbitrary collector as e.g. ``openai`` and inherit the
+# allow-list entry. These are the provider-owned endpoint hosts exposed by
+# Hermes 0.19's built-in profiles. A leading dot means "this DNS suffix";
+# exact entries never accept a sibling/lookalike hostname.
+#
+# Every key must already be a ``policy_provider_id`` output. An alias key (e.g.
+# ``xai-oauth``) is unreachable for lookups — callers canonicalize first — and
+# would additionally let ``infer_cloud_provider`` return a non-canonical
+# identity that no allow-list entry can match.
+_CLOUD_ENDPOINT_HOSTS: Final[Mapping[str, tuple[str, ...]]] = {
+    "alibaba": ("dashscope-intl.aliyuncs.com",),
+    "alibaba-coding-plan": ("coding-intl.dashscope.aliyuncs.com",),
+    "anthropic": ("api.anthropic.com",),
+    "arcee": ("api.arcee.ai",),
+    # Azure resource subdomains select an operator/tenant, so a vendor suffix
+    # is not sufficient destination ownership. Strict refuses Azure Foundry
+    # until policy.json has a separately persisted exact-endpoint pin.
+    "azure-foundry": (),
+    # Bedrock and Vertex have shape-specific matchers below. Deliberately do
+    # not use broad ``.amazonaws.com`` / ``.googleapis.com`` suffixes: those
+    # would grant unrelated services such as S3 or Cloud Storage.
+    "bedrock": (),
+    "copilot": ("api.githubcopilot.com",),
+    "deepinfra": ("api.deepinfra.com",),
+    "deepseek": ("api.deepseek.com",),
+    "fireworks": ("api.fireworks.ai",),
+    "gemini": ("generativelanguage.googleapis.com",),
+    "gmi": ("api.gmi-serving.com",),
+    "huggingface": ("router.huggingface.co",),
+    "kilocode": ("api.kilo.ai",),
+    "kimi-coding": ("api.kimi.com", "api.moonshot.ai"),
+    "kimi-coding-cn": ("api.moonshot.cn",),
+    "minimax": ("api.minimax.io",),
+    "minimax-cn": ("api.minimaxi.com",),
+    "nous": ("inference-api.nousresearch.com",),
+    "novita": ("api.novita.ai",),
+    "nvidia": ("integrate.api.nvidia.com",),
+    "ollama-cloud": ("ollama.com",),
+    "openai": ("api.openai.com",),
+    "openai-codex": ("chatgpt.com",),
+    "opencode-go": ("opencode.ai",),
+    "opencode-zen": ("opencode.ai",),
+    "openrouter": ("openrouter.ai",),
+    "qwen-oauth": ("portal.qwen.ai",),
+    "stepfun": ("api.stepfun.ai", "api.stepfun.com"),
+    "tencent-tokenhub": ("tokenhub.tencentmaas.com",),
+    "upstage": ("api.upstage.ai",),
+    "vertex": (),
+    "xai": ("api.x.ai",),
+    "xiaomi": ("api.xiaomimimo.com",),
+    # Hermes probes both the global Z.AI host and its China service
+    # (``hermes_cli.auth.ZAI_ENDPOINTS``); vision resolution uses the same
+    # pair directly.
+    "zai": ("api.z.ai", "open.bigmodel.cn"),
+}
+
+_BEDROCK_ENDPOINT_RE: Final = re.compile(
+    r"^bedrock-runtime(?:-fips)?\.[a-z0-9-]+\."
+    r"(?:amazonaws\.com(?:\.cn)?|api\.aws)$"
+)
+_VERTEX_ENDPOINT_RE: Final = re.compile(r"^(?:[a-z0-9-]+-)?aiplatform\.googleapis\.com$")
+
+
+def policy_provider_id(provider_id: str) -> str:
+    """Return the stable provider identity used by Mordred policy files."""
+    canonical = canonicalize_provider(provider_id)
+    return _POLICY_PROVIDER_EQUIVALENTS.get(canonical, canonical)
 
 
 class _InvalidLocalEndpoint(ValueError):
     """A strict-mode ``mordred-local`` endpoint is not safely loopback-only."""
+
+
+def safe_endpoint_for_audit(endpoint: object) -> str:
+    """Return a bounded URL display with all credential-bearing parts removed."""
+    if not isinstance(endpoint, str) or not endpoint:
+        return "<missing>"
+    if endpoint != endpoint.strip() or any(ord(char) < 0x20 or ord(char) == 0x7F for char in endpoint):
+        return "<invalid>"
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return "<invalid>"
+    scheme = parsed.scheme.casefold()
+    hostname = parsed.hostname
+    if scheme not in {"http", "https"} or not hostname:
+        return "<invalid>"
+    host = hostname.rstrip(".").casefold()
+    if not host:
+        return "<invalid>"
+    rendered_host = f"[{host}]" if ":" in host else host
+    authority = rendered_host if port is None else f"{rendered_host}:{port}"
+    # Paths can also contain bearer/project secrets on custom or rejected
+    # endpoints. Audit needs only the destination origin; internal route keys
+    # retain normalized paths where provider disambiguation requires them.
+    sanitized = urlunsplit((scheme, authority, "", "", ""))
+    if len(sanitized) > _MAX_ENDPOINT_DISPLAY_LENGTH:
+        return sanitized[: _MAX_ENDPOINT_DISPLAY_LENGTH - 3] + "..."
+    return sanitized
 
 
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
@@ -118,6 +235,7 @@ def check_session_provider(
         _refuse_degraded(audit=audit, settings=settings)
         return  # unreachable — _refuse_degraded raises.
 
+    active_provider = policy_provider_id(active_provider)
     if active_provider == _LOCAL_PROVIDER_NAME:
         _probe_local(
             audit=audit,
@@ -184,7 +302,7 @@ def _refuse_degraded(*, audit: _AuditWriter, settings: _PolicySettings) -> None:
     msg = (
         "Mordred strict mode: active provider could not be resolved; refusing the session. "
         "Configure a provider in ~/.hermes/auth.json or ~/.hermes/config.yaml model.provider "
-        f"(intended fallback local endpoint: {settings.local_endpoint})."
+        f"(intended fallback local endpoint: {safe_endpoint_for_audit(settings.local_endpoint)})."
     )
     _LOG.error(msg)
     raise MordredSessionRefused(msg)
@@ -232,6 +350,98 @@ def _refuse_cloud_not_allowlisted(
         f"Mordred strict mode: refusing session because {detail}. "
         "Switch to mordred-local, add the provider to cloud_provider_allowlist, "
         "or rerun `hermes-mordred configure` to lower the policy."
+    )
+    _LOG.error(msg)
+    raise MordredSessionRefused(msg)
+
+
+def _refuse_cloud_endpoint_mismatch(
+    *,
+    audit: _AuditWriter,
+    provider_id: str,
+    runtime_base_url: str | None,
+    overridden: bool = True,
+) -> None:
+    """Refuse an allow-listed provider whose actual destination is unbound.
+
+    ``overridden`` distinguishes the two causes so the remedy is correct: an
+    operator-supplied ``base_url`` that is not provider-owned, versus a provider
+    that has no single owned default endpoint and therefore needs one pinned.
+    """
+    safe_endpoint = safe_endpoint_for_audit(runtime_base_url)
+    _safe_audit_append(
+        audit,
+        {
+            "event": "pre_api_request",
+            "decision": "block",
+            "reason": _REASON_CLOUD_ENDPOINT_MISMATCH,
+            "provider_id": provider_id,
+            "runtime_base_url": safe_endpoint,
+            "base_url_overridden": overridden,
+        },
+    )
+    _safe_audit_append(
+        audit,
+        {
+            "event": "pre_api_request",
+            "decision": "block",
+            "reason": _REASON_SESSION_REFUSED,
+            "provider_id": provider_id,
+            "runtime_base_url": safe_endpoint,
+        },
+    )
+    msg = (
+        (
+            "Mordred strict mode: refusing request because the runtime endpoint "
+            f"{safe_endpoint!r} is not a provider-owned endpoint for {provider_id!r}. "
+            "Remove the base_url override or use a provider whose endpoint is explicitly supported."
+        )
+        if overridden
+        else (
+            f"Mordred strict mode: refusing request because provider {provider_id!r} has no single "
+            "provider-owned default endpoint (its destination selects a tenant, region, or project). "
+            "Configure an explicit base_url for it, or use a provider with a fixed endpoint."
+        )
+    )
+    _LOG.error(msg)
+    raise MordredSessionRefused(msg)
+
+
+def _local_endpoint_matches_configured(
+    runtime_endpoint: str,
+    configured_endpoint: str,
+) -> bool:
+    """Bind a local client to the policy endpoint, tolerating one URL slash."""
+    if runtime_endpoint != runtime_endpoint.strip() or configured_endpoint != configured_endpoint.strip():
+        return False
+    return runtime_endpoint.rstrip("/") == configured_endpoint.rstrip("/")
+
+
+def _refuse_local_endpoint_mismatch(
+    *,
+    audit: _AuditWriter,
+    runtime_endpoint: str,
+    configured_endpoint: str,
+) -> None:
+    safe_runtime = safe_endpoint_for_audit(runtime_endpoint)
+    safe_configured = safe_endpoint_for_audit(configured_endpoint)
+    _safe_audit_append(
+        audit,
+        {
+            "event": "pre_api_request",
+            "decision": "block",
+            "reason": _REASON_SESSION_REFUSED,
+            "provider_id": _LOCAL_PROVIDER_NAME,
+            "runtime_base_url": safe_runtime,
+            "configured_local_endpoint": safe_configured,
+            "cause": "runtime local endpoint differs from policy pin",
+        },
+    )
+    msg = (
+        "Mordred strict mode: refusing mordred-local because its runtime "
+        f"endpoint {safe_runtime!r} differs from the configured endpoint "
+        f"{safe_configured!r}. Restart/reconfigure Hermes so the resolved "
+        "client matches policy.json."
     )
     _LOG.error(msg)
     raise MordredSessionRefused(msg)
@@ -291,6 +501,8 @@ def _probe_local(
     try:
         health_probe(endpoint)
     except MordredLocalUnreachable as e:
+        safe_endpoint = safe_endpoint_for_audit(endpoint)
+        safe_cause = MordredLocalUnreachable(f"local LLM health probe failed ({type(e).__name__})")
         _safe_audit_append(
             audit,
             {
@@ -298,12 +510,17 @@ def _probe_local(
                 "decision": "block",
                 "reason": _REASON_SESSION_REFUSED,
                 "provider_id": _LOCAL_PROVIDER_NAME,
-                "cause": str(e),
+                "cause": "local LLM health probe failed",
+                "error_type": type(e).__name__,
+                "runtime_base_url": safe_endpoint,
             },
         )
-        msg = f"Mordred strict mode: local LLM endpoint {endpoint!r} is unreachable ({e}); refusing the session."
+        msg = (
+            f"Mordred strict mode: local LLM endpoint {safe_endpoint!r} is unreachable "
+            f"({type(e).__name__}); refusing the session."
+        )
         _LOG.error(msg)
-        raise MordredSessionRefused(msg) from e
+        raise MordredSessionRefused(msg) from safe_cause
     _safe_audit_append(
         audit,
         {
@@ -336,6 +553,8 @@ def _validate_loopback_endpoint(endpoint: str) -> None:
         raise _InvalidLocalEndpoint("endpoint scheme must be http or https")
     if parsed.username is not None or parsed.password is not None:
         raise _InvalidLocalEndpoint("endpoint URL must not contain userinfo")
+    if parsed.query or parsed.fragment:
+        raise _InvalidLocalEndpoint("endpoint URL must not contain a query or fragment")
 
     hostname = parsed.hostname
     if not hostname:
@@ -419,6 +638,8 @@ def _resolve_cloud_attempt(
     provider_id: str,
     audit: _AuditWriter,
     prompt_fn: PromptFn,
+    route_key: str | None = None,
+    runtime_base_url: str | None = None,
 ) -> bool:
     """Decide a non-allowlisted cloud attempt under strict mode.
 
@@ -433,7 +654,8 @@ def _resolve_cloud_attempt(
     if action != "prompt-once":
         return False
 
-    cached = _cloud_prompt_decisions.get(provider_id)
+    cache_key = route_key or provider_id
+    cached = _cloud_prompt_decisions.get(cache_key)
     if cached is not None:
         # Already asked this provider this session — stay silent. A cached deny
         # still gets audited downstream by _refuse_cloud_not_allowlisted
@@ -443,7 +665,7 @@ def _resolve_cloud_attempt(
 
     verdict = prompt_fn(provider_id)
     if verdict is True:
-        _cloud_prompt_decisions[provider_id] = True
+        _cloud_prompt_decisions[cache_key] = True
         _safe_audit_append(
             audit,
             {
@@ -451,11 +673,12 @@ def _resolve_cloud_attempt(
                 "decision": "allow",
                 "reason": _REASON_CLOUD_PROMPTED_ALLOW,
                 "provider_id": provider_id,
+                **({"runtime_base_url": safe_endpoint_for_audit(runtime_base_url)} if runtime_base_url else {}),
             },
         )
         return True
     if verdict is False:
-        _cloud_prompt_decisions[provider_id] = False
+        _cloud_prompt_decisions[cache_key] = False
         _safe_audit_append(
             audit,
             {
@@ -463,6 +686,7 @@ def _resolve_cloud_attempt(
                 "decision": "block",
                 "reason": _REASON_CLOUD_PROMPTED_DENY,
                 "provider_id": provider_id,
+                **({"runtime_base_url": safe_endpoint_for_audit(runtime_base_url)} if runtime_base_url else {}),
             },
         )
         return False
@@ -476,9 +700,165 @@ def _resolve_cloud_attempt(
             "reason": _REASON_CLOUD_PROMPTED_DENY,
             "provider_id": provider_id,
             "prompt_unavailable": True,
+            **({"runtime_base_url": safe_endpoint_for_audit(runtime_base_url)} if runtime_base_url else {}),
         },
     )
     return False
+
+
+def _normalized_cloud_endpoint(runtime_base_url: str | None) -> tuple[str, str] | None:
+    """Return ``(host, normalized route id)`` for a safe cloud URL."""
+    if not isinstance(runtime_base_url, str) or not runtime_base_url.strip():
+        return None
+    if runtime_base_url != runtime_base_url.strip() or any(
+        ord(char) < 0x20 or ord(char) == 0x7F for char in runtime_base_url
+    ):
+        return None
+    raw = runtime_base_url.strip()
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() != "https" or parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    host = (parsed.hostname or "").rstrip(".").casefold()
+    if not host:
+        return None
+    default_port = port in (None, 443)
+    authority = host if default_port else f"{host}:{port}"
+    path = parsed.path.rstrip("/") or "/"
+    return host, f"https://{authority}{path}"
+
+
+def _host_matches_constraint(host: str, constraint: str) -> bool:
+    if constraint.startswith("."):
+        suffix = constraint[1:]
+        return host == suffix or host.endswith(constraint)
+    return host == constraint
+
+
+def _path_at_or_below(path: str, base: str) -> bool:
+    return path == base or path.startswith(f"{base}/")
+
+
+def cloud_endpoint_matches_provider(provider_id: str, runtime_base_url: str | None) -> bool:
+    """Whether a runtime URL belongs to the named built-in cloud provider."""
+    parsed = _normalized_cloud_endpoint(runtime_base_url)
+    provider = policy_provider_id(provider_id)
+    if parsed is None:
+        return False
+    host = parsed[0]
+    path = urlsplit(parsed[1]).path
+    if provider == "bedrock":
+        return _BEDROCK_ENDPOINT_RE.fullmatch(host) is not None
+    if provider == "vertex":
+        return _VERTEX_ENDPOINT_RE.fullmatch(host) is not None
+    if provider == "opencode-go":
+        return host == "opencode.ai" and _path_at_or_below(path, "/zen/go/v1")
+    if provider == "opencode-zen":
+        return host == "opencode.ai" and _path_at_or_below(path, "/zen/v1")
+    constraints = _CLOUD_ENDPOINT_HOSTS.get(provider)
+    return bool(constraints and any(_host_matches_constraint(parsed[0], constraint) for constraint in constraints))
+
+
+# Provider SDKs silently redirect to these when the caller passes no
+# ``base_url``. Hermes then reports ``base_url=""`` while the request actually
+# leaves for the override, so an absent runtime endpoint may only be trusted
+# once none of these is set. Enumerated from the installed
+# ``openai`` / ``anthropic`` / ``google`` clients rather than guessed.
+_SDK_BASE_URL_ENV_VARS: Final[tuple[str, ...]] = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "AZURE_OPENAI_ENDPOINT",
+    "GEMINI_NEXT_GEN_API_BASE_URL",
+    "OPENAI_BASE_URL",
+)
+
+
+def ambient_base_url_override() -> str | None:
+    """Return the first provider-SDK endpoint override present in the env.
+
+    ``None`` means no ambient redirect exists, so a client constructed without
+    an explicit ``base_url`` really does reach the vendor default.
+    """
+    for name in _SDK_BASE_URL_ENV_VARS:
+        raw = os.environ.get(name)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def cloud_provider_has_owned_default(provider_id: str) -> bool:
+    """Whether omitting ``base_url`` still lands on a provider-owned endpoint.
+
+    Hermes leaves ``base_url`` unset whenever the provider SDK supplies its own
+    endpoint (``agent.base_url = base_url or ""`` in ``agent/agent_init.py``);
+    native Anthropic is the common case. That is NOT an unbound destination — it
+    is the vendor default — so it must not be treated like an operator override
+    pointing at an arbitrary collector.
+
+    Providers whose destination selects a tenant, region, or project (Azure
+    Foundry, Bedrock, Vertex) have no single owned default. They keep failing
+    closed until an explicit endpoint is configured, which is exactly what their
+    empty :data:`_CLOUD_ENDPOINT_HOSTS` entries encode.
+    """
+    provider = policy_provider_id(provider_id)
+    return bool(_CLOUD_ENDPOINT_HOSTS.get(provider))
+
+
+def infer_cloud_provider(runtime_base_url: str | None) -> str | None:
+    """Infer a unique built-in provider from an actual endpoint."""
+    parsed = _normalized_cloud_endpoint(runtime_base_url)
+    if parsed is None:
+        return None
+    matches = [
+        provider for provider in _CLOUD_ENDPOINT_HOSTS if cloud_endpoint_matches_provider(provider, runtime_base_url)
+    ]
+    if not matches:
+        return None
+    # Several Hermes aliases intentionally share one service endpoint. Prefer
+    # a policy identity already canonical in the public allow-list.
+    priority = ("openai", "anthropic", "gemini", "bedrock", "vertex", "openrouter")
+    return next((provider for provider in priority if provider in matches), sorted(matches)[0])
+
+
+def _resolve_cloud_endpoint_binding(
+    provider_id: str,
+    runtime_base_url: str | None,
+) -> tuple[bool, str | None, bool]:
+    """Decide whether the request's real destination belongs to ``provider_id``.
+
+    Returns ``(bound, effective_base_url, overridden)``.
+
+    Endpoint identity is a prerequisite, not an approval decision: an allow-list
+    entry or a provider-only prompt must never bless
+    ``provider=openai, base_url=https://collector...``.
+
+    An absent/blank ``base_url`` is NOT an unbound destination. Hermes stores
+    ``base_url or ""`` and omits it whenever the provider SDK supplies its own
+    endpoint, so the request goes to the vendor default. Such a client is still
+    redirectable through the SDK's own environment overrides while Hermes keeps
+    reporting ``base_url=""``, so bind against the ambient value when one exists
+    and otherwise require the provider to own a single default endpoint.
+    """
+    overridden = isinstance(runtime_base_url, str) and bool(runtime_base_url.strip())
+    if not overridden:
+        ambient = ambient_base_url_override()
+        if ambient is not None:
+            return cloud_endpoint_matches_provider(provider_id, ambient), ambient, True
+        return cloud_provider_has_owned_default(provider_id), runtime_base_url, False
+    return cloud_endpoint_matches_provider(provider_id, runtime_base_url), runtime_base_url, True
+
+
+def _cloud_route_key(provider_id: str, runtime_base_url: str | None) -> str:
+    parsed = _normalized_cloud_endpoint(runtime_base_url)
+    endpoint = parsed[1] if parsed is not None else "<missing-or-invalid-endpoint>"
+    return f"{provider_id}@{endpoint}"
 
 
 # --------------------------------------------------------------------------- #
@@ -550,7 +930,7 @@ def _read_policy_settings(policy_json_path: Path) -> _PolicySettings:
     # arbitrary-endpoint grant is not something strict mode should make easy.
     cloud_allowlist = (
         frozenset(
-            s for s in (canonicalize_provider(x) for x in raw_allowlist if isinstance(x, str)) if s and s != "custom"
+            s for s in (policy_provider_id(x) for x in raw_allowlist if isinstance(x, str)) if s and s != "custom"
         )
         if isinstance(raw_allowlist, list)
         else frozenset()
@@ -623,6 +1003,7 @@ def check_runtime_provider(
         # silently allows unresolved-provider API calls.
         _refuse_degraded(audit=audit, settings=settings)
         return  # unreachable — _refuse_degraded raises
+    active_provider = policy_provider_id(active_provider)
     if active_provider == _LOCAL_PROVIDER_NAME:
         # Codex review P2 round 7: probe the runtime ``base_url`` (the URL
         # the request will actually use), not the policy.json mirror —
@@ -630,11 +1011,17 @@ def check_runtime_provider(
         # after a ``configure`` rerun. Fall back to policy.json only when
         # the hook payload doesn't supply a usable base_url (e.g.
         # synthetic test payloads or future hook payload changes).
-        probe_endpoint = (
-            runtime_base_url.strip()
-            if isinstance(runtime_base_url, str) and runtime_base_url.strip()
-            else settings.local_endpoint
-        )
+        runtime_endpoint = runtime_base_url if isinstance(runtime_base_url, str) and runtime_base_url.strip() else None
+        if runtime_endpoint is not None and not _local_endpoint_matches_configured(
+            runtime_endpoint,
+            settings.local_endpoint,
+        ):
+            _refuse_local_endpoint_mismatch(
+                audit=audit,
+                runtime_endpoint=runtime_endpoint,
+                configured_endpoint=settings.local_endpoint,
+            )
+        probe_endpoint = runtime_endpoint or settings.local_endpoint
         _probe_local(
             audit=_RefuseOnlyAuditWriter(audit),
             settings=settings,
@@ -642,7 +1029,19 @@ def check_runtime_provider(
             probe_endpoint=probe_endpoint,
         )
         return
-    if active_provider in settings.cloud_allowlist and settings.allow_cloud_llm:
+    provider_allowlisted = active_provider in settings.cloud_allowlist and settings.allow_cloud_llm
+    endpoint_bound, runtime_base_url, overridden = _resolve_cloud_endpoint_binding(
+        active_provider,
+        runtime_base_url,
+    )
+    if not endpoint_bound:
+        _refuse_cloud_endpoint_mismatch(
+            audit=audit,
+            provider_id=active_provider,
+            runtime_base_url=runtime_base_url,
+            overridden=overridden,
+        )
+    if provider_allowlisted:
         return
     # Non-allowlisted cloud under strict mode. ``always-block`` (default)
     # refuses; ``prompt-once`` asks the operator once per provider via an
@@ -652,6 +1051,8 @@ def check_runtime_provider(
         provider_id=active_provider,
         audit=audit,
         prompt_fn=prompt_fn or _default_prompt,
+        route_key=_cloud_route_key(active_provider, runtime_base_url),
+        runtime_base_url=runtime_base_url,
     ):
         return
     _refuse_cloud_not_allowlisted(
@@ -678,4 +1079,12 @@ class _RefuseOnlyAuditWriter:
         self._inner.append(entry)
 
 
-__all__ = ["check_runtime_provider", "check_session_provider"]
+__all__ = [
+    "check_runtime_provider",
+    "check_session_provider",
+    "cloud_endpoint_matches_provider",
+    "cloud_provider_has_owned_default",
+    "infer_cloud_provider",
+    "policy_provider_id",
+    "safe_endpoint_for_audit",
+]

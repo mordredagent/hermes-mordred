@@ -71,6 +71,21 @@ class TestProbeSuccess:
         probe(endpoint="http://localhost:1234/v1/", transport=httpx.MockTransport(handler))
         assert seen == ["http://localhost:1234/v1/models"]
 
+    def test_probe_drops_query_and_fragment_credentials(self) -> None:
+        from mordred_hermes.llm_guard.health import probe
+
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(200, json={"data": []})
+
+        probe(
+            endpoint="http://localhost:1234/v1?api_key=query-secret#fragment-secret",
+            transport=httpx.MockTransport(handler),
+        )
+        assert seen == ["http://localhost:1234/v1/models"]
+
 
 class TestProbeFailure:
     def test_500_raises_unreachable(self) -> None:
@@ -87,7 +102,7 @@ class TestProbeFailure:
         from mordred_hermes.llm_guard._exceptions import MordredLocalUnreachable
         from mordred_hermes.llm_guard.health import probe
 
-        with pytest.raises(MordredLocalUnreachable, match=r"connection refused|ConnectError"):
+        with pytest.raises(MordredLocalUnreachable, match="ConnectError"):
             probe(
                 endpoint="http://localhost:1234/v1",
                 transport=httpx.MockTransport(_connect_error_handler),
