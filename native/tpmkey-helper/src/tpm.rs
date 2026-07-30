@@ -520,6 +520,7 @@ mod tests {
     use super::*;
     use crate::errmap::Reason;
     use crate::sec1;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -540,6 +541,10 @@ mod tests {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             p.push(format!("tpmkey-tpm-test-{}-{}", std::process::id(), n));
             std::fs::create_dir_all(&p).unwrap();
+            // The store refuses any pre-existing dir that is not exactly 0700
+            // (umask makes create_dir_all produce 0755), same as production
+            // dirs created by the write path.
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
             TempDir(p)
         }
     }
