@@ -31,6 +31,8 @@ class _FakeRunner:
     def __init__(self, responses: dict[tuple[str, ...], subprocess.CompletedProcess[str]]) -> None:
         self._responses = responses
         self.calls: list[tuple[str, ...]] = []
+        self.timeouts: list[float | None] = []
+        self.lockdown_state = "off"
 
     def __call__(
         self,
@@ -41,13 +43,21 @@ class _FakeRunner:
         text: bool = True,
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, timeout
+        del check, capture_output, text
         key = tuple(argv)
         self.calls.append(key)
+        self.timeouts.append(timeout)
+        if key[-2:] == ("lockdown-mode", "get") and key not in self._responses:
+            return _result(f"Network lockdown when disconnected: {self.lockdown_state}\n")
         try:
-            return self._responses[key]
+            result = self._responses[key]
         except KeyError:
-            return subprocess.CompletedProcess(args=list(key), returncode=0, stdout="", stderr="")
+            result = subprocess.CompletedProcess(args=list(key), returncode=0, stdout="", stderr="")
+        if result.returncode == 0 and key[-3:] == ("lockdown-mode", "set", "on"):
+            self.lockdown_state = "on"
+        elif result.returncode == 0 and key[-3:] == ("lockdown-mode", "set", "off"):
+            self.lockdown_state = "off"
+        return result
 
 
 def _result(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -296,6 +306,47 @@ class TestWireGuardProvider:
         handle = WireGuardHandle(wg_quick_path="/usr/bin/wg-quick", config_path=self._CONF)
         assert WireGuardProvider(config_path=self._CONF).health(handle, runner=runner) is False
 
+    def test_all_external_commands_have_bounded_timeouts(self) -> None:
+        from mordred_hermes.network.vpn_providers import WireGuardProvider
+        from mordred_hermes.network.vpn_providers import wireguard as wireguard_mod
+
+        runner = _FakeRunner({("wg", "show", "wg0"): _result(stdout="latest handshake: 5 seconds ago\n")})
+        provider = WireGuardProvider(config_path=self._CONF, exists=lambda _p: True)
+        handle = provider.bring_up(
+            cli_path="/usr/bin/wg-quick",
+            region="auto",
+            policy_mode="off",
+            runner=runner,
+        )
+        assert provider.health(handle, runner=runner) is True
+        provider.disconnect(handle, runner=runner)
+
+        assert runner.timeouts == [wireguard_mod.DEFAULT_COMMAND_TIMEOUT] * 3
+
+    def test_command_timeouts_fail_safely(self) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.vpn_providers import WireGuardProvider
+        from mordred_hermes.network.vpn_providers.wireguard import WireGuardHandle
+
+        def timeout_runner(
+            argv: list[str] | tuple[str, ...],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd=list(argv), timeout=float(kwargs["timeout"]))
+
+        provider = WireGuardProvider(config_path=self._CONF, exists=lambda _p: True)
+        with pytest.raises(BringupFailed, match="timed out"):
+            provider.bring_up(
+                cli_path="/usr/bin/wg-quick",
+                region="auto",
+                policy_mode="off",
+                runner=timeout_runner,
+            )
+
+        handle = WireGuardHandle(wg_quick_path="/usr/bin/wg-quick", config_path=self._CONF)
+        provider.disconnect(handle, runner=timeout_runner)
+        assert provider.health(handle, runner=timeout_runner) is False
+
 
 # --------------------------------------------------------------------------- #
 # Custom-command provider (the 'any VPN' escape hatch — ExpressVPN, NordVPN)   #
@@ -371,6 +422,50 @@ class TestCustomCommandProvider:
         with pytest.raises(BringupFailed):
             provider.bring_up(cli_path="expressvpn", region="auto", policy_mode="off", runner=runner)
 
+    def test_command_errors_never_expose_argv_or_output_secrets(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.vpn_providers import CustomCommandProvider
+        from mordred_hermes.network.vpn_providers.custom import CustomHandle
+
+        secret_up = ("vendor-vpn", "connect", "--token", "argv-secret")
+        secret_down = ("vendor-vpn", "disconnect", "--token", "down-secret")
+        provider = CustomCommandProvider(
+            up_cmd=secret_up,
+            down_cmd=secret_down,
+        )
+        runner = _FakeRunner(
+            {
+                secret_up: subprocess.CompletedProcess(
+                    args=list(secret_up),
+                    returncode=2,
+                    stdout="",
+                    stderr="server echoed output-secret",
+                ),
+                secret_down: _result(returncode=3),
+            }
+        )
+
+        with pytest.raises(BringupFailed) as excinfo:
+            provider.bring_up(
+                cli_path="vendor-vpn",
+                region="auto",
+                policy_mode="off",
+                runner=runner,
+            )
+        provider.disconnect(
+            CustomHandle(down_cmd=secret_down, health_cmd=None),
+            runner=runner,
+        )
+
+        rendered = str(excinfo.value) + caplog.text
+        assert "vendor-vpn" in rendered
+        assert "3 argument(s)" in rendered
+        for secret in ("argv-secret", "down-secret", "output-secret", "--token"):
+            assert secret not in rendered
+
     def test_disconnect_runs_down_cmd(self) -> None:
         from mordred_hermes.network.vpn_providers import CustomCommandProvider
         from mordred_hermes.network.vpn_providers.custom import CustomHandle
@@ -404,6 +499,59 @@ class TestCustomCommandProvider:
         handle = CustomHandle(down_cmd=self._DOWN, health_cmd=None)
         # No probe configured -> cannot observe a drop -> reported healthy.
         assert CustomCommandProvider(up_cmd=self._UP, down_cmd=self._DOWN).health(handle, runner=runner) is True
+
+    def test_all_external_commands_have_bounded_timeouts(self) -> None:
+        from mordred_hermes.network.vpn_providers import CustomCommandProvider
+        from mordred_hermes.network.vpn_providers import custom as custom_mod
+
+        runner = _FakeRunner({})
+        provider = CustomCommandProvider(
+            up_cmd=self._UP,
+            down_cmd=self._DOWN,
+            health_cmd=self._HEALTH,
+        )
+        handle = provider.bring_up(
+            cli_path="expressvpn",
+            region="auto",
+            policy_mode="off",
+            runner=runner,
+        )
+        assert provider.health(handle, runner=runner) is True
+        provider.disconnect(handle, runner=runner)
+
+        assert runner.timeouts == [
+            custom_mod.DEFAULT_UP_TIMEOUT,
+            custom_mod.DEFAULT_COMMAND_TIMEOUT,
+            custom_mod.DEFAULT_COMMAND_TIMEOUT,
+        ]
+
+    def test_command_timeouts_fail_safely(self) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.vpn_providers import CustomCommandProvider
+        from mordred_hermes.network.vpn_providers.custom import CustomHandle
+
+        def timeout_runner(
+            argv: list[str] | tuple[str, ...],
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(cmd=list(argv), timeout=float(kwargs["timeout"]))
+
+        provider = CustomCommandProvider(
+            up_cmd=self._UP,
+            down_cmd=self._DOWN,
+            health_cmd=self._HEALTH,
+        )
+        with pytest.raises(BringupFailed, match="timed out"):
+            provider.bring_up(
+                cli_path="expressvpn",
+                region="auto",
+                policy_mode="off",
+                runner=timeout_runner,
+            )
+
+        handle = CustomHandle(down_cmd=self._DOWN, health_cmd=self._HEALTH)
+        provider.disconnect(handle, runner=timeout_runner)
+        assert provider.health(handle, runner=timeout_runner) is False
 
 
 # --------------------------------------------------------------------------- #

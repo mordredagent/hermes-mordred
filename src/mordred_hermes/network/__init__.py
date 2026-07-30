@@ -32,6 +32,7 @@ from .._policy_io import load_policy_mapping
 from .._policy_types import VALID_ACTIVE_PATHS
 from .._yaml_io import load_plugin_section
 from . import api, hooks
+from . import proxy_env as proxy_env_mod
 from . import settings as settings_mod
 from ._exceptions import MordredPathBringupFailed
 from .runtime import Runtime, RuntimeConfig, route_config_fingerprint
@@ -86,6 +87,7 @@ def register(ctx: PluginContext) -> None:
     """
     audit = _registration_audit()
     config = _registration_config(audit)
+    _register_proxy_env_passthrough(config=config, audit=audit)
     new_runtime = _prepare_process_runtime(config=config, audit=audit)
     try:
         _wire_network_hooks(ctx=ctx, audit=audit)
@@ -99,6 +101,70 @@ def register(ctx: PluginContext) -> None:
             error=e,
             lifecycle_context="while registering mandatory network hooks",
         )
+
+
+def _register_proxy_env_passthrough(
+    *,
+    config: RuntimeConfig,
+    audit: Writer,
+    registrar: Callable[[set[str]], None] | None = None,
+    checker: Callable[[str], bool] | None = None,
+) -> None:
+    """Allow the frozen route environment through ``execute_code``.
+
+    Hermes deliberately scrubs child-process environments. Its supported
+    passthrough registry is therefore part of the network route's security
+    boundary: mutating ``os.environ`` alone does not protect code-execution
+    children. Registration happens before route activation and is verified
+    immediately. Strict mode refuses startup on any missing key; lenient/off
+    retain compatibility but emit an explicit degraded audit marker.
+    """
+    names = proxy_env_mod.managed_var_names()
+    error: Exception | None = None
+    missing: list[str] = []
+    try:
+        if registrar is None or checker is None:
+            from tools.env_passthrough import (  # type: ignore[import-untyped]
+                is_env_passthrough,
+                register_env_passthrough,
+            )
+
+            registrar = register_env_passthrough
+            checker = is_env_passthrough
+        registrar(names)
+        missing = sorted(name for name in names if not checker(name))
+    except Exception as exc:
+        error = exc
+
+    if error is None and not missing:
+        return
+    detail = (
+        f"proxy environment passthrough registration failed: {error}"
+        if error is not None
+        else f"proxy environment passthrough verification failed for: {missing}"
+    )
+    failure = RuntimeError(detail)
+    if config.policy_mode == "strict":
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path=config.default_path,
+            policy_mode=config.policy_mode,
+            error=failure,
+            lifecycle_context="before execute_code child routing was secured",
+        )
+    safe_audit_append(
+        audit,
+        {
+            "event": "network.register",
+            "decision": "warn",
+            "reason": "network.transport_incompatible",
+            "attempted_path": config.default_path,
+            "policy_mode": config.policy_mode,
+            "error": detail,
+        },
+        logger=_LOG,
+    )
+    _LOG.warning("%s; execute_code child traffic may not inherit the selected route", detail)
 
 
 def _registration_audit() -> Writer:
@@ -216,6 +282,11 @@ def _wire_network_hooks(*, ctx: PluginContext, audit: Writer) -> None:
     check_plugin_integrity = _load_integrity_hook()
 
     def _on_session_start(**kwargs: Any) -> None:
+        # Hermes /reset clears its ContextVar-backed env passthrough registry.
+        # Reassert the complete route environment at every new session before
+        # any execute_code child can run, using the policy currently on disk.
+        session_config = _registration_config(audit)
+        _register_proxy_env_passthrough(config=session_config, audit=audit)
         hooks.on_session_start(
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
             config_path=DEFAULT_CONFIG_PATH,
@@ -503,7 +574,8 @@ def _resolve_tor_socks_port(network: dict[str, Any]) -> int:
         # ``mullvad_killswitch: true`` placed under the wrong key can't
         # silently become port 1.
         return 0
-    if isinstance(value, int) and 0 < value <= 65535:
+    # Runtime derives ControlPort as SOCKSPort + 1.
+    if isinstance(value, int) and 0 < value < 65535:
         return value
     return 0
 

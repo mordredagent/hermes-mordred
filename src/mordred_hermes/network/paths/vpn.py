@@ -18,6 +18,7 @@ for v1.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
@@ -25,7 +26,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, Protocol
 
 from ..._policy_types import PolicyMode as PolicyMode
 from .._exceptions import BringupFailed
@@ -38,8 +39,32 @@ MACOS_APP_BUNDLE_PATH: Final[str] = MACOS_MULLVAD_APP_CLI
 DEFAULT_CONNECT_TIMEOUT: Final[float] = 10.0
 DEFAULT_POLL_INTERVAL: Final[float] = 0.5
 DEFAULT_MAX_HANDSHAKE_AGE_SECONDS: Final[float] = 180.0
+DEFAULT_COMMAND_TIMEOUT: Final[float] = 5.0
 
-SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+class SubprocessRunner(Protocol):
+    """The injectable command runner contract.
+
+    Deliberately NOT ``Callable[..., CompletedProcess[str]]``: every production
+    call site now passes ``timeout=`` so a bounded command cannot hold the
+    runtime's lifecycle lock forever, and the elided-argument form let a runner
+    without that parameter type-check cleanly and then ``TypeError`` at bring-up.
+    Keyword arguments carry defaults so existing ``runner(argv)`` calls remain
+    valid for implementers.
+    """
+
+    def __call__(
+        self,
+        argv: list[str] | tuple[str, ...],
+        *,
+        check: bool = False,
+        capture_output: bool = True,
+        text: bool = True,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+
+SettingState = Literal["on", "off", "unknown"]
 
 
 def _default_runner(
@@ -65,19 +90,19 @@ def _default_runner(
 
 
 DEFAULT_RUNNER: Final[SubprocessRunner] = _default_runner
+_LOG = logging.getLogger("mordred.network.vpn")
 
 
 @dataclass(frozen=True, slots=True)
 class MullvadHandle:
     """What we configured. The Mullvad daemon owns the actual tunnel state.
 
-    Codex round 8 P1 (2026-05-14): ``lockdown_applied_by_us`` records
-    whether we changed the lockdown setting from ``off`` to ``on``
-    (vs. the user already had it on before Mordred ran). Only the
-    setting WE flipped is eligible for rollback on disconnect /
-    bring-up failure — undoing the user's pre-existing security
-    posture would weaken their machine after a transient bring-up
-    failure.
+    ``lockdown_applied_by_us`` records whether we observed ``off`` and then
+    successfully requested ``on``. It is informational, not proof of exclusive
+    ownership: Mullvad has no compare-and-swap operation, so another actor may
+    enable lockdown between those commands. Strict automatic cleanup therefore
+    always preserves ON; only an explicit ``disconnect(...,
+    preserve_lockdown=False)`` may turn it off.
 
     Mullvad CLI 2026.2 removed the separate ``always-require-vpn``
     subcommand; its semantics are now subsumed by ``lockdown-mode``,
@@ -136,19 +161,29 @@ def bring_up(
     semantics are now subsumed by ``lockdown-mode``, so strict mode
     only flips that one setting.
     """
-    # Codex round 7 P2-A + round 8 P1-A (2026-05-14): only enable
-    # strict kill-switch settings we found OFF, and only roll back the
-    # ones WE flipped. Querying current state first prevents two bugs:
-    #   (1) undoing the user's pre-existing lockdown after our bring-up
-    #       fails — would weaken their security posture, and
-    #   (2) re-applying a setting that was already on — pointless churn.
+    # Only enable a strict kill-switch we observed OFF. The state query and
+    # mutation are not atomic (Mullvad exposes no CAS), so even a successful
+    # ``set on`` cannot establish exclusive ownership. On later failure we
+    # deliberately leave lockdown ON rather than risk disabling a concurrent
+    # operator's security setting.
     lockdown_applied = False
-    applied_strict: list[tuple[str, ...]] = []
     try:
-        if policy_mode == "strict" and not _is_setting_on(runner, cli_path, "lockdown-mode"):
-            _run_or_raise(runner, (cli_path, "lockdown-mode", "set", "on"))
-            applied_strict.append((cli_path, "lockdown-mode", "set", "off"))
-            lockdown_applied = True
+        if policy_mode == "strict":
+            lockdown_state = _get_setting_state(runner, cli_path, "lockdown-mode")
+            if lockdown_state == "unknown":
+                raise BringupFailed(
+                    "mullvad lockdown-mode state could not be determined; "
+                    "refusing to change an operator-owned kill-switch in strict mode"
+                )
+            if lockdown_state == "off":
+                _run_or_raise(runner, (cli_path, "lockdown-mode", "set", "on"))
+                lockdown_applied = True
+                confirmed_state = _get_setting_state(runner, cli_path, "lockdown-mode")
+                if confirmed_state != "on":
+                    raise BringupFailed(
+                        "mullvad lockdown-mode did not confirm ON after a successful set command; "
+                        f"observed {confirmed_state!r}"
+                    )
         # Codex round 6 P1 (2026-05-14): the Mullvad CLI keyword for
         # automatic relay selection is ``any``, not ``auto``. We keep
         # ``auto`` as the user-facing alias (wizard prompt +
@@ -159,15 +194,12 @@ def bring_up(
         _run_or_raise(runner, (cli_path, "relay", "set", "location", cli_region))
         _run_or_raise(runner, (cli_path, "connect"))
     except BringupFailed:
-        for rollback_argv in reversed(applied_strict):
-            try:
-                runner(rollback_argv)
-            except Exception as rb_err:
-                # A failed rollback must not mask the original error.
-                # Log so the operator can clean up manually.
-                import logging
-
-                logging.getLogger("mordred.network.vpn").warning("rollback of %r failed: %s", rollback_argv, rb_err)
+        if lockdown_applied:
+            _LOG.warning(
+                "Mullvad bring-up failed after lockdown-mode was requested ON; "
+                "leaving it ON because concurrent ownership cannot be ruled out. "
+                "Disable it explicitly only after confirming no other actor relies on it."
+            )
         raise
     return MullvadHandle(
         cli_path=cli_path,
@@ -177,22 +209,24 @@ def bring_up(
     )
 
 
-def _is_setting_on(runner: SubprocessRunner, cli_path: str, setting: str) -> bool:
-    """Query ``mullvad <setting> get`` and parse "on"/"off".
+def _get_setting_state(runner: SubprocessRunner, cli_path: str, setting: str) -> SettingState:
+    """Query ``mullvad <setting> get`` without conflating failure with OFF.
 
-    Returns ``True`` when the setting is enabled, ``False`` otherwise
-    (including when the query itself fails — failure-open here keeps
-    bring-up robust against future ``mullvad`` CLI output changes; the
-    worst case is we re-apply a setting that was already on, which is
-    a no-op).
+    ``unknown`` covers command errors, non-zero exits, and output drift. In
+    strict mode the caller refuses before mutation: treating an unreadable
+    operator-owned ON setting as OFF would let a later rollback disable the
+    user's pre-existing kill-switch.
     """
     try:
-        result = runner((cli_path, setting, "get"))
-    except OSError:
-        return False
+        result = runner(
+            (cli_path, setting, "get"),
+            timeout=DEFAULT_COMMAND_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
     if result.returncode != 0:
-        return False
-    stdout = (result.stdout or "").lower()
+        return "unknown"
+    stdout = (result.stdout or "").strip().lower()
     # Mullvad CLI output forms: "Network lockdown when disconnected: on"
     # / "Always require VPN: off". Match the bare value token, never a
     # substring: a stray word ending in "on" (e.g. "...connection") must
@@ -200,15 +234,20 @@ def _is_setting_on(runner: SubprocessRunner, cli_path: str, setting: str) -> boo
     # OPEN, because bring_up would then skip ``lockdown-mode set on``
     # believing the kill-switch is already active. The value token
     # ("on"/"off") is stable across Mullvad versions even as labels drift.
-    tokens = stdout.split()
-    return ": on" in stdout or (bool(tokens) and tokens[-1] == "on")
+    match = re.search(r"(?:^|:\s*)(on|off)\s*$", stdout)
+    if match is None:
+        return "unknown"
+    return "on" if match.group(1) == "on" else "off"
 
 
 def _run_or_raise(runner: SubprocessRunner, argv: tuple[str, ...]) -> None:
     """Invoke ``runner(argv)`` and translate non-zero returncode into
     :class:`BringupFailed`. Empty stderr defaults so the message is
     still actionable when the CLI is silent."""
-    result = runner(argv)
+    try:
+        result = runner(argv, timeout=DEFAULT_COMMAND_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BringupFailed(f"mullvad command {' '.join(argv)!r} failed or timed out: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise BringupFailed(f"mullvad command {' '.join(argv)!r} failed (rc={result.returncode}): {detail!r}")
@@ -231,8 +270,17 @@ def wait_connected(
     """
     start = clock()
     while True:
-        result = runner((cli_path, "status"))
-        if "Connected" in (result.stdout or ""):
+        try:
+            result = runner(
+                (cli_path, "status"),
+                timeout=min(DEFAULT_COMMAND_TIMEOUT, max(timeout, 0.1)),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise BringupFailed(f"mullvad status failed or timed out: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise BringupFailed(f"mullvad status failed (rc={result.returncode}): {detail!r}")
+        if _status_is_connected(result.stdout or ""):
             return
         if clock() - start > timeout:
             raise BringupFailed(f"mullvad did not reach Connected within {timeout}s")
@@ -256,9 +304,30 @@ def disconnect(
     removed upstream and ``lockdown-mode`` now covers the same
     "block traffic when not connected" guarantee.
     """
-    runner((handle.cli_path, "disconnect"))
+    _run_or_raise(runner, (handle.cli_path, "disconnect"))
     if not preserve_lockdown:
-        runner((handle.cli_path, "lockdown-mode", "set", "off"))
+        _run_or_raise(runner, (handle.cli_path, "lockdown-mode", "set", "off"))
+
+
+def _status_is_connected(stdout: str) -> bool:
+    """Parse the Mullvad status token without substring false positives.
+
+    Every non-blank line is examined, not just the first: Mullvad versions differ
+    in whether they print the tunnel state first or precede it with a header, and
+    pinning to line 0 would report a healthy tunnel as down after a cosmetic CLI
+    change. Token discipline is unchanged — ``Not Connected``, ``Connecting``,
+    and ``Disconnected`` still do not match.
+    """
+    prefix = "tunnel status:"
+    for raw_line in stdout.splitlines():
+        normalized = raw_line.strip().casefold()
+        if not normalized:
+            continue
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+        if normalized == "connected" or normalized.startswith("connected to "):
+            return True
+    return False
 
 
 _AGE_TOKEN_RE: Final = re.compile(
@@ -329,10 +398,10 @@ def health(
     state — the exact signal :func:`wait_connected` polls at bring-up. It is
     inherently scoped to Mullvad's tunnel (``mullvad status`` cannot be fooled
     by a sibling ``wg`` interface) and flips to ``Disconnected`` /
-    ``Connecting`` the moment that tunnel drops. The ``Connected`` (capital C)
-    substring test never matches ``Disconnected`` (lower-case ``c`` after the
-    ``Dis`` prefix), so it distinguishes the two exactly as ``wait_connected``
-    does.
+    ``Connecting`` the moment that tunnel drops. The parser requires an exact
+    ``Connected`` token or ``Connected to ...`` first line (optionally after
+    ``Tunnel status:``), so diagnostics such as ``Not Connected`` cannot mark
+    the route ready.
 
     Trade-off — daemon belief vs kernel handshake ground truth: ``mullvad
     status`` reflects the daemon's connection state, not the WireGuard kernel
@@ -356,9 +425,12 @@ def health(
     P2 / HIGH-3 2026-05-13).
     """
     try:
-        result = runner((handle.cli_path, "status"))
+        result = runner(
+            (handle.cli_path, "status"),
+            timeout=DEFAULT_COMMAND_TIMEOUT,
+        )
     except (FileNotFoundError, PermissionError, subprocess.SubprocessError, OSError):
         return False
     if result.returncode != 0:
         return False
-    return "Connected" in (result.stdout or "")
+    return _status_is_connected(result.stdout or "")

@@ -101,25 +101,42 @@ def pick_free_port(
     socket_factory: Callable[..., Any] = socket.socket,
     host: str = "127.0.0.1",
 ) -> int:
-    """Return the first port in ``candidates`` whose ``bind`` succeeds.
+    """Return the first free adjacent ``(SOCKS, ControlPort)`` pair.
 
-    Raises :class:`BringupFailed` if every candidate is busy. The probe
-    binds and immediately closes — the kernel may briefly hold the
-    port in TIME_WAIT, but the tor daemon's own bind retry tolerates
-    the typical 1-2 second window.
+    Tor uses ``socks_port + 1`` for its control socket. Checking only the
+    SOCKS port can select a pair whose control port is already occupied (or
+    select 65535, whose derived control port is invalid). Both sockets remain
+    bound until the pair has been proven available, then close together.
     """
     last_err: OSError | None = None
     for port in candidates:
-        sock = socket_factory(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock.bind((host, port))
+            validate_port_pair(port)
+        except BringupFailed as exc:
+            last_err = OSError(str(exc))
+            continue
+        sockets: list[Any] = []
+        try:
+            for candidate in (port, port + 1):
+                sock = socket_factory(socket.AF_INET, socket.SOCK_STREAM)
+                sockets.append(sock)
+                sock.bind((host, candidate))
         except OSError as e:
             last_err = e
             continue
         finally:
-            sock.close()
+            for sock in sockets:
+                sock.close()
         return port
-    raise BringupFailed(f"all candidate Tor SOCKS ports busy: {candidates} (last error: {last_err})")
+    raise BringupFailed(
+        f"all candidate Tor SOCKS/control port pairs busy or invalid: {candidates} (last error: {last_err})"
+    )
+
+
+def validate_port_pair(socks_port: object) -> None:
+    """Require room for the adjacent TCP control port."""
+    if isinstance(socks_port, bool) or not isinstance(socks_port, int) or not 0 < socks_port < 65535:
+        raise BringupFailed(f"Tor SOCKS port must be in 1..65534 so control port +1 is valid; got {socks_port!r}")
 
 
 ReadLine = Callable[[float], "str | None"]
@@ -150,11 +167,10 @@ def _make_default_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[
     ``for line in stdout`` blocked indefinitely whenever tor stopped
     writing — that codepath is now gone.
 
-    ``cleanup()`` abandons the stream (the pump thread stops reading and
-    exits), matching the abandoned-stream semantics of the selectors
-    implementation this replaced — a later ``wait_for_bootstrap`` retry on
-    the same process is not raced by a still-draining earlier reader
-    (review 2026-07-29).
+    After ``cleanup()`` the pump stops queueing lines but deliberately keeps
+    draining the OS pipe until EOF. Tor retains stdout for its lifetime; if no
+    reader remains after bootstrap, enough later log output fills the pipe and
+    blocks the daemon itself.
     """
     fileno_attr = getattr(stdout, "fileno", None)
     if callable(fileno_attr):
@@ -181,18 +197,17 @@ def _make_piped_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[],
     See :func:`_make_default_read_line` for the contract and the
     portability rationale (selectors cannot watch pipes on Windows).
 
-    Reader-side errors are not swallowed on the pump thread: they are
+    Reader-side errors before cleanup are not swallowed on the pump thread: they are
     delivered through the queue and re-raised by ``read_line``, preserving
     the pre-thread behavior where a torn-down pipe raised on the caller's
-    thread and surfaced as ``BringupFailed`` with a real ``__cause__``
-    (review 2026-07-29). ``cleanup()`` makes the pump stop reading after
-    at most one already-in-flight line and exit.
+    thread and surfaced as ``BringupFailed`` with a real ``__cause__``.
+    ``cleanup()`` switches the thread to discard/drain mode.
     """
     lines: queue.SimpleQueue[str | BaseException | None] = queue.SimpleQueue()
-    stopped = threading.Event()
+    draining = threading.Event()
     threading.Thread(
         target=_pump_stdout_lines,
-        args=(stdout, lines, stopped),
+        args=(stdout, lines, draining),
         name="mordred-tor-bootstrap-read",
         daemon=True,
     ).start()
@@ -214,7 +229,7 @@ def _make_piped_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[],
         return item
 
     def cleanup() -> None:
-        stopped.set()
+        draining.set()
 
     return read_line, cleanup
 
@@ -222,21 +237,22 @@ def _make_piped_read_line(stdout: Iterable[str]) -> tuple[ReadLine, Callable[[],
 def _pump_stdout_lines(
     stdout: Iterable[str],
     lines: queue.SimpleQueue[str | BaseException | None],
-    stopped: threading.Event,
+    draining: threading.Event,
 ) -> None:
     """Pump thread body for :func:`_make_piped_read_line`.
 
-    Blocks in ``readline`` and forwards each line into ``lines``. Errors are
-    delivered (not swallowed) so ``read_line`` re-raises them; the trailing
-    ``None`` sentinel signals EOF or post-``cleanup`` abandonment.
+    Blocks in ``readline`` and forwards bootstrap lines into ``lines``.
+    Once ``draining`` is set, it consumes and discards all later output so the
+    child's pipe never applies backpressure. Errors are delivered only while a
+    caller is still reading; the trailing ``None`` sentinel signals EOF.
     """
     try:
         for line in stdout:
-            if stopped.is_set():
-                break
-            lines.put(line)
+            if not draining.is_set():
+                lines.put(line)
     except Exception as exc:  # delivered, not swallowed: read_line re-raises
-        lines.put(exc)
+        if not draining.is_set():
+            lines.put(exc)
     finally:
         lines.put(None)  # EOF/abandon sentinel
 

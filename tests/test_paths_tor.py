@@ -21,7 +21,7 @@ import contextlib
 import os
 import socket
 import subprocess
-import time
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TextIO
@@ -198,6 +198,25 @@ class TestPortShift:
         )
         assert chosen == 9150
 
+    def test_shifts_when_adjacent_control_port_is_busy(self) -> None:
+        from mordred_hermes.network.paths import tor
+
+        chosen = tor.pick_free_port(
+            candidates=(9050, 9150),
+            socket_factory=_make_busy_socket_factory({9051}),
+        )
+        assert chosen == 9150
+
+    def test_rejects_65535_because_control_port_would_overflow(self) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import tor
+
+        with pytest.raises(BringupFailed, match="pairs busy or invalid"):
+            tor.pick_free_port(
+                candidates=(65535,),
+                socket_factory=_make_busy_socket_factory(set()),
+            )
+
     def test_all_busy_raises_bringup_failed(self) -> None:
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import tor
@@ -274,6 +293,32 @@ class TestBootstrap:
                 read_line=returns_eof,
             )
         assert eof_calls, "read_line should have been called at least once"
+
+    def test_stdout_is_continuously_drained_after_bootstrap(self) -> None:
+        """A live Tor daemon must not block when its stdout pipe fills later."""
+        from mordred_hermes.network.paths import tor
+
+        script = (
+            "import sys,time\n"
+            "print('Bootstrapped 100% (done)', flush=True)\n"
+            "time.sleep(0.2)\n"
+            "for _ in range(1024):\n"
+            "    print('x' * 1024)\n"
+            "sys.stdout.flush()\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        try:
+            tor.wait_for_bootstrap(proc, timeout=2.0)
+            assert proc.wait(timeout=5.0) == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -898,10 +943,8 @@ class TestPipedReadLine:
         finally:
             cleanup()
 
-    def test_cleanup_abandons_the_stream(self, pipe: tuple[TextIO, TextIO]) -> None:
-        """After ``cleanup()`` the pump stops consuming: at most one
-        in-flight line is read (and not enqueued), then the thread exits —
-        it must not keep draining lines a retry reader would need."""
+    def test_cleanup_switches_to_discarding_drain_mode(self, pipe: tuple[TextIO, TextIO]) -> None:
+        """After cleanup, later lines are consumed but never queued."""
         from mordred_hermes.network.paths import tor
 
         reader, writer = pipe
@@ -910,12 +953,8 @@ class TestPipedReadLine:
         writer.flush()
         assert read_line(2.0) == "a\n"
         cleanup()
-        # Unblock the pump's pending readline so it observes the stop flag.
         writer.write("unblock\n")
         writer.flush()
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if read_line(0.05) is None:  # abandon sentinel arrived
-                break
-        else:
-            pytest.fail("pump thread did not stop after cleanup()")
+        writer.close()
+        # The post-cleanup line was drained/discarded; EOF is the next item.
+        assert read_line(2.0) is None

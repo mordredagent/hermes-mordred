@@ -11,18 +11,14 @@ from tests._network_runtime_fakes import _make_runtime, _VpnFakes
 
 
 class TestVpnWaitFailureRollback:
-    """Codex round 9 P1-A (2026-05-14): if ``bring_up()`` succeeded
-    (lockdown applied) but ``wait_connected()`` times out, runtime
-    cleanup must roll back the setting it applied. Otherwise lockdown
-    stays on after the session aborts and blocks the user's traffic.
+    """Strict cleanup preserves the kill-switch on wait failure.
 
-    Mullvad CLI 2026.2 drift (2026-05-20): the standalone
-    ``always-require-vpn`` rollback path was removed upstream;
-    ``lockdown-mode`` is now the single kill-switch surface, so only
-    its applied-by-us state needs to drive the cleanup.
+    Mullvad exposes no atomic compare-and-swap operation. Even when Mordred
+    observed OFF and successfully requested ON, another actor may have enabled
+    lockdown in between; automatic OFF would then weaken that actor's posture.
     """
 
-    def test_wait_failure_clears_lockdown_when_applied_by_us(self) -> None:
+    def test_strict_wait_failure_preserves_lockdown_even_when_applied_by_us(self) -> None:
         from mordred_hermes.network.paths import vpn as vpn_real
 
         vpn = _VpnFakes()
@@ -49,12 +45,12 @@ class TestVpnWaitFailureRollback:
         with pytest.raises(BringupFailed):
             rt.use("vpn")
 
-        # Runtime cleanup must have called disconnect with the flag
-        # that clears the applied setting.
+        # Runtime still disconnects the failed tunnel, but strict cleanup
+        # leaves the kill-switch ON. An operator can explicitly clear it after
+        # ruling out concurrent ownership.
         assert len(vpn.disconnect_calls) == 1
         call = vpn.disconnect_calls[0]
-        # Lockdown WAS applied by us → clear it on cleanup.
-        assert call.get("preserve_lockdown") is False
+        assert call.get("preserve_lockdown") is True
         rt.stop()
 
     def test_wait_failure_preserves_user_lockdown_when_not_applied(self) -> None:

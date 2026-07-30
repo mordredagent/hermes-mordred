@@ -30,10 +30,23 @@ class TestVpnUse:
     def test_vpn_no_proxy_env_set(self) -> None:
         """VPN routes packets at the kernel level - no HTTPS_PROXY needed."""
         env: dict[str, str] = {}
-        rt = _make_runtime(env=env)
+        rt = _make_runtime(env=env, policy_mode="lenient")
         rt.use("vpn")
         assert "HTTPS_PROXY" not in env
         assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+        rt.stop()
+
+    def test_policy_off_vpn_preserves_ambient_proxy(self) -> None:
+        env = {
+            "HTTPS_PROXY": "http://corp-proxy.example:3128",
+            "NO_PROXY": "internal.example",
+        }
+        rt = _make_runtime(vpn_fakes=_VpnFakes(), policy_mode="off", env=env)
+
+        rt.use("vpn")
+
+        assert env["HTTPS_PROXY"] == "http://corp-proxy.example:3128"
+        assert env["NO_PROXY"] == "internal.example"
         rt.stop()
 
 

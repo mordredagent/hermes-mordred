@@ -59,7 +59,7 @@ Docker harness: `tests/integration/_docker.py` (compose v2 lifecycle helper with
 
 ## Network audit reason codes
 
-Phase 3 step-0 appended four `network.*` codes to `mordred_hermes.privacy_check._audit_reasons.ReasonCode` (Literal). The transport-gate follow-up later added `network.transport_incompatible`; the repository-wide frozen enum now contains **30 codes**:
+Phase 3 step-0 appended four `network.*` codes to `mordred_hermes.privacy_check._audit_reasons.ReasonCode` (Literal). The transport-gate follow-up later added `network.transport_incompatible`; a subsequent LLM endpoint-binding reason brings the repository-wide frozen enum to **31 codes**:
 
 - `network.use` — successful initial/unfrozen route activation (decision `override`, fields `prev_path` / `new_path` / `live_subprocess_count`); same frozen route is a no-op and a conflicting route requires restart
 - `network.use_failed` — `api.use(path)` raised `MordredNetworkError` (decision `raise`)

@@ -68,6 +68,63 @@ class TestRegister:
         assert s.active_path == "clearnet"
         assert s.ready is True
 
+    def test_register_allows_all_managed_proxy_vars_through_execute_code(self) -> None:
+        from tools.env_passthrough import is_env_passthrough
+
+        from mordred_hermes.network import proxy_env, register
+
+        register(_FakeCtx())
+
+        assert proxy_env.managed_var_names() == {
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "ALL_PROXY",
+            "https_proxy",
+            "http_proxy",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        }
+        assert all(is_env_passthrough(name) for name in proxy_env.managed_var_names())
+
+    def test_session_start_restores_proxy_passthrough_after_hermes_reset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tools.env_passthrough import clear_env_passthrough, is_env_passthrough
+
+        import mordred_hermes.network as network
+        from mordred_hermes.network import proxy_env, register
+
+        ctx = _FakeCtx()
+        register(ctx)
+        clear_env_passthrough()
+        assert not any(is_env_passthrough(name) for name in proxy_env.managed_var_names())
+        monkeypatch.setattr(network.hooks, "on_session_start", lambda **_kwargs: None)
+
+        ctx.hooks[1][1]()
+
+        assert all(is_env_passthrough(name) for name in proxy_env.managed_var_names())
+
+    def test_strict_refuses_when_proxy_passthrough_verification_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        import mordred_hermes.network as network
+        from mordred_hermes.network.runtime import RuntimeConfig
+        from mordred_hermes.privacy_check.audit import NDJSONWriter
+
+        audit = NDJSONWriter(tmp_path / "audit.log")
+        config = RuntimeConfig(policy_mode="strict", default_path="tor")
+
+        with pytest.raises(MordredPathBringupFailed, match="execute_code child routing"):
+            network._register_proxy_env_passthrough(
+                config=config,
+                audit=audit,
+                registrar=lambda _names: None,
+                checker=lambda _name: False,
+            )
+
     def test_registered_pre_tool_call_passes_default_config_path(
         self,
         monkeypatch: pytest.MonkeyPatch,
