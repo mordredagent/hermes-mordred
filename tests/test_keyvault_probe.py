@@ -7,6 +7,7 @@ install_wrapper tests inject a fake probe; these cover the probe itself.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,53 @@ def test_populated_keyvault_is_initialized(tmp_path: Path) -> None:
     meta["keys"]["deadbeef"] = {"key_id": "k", "created_at": "2026-05-16T00:00:00.000Z"}
     _storage.save_meta(root, meta)
     assert keyvault_initialized(home=tmp_path) is True
+
+
+def test_reset_journal_is_not_reported_as_initialized(tmp_path: Path) -> None:
+    """A partially completed reset is unavailable even while meta survives."""
+    root = _storage.resolve_keyvault_dir(tmp_path)
+    _storage.ensure_layout(root)
+    meta = _storage.load_meta(root)
+    meta["keys"]["deadbeef"] = {"key_id": "k", "created_at": "2026-05-16T00:00:00.000Z"}
+    _storage.save_meta(root, meta)
+    with _storage.keyvault_lifecycle_lock(root):
+        _storage.write_reset_journal(root, b"pending reset")
+
+    with pytest.raises(KeyvaultProbeError, match="reset is incomplete"):
+        keyvault_initialized(home=tmp_path)
+
+
+def test_probe_waits_for_lifecycle_then_observes_reset_journal(tmp_path: Path) -> None:
+    root = _storage.resolve_keyvault_dir(tmp_path)
+    _storage.ensure_layout(root)
+    meta = _storage.load_meta(root)
+    meta["keys"]["deadbeef"] = {"key_id": "k", "created_at": "2026-05-16T00:00:00.000Z"}
+    _storage.save_meta(root, meta)
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def probe() -> None:
+        started.set()
+        try:
+            keyvault_initialized(home=tmp_path)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    with _storage.keyvault_lifecycle_lock(root):
+        thread = threading.Thread(target=probe)
+        thread.start()
+        assert started.wait(timeout=5)
+        assert not finished.wait(timeout=0.1)
+        _storage.write_reset_journal(root, b"pending reset")
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], KeyvaultProbeError)
+    assert "reset is incomplete" in str(errors[0])
 
 
 def test_corrupt_meta_raises_keyvault_probe_error(tmp_path: Path) -> None:

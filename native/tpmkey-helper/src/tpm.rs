@@ -355,17 +355,48 @@ impl KeyOps for TpmOps {
 
         let (sec1_pub, blob) = created?;
 
-        // Persist last: `O_EXCL` turns a pre-existing tag into a race-free EXISTS,
-        // and the just-created TPM child was never made persistent, so a refusal
-        // here leaks nothing.
+        // Persist last: atomic no-replace publication turns a pre-existing tag
+        // into a race-free EXISTS, and the just-created TPM child was never
+        // made persistent, so a refusal here leaks nothing.
         store::write_blob_excl(self.blob_dir(), tag, &blob).map_err(store_err)?;
         Ok(sec1_pub.to_vec())
     }
 
     fn public_key(&self, tag: &str) -> Result<Vec<u8>, OpError> {
         let blob = store::read_blob(self.blob_dir(), tag).map_err(store_err)?;
-        let (public, _private) = decode_blob(&blob)?;
-        Ok(public_to_sec1(&public)?.to_vec())
+        let (public, private) = decode_blob(&blob)?;
+
+        // Never trust the cleartext public area from the filesystem on its own.
+        // The TPM-wrapped private blob contains an integrity value bound to the
+        // public area's Name and to this deterministic storage parent. Loading
+        // both halves makes the live TPM authenticate that binding, defeating
+        // an offline substitution of an attacker's software public key.
+        let mut ctx = open_context()?;
+        let primary = ctx.execute_with_nullauth_session(|ctx| {
+            ctx.create_primary(
+                Hierarchy::Owner,
+                primary_template()?,
+                None,
+                None,
+                None,
+                None,
+            )
+            .map_err(OpError::from)
+        })?;
+        let primary_handle = primary.key_handle;
+
+        let live_public = ctx.execute_with_nullauth_session(|ctx| -> Result<Public, OpError> {
+            let child = ctx.load(primary_handle, private, public)?;
+            // Return what the TPM reports for the successfully loaded
+            // object, rather than echoing any filesystem-supplied bytes.
+            let read_result = ctx.read_public(child);
+            let _ = ctx.flush_context(child.into());
+            let (live_public, _name, _qualified_name) = read_result?;
+            Ok(live_public)
+        });
+
+        let _ = ctx.flush_context(primary_handle.into());
+        Ok(public_to_sec1(&live_public?)?.to_vec())
     }
 
     fn delete(&self, tag: &str) -> Result<(), OpError> {
@@ -489,6 +520,7 @@ mod tests {
     use super::*;
     use crate::errmap::Reason;
     use crate::sec1;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -509,6 +541,10 @@ mod tests {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             p.push(format!("tpmkey-tpm-test-{}-{}", std::process::id(), n));
             std::fs::create_dir_all(&p).unwrap();
+            // The store refuses any pre-existing dir that is not exactly 0700
+            // (umask makes create_dir_all produce 0755), same as production
+            // dirs created by the write path.
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
             TempDir(p)
         }
     }
@@ -604,6 +640,44 @@ mod tests {
 
         let pk2 = ops.public_key(&t).expect("public_key");
         assert_eq!(pk1, pk2, "public_key must echo the generate output");
+    }
+
+    #[test]
+    fn public_key_rejects_public_private_blob_substitution() {
+        if !tpm_enabled() {
+            return;
+        }
+        let dir = TempDir::new();
+        let ops = ops_in(&dir);
+        let victim_tag = tag("victim");
+        let substitute_tag = tag("substitute");
+
+        ops.generate(&victim_tag, "", false)
+            .expect("generate victim");
+        ops.generate(&substitute_tag, "", false)
+            .expect("generate substitute");
+
+        let victim_blob = store::read_blob(ops.blob_dir(), &victim_tag).expect("read victim blob");
+        let substitute_blob =
+            store::read_blob(ops.blob_dir(), &substitute_tag).expect("read substitute blob");
+        let (_victim_public, victim_private) =
+            decode_blob(&victim_blob).expect("decode victim blob");
+        let (substitute_public, _substitute_private) =
+            decode_blob(&substitute_blob).expect("decode substitute blob");
+
+        // Simulate an offline attacker replacing only the cleartext public
+        // area while retaining the victim's opaque TPM private area. Merely
+        // decoding this blob would expose the substitute public key; TPM Load
+        // must reject the mismatched Name/integrity binding.
+        let forged_blob =
+            encode_blob(&substitute_public, &victim_private).expect("encode forged blob");
+        std::fs::write(store::blob_path(ops.blob_dir(), &victim_tag), forged_blob)
+            .expect("replace stored blob");
+
+        let err = ops
+            .public_key(&victim_tag)
+            .expect_err("TPM must reject a substituted public area");
+        assert_eq!(err.reason, Reason::Unavailable);
     }
 
     #[test]

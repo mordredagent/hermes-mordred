@@ -23,7 +23,6 @@ both are backward-compatible.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import ipaddress
 import json
 import logging
@@ -46,7 +45,7 @@ from .crypto import (
     is_encrypted,
     key_id,
 )
-from .wallet import _do_sign, _get_address, _prepare_sign, _wallet_chain_id_hex, analyze_sign
+from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
 from .webauthn import InvalidWebAuthnPublicKey
 
 # K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
@@ -680,7 +679,16 @@ class _Connection:
             from .._home import hermes_home
 
             env_path = hermes_home() / ".env"
-            _upsert_env_vars(env_path, {"SLACK_BOT_TOKEN": bot, "SLACK_APP_TOKEN": app})
+            updated = await asyncio.get_event_loop().run_in_executor(
+                None,
+                _update_slack_env,
+                env_path,
+                {"SLACK_BOT_TOKEN": bot, "SLACK_APP_TOKEN": app},
+                msg.get("overwrite") is True,
+            )
+            if not updated:
+                await _reply(False, error="slack_already_configured")
+                return
             await _reply(True, note="tokens written to ~/.hermes/.env — restart Hermes to apply")
         except Exception as exc:
             await _reply(False, error=str(exc))
@@ -734,7 +742,7 @@ class _Connection:
     async def _on_accounts(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")
         try:
-            address = await asyncio.get_event_loop().run_in_executor(None, _get_address)
+            address, chain_id = await asyncio.get_event_loop().run_in_executor(None, _get_account_snapshot)
         except Exception as exc:
             # This is an accounts RPC failure, not a chat stream failure. The
             # generic correlated error lets every client reject immediately
@@ -746,7 +754,7 @@ class _Connection:
                 "id": mid,
                 "type": "accounts_result",
                 "accounts": [address] if address else [],
-                "chainId": _wallet_chain_id_hex(),
+                "chainId": chain_id,
             }
         )
 
@@ -841,7 +849,9 @@ class _Connection:
         if pend is None:
             await self._send({"id": mid, "type": "sign_result", "request_id": request_id, "error": "unknown_request"})
             return
-        if not msg.get("approved"):
+        # The wire contract is boolean. JSON strings such as ``"false"`` are
+        # truthy in Python and must never cross the user-approval boundary.
+        if msg.get("approved") is not True:
             await self._send({"id": mid, "type": "sign_result", "request_id": request_id, "error": "user_rejected"})
             return
         try:
@@ -869,51 +879,91 @@ def _hermes_version() -> str:
         return "0.0.0"
 
 
+def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:
+    """Return ``(name, exported, value)`` for one simple dotenv assignment."""
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    name, value = line.split("=", 1)
+    name = name.strip()
+    exported = name.startswith("export ")
+    if exported:
+        name = name.removeprefix("export ").strip()
+    return name, exported, value
+
+
+def _dotenv_has_nonempty_key(existing: str, keys: set[str]) -> bool:
+    """Whether dotenv text contains one of *keys* with a non-empty value."""
+    for raw_line in existing.splitlines():
+        assignment = _dotenv_assignment(raw_line)
+        if assignment is None:
+            continue
+        name, _exported, value = assignment
+        if name in keys and value.strip():
+            return True
+    return False
+
+
+def _updated_env_text(existing: str, updates: dict[str, str]) -> str:
+    """Return dotenv text with ``updates`` merged, preserving other lines."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for ln in existing.splitlines():
+        assignment = _dotenv_assignment(ln)
+        key, exported, _old_value = assignment if assignment is not None else ("", False, "")
+        if key in updates:
+            out.append(f"{'export ' if exported else ''}{key}={updates[key]}")
+            seen.add(key)
+        else:
+            out.append(ln)
+    out.extend(f"{key}={val}" for key, val in updates.items() if key not in seen)
+    return "\n".join(out) + "\n"
+
+
+def _validate_env_updates(updates: dict[str, str]) -> None:
+    for key, val in updates.items():
+        if any(c in key or c in val for c in ("\n", "\r")):
+            raise ValueError("refusing to write a dotenv entry containing a newline")
+
+
 def _upsert_env_vars(env_path: Path, updates: dict[str, str]) -> None:
-    """Insert-or-replace ``KEY=value`` lines in a dotenv file, preserving the
-    rest verbatim. Keys already present are overwritten in place; new keys are
-    appended. The file is created if it doesn't exist.
+    """Lock and atomically upsert dotenv entries while preserving other lines.
 
     Raises ``ValueError`` on a key/value carrying CR or LF: entries are emitted
     as raw ``KEY=value`` lines joined by "\\n", so such a value would inject
     arbitrary extra dotenv entries. Callers validate their own inputs (see
     ``_SLACK_BOT_TOKEN_RE``); this is the last line of defence for future ones.
 
-    The write is atomic (mkstemp + ``os.replace``) at mode 0o600: this file
-    holds Slack bot/app tokens, so a plain ``write_text`` would (a) leave them
-    world-readable at the umask default on first creation and (b) truncate-then-
-    write, destroying every other var already in ``.env`` if the process died
-    mid-write. ``os.replace`` also gives the resulting file the tmp's 0o600 mode,
-    tightening an existing loosely-permissioned ``.env`` rather than preserving
-    the leak. It is NOT ``keyvault._storage.atomic_write`` — that one refuses a
-    pre-existing file whose mode isn't already 0o600, but a host-managed ``.env``
-    may legitimately be 0o644."""
-    import os
-    import tempfile
+    The shared sibling lock is also used by ``DotEnvFileWriter`` so concurrent
+    Slack and wizard updates cannot both read the same old file and lose one
+    another's unrelated entries.
+    """
+    from ..wizard.env_file_writer import update_dotenv_file
 
-    for key, val in updates.items():
-        if any(c in key or c in val for c in ("\n", "\r")):
-            raise ValueError("refusing to write a dotenv entry containing a newline")
-    existing = env_path.read_text() if env_path.exists() else ""
-    seen: set[str] = set()
-    out: list[str] = []
-    for ln in existing.splitlines():
-        key = ln.split("=", 1)[0].strip() if "=" in ln else ""
-        if key in updates:
-            out.append(f"{key}={updates[key]}")
-            seen.add(key)
-        else:
-            out.append(ln)
-    out.extend(f"{key}={val}" for key, val in updates.items() if key not in seen)
-    body = "\n".join(out) + "\n"
+    _validate_env_updates(updates)
+    update_dotenv_file(env_path, lambda existing: _updated_env_text(existing, updates))
 
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(env_path.parent), prefix=".env.", suffix=".tmp")
+
+class _SlackAlreadyConfigured(Exception):
+    """Internal transaction-abort signal; never includes credential text."""
+
+
+def _update_slack_env(env_path: Path, updates: dict[str, str], overwrite: bool) -> bool:
+    """Check-and-upsert Slack credentials in one locked dotenv transaction."""
+    from ..wizard.env_file_writer import update_dotenv_file
+
+    _validate_env_updates(updates)
+
+    def transform(existing: str) -> str:
+        if not overwrite and _dotenv_has_nonempty_key(
+            existing,
+            {"SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"},
+        ):
+            raise _SlackAlreadyConfigured
+        return _updated_env_text(existing, updates)
+
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(body)
-        os.replace(tmp, env_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+        update_dotenv_file(env_path, transform)
+    except _SlackAlreadyConfigured:
+        return False
+    return True

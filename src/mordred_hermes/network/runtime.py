@@ -221,6 +221,11 @@ class Runtime:
             )
         )
 
+        # Serializes whole mutating lifecycle operations across the deliberate
+        # ``_lock`` release used while joining the liveness worker. Without a
+        # second lock, ``stop()`` can enter that window, tear down the handle,
+        # and leave the switching caller to resume against ``None``.
+        self._operation_lock = threading.RLock()
         self._lock = threading.RLock()
         self._state: State = State.IDLE
         self._active_path: ActivePath = "clearnet"
@@ -253,6 +258,32 @@ class Runtime:
 
     def use(self, path: str) -> None:
         """Switch the active path, mutating env + audit log accordingly."""
+        self._acquire_operation_or_raise()
+        try:
+            self._use(path)
+        finally:
+            self._operation_lock.release()
+
+    def _acquire_operation_or_raise(self) -> None:
+        """Claim a mutation slot without hiding an in-progress lifecycle.
+
+        ``stop`` deliberately waits for a switch to finish so it cannot tear
+        down a handle still owned by that switch. A second switch has the
+        opposite API contract: fail immediately with ``AlreadySwitching``
+        instead of blocking for daemon bring-up or worker shutdown.
+        """
+        if self._operation_lock.acquire(blocking=False):
+            return
+        # Do not acquire ``_lock`` on the contention path. The active switch
+        # normally holds it across daemon bring-up, so taking it merely to
+        # improve an error-message snapshot would turn this fail-immediate API
+        # into a wait-for-bring-up API. Enum reference reads are sufficient for
+        # this best-effort diagnostic.
+        state = self._state.value
+        raise AlreadySwitching(f"path lifecycle operation already in progress (state={state})")
+
+    def _use(self, path: str) -> None:
+        """Serialized implementation of :meth:`use`."""
         if path not in ACTIVE_PATHS:
             raise UnknownPath(f"unknown network path: {path!r}")
         target = cast(ActivePath, path)
@@ -309,9 +340,12 @@ class Runtime:
         outer re-entrant lock also prevents a direct reference from interleaving
         another ``use`` between activation and freeze.
         """
-        with self._lock:
-            self.use(path)
+        self._acquire_operation_or_raise()
+        try:
+            self._use(path)
             self.freeze_process_route(expected_path=path)
+        finally:
+            self._operation_lock.release()
 
     def status(self) -> NetworkStatus:
         with self._lock:
@@ -363,14 +397,15 @@ class Runtime:
         Idempotent: callable from process-exit cleanup even if no path
         was ever activated.
         """
-        self._stop_worker()
-        with self._lock:
-            if self._handle is not None:
-                self._teardown_current()
-            self._restore_env()
-            self._state = State.IDLE
-            self._active_path = "clearnet"
-            self._reset_liveness()
+        with self._operation_lock:
+            self._stop_worker()
+            with self._lock:
+                if self._handle is not None:
+                    self._teardown_current()
+                self._restore_env()
+                self._state = State.IDLE
+                self._active_path = "clearnet"
+                self._reset_liveness()
 
     # ------------------------------------------------------------------ #
     # Public helpers for hooks layer (PR2-B)                              #
@@ -542,8 +577,21 @@ class Runtime:
             self._teardown_current()
         try:
             handle = self._bring_up(target)
-        except BringupFailed as e:
+        except Exception as raw_error:
+            failure = (
+                raw_error
+                if isinstance(raw_error, BringupFailed)
+                else BringupFailed(f"{target} bring-up failed unexpectedly ({type(raw_error).__name__})")
+            )
             self._handle = None
+            # Normalize the truthful no-route state before either raising or
+            # attempting a lenient clearnet fallback. This also covers an
+            # unexpected provider/plugin Exception, which previously left the
+            # runtime stuck in BRINGING_UP.
+            self._restore_env()
+            self._active_path = "clearnet"
+            self._state = State.IDLE
+            self._reset_liveness()
             if self._config.policy_mode == "strict":
                 # Codex P2 fix (2026-05-14): the previous path was already
                 # torn down before the new bring-up was attempted. If we
@@ -554,11 +602,9 @@ class Runtime:
                 # killed SOCKS port. Restore the pre-runtime env and reset
                 # the active path to clearnet so the truthful failure is
                 # visible to callers + downstream subprocesses.
-                self._restore_env()
-                self._active_path = "clearnet"
-                self._state = State.IDLE
-                self._reset_liveness()
-                raise
+                if failure is raw_error:
+                    raise
+                raise failure from raw_error
             # lenient / off: fall back to clearnet and audit it.
             self._emit_audit(
                 {
@@ -567,10 +613,20 @@ class Runtime:
                     "reason": _REASON_BRINGUP_FAILED,
                     "attempted_path": target,
                     "fallback_path": "clearnet",
-                    "error": str(e),
+                    "error": str(failure),
                 }
             )
-            fallback_handle = self._bring_up("clearnet")
+            try:
+                fallback_handle = self._bring_up("clearnet")
+            except Exception as fallback_error:
+                self._handle = None
+                self._restore_env()
+                self._active_path = "clearnet"
+                self._state = State.IDLE
+                self._reset_liveness()
+                raise BringupFailed(
+                    f"clearnet fallback failed unexpectedly ({type(fallback_error).__name__})"
+                ) from fallback_error
             self._handle = fallback_handle
             self._active_path = "clearnet"
             self._apply_env("clearnet")
@@ -614,6 +670,7 @@ class Runtime:
 
     def _bring_up_tor(self) -> _ActiveHandle:
         port = self._config.tor_socks_port or self._tor_pick_port()
+        tor_mod.validate_port_pair(port)
         control_port = port + 1
         torrc = tor_mod.render_torrc(
             socks_port=port,
@@ -704,14 +761,17 @@ class Runtime:
             )
         except OSError as bring_err:
             raise BringupFailed(f"vpn provider bring-up failed: {bring_err}") from bring_err
-        # Codex r8-P1-B (2026-05-14): preserve the user's pre-existing
-        # lockdown setting on cleanup; only clear what WE applied.
-        # ``MullvadHandle.lockdown_applied_by_us`` records whether we
-        # flipped it so we never strip security posture the user
-        # established before Mordred ran. ``getattr`` keeps this generic
-        # for providers whose handle has no lockdown concept (WireGuard,
-        # custom) — they default to "preserve" (a no-op for them).
-        preserve_on_cleanup = not getattr(vpn_handle, "lockdown_applied_by_us", False)
+        # Strict cleanup always preserves lockdown. Mullvad has no atomic
+        # compare-and-swap operation, so observing OFF followed by a successful
+        # ``set on`` cannot prove exclusive ownership: another actor may have
+        # enabled it in between. Turning it OFF after a wait failure could
+        # therefore weaken that actor's security posture. Non-strict providers
+        # retain the historical applied-by-us cleanup behavior.
+        preserve_on_cleanup = self._config.policy_mode == "strict" or not getattr(
+            vpn_handle,
+            "lockdown_applied_by_us",
+            False,
+        )
         try:
             self._vpn_provider.wait_connected(cli_path=cli_path)
         except (BringupFailed, OSError) as wait_err:
@@ -771,12 +831,19 @@ class Runtime:
         if self._handle is not None and self._handle.path == "tor":
             tor_handle = self._handle.handle
             port = tor_handle.socks_port
-        desired = proxy_env_mod.desired_env(
-            path=target,
-            tor_socks_port=port,
-            no_proxy_extra=self._config.no_proxy_extra,
-            isolation_token=self._config.isolation_token,
-        )
+        if self._config.policy_mode == "off" and target != "tor":
+            # Policy-off must not silently disable an ambient corporate/user
+            # proxy. Restore the exact pre-runtime managed environment when
+            # entering clearnet/VPN (also handles an explicit Tor->clearnet
+            # switch without leaving Tor's now-dead SOCKS URL behind).
+            desired = {key: value for key, value in self._env_snapshot.items() if value is not None}
+        else:
+            desired = proxy_env_mod.desired_env(
+                path=target,
+                tor_socks_port=port,
+                no_proxy_extra=self._config.no_proxy_extra,
+                isolation_token=self._config.isolation_token,
+            )
         # Set-then-prune, never pop-then-set. ``self._env`` is the process-global
         # ``os.environ``, and ``_lock`` only serialises the runtime's OWN writers
         # — it cannot stop another thread in this process (a tool-call handler,

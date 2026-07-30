@@ -121,3 +121,8 @@ class TestMnemonicToSeed:
 
     def test_passphrase_changes_output(self) -> None:
         assert _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC, "") != _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC, "extra")
+
+    def test_mnemonic_whitespace_is_canonicalized_before_derivation(self) -> None:
+        spaced = "\n  " + _HARDHAT_MNEMONIC.replace(" ", "  \t") + "  \n"
+        assert _bip39.canonicalize_mnemonic(spaced) == _HARDHAT_MNEMONIC
+        assert _bip39.mnemonic_to_seed(spaced) == _bip39.mnemonic_to_seed(_HARDHAT_MNEMONIC)

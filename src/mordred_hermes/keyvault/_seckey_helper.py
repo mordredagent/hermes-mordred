@@ -212,7 +212,12 @@ def _normalize_reason(value: Any) -> str | None:
     return value if isinstance(value, str) and value in _OPS_REASONS else None
 
 
-def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _run_helper(
+    binary: str,
+    payload: dict[str, Any],
+    *,
+    env_override: tuple[str, str] | None = None,
+) -> dict[str, Any]:
     """Invoke the helper once with ``payload`` on stdin, return parsed stdout.
 
     Raises:
@@ -228,11 +233,16 @@ def _run_helper(binary: str, payload: dict[str, Any]) -> dict[str, Any]:
             real failure cause to stderr.
     """
     try:
+        env = None
+        if env_override is not None:
+            env = dict(os.environ)
+            env[env_override[0]] = env_override[1]
         proc = subprocess.run(
             [binary],
             input=json.dumps(payload).encode("utf-8"),
             capture_output=True,
             timeout=_TIMEOUT_SECONDS,
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise _OpsError(-1, "helper", f"helper timed out after {_TIMEOUT_SECONDS}s") from exc
@@ -308,30 +318,53 @@ class _HelperSecKeyOps:
     SHA-256 prefix derived in :mod:`_seckey_errors`).
     """
 
-    def __init__(self, binary: str) -> None:
+    def __init__(
+        self,
+        binary: str,
+        *,
+        env_override: tuple[str, str] | None = None,
+    ) -> None:
         self._binary = binary
+        self._env_override = env_override
+
+    def with_store_override(self, env_name: str, store: Path) -> _HelperSecKeyOps:
+        """Clone this helper ops with an explicit per-keyvault blob store."""
+
+        return _HelperSecKeyOps(
+            self._binary,
+            env_override=(env_name, os.fspath(store)),
+        )
+
+    def _invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Invoke while preserving the historical two-argument seam."""
+
+        if self._env_override is None:
+            return _run_helper(self._binary, payload)
+        return _run_helper(
+            self._binary,
+            payload,
+            env_override=self._env_override,
+        )
 
     def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
-        response = _run_helper(
-            self._binary,
+        response = self._invoke(
             {"cmd": "generate", "tag_hex": tag.hex(), "label": label, "unattended": unattended},
         )
         return _hex_field(response, "public_key_hex")
 
     def copy_public_key(self, tag: bytes) -> bytes:
-        response = _run_helper(self._binary, {"cmd": "public_key", "tag_hex": tag.hex()})
+        response = self._invoke({"cmd": "public_key", "tag_hex": tag.hex()})
         return _hex_field(response, "public_key_hex")
 
     def delete_key(self, tag: bytes) -> None:
         # The helper treats errSecItemNotFound as success, so this is idempotent.
-        _run_helper(self._binary, {"cmd": "delete", "tag_hex": tag.hex()})
+        self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
 
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
-        response = _run_helper(
-            self._binary,
+        response = self._invoke(
             {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer_pub.hex()},
         )
         return _hex_field(response, "shared_hex")
 
     def probe(self) -> None:
-        _run_helper(self._binary, {"cmd": "probe"})
+        self._invoke({"cmd": "probe"})

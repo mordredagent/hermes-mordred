@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -22,6 +23,7 @@ from mordred_hermes.wizard.policy_writer import (
     MORDRED_PLUGIN_NAMES,
     PolicySnapshot,
     PolicyWriter,
+    _atomic_write_text,
 )
 
 
@@ -88,6 +90,40 @@ class TestEmitPolicyJson:
         first_mtime = path.stat().st_mtime_ns
         w.emit_policy_json(snap)
         assert path.stat().st_mtime_ns == first_mtime, "no-op write must not touch mtime"
+
+    def test_idempotent_write_repairs_secret_file_mode(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        snap = PolicySnapshot(policy="strict")
+        w.emit_policy_json(snap)
+        path = tmp_path / "mordred" / "policy.json"
+        path.chmod(0o644)
+
+        w.emit_policy_json(snap)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_atomic_write_never_replaces_an_unreadable_existing_file(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        path = tmp_path / "secret.json"
+        original = b'{"operator_managed": true}\n'
+        path.write_bytes(original)
+        from mordred_hermes.wizard import policy_writer as pw
+
+        real_open = pw.os.open
+
+        def deny_target_read(candidate: object, *args: object, **kwargs: object) -> int:
+            if os.fspath(candidate) == os.fspath(path):
+                raise PermissionError("simulated ACL denial")
+            return real_open(candidate, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pw.os, "open", deny_target_read)
+
+        with pytest.raises(PermissionError, match="ACL denial"):
+            _atomic_write_text(path, '{"replacement": true}\n', mode=0o600)
+        assert path.read_bytes() == original
 
     def test_preserves_hand_edited_provider_overrides_only(self, tmp_path: Path) -> None:
         """Configure-owned fields update, while the opaque extension survives."""
@@ -845,6 +881,87 @@ class TestWriteCompose:
         leftovers = sorted(p.name for p in tmp_path.rglob("*.tmp"))
         assert leftovers == [], f"unexpected .tmp leftovers: {leftovers}"
 
+    def test_begin_resynchronizes_an_idempotent_existing_marker(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard import policy_writer as pw
+
+        w = _writer(tmp_path)
+        marker = pw.policy_transaction_marker_for_policy(w.policy_json_path)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("pending\n", encoding="utf-8")
+        marker.chmod(0o600)
+        synced_fds: list[int] = []
+        synced_parents: list[Path] = []
+
+        monkeypatch.setattr(pw, "_atomic_write_text", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(pw, "_fsync_durable", lambda fd: synced_fds.append(fd))
+        monkeypatch.setattr(pw, "_fsync_parent", lambda path: synced_parents.append(path))
+
+        assert pw._begin_policy_transaction(w.policy_json_path) == marker
+        assert len(synced_fds) == 1
+        assert synced_parents == [marker]
+
+    @pytest.mark.parametrize(
+        ("old_mode", "new_mode"),
+        [("strict", "off"), ("off", "strict")],
+    )
+    def test_second_file_failure_leaves_fail_closed_marker_until_reconciled(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        old_mode: str,
+        new_mode: str,
+    ) -> None:
+        from mordred_hermes import _policy_io
+        from mordred_hermes.privacy_check import _runtime as privacy_runtime
+        from mordred_hermes.wizard import policy_writer as pw
+
+        w = _writer(tmp_path)
+        w.write(PolicySnapshot(policy=old_mode))  # type: ignore[arg-type]
+        real_atomic_write = pw._atomic_write_text
+
+        def fail_config_write(path: Path, text: str, *, mode: int | None = None) -> None:
+            if path == w.config_path:
+                raise OSError("injected config write failure")
+            real_atomic_write(path, text, mode=mode)
+
+        monkeypatch.setattr(pw, "_atomic_write_text", fail_config_write)
+
+        with pytest.raises(OSError, match="injected config write failure"):
+            w.write(PolicySnapshot(policy=new_mode))  # type: ignore[arg-type]
+
+        marker = _policy_io.policy_transaction_marker_for_policy(w.policy_json_path)
+        assert marker.is_file()
+        assert json.loads(w.policy_json_path.read_text(encoding="utf-8"))["policy"] == new_mode
+        assert _policy_io.load_policy_mapping(w.policy_json_path) == {}
+        assert (
+            _policy_io.read_policy_mode_fail_closed(
+                w.policy_json_path,
+                default="lenient",
+                log=logging.getLogger("test.policy.transaction"),
+            )
+            == "strict"
+        )
+        assert privacy_runtime.get_active_policy_mode(config_path=w.config_path) == "strict"
+
+        # A later successful configure reconciles both mirrors and is the only
+        # operation allowed to clear the stale marker.
+        monkeypatch.setattr(pw, "_atomic_write_text", real_atomic_write)
+        w.write(PolicySnapshot(policy=new_mode))  # type: ignore[arg-type]
+        assert not marker.exists()
+        assert (
+            _policy_io.read_policy_mode_fail_closed(
+                w.policy_json_path,
+                default="lenient",
+                log=logging.getLogger("test.policy.transaction"),
+            )
+            == new_mode
+        )
+        assert privacy_runtime.get_active_policy_mode(config_path=w.config_path) == new_mode
+
 
 class TestHasConfigYamlSectionProtocol:
     """H2 (review 2026-05-14): ``PolicyWriter.write`` accepted
@@ -964,6 +1081,69 @@ class TestAtomicWriteHardening:
             f"tmpfile names must be randomized to avoid predictable collisions; "
             f"got the same name {tmpfiles_seen[0]!r} twice"
         )
+
+    def test_matching_symlink_is_replaced_instead_of_treated_as_idempotent(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import policy_writer as pw
+
+        victim = tmp_path / "victim.txt"
+        victim.write_text("same\n", encoding="utf-8")
+        target = tmp_path / "policy.json"
+        target.symlink_to(victim)
+
+        pw._atomic_write_text(target, "same\n", mode=0o600)
+
+        assert target.is_file() and not target.is_symlink()
+        assert target.read_text(encoding="utf-8") == "same\n"
+        assert victim.read_text(encoding="utf-8") == "same\n"
+
+    def test_matching_content_rewrites_atomically_when_fchmod_is_unavailable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard import policy_writer as pw
+
+        target = tmp_path / "policy.json"
+        target.write_text("same\n", encoding="utf-8")
+        target.chmod(0o644)
+        replacements: list[tuple[object, object]] = []
+        real_replace = pw.os.replace
+
+        def record_replace(src: object, dst: object) -> None:
+            replacements.append((src, dst))
+            real_replace(src, dst)  # type: ignore[arg-type]
+
+        monkeypatch.delattr(pw.os, "fchmod", raising=False)
+        monkeypatch.setattr(pw.os, "replace", record_replace)
+
+        pw._atomic_write_text(target, "same\n", mode=0o600)
+
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert len(replacements) == 1
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+    def test_fifo_is_replaced_without_attempting_to_read_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard import policy_writer as pw
+
+        target = tmp_path / "policy.json"
+        os.mkfifo(target, mode=0o600)
+        real_read_text = Path.read_text
+
+        def reject_fifo_read(candidate: Path, *args: object, **kwargs: object) -> str:
+            if candidate == target:
+                pytest.fail("atomic writer must not read a FIFO")
+            return real_read_text(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", reject_fifo_read)
+
+        pw._atomic_write_text(target, "replacement\n", mode=0o600)
+
+        assert stat.S_ISREG(target.lstat().st_mode)
+        assert target.read_bytes() == b"replacement\n"
 
 
 class TestMordredE2EIsEnabledByConfigure:

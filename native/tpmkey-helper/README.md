@@ -57,8 +57,18 @@ exits 0 (success) or 1 (error).
 ## Key store
 
 Each key persists as an opaque TPM key-context blob at `<store>/<tag_hex>.bin`
-(directory `0700`, file `0600`, created `O_CREAT | O_EXCL`). The store directory
-resolves as:
+(directory `0700`, file `0600`). A complete blob is first written and synced
+under an exclusive private staging name, then atomically hard-linked into place
+without replacement and the directory is synced. Thus concurrent generation
+still has exactly one winner, while a failed or interrupted write cannot leave
+a partial authoritative blob that blocks regeneration. The first directory
+sync after the no-replace link is required before generation reports success.
+A failure there is indeterminate: the complete visible orphan remains for
+explicit reset/remediation, and Python does not commit ciphertext/meta against
+a key name that may disappear after power loss. Private staging-name cleanup
+after durable publication remains best-effort. Reads reject symlinked,
+non-regular, or non-`0600` blobs and a symlinked/non-directory/non-`0700`
+store. The store directory resolves as:
 
 1. `MORDRED_TPMKEY_STORE` — explicit absolute directory (authoritative)
 2. `$HERMES_HOME/mordred/keyvault/tpm`
@@ -72,6 +82,11 @@ bindgen): `libtss2-dev`, `clang`/`libclang-dev`, `pkg-config`.
 ```sh
 ./build.sh   # cargo build --release --locked + install to ~/.local/bin
 ```
+
+Installation copies, chmods, and syncs a private file inside the destination
+directory before atomically renaming it over the old helper. An interrupted or
+out-of-space copy therefore leaves the previously-working executable intact.
+The install-directory sync is required before the script reports success.
 
 Point Python at it (if not on `PATH`):
 `export MORDRED_TPMKEY_HELPER="$HOME/.local/bin/mordred-hermes-tpmkey"`.

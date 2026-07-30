@@ -252,6 +252,68 @@ def test_extension_pair_expiry_warns_on_stderr(
     assert "extension serve" in err
 
 
+def test_extension_pair_timeout_revokes_pending_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    revoked: list[str] = []
+    code = "MORT-TEST0000-TEST0000"
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: (code, time.time() + 60.0),
+        pair_outcome=lambda _code: ("pending", None),
+        revoke_code=lambda value: revoked.append(value) or True,
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.001)
+
+    assert extension_pair_cli.extension_pair(timeout=0.0) == 1
+    assert revoked == [code]
+    assert "no pairing" in capsys.readouterr().err
+
+
+def test_extension_pair_ctrl_c_revokes_pending_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revoked: list[str] = []
+    code = "MORT-TEST0000-TEST0000"
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: (code, time.time() + 60.0),
+        revoke_code=lambda value: revoked.append(value) or True,
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(
+        extension_pair_cli,
+        "_await_outcome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    assert extension_pair_cli.extension_pair(timeout=5.0) == 1
+    assert revoked == [code]
+
+
+def test_extension_pair_ctrl_c_reports_pairing_that_committed_before_revoke(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = "MORT-TEST0000-TEST0000"
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: (code, time.time() + 60.0),
+        revoke_code=lambda _value: False,
+        pair_outcome=lambda _value: ("paired", None),
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(
+        extension_pair_cli,
+        "_await_outcome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    assert extension_pair_cli.extension_pair(timeout=5.0) == 0
+    captured = capsys.readouterr()
+    assert "completed before cancellation" in captured.err
+    assert "Paired (" in captured.out
+
+
 def test_cli_extension_pair_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, float] = {}
 

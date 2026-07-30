@@ -217,7 +217,12 @@ def run(
         openclaw_base: Override for tests; production = ``~/.openclaw/mordred``.
     """
     if target_snapshot is None:
-        target_snapshot = PolicySnapshot(policy="lenient")
+        # An integrated OpenClaw upgrade must back-fill Hermes with the legacy
+        # policy itself, not first write today's lenient default and then
+        # mistake that self-created value for an operator conflict.
+        target_snapshot = openclaw_migration.read_policy_snapshot(openclaw_base, policy_writer)
+        if target_snapshot is None:
+            target_snapshot = PolicySnapshot(policy="lenient")
     # Upgrade rewrites the wizard-owned snapshot fields, but must not erase the
     # operator-managed provider transport evidence already in policy.json.
     target_snapshot = _preserve_provider_overrides(

@@ -43,7 +43,7 @@ from .._provider_resolution import (
     resolve_disk_provider,
 )
 from .._proxy_bypass import ensure_loopback_proxy_bypass
-from . import enforce, harness_detect, local_adapter
+from . import auxiliary_guard, enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._typing import PluginContext
 
@@ -83,10 +83,19 @@ def register(ctx: PluginContext) -> None:
     # wheel's interpreter-startup .pth hook.
     ensure_loopback_proxy_bypass()
     local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
+    # Hermes 0.19 does not emit ``pre_api_request`` for auxiliary LLM calls.
+    # Install guards at its client-resolver seams before any side task can
+    # construct/cache a client; strict mode verifies installation again at
+    # session start and refuses if upstream drift removed a seam.
+    auxiliary_guard.install(
+        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        audit_path=DEFAULT_AUDIT_PATH,
+    )
     from ..privacy_check.hooks import check_plugin_integrity
 
     ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("on_session_start", _on_session_start_harness)
+    ctx.register_hook("on_session_start", _on_session_start_auxiliary)
     ctx.register_hook("on_session_start", _on_session_start_enforce)
     # Codex review P1 round 3: ``on_session_start`` only sees disk-based
     # state, so runtime overrides (``hermes --provider …``,
@@ -105,6 +114,15 @@ def _on_session_start_harness(**_kwargs: Any) -> None:
         policy_mode=policy_mode,
         config_path=DEFAULT_CONFIG_PATH,
         audit=audit,
+    )
+
+
+def _on_session_start_auxiliary(**_kwargs: Any) -> None:
+    """Fail early on declared auxiliary routes that violate strict policy."""
+    auxiliary_guard.validate_session(
+        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        config_path=DEFAULT_CONFIG_PATH,
+        audit_path=DEFAULT_AUDIT_PATH,
     )
 
 

@@ -317,10 +317,10 @@ def test_page_token_auth_and_history():
 
 
 def test_accounts_failure_is_a_correlated_rpc_error(monkeypatch):
-    def _fail_address():
+    def _fail_account_snapshot():
         raise RuntimeError("vault unavailable")
 
-    monkeypatch.setattr(extension_api, "_get_address", _fail_address)
+    monkeypatch.setattr(extension_api, "_get_account_snapshot", _fail_account_snapshot)
 
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)
@@ -637,7 +637,7 @@ def test_page_session_allowlist_blocks_crypto_and_wallet_but_allows_chat_and_acc
     two handlers the bundled localhost web app actually uses (``chat``,
     ``accounts_request``), proving the allowlist blocks and permits
     correctly rather than over-blocking."""
-    monkeypatch.setattr(extension_api, "_get_address", lambda: "0xabc")
+    monkeypatch.setattr(extension_api, "_get_account_snapshot", lambda: ("0xabc", "0x1"))
 
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port, chat_handler=_chat_handler)
@@ -701,6 +701,7 @@ def test_page_session_allowlist_blocks_crypto_and_wallet_but_allows_chat_and_acc
     assert out["chat"] == "こんにちは、受け取りました: hi"
     assert out["accounts"]["type"] == "accounts_result"
     assert out["accounts"]["accounts"] == ["0xabc"]
+    assert out["accounts"]["chainId"] == "0x1"
 
 
 def test_slack_setup_rejects_newline_bearing_token(tmp_path):
@@ -798,6 +799,70 @@ def test_upsert_env_vars_preserves_unrelated_existing_vars(tmp_path):
     assert "KEEP_ME=untouched" in text
     assert "SLACK_BOT_TOKEN=xoxb-new" in text
     assert "SLACK_BOT_TOKEN=old" not in text
+
+
+def test_upsert_env_vars_replaces_export_assignments_without_leaving_old_tokens(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(
+        "export SLACK_BOT_TOKEN=xoxb-old\nexport SLACK_APP_TOKEN=xapp-old\nKEEP_ME=untouched\n",
+        encoding="utf-8",
+    )
+
+    extension_api._upsert_env_vars(
+        env,
+        {
+            "SLACK_BOT_TOKEN": "xoxb-new",
+            "SLACK_APP_TOKEN": "xapp-new",
+        },
+    )
+
+    text = env.read_text(encoding="utf-8")
+    assert "xoxb-old" not in text
+    assert "xapp-old" not in text
+    assert text.count("SLACK_BOT_TOKEN=") == 1
+    assert text.count("SLACK_APP_TOKEN=") == 1
+    assert "export SLACK_BOT_TOKEN=xoxb-new" in text
+    assert "export SLACK_APP_TOKEN=xapp-new" in text
+    assert "KEEP_ME=untouched" in text
+
+
+def test_slack_setup_requires_explicit_overwrite_for_existing_tokens(tmp_path):
+    env = tmp_path / ".env"
+    original = "KEEP_ME=untouched\nSLACK_BOT_TOKEN=xoxb-old\nSLACK_APP_TOKEN=xapp-old\n"
+    env.write_text(original, encoding="utf-8")
+    conn = _authed_conn()
+
+    asyncio.run(
+        conn._on_slack_setup(
+            {
+                "id": "s1",
+                "type": "slack_setup",
+                "bot_token": "xoxb-new",
+                "app_token": "xapp-new",
+            }
+        )
+    )
+
+    assert conn.ws.sent[-1]["error"] == "slack_already_configured"
+    assert env.read_text(encoding="utf-8") == original
+
+    asyncio.run(
+        conn._on_slack_setup(
+            {
+                "id": "s2",
+                "type": "slack_setup",
+                "bot_token": "xoxb-new",
+                "app_token": "xapp-new",
+                "overwrite": True,
+            }
+        )
+    )
+
+    assert conn.ws.sent[-1]["ok"] is True
+    updated = env.read_text(encoding="utf-8")
+    assert "KEEP_ME=untouched" in updated
+    assert "SLACK_BOT_TOKEN=xoxb-new" in updated
+    assert "SLACK_APP_TOKEN=xapp-new" in updated
 
 
 def test_encrypt_without_pairing_replies_encrypt_fail():
@@ -1063,6 +1128,37 @@ def test_sign_request_without_request_id_is_rejected():
     )
     assert conn.ws.sent == [{"id": "s1", "type": "sign_result", "request_id": "", "error": "missing_request_id"}]
     assert conn._pending_sign == {}
+
+
+@pytest.mark.parametrize("approved", ["false", 1, {}, [True], None])
+def test_sign_approve_accepts_only_boolean_true(approved, monkeypatch):
+    conn = _authed_conn()
+    conn._pending_sign["r1"] = {
+        "method": "personal_sign",
+        "params": ["0x1"],
+        "chain_id": None,
+        "rpc_url": None,
+        "expected_signer": None,
+    }
+    monkeypatch.setattr(extension_api, "_do_sign", lambda *_args: pytest.fail("unapproved request was signed"))
+
+    asyncio.run(
+        conn._on_sign_approve(
+            {
+                "id": "s1",
+                "type": "sign_approve",
+                "request_id": "r1",
+                "approved": approved,
+            }
+        )
+    )
+
+    assert conn.ws.sent[-1] == {
+        "id": "s1",
+        "type": "sign_result",
+        "request_id": "r1",
+        "error": "user_rejected",
+    }
 
 
 def test_sign_request_duplicate_request_id_is_rejected(monkeypatch):

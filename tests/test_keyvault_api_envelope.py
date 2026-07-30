@@ -79,10 +79,19 @@ def captured_audit() -> tuple[list[dict[str, Any]], Any]:
 
 
 @pytest.fixture
-def registered_key(backend: FakeBackend) -> str:
-    """A key_id whose Enclave wrapping key already exists in the FakeBackend."""
+def registered_key(backend: FakeBackend, home: Path) -> str:
+    """A key_id whose native key and authoritative v1 commits both exist."""
     key_id = "test-key-1"
     wrap.generate_wrapping_key(key_id, backend=backend)
+    root = _storage.resolve_keyvault_dir(home)
+    key_id_hash_hex = _key_id_hash(key_id).hex()
+    _storage.atomic_write(root / "digests" / f"{key_id_hash_hex}.commit", b"\x42" * 32)
+    meta = _storage.load_meta(root)
+    meta["keys"][key_id_hash_hex] = {
+        "key_id": key_id,
+        "created_at": "2026-07-30T00:00:00+00:00",
+    }
+    _storage.save_meta(root, meta)
     return key_id
 
 
@@ -241,17 +250,14 @@ class TestApiEncrypt:
         api.encrypt(registered_key, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
         assert log == []
 
-    def test_unregistered_key_raises_wrap_key_not_found(
+    def test_key_without_authoritative_commit_is_rejected_before_wrap(
         self, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
     ) -> None:
-        # In-tree code-reviewer LOW-2 regression anchor: ``encrypt`` calls
-        # ``wrap.wrap_dek`` which needs the Enclave public key. When no
-        # ``generate_wrapping_key`` has been called for the key_id the
-        # FakeBackend raises :class:`WrapKeyNotFound`; this test pins that
-        # the exception propagates cleanly through ``api.encrypt`` (no
-        # swallowing, no spurious audit emit, no partial filesystem state).
+        # A backend key is not authoritative while provision/import may still
+        # roll it back. No matching meta row + digest means encrypt must fail
+        # before native-key lookup and before writing any ciphertext.
         log, sink = captured_audit
-        with pytest.raises(WrapKeyNotFound):
+        with pytest.raises(_storage.KeyvaultCorruptError, match="single committed key"):
             api.encrypt("never-registered-key", b"x", "purpose", backend=backend, audit_sink=sink, home=home)
         # No audit entry — encrypt has no authorization gate (codex OD-3).
         assert log == []
@@ -259,6 +265,25 @@ class TestApiEncrypt:
         kid_hex = _key_id_hash("never-registered-key").hex()
         kid_dir = home / "mordred" / "keyvault" / "ciphertexts" / kid_hex
         assert not kid_dir.exists()
+
+    def test_committed_key_missing_from_backend_raises_wrap_key_not_found(
+        self, backend: FakeBackend, home: Path, captured_audit: tuple[list[dict[str, Any]], Any]
+    ) -> None:
+        key_id = "committed-but-native-key-missing"
+        key_id_hash_hex = _key_id_hash(key_id).hex()
+        root = _storage.resolve_keyvault_dir(home)
+        _storage.atomic_write(root / "digests" / f"{key_id_hash_hex}.commit", b"\x42" * 32)
+        meta = _storage.load_meta(root)
+        meta["keys"][key_id_hash_hex] = {
+            "key_id": key_id,
+            "created_at": "2026-07-30T00:00:00+00:00",
+        }
+        _storage.save_meta(root, meta)
+
+        log, sink = captured_audit
+        with pytest.raises(WrapKeyNotFound):
+            api.encrypt(key_id, b"x", "purpose", backend=backend, audit_sink=sink, home=home)
+        assert log == []
 
 
 # ----------------------------- api.decrypt -----------------------------

@@ -121,6 +121,16 @@ class TestTorHealthDefaultIsDeepProbe:
 
 
 class TestTorUse:
+    def test_pinned_65535_is_rejected_before_rendering_invalid_control_port(self) -> None:
+        tor = _TorFakes()
+        rt = _make_runtime(tor_fakes=tor, tor_socks_port=65535, policy_mode="strict")
+
+        with pytest.raises(BringupFailed, match=r"1\.\.65534"):
+            rt.use("tor")
+
+        assert tor.start_calls == []
+        rt.stop()
+
     def test_use_tor_picks_free_port_and_starts_process(self) -> None:
         tor = _TorFakes(pick_port_return=9150)
         rt = _make_runtime(tor_fakes=tor)

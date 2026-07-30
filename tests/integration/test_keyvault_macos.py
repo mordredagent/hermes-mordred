@@ -10,7 +10,7 @@ Run manually:
 
 .. code-block:: bash
 
-   MORDRED_KEYVAULT_LIVE=1 pytest tests/integration/test_keyvault_macos.py -v
+   MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v
 
 Approve the biometric prompt when it appears during ``unwrap_dek``.
 
@@ -32,6 +32,8 @@ import pytest
 from mordred_hermes.keyvault import native, wrap
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
+
+pytestmark = pytest.mark.integration
 
 _LIVE_GATE_ENV = "MORDRED_KEYVAULT_LIVE"
 
@@ -196,7 +198,7 @@ def test_enable_se_builds_installs_and_verifies_helper(tmp_path: Path, monkeypat
 
     install_dir = tmp_path / "bin"
     monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(install_dir / "mordred-hermes-sekey"))
-    rc = keyvault_native_cli.enable_se(install_dir=install_dir, unattended=True)
+    rc = keyvault_native_cli.enable_se(install_dir=install_dir, home=tmp_path)
     assert rc == 0
     assert (install_dir / "mordred-hermes-sekey").is_file()
 

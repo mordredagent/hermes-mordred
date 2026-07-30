@@ -85,7 +85,7 @@ Mapping the 3 hooks that the old SPEC depended on to their Hermes equivalents yi
 | `~/.openclaw/mordred/audit.log` | `~/.hermes/mordred/audit.log` | `mordred_privacy_check` |
 | `~/.openclaw/mordred/policy.json` | `~/.hermes/mordred/policy.json` | `mordred_privacy_check` (writer is `mordred_wizard`) |
 | `~/.openclaw/mordred/keyvault/` | `~/.hermes/mordred/keyvault/` | `mordred_keyvault` (Phase 4) |
-| `~/.openclaw/credentials/mordred-network.json` | `~/.hermes/mordred/credentials/network.json` or a Mordred-specific key in `~/.hermes/.env` (e.g., `MORDRED_MULLVAD_ACCOUNT=...`) | `mordred_network` |
+| `~/.openclaw/mordred/credentials/` | `~/.hermes/mordred/credentials/` | `mordred_network` |
 | `plugins.entries.mordred-*.config` in `~/.openclaw/openclaw.json` | the `plugins.mordred-*` section in `~/.hermes/config.yaml` | wizard goes from JSON5 round-trip → YAML round-trip (pyyaml's round-trip support is weak, so adoption of **`ruamel.yaml`** is under consideration) |
 
 > Hermes's `get_hermes_home()` is profile-aware (default `~/.hermes/`). Mordred reuses the same profile resolution.

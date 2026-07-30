@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import stat
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -137,6 +139,92 @@ class TestResealEnvCore:
         rc = reseal_env(home=home, root=root, backend=backend, store=_ReadRaisesStore())
         assert rc == 1
         assert (home / ".env").read_bytes() == b"B=2\n"  # kept, not lost
+
+    def test_keyboard_interrupt_after_capture_restores_plaintext(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ctrl-C anywhere after capture must not strand the sole live values."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, _ENV_MULTI)
+        env_path = home / ".env"
+        env_path.write_bytes(b"C=3\n")
+
+        def interrupt_open(*_args: object, **_kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(_env_reseal, "_open_hot_or_report", interrupt_open)
+        with pytest.raises(KeyboardInterrupt):
+            reseal_env(home=home, root=root, backend=backend, store=store)
+
+        assert env_path.read_bytes() == b"C=3\n"
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+        assert not list(home.glob(".env.mordred-reseal-*"))
+
+    def test_concurrent_replacement_after_merge_is_not_deleted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _seal(root, home, backend, store, _ENV_MULTI)
+        env_path = home / ".env"
+        snapshot = b"C=3\n"
+        replacement = b"D=4\n"
+        env_path.write_bytes(snapshot)
+        merge_finished = threading.Barrier(2)
+        replacement_finished = threading.Barrier(2)
+
+        real_open_vault = vault.open_vault
+
+        class RacingOpen:
+            def __init__(self, opened: object) -> None:
+                self.opened = opened
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self.opened, name)
+
+            def __enter__(self) -> RacingOpen:
+                self.opened.__enter__()  # type: ignore[attr-defined]
+                return self
+
+            def __exit__(self, *args: object) -> object:
+                result = self.opened.__exit__(*args)  # type: ignore[attr-defined]
+                merge_finished.wait(timeout=5)
+                replacement_finished.wait(timeout=5)
+                return result
+
+        def racing_open(*args: object, **kwargs: object) -> RacingOpen:
+            return RacingOpen(real_open_vault(*args, **kwargs))  # type: ignore[arg-type]
+
+        monkeypatch.setattr(vault, "open_vault", racing_open)
+
+        def replace_live_env() -> None:
+            merge_finished.wait(timeout=5)
+            env_path.write_bytes(replacement)
+            replacement_finished.wait(timeout=5)
+
+        writer = threading.Thread(target=replace_live_env)
+        writer.start()
+        rc = reseal_env(home=home, root=root, backend=backend, store=store)
+        writer.join(timeout=5)
+
+        assert rc == 0
+        assert not writer.is_alive()
+        assert env_path.read_bytes() == replacement
+        assert not list(home.glob(".env.mordred-reseal-*"))
+        key_id = anchor_label = _identity.vault_identity(root)
+        with real_open_vault(
+            root,
+            key_id=key_id,
+            backend=backend,
+            store=store,
+            anchor_label=anchor_label,
+        ) as opened:
+            assert opened.read_file(".env") == b"A=1\nB=2\nC=3\n"
 
 
 # -----------------------------------------------------------------------------

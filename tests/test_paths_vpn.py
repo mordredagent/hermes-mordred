@@ -35,6 +35,7 @@ class _FakeRunner:
     def __init__(self, responses: dict[tuple[str, ...], subprocess.CompletedProcess[str]]) -> None:
         self._responses = responses
         self.calls: list[tuple[str, ...]] = []
+        self.timeouts: list[float | None] = []
 
     def __call__(
         self,
@@ -45,13 +46,54 @@ class _FakeRunner:
         text: bool = True,
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, timeout
+        del check, capture_output, text
         key = tuple(argv)
         self.calls.append(key)
+        self.timeouts.append(timeout)
         try:
             return self._responses[key]
         except KeyError:
             return subprocess.CompletedProcess(args=list(key), returncode=0, stdout="", stderr="")
+
+
+class _LockdownTransitionRunner(_FakeRunner):
+    """Stateful runner for a successful strict OFF -> ON transition."""
+
+    def __init__(
+        self,
+        responses: dict[tuple[str, ...], subprocess.CompletedProcess[str]] | None = None,
+        *,
+        initial_state: str = "off",
+    ) -> None:
+        super().__init__(responses or {})
+        self.lockdown_state = initial_state
+
+    def __call__(
+        self,
+        argv: list[str] | tuple[str, ...],
+        *,
+        check: bool = False,
+        capture_output: bool = True,
+        text: bool = True,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        key = tuple(argv)
+        if key[-2:] == ("lockdown-mode", "get") and key not in self._responses:
+            self.calls.append(key)
+            self.timeouts.append(timeout)
+            return _result(f"Network lockdown when disconnected: {self.lockdown_state}\n")
+        result = super().__call__(
+            argv,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+        )
+        if result.returncode == 0 and key[-3:] == ("lockdown-mode", "set", "on"):
+            self.lockdown_state = "on"
+        elif result.returncode == 0 and key[-3:] == ("lockdown-mode", "set", "off"):
+            self.lockdown_state = "off"
+        return result
 
 
 def _result(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -118,7 +160,7 @@ class TestBringUp:
     def test_strict_enforces_lockdown(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner({})
+        runner = _LockdownTransitionRunner()
         vpn.bring_up(
             cli_path="/bin/mullvad",
             region="auto",
@@ -162,6 +204,8 @@ class TestBringUp:
             runner=runner,
         )
         assert ("/bin/mullvad", "connect") in runner.calls
+        assert runner.timeouts
+        assert all(timeout is not None and timeout > 0 for timeout in runner.timeouts)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +226,7 @@ class TestBringUpReturnCodes:
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner({("mullvad", "lockdown-mode", "set", "on"): _result(returncode=1)})
+        runner = _LockdownTransitionRunner({("mullvad", "lockdown-mode", "set", "on"): _result(returncode=1)})
         with pytest.raises(BringupFailed):
             vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
 
@@ -249,17 +293,36 @@ class TestPreservePreExistingLockdown:
         # No redundant set-on was issued, because lockdown was already on.
         assert ("mullvad", "lockdown-mode", "set", "on") not in runner.calls
 
+    def test_failed_state_query_aborts_without_mutation_or_rollback(self) -> None:
+        """A failed GET must not be treated as OFF and claimed as ours.
+
+        This reproduces the dangerous sequence where the user's real state is
+        ON, the GET command fails, and a later relay failure used to trigger
+        ``set off`` against their pre-existing kill-switch.
+        """
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner(
+            {
+                ("mullvad", "lockdown-mode", "get"): _result(stdout="on", returncode=1),
+                ("mullvad", "relay", "set", "location", "any"): _result(returncode=1),
+            }
+        )
+
+        with pytest.raises(BringupFailed, match="state could not be determined"):
+            vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
+
+        assert ("mullvad", "lockdown-mode", "set", "on") not in runner.calls
+        assert ("mullvad", "lockdown-mode", "set", "off") not in runner.calls
+
     def test_handle_records_what_we_applied(self) -> None:
         """The returned handle reflects whether *we* enabled lockdown
         (so runtime tear-down can decide whether to undo it).
         """
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner(
-            {
-                ("mullvad", "lockdown-mode", "get"): _result(stdout="Network lockdown when disconnected: off\n"),
-            }
-        )
+        runner = _LockdownTransitionRunner()
         handle = vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
         # We changed lockdown from off → on, so we should clean up on disconnect.
         assert handle.lockdown_applied_by_us is True
@@ -278,21 +341,75 @@ class TestPreservePreExistingLockdown:
 
 
 class TestStrictPartialFailureRollback:
-    """Codex round 7 P2-A (2026-05-14): if strict bring-up applies
-    ``lockdown-mode set on`` and then a later command fails, the
-    Mullvad client state must be rolled back so the user is not left
-    with a persistent kill-switch that blocks all traffic after the
-    session aborts."""
+    """Strict failures retain lockdown because ownership is not atomic."""
 
-    def test_rolls_back_lockdown_when_connect_fails(self) -> None:
+    def test_preserves_lockdown_when_connect_fails(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         from mordred_hermes.network._exceptions import BringupFailed
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner({("mullvad", "connect"): _result(returncode=2)})
+        runner = _LockdownTransitionRunner({("mullvad", "connect"): _result(returncode=2)})
         with pytest.raises(BringupFailed):
             vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
-        # The strict setting we applied must have been undone.
-        assert ("mullvad", "lockdown-mode", "set", "off") in runner.calls
+        assert ("mullvad", "lockdown-mode", "set", "off") not in runner.calls
+        assert "leaving it ON" in caplog.text
+
+    def test_concurrent_owner_barrier_never_turns_lockdown_off(self) -> None:
+        """Deterministically interleave another actor after the initial GET."""
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import vpn
+
+        calls: list[tuple[str, ...]] = []
+        query_count = 0
+        concurrent_owner_state = "off"
+
+        def runner(
+            argv: list[str] | tuple[str, ...],
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal query_count, concurrent_owner_state
+            command = tuple(argv)
+            calls.append(command)
+            if command[-2:] == ("lockdown-mode", "get"):
+                query_count += 1
+                if query_count == 1:
+                    return _result("Network lockdown when disconnected: off\n")
+                return _result(f"Network lockdown when disconnected: {concurrent_owner_state}\n")
+            if command[-3:] == ("lockdown-mode", "set", "on"):
+                # The other actor enables and begins relying on lockdown in
+                # the query/mutation window. Mordred's idempotent set also
+                # returns success, but cannot claim exclusive ownership.
+                concurrent_owner_state = "on"
+                return _result()
+            if command[-1:] == ("connect",):
+                return _result(returncode=2)
+            if command[-3:] == ("lockdown-mode", "set", "off"):
+                concurrent_owner_state = "off"
+            return _result()
+
+        with pytest.raises(BringupFailed, match="connect"):
+            vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
+
+        assert ("mullvad", "lockdown-mode", "set", "off") not in calls
+        assert concurrent_owner_state == "on"
+
+    def test_unconfirmed_set_on_is_rolled_back_and_refused(self) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import vpn
+
+        # The CLI reports OFF both before and after a successful ``set on``.
+        runner = _LockdownTransitionRunner(
+            {
+                ("mullvad", "lockdown-mode", "get"): _result(stdout="Network lockdown when disconnected: off\n"),
+            }
+        )
+
+        with pytest.raises(BringupFailed, match="did not confirm ON"):
+            vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
+
+        assert ("mullvad", "lockdown-mode", "set", "off") not in runner.calls
 
     def test_lenient_failure_does_not_alter_user_settings(self) -> None:
         """Lenient mode never sets lockdown, so no rollback fires."""
@@ -318,10 +435,13 @@ class TestMullvadCli2026Drift:
     def test_strict_mode_does_not_invoke_removed_subcommand(self) -> None:
         from mordred_hermes.network.paths import vpn
 
+        lockdown_state = "off"
+
         def runner_2026_2(
             argv: list[str] | tuple[str, ...],
             **_kwargs: object,
         ) -> subprocess.CompletedProcess[str]:
+            nonlocal lockdown_state
             argv_t = tuple(argv)
             if "always-require-vpn" in argv_t:
                 return subprocess.CompletedProcess(
@@ -330,6 +450,10 @@ class TestMullvadCli2026Drift:
                     stdout="",
                     stderr="error: unrecognized subcommand 'always-require-vpn'\n",
                 )
+            if argv_t[-2:] == ("lockdown-mode", "get"):
+                return _result(f"Network lockdown when disconnected: {lockdown_state}\n")
+            if argv_t[-3:] == ("lockdown-mode", "set", "on"):
+                lockdown_state = "on"
             return subprocess.CompletedProcess(args=list(argv_t), returncode=0, stdout="", stderr="")
 
         handle = vpn.bring_up(
@@ -344,7 +468,7 @@ class TestMullvadCli2026Drift:
     def test_strict_mode_never_emits_always_require_argv(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        runner = _FakeRunner({})
+        runner = _LockdownTransitionRunner()
         vpn.bring_up(cli_path="mullvad", region="auto", policy_mode="strict", runner=runner)
         for call in runner.calls:
             assert "always-require-vpn" not in call, (
@@ -392,6 +516,7 @@ class TestWaitConnected:
             timeout=2.0,
             clock=_FakeClock(start=0.0, step=0.01),
         )
+        assert runner.timeouts == [2.0]
 
     def test_timeout_raises_bringup_failed(self) -> None:
         from mordred_hermes.network._exceptions import BringupFailed
@@ -400,6 +525,35 @@ class TestWaitConnected:
         status_cmd = ("/bin/mullvad", "status")
         runner = _FakeRunner({status_cmd: _result(stdout="Tunnel status: Disconnected\n")})
         with pytest.raises(BringupFailed):
+            vpn.wait_connected(
+                cli_path="/bin/mullvad",
+                runner=runner,
+                timeout=0.05,
+                clock=_FakeClock(start=0.0, step=0.1),
+            )
+
+    def test_nonzero_status_refuses_even_if_stdout_says_connected(self) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import vpn
+
+        status_cmd = ("/bin/mullvad", "status")
+        runner = _FakeRunner(
+            {
+                status_cmd: _result(
+                    stdout="Tunnel status: Connected\n",
+                    returncode=1,
+                )
+            }
+        )
+        with pytest.raises(BringupFailed, match="status failed"):
+            vpn.wait_connected(cli_path="/bin/mullvad", runner=runner)
+
+    def test_not_connected_diagnostic_never_marks_ready(self) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Not Connected (last state: Connected)\n")})
+        with pytest.raises(BringupFailed, match="did not reach Connected"):
             vpn.wait_connected(
                 cli_path="/bin/mullvad",
                 runner=runner,
@@ -421,6 +575,7 @@ class TestDisconnect:
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
         vpn.disconnect(handle, runner=runner)
         assert ("/bin/mullvad", "disconnect") in runner.calls
+        assert runner.timeouts == [vpn.DEFAULT_COMMAND_TIMEOUT]
 
     def test_preserve_lockdown_default(self) -> None:
         from mordred_hermes.network.paths import vpn
@@ -437,6 +592,26 @@ class TestDisconnect:
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
         vpn.disconnect(handle, runner=runner, preserve_lockdown=False)
         assert ("/bin/mullvad", "lockdown-mode", "set", "off") in runner.calls
+
+    @pytest.mark.parametrize(
+        "failed_command",
+        [
+            ("/bin/mullvad", "disconnect"),
+            ("/bin/mullvad", "lockdown-mode", "set", "off"),
+        ],
+    )
+    def test_nonzero_cleanup_command_is_reported(
+        self,
+        failed_command: tuple[str, ...],
+    ) -> None:
+        from mordred_hermes.network._exceptions import BringupFailed
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner({failed_command: _result(returncode=9)})
+        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
+
+        with pytest.raises(BringupFailed, match="rc=9"):
+            vpn.disconnect(handle, runner=runner, preserve_lockdown=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -476,6 +651,13 @@ class TestHealth:
         from mordred_hermes.network.paths import vpn
 
         runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout=self._CONNECTING)})
+        handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
+        assert vpn.health(handle, runner=runner) is False
+
+    def test_not_connected_diagnostic_is_unhealthy(self) -> None:
+        from mordred_hermes.network.paths import vpn
+
+        runner = _FakeRunner({("/bin/mullvad", "status"): _result(stdout="Not Connected (last state: Connected)\n")})
         handle = vpn.MullvadHandle(cli_path="/bin/mullvad", region="auto", lockdown_enforced=True)
         assert vpn.health(handle, runner=runner) is False
 
@@ -619,43 +801,43 @@ class TestParseHandshakeAge:
 
 
 # --------------------------------------------------------------------------- #
-# _is_setting_on — bare-token match, not substring (audit #7)                 #
+# _get_setting_state — tri-state parsing and ownership safety                 #
 # --------------------------------------------------------------------------- #
 
 
-class TestIsSettingOn:
-    def test_labeled_on_reads_true(self) -> None:
+class TestGetSettingState:
+    def test_labeled_on_reads_on(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+        def runner(_argv: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return _result("Network lockdown when disconnected: on\n")
 
-        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is True
+        assert vpn._get_setting_state(runner, "/fake/mullvad", "lockdown-mode") == "on"
 
-    def test_labeled_off_reads_false(self) -> None:
+    def test_labeled_off_reads_off(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+        def runner(_argv: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return _result("Network lockdown when disconnected: off\n")
 
-        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is False
+        assert vpn._get_setting_state(runner, "/fake/mullvad", "lockdown-mode") == "off"
 
-    def test_word_ending_in_on_is_not_misread_as_on(self) -> None:
+    def test_word_ending_in_on_is_unknown(self) -> None:
         # Regression #7: an OFF status whose last word merely ends in "on"
         # (e.g. "...connection") must NOT read as ON — that would fail OPEN
         # in strict (bring_up would skip enabling the kill-switch, believing
         # it is already active).
         from mordred_hermes.network.paths import vpn
 
-        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+        def runner(_argv: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return _result("Tunnel status: no active connection\n")
 
-        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is False
+        assert vpn._get_setting_state(runner, "/fake/mullvad", "lockdown-mode") == "unknown"
 
-    def test_nonzero_returncode_reads_false(self) -> None:
+    def test_nonzero_returncode_reads_unknown(self) -> None:
         from mordred_hermes.network.paths import vpn
 
-        def runner(_argv: Any) -> subprocess.CompletedProcess[str]:
+        def runner(_argv: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return _result("on", returncode=1)
 
-        assert vpn._is_setting_on(runner, "/fake/mullvad", "lockdown-mode") is False
+        assert vpn._get_setting_state(runner, "/fake/mullvad", "lockdown-mode") == "unknown"

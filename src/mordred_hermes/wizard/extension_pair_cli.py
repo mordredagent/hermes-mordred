@@ -149,6 +149,25 @@ def _poll_state(pairing: Any, code: str) -> tuple[str, str | None]:
     return ("consumed" if pairing.code_consumed(code) else "pending", None)
 
 
+def _revoke_or_observe(pairing: Any, code: str) -> tuple[bool, str, str | None]:
+    """Try to revoke *code*, then report its terminal/observed state."""
+    revoke = getattr(pairing, "revoke_code", None)
+    if callable(revoke):
+        try:
+            if bool(revoke(code)):
+                return True, "failed", "cancelled"
+        except Exception:
+            # Cancellation/timeout handling must not turn a backend I/O error
+            # into a traceback. The status probe below may still tell us that
+            # the pairing committed before revocation took effect.
+            pass
+    try:
+        state, fail_reason = _poll_state(pairing, code)
+    except Exception:
+        return False, "unknown", None
+    return False, state, fail_reason
+
+
 def _sanitize_reason(reason: str | None) -> str:
     """Escape a fail_reason read back from pending.json for terminal display.
 
@@ -240,18 +259,44 @@ def extension_pair(*, timeout: float = 600.0) -> int:
     try:
         rc = _await_outcome(pairing, code, deadline, color=color, ascii_only=ascii_only)
     except KeyboardInterrupt:
-        print("\nCancelled — no pairing was completed.", file=sys.stderr)
+        revoked, state, fail_reason = _revoke_or_observe(pairing, code)
+        if state == "paired":
+            print("\nPairing completed before cancellation took effect.", file=sys.stderr)
+            return _print_paired(color=color, ascii_only=ascii_only)
+        if revoked:
+            print("\nCancelled — the pairing code was revoked before completion.", file=sys.stderr)
+        elif state == "failed":
+            print(
+                f"\nCancelled — pairing had already ended ({_sanitize_reason(fail_reason)}).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\nCancelled locally, but the pairing code could not be revoked or its status confirmed; "
+                "verify the extension before relying on cancellation.",
+                file=sys.stderr,
+            )
         return 1
     if rc is not None:
         return rc
+
+    revoked, state, _fail_reason = _revoke_or_observe(pairing, code)
+    if state == "paired":
+        _term.emit_note("pairing completed at the timeout boundary")
+        return _print_paired(color=color, ascii_only=ascii_only)
 
     reason = (
         "the pairing code expired before the extension connected"
         if time.time() >= expires_at
         else f"no pairing within {int(timeout)} seconds"
     )
+    revocation_note = (
+        " The pending code was revoked."
+        if revoked
+        else " The code could not be revoked or its status confirmed; verify the extension before retrying."
+    )
     _term.emit_warn(
-        f"{reason} — run `hermes-mordred extension pair` for a new code "
+        f"{reason}.{revocation_note} Run `hermes-mordred extension pair` for a new code "
         "(check a server is running: `hermes-mordred extension serve` or a "
         "full Hermes gateway)."
     )

@@ -39,6 +39,7 @@
 // key does not.
 
 import CryptoKit
+import Darwin
 import Foundation
 import Security
 
@@ -116,6 +117,40 @@ func blobURL(tagHex: String) -> URL {
     storeDir().appendingPathComponent("\(tagHex).bin", isDirectory: false)
 }
 
+func openValidatedStoreDirectory() throws -> Int32 {
+    let dir = storeDir()
+    let fd = dir.path.withCString {
+        open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    guard fd >= 0 else {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to open store dir safely: \(String(cString: strerror(errno)))"
+        )
+    }
+    var info = stat()
+    if fstat(fd, &info) != 0 {
+        let message = String(cString: strerror(errno))
+        _ = close(fd)
+        throw HelperError(domain: "helper", status: -1, message: "failed to inspect store dir: \(message)")
+    }
+    guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
+        _ = close(fd)
+        throw HelperError(domain: "helper", status: -1, message: "store path is not a real directory")
+    }
+    let permissions = info.st_mode & mode_t(0o777)
+    guard permissions == mode_t(0o700) else {
+        _ = close(fd)
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "store directory must be mode 0700 (got \(String(permissions, radix: 8)))"
+        )
+    }
+    return fd
+}
+
 func ensureStoreDir() throws {
     let dir = storeDir()
     do {
@@ -127,26 +162,245 @@ func ensureStoreDir() throws {
     } catch {
         throw HelperError(domain: "helper", status: -1, message: "failed to create store dir: \(error.localizedDescription)")
     }
+    // createDirectory is idempotent and follows an existing symlink. Bind the
+    // postcondition to an O_NOFOLLOW directory descriptor and reject loose or
+    // non-directory objects before creating/reading any key blob.
+    let fd = try openValidatedStoreDirectory()
+    _ = close(fd)
+}
+
+func withStoreLock<T>(_ body: () throws -> T) throws -> T {
+    try ensureStoreDir()
+    let lockURL = storeDir().appendingPathComponent(".lock", isDirectory: false)
+    let flags = O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW
+    let fd = lockURL.path.withCString {
+        open($0, flags, mode_t(0o600))
+    }
+    guard fd >= 0 else {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to open store lock: \(String(cString: strerror(errno)))"
+        )
+    }
+    var lockInfo = stat()
+    if fstat(fd, &lockInfo) != 0 || (lockInfo.st_mode & mode_t(S_IFMT)) != mode_t(S_IFREG) {
+        let message = String(cString: strerror(errno))
+        _ = close(fd)
+        throw HelperError(domain: "helper", status: -1, message: "store lock is not a regular file: \(message)")
+    }
+    if fchmod(fd, mode_t(0o600)) != 0 {
+        let message = String(cString: strerror(errno))
+        _ = close(fd)
+        throw HelperError(domain: "helper", status: -1, message: "failed to secure store lock: \(message)")
+    }
+    if flock(fd, LOCK_EX) != 0 {
+        let message = String(cString: strerror(errno))
+        _ = close(fd)
+        throw HelperError(domain: "helper", status: -1, message: "failed to acquire store lock: \(message)")
+    }
+    defer {
+        _ = flock(fd, LOCK_UN)
+        _ = close(fd)
+    }
+    return try body()
+}
+
+func emitStoreWarning(_ message: String) {
+    guard let data = "mordred-hermes-sekey: \(message)\n".data(using: .utf8) else { return }
+    FileHandle.standardError.write(data)
+}
+
+func createStagingBlob(tagHex: String) throws -> (url: URL, fd: Int32) {
+    let dir = storeDir()
+    for _ in 0..<128 {
+        let name = ".\(tagHex).tmp-\(getpid())-\(UUID().uuidString)"
+        let url = dir.appendingPathComponent(name, isDirectory: false)
+        let flags = O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW
+        let fd = url.path.withCString {
+            open($0, flags, mode_t(0o600))
+        }
+        if fd >= 0 {
+            return (url, fd)
+        }
+        let errorNumber = errno
+        if errorNumber == EEXIST {
+            continue
+        }
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to create blob staging file: \(String(cString: strerror(errorNumber)))"
+        )
+    }
+    throw HelperError(domain: "helper", status: -1, message: "failed to allocate a unique blob staging file")
+}
+
+func durableSync(_ fd: Int32, description: String) throws {
+    // On macOS fsync(2) may stop at the drive's volatile write cache.
+    // F_FULLFSYNC asks the device to flush through to stable media. Fall back
+    // only when the filesystem does not implement it; a real I/O failure must
+    // propagate instead of being hidden by a weaker second call.
+    if fcntl(fd, F_FULLFSYNC) == 0 {
+        return
+    }
+    let fullSyncError = errno
+    if fullSyncError != ENOTSUP && fullSyncError != EINVAL {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to durably sync \(description): \(String(cString: strerror(fullSyncError)))"
+        )
+    }
+    if fsync(fd) != 0 {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to sync \(description): \(String(cString: strerror(errno)))"
+        )
+    }
+}
+
+func syncStoreDirectory() throws {
+    let fd = try openValidatedStoreDirectory()
+    defer { _ = close(fd) }
+    try durableSync(fd, description: "store directory")
+}
+
+func syncStoreDirectoryBestEffort(context: String) {
+    do {
+        try syncStoreDirectory()
+    } catch {
+        emitStoreWarning("\(context), but the store directory could not be synced: \(error)")
+    }
 }
 
 func writeBlob(_ blob: Data, tagHex: String) throws {
     try ensureStoreDir()
-    let url = blobURL(tagHex: tagHex)
-    do {
-        try blob.write(to: url, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    } catch {
-        throw HelperError(domain: "helper", status: -1, message: "failed to write blob: \(error.localizedDescription)")
+    let target = blobURL(tagHex: tagHex)
+    let staging = try createStagingBlob(tagHex: tagHex)
+    var fdOpen = true
+    var stagingPresent = true
+    defer {
+        if fdOpen {
+            _ = close(staging.fd)
+        }
+        if stagingPresent {
+            _ = staging.url.path.withCString { unlink($0) }
+        }
     }
+
+    if fchmod(staging.fd, mode_t(0o600)) != 0 {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to secure blob staging file: \(String(cString: strerror(errno)))"
+        )
+    }
+    try blob.withUnsafeBytes { bytes in
+        guard let base = bytes.baseAddress else { return }
+        var offset = 0
+        while offset < bytes.count {
+            let written = Darwin.write(staging.fd, base.advanced(by: offset), bytes.count - offset)
+            if written < 0 {
+                if errno == EINTR {
+                    continue
+                }
+                throw HelperError(
+                    domain: "helper",
+                    status: -1,
+                    message: "failed to write blob staging file: \(String(cString: strerror(errno)))"
+                )
+            }
+            if written == 0 {
+                throw HelperError(
+                    domain: "helper",
+                    status: -1,
+                    message: "failed to write blob staging file: write returned no progress"
+                )
+            }
+            offset += written
+        }
+    }
+    try durableSync(staging.fd, description: "blob staging file")
+    _ = close(staging.fd)
+    fdOpen = false
+
+    let linkResult = staging.url.path.withCString { source in
+        target.path.withCString { destination in
+            link(source, destination)
+        }
+    }
+    if linkResult != 0 {
+        let errorNumber = errno
+        if errorNumber == EEXIST {
+            throw HelperError(domain: "OSStatus", status: errDuplicateItem, message: "key already exists for tag")
+        }
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to publish blob: \(String(cString: strerror(errorNumber)))"
+        )
+    }
+
+    // The link is visible but is not a durable commit until its parent
+    // directory is synced. If this fails, report an indeterminate generation
+    // failure: Python must not commit metadata/ciphertext for a key whose
+    // authoritative name can disappear after power loss. The visible orphan
+    // is intentionally left for explicit reset/remediation.
+    try syncStoreDirectory()
+    let unlinkResult = staging.url.path.withCString { unlink($0) }
+    if unlinkResult == 0 || errno == ENOENT {
+        stagingPresent = false
+    } else {
+        emitStoreWarning(
+            "key blob was published, but its private staging name could not be removed: "
+                + String(cString: strerror(errno))
+        )
+    }
+    syncStoreDirectoryBestEffort(context: "key blob is available after staging cleanup")
 }
 
 func readBlob(tagHex: String) throws -> Data {
+    try ensureStoreDir()
     let url = blobURL(tagHex: tagHex)
-    guard FileManager.default.fileExists(atPath: url.path) else {
-        throw HelperError(domain: "OSStatus", status: errItemNotFound, message: "no key for tag")
+    let fd = url.path.withCString {
+        open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
     }
+    guard fd >= 0 else {
+        if errno == ENOENT {
+            throw HelperError(domain: "OSStatus", status: errItemNotFound, message: "no key for tag")
+        }
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to open blob safely: \(String(cString: strerror(errno)))"
+        )
+    }
+    defer { _ = close(fd) }
+
+    var info = stat()
+    guard fstat(fd, &info) == 0 else {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "failed to inspect blob: \(String(cString: strerror(errno)))"
+        )
+    }
+    guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+        throw HelperError(domain: "helper", status: -1, message: "key blob is not a regular file")
+    }
+    let permissions = info.st_mode & mode_t(0o777)
+    guard permissions == mode_t(0o600) else {
+        throw HelperError(
+            domain: "helper",
+            status: -1,
+            message: "key blob must be mode 0600 (got \(String(permissions, radix: 8)))"
+        )
+    }
+
     do {
-        return try Data(contentsOf: url)
+        return try FileHandle(fileDescriptor: fd, closeOnDealloc: false).readToEnd() ?? Data()
     } catch {
         throw HelperError(domain: "helper", status: -1, message: "failed to read blob: \(error.localizedDescription)")
     }
@@ -198,38 +452,73 @@ func loadKey(tagHex: String) throws -> SecureEnclave.P256.KeyAgreement.PrivateKe
 }
 
 func generate(tagHex: String, unattended: Bool) throws -> Data {
-    // Refuse to overwrite an existing key — mirrors errSecDuplicateItem so the
-    // backend maps it to "already exists" rather than silently rotating.
-    if FileManager.default.fileExists(atPath: blobURL(tagHex: tagHex).path) {
-        throw HelperError(domain: "OSStatus", status: errDuplicateItem, message: "key already exists for tag")
+    // One helper process is spawned per request, so an in-process mutex cannot
+    // close the fileExists→write race. Hold a store-wide advisory file lock
+    // across the complete duplicate check, Enclave generation, and atomic
+    // publication. Concurrent generate requests for the same tag serialize;
+    // the loser observes the winner's blob and returns duplicate-item without
+    // replacing it.
+    return try withStoreLock {
+        if try pathExistsNoFollow(blobURL(tagHex: tagHex)) {
+            throw HelperError(domain: "OSStatus", status: errDuplicateItem, message: "key already exists for tag")
+        }
+        // unattended → .privateKeyUsage only (no prompt); otherwise biometry-gated.
+        let access = try makeAccessControl(biometry: !unattended)
+        let key: SecureEnclave.P256.KeyAgreement.PrivateKey
+        do {
+            key = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
+        } catch {
+            throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "SecureEnclave key generation failed: \(error.localizedDescription)")
+        }
+        try writeBlob(key.dataRepresentation, tagHex: tagHex)
+        return key.publicKey.x963Representation
     }
-    // unattended → .privateKeyUsage only (no prompt); otherwise biometry-gated.
-    let access = try makeAccessControl(biometry: !unattended)
-    let key: SecureEnclave.P256.KeyAgreement.PrivateKey
-    do {
-        key = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access)
-    } catch {
-        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "SecureEnclave key generation failed: \(error.localizedDescription)")
-    }
-    try writeBlob(key.dataRepresentation, tagHex: tagHex)
-    return key.publicKey.x963Representation
 }
 
 func publicKey(tagHex: String) throws -> Data {
     try loadKey(tagHex: tagHex).publicKey.x963Representation
 }
 
+func pathExistsNoFollow(_ url: URL) throws -> Bool {
+    var info = stat()
+    let result = url.path.withCString { lstat($0, &info) }
+    if result == 0 {
+        return true
+    }
+    if errno == ENOENT {
+        return false
+    }
+    throw HelperError(
+        domain: "helper",
+        status: -1,
+        message: "failed to inspect blob path: \(String(cString: strerror(errno)))"
+    )
+}
+
 func deleteKey(tagHex: String) throws {
-    let url = blobURL(tagHex: tagHex)
-    // Idempotent: a missing key is success, not an error.
-    guard FileManager.default.fileExists(atPath: url.path) else { return }
-    do {
-        try FileManager.default.removeItem(at: url)
-    } catch {
-        // Lost a race with another deleter? Treat a now-absent file as success.
-        if FileManager.default.fileExists(atPath: url.path) {
-            throw HelperError(domain: "helper", status: -1, message: "failed to delete blob: \(error.localizedDescription)")
+    let initialURL = blobURL(tagHex: tagHex)
+    // Preserve idempotent no-op semantics without creating a store + lock when
+    // no directory entry exists. lstat is intentional: a dangling final
+    // symlink is still an entry and must be unlinked, or it permanently makes
+    // no-replace generation return EEXIST.
+    guard try pathExistsNoFollow(initialURL) else { return }
+    try withStoreLock {
+        let url = blobURL(tagHex: tagHex)
+        let result = url.path.withCString { unlink($0) }
+        if result != 0 {
+            if errno == ENOENT {
+                return
+            }
+            throw HelperError(
+                domain: "helper",
+                status: -1,
+                message: "failed to delete blob: \(String(cString: strerror(errno)))"
+            )
         }
+        // The deletion is not crash-durable until its directory entry is
+        // flushed. Do not claim reset success while the key name can return
+        // after power loss.
+        try syncStoreDirectory()
     }
 }
 

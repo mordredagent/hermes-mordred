@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _storage, api, wrap
+from mordred_hermes.keyvault import _native_key_id, _storage, api, wrap
 from tests._keyvault_fakes import FakeBackend
 from tests._keyvault_lifecycle_helpers import (
     _SPEC_DIGEST,
@@ -143,9 +143,19 @@ class TestGenerateHappyPath:
             audit_sink=audit,
             home=home,
         )
-        assert len(wrap.get_wrapping_key_public("default", backend=backend)) == 65
         meta = _storage.load_meta(kv_root)
         assert result.key_id_hash in meta["keys"]
+        native_key_id = meta["keys"][result.key_id_hash][_native_key_id.NATIVE_KEY_ID_FIELD]
+        assert (
+            len(
+                wrap.get_wrapping_key_public(
+                    "default",
+                    backend=backend,
+                    native_key_id=native_key_id,
+                )
+            )
+            == 65
+        )
 
     def test_audit_emits_started_then_completed(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         api.generate(

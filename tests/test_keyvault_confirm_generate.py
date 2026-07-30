@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _storage, api, wrap
+from mordred_hermes.keyvault import _native_key_id, _storage, api, wrap
 from tests._keyvault_fakes import FakeBackend
 from tests._keyvault_lifecycle_helpers import (
     _FAR_PAST,
@@ -156,7 +156,12 @@ class TestConfirmGenerateHappyPath:
     def test_enclave_key_is_generated(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         handle, digest = _prepared()
         api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
-        pub = wrap.get_wrapping_key_public("default", backend=backend)
+        root = _storage.resolve_keyvault_dir(home)
+        pub = wrap.get_wrapping_key_public(
+            "default",
+            backend=backend,
+            native_key_id=_native_key_id.scoped_native_key_id(root, "default"),
+        )
         assert len(pub) == 65  # SEC1 uncompressed P-256
 
     def test_meta_json_row_written(self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path) -> None:
@@ -276,6 +281,35 @@ class TestConfirmGenerateMismatch:
         assert isinstance(result, api.GenerateResult)
 
 
+class TestConfirmGenerateKeyIdValidation:
+    """Invalid main-key ids fail before audit, filesystem, or native mutation."""
+
+    @pytest.mark.parametrize("key_id", ["", "mordred.audit-log", "\ud800"])
+    def test_empty_or_reserved_key_id_is_rejected_before_mutation(
+        self,
+        key_id: str,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+    ) -> None:
+        handle, digest = _prepared()
+
+        with pytest.raises(_native_key_id.InvalidMainKeyId):
+            api.confirm_generate(
+                handle,
+                digest,
+                key_id=key_id,
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+
+        assert backend.calls == []
+        assert audit.log == []
+        assert not kv_root.exists()
+
+
 class TestConfirmGenerateAuditFailure:
     """The 3 audit emits have 3 distinct sink-failure policies."""
 
@@ -308,7 +342,11 @@ class TestConfirmGenerateAuditFailure:
         assert isinstance(result, api.GenerateResult)
         meta = _storage.load_meta(kv_root)
         assert result.key_id_hash in meta["keys"]
-        pub = wrap.get_wrapping_key_public("default", backend=backend)
+        pub = wrap.get_wrapping_key_public(
+            "default",
+            backend=backend,
+            native_key_id=_native_key_id.scoped_native_key_id(kv_root, "default"),
+        )
         assert len(pub) == 65
 
     def test_init_denied_sink_failure_chains_as_context(self, backend: FakeBackend, home: Path) -> None:
@@ -442,9 +480,14 @@ class TestConfirmGenerateRollback:
         key_id_hash = _storage_key_id_hash("default")
         real_save_meta = _storage.save_meta
 
+        save_count = 0
+
         def commit_then_boom(root: Path, meta: dict[str, Any]) -> None:
+            nonlocal save_count
+            save_count += 1
             real_save_meta(root, meta)  # the atomic rename commits meta.json
-            raise OSError("parent-dir fsync failed after meta.json was committed")
+            if save_count == 2:  # row + pending ownership commit
+                raise OSError("parent-dir fsync failed after meta.json was committed")
 
         monkeypatch.setattr(_storage, "save_meta", commit_then_boom)
         with pytest.raises(OSError, match="fsync failed"):
@@ -455,6 +498,122 @@ class TestConfirmGenerateRollback:
         # And the Enclave key was rolled back too.
         with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound
             wrap.get_wrapping_key_public("default", backend=backend)
+
+    def test_post_replace_failure_and_delete_failure_retains_row_plus_pending_fail_closed(
+        self,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class DeleteFailBackend(FakeBackend):
+            def delete_enclave_key(self, key_id: str) -> None:
+                self.calls.append(("delete", key_id))
+                raise OSError("native delete transport failed")
+
+        backend = DeleteFailBackend()
+        handle, digest = _prepared()
+        key_id_hash = _storage_key_id_hash("default")
+        real_save_meta = _storage.save_meta
+        save_count = 0
+
+        def ownership_commit_then_boom(root: Path, meta: dict[str, Any]) -> None:
+            nonlocal save_count
+            save_count += 1
+            real_save_meta(root, meta)
+            if save_count == 2:
+                raise OSError("parent-dir fsync failed after ownership rename")
+
+        monkeypatch.setattr(_storage, "save_meta", ownership_commit_then_boom)
+        with pytest.raises(OSError, match="ownership rename"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+        meta = _storage.load_meta(kv_root)
+        physical = _native_key_id.scoped_native_key_id(kv_root, "default")
+        assert meta["keys"][key_id_hash][_native_key_id.NATIVE_KEY_ID_FIELD] == physical
+        assert _native_key_id.pending_native_key_from_meta(kv_root, meta) == ("default", physical)
+
+        backend.calls.clear()
+        with pytest.raises(_storage.KeyvaultCorruptError, match="provisioning is incomplete"):
+            api.encrypt(
+                "default",
+                b"must-not-use-uncertain-key",
+                "secret",
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+        assert backend.calls == []
+
+    def test_pending_cleanup_failure_leaves_owned_key_fail_closed_without_rollback(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handle, digest = _prepared()
+        real_save_meta = _storage.save_meta
+        save_count = 0
+
+        def fail_before_pending_cleanup(root: Path, meta: dict[str, Any]) -> None:
+            nonlocal save_count
+            save_count += 1
+            if save_count == 3:
+                raise OSError("pending cleanup write failed")
+            real_save_meta(root, meta)
+
+        monkeypatch.setattr(_storage, "save_meta", fail_before_pending_cleanup)
+        with pytest.raises(OSError, match="pending cleanup"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+        meta = _storage.load_meta(kv_root)
+        assert _native_key_id.PENDING_NATIVE_KEY_FIELD in meta
+        assert not any(operation == "delete" for operation, _key_id in backend.calls)
+        with pytest.raises(_storage.KeyvaultCorruptError, match="provisioning is incomplete"):
+            api.encrypt(
+                "default",
+                b"blocked",
+                "secret",
+                backend=backend,
+                audit_sink=audit,
+                home=home,
+            )
+
+    def test_post_replace_pending_cleanup_error_accepts_verified_visible_commit(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        handle, digest = _prepared()
+        real_save_meta = _storage.save_meta
+        save_count = 0
+
+        def cleanup_commit_then_boom(root: Path, meta: dict[str, Any]) -> None:
+            nonlocal save_count
+            save_count += 1
+            real_save_meta(root, meta)
+            if save_count == 3:
+                raise OSError("parent-dir fsync failed after pending cleanup")
+
+        monkeypatch.setattr(_storage, "save_meta", cleanup_commit_then_boom)
+        result = api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+        assert result.key_id == "default"
+        assert _native_key_id.PENDING_NATIVE_KEY_FIELD not in _storage.load_meta(kv_root)
+        envelope_id = api.encrypt(
+            "default",
+            b"committed",
+            "secret",
+            backend=backend,
+            audit_sink=audit,
+            home=home,
+        )
+        assert envelope_id
 
 
 class TestConfirmGenerateHandleExpiry:
@@ -501,6 +660,55 @@ class TestConfirmGenerateReInit:
     pre-merge P2) — and the existing key is NOT disturbed.
     """
 
+    def test_pending_reset_journal_rejects_before_init_started(
+        self,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+    ) -> None:
+        kv_root.parent.mkdir(mode=0o700, parents=True)
+        with _storage.keyvault_lifecycle_lock(kv_root):
+            _storage.write_reset_journal(kv_root, b"pending reset")
+        handle, digest = _prepared()
+
+        with pytest.raises(_storage.KeyvaultResetInProgressError, match="reset"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+        assert audit.log == []
+        assert backend.calls == []
+        assert not kv_root.exists()
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            _native_key_id.AUDIT_KEY_FIELD,
+            _native_key_id.PENDING_AUDIT_KEY_FIELD,
+        ],
+    )
+    def test_residual_audit_ownership_rejects_before_any_mutation(
+        self,
+        field: str,
+        backend: FakeBackend,
+        audit: _AuditCapture,
+        home: Path,
+        kv_root: Path,
+    ) -> None:
+        _storage.ensure_layout(kv_root)
+        meta = _storage.load_meta(kv_root)
+        meta[field] = {"residual": True}
+        _storage.save_meta(kv_root, meta)
+        before_meta = _storage.safe_read(kv_root / "meta.json")
+        handle, digest = _prepared()
+
+        with pytest.raises(RuntimeError, match="already initialized"):
+            api.confirm_generate(handle, digest, backend=backend, audit_sink=audit, home=home)
+
+        assert audit.log == []
+        assert backend.calls == []
+        assert _storage.safe_read(kv_root / "meta.json") == before_meta
+        assert list((kv_root / "digests").iterdir()) == []
+
     def test_reinit_same_key_id_rejected(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         h1, d1 = _prepared()
         api.confirm_generate(h1, d1, backend=backend, audit_sink=audit, home=home)
@@ -537,7 +745,11 @@ class TestConfirmGenerateReInit:
         h2, d2 = _prepared()
         with pytest.raises(RuntimeError, match="already initialized"):
             api.confirm_generate(h2, d2, backend=backend, audit_sink=audit, home=home)
-        pub = wrap.get_wrapping_key_public("default", backend=backend)
+        pub = wrap.get_wrapping_key_public(
+            "default",
+            backend=backend,
+            native_key_id=_native_key_id.scoped_native_key_id(kv_root, "default"),
+        )
         assert len(pub) == 65
         meta = _storage.load_meta(kv_root)
         assert first.key_id_hash in meta["keys"]

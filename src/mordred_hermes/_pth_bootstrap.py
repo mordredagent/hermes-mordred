@@ -61,14 +61,15 @@ def _looks_like_hermes(argv: Sequence[str]) -> bool:
     if not argv:
         return False
     arg0 = argv[0] or ""
-    base = os.path.basename(arg0)
-    if base.endswith(".py"):
-        base = base[:-3]
-    elif base.endswith(".exe"):
-        base = base[:-4]
-    if base in ("hermes", "hermes-agent", "hermes-acp", "hermes-mordred"):
-        return True
     norm = arg0.replace("\\", "/")
+    base = os.path.basename(norm)
+    folded_base = base.casefold()
+    if folded_base.endswith(".py"):
+        base = base[:-3]
+    elif folded_base.endswith(".exe"):
+        base = base[:-4]
+    if base.casefold() in ("hermes", "hermes-agent", "hermes-acp", "hermes-mordred"):
+        return True
     return "/hermes_cli/" in norm or norm.endswith("/hermes_cli")
 
 

@@ -10,7 +10,9 @@ Synchronous (``requests``); callers invoke it from a thread executor.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 import socket
 import ssl
 from ipaddress import IPv4Address, IPv6Address, ip_address
@@ -22,10 +24,30 @@ DEFAULT_RPC: dict[int, str] = {
     1: "https://cloudflare-eth.com",
     11155111: "https://ethereum-sepolia-rpc.publicnode.com",
 }
+_MAX_RPC_RESPONSE_BYTES = 2 * 1024 * 1024
+_RPC_READ_CHUNK_BYTES = 64 * 1024
+_MAX_RPC_ERROR_MESSAGE_CHARS = 512
+_MIN_RPC_ERROR_CODE = -(2**31)
+_MAX_RPC_ERROR_CODE = 2**31 - 1
+_TRANSACTION_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}\Z")
 
 
 class JsonRpcError(Exception):
     pass
+
+
+class JsonRpcRemoteError(JsonRpcError):
+    """A structurally valid JSON-RPC error response from the remote node."""
+
+
+class JsonRpcHttpError(JsonRpcError):
+    """The endpoint answered with a non-2xx HTTP status.
+
+    Distinguished from a transport failure so callers with a legitimate
+    per-method fallback can treat "this node rejects this method" the same way
+    whether it arrives as a JSON-RPC error object or as an HTTP status — some
+    endpoints answer an unsupported method with 400/405 rather than a JSON body.
+    """
 
 
 def _parse_ip_literal(host: str) -> IPv4Address | IPv6Address | None:
@@ -194,6 +216,116 @@ def _proxies(rpc_url: str) -> dict[str, str] | None:
     return _resolve_route(rpc_url)[0]
 
 
+def _declared_response_length(headers: Any) -> int | None:
+    """Parse and enforce an optional HTTP Content-Length header."""
+    if headers is None:
+        return None
+    try:
+        raw_length = headers.get("Content-Length")
+    except Exception as exc:
+        raise JsonRpcError("rpc_invalid_response: unreadable Content-Length") from exc
+    if raw_length is None:
+        return None
+    if isinstance(raw_length, bytes):
+        try:
+            length_text = raw_length.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise JsonRpcError("rpc_invalid_response: invalid Content-Length") from exc
+    elif isinstance(raw_length, str):
+        length_text = raw_length
+    else:
+        raise JsonRpcError("rpc_invalid_response: invalid Content-Length")
+    length_text = length_text.strip()
+    if not length_text.isascii() or not length_text.isdigit() or len(length_text) > 20:
+        raise JsonRpcError("rpc_invalid_response: invalid Content-Length")
+    declared = int(length_text)
+    if declared > _MAX_RPC_RESPONSE_BYTES:
+        raise JsonRpcError("rpc_response_too_large: RPC response exceeds 2 MiB")
+    return declared
+
+
+def _bounded_response_bytes(raw: Any) -> bytes:
+    """Validate an already-materialized fake/compatibility response body."""
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        raise JsonRpcError("rpc_invalid_response: expected a byte response body")
+    if len(raw) > _MAX_RPC_RESPONSE_BYTES:
+        raise JsonRpcError("rpc_response_too_large: RPC response exceeds 2 MiB")
+    return bytes(raw)
+
+
+def _read_bounded_response(reader: Any) -> bytes:
+    """Read at most 2 MiB plus one detection byte from a urllib3 response."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        requested = min(_RPC_READ_CHUNK_BYTES, _MAX_RPC_RESPONSE_BYTES + 1 - total)
+        chunk = reader(requested)
+        if not chunk:
+            return b"".join(chunks)
+        bounded = _bounded_response_bytes(chunk)
+        total += len(bounded)
+        if total > _MAX_RPC_RESPONSE_BYTES:
+            raise JsonRpcError("rpc_response_too_large: RPC response exceeds 2 MiB")
+        chunks.append(bounded)
+
+
+def _read_bounded_chunks(chunks: Any) -> bytes:
+    """Collect a requests streaming iterator under the same byte limit."""
+    body: list[bytes] = []
+    total = 0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        bounded = _bounded_response_bytes(chunk)
+        total += len(bounded)
+        if total > _MAX_RPC_RESPONSE_BYTES:
+            raise JsonRpcError("rpc_response_too_large: RPC response exceeds 2 MiB")
+        body.append(bounded)
+    return b"".join(body)
+
+
+def _decode_json_bytes(raw: bytes) -> Any:
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise JsonRpcError("rpc_invalid_response: expected JSON") from exc
+
+
+def _urllib3_success_json(response: Any) -> Any:
+    """Decode a successful urllib3 response without an unbounded preload."""
+    _declared_response_length(getattr(response, "headers", None))
+    reader = getattr(response, "read", None)
+    if callable(reader):
+        raw = _read_bounded_response(reader)
+    else:
+        # Small test doubles historically exposed only ``.data``. Production
+        # urllib3 responses always take the streaming branch above.
+        raw = _bounded_response_bytes(getattr(response, "data", None))
+    return _decode_json_bytes(raw)
+
+
+def _requests_success_json(response: Any) -> Any:
+    """Decode a successful requests response while bounding streamed bytes."""
+    _declared_response_length(getattr(response, "headers", None))
+    iterator = getattr(response, "iter_content", None)
+    if callable(iterator):
+        raw = _read_bounded_chunks(iterator(chunk_size=_RPC_READ_CHUNK_BYTES))
+        return _decode_json_bytes(raw)
+
+    # Compatibility for existing lightweight fakes. A real requests.Response
+    # always has iter_content and therefore never parses before the byte limit.
+    content = getattr(response, "content", None)
+    if content is not None:
+        return _decode_json_bytes(_bounded_response_bytes(content))
+    try:
+        data = response.json()
+        encoded = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise JsonRpcError("rpc_invalid_response: expected JSON") from exc
+    _bounded_response_bytes(encoded)
+    return data
+
+
 def _direct_https_post(
     rpc_url: str,
     payload: dict[str, Any],
@@ -220,6 +352,7 @@ def _direct_https_post(
         server_hostname=host,
         ssl_context=ssl.create_default_context(),
     )
+    response: Any | None = None
     try:
         response = pool.urlopen(
             "POST",
@@ -229,19 +362,24 @@ def _direct_https_post(
             redirect=False,
             retries=False,
             timeout=timeout,
+            preload_content=False,
         )
         if response.status < 200 or response.status >= 300:
             return response.status, None
-        try:
-            data = json.loads(response.data)
-        except (TypeError, ValueError) as exc:
-            raise JsonRpcError("rpc_invalid_response: expected JSON") from exc
-        return response.status, data
+        return response.status, _urllib3_success_json(response)
     except JsonRpcError:
         raise
     except Exception as exc:
         raise JsonRpcError("rpc_request_failed: direct HTTPS request failed") from exc
     finally:
+        if response is not None:
+            close_response = getattr(response, "close", None)
+            release_response = getattr(response, "release_conn", None)
+            with contextlib.suppress(Exception):
+                if callable(close_response):
+                    close_response()
+                elif callable(release_response):
+                    release_response()
         pool.close()
 
 
@@ -264,18 +402,50 @@ def _proxied_https_post(
                 proxies=proxies,
                 timeout=timeout,
                 allow_redirects=False,
+                stream=True,
             )
-            if response.status_code < 200 or response.status_code >= 300:
-                return response.status_code, None
             try:
-                data = response.json()
-            except (TypeError, ValueError) as exc:
-                raise JsonRpcError("rpc_invalid_response: expected JSON") from exc
-            return response.status_code, data
+                if response.status_code < 200 or response.status_code >= 300:
+                    return response.status_code, None
+                return response.status_code, _requests_success_json(response)
+            finally:
+                close_response = getattr(response, "close", None)
+                if callable(close_response):
+                    close_response()
     except JsonRpcError:
         raise
     except Exception as exc:
         raise JsonRpcError("rpc_request_failed: proxied HTTPS request failed") from exc
+
+
+def _response_result(data: Any) -> Any:
+    """Validate one JSON-RPC 2.0 response envelope and return its result."""
+    if not isinstance(data, dict):
+        raise JsonRpcError("rpc_invalid_response: expected a JSON object")
+    if data.get("jsonrpc") != "2.0":
+        raise JsonRpcError("rpc_invalid_response: unsupported JSON-RPC version")
+    response_id = data.get("id")
+    if isinstance(response_id, bool) or not isinstance(response_id, int) or response_id != 1:
+        raise JsonRpcError("rpc_invalid_response: response id mismatch")
+    has_result = "result" in data
+    has_error = "error" in data
+    if has_result == has_error:
+        raise JsonRpcError("rpc_invalid_response: expected exactly one of result or error")
+    if has_error:
+        error = data["error"]
+        if not isinstance(error, dict):
+            raise JsonRpcError("rpc_invalid_response: error must be an object")
+        code = error.get("code")
+        message = error.get("message")
+        if type(code) is not int or not (_MIN_RPC_ERROR_CODE <= code <= _MAX_RPC_ERROR_CODE):
+            raise JsonRpcError("rpc_invalid_response: error code must be a signed 32-bit integer")
+        if type(message) is not str:
+            raise JsonRpcError("rpc_invalid_response: error message must be a string")
+        if len(message) > _MAX_RPC_ERROR_MESSAGE_CHARS:
+            raise JsonRpcError("rpc_invalid_response: error message is too long")
+        safe_message = json.dumps(message, ensure_ascii=True)
+        raise JsonRpcRemoteError(f"rpc_error: code={code} message={safe_message}")
+    return data["result"]
 
 
 def call(rpc_url: str, method: str, params: list[Any], *, timeout: float = 30.0) -> Any:
@@ -291,23 +461,8 @@ def call(rpc_url: str, method: str, params: list[Any], *, timeout: float = 30.0)
     if 300 <= status < 400:
         raise JsonRpcError("rpc_redirect_refused: RPC endpoints may not redirect")
     if status < 200 or status >= 300:
-        raise JsonRpcError(f"rpc_http_error: RPC endpoint returned HTTP {status}")
-    if not isinstance(data, dict):
-        raise JsonRpcError("rpc_invalid_response: expected a JSON object")
-    if data.get("id") != 1:
-        raise JsonRpcError("rpc_invalid_response: response id mismatch")
-    if data.get("error"):
-        raise JsonRpcError(str(data["error"]))
-    return data.get("result")
-
-
-def _to_int(hexstr: Any) -> int:
-    if hexstr is None:
-        return 0
-    if isinstance(hexstr, int):
-        return hexstr
-    s = str(hexstr)
-    return int(s, 16) if s.startswith("0x") else int(s)
+        raise JsonRpcHttpError(f"rpc_http_error: RPC endpoint returned HTTP {status}")
+    return _response_result(data)
 
 
 def _rpc_quantity(value: Any, *, field: str) -> int:
@@ -337,7 +492,10 @@ def assert_rpc_chain_id(rpc_url: str, expected_chain_id: int) -> None:
 
 
 def get_nonce(rpc_url: str, address: str) -> int:
-    return _to_int(call(rpc_url, "eth_getTransactionCount", [address, "pending"]))
+    return _rpc_quantity(
+        call(rpc_url, "eth_getTransactionCount", [address, "pending"]),
+        field="eth_getTransactionCount",
+    )
 
 
 def estimate_gas(rpc_url: str, tx: dict[str, Any], from_address: str) -> int:
@@ -345,26 +503,34 @@ def estimate_gas(rpc_url: str, tx: dict[str, Any], from_address: str) -> int:
     for k in ("to", "value", "data"):
         if tx.get(k) not in (None, ""):
             call_obj[k] = tx[k]
-    gas = _to_int(call(rpc_url, "eth_estimateGas", [call_obj]))
+    gas = _rpc_quantity(call(rpc_url, "eth_estimateGas", [call_obj]), field="eth_estimateGas")
     return gas + gas // 5  # +20% headroom
 
 
 def fee_data(rpc_url: str) -> dict[str, int]:
     """Return EIP-1559 fees from the latest block + priority fee suggestion."""
-    block = call(rpc_url, "eth_getBlockByNumber", ["latest", False]) or {}
-    base = _to_int(block.get("baseFeePerGas"))
+    block = call(rpc_url, "eth_getBlockByNumber", ["latest", False])
+    if not isinstance(block, dict):
+        raise JsonRpcError("rpc_invalid_response: eth_getBlockByNumber must return an object")
+    base = _rpc_quantity(block["baseFeePerGas"], field="baseFeePerGas") if "baseFeePerGas" in block else 0
     try:
-        tip = _to_int(call(rpc_url, "eth_maxPriorityFeePerGas", []))
-    except Exception:
+        tip_result = call(rpc_url, "eth_maxPriorityFeePerGas", [])
+    except (JsonRpcRemoteError, JsonRpcHttpError):
+        # A node that does not implement EIP-1559 tip suggestion rejects it
+        # either as a JSON-RPC error object or as an HTTP 4xx. Both mean "ask
+        # someone else", not "the transport is broken", so both fall back.
+        # Transport failures still propagate.
         tip = 1_500_000_000  # 1.5 gwei
+    else:
+        tip = _rpc_quantity(tip_result, field="eth_maxPriorityFeePerGas")
     if base:
         return {"maxPriorityFeePerGas": tip, "maxFeePerGas": base * 2 + tip}
-    gas_price = _to_int(call(rpc_url, "eth_gasPrice", []))
+    gas_price = _rpc_quantity(call(rpc_url, "eth_gasPrice", []), field="eth_gasPrice")
     return {"gasPrice": gas_price}
 
 
 def get_gas_price(rpc_url: str) -> int:
-    return _to_int(call(rpc_url, "eth_gasPrice", []))
+    return _rpc_quantity(call(rpc_url, "eth_gasPrice", []), field="eth_gasPrice")
 
 
 def _fill_eip1559_fees(rpc_url: str, out: dict[str, Any]) -> None:
@@ -380,10 +546,13 @@ def _fill_eip1559_fees(rpc_url: str, out: dict[str, Any]) -> None:
     suggested_max = suggested["maxFeePerGas"]
     if missing_priority:
         if not missing_max:
-            suggested_priority = min(suggested_priority, _to_int(out["maxFeePerGas"]))
+            suggested_priority = min(
+                suggested_priority,
+                _rpc_quantity(out["maxFeePerGas"], field="maxFeePerGas"),
+            )
         out["maxPriorityFeePerGas"] = hex(suggested_priority)
     if missing_max:
-        priority = _to_int(out["maxPriorityFeePerGas"])
+        priority = _rpc_quantity(out["maxPriorityFeePerGas"], field="maxPriorityFeePerGas")
         out["maxFeePerGas"] = hex(max(suggested_max, priority))
 
 
@@ -411,4 +580,7 @@ def fill_transaction(rpc_url: str, tx: dict[str, Any], from_address: str, chain_
 def send_raw_transaction(rpc_url: str, raw_hex: str, *, expected_chain_id: int) -> str:
     """Re-verify the approved chain, then broadcast and return its hash."""
     assert_rpc_chain_id(rpc_url, expected_chain_id)
-    return str(call(rpc_url, "eth_sendRawTransaction", [raw_hex]))
+    result = call(rpc_url, "eth_sendRawTransaction", [raw_hex])
+    if not isinstance(result, str) or _TRANSACTION_HASH_RE.fullmatch(result) is None:
+        raise JsonRpcError("rpc_invalid_response: eth_sendRawTransaction must return a transaction hash")
+    return result

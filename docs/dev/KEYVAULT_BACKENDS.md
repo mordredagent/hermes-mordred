@@ -10,7 +10,7 @@
 >
 > The verification and conclusions in §2–§4 / §7 all target the path that **persists the SE key in the Keychain** (`SecKeyCreateRandomKey` + `kSecAttrIsPermanent`, the `keychain-access-groups` entitlement); this path has been **abandoned**. The shipped live SE path does not use the Keychain at all — the helper `mordred-hermes-sekey` **stores the CryptoKit `SecureEnclave.P256` `dataRepresentation` blob in a plaintext file**. As a result, **ad-hoc `codesign --sign -` alone is enough to drive real hardware SE — no entitlement, no provisioning profile, and no paid Apple Developer Program membership are required** (the `dataRepresentation` blob is device-bound, so it is meaningless on another machine).
 >
-> **Enabling it is a single command**: `hermes mordred keyvault enable-se` invokes `native/sekey-helper/build.sh`, which runs build → ad-hoc signing → install to `~/.local/bin` → SE probe; on success it promotes the keyvault's wrapping key from the software P-256 fallback to **hardware SE** (auto-detected on the Python side by `_seckey_helper._find_helper()`). **Fail-safe**: if the platform guard, build, or probe fails, it stays on the software fallback (the at-rest guarantee never degrades; exit code 1). See [`SECRETS_ENV_ENCRYPTION.md`](./SECRETS_ENV_ENCRYPTION.md) §7 for details; the implementation is in `keyvault/_seckey_helper.py` / `keyvault/_seckey_backend.py` / `wizard/keyvault_cli.py:enable_se`.
+> **Installing it is a single command**: `hermes mordred keyvault enable-se` invokes `native/sekey-helper/build.sh`, which runs build → ad-hoc signing → atomic install to `~/.local/bin` → SE probe. It may also refresh the helper with an existing vault, but installs/probes only; it does **not** create, promote, or migrate a wrapping key. Existing helper-store, legacy PyObjC-Keychain, and software keys stay in their original namespaces and remain reachable through ordered backend fallback. A later fresh `keyvault init` or recovery creates the key through the auto-detected helper. Put `MORDRED_SEKEY_UNATTENDED=1` on that key-creation command when no per-use prompt is required. **Fail-safe**: platform guard, preflight, build, or probe failure exits 1 without claiming activation. See [`SECRETS_ENV_ENCRYPTION.md`](./SECRETS_ENV_ENCRYPTION.md) §7 for details; the implementation is in `keyvault/_seckey_helper.py` / `keyvault/_seckey_backend.py` / `wizard/keyvault_native_cli.py:enable_se`.
 >
 > §2–§8 below are preserved historically as **an investigation record of the
 > Keychain path and design alternatives**. The current disposition of the
@@ -150,6 +150,32 @@ Using the `NativeBackend` Protocol as a common plug-in point, the actual key-pro
 ### 5.2 The Selector and the "Key ⇄ Backend Binding" (the Most Important Invariant)
 - `policy.keyvault.backend = auto | software | secure_enclave | token | tpm`. `auto` decides based on capability-probe order (token > OS hardware > software), and **the selection result is explicitly surfaced to the user and recorded**.
 - **A key is bound to the backend it was generated with.** A DEK wrapped by SE cannot be unwrapped by software (the key material is different). A small **keystore index** (`key_id → {backend, pubkey, created_at}`) is kept under `~/.hermes/mordred/keyvault/`, and unwrap requests are routed to the correct backend. The wire format (MRKW blob) requires no changes.
+
+### Logical IDs and profile-scoped native IDs
+
+`key_id` in MRKW/MREN, backups, and audit events is the portable **logical**
+identifier. New `meta.json` rows also carry a deterministic `native_key_id`
+derived from the absolute keyvault root and logical id. Only this physical id
+is sent to SE/TPM/software native operations, preventing two `HERMES_HOME`
+profiles from colliding in a machine-global Keychain namespace. Explicit
+`home=` API calls bind file-backed helpers to that root's `sekey/` or `tpm/`
+store; an operator-set `MORDRED_*KEY_STORE` remains authoritative.
+
+Rows written before this split have no `native_key_id`. They remain readable
+through their legacy logical native id, but automatic reset/rollback never
+deletes that global tag because exclusive profile ownership cannot be proven.
+For these legacy rows only, helper-backed reads try the explicit profile's
+bound store first, then the caller backend's historical ambient
+`HERMES_HOME` store on `WrapKeyNotFound`. Current scoped ids never take that
+fallback. Operators recovering a non-ambient old profile can point directly at
+its helper blobs with the authoritative `MORDRED_SEKEY_STORE` (macOS) or
+`MORDRED_TPMKEY_STORE` (Linux) override for the export, then remove the
+override before recovery.
+The supported migration is: verify/export a backup, reset the old profile, then
+recover into the fresh profile. Recovery preserves the backup's logical
+`key_id` while generating a new profile-scoped physical key. A durable
+`pending_native_key` journal is written before generation so a post-publication
+helper failure can be cleaned up safely by `keyvault reset`.
 - **No silent fallback.** If an attempt is made to open an SE-generated key in an unsigned environment, it must **fail with an explicit error** rather than silently falling back to software (protection-level degradation must never be hidden).
 
 ### 5.3 Migration (Optional)

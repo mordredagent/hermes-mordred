@@ -8,6 +8,7 @@ import json
 import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -97,6 +98,51 @@ class TestOnSessionStartNoSiblingsDisabled:
 
 
 class TestOnSessionStartStrictAbort:
+    def test_enabled_sibling_with_registration_error_is_refused(
+        self,
+        strict_config: Path,
+        tmp_path: Path,
+    ) -> None:
+        _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        plugins = {
+            name: SimpleNamespace(
+                enabled=True,
+                error=None,
+                module=object(),
+                hooks_registered=list(_runtime.SIBLING_REQUIRED_HOOKS[name]),
+            )
+            for name in _runtime.SIBLING_PLUGINS
+        }
+        plugins["mordred_network"].error = "synthetic register failure"
+        manager = SimpleNamespace(_plugins=plugins)
+
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.check_plugin_integrity(plugin_manager=manager)
+
+        assert _runtime.is_poisoned()
+
+    def test_enabled_sibling_missing_mandatory_hook_is_refused(
+        self,
+        strict_config: Path,
+        tmp_path: Path,
+    ) -> None:
+        _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        plugins = {
+            name: SimpleNamespace(
+                enabled=True,
+                error=None,
+                module=object(),
+                hooks_registered=list(_runtime.SIBLING_REQUIRED_HOOKS[name]),
+            )
+            for name in _runtime.SIBLING_PLUGINS
+        }
+        plugins["mordred_llm_guard"].hooks_registered.remove("pre_api_request")
+
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.check_plugin_integrity(
+                plugin_manager=SimpleNamespace(_plugins=plugins),
+            )
+
     def test_strict_with_disabled_sibling_raises_integrity_refusal(self, tmp_path: Path) -> None:
         config = _write_config(
             tmp_path / "config.yaml",
@@ -250,6 +296,20 @@ class TestPreToolCallStrict:
         # No pre_tool_call entries for allows
         entries = _audit_entries(audit)
         assert all(e.get("event") != "pre_tool_call" for e in entries)
+
+    @pytest.mark.parametrize("active_path", ["tor", "vpn"])
+    def test_allows_web_tools_on_ready_protected_path(
+        self,
+        strict_config: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        active_path: str,
+    ) -> None:
+        _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        monkeypatch.setattr(hooks, "_resolve_active_network_path", lambda: active_path)
+
+        assert hooks.pre_tool_call(tool_name="web_fetch") is None
+        assert hooks.pre_tool_call(tool_name="web_search") is None
 
 
 class TestPreToolCallLenientAndOff:

@@ -10,9 +10,15 @@
 //!   3. `~/.hermes/mordred/keyvault/tpm`
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-process nonce for staging-file names. The PID separates helper
+/// processes; this counter separates concurrent writes within one process
+/// (notably the store's unit tests).
+static NEXT_STAGING_FILE: AtomicU64 = AtomicU64::new(0);
 
 /// A store I/O outcome that maps onto the neutral taxonomy.
 #[derive(Debug, PartialEq, Eq)]
@@ -90,50 +96,194 @@ pub fn blob_path(dir: &Path, tag_hex: &str) -> PathBuf {
     dir.join(format!("{tag_hex}.bin"))
 }
 
-/// Refuse a store directory that is itself a symlink (M4, security review
-/// 2026-06-11; parity with the Python vault's lstat-based refusal): an
-/// offline-planted link must not redirect the 0700 chmod or the blob writes
-/// into an attacker-chosen directory. lstat-based — a link to a perfectly
-/// real directory is still refused.
-fn ensure_dir_not_symlink(dir: &Path) -> Result<(), StoreError> {
+/// Validate an existing store directory without following its final component.
+///
+/// Returns `false` when absent so the write path can create it. A symlink,
+/// non-directory, or mode other than 0700 is rejected instead of followed or
+/// silently repaired; read/delete use the same invariant as publication.
+fn validate_store_dir(dir: &Path) -> Result<bool, StoreError> {
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Io(format!(
             "refusing symlinked store dir: {}",
             dir.display()
         ))),
-        _ => Ok(()),
+        Ok(meta) if !meta.file_type().is_dir() => Err(StoreError::Io(format!(
+            "store path is not a directory: {}",
+            dir.display()
+        ))),
+        Ok(meta) => {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                Err(StoreError::Io(format!(
+                    "store directory must be mode 0700, got {mode:04o}: {}",
+                    dir.display()
+                )))
+            } else {
+                Ok(true)
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(StoreError::Io(error.to_string())),
     }
 }
 
-/// Write `blob` for `tag_hex`, refusing to overwrite an existing key.
+/// A staging path that is removed on every normal error path. A process crash
+/// may leave the dotfile behind, but never a partial `<tag>.bin` tombstone:
+/// readers and future creates ignore staging names.
+struct StagingPath {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingPath {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn remove(&mut self) -> io::Result<()> {
+        fs::remove_file(&self.path)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for StagingPath {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Create a private staging file in `dir`.
 ///
-/// Creates `dir` (0700) if absent and opens the blob `O_CREAT | O_EXCL` (0600),
-/// so a pre-existing key surfaces as [`StoreError::Exists`] race-free.
-pub fn write_blob_excl(dir: &Path, tag_hex: &str, blob: &[u8]) -> Result<(), StoreError> {
+/// A stale staging file left by a killed helper is harmless. Skip over it and
+/// choose another nonce so it cannot block generation for the real tag.
+fn create_staging_file(dir: &Path, tag_hex: &str) -> Result<(fs::File, StagingPath), StoreError> {
+    for _ in 0..1024 {
+        let nonce = NEXT_STAGING_FILE.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".{tag_hex}.tmp-{}-{nonce}", std::process::id());
+        let path = dir.join(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, StagingPath::new(path))),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(StoreError::Io(e.to_string())),
+        }
+    }
+    Err(StoreError::Io(
+        "could not allocate a unique key-blob staging file".to_string(),
+    ))
+}
+
+/// Flush directory-entry changes for durable publication of a blob.
+fn sync_dir(dir: &Path) -> Result<(), StoreError> {
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    directory
+        .sync_all()
+        .map_err(|e| StoreError::Io(e.to_string()))
+}
+
+/// Core implementation, injectable only so the partial-write cleanup invariant
+/// can be fault-tested without depending on disk exhaustion.
+fn write_blob_excl_with_hooks<F, S, R>(
+    dir: &Path,
+    tag_hex: &str,
+    write_blob: F,
+    mut sync_directory: S,
+    remove_staging: R,
+) -> Result<(), StoreError>
+where
+    F: FnOnce(&mut fs::File) -> io::Result<()>,
+    S: FnMut(&Path) -> Result<(), StoreError>,
+    R: FnOnce(&mut StagingPath) -> io::Result<()>,
+{
     ensure_safe_tag(tag_hex)?;
-    ensure_dir_not_symlink(dir)?;
-    fs::create_dir_all(dir).map_err(|e| StoreError::Io(e.to_string()))?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-        .map_err(|e| StoreError::Io(e.to_string()))?;
-    let path = blob_path(dir, tag_hex);
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(StoreError::Exists),
-        Err(e) => return Err(StoreError::Io(e.to_string())),
-    };
-    file.write_all(blob)
-        .map_err(|e| StoreError::Io(e.to_string()))?;
+    if !validate_store_dir(dir)? {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(dir)
+            .map_err(|e| StoreError::Io(e.to_string()))?;
+        if !validate_store_dir(dir)? {
+            return Err(StoreError::Io(
+                "store directory disappeared after creation".to_string(),
+            ));
+        }
+    }
+
+    let target = blob_path(dir, tag_hex);
+    let (mut file, mut staging) = create_staging_file(dir, tag_hex)?;
+    write_blob(&mut file).map_err(|e| StoreError::Io(e.to_string()))?;
     // Pin the mode exactly (independent of the process umask), matching the
     // Swift helper's explicit 0600 on the written blob. Handle-based (M4) so
     // a racing path swap cannot redirect the chmod.
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|e| StoreError::Io(e.to_string()))?;
+    // Persist the complete contents and mode before the file becomes visible
+    // at the authoritative name. Therefore every visible target is complete.
+    file.sync_all().map_err(|e| StoreError::Io(e.to_string()))?;
+    drop(file);
+
+    // A hard link is an atomic no-replace publication primitive on the same
+    // filesystem. Unlike `rename`, it cannot overwrite a concurrently-created
+    // target; exactly one competing generate wins and all others get EXISTS.
+    match fs::hard_link(&staging.path, &target) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(StoreError::Exists),
+        Err(e) => return Err(StoreError::Io(e.to_string())),
+    }
+
+    // The target is visible but is not a durable commit until the parent
+    // directory is synced. Propagate failure as an indeterminate generation:
+    // Python must not persist metadata/ciphertext for a key name that can
+    // disappear after power loss. The visible orphan is intentionally left
+    // for explicit reset/remediation.
+    sync_directory(dir)?;
+    if let Err(error) = remove_staging(&mut staging) {
+        eprintln!(
+            "mordred-hermes-tpmkey: key blob was published, but its private staging \
+             name could not be removed: {error}"
+        );
+    }
+    // Explicitly run the RAII cleanup retry before the final directory sync.
+    drop(staging);
+    if let Err(error) = sync_directory(dir) {
+        eprintln!(
+            "mordred-hermes-tpmkey: key blob is available, but staging cleanup \
+             could not be synced: {error:?}"
+        );
+    }
     Ok(())
+}
+
+/// Core implementation with the production publication/cleanup hooks.
+fn write_blob_excl_with<F>(dir: &Path, tag_hex: &str, write_blob: F) -> Result<(), StoreError>
+where
+    F: FnOnce(&mut fs::File) -> io::Result<()>,
+{
+    write_blob_excl_with_hooks(dir, tag_hex, write_blob, sync_dir, StagingPath::remove)
+}
+
+/// Write `blob` for `tag_hex`, refusing to overwrite an existing key.
+///
+/// The complete blob is written and synced under a private staging name, then
+/// atomically hard-linked into place. This preserves `O_EXCL`-equivalent
+/// concurrency semantics while ensuring an interrupted write cannot leave a
+/// partial authoritative blob that permanently blocks regeneration. The file
+/// inode is synced before publication and the first parent-directory sync is
+/// required before success. Private staging cleanup and its follow-up sync are
+/// best-effort after that durable publication point.
+pub fn write_blob_excl(dir: &Path, tag_hex: &str, blob: &[u8]) -> Result<(), StoreError> {
+    write_blob_excl_with(dir, tag_hex, |file| file.write_all(blob))
 }
 
 /// Read the blob for `tag_hex` (→ [`StoreError::NotFound`] when absent).
@@ -147,38 +297,60 @@ pub fn read_blob(dir: &Path, tag_hex: &str) -> Result<Vec<u8>, StoreError> {
     use std::io::Read;
 
     ensure_safe_tag(tag_hex)?;
-    ensure_dir_not_symlink(dir)?;
+    validate_store_dir(dir)?;
     let mut file = match fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(blob_path(dir, tag_hex))
     {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(StoreError::NotFound),
         Err(e) => return Err(StoreError::Io(e.to_string())),
     };
+    let metadata = file
+        .metadata()
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+    if !metadata.file_type().is_file() {
+        return Err(StoreError::Io("key blob is not a regular file".to_string()));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        return Err(StoreError::Io(format!(
+            "key blob must be mode 0600, got {mode:04o}"
+        )));
+    }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|e| StoreError::Io(e.to_string()))?;
     Ok(bytes)
 }
 
-/// Delete the blob for `tag_hex`, idempotently (a missing blob is success).
-/// Refuses a symlinked store dir like the read/write paths (M4).
-pub fn delete_blob(dir: &Path, tag_hex: &str) -> Result<(), StoreError> {
+fn delete_blob_with_sync<S>(dir: &Path, tag_hex: &str, sync_directory: S) -> Result<(), StoreError>
+where
+    S: FnOnce(&Path) -> Result<(), StoreError>,
+{
     ensure_safe_tag(tag_hex)?;
-    ensure_dir_not_symlink(dir)?;
+    validate_store_dir(dir)?;
     match fs::remove_file(blob_path(dir, tag_hex)) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_directory(dir),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(StoreError::Io(e.to_string())),
     }
+}
+
+/// Delete the blob for `tag_hex`, idempotently (a missing blob is success).
+/// Refuses a symlinked store dir like the read/write paths (M4), unlinks a
+/// final symlink itself without following its target, and syncs the parent
+/// directory before reporting durable success.
+pub fn delete_blob(dir: &Path, tag_hex: &str) -> Result<(), StoreError> {
+    delete_blob_with_sync(dir, tag_hex, sync_dir)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -256,6 +428,132 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_writers_publish_exactly_one_complete_blob() {
+        let tmp = TempDir::new("race");
+        let dir = tmp.path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+
+        for writer in 0_u8..8 {
+            let dir = dir.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                let blob = vec![writer; 4096];
+                barrier.wait();
+                (writer, write_blob_excl(&dir, "same", &blob))
+            }));
+        }
+
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("writer thread"))
+            .collect();
+        let winners: Vec<_> = results
+            .iter()
+            .filter_map(|(writer, result)| result.as_ref().ok().map(|()| *writer))
+            .collect();
+        assert_eq!(winners.len(), 1, "exactly one writer must publish");
+        assert!(
+            results
+                .iter()
+                .filter(|(_, result)| matches!(result, Err(StoreError::Exists)))
+                .count()
+                == 7,
+            "every losing writer must receive EXISTS"
+        );
+        assert_eq!(
+            read_blob(tmp.path(), "same").unwrap(),
+            vec![winners[0]; 4096],
+            "the published target must contain one complete writer payload"
+        );
+
+        let names: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("same.bin")],
+            "normal success and contention must clean every staging file"
+        );
+    }
+
+    #[test]
+    fn failed_partial_staging_write_does_not_create_a_tombstone() {
+        let tmp = TempDir::new("partial");
+        let result = write_blob_excl_with(tmp.path(), "retryable", |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "injected write failure",
+            ))
+        });
+        assert!(matches!(result, Err(StoreError::Io(_))));
+        assert_eq!(
+            read_blob(tmp.path(), "retryable"),
+            Err(StoreError::NotFound),
+            "a failed write must not publish the authoritative target"
+        );
+        assert!(
+            fs::read_dir(tmp.path()).unwrap().next().is_none(),
+            "the normal failure path must clean its private staging file"
+        );
+
+        write_blob_excl(tmp.path(), "retryable", b"complete").unwrap();
+        assert_eq!(
+            read_blob(tmp.path(), "retryable").unwrap(),
+            b"complete".to_vec(),
+            "the same tag must remain retryable after an interrupted write"
+        );
+    }
+
+    #[test]
+    fn post_publish_sync_failure_reports_indeterminate_generation() {
+        let tmp = TempDir::new("publish-sync");
+        let result = write_blob_excl_with_hooks(
+            tmp.path(),
+            "durable",
+            |file| file.write_all(b"complete"),
+            |_dir| {
+                Err(StoreError::Io(
+                    "injected directory sync failure".to_string(),
+                ))
+            },
+            StagingPath::remove,
+        );
+
+        assert!(matches!(result, Err(StoreError::Io(_))));
+        assert_eq!(
+            read_blob(tmp.path(), "durable").unwrap(),
+            b"complete".to_vec(),
+            "the complete visible orphan remains for explicit reset/remediation"
+        );
+    }
+
+    #[test]
+    fn post_publish_cleanup_failure_does_not_report_a_false_generate_failure() {
+        let tmp = TempDir::new("publish-cleanup");
+        let result = write_blob_excl_with_hooks(
+            tmp.path(),
+            "complete",
+            |file| file.write_all(b"complete"),
+            sync_dir,
+            |_staging| Err(io::Error::other("injected staging cleanup failure")),
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            read_blob(tmp.path(), "complete").unwrap(),
+            b"complete".to_vec()
+        );
+        assert_eq!(
+            fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "the RAII retry should remove the failed-cleanup staging name"
+        );
+    }
+
+    #[test]
     fn read_missing_is_not_found() {
         let tmp = TempDir::new("miss");
         assert_eq!(read_blob(tmp.path(), "nope"), Err(StoreError::NotFound));
@@ -299,6 +597,7 @@ mod tests {
         // file from outside the store.
         let tmp = TempDir::new("lnkread");
         fs::create_dir_all(tmp.path()).unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let outside = tmp.path().join("outside.txt");
         fs::write(&outside, b"not-a-blob").unwrap();
         std::os::unix::fs::symlink(&outside, blob_path(tmp.path(), "lnk")).unwrap();
@@ -331,6 +630,7 @@ mod tests {
         // component, so read/delete need the same lstat dir refusal as write.
         let real = TempDir::new("lnkdir-rd-real");
         fs::create_dir_all(real.path()).unwrap();
+        fs::set_permissions(real.path(), fs::Permissions::from_mode(0o700)).unwrap();
         write_blob_excl(real.path(), "ab", b"x").unwrap();
         let holder = TempDir::new("lnkdir-rd-holder");
         fs::create_dir_all(holder.path()).unwrap();
@@ -346,6 +646,94 @@ mod tests {
         );
         // The real dir still works untouched.
         assert_eq!(read_blob(real.path(), "ab").unwrap(), b"x".to_vec());
+    }
+
+    #[test]
+    fn read_refuses_loose_mode_blob() {
+        let tmp = TempDir::new("loose-blob");
+        write_blob_excl(tmp.path(), "ab", b"x").unwrap();
+        fs::set_permissions(
+            blob_path(tmp.path(), "ab"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(
+            matches!(read_blob(tmp.path(), "ab"), Err(StoreError::Io(_))),
+            "read accepted a loose-mode key blob"
+        );
+    }
+
+    #[test]
+    fn read_refuses_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = TempDir::new("fifo");
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let fifo = blob_path(tmp.path(), "ab");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo failed: {}", io::Error::last_os_error());
+        assert!(
+            matches!(read_blob(tmp.path(), "ab"), Err(StoreError::Io(_))),
+            "read accepted a FIFO key blob"
+        );
+    }
+
+    #[test]
+    fn read_write_delete_refuse_loose_store_dir() {
+        let tmp = TempDir::new("loose-dir");
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(blob_path(tmp.path(), "ab"), b"x").unwrap();
+        fs::set_permissions(
+            blob_path(tmp.path(), "ab"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            write_blob_excl(tmp.path(), "new", b"x"),
+            Err(StoreError::Io(_))
+        ));
+        assert!(matches!(
+            read_blob(tmp.path(), "ab"),
+            Err(StoreError::Io(_))
+        ));
+        assert!(matches!(
+            delete_blob(tmp.path(), "ab"),
+            Err(StoreError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn delete_unlinks_blob_symlink_without_touching_target() {
+        let tmp = TempDir::new("delete-link");
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let outside = tmp.path().join("outside");
+        fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, blob_path(tmp.path(), "ab")).unwrap();
+
+        assert_eq!(delete_blob(tmp.path(), "ab"), Ok(()));
+        assert_eq!(fs::read(outside).unwrap(), b"keep");
+        assert!(!blob_path(tmp.path(), "ab").exists());
+    }
+
+    #[test]
+    fn delete_directory_sync_failure_is_reported() {
+        let tmp = TempDir::new("delete-sync");
+        write_blob_excl(tmp.path(), "ab", b"x").unwrap();
+
+        let result = delete_blob_with_sync(tmp.path(), "ab", |_dir| {
+            Err(StoreError::Io(
+                "injected delete directory sync failure".to_string(),
+            ))
+        });
+
+        assert!(matches!(result, Err(StoreError::Io(_))));
+        assert_eq!(read_blob(tmp.path(), "ab"), Err(StoreError::NotFound));
     }
 
     #[test]

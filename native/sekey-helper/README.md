@@ -37,7 +37,15 @@ Python (unsigned)
 3. `~/.hermes/mordred/keyvault/sekey`
 
 This mirrors `mordred_hermes._home.hermes_home`. The directory is created
-`0700` and each `<tag_hex>.bin` blob is written `0600`.
+`0700` and each `<tag_hex>.bin` blob is written `0600`. A blob is completed,
+chmodded, and synced under a private staging name before an atomic no-replace
+hard link publishes it, so neither a short write nor a concurrent generator can
+leave a partial or silently replaced authoritative key. The helper rejects a
+symlinked/non-directory/loose-mode store and reads blobs with no-follow,
+regular-file, and exact-mode checks. Publication is reported successful only
+after the store directory syncs; a sync failure is indeterminate and leaves the
+visible orphan for explicit reset/remediation rather than letting Python commit
+ciphertext against a non-durable key name.
 
 ## Protocol (one process invocation = one operation)
 
@@ -71,6 +79,13 @@ The choice is baked into the key's `dataRepresentation` at generation time and c
 
 On the Python side this is `unattended=` on `api.generate` / `wrap.generate_wrapping_key` / `backend.generate_enclave_key`; when unspecified, the default comes from the `MORDRED_SEKEY_UNATTENDED=1` env var, else interactive.
 
+Generation and deletion are serialized with a private store-wide `.lock` file.
+For generation, the lock spans the existence check, Secure Enclave key creation,
+and atomic blob publication. Concurrent helpers therefore cannot both pass the
+duplicate check and replace one another's key; exactly one request wins and
+later requests return `errSecDuplicateItem`. A concurrent delete likewise
+cannot remove a newly generated blob between that check and publication.
+
 When **interactive**, `ecdh` triggers a system prompt because the
 key is created with the access control
 `[.privateKeyUsage, .biometryCurrentSet, .or, .devicePasscode]` — Touch ID
@@ -92,8 +107,15 @@ checkout or a `pip install`-ed wheel), builds + ad-hoc-signs + installs the
 helper, then verifies the Secure Enclave probe:
 
 ```bash
-hermes mordred keyvault enable-se          # add --unattended for prompt-free decrypt
+hermes-mordred keyvault enable-se
+# Authorization policy is selected when the key is created, not at install:
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred keyvault init
 ```
+
+The installer may also refresh the helper with an existing vault. It never
+promotes or migrates an existing wrapping key: helper-store, legacy
+PyObjC-Keychain, and software keys stay in their original namespace and remain
+reachable through the Python backend's ordered fallback.
 
 Or run the build script directly:
 
@@ -103,7 +125,13 @@ Or run the build script directly:
 
 Both run `swift build -c release`, codesign ad-hoc (no Developer ID, no
 provisioning profile, no paid Apple Developer account required), and install to
-`~/.local/bin/mordred-hermes-sekey`.
+`~/.local/bin/mordred-hermes-sekey`. Installation copies and syncs to a private
+file in the destination directory, verifies that staged signature, then
+atomically renames it over the old helper; an interrupted copy leaves the
+previous executable intact. The destination directory sync is required before
+the installer reports success. Key-blob publication and deletion inside the
+helper use macOS `F_FULLFSYNC` for the blob/store directory (falling back to
+`fsync` only when the filesystem reports that full sync is unsupported).
 
 Overrides via env: `MORDRED_SEKEY_INSTALL_DIR` (install target),
 `MORDRED_SEKEY_STORE` (key blob directory).

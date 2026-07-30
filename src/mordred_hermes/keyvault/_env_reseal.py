@@ -43,6 +43,12 @@ from typing import TYPE_CHECKING
 
 from .. import _term
 from ._identity import resolve_backend, resolve_store, vault_identity
+from ._plaintext_capture import (
+    capture_plaintext,
+    discard_capture,
+    read_captured_plaintext,
+    restore_capture_no_replace,
+)
 from ._runtime_env import _env_optout_marker_path
 
 if TYPE_CHECKING:
@@ -202,6 +208,45 @@ def _reseal_within_open(opened: OpenVault, overrides: dict[str, str]) -> tuple[b
     return True, ".env resealed: merged the new value(s) into the vault and removed the plaintext."
 
 
+def _restore_or_preserve_capture(candidate: Path, env_path: Path) -> None:
+    """Restore a failed capture without overwriting a concurrent live file."""
+    try:
+        restored = restore_capture_no_replace(candidate, env_path)
+    except OSError as exc:
+        _term.emit_warn(
+            f".env reseal failed and the captured plaintext could not be restored: {exc}. "
+            f"It remains at {candidate}; reconcile it manually."
+        )
+        return
+    if not restored:
+        _term.emit_warn(
+            f".env changed while it was being resealed. The newer live file was "
+            f"left untouched and the earlier captured values remain at {candidate}; "
+            "merge/reseal both copies."
+        )
+
+
+def _discard_resealed_capture(candidate: Path, env_path: Path, success_msg: str | None) -> int:
+    """Delete only the successfully-enrolled private capture, never ``env_path``."""
+    try:
+        discard_capture(candidate)
+    except OSError as exc:
+        _term.emit_warn(
+            f".env was reconciled into the vault but its captured plaintext deletion at "
+            f"{candidate} could not be made durable: {exc} — inspect and remove any residue."
+        )
+        return 0
+    if env_path.exists() or env_path.is_symlink():
+        _term.emit_warn(
+            ".env changed while it was being resealed. The captured values were "
+            "enrolled, and the newer live .env was left untouched for the next reseal."
+        )
+        return 0
+    assert success_msg is not None
+    print(success_msg)
+    return 0
+
+
 def reseal_env(
     *,
     home: Path,
@@ -233,59 +278,73 @@ def reseal_env(
     stranded.
     """
     env_path = home / _ENV_NAME
-    if not env_path.is_file():
-        return 0  # no stray plaintext → nothing to reconcile
-    if _env_optout_marker_path(home).exists():
-        return 0  # disabled state: the plaintext is the live copy, not drift
-    if not _env_enrolled(root):
-        return 0  # not vault-managed → first-time enable handles enrollment
-
-    try:
-        disk_text = env_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        _term.emit_warn(f"cannot reseal .env (unreadable / non-UTF-8 plaintext): {exc} — leaving it in place.")
+    if (
+        not (env_path.exists() or env_path.is_symlink())  # no stray plaintext
+        or _env_optout_marker_path(home).exists()  # disabled: plaintext is intentional
+        or not _env_enrolled(root)  # first-time enable owns unmanaged plaintext
+    ):
         return 0
 
-    from io import StringIO
+    try:
+        captured_path = capture_plaintext(env_path)
+    except OSError as exc:
+        _term.emit_warn(f"cannot safely capture .env for reseal: {exc} — leaving it in place.")
+        return 0
+    if captured_path is None:
+        return 0
 
-    from dotenv import dotenv_values
-
-    overrides = {k: v for k, v in dotenv_values(stream=StringIO(disk_text), interpolate=False).items() if v is not None}
-
-    # One device-key unlock (one Touch ID) covers read-base → enroll-merged →
-    # verify-read-back through the *same* open (see :func:`_reseal_within_open`).
-    # Enrolling the merged bytes directly means the full plaintext is never staged
-    # in a temp file at rest, so an interrupted reseal leaves no plaintext behind.
-    from . import anchor, vault
-    from ._exceptions import WrapError
-
-    opened = _open_hot_or_report(root, backend=backend, store=store)
-    if opened is None:
-        _term.emit_error(
-            ".env is enrolled but the vault could not be opened to reseal a stray plaintext "
-            "— leaving the plaintext in place (run `encryption status`)."
-        )
-        return 1
-
-    with opened:
+    # Every return/exception before verified enrollment restores the captured
+    # inode without replacing a concurrent new live file. This outer guard is
+    # deliberately BaseException-safe via ``finally``: Ctrl-C/SystemExit from
+    # dotenv parsing, vault open, context entry/exit, or an unexpected backend
+    # error must not strand the sole plaintext under the private candidate name.
+    restore_needed = True
+    try:
         try:
-            remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
+            disk_bytes = read_captured_plaintext(captured_path)
+            disk_text = disk_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            _term.emit_warn(f"cannot reseal .env (unreadable / non-UTF-8 plaintext): {exc}.")
+            return 0
+
+        from io import StringIO
+
+        from dotenv import dotenv_values
+
+        overrides = {
+            k: v for k, v in dotenv_values(stream=StringIO(disk_text), interpolate=False).items() if v is not None
+        }
+
+        # One device-key unlock (one Touch ID) covers read-base → enroll-merged →
+        # verify-read-back through the *same* open (see :func:`_reseal_within_open`).
+        # Enrolling the merged bytes directly means the full plaintext is never staged
+        # in a temp file at rest, so an interrupted reseal leaves no plaintext behind.
+        from . import anchor, vault
+        from ._exceptions import WrapError
+
+        opened = _open_hot_or_report(root, backend=backend, store=store)
+        if opened is None:
+            _term.emit_error(
+                ".env is enrolled but the vault could not be opened to reseal a stray plaintext "
+                "— leaving the plaintext in place (run `encryption status`)."
+            )
+            return 1
+
+        try:
+            with opened:
+                remove_plaintext, success_msg = _reseal_within_open(opened, overrides)
         except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
             _term.emit_error(f"cannot reseal .env into the vault: {exc} — leaving the plaintext in place.")
             return 1
 
-    if not remove_plaintext:
-        return 0  # a warning was already emitted; the plaintext is kept
+        if not remove_plaintext:
+            return 0  # a warning was already emitted; the plaintext is kept
 
-    # The vault is closed and consistent; only now remove the stray plaintext — and
-    # report success only once it is actually gone.
-    try:
-        env_path.unlink()
-    except OSError as exc:
-        _term.emit_warn(
-            f".env was reconciled into the vault but the plaintext at {env_path} could not be removed: {exc} "
-            "— remove it by hand (it is still readable at rest)."
-        )
-        return 0
-    print(success_msg)
-    return 0
+        # Read-back verification proved the vault now contains the captured
+        # values. From here the candidate is safe to discard; a host write that
+        # recreated the live pathname is never read/unlinked.
+        restore_needed = False
+        return _discard_resealed_capture(captured_path, env_path, success_msg)
+    finally:
+        if restore_needed:
+            _restore_or_preserve_capture(captured_path, env_path)

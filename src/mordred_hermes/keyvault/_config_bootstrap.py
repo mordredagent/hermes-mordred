@@ -44,8 +44,17 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .. import _term
 from .._home import hermes_home
 from ._identity import default_vault_root, resolve_backend_store, vault_identity
+from ._plaintext_capture import (
+    capture_plaintext,
+    discard_capture,
+    publish_plaintext_no_replace,
+    read_captured_plaintext,
+    read_regular_plaintext,
+    restore_capture_no_replace,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -137,7 +146,7 @@ def materialize_config(
     if not _marker_path(home).exists():
         return 0  # not opted in
 
-    from . import _storage, vault
+    from . import vault
 
     key_id = anchor_label = vault_identity(root)
     backend, store = resolve_backend_store(backend, store)
@@ -159,8 +168,8 @@ def materialize_config(
     with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
         enrolled = config_name in opened.list_files()
 
-        if plaintext_path.exists():
-            disk_bytes = plaintext_path.read_bytes()
+        if plaintext_path.exists() or plaintext_path.is_symlink():
+            disk_bytes = read_regular_plaintext(plaintext_path, make_private=True)
             vault_bytes = opened.read_file(config_name) if enrolled else None
             if disk_bytes != vault_bytes:
                 # The working copy is authoritative — persist it into the vault and
@@ -173,9 +182,55 @@ def materialize_config(
                 f"config.yaml is marked vault-managed but not enrolled in the vault at {root} "
                 f"and no plaintext is present — nothing to materialize. {_RECOVERY_HINT}"
             )
-        # No working copy on disk: decrypt the enrolled config onto disk (0o600).
-        _storage.atomic_write(plaintext_path, opened.read_file(config_name))
+        # No working copy was observed. Publish the complete decrypted inode
+        # with atomic no-replace semantics: a host/process that creates a live
+        # config during the vault read wins and must never be overwritten.
+        vault_bytes = opened.read_file(config_name)
+        if not publish_plaintext_no_replace(plaintext_path, vault_bytes):
+            # The racing live file is authoritative by the same unclean-exit
+            # rule as the initial-present branch. Read one regular inode
+            # without following/blocking and reconcile it into the vault.
+            disk_bytes = read_regular_plaintext(plaintext_path, make_private=True)
+            if disk_bytes != vault_bytes:
+                opened.enroll_file(config_name, disk_bytes)
         return 1
+
+
+def _restore_failed_config_capture(captured_path: Path, plaintext_path: Path) -> None:
+    """Restore without replacing a concurrent new live config."""
+    try:
+        restored = restore_capture_no_replace(captured_path, plaintext_path)
+    except OSError as restore_exc:
+        _term.emit_warn(
+            f"config.yaml reseal failed and its captured plaintext could not "
+            f"be restored: {restore_exc}. It remains at {captured_path}."
+        )
+        return
+    if not restored:
+        _term.emit_warn(
+            f"config.yaml changed during the failed reseal. The newer live "
+            f"file was preserved and the earlier capture remains at {captured_path}."
+        )
+
+
+def _discard_resealed_config_capture(captured_path: Path, plaintext_path: Path) -> int:
+    """Remove only the enrolled capture, never a concurrent live replacement."""
+    try:
+        discard_capture(captured_path)
+    except OSError as exc:
+        _term.emit_warn(
+            f"config.yaml was resealed but its captured plaintext deletion at "
+            f"{captured_path} could not be made durable: {exc} — inspect and remove any residue."
+        )
+        return 0
+    if plaintext_path.exists() or plaintext_path.is_symlink():
+        _term.emit_warn(
+            "config.yaml changed while it was being resealed. The captured "
+            "version was enrolled and the newer live plaintext was left for "
+            "the next reseal."
+        )
+        return 0
+    return 1
 
 
 def reseal_config(
@@ -197,7 +252,7 @@ def reseal_config(
         return 0  # not opted in — never touch an unmanaged config
 
     plaintext_path = home / config_name
-    if not plaintext_path.exists():
+    if not (plaintext_path.exists() or plaintext_path.is_symlink()):
         return 0
 
     from . import vault
@@ -205,20 +260,28 @@ def reseal_config(
     key_id = anchor_label = vault_identity(root)
     backend, store = resolve_backend_store(backend, store)
 
-    disk_bytes = plaintext_path.read_bytes()
-    with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
-        enrolled = config_name in opened.list_files()
-        vault_bytes = opened.read_file(config_name) if enrolled else None
-        if disk_bytes != vault_bytes:
-            opened.enroll_file(config_name, disk_bytes)
+    try:
+        captured_path = capture_plaintext(plaintext_path)
+    except OSError as exc:
+        _term.emit_warn(f"config.yaml could not be safely captured for reseal: {exc} — leaving it in place.")
+        return 0
+    if captured_path is None:
+        return 0
 
-    # The vault now holds the working copy; remove the on-disk plaintext so
-    # config.yaml is encrypted at rest again between sessions. Reached only after
-    # a clean enroll/open — a failure above leaves the plaintext untouched.
-    # ``missing_ok``: the vault open above can be slow (device key / Touch ID); if
-    # the file vanished in that window (concurrent removal) the goal is already met.
-    plaintext_path.unlink(missing_ok=True)
-    return 1
+    try:
+        disk_bytes = read_captured_plaintext(captured_path)
+        with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
+            enrolled = config_name in opened.list_files()
+            vault_bytes = opened.read_file(config_name) if enrolled else None
+            if disk_bytes != vault_bytes:
+                opened.enroll_file(config_name, disk_bytes)
+    except BaseException:
+        _restore_failed_config_capture(captured_path, plaintext_path)
+        raise
+
+    # Enrollment consumed exactly the privately-captured inode. Delete only
+    # that name; a writer that recreated live config.yaml is left untouched.
+    return _discard_resealed_config_capture(captured_path, plaintext_path)
 
 
 def install_config_decrypt(*, home: Path | None = None) -> int:

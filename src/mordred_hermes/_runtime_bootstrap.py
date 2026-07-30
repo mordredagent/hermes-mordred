@@ -23,14 +23,17 @@ from __future__ import annotations
 import functools
 import os
 import sys
+import threading
 from collections.abc import Callable
 from typing import Any, Final, NoReturn, cast
 
 from ._proxy_bypass import ensure_loopback_proxy_bypass
 
 _WRAPPED_MARKER: Final = "__mordred_integrity_discovery_wrapper__"
+_MANDATORY_HOOK_MARKER: Final = "__mordred_mandatory_integrity_hook__"
 _PRIVACY_HOOKS_MODULE: Final = "mordred_hermes.privacy_check.hooks"
 _SAFE_MODE_TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
+_HOOK_MUTATION_LOCK: Final = threading.RLock()
 
 
 def _safe_mode_enabled() -> bool:
@@ -61,9 +64,28 @@ def _mandatory_integrity_hook(**kwargs: Any) -> None:
         _raise_runtime_refusal("mandatory integrity evaluation failed", exc)
 
 
+def _make_mandatory_integrity_hook(manager: Any) -> Callable[..., None]:
+    """Bind one bridge to the manager whose discovery it guards."""
+
+    @functools.wraps(_mandatory_integrity_hook)
+    def bound_integrity_hook(**kwargs: Any) -> None:
+        # The invocation payload is host-controlled.  Always use the manager
+        # captured at discovery time, even if a caller supplies this key.
+        kwargs["plugin_manager"] = manager
+        _mandatory_integrity_hook(**kwargs)
+
+    setattr(bound_integrity_hook, _MANDATORY_HOOK_MARKER, True)
+    return bound_integrity_hook
+
+
+def _is_mandatory_integrity_bridge(callback: Callable[..., Any]) -> bool:
+    """Whether ``callback`` is a manager-bound mandatory bridge."""
+    return bool(getattr(callback, _MANDATORY_HOOK_MARKER, False))
+
+
 def _is_integrity_callback(callback: Callable[..., Any]) -> bool:
     """Whether an existing callback already runs the sibling-integrity gate."""
-    if callback is _mandatory_integrity_hook:
+    if callback is _mandatory_integrity_hook or _is_mandatory_integrity_bridge(callback):
         return True
     return getattr(callback, "__module__", "") == _PRIVACY_HOOKS_MODULE and getattr(callback, "__name__", "") in {
         "check_plugin_integrity",
@@ -75,15 +97,20 @@ def _ensure_integrity_callback(manager: Any) -> None:
     """Keep exactly one mandatory bridge at the front of the hook list."""
     if _safe_mode_enabled():
         return
-    raw_hooks = getattr(manager, "_hooks", None)
-    if not isinstance(raw_hooks, dict):
-        raise RuntimeError("Hermes PluginManager has no mutable _hooks registry")
-    hooks = cast(dict[str, list[Callable[..., Any]]], raw_hooks)
-    callbacks = hooks.setdefault("on_session_start", [])
-    if not isinstance(callbacks, list):
-        raise RuntimeError("Hermes PluginManager on_session_start hook registry is not a mutable list")
-    callbacks[:] = [callback for callback in callbacks if callback is not _mandatory_integrity_hook]
-    callbacks.insert(0, _mandatory_integrity_hook)
+    with _HOOK_MUTATION_LOCK:
+        raw_hooks = getattr(manager, "_hooks", None)
+        if not isinstance(raw_hooks, dict):
+            raise RuntimeError("Hermes PluginManager has no mutable _hooks registry")
+        hooks = cast(dict[str, list[Callable[..., Any]]], raw_hooks)
+        callbacks = hooks.setdefault("on_session_start", [])
+        if not isinstance(callbacks, list):
+            raise RuntimeError("Hermes PluginManager on_session_start hook registry is not a mutable list")
+        callbacks[:] = [
+            callback
+            for callback in callbacks
+            if callback is not _mandatory_integrity_hook and not _is_mandatory_integrity_bridge(callback)
+        ]
+        callbacks.insert(0, _make_mandatory_integrity_hook(manager))
 
 
 def _install_plugin_discovery_wrapper() -> None:
@@ -93,6 +120,9 @@ def _install_plugin_discovery_wrapper() -> None:
     manager_type = hermes_plugins.PluginManager
     current = manager_type.discover_and_load
     if bool(getattr(current, _WRAPPED_MARKER, False)):
+        existing_manager = getattr(hermes_plugins, "_plugin_manager", None)
+        if existing_manager is not None and bool(getattr(existing_manager, "_discovered", False)):
+            _ensure_integrity_callback(existing_manager)
         return
     original = cast(Callable[..., Any], current)
 

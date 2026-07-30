@@ -51,6 +51,31 @@ class TestClearnetUse:
         assert "HTTPS_PROXY" not in env
         assert "HTTP_PROXY" not in env
         assert "ALL_PROXY" not in env
-        assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+        assert "NO_PROXY" not in env
         assert env["UNRELATED"] == "value"
+        rt.stop()
+
+    def test_policy_off_preserves_ambient_proxy_configuration(self) -> None:
+        original = {
+            "HTTPS_PROXY": "http://corp-proxy.example:3128",
+            "https_proxy": "http://lower-proxy.example:3128",
+            "NO_PROXY": "internal.example",
+            "no_proxy": "internal.example",
+        }
+        env = dict(original)
+        rt = _make_runtime(env=env, policy_mode="off")
+
+        rt.use("clearnet")
+
+        assert env == original
+        rt.stop()
+
+    def test_lenient_clearnet_still_clears_ambient_proxy(self) -> None:
+        env = {"HTTPS_PROXY": "http://corp-proxy.example:3128"}
+        rt = _make_runtime(env=env, policy_mode="lenient")
+
+        rt.use("clearnet")
+
+        assert "HTTPS_PROXY" not in env
+        assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
         rt.stop()

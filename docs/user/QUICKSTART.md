@@ -209,12 +209,19 @@ the `vault recover` notes in
 > blocks until the 120 s helper timeout and then starts **without** the
 > vault-managed secrets — a sealed Slack token silently drops the platform. To
 > make the hot path silent while your Mac is unlocked, build the Secure Enclave
-> helper in **unattended** mode *before* the device key is first created:
+> helper first, then select **unattended** policy when the device key is
+> created:
 >
 > ```sh
-> $M keyvault enable-se --unattended   # SE helper as a no-Touch-ID key
-> $M keyvault init                     # the device key is now created unattended
+> $M keyvault enable-se                # install/refresh and probe helper
+> MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+>                                      # create the device key unattended
 > ```
+>
+> `enable-se` does not create, promote, or migrate a wrapping key. Existing
+> helper, legacy Keychain, and software keys remain in their original backend
+> namespace and continue to work through fallback. The policy environment
+> variable belongs on a later fresh `keyvault init` (or recovery).
 >
 > **Trade-off:** an unattended key can be unwrapped by any process running as you
 > while the Mac is unlocked — you trade per-use biometric confirmation for
@@ -307,18 +314,21 @@ For the full question-by-question table, the **policy mode** detail, and the
 ## Reset or remove the keyvault
 
 Need to start over — wrong hardware tier, a botched setup, or decommissioning a
-machine? `keyvault reset` destroys **all** key material and removes the keyvault.
+machine? `keyvault reset` destroys all provably profile-owned key material and
+removes the keyvault.
 
 | Do (command) | Purpose | Result |
 |---|---|---|
-| `$M keyvault reset` | Destroy all key material and delete the keyvault (irreversible). | Asks you to type `reset` to confirm, deletes the hardware keys, removes the keyvault. |
+| `$M keyvault reset` | Destroy profile-owned key material and delete the keyvault (irreversible). | Asks you to type `reset` to confirm, deletes profile-owned hardware keys, removes the keyvault. |
 | `$M keyvault reset --yes` | Same, but skip the prompt (scripted / non-interactive use). | No confirmation; deletes immediately. |
 
 > **⚠️ This cannot be undone.** Anything sealed by this keyvault — wallets,
 > encrypted secrets — is lost unless you can run `$M keyvault recover` with your
 > 24-word Seed Phrase, Passphrase and backup blob. Reset prints the exact key IDs
 > it will destroy before asking you to confirm; if no keyvault exists it just says
-> "nothing to reset". Afterwards, `$M keyvault init` starts a fresh one.
+> "nothing to reset". Legacy machine-global keys are retained when exclusive
+> profile ownership cannot be proven and are reported explicitly. Afterwards,
+> `$M keyvault init` starts a fresh one.
 
 ---
 

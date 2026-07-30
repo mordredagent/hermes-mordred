@@ -375,7 +375,13 @@ def _emit_unwrap_denied(
 # ---------------------------------------------------------------------------
 
 
-def generate_wrapping_key(key_id: str, *, backend: NativeBackend, unattended: bool | None = None) -> bytes:
+def generate_wrapping_key(
+    key_id: str,
+    *,
+    backend: NativeBackend,
+    unattended: bool | None = None,
+    native_key_id: str | None = None,
+) -> bytes:
     """Create + persist a Secure-Enclave-backed P-256 keypair for ``key_id``.
 
     Returns the SEC1 uncompressed public key (65 bytes) so callers — e.g.
@@ -394,19 +400,29 @@ def generate_wrapping_key(key_id: str, *, backend: NativeBackend, unattended: bo
     ``None`` uses the backend default (``MORDRED_SEKEY_UNATTENDED`` env,
     else interactive).
     """
-    return backend.generate_enclave_key(key_id, unattended=unattended)
+    return backend.generate_enclave_key(native_key_id if native_key_id is not None else key_id, unattended=unattended)
 
 
-def get_wrapping_key_public(key_id: str, *, backend: NativeBackend) -> bytes:
+def get_wrapping_key_public(
+    key_id: str,
+    *,
+    backend: NativeBackend,
+    native_key_id: str | None = None,
+) -> bytes:
     """Return the SEC1 uncompressed P-256 public key (65 bytes) for ``key_id``.
 
     Raises :class:`WrapKeyNotFound` if the Keychain has no item. No
     Enclave authorization happens — public-key lookup is unprivileged.
     """
-    return backend.get_enclave_public_key(key_id)
+    return backend.get_enclave_public_key(native_key_id if native_key_id is not None else key_id)
 
 
-def delete_wrapping_key(key_id: str, *, backend: NativeBackend) -> None:
+def delete_wrapping_key(
+    key_id: str,
+    *,
+    backend: NativeBackend,
+    native_key_id: str | None = None,
+) -> None:
     """Remove the Keychain item for ``key_id``. Idempotent.
 
     Deleted keys cannot be recovered — any wrap blobs produced under
@@ -414,10 +430,16 @@ def delete_wrapping_key(key_id: str, *, backend: NativeBackend) -> None:
     responsible for exporting backups (``api.export_backup``, Phase 4
     PR4) before invoking this.
     """
-    backend.delete_enclave_key(key_id)
+    backend.delete_enclave_key(native_key_id if native_key_id is not None else key_id)
 
 
-def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend) -> bytes:
+def wrap_dek(
+    dek: bytes,
+    key_id: str,
+    *,
+    backend: NativeBackend,
+    native_key_id: str | None = None,
+) -> bytes:
     """Wrap a 32-byte DEK under the Enclave-protected wrapping key.
 
     Offline — does NOT call ``enclave_ecdh`` and never prompts the user
@@ -435,7 +457,7 @@ def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend) -> bytes:
     if len(dek) != DEK_LEN:
         raise ValueError(f"DEK must be exactly {DEK_LEN} bytes; got {len(dek)}")
 
-    enclave_pub_bytes = backend.get_enclave_public_key(key_id)
+    enclave_pub_bytes = backend.get_enclave_public_key(native_key_id if native_key_id is not None else key_id)
     enclave_pub = _decode_sec1_uncompressed_p256(enclave_pub_bytes)
 
     ephemeral_priv = ec.generate_private_key(ec.SECP256R1())
@@ -464,6 +486,7 @@ def unwrap_dek(
     *,
     audit_sink: AuditSink,
     backend: NativeBackend,
+    native_key_id: str | None = None,
 ) -> bytes:
     """Verify the blob and unwrap the DEK using the Enclave key.
 
@@ -520,7 +543,10 @@ def unwrap_dek(
     denied: NativeBackendError | None = None
     shared_secret: bytes | None = None
     try:
-        shared_secret = backend.enclave_ecdh(key_id, parsed.ephemeral_pub)
+        shared_secret = backend.enclave_ecdh(
+            native_key_id if native_key_id is not None else key_id,
+            parsed.ephemeral_pub,
+        )
     except NativeBackendError as exc:
         denied = exc
 

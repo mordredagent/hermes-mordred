@@ -164,10 +164,13 @@ v2 escape hatch (deferred):
 - [x] Implement `config_schema` (policy/allow_cloud_llm/cloud_provider_allowlist/audit_log_path) in `plugin.yaml` (PLAN §1.1)
 - [x] Implement a pure policy evaluator in `policy.py` (no I/O)
 - [x] In `skill_frontmatter.py`, `yaml.safe_load` the SKILL.md frontmatter and extract `metadata.mordred.*` (using the ruamel.yaml safe loader; the nested-object form is documented as an agentskills.io spec deviation in POLICY.md §SKILL.md `metadata.mordred.*`)
-- [x] Implement a single-writer NDJSON logger in `audit.py` (rotation, gzip, 30-day retention, file mode 0600)
+- [x] Implement a process-serialized NDJSON logger in `audit.py` (rotation, gzip, 30-day retention, file mode 0600)
   - [x] Froze the `class Writer(Protocol): def append(self, entry: dict) -> None: ...` interface in Phase 1 (factory-swapped to `EncryptedWriter` in Phase 4)
-  - [x] Serialized via an in-process write queue; multi-process is unsupported in v1
-  - [x] **M1 (multi-process write contention)**: each writer opens with `os.O_APPEND` mode and issues one `write()` call per line (relying on POSIX `O_APPEND`'s atomicity guarantee; entries under the 4 KiB PIPE_BUF won't interleave, entry size cap = 4000 bytes). See PATHS.md §Multi-process write contention. Upgrade to a daemon writer over a Unix domain socket, or `fcntl.flock` exclusion, in v2
+  - [x] Serialized via an in-process lock plus stable sidecar `fcntl.flock`
+  - [x] **M1 (multi-process write contention)**: lock format checks, rotation,
+    write-all, and rollback as one cross-process critical section; verify MRAL
+    inode/header ownership before DEK reuse. See PATHS.md §Multi-process write
+    serialization. A daemon writer remains an optional churn optimization
 - [x] Implement `hermes mordred install <skill>` in `install_wrapper.py`:
   - [x] Read SKILL.md, parse frontmatter
   - [x] strict + clearnet → block + audit `policy.strict.clearnet`
@@ -208,7 +211,7 @@ v2 escape hatch (deferred):
 ### 1.4 Tests (Phase 1)
 
 - [x] `tests/test_policy.py`: covers the strict/lenient/off × clearnet/tor/vpn/local-only matrix (2026-05-10 Phase 1.1 PR)
-- [x] `tests/test_audit.py`: rotation, file mode 0600, single-writer concurrency (2026-05-10 Phase 1.1 PR)
+- [x] `tests/test_audit.py`: rotation, file mode 0600, thread/process concurrency (2026-05-10 Phase 1.1 PR; process-lock regression added 2026-07-30)
 - [x] `tests/test_install_wrapper.py`: asserts install results for fixture skills (2026-05-10 Phase 1.1 PR)
 - [x] Added `tests/test_skill_frontmatter.py`: matrix for the SKILL.md frontmatter parser (2026-05-10 Phase 1.1 PR; not in the original PLAN, added as independent verification of skill_frontmatter.py)
 - [x] Added `tests/test_hooks.py`: matrix for the `on_session_start` / `pre_tool_call` hook handlers, the strict refusal path, the poison flag, and sibling-disable detection (2026-05-10 Phase 1.1 PR; dedicated `MordredIntegrityRefused` coverage added in the follow-up refactor)
@@ -407,7 +410,7 @@ v2 escape hatch (deferred):
 ### Open decisions
 
 - [x] **[DECIDE confirmed]** DECIDE: implement the PC↔phone pairing flow (QR + mDNS + self-signed-TLS) in v1, or defer it to v2-F7 → **confirmed 2026-06-03: deferred to v2-F7** (operator-approved). It represents roughly a week of additional implementation including phone-side UI selection, so it's out of scope for v1 and does not block v1 GA. v1 keeps the degraded flow (displaying both halves on the PC) as specified in SPEC (since this weakens the UX-level safety guarantee, v2-F7 is a candidate for early promotion). See ROADMAP.md §v2-F7 for details
-- [x] DECIDE: how to handle the pre-Phase-4 plaintext audit log — provide a manual purge (`hermes mordred audit purge --before YYYY-MM-DD`) → **confirmed and implemented 2026-05-17** (the `audit purge` CLI landed in Phase 4 PR8, see §4.2 L443. Checkbox corrected to `[x]` since the decision's disposition is now satisfied by the implementation)
+- [x] DECIDE: how to handle the pre-Phase-4 plaintext audit log — provide a manual purge (`hermes mordred audit purge --before YYYY-MM-DD --yes`) → **confirmed and implemented 2026-05-17** (the `audit purge` CLI landed in Phase 4 PR8, see §4.2 L443. Checkbox corrected to `[x]` since the decision's disposition is now satisfied by the implementation)
 
 ### 4.1 `mordred_keyvault` plugin
 
@@ -458,7 +461,7 @@ v2 escape hatch (deferred):
 - [x] `hermes mordred keyvault verify-digest` — landed in Phase 4 PR8. `keyvault_cli.verify_digest` shows each key's full 32-byte verification digest in hex (for offline cross-checking). An empty vault or an unreadable `digests/<hash>.commit` returns rc 1
 - [x] `hermes mordred keyvault recover --blob <path>` — **Phase 4 PR10 step-C completed**. `keyvault_cli.recover`: reads the blob + prompts for Seed/Passphrase + pre-validates the BIP39 checksum + recomputes the seed-bound PoW + calls `api.import_backup(*, backend=_SecKeyBackend())`. Distinguishes `RecoveryDigestMismatch` / `BackupCorrupt` / `WrapError`
 - [x] `hermes mordred audit decrypt --date YYYY-MM-DD` (requires Secure Enclave authorization) — **Phase 4 PR10 step-B completed**. `audit_cli.decrypt`: decrypts rotated `audit.log.<date>[.N][.gz]` files plus the current day's active log via `log_encryption.decrypt_log_file` → `unwrap_dek` → `backend.enclave_ecdh`, distinguishing denied prompt / missing wrapping key / corrupt file
-- [x] `hermes mordred audit purge --before YYYY-MM-DD` (manual deletion of pre-Phase-4 plaintext logs; see PATHS.md §Consumer CLI, PLAN.md §Audit-log encryption coupling) — landed in Phase 4 PR8. `audit_cli.purge` deletes rotated `audit.log.<date>[.N][.gz]` files strictly older than the cutoff date, never touches the active `audit.log`, ignores non-dated rotation files, and returns rc 2 on an invalid date
+- [x] `hermes mordred audit purge --before YYYY-MM-DD --yes` (manual deletion of pre-Phase-4 plaintext logs; see PATHS.md §Consumer CLI, PLAN.md §Audit-log encryption coupling) — landed in Phase 4 PR8. `audit_cli.purge` deletes rotated `audit.log.<date>[.N][.gz]` files strictly older than the cutoff date, never touches the active `audit.log`, ignores non-dated rotation files, and returns rc 2 on an invalid date
 
 ### 4.3 Tests (Phase 4)
 
