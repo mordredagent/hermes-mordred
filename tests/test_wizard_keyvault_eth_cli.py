@@ -19,11 +19,13 @@ Enclave) and inject ``backend`` / ``audit_sink`` / ``home`` exactly as the
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from mordred_hermes.keyvault import _storage
 from mordred_hermes.keyvault.ethereum import store_seed_phrase
 from mordred_hermes.wizard import keyvault_eth_cli
 from tests._keyvault_fakes import FakeBackend
@@ -41,6 +43,13 @@ def _backend(tmp_path: Path) -> tuple[FakeBackend, list[dict], dict]:
     """Return (backend, audit_log, kwargs) wired to ``tmp_path``."""
     backend = FakeBackend()
     backend.generate_enclave_key("default")
+    root = _storage.resolve_keyvault_dir(tmp_path)
+    _storage.ensure_layout(root)
+    key_hash = hashlib.sha256(b"default").digest()[:16].hex()
+    _storage.atomic_write(root / "digests" / f"{key_hash}.commit", b"\x00" * 32)
+    meta = _storage.load_meta(root)
+    meta["keys"][key_hash] = {"key_id": "default", "created_at": "2026-01-01T00:00:00Z"}
+    _storage.save_meta(root, meta)
     log: list[dict] = []
     kwargs: dict = {"backend": backend, "audit_sink": log.append, "home": tmp_path}
     return backend, log, kwargs

@@ -7,6 +7,7 @@ live in `test_openclaw_migration.py`.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,71 @@ class TestRunStory1Apply:
         assert "policy: lenient" in text
         # User's pre-existing profile key is preserved (round-trip)
         assert "profile: default" in text
+
+    def test_apply_preserves_existing_provider_overrides(self, tmp_path: Path) -> None:
+        """Upgrade back-fill must not erase operator transport evidence."""
+        w = _writer(tmp_path)
+        w.config_path.write_text("profile: default\n", encoding="utf-8")
+        override = {"corp-proxy": {"transport": "httpx", "future_unsafe_fact": True}}
+        w.policy_json_path.parent.mkdir(parents=True)
+        w.policy_json_path.write_text(
+            json.dumps(
+                {
+                    "policy": "off",
+                    "provider_overrides": override,
+                    "unknown_top_level": "drop",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = upgrade.run(
+            options=upgrade.UpgradeOptions(),
+            policy_writer=w,
+            target_snapshot=PolicySnapshot(policy="lenient"),
+            openclaw_base=tmp_path / "no-openclaw-here",
+        )
+
+        assert report.story1_action == "applied"
+        body = json.loads(w.policy_json_path.read_text(encoding="utf-8"))
+        assert body["provider_overrides"] == override
+        assert body["policy"] == "lenient"
+        assert "unknown_top_level" not in body
+
+    def test_integrated_openclaw_policy_is_resolved_before_default_backfill(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        w.config_path.write_text("profile: default\n", encoding="utf-8")
+        openclaw_base = tmp_path / "openclaw" / "mordred"
+        openclaw_base.mkdir(parents=True)
+        (openclaw_base.parent / "openclaw.json").write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "entries": {
+                            "mordred-privacy-check": {
+                                "config": {
+                                    "policy": "strict",
+                                    "allow_cloud_llm": False,
+                                    "cloud_provider_allowlist": [],
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = upgrade.run(
+            options=upgrade.UpgradeOptions(),
+            policy_writer=w,
+            openclaw_base=openclaw_base,
+        )
+
+        assert report.story1_action == "applied"
+        assert report.story1_5_action == "migrated"
+        assert "policy: strict" in w.config_path.read_text(encoding="utf-8")
+        assert json.loads(w.policy_json_path.read_text(encoding="utf-8"))["policy"] == "strict"
 
 
 class TestRunPolicyConflict:

@@ -61,7 +61,7 @@ from ._prompt_io import (
 from ._prompt_io import (
     _RefusingPromptIO as _RefusingPromptIO,
 )
-from .policy_writer import PolicySnapshot, PolicyWriter
+from .policy_writer import PolicySnapshot, PolicyWriter, _preserve_provider_overrides
 
 #: Cloud providers offered as checkbox choices for the allowlist prompt.
 #: Sourced from the network flagger's canonical registry so the wizard and the
@@ -380,8 +380,8 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         local_llm_model_id=local_llm_model_id,
         cloud_attempt_action=cloud_attempt_action,
         harness_primary=harness_primary,
-        # strict → disable IPv6 by default (mirrors the network reader's
-        # ``_resolve_disable_ipv6``: strict → True, lenient/off → False).
+        # strict → disable IPv6 by default (mirrors the network settings
+        # resolver: strict → True, lenient/off → False).
         disable_ipv6=(policy == "strict"),
     )
     return ConfigureResult(snapshot=snapshot)
@@ -434,6 +434,16 @@ def run(
             _term.emit_warn(f"`hermes setup` exited with code {rc}; continuing with Mordred prompts anyway")
 
     result = collect_answers(prompt_io)
+    # ``provider_overrides`` is an operator-managed policy.json extension,
+    # not a wizard prompt. Carry it into the resolved snapshot before writing
+    # so interactive configure cannot erase it (or turn an invalid value into
+    # a permissive empty object).
+    result = ConfigureResult(
+        snapshot=_preserve_provider_overrides(
+            result.snapshot,
+            policy_writer.policy_json_path,
+        )
+    )
     policy_writer.write(result.snapshot)
     return result
 
@@ -540,6 +550,7 @@ def snapshot_from_args(
     if raw_action not in ("always-block", "prompt-once"):
         raw_action = "always-block"
     cloud_attempt_action = _coerce_cloud_attempt_action(raw_action)
+    provider_overrides = existing.get("provider_overrides", {})
 
     snapshot = PolicySnapshot(
         policy=policy,
@@ -550,6 +561,10 @@ def snapshot_from_args(
         cloud_attempt_action=cloud_attempt_action,
         harness_primary=str(_seeded("harness", "harness_primary", "none")),
         disable_ipv6=(policy == "strict"),
+        # Do not validate/coerce this operator-managed extension here.
+        # Malformed values must remain malformed so strict + Tor continues to
+        # fail closed in network.hooks._read_provider_overrides.
+        provider_overrides=provider_overrides,
     )
     return ConfigureResult(snapshot=snapshot)
 

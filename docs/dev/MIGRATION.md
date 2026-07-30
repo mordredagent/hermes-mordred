@@ -85,7 +85,7 @@ Mapping the 3 hooks that the old SPEC depended on to their Hermes equivalents yi
 | `~/.openclaw/mordred/audit.log` | `~/.hermes/mordred/audit.log` | `mordred_privacy_check` |
 | `~/.openclaw/mordred/policy.json` | `~/.hermes/mordred/policy.json` | `mordred_privacy_check` (writer is `mordred_wizard`) |
 | `~/.openclaw/mordred/keyvault/` | `~/.hermes/mordred/keyvault/` | `mordred_keyvault` (Phase 4) |
-| `~/.openclaw/credentials/mordred-network.json` | `~/.hermes/mordred/credentials/network.json` or a Mordred-specific key in `~/.hermes/.env` (e.g., `MORDRED_MULLVAD_ACCOUNT=...`) | `mordred_network` |
+| `~/.openclaw/mordred/credentials/` | `~/.hermes/mordred/credentials/` | `mordred_network` |
 | `plugins.entries.mordred-*.config` in `~/.openclaw/openclaw.json` | the `plugins.mordred-*` section in `~/.hermes/config.yaml` | wizard goes from JSON5 round-trip → YAML round-trip (pyyaml's round-trip support is weak, so adoption of **`ruamel.yaml`** is under consideration) |
 
 > Hermes's `get_hermes_home()` is profile-aware (default `~/.hermes/`). Mordred reuses the same profile resolution.
@@ -154,18 +154,23 @@ Rationale:
 
 ## 7. Platform Support [DECIDED]
 
-The old SPEC was **macOS Apple Silicon only** (reason: Secure Enclave native addon), but moving to Hermes lets us make Phase 1–3 OS-independent, so we're expanding it.
+The old SPEC was **macOS Apple Silicon only** (reason: Secure Enclave native
+addon), but moving to Hermes made Phase 1-3 OS-independent. A later backend
+follow-up completed the Linux TPM 2.0 MVP on 2026-06-09.
 
 | Phase | Platform |
 |-------|-------------------|
 | Phase 1–3 | **macOS / Linux / WSL2** (all environments where Hermes runs) |
-| Phase 4 (keyvault, Tier 1) | **macOS Apple Silicon only** (Secure Enclave) |
-| Phase 4 (keyvault, Tier 2/3) | v2: Linux (TPM 2.0) / Windows (DPAPI) deferred to ROADMAP `v2-OS2` |
+| Phase 4 (keyvault, macOS) | Secure Enclave on supported Macs, with a login-Keychain software P-256 fallback |
+| Phase 4 (keyvault, Linux) | **TPM 2.0 MVP complete**; packaged helper, machine-bound, no software fallback |
+| Phase 4 (keyvault, Windows native) | DPAPI / TPM deferred to ROADMAP `v2-OS2` |
 
 **Rationale**:
 - Phase 1–3 (network/privacy-check/llm-guard/wizard) is pure Python. The Tor/Mullvad CLI is, if anything, easier to run on Linux
 - Opening this up to the whole Hermes community has significant value (Hermes supports as far as Linux/Termux/WSL2)
-- Only Phase 4 is limited to macOS Apple Silicon due to the physical constraint of the Secure Enclave (same as the old SPEC)
+- Phase 4 began with the macOS Secure Enclave implementation. Linux later
+  gained the TPM 2.0 helper; transparent startup injection and the direct
+  blackout fallback remain separate macOS-only integrations
 
 ---
 
@@ -214,11 +219,11 @@ Total: **4–6 days** (documentation only; does not include code implementation)
 | # | Item | Decision | Notes |
 |---|------|------------|------|
 | 1 | Strategy | **Option C + Vendored-fork escape hatch** (zero upstream PR) | See §5. Distributed via `pip install mordred-hermes`, no upstream PR submitted, only items where core modification truly becomes necessary are handled via a vendored fork extra (out of scope for v1) |
-| 2 | Platform | **Phase 1–3 = macOS/Linux/WSL2, Phase 4 = macOS Apple Silicon** | See §7. Phase 4 Tier 2/3 is v2-OS2 |
+| 2 | Platform | **Phase 1-3 = macOS/Linux/WSL2; Phase 4 key custody = macOS + Linux TPM 2.0** | See §7. Windows-native key custody remains v2-OS2 |
 | 3 | YAML writer | **`ruamel.yaml`** | Preserves user comments and key order via round-trip (an equivalent guarantee to the old SPEC's JSON5 round-trip) |
 | 4 | Hermes upstream PR | **Not submitted (zero-PR commitment)** | Old S1 (privacy_lock) achieves defense-in-depth via a plugin-side wrapper + audit log. `H1` (before_install equivalent) and `H2` (agent init/shutdown) are also handled with a plugin-side fallback (CLI wrapper, existing hooks). If hard-enforce becomes necessary in v2, we proceed to the vendored fork extra |
 | 5 | Relationship with `hermes claw migrate` | **Keep it as an independent command** (`hermes mordred upgrade`), but spell out the 2-step flow in the docs | Users coming from OpenClaw + Mordred go through 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade` |
-| 6 | Distribution form | **Single package `mordred-hermes`** (bundles the 5 plugins) | The 5 plugins are tightly coupled (e.g., keyvault → network blackout assert). Distributed together to avoid version skew. Each plugin's enabled/disabled state can be controlled individually via config |
+| 6 | Distribution form | **Single package `mordred-hermes`** (bundles 6 plugins) | The plugins are tightly coupled (e.g., keyvault → network blackout assert). Distributed together to avoid version skew. Each plugin's enabled/disabled state can be controlled individually via config |
 | 7 | Treatment of the old `mordred-mvp-docs/` | **Left in place with a deprecation marker added** | Create `../../mordred/mordred-mvp-docs/README.md` and note the migration destination. Not deleted, for discoverability |
 
 ---

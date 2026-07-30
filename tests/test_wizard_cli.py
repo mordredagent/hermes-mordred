@@ -338,11 +338,16 @@ class TestEnableSEWiring:
         ns = parser.parse_args(["mordred", "keyvault", "enable-se"])
         assert hasattr(ns, "func"), "set_defaults(func=...) missing for keyvault enable-se"
 
-    def test_enable_se_flags_parse(self) -> None:
+    def test_enable_se_install_dir_parses(self) -> None:
         parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "enable-se", "--install-dir", "/tmp/bin", "--unattended"])
+        ns = parser.parse_args(["mordred", "keyvault", "enable-se", "--install-dir", "/tmp/bin"])
         assert ns.install_dir == "/tmp/bin"
-        assert ns.unattended is True
+
+    def test_enable_se_rejects_unattended_installer_flag(self) -> None:
+        parser = _build_parser()
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["mordred", "keyvault", "enable-se", "--unattended"])
+        assert exc.value.code == 2
 
     def test_cli_enable_se_forwards_args(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}
@@ -352,11 +357,11 @@ class TestEnableSEWiring:
             return 0
 
         monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
-        ns = argparse.Namespace(install_dir="/tmp/bin", unattended=True)
+        ns = argparse.Namespace(install_dir="/tmp/bin")
         rc = keyvault_native_cli.cli_enable_se(ns)
         assert rc == 0
         assert captured["install_dir"] == Path("/tmp/bin")
-        assert captured["unattended"] is True
+        assert "unattended" not in captured
 
     def test_cli_enable_se_absent_flags_pass_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}
@@ -366,10 +371,10 @@ class TestEnableSEWiring:
             return 0
 
         monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
-        ns = argparse.Namespace(install_dir=None, unattended=False)
+        ns = argparse.Namespace(install_dir=None)
         keyvault_native_cli.cli_enable_se(ns)
         assert captured["install_dir"] is None
-        assert captured["unattended"] is None  # absence → env default, not False
+        assert "unattended" not in captured
 
     def test_dispatch_routes_handler_to_native_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # End-to-end: the cli.py handler must import + delegate to

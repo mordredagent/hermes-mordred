@@ -97,6 +97,16 @@ class BackupCorrupt(ValueError):
     """
 
 
+class BackupImportConflict(RuntimeError):
+    """A valid backup was aimed at a keyvault that is not fresh.
+
+    Import is a provisioning transaction, not an overwrite/merge operation.
+    Refusing existing metadata, commits, or ciphertext trees prevents a backup
+    restored through a different native-backend namespace from deleting live
+    secrets that the importing backend cannot see.
+    """
+
+
 @dataclass(frozen=True)
 class ParsedHeader:
     """Result of :func:`parse_header`. Contains everything needed to

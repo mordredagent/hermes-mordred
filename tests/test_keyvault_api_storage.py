@@ -24,11 +24,16 @@ safety semantics" for the canonical wording.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import json
 import os
+import select
+import signal
 import stat
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -137,6 +142,31 @@ class TestEnsureLayout:
 
         monkeypatch.setattr(Path, "exists", fake_exists)
         _storage.ensure_layout(root)  # must not raise FileExistsError
+
+    def test_waits_for_lifecycle_lock_before_creating_root(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        finished = threading.Event()
+        errors: list[BaseException] = []
+
+        def initialize() -> None:
+            try:
+                _storage.ensure_layout(root)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with _storage.keyvault_lifecycle_lock(root):
+            thread = threading.Thread(target=initialize)
+            thread.start()
+            assert not finished.wait(timeout=0.1)
+            assert not root.exists()
+
+        assert finished.wait(timeout=5)
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert errors == []
+        assert root.is_dir()
 
 
 # ---------------------------- atomic_write ----------------------------
@@ -361,6 +391,48 @@ class TestSafeRead:
 
 
 class TestKeyvaultLock:
+    def test_nested_lifecycle_and_keyvault_locks_are_reentrant(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        script = """
+import sys
+from pathlib import Path
+from mordred_hermes.keyvault import _storage
+
+root = Path(sys.argv[1])
+with _storage.keyvault_lifecycle_lock(root):
+    with _storage.keyvault_lifecycle_lock(root):
+        with _storage.keyvault_lock(root):
+            with _storage.keyvault_lock(root):
+                pass
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script, os.fspath(root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_holds_stable_parent_lifecycle_lock(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        lifecycle = root.parent / ".keyvault.lifecycle.lock"
+
+        with _storage.keyvault_lock(root):
+            fd = os.open(lifecycle, os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+        # Unlike root/.lock, this inode remains available to serialize a
+        # later destructive reset with re-creation of the root.
+        assert lifecycle.is_file()
+        assert stat.S_IMODE(lifecycle.stat().st_mode) == 0o600
+
     def test_acquires_exclusive_lock(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
@@ -435,6 +507,220 @@ class TestKeyvaultLock:
         with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_lock(root):
             pass  # pragma: no cover — the lock must refuse before entry
 
+    def test_missing_inner_lock_fails_closed_inside_nested_lifecycle(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        (root / ".lock").unlink()
+
+        with (
+            _storage.keyvault_lifecycle_lock(root),
+            pytest.raises(FileNotFoundError),
+            _storage.keyvault_lock(root),
+        ):
+            pass  # pragma: no cover — no critical-section entry
+
+    def test_symlinked_inner_lock_is_refused_without_touching_target(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"unchanged")
+        os.chmod(victim, 0o600)
+        (root / ".lock").unlink()
+        (root / ".lock").symlink_to(victim)
+
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_lock(root):
+            pass
+
+        assert victim.read_bytes() == b"unchanged"
+
+    def test_fifo_inner_lock_is_refused_without_blocking(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        (root / ".lock").unlink()
+        os.mkfifo(root / ".lock", mode=0o600)
+
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_lock(root):
+            pass
+
+    def test_replaced_inner_lock_inode_is_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        lock_path = root / ".lock"
+        real_open = os.open
+        swapped = False
+
+        def racing_open(path: os.PathLike[str] | str, flags: int, mode: int = 0o777) -> int:
+            nonlocal swapped
+            if Path(path) == lock_path and not swapped:
+                swapped = True
+                lock_path.unlink()
+                replacement_fd = real_open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(replacement_fd)
+            return real_open(path, flags, mode)
+
+        monkeypatch.setattr(_storage.os, "open", racing_open)
+        with pytest.raises(_storage.KeyvaultPermissionError, match="changed"), _storage.keyvault_lock(root):
+            pass
+
+    def test_forked_child_drops_inherited_lock_state_and_waits_for_parent(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        ready_r, ready_w = os.pipe()
+        acquired_r, acquired_w = os.pipe()
+        child_pid = -1
+        try:
+            with _storage.keyvault_lifecycle_lock(root):
+                child_pid = os.fork()
+                if child_pid == 0:  # pragma: no cover — assertions happen in parent
+                    os.close(ready_r)
+                    os.close(acquired_r)
+                    os.write(ready_w, b"r")
+                    with _storage.keyvault_lifecycle_lock(root):
+                        os.write(acquired_w, b"a")
+                    os._exit(0)
+
+                os.close(ready_w)
+                os.close(acquired_w)
+                assert select.select([ready_r], [], [], 2)[0]
+                assert os.read(ready_r, 1) == b"r"
+                assert not select.select([acquired_r], [], [], 0.1)[0]
+
+            assert select.select([acquired_r], [], [], 5)[0]
+            assert os.read(acquired_r, 1) == b"a"
+            waited_pid, status = os.waitpid(child_pid, 0)
+            child_pid = -1
+            assert waited_pid > 0
+            assert os.waitstatus_to_exitcode(status) == 0
+        finally:
+            for fd in (ready_r, acquired_r):
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            if child_pid > 0:
+                os.kill(child_pid, signal.SIGKILL)
+                os.waitpid(child_pid, 0)
+
+
+class TestLifecycleLockPathSafety:
+    def test_symlinked_lifecycle_lock_is_refused_without_touching_target(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        lifecycle = root.parent / ".keyvault.lifecycle.lock"
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"unchanged")
+        os.chmod(victim, 0o600)
+        lifecycle.unlink()
+        lifecycle.symlink_to(victim)
+
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_lifecycle_lock(root):
+            pass
+
+        assert victim.read_bytes() == b"unchanged"
+
+    def test_fifo_lifecycle_lock_is_refused_without_blocking(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        lifecycle = root.parent / ".keyvault.lifecycle.lock"
+        lifecycle.unlink()
+        os.mkfifo(lifecycle, mode=0o600)
+
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_lifecycle_lock(root):
+            pass
+
+
+class TestKeyvaultReadLock:
+    def test_absent_profile_does_not_create_parent_or_lock(self, tmp_path: Path) -> None:
+        root = tmp_path / "missing-parent" / "kv"
+
+        with _storage.keyvault_read_lock(root):
+            pass
+
+        assert not root.parent.exists()
+
+    def test_existing_profile_waits_for_lifecycle_owner(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        entered = threading.Event()
+        finished = threading.Event()
+
+        def reader() -> None:
+            with _storage.keyvault_read_lock(root):
+                entered.set()
+            finished.set()
+
+        with _storage.keyvault_lifecycle_lock(root):
+            thread = threading.Thread(target=reader)
+            thread.start()
+            assert not entered.wait(timeout=0.1)
+            assert not finished.is_set()
+
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert entered.is_set()
+        assert finished.is_set()
+
+    def test_symlinked_root_is_refused_before_snapshot(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.mkdir(mode=0o700)
+        root = tmp_path / "kv"
+        root.symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_read_lock(root):
+            pass
+
+    def test_fifo_root_is_refused_without_blocking(self, tmp_path: Path) -> None:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation is unavailable")
+        root = tmp_path / "kv"
+        os.mkfifo(root, mode=0o600)
+
+        with pytest.raises(_storage.KeyvaultPermissionError), _storage.keyvault_read_lock(root):
+            pass
+
+
+class TestResetJournalDurability:
+    def test_failed_clear_flush_restores_visible_journal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        payload = b'{"pending":"reset"}'
+
+        def fail_flush(_root: Path) -> None:
+            raise OSError("simulated directory flush failure")
+
+        with _storage.keyvault_lifecycle_lock(root):
+            _storage.write_reset_journal(root, payload)
+            monkeypatch.setattr(_storage, "fsync_keyvault_parent", fail_flush)
+            with pytest.raises(OSError, match="simulated directory flush failure"):
+                _storage.clear_reset_journal(root)
+
+        assert _storage.safe_read(_storage.reset_journal_path(root)) == payload
+        with pytest.raises(_storage.KeyvaultResetInProgressError):
+            _storage.ensure_layout(root)
+
+    def test_failed_clear_and_republish_raises_critical_restore_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        with _storage.keyvault_lifecycle_lock(root):
+            _storage.write_reset_journal(root, b'{"pending":"reset"}')
+
+            def fail_flush(_root: Path) -> None:
+                raise OSError("simulated directory flush failure")
+
+            def fail_republish(_path: Path, _data: bytes) -> None:
+                raise OSError("simulated journal republish failure")
+
+            monkeypatch.setattr(_storage, "fsync_keyvault_parent", fail_flush)
+            monkeypatch.setattr(_storage, "atomic_write", fail_republish)
+            with pytest.raises(_storage.KeyvaultResetJournalRestoreError, match="could not be restored"):
+                _storage.clear_reset_journal(root)
+
 
 # ---------------------------- load_meta / save_meta ----------------------------
 
@@ -462,6 +748,18 @@ class TestLoadMeta:
         (root / "meta.json").write_text("not json{{")
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
+
+    def test_non_utf8_json_raises_corrupt_without_leaking_bytes(self, tmp_path: Path) -> None:
+        root = tmp_path / "kv"
+        _storage.ensure_layout(root)
+        secret_marker = b"\xffSECRET_NON_UTF8_MARKER"
+        (root / "meta.json").write_bytes(secret_marker)
+
+        with pytest.raises(_storage.KeyvaultCorruptError, match="UTF-8 JSON") as raised:
+            _storage.load_meta(root)
+
+        assert "SECRET_NON_UTF8_MARKER" not in str(raised.value)
+        assert raised.value.__cause__ is None
 
     def test_missing_version_field_raises_corrupt(self, tmp_path: Path) -> None:
         root = tmp_path / "kv"

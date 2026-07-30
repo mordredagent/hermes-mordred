@@ -92,7 +92,86 @@ class TestEnableSE:
         assert calls["build"] == 1 and calls["verify"] == 1
         # No --install-dir given → verify must be probed with install_dir=None.
         assert calls["verify_install_dir"] is None
-        assert "mordred-hermes-sekey" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "mordred-hermes-sekey" in out
+        assert "later fresh key creation" in out
+        assert "now active for the keyvault" not in out
+
+    def test_unattended_is_rejected_as_an_installer_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._patch_all_ok(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            keyvault_native_cli,
+            "_run_sekey_build",
+            lambda *a, **k: pytest.fail("build must not run for a rejected --unattended flag"),
+        )
+
+        rc = keyvault_native_cli.enable_se(home=tmp_path, unattended=True)
+
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "cannot be applied while installing" in err
+        assert "MORDRED_SEKEY_UNATTENDED=1" in err
+
+    def test_existing_key_allows_install_without_claiming_hardware_promotion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from mordred_hermes.keyvault import _storage
+
+        calls = self._patch_all_ok(monkeypatch, tmp_path)
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        meta = _storage.load_meta(root)
+        meta["keys"]["0" * 32] = {"key_id": "default", "created_at": "2026-01-01T00:00:00Z"}
+        _storage.save_meta(root, meta)
+
+        rc = keyvault_native_cli.enable_se(home=tmp_path)
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert calls["build"] == 1 and calls["verify"] == 1
+        assert captured.err == ""
+        assert "remain in their current backend namespace" in captured.out
+        assert "now active for the keyvault" not in captured.out
+        assert _storage.load_meta(root) == meta
+
+    @pytest.mark.parametrize("residue_kind", ["commit", "ciphertext", "backend_store"])
+    def test_existing_artifacts_do_not_block_helper_refresh_or_get_modified(
+        self,
+        residue_kind: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.keyvault import _storage
+
+        calls = self._patch_all_ok(monkeypatch, tmp_path)
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        if residue_kind == "commit":
+            artifact = root / "digests" / "orphan.commit"
+            expected = b"x" * 32
+            _storage.atomic_write(artifact, expected)
+        elif residue_kind == "ciphertext":
+            purpose_dir = root / "ciphertexts" / ("a" * 32) / ("b" * 32)
+            purpose_dir.mkdir(parents=True)
+            artifact = purpose_dir / "orphan.gcm"
+            expected = b"orphan"
+            artifact.write_bytes(expected)
+        else:
+            store_dir = root / "sekey"
+            store_dir.mkdir()
+            artifact = store_dir / "orphan.bin"
+            expected = b"opaque-key-blob"
+            artifact.write_bytes(expected)
+
+        rc = keyvault_native_cli.enable_se(home=tmp_path)
+
+        assert rc == 0
+        assert calls["build"] == 1 and calls["verify"] == 1
+        assert artifact.read_bytes() == expected
+        assert capsys.readouterr().err == ""
 
     def test_unsupported_platform_returns_1_without_building(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -234,6 +313,7 @@ class TestEnableSESeams:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         seen: dict[str, Any] = {}
+        monkeypatch.delenv("MORDRED_SEKEY_UNATTENDED", raising=False)
 
         class _CP:
             returncode = 0
@@ -249,7 +329,7 @@ class TestEnableSESeams:
         rc, out = keyvault_native_cli._run_sekey_build(tmp_path, install_dir=tmp_path / "bin", unattended=True)
         assert rc == 0 and "ok-out" in out
         assert seen["env"]["MORDRED_SEKEY_INSTALL_DIR"] == str(tmp_path / "bin")
-        assert seen["env"]["MORDRED_SEKEY_UNATTENDED"] == "1"
+        assert "MORDRED_SEKEY_UNATTENDED" not in seen["env"]
         assert seen["cmd"][0] == "bash"
 
     def test_run_sekey_build_oserror_returns_1(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -364,7 +444,10 @@ class TestEnableTPM:
         rc = keyvault_native_cli.enable_tpm(home=tmp_path)
         assert rc == 0
         assert calls["build"] == 1 and calls["verify"] == 1
-        assert "mordred-hermes-tpmkey" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "mordred-hermes-tpmkey" in out
+        assert "hardware probe succeeded" in out
+        assert "now active for the keyvault" not in out
 
     def test_unsupported_platform_returns_1_without_building(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

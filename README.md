@@ -8,7 +8,7 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a8`
+**Status: active alpha** — current release `0.1.0a9`
 ([PyPI](https://pypi.org/project/mordred-hermes/) has the release history and dates).
 
 New here? The step-by-step
@@ -33,7 +33,7 @@ The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-po
 | `mordred_wizard` | The CLI surface — `configure`, `status`, `encryption`, `keyvault`, `network`, `audit`, … |
 | `mordred_llm_guard` | Strict-mode enforcement of local-only LLM usage |
 | `mordred_network` | Privacy-path management: Tor / VPN / clearnet |
-| `mordred_keyvault` | Hardware-backed key management — Secure Enclave (macOS), TPM 2.0 (Linux), software fallback |
+| `mordred_keyvault` | Hardware-backed key management — Secure Enclave with Keychain fallback (macOS), TPM 2.0 (Linux) |
 | `mordred_e2e` | End-to-end encryption for gateway messaging platforms (Slack / Discord) — decrypts inbound, re-encrypts outbound replies |
 
 ## Requirements
@@ -43,8 +43,9 @@ The Mordred entry-point plugins, exposed via the `hermes_agent.plugins` entry-po
   published and are not installable). The floor is exercised in CI on every PR
   (the `hermes-floor` job pins it exactly); behavior against the latest release
   was last verified on 0.19.0, 2026-07-21
-- macOS or Linux. No special hardware required — without a Secure Enclave / TPM,
-  the keyvault degrades to a software-protected key automatically.
+- macOS or Linux. macOS can fall back to a software P-256 key in the login
+  Keychain when Secure Enclave access is unavailable. Linux keyvault setup
+  requires the TPM 2.0 helper and fails closed when it is absent.
 
 ## Install (users, from PyPI)
 
@@ -57,10 +58,10 @@ form is `uv pip install --python …` (no `uv` on your machine? Install it first
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a8"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a9"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a8"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a9"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -85,12 +86,12 @@ Optional extras, all opt-in:
 | `ethereum` | `eth-keys` / `eth-hash` / `eth-account` / `rlp` | HD-wallet commands (`keyvault eth new / derive / address`) |
 | `tor-control` | `stem` | Deep Tor liveness probing for strict-mode operators |
 | `messaging` | `qrcode` | Terminal QR rendering for `extension pair` |
-| `extension` | `aiohttp` / `cryptography` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview) and pairing (since `0.1.0a2`) |
+| `extension` | `aiohttp` / `cryptography` / `requests[socks]` / `urllib3` | The [browser-extension WebSocket gateway](#browser-extension-websocket-gateway-preview), pairing, and Tor-routed RPC transport |
 
 ### Enable the plugins
 
 Running `hermes-mordred configure` (next section) does this for you — every
-run back-fills all five `mordred_*` entries into `plugins.enabled` in
+run back-fills all six `mordred_*` entries into `plugins.enabled` in
 `~/.hermes/config.yaml` if they're missing, so there's no manual step.
 Afterwards `~/.hermes/config.yaml` should contain:
 
@@ -102,6 +103,7 @@ plugins:
     - mordred_llm_guard
     - mordred_network
     - mordred_keyvault
+    - mordred_e2e
 ```
 
 Only edit this by hand if you want the plugins enabled *before* the first
@@ -118,8 +120,9 @@ M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 # First run — set up, in order:
 $M configure                       # interactive Mordred setup (policy / LLM / harness)
 $M network init                    # optional — pick a privacy route (Tor / VPN / clearnet)
-$M keyvault enable-se --unattended # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
-$M keyvault init                   # create the hardware-backed key (interactive ceremony)
+$M keyvault enable-se              # macOS — install/refresh and probe the SE helper
+MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+                                    # create a no-Touch-ID hardware key (interactive ceremony)
 $M encryption enable env           # encrypt your .env at rest
 $M status                          # verify — the `env` row reads [on] enrolled
 
@@ -134,12 +137,17 @@ $M configure                       # re-run interactive setup anytime
 $M configure --with-hermes-setup   # re-run and include the upstream `hermes setup` wizard
 ```
 
-> **Why `enable-se --unattended` is recommended (macOS).** The default
+> **Why unattended key creation is recommended on macOS.** The default
 > **attended** device key asks for Touch ID on every vault unwrap — a
 > **background** process (a launchd-started gateway, `extension serve`) can
 > never answer that prompt and silently starts without the vault-managed
-> secrets. Run it **before** `keyvault init`: the attended/unattended choice
-> is fixed at key creation. Already hit this, or want the full trade-off?
+> secrets. `enable-se` only installs/probes the helper; it does not create,
+> promote, or migrate a wrapping key. It is safe to refresh with an existing
+> vault: existing helper, legacy Keychain, and software keys remain in their
+> current namespace and continue through backend fallback. Set
+> `MORDRED_SEKEY_UNATTENDED=1` on a later fresh `keyvault init` (or recovery)
+> command: the attended/unattended choice is fixed at key creation. Already
+> hit this, or want the full trade-off?
 > See [Troubleshooting](#troubleshooting) below.
 
 > **Network troubleshooting.** If network communication drops out now and then,
@@ -187,7 +195,7 @@ from hermes_cli.plugins import PluginManager
 mgr = PluginManager(); mgr.discover_and_load(force=True)
 print(sorted(k for k, p in mgr._plugins.items() if p.manifest.source == 'entrypoint'))
 "
-# → ['mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
+# → ['mordred_e2e', 'mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
 ```
 
 ## Browser-extension WebSocket gateway (preview)
@@ -197,13 +205,28 @@ extension talks to — `ws://127.0.0.1:7788/ext`, localhost-only, no TLS. It was
 ported from the full-Hermes gateway layer in #30 and ships on PyPI since
 `0.1.0a2` (install the `extension` extra).
 
+Gateway messaging E2E (Slack / Discord) uses the context-bound `ENC:v3`
+wire. This is a deliberate breaking change from gateway command/reply v1/v2:
+deploy a v3-capable Mordred Extension at the same time. Legacy v1/v2 crypto
+remains available to the WebSocket API and stored-history helpers, but is not
+accepted as an agent command. See [the gateway E2E wire specification](docs/dev/SLACK_E2E.md).
+
 ### How it works
 
-An Origin check admits only `chrome-extension://` / `moz-extension://` clients,
-header-less local processes, and the server's own localhost page. On connect
+The server refuses non-loopback binds and validates the TCP peer, Host, and
+Origin. It admits only `chrome-extension://` / `moz-extension://` clients,
+header-less loopback processes, and its own localhost page. On connect
 the server sends an `auth_challenge`; the extension authenticates with its
-paired `ext_token` (plus a WebAuthn assertion once a credential is registered),
-the localhost page with a per-process page token. After auth:
+paired `ext_token` (plus a WebAuthn assertion once a Chromium-extension
+credential is registered), the localhost page with a per-process page token
+delivered only in the private launch URL's fragment. The fragment is not sent
+over HTTP and is removed from browser history before the app starts. Extension
+WebSocket sessions remain bound to the pairing token generation that
+authenticated them; re-pairing or clearing pairing state immediately revokes
+their next privileged frame and discards pending approvals. Firefox
+transport remains supported, but Firefox WebAuthn registration is refused
+until the wire protocol carries its browser-specific stable ceremony origin
+and RP ID. After auth:
 
 | Message | What it does |
 |---|---|
@@ -211,8 +234,17 @@ the localhost page with a per-process page token. After auth:
 | `chat` | Stream one conversation turn as `chat_chunk*` + `chat_end`; replies-in-kind E2E with `K_extchat` (encrypted in → encrypted out) |
 | `encrypt` / `decrypt` | Slack-message crypto with the paired key |
 | `accounts_request` | Wallet address + chain id from the keyvault |
-| `sign_request` → `sign_prompt`, then `sign_approve` → `sign_result` | Deterministic risk analysis, user approval, then keyvault signing (`personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction` incl. RPC fill + broadcast) |
+| `sign_request` → `sign_prompt`, then `sign_approve` → `sign_result` | Deterministic risk analysis and keyvault signing. Every prompt freezes the exact requested signer; transactions additionally freeze chain, nonce, gas, fees, and RPC origin after filling. If the selected wallet changes before approval, signing fails |
 | `history_get` / `history_clear` | Encrypted-at-rest conversation history |
+
+For `eth_sendTransaction`, the extension cannot introduce an arbitrary RPC
+endpoint or chain: both must match the operator-selected values in
+`~/.hermes/extension/wallet.json` (or the built-in endpoint for that configured
+chain). RPC transport rejects local/private targets and redirects, pins
+validated direct DNS answers, and never bypasses the route selected by the
+network gateway. Before returning any message signature or broadcasting a raw
+transaction, Hermes recovers its actual signer and verifies that it is still
+the address shown in the approval prompt.
 
 Wire protocol: the extension repo's `SPEC.ja.md` §6 / `src/lib/protocol.ts`;
 server side in [`src/mordred_hermes/extension/api.py`](src/mordred_hermes/extension/api.py).
@@ -221,15 +253,15 @@ server side in [`src/mordred_hermes/extension/api.py`](src/mordred_hermes/extens
 
 Nothing starts the server automatically yet: Hermes exposes no gateway-boot
 hook a plugin could use, so `register(ctx)` cannot launch a long-running server
-(see `docs/dev/ROADMAP.md` § browser-extension gateway counterpart). Until that
+(see `docs/dev/ROADMAP.md` §"Remaining browser-extension gateway integration"). Until that
 lands, start it in the foreground with one command — it needs the `extension`
 extra (see the [extras table](#install-users-from-pypi) above).
 
-**PyPI install** — make sure the `extension` extra is included (swap `macos`
-for `keyvault` on Linux):
+**PyPI install** — include `extension`; add `ethereum` for the wallet signing
+flows shown below (swap `macos` for `keyvault` on Linux):
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension]==0.1.0a8"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension,ethereum]==0.1.0a9"
 ```
 
 Then use the `$M` alias from [Use it](#use-it):
@@ -243,7 +275,8 @@ $M extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
 **From a dev checkout** instead:
 
 ```sh
-uv sync --extra extension     # or: uv pip install -e ".[extension]"
+uv sync --extra extension --extra ethereum
+# or: uv pip install -e ".[extension,ethereum]"
 
 .venv/bin/hermes-mordred extension serve      # ws://127.0.0.1:7788/ext — Ctrl+C to stop
 .venv/bin/python -m mordred_hermes.extension
@@ -257,7 +290,7 @@ between the two forms: with the `extension` extra missing, only
 `hermes-mordred extension serve` prints the install hint — the module form
 fails on the package import itself with a plain `ImportError`.
 
-Pairing, auth (incl. WebAuthn), `encrypt`/`decrypt`, history, and the
+Pairing, auth (incl. Chromium WebAuthn), `encrypt`/`decrypt`, history, and the
 keyvault-backed `accounts_request` / `sign_request` flows are fully functional
 standalone — they only touch `~/.hermes` and the keyvault.
 
@@ -273,9 +306,10 @@ standalone — they only touch `~/.hermes` and the keyvault.
   second terminal while `extension serve` is running — both sides share
   `~/.hermes/extension/pending.json`, so codes are also consumable by a full
   Hermes gateway hosting the WS server.
-- **`GET http://127.0.0.1:7788/` serves the bundled localhost web app** — a
-  browser page over the same WS API (the startup log prints both URLs; the
-  extension's WS endpoint is `/ext`). A 503 "web app not built" response
+- **The private `Web page:` URL printed by `extension serve` opens the bundled
+  localhost web app** — use the complete URL including its `#token=…` fragment;
+  a plain anonymous GET serves only the token-free shell. The extension's WS
+  endpoint is `/ext`. A 503 "web app not built" response
   appears only if the bundled page is missing — the PyPI wheel ships it.
 
 ## Install (development)
@@ -336,8 +370,8 @@ bump versions in lockstep with `tools/bump_version.py`. Runbook:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Slack integration silently off after a Touch ID prompt at login | Attended Secure Enclave device key + a launchd-started background process (gateway, `extension serve`) racing for Touch ID — a background process can never answer the prompt, so it blocks until the helper's 120 s timeout and starts **without** the vault-managed secrets (a sealed Slack bot token silently drops the platform, with only a `Failed to load plugin 'mordred_keyvault': auth_failed` warning in the logs). | Run `$M keyvault enable-se --unattended` **before** `$M keyvault init` — the attended/unattended choice is fixed at key creation. Already affected? See [`USAGE.md` §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) for re-keying onto an unattended key without destroying your sealed secrets — do **not** use `keyvault reset`. |
-| `~/.hermes/mordred/audit.log` is plaintext NDJSON whose entries say `mordred.degraded.audit_encryption_unavailable` | A Mordred process started somewhere the Keychain / Secure Enclave helper is unreachable (a sandboxed shell, a pre-unlock launchd start, a container). The audit-writer factory probes the audit-log wrapping key once per process; on failure it rotates the encrypted log aside and that process writes plaintext for its whole lifetime — fail-open by design, so auditing never stops (each downgrade leaves one `warn` marker in the trail). | A healthy log starts with `{"fmt":"MRAL"` — check with `head -c 20 ~/.hermes/mordred/audit.log`. Recovery is automatic: the next audit write from a healthy context (a normal login shell) rotates the plaintext file aside and starts a fresh encrypted log; long-lived services pick that up on restart. Rotated plaintext siblings remain as dated `audit.log.<date>` files — remove them with `$M audit purge --yes` if they must not persist. |
+| Slack integration silently off after a Touch ID prompt at login | Attended Secure Enclave device key + a launchd-started background process (gateway, `extension serve`) racing for Touch ID — a background process can never answer the prompt, so it blocks until the helper's 120 s timeout and starts **without** the vault-managed secrets (a sealed Slack bot token silently drops the platform, with only a `Failed to load plugin 'mordred_keyvault': auth_failed` warning in the logs). | `$M keyvault enable-se` may be installed/refreshed at any time, but it never changes an existing key's policy. Already affected vaults need the documented verified-backup/recovery-to-a-fresh-vault workflow, with `MORDRED_SEKEY_UNATTENDED=1` on the recovery key creation. See [`USAGE.md` §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them). |
+| `~/.hermes/mordred/audit.log` is plaintext NDJSON whose entries say `mordred.degraded.audit_encryption_unavailable` | A Mordred process started somewhere the Keychain / Secure Enclave helper is unreachable (a sandboxed shell, a pre-unlock launchd start, a container). The audit-writer factory probes the audit-log wrapping key once per process; on failure it rotates the encrypted log aside and that process writes plaintext for its whole lifetime — fail-open by design, so auditing never stops (each downgrade leaves one `warn` marker in the trail). | A healthy log starts with `{"fmt":"MRAL"` — check with `head -c 20 ~/.hermes/mordred/audit.log`. Recovery is automatic: the next audit write from a healthy context (a normal login shell) rotates the plaintext file aside and starts a fresh encrypted log; long-lived services pick that up on restart. Rotated plaintext siblings remain as dated `audit.log.<date>` files — remove them with `$M audit purge --before YYYY-MM-DD --yes` if they must not persist. |
 | `extension serve` fails to start, citing port 7788 in use | Something else already owns `127.0.0.1:7788` — usually a full Hermes gateway already hosting the extension API (nothing to start), occasionally a stale `extension serve` process from an earlier run. | Check what's listening: `lsof -i :7788`. A full Hermes gateway there means there's nothing to do — the API is already up. A stale `extension serve` should be stopped, or bind a different port instead with `$M extension serve --port 7799` (see the [`extension` command reference](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#extension--browser-extension-pairing-and-server-preview)). |
 | `extension serve` logs show the extension reconnecting roughly every ~30s | Expected: Chrome kills an idle Manifest V3 service-worker after about 30s, so the extension's background context reconnects — this is Chrome's extension lifecycle, not a server bug. The server already sends an app-level keepalive under that window to help keep the connection alive. | Nothing to fix. If chats or signing requests are actually being dropped (not just reconnect log lines), that's a different problem — file an issue. |
 | Network communication drops out now and then | The active privacy path (Tor / VPN) is down or flagged unhealthy. | See the network-troubleshooting note under [Use it](#use-it) above — run `$M network status` to check `state` / `last_health`, then `$M network use <tor\|vpn\|clearnet>` to re-establish the path. |
@@ -417,10 +451,14 @@ $M encryption status             # verify — every row reads [off]
 plan to reinstall and keep the same vault.
 
 ```sh
-$M keyvault reset --yes          # DESTROY the hardware-backed key + remove the keyvault dir
+$M keyvault reset --yes          # DESTROY profile-owned wrapping keys + remove the keyvault dir
 ```
 
-**3. Disable the plugins.** Remove the five `mordred_*` entries from the
+Current profile-scoped keys are deleted. Legacy machine-global keys are
+retained when exclusive ownership cannot be proven; export a backup before
+reset and follow the migration guidance in `docs/user/USAGE.md`.
+
+**3. Disable the plugins.** Remove the six `mordred_*` entries from the
 `plugins.enabled` list in `~/.hermes/config.yaml` (undo
 [Enable the plugins](#enable-the-plugins)).
 

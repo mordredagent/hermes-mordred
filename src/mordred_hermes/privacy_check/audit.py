@@ -1,14 +1,15 @@
-"""Audit log writer — single-writer NDJSON with daily + size rotation, gzip + retention.
+"""Audit log writer — serialized NDJSON with daily + size rotation, gzip + retention.
 
 Phase 1 implementation per SPEC.md §Audit log policy + TODO.md §1.1:
 
 - File mode ``0o600``, parent dir mode ``0o700``
-- POSIX ``O_APPEND`` open per write — atomic appends up to ``PIPE_BUF``
-  (4096 bytes); we cap each entry at 4000 bytes for a safety margin (M1)
+- POSIX ``O_APPEND`` open per write with a short-write completion loop
+- Entries capped at the frozen 4000-byte writer limit
 - Daily roll to ``audit.log.YYYY-MM-DD``, gzip after rotation
 - 10 MB size cap forces same-day rotation (``audit.log.YYYY-MM-DD.N.gz``)
 - 30-day retention swept on each rotation
-- Single-writer queue via ``threading.Lock`` — multi-process unsupported v1
+- In-process ``threading.Lock`` plus a stable ``fcntl.flock`` sidecar lock;
+  cooperating Mordred processes cannot interleave rotation/write/rollback
 
 Phase 4 will swap :class:`NDJSONWriter` for ``EncryptedWriter`` behind the
 :class:`Writer` Protocol; the Protocol is frozen here.
@@ -21,17 +22,30 @@ per entry, which is negligible at audit-log volumes.
 from __future__ import annotations
 
 import contextlib
-import gzip
 import json
 import logging
 import os
-import shutil
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
+from .._audit_io import (
+    audit_path_stat as _audit_path_stat,
+)
+from .._audit_io import (
+    compress_rotated_file as _compress_rotated_file,
+)
+from .._audit_io import (
+    exclusive_audit_lock as _exclusive_audit_lock,
+)
+from .._audit_io import (
+    open_audit_file as _open_audit_file,
+)
+from .._audit_io import (
+    read_first_line as _read_first_line,
+)
 from .._log_rotation import next_rotation_target as _next_rotation_target
 from .._log_rotation import sweep_retention as _sweep_retention
 from .._log_rotation import today_utc_date as _today_utc_date
@@ -42,8 +56,9 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger("mordred.privacy_check.audit")
 
-# 96-byte safety margin under POSIX PIPE_BUF (4096). Larger entries cannot
-# guarantee atomic appends under contention.
+# Frozen bounded-entry limit shared with the encrypted writer. Cross-process
+# whole-entry serialization comes from the stable sidecar lock, not PIPE_BUF
+# (which specifies pipe/FIFO writes, not regular audit files).
 MAX_ENTRY_BYTES: Final = 4000
 
 DEFAULT_ROTATE_BYTES: Final = 10 * 1024 * 1024  # 10 MB
@@ -102,12 +117,12 @@ def _serialize(entry: Mapping[str, Any]) -> bytes:
 
 @dataclass
 class NDJSONWriter:
-    """Single-writer NDJSON audit logger.
+    """Serialized NDJSON audit logger.
 
-    Multi-process writes are not supported in v1 — the in-process
-    ``threading.Lock`` only serializes threads of one Python process.
-    See TODO.md §1.1 L150 / M1 for v2 plans (Unix domain socket daemon
-    or ``fcntl.flock``).
+    The in-process lock serializes threads using one writer instance.  A
+    stable sidecar ``flock`` additionally serializes cooperating Mordred
+    processes, including the separate installer CLI process, across rotation,
+    append, and rollback.
     """
 
     path: Path
@@ -118,23 +133,50 @@ class NDJSONWriter:
 
     def __post_init__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # If the file pre-exists with looser perms (e.g. user touched it),
-        # tighten to 0o600. Best-effort: ignore on platforms / filesystems
-        # where chmod is a no-op.
-        if self.path.exists():
-            with contextlib.suppress(OSError):
-                os.chmod(self.path, 0o600)
+        # Tighten an existing regular inode through a no-follow descriptor.
+        # Symlinks and specials fail closed without chmoding or opening their
+        # target (a FIFO open could otherwise block interpreter startup).
+        if _audit_path_stat(self.path) is not None:
+            # ``tighten=True`` is the point of this open: repair a log the user
+            # touched at the umask default. Plain reads elsewhere deliberately
+            # leave permissions alone.
+            fd = _open_audit_file(self.path, os.O_RDONLY, tighten=True)
+            os.close(fd)
 
     def append(self, entry: Mapping[str, Any]) -> None:
         """Append one audit entry. Adds ``ts`` if caller did not."""
         merged: dict[str, Any] = {"ts": _utcnow_iso(), **dict(entry)}
         data = _serialize(merged)
 
-        with self._lock:
+        with self._lock, _exclusive_audit_lock(self.path):
+            _assert_plaintext_append_safe(self.path)
             self._maybe_rotate(len(data))
-            fd = os.open(str(self.path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            fd = _open_audit_file(
+                self.path,
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+            )
+            offset = 0
             try:
-                os.write(fd, data)
+                original_size = os.fstat(fd).st_size
+                view = memoryview(data)
+                while offset < len(view):
+                    written = os.write(fd, view[offset:])
+                    if written <= 0:
+                        raise OSError("os.write returned 0 bytes while appending the audit entry")
+                    offset += written
+            except BaseException:
+                # Writer protocol invariant: append is whole-entry or none.
+                # The stable sidecar flock is still held here, so no
+                # cooperating process can append between original_size and
+                # this rollback and have its entry truncated with ours.
+                if offset:
+                    try:
+                        os.ftruncate(fd, original_size)
+                    except OSError as rollback_error:
+                        raise OSError(
+                            "audit append failed and its partial entry could not be rolled back"
+                        ) from rollback_error
+                raise
             finally:
                 os.close(fd)
 
@@ -158,35 +200,33 @@ class NDJSONWriter:
         "daily roll" intent — strict midnight-UTC rotation is v2).
         """
         today = _today_utc_date()
-        if self._last_date and self._last_date != today and self.path.exists():
+        metadata = _audit_path_stat(self.path)
+        if self._last_date and self._last_date != today and metadata is not None:
             self._rotate(self._last_date)
-        elif self.path.exists() and self.path.stat().st_size + incoming_bytes > self.rotate_bytes:
+        elif metadata is not None and metadata.st_size + incoming_bytes > self.rotate_bytes:
             self._rotate(today)
         self._last_date = today
 
     def _rotate(self, date_suffix: str) -> None:
-        if not self.path.exists():
+        before = _audit_path_stat(self.path)
+        if before is None:
             return
 
         target = _next_rotation_target(self.path, date_suffix)
         os.replace(self.path, target)
+        moved = _audit_path_stat(target)
+        if moved is None or (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("audit path changed during rotation")
 
         gz_target = target.with_suffix(target.suffix + ".gz")
         try:
-            with target.open("rb") as src, gzip.open(gz_target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            target.unlink()
+            _compress_rotated_file(target, gz_target)
         except Exception as e:
             # gzip failure does NOT lose data — `target` already holds the
             # rotated content. Leave it un-gzipped; the next rotation's
             # collision loop will pick a new suffix. Best-effort: clean up
             # any partial .gz so it doesn't read as corrupt.
             _LOG.warning("audit gzip rotation failed; raw rotated file kept at %s: %s", target, e)
-            with contextlib.suppress(OSError):
-                gz_target.unlink()
-        else:
-            with contextlib.suppress(OSError):
-                os.chmod(gz_target, 0o600)
 
         _sweep_retention(self.path, self.retention_days)
 
@@ -199,18 +239,34 @@ class NDJSONWriter:
 _MRAL_FMT: Final = "MRAL"
 
 
+def _assert_plaintext_append_safe(audit_path: Path) -> None:
+    """Refuse MRAL, malformed, or foreign active-file formats."""
+    first_line = _read_first_line(audit_path, limit=MAX_ENTRY_BYTES + 1)
+    if first_line is None or not first_line:
+        return
+    try:
+        first_entry = json.loads(first_line)
+    except ValueError as exc:
+        raise OSError("refusing to append plaintext to an unrecognized or corrupt audit log") from exc
+    if not isinstance(first_entry, dict):
+        raise OSError("refusing to append plaintext to a foreign audit-log format")
+    if first_entry.get("fmt") == _MRAL_FMT:
+        raise OSError("refusing to append plaintext to an MRAL-encrypted audit log")
+
+
 def _audit_log_is_encrypted(audit_path: Path) -> bool:
     """Return True if ``audit_path`` is a Phase 4 ``MRAL``-encrypted log.
 
     The ``MRAL`` format's line 0 is a JSON header carrying ``fmt:"MRAL"``;
     a plaintext NDJSON log's first line is an ordinary audit entry that
-    never carries that field. A missing or unreadable file is "not
-    encrypted" — the caller then has nothing to preserve.
+    never carries that field. A missing file is "not encrypted"; unsafe
+    path types and I/O failures propagate so callers fail closed.
     """
     try:
-        with audit_path.open("rb") as fh:
-            first_line = fh.readline(MAX_ENTRY_BYTES + 1)
-    except OSError:
+        first_line = _read_first_line(audit_path, limit=MAX_ENTRY_BYTES + 1)
+    except FileNotFoundError:
+        return False
+    if first_line is None:
         return False
     if first_line[:1] != b"{":
         return False
@@ -234,16 +290,67 @@ def _rotate_encrypted_log_aside(audit_path: Path) -> None:
     writer starts a fresh file. This mirrors :class:`EncryptedWriter`'s
     rotate-aside of a foreign plaintext file (the forward transition).
     """
-    if not _audit_log_is_encrypted(audit_path):
-        return
-    target = _next_rotation_target(audit_path, _today_utc_date())
-    os.replace(audit_path, target)
+    with _exclusive_audit_lock(audit_path):
+        if not _audit_log_is_encrypted(audit_path):
+            return
+        before = _audit_path_stat(audit_path)
+        if before is None:
+            return
+        target = _next_rotation_target(audit_path, _today_utc_date())
+        os.replace(audit_path, target)
+        moved = _audit_path_stat(target)
+        if moved is None or (moved.st_dev, moved.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise OSError("audit path changed during encrypted-log rotation")
     _LOG.warning(
         "audit log at %s is MRAL-encrypted but a plaintext writer is taking over; "
         "rotated the encrypted log aside to %s (still readable via `audit decrypt`)",
         audit_path,
         target,
     )
+
+
+def _select_audit_native_key(root: Path, meta: Mapping[str, Any]) -> str | None:
+    """Return the scoped committed audit id, or ``None`` for legacy main."""
+
+    from ..keyvault import _native_key_id, _secret_ops, _storage
+    from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+    rows = list(meta["keys"].items())
+    if len(rows) != 1 or not isinstance(rows[0][1], dict):
+        raise _storage.KeyvaultCorruptError("initialized keyvault must have exactly one metadata row")
+    main_key_id_hash, main_row = rows[0]
+    main_key_id = main_row.get("key_id")
+    if not isinstance(main_key_id_hash, str) or not isinstance(main_key_id, str):
+        raise _storage.KeyvaultCorruptError("keyvault metadata row has no valid logical key id")
+    if _native_key_id.PENDING_AUDIT_KEY_FIELD in meta:
+        raise _storage.KeyvaultCorruptError("audit-key provisioning is incomplete")
+    if _native_key_id.NATIVE_KEY_ID_FIELD not in main_row:
+        if _native_key_id.AUDIT_KEY_FIELD in meta:
+            raise _storage.KeyvaultCorruptError("legacy keyvault has unexpected scoped audit-key ownership metadata")
+        # Pre-profile-scoping metadata selects the legacy global audit key.
+        return None
+
+    # Validation accepts both the current canonical scoped id and the
+    # exact-abspath scoped id written before path canonicalization.
+    _secret_ops._assert_key_committed(
+        root,
+        main_key_id,
+        main_key_id_hash,
+    )
+    try:
+        audit_native_key_id = _native_key_id.committed_audit_key_from_meta(
+            root,
+            meta,
+            AUDIT_LOG_KEY_ID,
+        )
+    except _native_key_id.NativeKeyIdMismatch as exc:
+        raise _storage.KeyvaultCorruptError(str(exc)) from None
+    if audit_native_key_id is None:
+        raise _storage.KeyvaultCorruptError("scoped keyvault has no committed audit-key ownership record")
+    return audit_native_key_id
 
 
 def make_audit_writer(
@@ -281,15 +388,46 @@ def make_audit_writer(
             return NDJSONWriter(path=audit_path)
 
         # Keyvault is initialized — only now touch the crypto stack.
+        from ..keyvault import _native_key_id, _storage
         from ..keyvault._identity import resolve_backend
         from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
         from ..keyvault.wrap import get_wrapping_key_public
 
-        backend = resolve_backend(backend)
-        # Probe that the audit-log wrapping key exists and the backend is
-        # usable. get_wrapping_key_public needs no Enclave authorization.
-        get_wrapping_key_public(AUDIT_LOG_KEY_ID, backend=backend)
-        return EncryptedWriter(audit_path, backend=backend)
+        root = _storage.resolve_keyvault_dir(keyvault_home)
+        with _storage.keyvault_lifecycle_lock(root):
+            # The cheap probe above is intentionally unlocked. Re-check after
+            # acquiring the stable lifecycle lock: import may have published a
+            # meta rename and then rolled it back, or reset may have removed the
+            # profile while this factory was resolving the backend.
+            if not keyvault_initialized(keyvault_home):
+                _rotate_encrypted_log_aside(audit_path)
+                return NDJSONWriter(path=audit_path)
+
+            _storage.assert_keyvault_active(root)
+            meta = _storage.load_meta(root)
+            audit_native_key_id = _select_audit_native_key(root, meta)
+
+            backend = resolve_backend(backend)
+            selected_native_key_id = audit_native_key_id or AUDIT_LOG_KEY_ID
+            backend = _native_key_id.backend_for_persisted_key(
+                backend,
+                root,
+                AUDIT_LOG_KEY_ID,
+                selected_native_key_id,
+            )
+            # Probe that the audit-log wrapping key exists and the backend is
+            # usable. get_wrapping_key_public needs no Enclave authorization.
+            get_wrapping_key_public(
+                AUDIT_LOG_KEY_ID,
+                backend=backend,
+                native_key_id=audit_native_key_id,
+            )
+            return EncryptedWriter(
+                audit_path,
+                backend=backend,
+                native_key_id=audit_native_key_id,
+                keyvault_root=root,
+            )
     except Exception as exc:
         _LOG.warning(
             "encrypted audit log unavailable (%s: %s); falling back to plaintext NDJSON",

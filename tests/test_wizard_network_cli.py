@@ -5,19 +5,16 @@ Before PR2 these handlers were ``NotImplementedError`` stubs (see
 to the real surface:
 
 - ``network use <path>``: writes ``plugins.mordred_network.default_path``
-  into ``~/.hermes/config.yaml`` so the next session brings the path
-  up at ``on_session_start``. If a runtime singleton is already
-  registered in *this* process (rare for standalone ``hermes-mordred``
-  invocations but normal inside ``hermes`` itself), also call
-  :func:`api.use` so the switch takes effect immediately.
+  into ``~/.hermes/config.yaml`` for registration-time activation in the next
+  Hermes process. If a runtime singleton is already registered, :func:`api.use`
+  confirms a same-route no-op or refuses a conflicting frozen route with
+  restart guidance.
 - ``network status``: prints in-process runtime status if available,
   else falls back to the configured-but-not-active disk state.
 
-The first invocation backs the acceptance-gate sentence "Manual
-``hermes mordred network use vpn`` switches path within 2s"
-(TODO.md §3 acceptance gate). The cross-process persistence model is
-documented inline; live in-session switching is the path that satisfies
-"within 2s".
+The cross-process persistence model is documented inline. Live in-session
+switching is deliberately unsupported because provider clients snapshot their
+transport when the process starts.
 """
 
 from __future__ import annotations
@@ -28,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.network._exceptions import BringupFailed, UnknownPath
+from mordred_hermes.network._exceptions import BringupFailed, PathSwitchRequiresRestart, UnknownPath
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
@@ -151,6 +148,24 @@ class TestNetworkUseLive:
         )
         rc = cli._handle_network_use(args)
         assert rc != 0
+
+    def test_conflicting_frozen_route_is_saved_and_prints_restart_guidance(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.network import api
+        from mordred_hermes.wizard import cli
+
+        rt = _FakeRuntime()
+        rt.use_raises = PathSwitchRequiresRestart("Restart Hermes to apply the saved route.")
+        api.set_runtime(rt)
+        config = tmp_path / "config.yaml"
+        args = _make_args(path="vpn", config_path=config)
+
+        assert cli._handle_network_use(args) != 0
+        assert "restart hermes" in capsys.readouterr().err.lower()
+        assert "default_path: vpn" in config.read_text(encoding="utf-8")
 
 
 class TestNetworkUsePersistence:
@@ -349,6 +364,7 @@ class TestNetworkStatusLive:
         cli._handle_network_status(args)
         out = capsys.readouterr().out
         assert "drop" in out.lower()
+        assert "restart hermes" in out.lower()
 
 
 class TestNetworkStatusStandalone:

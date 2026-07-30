@@ -35,10 +35,15 @@ from typing import TYPE_CHECKING, Any
 
 from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE
-from .._policy_io import load_policy_mapping, read_policy_mode_fail_closed
+from .._policy_io import read_policy_mode_fail_closed
 from .._provider_identity import canonicalize_provider
-from .._yaml_io import load_yaml_mapping
-from . import enforce, harness_detect, local_adapter
+from .._provider_resolution import (
+    read_auth_active_provider,
+    read_config_model_provider,
+    resolve_disk_provider,
+)
+from .._proxy_bypass import ensure_loopback_proxy_bypass
+from . import auxiliary_guard, enforce, harness_detect, local_adapter
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
 from ._typing import PluginContext
 
@@ -71,8 +76,26 @@ def register(ctx: PluginContext) -> None:
     3. Register the enforce handler on the same hook (after step 2 so
        harness refusals propagate first).
     """
+    # Hermes discovers plugins before constructing AIAgent, while the later
+    # on_session_start/pre_api_request hooks run after its shared httpx client
+    # has already captured ambient proxy settings.  Establish the bypass here
+    # as a defense-in-depth path for embedded callers that do not execute the
+    # wheel's interpreter-startup .pth hook.
+    ensure_loopback_proxy_bypass()
     local_adapter.register_mordred_local(policy_json_path=DEFAULT_POLICY_JSON_PATH)
+    # Hermes 0.19 does not emit ``pre_api_request`` for auxiliary LLM calls.
+    # Install guards at its client-resolver seams before any side task can
+    # construct/cache a client; strict mode verifies installation again at
+    # session start and refuses if upstream drift removed a seam.
+    auxiliary_guard.install(
+        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        audit_path=DEFAULT_AUDIT_PATH,
+    )
+    from ..privacy_check.hooks import check_plugin_integrity
+
+    ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("on_session_start", _on_session_start_harness)
+    ctx.register_hook("on_session_start", _on_session_start_auxiliary)
     ctx.register_hook("on_session_start", _on_session_start_enforce)
     # Codex review P1 round 3: ``on_session_start`` only sees disk-based
     # state, so runtime overrides (``hermes --provider …``,
@@ -91,6 +114,15 @@ def _on_session_start_harness(**_kwargs: Any) -> None:
         policy_mode=policy_mode,
         config_path=DEFAULT_CONFIG_PATH,
         audit=audit,
+    )
+
+
+def _on_session_start_auxiliary(**_kwargs: Any) -> None:
+    """Fail early on declared auxiliary routes that violate strict policy."""
+    auxiliary_guard.validate_session(
+        policy_json_path=DEFAULT_POLICY_JSON_PATH,
+        config_path=DEFAULT_CONFIG_PATH,
+        audit_path=DEFAULT_AUDIT_PATH,
     )
 
 
@@ -205,55 +237,23 @@ def _resolve_active_provider(*, auth_json_path: Path, config_path: Path) -> str 
     caller (enforce) treats ``None`` as the degraded
     ``no_resolved_provider`` path (POLICY.md row 6).
     """
-    configured = _read_config_model_provider(config_path)
-    if configured:
-        return canonicalize_provider(configured)
-    resolved = _read_auth_active_provider(auth_json_path)
+    resolved = resolve_disk_provider(
+        config_path=config_path,
+        auth_json_path=auth_json_path,
+        config_reader=_read_config_model_provider,
+        auth_reader=_read_auth_active_provider,
+    )
     return canonicalize_provider(resolved) if resolved else None
 
 
 def _read_auth_active_provider(auth_json_path: Path) -> str | None:
-    """Read ``active_provider`` from ``auth.json``, normalized to lowercase.
-
-    Codex duplication finding: this used to hand-roll the exact
-    exists()/open/json.load/except(OSError, JSONDecodeError)/warning/
-    isinstance(dict) shape that ``_policy_io.load_policy_mapping`` already
-    centralizes for the other ``policy.json`` readers in this module.
-    ``load_policy_mapping`` collapses a missing, unreadable, malformed, or
-    non-object file to ``{}`` (logging the same "could not read ..."
-    warning on read/parse failure), so ``.get("active_provider")`` reproduces
-    exactly the ``None`` this function returned in all of those cases before
-    falling through to the string normalization below.
-    """
-    value = load_policy_mapping(auth_json_path, log=_LOG).get("active_provider")
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized:
-            return normalized
-    return None
+    """Compatibility seam over the shared persistent-provider reader."""
+    return read_auth_active_provider(auth_json_path, log=_LOG)
 
 
 def _read_config_model_provider(config_path: Path) -> str | None:
-    # Default catch=(OSError, YAMLError) is deliberately narrow (review LOW
-    # finding #3): I/O errors and YAML parse failures route to the degraded
-    # "no resolved provider" path; programming errors still escape.
-    data = load_yaml_mapping(config_path, log=_LOG)
-    model = data.get("model")
-    if not isinstance(model, dict):
-        return None
-    value = model.get("provider")
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    # ``"auto"`` is Hermes' sentinel for "fall back to auth.json / env"
-    # (``runtime_provider.resolve_requested_provider`` returns it when no
-    # concrete provider is set). Treat as no-config so the caller defers
-    # to ``auth.json active_provider``. Lowercase normalization matches
-    # the allowlist normalization in ``enforce._read_policy_settings``
-    # (Codex P2 round 5).
-    if not normalized or normalized == "auto":
-        return None
-    return normalized
+    """Compatibility seam over the shared persistent-provider reader."""
+    return read_config_model_provider(config_path, log=_LOG)
 
 
 def _read_policy_mode(policy_json_path: Path) -> str:
@@ -272,22 +272,16 @@ def _read_policy_mode(policy_json_path: Path) -> str:
 
 @functools.lru_cache(maxsize=1)
 def _build_audit_writer(path: Path) -> Writer:
-    """Construct the encryption-aware audit writer privacy_check uses.
+    """Module-local reference to the process-wide writer for ``path``.
 
-    Codex M2 follow-up: cached so the ``__post_init__`` ``mkdir`` + ``chmod``
-    only fire once per process per path. Module-scoped ``lru_cache`` is
-    safe — a single cached writer instance is appended to sequentially by this
-    plugin's hooks, so it can be shared across every ``on_session_start``
-    invocation.
+    The local ``lru_cache`` avoids repeated registry lookups and preserves the
+    ``cache_clear()`` test API. It does not own writer lifecycle.
 
     Construction is delegated to the shared
     :func:`mordred_hermes._audit_support.build_audit_writer`, which returns the
-    encryption-aware writer ``privacy_check`` uses for ``audit.log`` (an
-    ``EncryptedWriter`` once the keyvault is initialized, else an
-    ``NDJSONWriter``), doing the lazy ``privacy_check`` import so ``register``
-    stays cheap. The module-local ``lru_cache`` keeps this cache -- and the
-    ``cache_clear()`` the tests drive -- separate from ``network``'s
-    identically-pathed writer. The ``TYPE_CHECKING`` import at the top
-    preserves the return type for static checkers.
+    same normalized-path singleton used by privacy_check, network and
+    extension-sign. Clearing this local cache therefore cannot wipe an active
+    MRAL DEK or create a competing writer. The lazy privacy_check import keeps
+    ``register`` cheap.
     """
     return build_audit_writer(path)

@@ -13,9 +13,12 @@ never stops auditing.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
-from mordred_hermes.keyvault import _storage
+import pytest
+
+from mordred_hermes.keyvault import _native_key_id, _storage
 from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter, decrypt_log_file
 from mordred_hermes.privacy_check.audit import NDJSONWriter, make_audit_writer
 from tests._keyvault_fakes import FakeBackend
@@ -58,6 +61,32 @@ class TestMakeAuditWriter:
         backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
         writer = make_audit_writer(tmp_path / "audit.log", keyvault_home=tmp_path, backend=backend)
         assert isinstance(writer, EncryptedWriter)
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            _native_key_id.AUDIT_KEY_FIELD,
+            _native_key_id.PENDING_AUDIT_KEY_FIELD,
+        ],
+    )
+    def test_legacy_main_with_scoped_audit_ownership_falls_back_before_backend_io(
+        self,
+        field: str,
+        tmp_path: Path,
+    ) -> None:
+        _init_meta(tmp_path)
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        meta = _storage.load_meta(root)
+        meta[field] = {"residual": True}
+        _storage.save_meta(root, meta)
+        backend = FakeBackend()
+        backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
+        backend.calls.clear()
+
+        writer = make_audit_writer(tmp_path / "audit.log", keyvault_home=tmp_path, backend=backend)
+
+        assert isinstance(writer, NDJSONWriter)
+        assert backend.calls == []
 
     def test_initialized_without_audit_key_falls_back_to_ndjson(self, tmp_path: Path) -> None:
         _init_meta(tmp_path)
@@ -145,7 +174,12 @@ class TestMakeAuditWriter:
         # original encrypted entry is still decryptable.
         rotated = sorted(p for p in tmp_path.iterdir() if p.name.startswith("audit.log."))
         assert rotated, "the encrypted log must be rotated aside, not corrupted"
-        entries = decrypt_log_file(rotated[-1], backend=enc_backend, audit_sink=lambda e: None)
+        entries = decrypt_log_file(
+            rotated[-1],
+            backend=enc_backend,
+            audit_sink=lambda e: None,
+            keyvault_home=tmp_path,
+        )
         assert entries[0]["event"] == "policy.strict.clearnet"
 
         # The fresh active log is plaintext NDJSON carrying the downgrade marker.
@@ -180,7 +214,12 @@ class TestMakeAuditWriter:
 
         rotated = sorted(p for p in tmp_path.iterdir() if p.name.startswith("audit.log."))
         assert rotated, "the stale encrypted log must be rotated aside"
-        entries = decrypt_log_file(rotated[-1], backend=enc_backend, audit_sink=lambda e: None)
+        entries = decrypt_log_file(
+            rotated[-1],
+            backend=enc_backend,
+            audit_sink=lambda e: None,
+            keyvault_home=tmp_path,
+        )
         assert entries[0]["event"] == "policy.strict.tor"
         assert _DOWNGRADE_REASON not in _audit_reasons(log_path)
 
@@ -193,8 +232,57 @@ class TestMakeAuditWriter:
         writer = make_audit_writer(log_path, keyvault_home=tmp_path, backend=backend)
         writer.append({"event": "policy.strict.clearnet"})
         writer.close()
-        entries = decrypt_log_file(log_path, backend=backend, audit_sink=lambda entry: None)
+        entries = decrypt_log_file(
+            log_path,
+            backend=backend,
+            audit_sink=lambda entry: None,
+            keyvault_home=tmp_path,
+        )
         assert entries[0]["event"] == "policy.strict.clearnet"
+
+    def test_factory_writer_rejects_recreated_keyvault_generation(self, tmp_path: Path) -> None:
+        """A cached DEK must not outlive reset + same-path reinitialization."""
+        _init_meta(tmp_path)
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        backend = FakeBackend()
+        backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
+        log_path = tmp_path / "audit.log"
+        writer = make_audit_writer(log_path, keyvault_home=tmp_path, backend=backend)
+        assert isinstance(writer, EncryptedWriter)
+        writer.append({"event": "old-generation"})
+        size_before = log_path.stat().st_size
+
+        # Keep the old inode alive under a sibling name so the recreated root
+        # is guaranteed to have a different identity (no inode-reuse flake).
+        old_root = root.with_name("keyvault.old-generation")
+        with _storage.keyvault_lifecycle_lock(root):
+            root.rename(old_root)
+            _storage.ensure_layout(root)
+
+        with pytest.raises(OSError, match="keyvault root changed"):
+            writer.append({"event": "must-not-cross-generation"})
+        assert log_path.stat().st_size == size_before
+
+    def test_factory_writer_rejects_rotated_epoch_even_with_same_root_inode(self, tmp_path: Path) -> None:
+        """The random epoch closes the theoretical dev/inode-reuse gap."""
+        _init_meta(tmp_path)
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        backend = FakeBackend()
+        backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
+        log_path = tmp_path / "audit.log"
+        writer = make_audit_writer(log_path, keyvault_home=tmp_path, backend=backend)
+        assert isinstance(writer, EncryptedWriter)
+        writer.append({"event": "old-epoch"})
+        root_identity = (root.lstat().st_dev, root.lstat().st_ino)
+        size_before = log_path.stat().st_size
+
+        with _storage.keyvault_lifecycle_lock(root):
+            _storage.ensure_generation_epoch(root, force_new=True)
+
+        assert (root.lstat().st_dev, root.lstat().st_ino) == root_identity
+        with pytest.raises(OSError, match="keyvault root changed"):
+            writer.append({"event": "must-not-cross-epoch"})
+        assert log_path.stat().st_size == size_before
 
 
 class TestSharedBuildAuditWriter:
@@ -227,3 +315,210 @@ class TestSharedBuildAuditWriter:
         # (audit_path.parent.parent), matching privacy_check — not the ambient
         # default home.
         assert seen == [(audit_path, tmp_path)]
+
+
+def _clear_shared_writer_references() -> None:
+    """Drop plugin-local references before resetting the owning registry."""
+    import mordred_hermes.llm_guard as llm_guard
+    import mordred_hermes.network as network
+    from mordred_hermes import _audit_support
+    from mordred_hermes.keyvault import extension_sign
+    from mordred_hermes.privacy_check import _runtime
+
+    network._build_audit_writer.cache_clear()
+    llm_guard._build_audit_writer.cache_clear()
+    extension_sign._audit_writer.cache_clear()
+    _runtime.reset_state_for_tests()
+    _audit_support._reset_audit_writer_registry_for_tests()
+
+
+@pytest.fixture
+def clean_shared_writer_registry() -> Iterator[None]:
+    """Keep this module's process-wide registry scenarios isolated."""
+    _clear_shared_writer_references()
+    yield
+    _clear_shared_writer_references()
+
+
+def test_shared_builder_normalizes_plaintext_writer_paths(
+    tmp_path: Path,
+    clean_shared_writer_registry: None,
+) -> None:
+    """An uninitialized keyvault also gets one writer per physical path."""
+    from mordred_hermes import _audit_support
+
+    home = tmp_path / "home"
+    log_path = home / "mordred" / "audit.log"
+    alias_path = home / "mordred" / "unused" / ".." / "audit.log"
+
+    first = _audit_support.build_audit_writer(alias_path, keyvault_home=home)
+    second = _audit_support.build_audit_writer(log_path, keyvault_home=home)
+
+    assert isinstance(first, NDJSONWriter)
+    assert first is second
+    first.append({"event": "registry.plain.first"})
+    second.append({"event": "registry.plain.second"})
+    assert [json.loads(line)["event"] for line in log_path.read_text().splitlines()] == [
+        "registry.plain.first",
+        "registry.plain.second",
+    ]
+
+
+def test_shared_builder_preserves_final_symlink_for_writer_refusal(
+    tmp_path: Path,
+    clean_shared_writer_registry: None,
+) -> None:
+    """Registry normalization must not resolve ``audit.log`` to its victim."""
+    from mordred_hermes import _audit_support
+
+    home = tmp_path / "home"
+    mordred_dir = home / "mordred"
+    mordred_dir.mkdir(parents=True)
+    victim = tmp_path / "victim.log"
+    victim.write_text("do-not-touch\n", encoding="utf-8")
+    victim.chmod(0o644)
+    (mordred_dir / "audit.log").symlink_to(victim)
+
+    with pytest.raises(OSError, match="regular file"):
+        _audit_support.build_audit_writer(
+            mordred_dir / "audit.log",
+            keyvault_home=home,
+        )
+
+    assert victim.read_text(encoding="utf-8") == "do-not-touch\n"
+    assert victim.stat().st_mode & 0o777 == 0o644
+
+
+def test_shared_builder_rejects_conflicting_keyvault_homes(
+    tmp_path: Path,
+    clean_shared_writer_registry: None,
+) -> None:
+    """One log path cannot silently inherit whichever keyvault home won first."""
+    from mordred_hermes import _audit_support
+
+    log_path = tmp_path / "audit" / "audit.log"
+    first_home = tmp_path / "home-a"
+    second_home = tmp_path / "home-b"
+
+    first = _audit_support.build_audit_writer(log_path, keyvault_home=first_home)
+    with pytest.raises(ValueError, match="already bound to keyvault home"):
+        _audit_support.build_audit_writer(log_path, keyvault_home=second_home)
+    assert _audit_support.build_audit_writer(log_path, keyvault_home=first_home) is first
+
+
+def test_plaintext_writer_warns_when_in_process_keyvault_init_requires_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    clean_shared_writer_registry: None,
+) -> None:
+    """Live references stay safe, but the plaintext lifetime is never silent."""
+    from mordred_hermes import _audit_support
+    from mordred_hermes.privacy_check import _keyvault_probe
+
+    home = tmp_path / "home"
+    log_path = home / "mordred" / "audit.log"
+    writer = _audit_support.build_audit_writer(log_path, keyvault_home=home)
+    assert isinstance(writer, NDJSONWriter)
+
+    monkeypatch.setattr(_keyvault_probe, "keyvault_initialized", lambda _home: True)
+    with caplog.at_level("WARNING", logger="mordred.audit"):
+        assert _audit_support.build_audit_writer(log_path, keyvault_home=home) is writer
+        assert _audit_support.build_audit_writer(log_path, keyvault_home=home) is writer
+
+    warnings = [record.message for record in caplog.records if "restart Hermes" in record.message]
+    assert len(warnings) == 1
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    restart_entries = [entry for entry in entries if "restart Hermes" in str(entry.get("detail"))]
+    assert len(restart_entries) == 1
+    assert restart_entries[0]["reason"] == "mordred.degraded.audit_encryption_unavailable"
+
+
+def test_all_plugin_factories_share_one_decryptable_mral_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_shared_writer_registry: None,
+) -> None:
+    """Alternating plugin appends must never mix DEKs in one MRAL file.
+
+    This exercises the actual network, llm_guard, privacy_check and
+    extension-sign factory paths. The pre-registry implementation constructed
+    four independent ``EncryptedWriter`` instances; the second constructor
+    rotated the active file, after which the first appended ciphertext using
+    the old DEK/AAD and made authentication fail.
+    """
+    import hermes_constants
+
+    import mordred_hermes.llm_guard as llm_guard
+    import mordred_hermes.network as network
+    from mordred_hermes.keyvault import _identity, extension_sign
+    from mordred_hermes.privacy_check import _runtime
+
+    home = tmp_path / "home"
+    log_path = home / "mordred" / "audit.log"
+    alias_path = home / "mordred" / "unused" / ".." / "audit.log"
+    _init_meta(home)
+    backend = FakeBackend()
+    backend.generate_enclave_key(AUDIT_LOG_KEY_ID)
+
+    monkeypatch.setattr(_identity, "resolve_backend", lambda _candidate: backend)
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
+
+    network_writer = network._build_audit_writer(alias_path)
+    llm_writer = llm_guard._build_audit_writer(log_path)
+    privacy_writer = _runtime.ensure_state(
+        config_path=home / "config.yaml",
+        audit_path=log_path,
+    ).audit
+    extension_writer = extension_sign._audit_writer()
+
+    assert isinstance(network_writer, EncryptedWriter)
+    assert network_writer is llm_writer is privacy_writer is extension_writer
+    assert network_writer.path == log_path.resolve()
+
+    # A local memoizer reset must only drop that module's reference. The
+    # process registry remains authoritative while other plugins are active.
+    network._build_audit_writer.cache_clear()
+    assert network._build_audit_writer(log_path) is network_writer
+
+    # Likewise, policy reload must retain the same active DEK rather than
+    # constructing a writer that rotates the file out from under sibling hooks.
+    _runtime.reload_state()
+    assert (
+        _runtime.ensure_state(
+            config_path=home / "config.yaml",
+            audit_path=log_path,
+        ).audit
+        is network_writer
+    )
+
+    # Force several rotations without writing a 10 MiB fixture. Every active
+    # and rotated MRAL file must authenticate independently.
+    network_writer.rotate_bytes = 700
+    writers = (network_writer, llm_writer, privacy_writer, extension_writer)
+    expected_events: list[str] = []
+    for seq in range(8):
+        event = f"registry.plugin.{seq}"
+        expected_events.append(event)
+        writers[seq % len(writers)].append(
+            {
+                "event": event,
+                "decision": "allow",
+                "detail": "x" * 220,
+            }
+        )
+
+    files = sorted(log_path.parent.glob("audit.log*"))
+    assert log_path in files
+    assert any(path.name.endswith(".gz") for path in files)
+
+    actual_events: list[str] = []
+    for path in files:
+        entries = decrypt_log_file(
+            path,
+            backend=backend,
+            audit_sink=lambda _entry: None,
+            keyvault_home=home,
+        )
+        actual_events.extend(str(entry["event"]) for entry in entries)
+    assert sorted(actual_events) == sorted(expected_events)

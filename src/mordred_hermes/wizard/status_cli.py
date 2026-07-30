@@ -22,12 +22,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from .._home import hermes_home as _hermes_home
+from .._policy_io import (
+    policy_transaction_marker_for_config,
+    policy_transaction_warning,
+)
 from ..keyvault._identity import resolve_root
 from . import _term
 from .encryption_cli import (
@@ -50,6 +55,8 @@ __all__ = [
     "render_text",
     "status",
 ]
+
+_LOG = logging.getLogger("mordred.wizard.status_cli")
 
 #: Resolve the platform hardware-helper binary, or None. Injected in tests.
 HelperFinder = Callable[[str], str | None]
@@ -103,9 +110,12 @@ def _network_state(home: Path) -> tuple[str, bool, str | None, bool | None]:
     """(configured_path, live, active_path, ready) without bringing anything up."""
     from ..network import api
     from ..network._exceptions import MordredNetworkError
-    from .network_cli import _read_default_path_from_config
+    from ..network.settings import read_default_path
 
-    configured = _read_default_path_from_config(home / "config.yaml")
+    # log= must be passed: with ``log=None`` the shared YAML loader swallows
+    # the malformed-config warning entirely and corrupted config.yaml would
+    # silently render as the clearnet default (review 2026-07-29).
+    configured = read_default_path(home / "config.yaml", log=_LOG)
     try:
         live_status = api.status()
     except MordredNetworkError:
@@ -115,19 +125,50 @@ def _network_state(home: Path) -> tuple[str, bool, str | None, bool | None]:
 
 def _keyvault_state(home: Path) -> tuple[bool, int, str]:
     """(initialized, key_count, detail) from meta.json — no backend, no prompt."""
-    from ..keyvault import _storage
+    from ..keyvault import _native_key_id, _storage
 
     root = _storage.resolve_keyvault_dir(home)
     try:
-        meta = _storage.load_meta(root)
+        with _storage.keyvault_read_lock(root) as profile_present:
+            if not profile_present:
+                return False, 0, "not initialised"
+            _storage.assert_keyvault_active(root)
+            meta = _storage.load_meta(root)
     except _storage.KeyvaultCorruptError as exc:
         return False, 0, f"meta.json corrupt — {exc}"
     except OSError as exc:  # KeyvaultPermissionError (bad mode / not a regular file)
         return False, 0, f"keyvault unreadable — {exc}"
     count = len(meta.get("keys", {}))
+    if _native_key_id.PENDING_NATIVE_KEY_FIELD in meta:
+        return False, 0, "incomplete native-key provisioning — reset required"
     if count == 0:
         return False, 0, "not initialised"
-    return True, count, f"{count} key" + ("" if count == 1 else "s")
+    detail = f"{count} key" + ("" if count == 1 else "s")
+    return True, count, f"{detail}{_audit_key_detail(meta)}"
+
+
+def _audit_key_detail(meta: Mapping[str, object]) -> str:
+    """Describe audit-log encryption state, which is otherwise invisible.
+
+    A keyvault whose audit wrapping key never committed still reports as a
+    healthy N-key vault while ``make_audit_writer`` silently falls back to
+    plaintext NDJSON. The stranded pending-without-committed case is worse than
+    "not provisioned": provisioning refuses to adopt a native key of unproven
+    durability, so every retry re-refuses and the audit log stays plaintext
+    permanently. Presence checks only — this must never raise from ``status``.
+    """
+    from ..keyvault import _native_key_id
+
+    committed = _native_key_id.AUDIT_KEY_FIELD in meta
+    pending = _native_key_id.PENDING_AUDIT_KEY_FIELD in meta
+    if committed:
+        return "; audit log encrypted"
+    if pending:
+        return (
+            "; audit-log encryption INCOMPLETE — a previous provisioning attempt was "
+            "interrupted, retries will not recover it, and the audit log stays plaintext"
+        )
+    return "; audit log plaintext (no audit wrapping key)"
 
 
 def _default_helper_finder(platform: str) -> str | None:
@@ -225,7 +266,15 @@ def status(
     on_path: Callable[[str], bool] | None = None,
     helper_finder: HelperFinder | None = None,
 ) -> int:
-    """Print the aggregated report. Always returns 0 (read-only)."""
+    """Print the aggregated report. Always returns 0 (read-only).
+
+    An interrupted policy write is warned about on stderr first: it silently
+    forces every reader closed to strict mode, and ``status`` is where an
+    operator looks when providers suddenly start refusing.
+    """
+    pending = policy_transaction_warning(policy_transaction_marker_for_config(home / "config.yaml"))
+    if pending is not None:
+        _term.emit_warn(pending)
     report = collect(
         home=home,
         root=root,

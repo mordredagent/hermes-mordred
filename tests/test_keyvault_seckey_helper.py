@@ -347,7 +347,7 @@ def test_backend_uses_application_tag(fake_helper: str, monkeypatch: pytest.Monk
         return real_run(binary, payload)
 
     monkeypatch.setattr(_seckey_helper, "_run_helper", _spy)
-    backend = _SecKeyBackend(ops=ops)
+    backend = _SecKeyBackend(ops=ops, sw_ops=None)
     key_id = "tag-derivation-key"
     backend.generate_enclave_key(key_id)
 
@@ -373,6 +373,20 @@ def test_locate_helper_source_finds_build_sources_in_checkout() -> None:
     assert (src / "build.sh").is_file()
     assert (src / "Package.swift").is_file()
     assert (src / "Sources" / "mordred-hermes-sekey" / "main.swift").is_file()
+
+
+def test_swift_helper_uses_fullfsync_for_blob_publication_and_delete() -> None:
+    """macOS ``fsync`` alone does not promise stable-media durability."""
+    src = _seckey_helper._locate_helper_source()
+    assert src is not None
+    source = (src / "Sources" / "mordred-hermes-sekey" / "main.swift").read_text(encoding="utf-8")
+
+    assert "fcntl(fd, F_FULLFSYNC)" in source
+    assert "fullSyncError != ENOTSUP && fullSyncError != EINVAL" in source
+    assert 'try durableSync(staging.fd, description: "blob staging file")' in source
+    assert 'try durableSync(fd, description: "store directory")' in source
+    delete_body = source.split("func deleteKey", 1)[1].split("func ecdh", 1)[0]
+    assert "try syncStoreDirectory()" in delete_body
 
 
 def _make_fake_sekey_source(

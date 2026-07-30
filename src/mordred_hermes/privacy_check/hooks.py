@@ -7,10 +7,11 @@ ignore unknown kwargs.
 
 Return shape contracts (HOOK_PAYLOADS.md §1, §4):
 
-- ``on_session_start`` — return value ignored. ``SystemExit`` propagates
-  past Hermes's ``except Exception`` wrapper (because ``SystemExit``
-  inherits ``BaseException``), letting strict mode actually abort the
-  session. Defense in depth: also poisons the process so any
+- ``on_session_start`` — return value ignored.
+  :class:`MordredIntegrityRefused` propagates past Hermes's
+  ``except Exception`` wrapper, letting strict mode actually abort the
+  session without masquerading as an ordinary process exit. Defense in
+  depth: also poisons the process so any
   subsequent ``pre_tool_call`` blocks unconditionally.
 - ``pre_tool_call`` — return ``None`` to allow, or
   ``{"action": "block", "message": str}`` to block.
@@ -18,36 +19,66 @@ Return shape contracts (HOOK_PAYLOADS.md §1, §4):
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Any
+import sys
+from typing import Any, cast
 
 from .._audit_support import safe_audit_append
+from .._policy_types import VALID_ACTIVE_PATHS, ActivePath
 from . import _runtime
+from ._exceptions import MordredIntegrityRefused
 from .policy import evaluate_pre_tool_call
 
 _LOG = logging.getLogger("mordred.privacy_check")
 
 
-def on_session_start(**kwargs: Any) -> None:
-    """Load policy, detect sibling-disable, emit one-shot degraded markers.
+def _resolve_active_network_path() -> ActivePath | None:
+    """Return a ready Mordred network path, failing closed to ``None``.
 
-    Strict + sibling-disable → audit + poison + ``SystemExit``.
+    The privacy plugin is loaded before the network plugin in the default
+    plugin order, so this lookup must stay lazy. A missing runtime, a route
+    still being brought up, or an invalid future status all map to ``None``;
+    :func:`evaluate_pre_tool_call` deliberately treats that as clearnet under
+    strict policy.
+    """
+    try:
+        from ..network import api
+
+        status = api.status()
+    except Exception:
+        return None
+    if not status.ready or status.active_path not in VALID_ACTIVE_PATHS:
+        return None
+    return cast(ActivePath, status.active_path)
+
+
+def check_plugin_integrity(**kwargs: Any) -> None:
+    """Detect an explicitly disabled Mordred plugin from any live sibling.
+
+    Strict + sibling-disable → audit + poison + integrity refusal.
     Lenient/off + sibling-disable → audit (warn) + log warning, continue.
-    Always emits ``mordred.degraded.no_origin_skill`` once per process
-    (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
+
+    Every runtime plugin registers this same callback. That is deliberate:
+    relying on ``mordred_privacy_check`` alone would make disabling that plugin
+    disable the detector too. As long as at least one runtime sibling remains
+    active, strict mode therefore fails closed.
     """
     state = _runtime.ensure_state()
     disabled = _runtime.find_disabled_siblings(config_path=state.config_path)
+    plugin_manager = kwargs.get("plugin_manager")
+    if plugin_manager is not None:
+        disabled.update(_runtime.find_unloaded_siblings(plugin_manager))
 
     if disabled:
         decision = "block" if state.policy_mode == "strict" else "warn"
         # safe_audit_append, not a bare append: Hermes wraps every hook callback
         # in ``except Exception`` and logs-and-continues. A plain Exception from
         # the audit write (disk full, permission flip, an over-long entry) would
-        # therefore be swallowed BEFORE the SystemExit below ever fires, and the
-        # session would proceed unprotected — a fail-open bypass of the very gate
-        # this hook exists to enforce. The refusal must outrank the audit write,
-        # so audit-side errors are logged and swallowed here instead.
+        # therefore be swallowed BEFORE the refusal below ever fires, and the
+        # session would proceed unprotected — a fail-open bypass of the very
+        # gate this hook exists to enforce. The refusal must outrank the audit
+        # write, so audit-side errors are logged and swallowed here instead.
         safe_audit_append(
             state.audit,
             {
@@ -65,9 +96,30 @@ def on_session_start(**kwargs: Any) -> None:
             )
             _runtime.poison(msg)
             _LOG.error(msg)
-            raise SystemExit(msg)
+            # The refusal is a bare BaseException by design (_exceptions.py)
+            # and typically surfaces in the host as an unhandled-exception
+            # traceback. Print the policy line to stderr first so the
+            # operator always sees the documented strict-policy abort, not
+            # just a crash dump (review 2026-07-29: the pre-refactor
+            # ``SystemExit(msg)`` printed exactly this one line). The print
+            # itself must never outrank the refusal: with a closed or absent
+            # stderr (daemonized gateway, pythonw) it raises an ordinary
+            # Exception that Hermes's hook wrapper would swallow — a
+            # fail-open — so any presenter error is suppressed.
+            with contextlib.suppress(Exception):
+                print(f"mordred: {msg}", file=sys.stderr)
+            raise MordredIntegrityRefused(msg)
         _LOG.warning("Mordred siblings disabled in %s mode: %s", state.policy_mode, sorted(disabled))
 
+
+def on_session_start(**kwargs: Any) -> None:
+    """Run the shared integrity gate and emit one-shot degraded markers.
+
+    Always emits ``mordred.degraded.no_origin_skill`` once per process
+    (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
+    """
+    check_plugin_integrity(**kwargs)
+    state = _runtime.ensure_state()
     if _runtime.claim_no_origin_skill_emit():
         safe_audit_append(
             state.audit,
@@ -111,7 +163,7 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     outcome = evaluate_pre_tool_call(
         policy_mode=state.policy_mode,
         tool_name=tool_name,
-        active_path=None,
+        active_path=_resolve_active_network_path(),
     )
     if outcome.decision == "block":
         safe_audit_append(

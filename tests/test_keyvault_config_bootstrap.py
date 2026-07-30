@@ -16,7 +16,9 @@ init → enroll → hot-path-open → read/write path runs for real on any platf
 
 from __future__ import annotations
 
+import contextlib
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -136,6 +138,47 @@ class TestMaterializeConfig:
         assert (home / "config.yaml").read_bytes() == edited  # disk untouched
         assert _read_vault_config(root, backend, store) == edited  # vault re-synced to disk
 
+    def test_concurrent_create_during_materialize_is_not_overwritten(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A live editor that wins the absent→publish race is authoritative."""
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_config(root, backend, store, _CONFIG)
+        _write_marker(home)
+        plaintext_path = home / "config.yaml"
+        concurrent = b"model: edited-during-startup\napi_key: new-value\n"
+        publish_reached = threading.Barrier(2)
+        writer_finished = threading.Barrier(2)
+        real_publish = _config_bootstrap.publish_plaintext_no_replace
+
+        def paused_publish(path: Path, data: bytes) -> bool:
+            publish_reached.wait(timeout=5)
+            writer_finished.wait(timeout=5)
+            return real_publish(path, data)
+
+        monkeypatch.setattr(_config_bootstrap, "publish_plaintext_no_replace", paused_publish)
+
+        def create_live_config() -> None:
+            publish_reached.wait(timeout=5)
+            plaintext_path.write_bytes(concurrent)
+            writer_finished.wait(timeout=5)
+
+        writer = threading.Thread(target=create_live_config)
+        writer.start()
+        n = _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
+        writer.join(timeout=5)
+
+        assert n == 1
+        assert not writer.is_alive()
+        assert plaintext_path.read_bytes() == concurrent
+        assert stat.S_IMODE(plaintext_path.stat().st_mode) == 0o600
+        assert _read_vault_config(root, backend, store) == concurrent
+        assert not list(home.glob(".config.yaml.mordred-materialize-*"))
+
     def test_disk_present_but_not_enrolled_resyncs_vault(self, tmp_path: Path) -> None:
         """A plaintext on disk with NO enrolled config (e.g. enable was interrupted before
         enroll, or the vault was re-created) is authoritative: it is synced into the vault."""
@@ -150,6 +193,30 @@ class TestMaterializeConfig:
         assert n == 1
         assert (home / "config.yaml").read_bytes() == _CONFIG  # disk kept
         assert _read_vault_config(root, backend, store) == _CONFIG  # now enrolled
+
+    def test_existing_config_symlink_is_rejected_without_reading_target(self, tmp_path: Path) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_config(root, backend, store, _CONFIG)
+        _write_marker(home)
+        outside = tmp_path / "outside-config"
+        outside.write_bytes(b"attacker-controlled: true\n")
+        outside.chmod(0o644)
+        (home / "config.yaml").symlink_to(outside)
+
+        with pytest.raises(OSError, match="symbolic-link"):
+            _config_bootstrap.materialize_config(
+                root=root,
+                home=home,
+                backend=backend,
+                store=store,
+            )
+
+        assert (home / "config.yaml").is_symlink()
+        assert outside.read_bytes() == b"attacker-controlled: true\n"
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+        assert _read_vault_config(root, backend, store) == _CONFIG
 
     def test_marker_without_enrolled_config_fails_closed(self, tmp_path: Path) -> None:
         """marker present but nothing enrolled and no plaintext → a setup error, fail closed.
@@ -264,6 +331,56 @@ class TestResealConfig:
         assert n == 1
         assert not (home / "config.yaml").exists()
         assert _read_vault_config(root, backend, store) == edited  # edits survived into the vault
+
+    def test_concurrent_replacement_after_enroll_is_not_deleted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_vault_with_config(root, backend, store, _CONFIG)
+        _write_marker(home)
+        snapshot = _CONFIG + b"voice: on\n"
+        replacement = snapshot + b"model: concurrently-edited\n"
+        config_path = home / "config.yaml"
+        config_path.write_bytes(snapshot)
+        enroll_finished = threading.Barrier(2)
+        replacement_finished = threading.Barrier(2)
+
+        real_open_vault = vault.open_vault
+
+        @contextlib.contextmanager
+        def racing_open(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            with real_open_vault(*args, **kwargs) as opened:  # type: ignore[arg-type]
+                yield opened
+            enroll_finished.wait(timeout=5)
+            replacement_finished.wait(timeout=5)
+
+        monkeypatch.setattr(vault, "open_vault", racing_open)
+
+        def replace_live_config() -> None:
+            enroll_finished.wait(timeout=5)
+            config_path.write_bytes(replacement)
+            replacement_finished.wait(timeout=5)
+
+        writer = threading.Thread(target=replace_live_config)
+        writer.start()
+        n = _config_bootstrap.reseal_config(root=root, home=home, backend=backend, store=store)
+        writer.join(timeout=5)
+
+        assert n == 0
+        assert not writer.is_alive()
+        assert config_path.read_bytes() == replacement
+        assert not list(home.glob(".config.yaml.mordred-reseal-*"))
+        key_id = anchor_label = _identity.vault_identity(root)
+        with real_open_vault(
+            root,
+            key_id=key_id,
+            backend=backend,
+            store=store,
+            anchor_label=anchor_label,
+        ) as opened:
+            assert opened.read_file("config.yaml") == snapshot
 
 
 class TestInstallConfigDecrypt:

@@ -10,27 +10,58 @@
 >
 > The verification and conclusions in §2–§4 / §7 all target the path that **persists the SE key in the Keychain** (`SecKeyCreateRandomKey` + `kSecAttrIsPermanent`, the `keychain-access-groups` entitlement); this path has been **abandoned**. The shipped live SE path does not use the Keychain at all — the helper `mordred-hermes-sekey` **stores the CryptoKit `SecureEnclave.P256` `dataRepresentation` blob in a plaintext file**. As a result, **ad-hoc `codesign --sign -` alone is enough to drive real hardware SE — no entitlement, no provisioning profile, and no paid Apple Developer Program membership are required** (the `dataRepresentation` blob is device-bound, so it is meaningless on another machine).
 >
-> **Enabling it is a single command**: `hermes mordred keyvault enable-se` invokes `native/sekey-helper/build.sh`, which runs build → ad-hoc signing → install to `~/.local/bin` → SE probe; on success it promotes the keyvault's wrapping key from the software P-256 fallback to **hardware SE** (auto-detected on the Python side by `_seckey_helper._find_helper()`). **Fail-safe**: if the platform guard, build, or probe fails, it stays on the software fallback (the at-rest guarantee never degrades; exit code 1). See [`SECRETS_ENV_ENCRYPTION.md`](./SECRETS_ENV_ENCRYPTION.md) §7 for details; the implementation is in `keyvault/_seckey_helper.py` / `keyvault/_seckey_backend.py` / `wizard/keyvault_cli.py:enable_se`.
+> **Installing it is a single command**: `hermes mordred keyvault enable-se` invokes `native/sekey-helper/build.sh`, which runs build → ad-hoc signing → atomic install to `~/.local/bin` → SE probe. It may also refresh the helper with an existing vault, but installs/probes only; it does **not** create, promote, or migrate a wrapping key. Existing helper-store, legacy PyObjC-Keychain, and software keys stay in their original namespaces and remain reachable through ordered backend fallback. A later fresh `keyvault init` or recovery creates the key through the auto-detected helper. Put `MORDRED_SEKEY_UNATTENDED=1` on that key-creation command when no per-use prompt is required. **Fail-safe**: platform guard, preflight, build, or probe failure exits 1 without claiming activation. See [`SECRETS_ENV_ENCRYPTION.md`](./SECRETS_ENV_ENCRYPTION.md) §7 for details; the implementation is in `keyvault/_seckey_helper.py` / `keyvault/_seckey_backend.py` / `wizard/keyvault_native_cli.py:enable_se`.
 >
-> §2–§8 below are preserved historically as **an investigation record of the Keychain path** (the layered-backend design in §5 and the Linux/Windows TPM discussion remain valid).
+> §2–§8 below are preserved historically as **an investigation record of the
+> Keychain path and design alternatives**. The current disposition of the
+> layered-backend and Linux TPM proposals is recorded immediately below.
+
+---
+
+> **Current backend update (2026-06-09)**: Linux TPM 2.0 is no longer a
+> roadmap-only proposal. The packaged `mordred-hermes-tpmkey` helper,
+> on-chip P-256 ECDH backend, `keyvault enable-tpm` installer, and swtpm CI
+> coverage have shipped. Linux deliberately has no software-key fallback:
+> keyvault operations fail closed when the helper is absent. The
+> `SoftwareBackend on every OS` recommendation preserved below was not adopted
+> as the Linux security floor. Windows-native and external-token backends
+> remain future work.
 
 ---
 
 ## 0. TL;DR
 
-- **The key-management logic is sound**. The keyvault unit tests report **735 passed / 4 skipped** (the 4 skips are live SE integration tests). The cryptography (AES-GCM / P-256 ECDH / HKDF / AES-KW / Argon2id) has been verified against real crypto. **Caveat**: the tests inject a fake `NativeBackend`, so the production `_SecKeyBackend`'s actual SE calls are exercised only by the 4 skipped live integration tests and are **not covered by CI** — "735 passing" does not mean "SE works" (as §2 shows, real SE is a separate matter).
-- **Only the on-device SE round trip on macOS fails to work.** The cause is not a bug in the key-management code but a macOS constraint: **persisting an SE key in the keychain requires code signing plus the `keychain-access-groups` entitlement approved via a provisioning profile**.
-- **Confirmed on real hardware that self-signed builds cannot use SE** (see the matrix in §2). Even a free Apple Development certificate does not work. Making it work requires the full paid set: **Developer ID + entitlement + a properly signed binary + notarization**.
-- **macOS SE is the odd one out.** Linux (TPM 2.0) / Windows (TPM via CNG) / external tokens (YubiKey/PKCS#11) require **no code signing** (they are gated by permissions and a PIN instead).
-- **Side finding (needs a fix)**: the premise behind Phase 4 commit `25e048ab6` ("switch keyvault keychain from DPK to legacy macOS") — that "the legacy keychain needs no entitlement" — is **false on real hardware**. Even a correctly Apple-Dev-signed interpreter hits `-34018` on the legacy path (§3).
-- **Recommendation**: a layered backend (§5). **Default = SoftwareBackend (passphrase + Argon2id, all OSes, no signing required)**, with **an external token (E)** as an optional hardware-protection add-on, and SE (A) / TPM as optional extras where the environment allows. SE is structurally a poor fit for Mordred, which is a CLI tool (§4.3).
+- **macOS**: the shipped CryptoKit file-store helper uses hardware Secure
+  Enclave with ad-hoc signing; no paid Developer ID or Keychain persistence
+  entitlement is required. When SE is unavailable, macOS can use a software
+  P-256 key in the login Keychain.
+- **Linux**: TPM 2.0 support is MVP-complete through the packaged helper.
+  It is machine-bound, uses on-chip ECDH, and fails closed without the helper;
+  there is no Linux software fallback.
+- **Windows / external tokens**: DPAPI/CNG TPM and PKCS#11/FIDO2 backends remain
+  future work.
+- **Historical scope**: §2-§4 preserve the investigation that disproved the
+  original Keychain-persistence approach. §5-§7 preserve the broader layered
+  backend proposal; its all-OS `SoftwareBackend` default was not adopted.
 
 ## 1. Summary of the Current State (v1)
 
-- `mordred_keyvault` is **limited to macOS Apple Silicon** ([`SPEC.md`](./SPEC.md) §Platform Support). `crypto.py` forbids import on Linux/WSL2 and is gated behind the `[macos]` extras.
-- Key hierarchy: the actual data is encrypted with a **DEK (AES-256-GCM)**, and the DEK is wrapped by a **wrapping key (P-256)**. The private half of the wrapping key lives in the SE. Wrapping happens offline (public key + software ephemeral key), and only unwrapping requires SE authorization (`SecKeyCopyKeyExchangeResult` → Touch ID).
-- The backend is already abstracted behind the **`NativeBackend` Protocol** (`wrap.py`, 4 methods: `generate_enclave_key` / `get_enclave_public_key` / `delete_enclave_key` / `enclave_ecdh`). The production implementation is `_SecKeyBackend` (`Security.framework` accessed via pyobjc + ctypes).
+- `mordred_keyvault` supports macOS and Linux key custody. macOS selects
+  Secure Enclave when available and otherwise uses its login-Keychain
+  software fallback. Linux selects the TPM helper and raises
+  `WrapNativeUnavailable` when it is missing.
+- Key hierarchy: the actual data is encrypted with a **DEK
+  (AES-256-GCM)**, and the DEK is wrapped by a **wrapping key (P-256)**.
+  Wrapping happens offline with the public key; unwrapping delegates ECDH to
+  the selected private-key backend.
+- The backend is abstracted behind the **`NativeBackend` Protocol** (`wrap.py`,
+  4 methods: `generate_enclave_key` / `get_enclave_public_key` /
+  `delete_enclave_key` / `enclave_ecdh`). `_SecKeyBackend` dispatches to the
+  macOS helper/Keychain implementation or the Linux TPM helper.
 - This Protocol is **the seam that this document's backend-swapping design plugs into**.
+- Transparent startup `.env`/config injection and the direct
+  `SCNetworkReachability` blackout fallback remain macOS-only integration
+  layers; that does not make the underlying Linux TPM keyvault unavailable.
 
 ## 2. On-Device Verification: Does SE Work With Self-Signing? (2026-05-25, Apple Silicon)
 
@@ -82,6 +113,12 @@ The full set of requirements for SE persistence:
 
 ## 5. Proposed Architecture: Layered Backend ("G")
 
+> **Historical proposal status**: this selector was not implemented as
+> written. In particular, Mordred does not silently fall back to an all-OS
+> software backend. Current production selection is Secure Enclave plus a
+> macOS-only login-Keychain fallback on macOS, and fail-closed TPM 2.0 on
+> Linux.
+
 Using the `NativeBackend` Protocol as a common plug-in point, the actual key-protection implementation is swapped based on environment and policy.
 
 ```
@@ -113,19 +150,49 @@ Using the `NativeBackend` Protocol as a common plug-in point, the actual key-pro
 ### 5.2 The Selector and the "Key ⇄ Backend Binding" (the Most Important Invariant)
 - `policy.keyvault.backend = auto | software | secure_enclave | token | tpm`. `auto` decides based on capability-probe order (token > OS hardware > software), and **the selection result is explicitly surfaced to the user and recorded**.
 - **A key is bound to the backend it was generated with.** A DEK wrapped by SE cannot be unwrapped by software (the key material is different). A small **keystore index** (`key_id → {backend, pubkey, created_at}`) is kept under `~/.hermes/mordred/keyvault/`, and unwrap requests are routed to the correct backend. The wire format (MRKW blob) requires no changes.
+
+### Logical IDs and profile-scoped native IDs
+
+`key_id` in MRKW/MREN, backups, and audit events is the portable **logical**
+identifier. New `meta.json` rows also carry a deterministic `native_key_id`
+derived from the absolute keyvault root and logical id. Only this physical id
+is sent to SE/TPM/software native operations, preventing two `HERMES_HOME`
+profiles from colliding in a machine-global Keychain namespace. Explicit
+`home=` API calls bind file-backed helpers to that root's `sekey/` or `tpm/`
+store; an operator-set `MORDRED_*KEY_STORE` remains authoritative.
+
+Rows written before this split have no `native_key_id`. They remain readable
+through their legacy logical native id, but automatic reset/rollback never
+deletes that global tag because exclusive profile ownership cannot be proven.
+For these legacy rows only, helper-backed reads try the explicit profile's
+bound store first, then the caller backend's historical ambient
+`HERMES_HOME` store on `WrapKeyNotFound`. Current scoped ids never take that
+fallback. Operators recovering a non-ambient old profile can point directly at
+its helper blobs with the authoritative `MORDRED_SEKEY_STORE` (macOS) or
+`MORDRED_TPMKEY_STORE` (Linux) override for the export, then remove the
+override before recovery.
+The supported migration is: verify/export a backup, reset the old profile, then
+recover into the fresh profile. Recovery preserves the backup's logical
+`key_id` while generating a new profile-scoped physical key. A durable
+`pending_native_key` journal is written before generation so a post-publication
+helper failure can be cleaned up safely by `keyvault reset`.
 - **No silent fallback.** If an attempt is made to open an SE-generated key in an unsigned environment, it must **fail with an explicit error** rather than silently falling back to software (protection-level degradation must never be hidden).
 
 ### 5.3 Migration (Optional)
 Migrating between backends = generate a wrapping key with the new backend → for each DEK, {unwrap with the old backend (authorized) → wrap with the new backend's public key (offline)} → update the index → delete the old key. The existing `import_backup` re-wrap flow in `api.py` can be reused.
 
-### 5.4 Phases
-| Phase | Content | Effect |
-| --- | --- | --- |
-| **P1 (top priority)** | `SoftwareBackend` + selector + keystore index + wiring into `register()` | **keyvault works on all OSes** (removes the current macOS-only limitation) |
-| P2 | With `auto`, use `SecureEnclaveBackend` on signed macOS (assuming the helper from §4.2) | Optionally offers hardware protection on Mac |
-| P3 | `HardwareTokenBackend` (PKCS#11) + `TpmBackend` + migration | Hardware protection independent of Apple |
+### 5.4 Proposed phases and actual disposition
 
-This is consistent with `crypto.py`'s "Tier 2/3 fallback (TPM/DPAPI) is v2-OS2" comment and [`ROADMAP.md`](./ROADMAP.md) v2-OS2 (backend abstraction). P1 pulls that roadmap item forward.
+| Phase | Content | Disposition |
+| --- | --- | --- |
+| Proposed P1 | All-OS `SoftwareBackend` + selector + keystore index | **Not adopted** as the Linux security floor |
+| macOS helper | CryptoKit Secure Enclave file-store helper + login-Keychain fallback | **Shipped** |
+| Linux TPM | Packaged helper + on-chip ECDH + installer/CI | **Shipped 2026-06-09** |
+| Windows / external token | CNG/DPAPI or PKCS#11/FIDO2 + migration | Deferred |
+
+See [`SPEC.md`](./SPEC.md) §Platform Support for the current support matrix
+and [`ROADMAP.md`](./ROADMAP.md) v2-OS2 for the remaining Windows/external
+backend work.
 
 ## 6. Security Assessment (by Threat)
 
@@ -142,12 +209,16 @@ This is consistent with `crypto.py`'s "Tier 2/3 fallback (TPM/DPAPI) is v2-OS2" 
 - SoftwareBackend provides **security on par with `age`, password managers, and FileVault against the "threats most people actually face" — loss, theft, leaks, and at-rest exposure**. Its weak points are two-fold: "malware on a running device" and "a weak passphrase."
 - The linchpin of its security is **(1) enforcing a strong passphrase and (2) an uncompromised device**. Hardening measures: strengthen Argon2id (e.g., 256 MiB / t≥3), `mlock` + zeroize the decrypted key, rate-limit and audit unwrap operations, and optionally add the OS keychain as a second layer.
 
-## 7. Recommendation and Decisions
+## 7. Historical Recommendation and Current Decisions
 
-1. **Make P1 (SoftwareBackend) the default** — this delivers the value of "working on all OSes right now," regardless of whether SE ever gets fixed. It is the most natural fit for a CLI tool.
+1. ~~**Make P1 (SoftwareBackend) the default**~~ — historical proposal, not
+   adopted. Software fallback is macOS-only; Linux fails closed on its TPM
+   backend.
 2. For users who want hardware protection, offer **E (external token)** — no Apple involvement, no profile, no signing needed, works on all OSes, and is best from an anti-surveillance standpoint.
-3. **SE (A) remains an optional extra** — build the signed-helper once real demand is confirmed, on the assumption of a paid Developer ID. Don't force a fix before then, and go in aware of the costs of Apple dependence (de-anonymization, a revocation switch, notarization).
-4. On Linux/Windows, **TPM** can provide hardware protection without signing (still to be implemented). There is no signing hell like macOS SE's.
+3. ~~**SE (A) remains an unimplemented signed-helper option**~~ — superseded:
+   the CryptoKit helper is shipped and works with ad-hoc signing.
+4. **Linux TPM is shipped** without a code-signing requirement. Windows TPM /
+   DPAPI and external-token support remain to be implemented.
 
 ## 8. Open Questions / Next Actions
 

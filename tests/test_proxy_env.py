@@ -280,40 +280,39 @@ class TestSocks5hLibraryAllowlist:
 
 
 # --------------------------------------------------------------------------- #
-# v2-N1 foundation: per-context Tor circuit isolation via SOCKS auth          #
+# Optional process-scoped Tor circuit token via SOCKS auth                    #
 # --------------------------------------------------------------------------- #
 
 
-class TestStreamIsolation:
-    """Per-context Tor circuit isolation (v2-N1 foundation).
+class TestProcessScopedIsolationToken:
+    """Pure proxy rendering for an optional process-scoped Tor token.
 
     Tor's ``IsolateSOCKSAuth`` (a ``SOCKSPort`` flag, made explicit in
     ``render_torrc``) maps each distinct SOCKS username/password pair to a
-    separate circuit. ``desired_env`` injects the caller-supplied
-    ``isolation_token`` as that credential so distinct sessions / providers
-    ride distinct exit circuits and cannot be correlated onto one circuit.
+    separate circuit pool. ``desired_env`` renders a caller-supplied
+    ``isolation_token`` as that credential; the runtime selects at most one
+    token before activation and keeps it for the lifetime of the process.
 
-    Per-*skill* isolation needs ``origin_skill`` in the ``pre_tool_call``
-    payload (absent in v1 — SPEC §"Path mismatch for parallel tool_calls")
-    and is deferred to v2-H2; this foundation isolates on whatever token the
-    runtime supplies.
+    Per-session isolation is deferred because provider clients snapshot their
+    proxy transport. Per-skill isolation additionally needs ``origin_skill``
+    in the ``pre_tool_call`` payload (v2-H2).
     """
 
     def test_token_injects_socks_userinfo(self) -> None:
         from mordred_hermes.network import proxy_env
 
-        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
-        assert env["HTTPS_PROXY"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
-        assert env["HTTP_PROXY"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
-        assert env["ALL_PROXY"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="process-a")
+        assert env["HTTPS_PROXY"] == "socks5h://process-a:process-a@127.0.0.1:9050"
+        assert env["HTTP_PROXY"] == "socks5h://process-a:process-a@127.0.0.1:9050"
+        assert env["ALL_PROXY"] == "socks5h://process-a:process-a@127.0.0.1:9050"
 
     def test_token_injects_lowercase_keys_too(self) -> None:
         """Codex round 5 P1 parity: the lowercase keys must carry the credential too."""
         from mordred_hermes.network import proxy_env
 
-        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
-        assert env["https_proxy"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
-        assert env["all_proxy"] == "socks5h://sess-1:sess-1@127.0.0.1:9050"
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="process-a")
+        assert env["https_proxy"] == "socks5h://process-a:process-a@127.0.0.1:9050"
+        assert env["all_proxy"] == "socks5h://process-a:process-a@127.0.0.1:9050"
 
     def test_none_token_leaves_url_unchanged(self) -> None:
         """Backward compat: no token → the bare socks5h URL (no userinfo)."""
@@ -338,8 +337,7 @@ class TestStreamIsolation:
         assert "@" not in env["HTTPS_PROXY"]
 
     def test_distinct_tokens_yield_distinct_userinfo(self) -> None:
-        """The isolation property: different tokens → different credentials →
-        (via IsolateSOCKSAuth) different circuits."""
+        """Different process tokens render different Tor credentials."""
         from mordred_hermes.network import proxy_env
 
         a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="alpha")
@@ -347,11 +345,11 @@ class TestStreamIsolation:
         assert a["HTTPS_PROXY"] != b["HTTPS_PROXY"]
 
     def test_same_token_is_stable(self) -> None:
-        """The same token must map to the same credential — circuit reuse within a context."""
+        """The same process token must render a stable credential."""
         from mordred_hermes.network import proxy_env
 
-        a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
-        b = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        a = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="process-a")
+        b = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="process-a")
         assert a["HTTPS_PROXY"] == b["HTTPS_PROXY"]
 
     def test_token_is_percent_encoded(self) -> None:
@@ -381,13 +379,13 @@ class TestStreamIsolation:
         from mordred_hermes.network import proxy_env
 
         for path in ("clearnet", "vpn"):
-            env = proxy_env.desired_env(path=path, isolation_token="sess-1")  # type: ignore[arg-type]
+            env = proxy_env.desired_env(path=path, isolation_token="process-a")  # type: ignore[arg-type]
             assert "HTTPS_PROXY" not in env
 
     def test_token_does_not_affect_no_proxy(self) -> None:
         from mordred_hermes.network import proxy_env
 
-        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="sess-1")
+        env = proxy_env.desired_env(path="tor", tor_socks_port=9050, isolation_token="process-a")
         np = env["NO_PROXY"].split(",")
         assert "localhost" in np
         assert "127.0.0.1" in np

@@ -88,6 +88,7 @@ class TestPromptAllow:
             active_provider="openai",
             audit=audit,
             prompt_fn=spy,
+            runtime_base_url="https://api.openai.com/v1",
         )
 
         assert spy.calls == ["openai"]
@@ -109,10 +110,35 @@ class TestPromptAllow:
                 active_provider="openai",
                 audit=audit,
                 prompt_fn=spy,
+                runtime_base_url="https://api.openai.com/v1",
             )
 
         assert spy.calls == ["openai"]  # asked exactly once
         assert len(audit.entries) == 1  # cached allows stay silent
+
+    def test_prompt_audit_sanitizes_runtime_endpoint(self) -> None:
+        audit = _FakeAuditWriter()
+
+        assert enforce._resolve_cloud_attempt(
+            action="prompt-once",
+            provider_id="openai",
+            audit=audit,
+            prompt_fn=lambda _provider: True,
+            route_key="redaction-test",
+            runtime_base_url=(
+                "https://audit-user:password-secret@api.openai.com/v1?api_key=query-secret#fragment-secret"
+            ),
+        )
+
+        rendered = json.dumps(audit.entries)
+        assert audit.entries[0]["runtime_base_url"] == "https://api.openai.com"
+        for secret in (
+            "audit-user",
+            "password-secret",
+            "query-secret",
+            "fragment-secret",
+        ):
+            assert secret not in rendered
 
 
 class TestPromptDeny:
@@ -128,6 +154,7 @@ class TestPromptDeny:
                 active_provider="openai",
                 audit=audit,
                 prompt_fn=spy,
+                runtime_base_url="https://api.openai.com/v1",
             )
 
         assert spy.calls == ["openai"]
@@ -152,6 +179,7 @@ class TestPromptDeny:
                     active_provider="openai",
                     audit=audit,
                     prompt_fn=spy,
+                    runtime_base_url="https://api.openai.com/v1",
                 )
 
         assert spy.calls == ["openai"]  # asked once; second call used the cache
@@ -174,6 +202,7 @@ class TestPromptUnavailable:
                 active_provider="openai",
                 audit=audit,
                 prompt_fn=unavailable,
+                runtime_base_url="https://api.openai.com/v1",
             )
 
         deny = audit.entries[0]
@@ -188,6 +217,7 @@ class TestPromptUnavailable:
             active_provider="openai",
             audit=_FakeAuditWriter(),
             prompt_fn=allow_spy,
+            runtime_base_url="https://api.openai.com/v1",
         )
         assert allow_spy.calls == ["openai"]
 
@@ -203,6 +233,7 @@ class TestPerProviderIsolation:
             active_provider="openai",
             audit=_FakeAuditWriter(),
             prompt_fn=spy,
+            runtime_base_url="https://api.openai.com/v1",
         )
         enforce.check_runtime_provider(
             policy_mode="strict",
@@ -210,6 +241,7 @@ class TestPerProviderIsolation:
             active_provider="anthropic",
             audit=_FakeAuditWriter(),
             prompt_fn=spy,
+            runtime_base_url="https://api.anthropic.com",
         )
         assert spy.calls == ["openai", "anthropic"]
 
@@ -226,6 +258,7 @@ class TestAlwaysBlockUnchanged:
                 active_provider="openai",
                 audit=audit,
                 prompt_fn=_explode,  # must not be called under always-block
+                runtime_base_url="https://api.openai.com/v1",
             )
 
         reasons = [e["reason"] for e in audit.entries]
@@ -246,8 +279,30 @@ class TestAlwaysBlockUnchanged:
             active_provider="openai",
             audit=audit,
             prompt_fn=_explode,  # allowlisted → never reaches the prompt branch
+            runtime_base_url="https://api.openai.com/v1",
         )
         assert audit.entries == []
+
+    def test_endpoint_mismatch_refuses_before_prompt_even_when_prompt_would_allow(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        cfg = _write_policy_json(tmp_path)
+        spy = _PromptSpy(True)
+        audit = _FakeAuditWriter()
+
+        with pytest.raises(MordredSessionRefused, match="not a provider-owned endpoint"):
+            enforce.check_runtime_provider(
+                policy_mode="strict",
+                policy_json_path=cfg,
+                active_provider="openai",
+                audit=audit,
+                prompt_fn=spy,
+                runtime_base_url="https://collector.example/v1",
+            )
+
+        assert spy.calls == []
+        assert audit.entries[0]["reason"] == "policy.strict.cloud_endpoint_mismatch"
 
 
 class TestDefaultPrompt:

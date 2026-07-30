@@ -71,6 +71,21 @@ class TestProbeSuccess:
         probe(endpoint="http://localhost:1234/v1/", transport=httpx.MockTransport(handler))
         assert seen == ["http://localhost:1234/v1/models"]
 
+    def test_probe_drops_query_and_fragment_credentials(self) -> None:
+        from mordred_hermes.llm_guard.health import probe
+
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(200, json={"data": []})
+
+        probe(
+            endpoint="http://localhost:1234/v1?api_key=query-secret#fragment-secret",
+            transport=httpx.MockTransport(handler),
+        )
+        assert seen == ["http://localhost:1234/v1/models"]
+
 
 class TestProbeFailure:
     def test_500_raises_unreachable(self) -> None:
@@ -87,7 +102,7 @@ class TestProbeFailure:
         from mordred_hermes.llm_guard._exceptions import MordredLocalUnreachable
         from mordred_hermes.llm_guard.health import probe
 
-        with pytest.raises(MordredLocalUnreachable, match=r"connection refused|ConnectError"):
+        with pytest.raises(MordredLocalUnreachable, match="ConnectError"):
             probe(
                 endpoint="http://localhost:1234/v1",
                 transport=httpx.MockTransport(_connect_error_handler),
@@ -144,3 +159,20 @@ class TestProbeContract:
             transport=httpx.MockTransport(_success_handler),
             timeout=1.0,
         )
+
+    def test_probe_never_trusts_ambient_proxy_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.llm_guard import health
+
+        seen: dict[str, object] = {}
+        real_client = health.httpx.Client
+
+        def client(**kwargs):
+            seen.update(kwargs)
+            return real_client(**kwargs)
+
+        monkeypatch.setattr(health.httpx, "Client", client)
+        health.probe(
+            endpoint="http://127.0.0.1:1234/v1",
+            transport=httpx.MockTransport(_success_handler),
+        )
+        assert seen["trust_env"] is False

@@ -21,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..keyvault import _storage
+from ..keyvault import _native_key_id, _storage
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io
 
@@ -198,16 +198,32 @@ class TerminalSeedSurface:
 
 
 def _refuse_if_initialised(home: Path | None) -> int | None:
-    """Pre-init guard. Returns 1 (after printing to stderr) when the keyvault
-    meta is corrupt or already holds a key (v1 is single-key); None to proceed.
-    """
+    """Reject corrupt, initialized, or residual native-ownership metadata."""
     root = _storage.resolve_keyvault_dir(home)
     try:
+        _storage.assert_keyvault_active(root)
         existing_meta = _storage.load_meta(root)
+    except _storage.KeyvaultResetInProgressError as exc:
+        _term.emit_error(
+            f"Keyvault reset is incomplete ({exc}). Run `hermes-mordred keyvault reset` before starting a new ceremony."
+        )
+        return 1
     except _storage.KeyvaultCorruptError as exc:
         _term.emit_error(f"Keyvault meta.json is corrupt — repair or remove it before init: {exc}")
         return 1
-    if existing_meta.get("keys"):
+    if _native_key_id.PENDING_NATIVE_KEY_FIELD in existing_meta:
+        _term.emit_error(
+            "Keyvault has an incomplete native-key provisioning journal. "
+            "Run `hermes-mordred keyvault reset` before starting a new ceremony."
+        )
+        return 1
+    if _native_key_id.has_native_key_ownership_state(existing_meta):
+        if not existing_meta.get("keys"):
+            _term.emit_error(
+                "Keyvault has residual native-key ownership metadata. "
+                "Run `hermes-mordred keyvault reset` before starting a new ceremony."
+            )
+            return 1
         _term.emit_error(
             "Keyvault already initialised — v1 keyvault is single-key. To restore a "
             "different key, use `hermes-mordred keyvault recover`."
@@ -488,21 +504,220 @@ def _confirm_or_refuse(
         return None
 
 
-def _provision_audit_log_key(backend: NativeBackend) -> None:
-    """Best-effort: provision the audit-log wrapping key so privacy_check's
-    encrypted-audit factory engages next session. A failure degrades to a printed
-    note — the keyvault is already durably initialised.
-    """
-    from ..keyvault._exceptions import WrapError
-    from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
-    from ..keyvault.wrap import generate_wrapping_key
+def _audit_key_state(
+    root: Path,
+    meta: dict[str, Any],
+    logical_key_id: str,
+) -> tuple[str | None, str | None]:
+    """Return validated ``(pending, committed)`` audit physical ids."""
 
     try:
-        generate_wrapping_key(AUDIT_LOG_KEY_ID, backend=backend)
-    except WrapError as exc:
+        pending = _native_key_id.pending_audit_key_from_meta(root, meta, logical_key_id)
+        committed = _native_key_id.committed_audit_key_from_meta(root, meta, logical_key_id)
+    except _native_key_id.NativeKeyIdMismatch as exc:
+        raise _storage.KeyvaultCorruptError(str(exc)) from None
+    if pending is not None and committed is not None and pending != committed:
+        raise _storage.KeyvaultCorruptError("audit-key pending and committed ownership records disagree")
+    return pending, committed
+
+
+def _require_scoped_main_key_for_audit(root: Path, meta: dict[str, Any]) -> None:
+    """Require one fully committed profile-scoped main key."""
+
+    from ..keyvault import _secret_ops
+
+    rows = list(meta["keys"].items())
+    if len(rows) != 1 or not isinstance(rows[0][1], dict):
+        raise _storage.KeyvaultCorruptError("audit-key provisioning requires one committed main key")
+    key_id_hash, row = rows[0]
+    key_id = row.get("key_id")
+    if not isinstance(key_id_hash, str) or not isinstance(key_id, str):
+        raise _storage.KeyvaultCorruptError("main key metadata has no valid logical key id")
+    if _native_key_id.NATIVE_KEY_ID_FIELD not in row:
+        raise _storage.KeyvaultCorruptError(
+            "legacy keyvault must be migrated by backup/reset/recover before scoped audit provisioning"
+        )
+    # `_assert_key_committed` validates either the current canonical scoped id
+    # or the exact-abspath scoped id written before path canonicalization.
+    # Both are profile-owned; only a row with no physical-id field is legacy.
+    _secret_ops._assert_key_committed(root, key_id, key_id_hash)
+
+
+def _rollback_new_audit_key(root: Path, backend: NativeBackend, native_key_id: str) -> None:
+    """Best-effort rollback, retaining pending if native deletion fails."""
+
+    try:
+        backend.delete_enclave_key(native_key_id)
+    except Exception:
+        return
+    try:
+        repaired = _storage.load_meta(root)
+        repaired.pop(_native_key_id.AUDIT_KEY_FIELD, None)
+        repaired.pop(_native_key_id.PENDING_AUDIT_KEY_FIELD, None)
+        _storage.save_meta(root, repaired)
+    except Exception:
+        # A remaining pending record keeps the factory fail-closed. If
+        # cleanup published then reported an fsync error, the native key is
+        # already gone and an empty visible record is safe as well.
+        return
+
+
+def _clear_pending_audit_key_after_commit(
+    root: Path,
+    *,
+    logical_key_id: str,
+    native_key_id: str,
+) -> None:
+    """Second-phase cleanup; never roll back a durably-owned audit key."""
+
+    meta = _storage.load_meta(root)
+    pending, committed = _audit_key_state(root, meta, logical_key_id)
+    if pending != native_key_id or committed != native_key_id:
+        raise _storage.KeyvaultCorruptError("audit-key ownership commit is incomplete")
+    meta.pop(_native_key_id.PENDING_AUDIT_KEY_FIELD)
+    try:
+        _storage.save_meta(root, meta)
+    except BaseException as exc:
+        try:
+            visible = _storage.load_meta(root)
+            visible_pending, visible_committed = _audit_key_state(root, visible, logical_key_id)
+        except Exception as visible_exc:
+            exc.add_note(f"audit pending-key cleanup left unreadable metadata: {visible_exc}")
+            raise exc from visible_exc
+        if visible_pending is not None or visible_committed != native_key_id:
+            exc.add_note("audit pending-key cleanup did not reach a committed visible state")
+            raise exc
+        if not isinstance(exc, Exception):
+            raise exc
+        _term.emit_warn(
+            "audit-log key metadata reported a durability error after publishing "
+            "a complete committed record; continuing with the verified visible state."
+        )
+
+
+def _commit_pending_audit_key(
+    root: Path,
+    *,
+    backend: NativeBackend,
+    logical_key_id: str,
+    native_key_id: str,
+    allow_duplicate_adoption: bool,
+) -> None:
+    """Generate/adopt the exact pending key and durably commit ownership."""
+
+    from ..keyvault._exceptions import WrapKeyAlreadyExists
+    from ..keyvault.wrap import generate_wrapping_key, get_wrapping_key_public
+
+    generated = False
+    try:
+        try:
+            generate_wrapping_key(
+                logical_key_id,
+                backend=backend,
+                native_key_id=native_key_id,
+            )
+            generated = True
+        except WrapKeyAlreadyExists:
+            # The durable exact pending record proves this profile owns the
+            # deterministic scoped selector. Adoption is still limited to a
+            # key known to predate a freshly-published pending record, or a
+            # row+pending retry proving generation previously succeeded. A
+            # pending-only retry after a generation durability error remains
+            # fail-closed: public visibility alone is not durability.
+            if not allow_duplicate_adoption:
+                # ...but refusing alone left the profile permanently plaintext:
+                # every later retry re-derives the same scoped selector, hits the
+                # same duplicate, and re-refuses. Discard the key of unproven
+                # durability instead of adopting it — strictly stronger than
+                # adoption, and safe because no ciphertext can depend on it
+                # (``make_audit_writer`` requires COMMITTED ownership, which by
+                # definition was never published on this path). The next attempt
+                # then starts from a clean, fresh provisioning.
+                _rollback_new_audit_key(root, backend, native_key_id)
+                raise
+            get_wrapping_key_public(
+                logical_key_id,
+                backend=backend,
+                native_key_id=native_key_id,
+            )
+
+        ownership_meta = _storage.load_meta(root)
+        ownership_pending, ownership_committed = _audit_key_state(root, ownership_meta, logical_key_id)
+        if ownership_pending != native_key_id:
+            raise _storage.KeyvaultCorruptError("audit-key pending ownership changed during provisioning")
+        if ownership_committed is None:
+            _native_key_id.add_committed_audit_key(
+                root,
+                ownership_meta,
+                logical_key_id,
+                native_key_id,
+            )
+        elif ownership_committed != native_key_id:
+            raise _storage.KeyvaultCorruptError("audit-key committed ownership changed during provisioning")
+        # First-phase ownership commit retains pending.
+        _storage.save_meta(root, ownership_meta)
+    except BaseException:
+        if generated:
+            _rollback_new_audit_key(root, backend, native_key_id)
+        raise
+
+
+def _provision_audit_log_key_locked(root: Path, backend: NativeBackend, logical_key_id: str) -> None:
+    """Run resumable two-phase audit-key provisioning under keyvault_lock."""
+
+    meta = _storage.load_meta(root)
+    _require_scoped_main_key_for_audit(root, meta)
+    native_key_id = _native_key_id.scoped_native_key_id(root, logical_key_id)
+    pending, committed = _audit_key_state(root, meta, logical_key_id)
+    if committed is not None and pending is None:
+        return
+    pending_was_present = pending is not None
+    if pending is None:
+        pending = _native_key_id.add_pending_audit_key(root, meta, logical_key_id)
+        _storage.save_meta(root, meta)
+    if pending != native_key_id:
+        raise _storage.KeyvaultCorruptError("pending audit key does not belong to this profile")
+    _commit_pending_audit_key(
+        root,
+        backend=backend,
+        logical_key_id=logical_key_id,
+        native_key_id=native_key_id,
+        allow_duplicate_adoption=not pending_was_present or committed is not None,
+    )
+    _clear_pending_audit_key_after_commit(
+        root,
+        logical_key_id=logical_key_id,
+        native_key_id=native_key_id,
+    )
+
+
+def _provision_audit_log_key(
+    backend: NativeBackend,
+    *,
+    home: Path | None,
+) -> None:
+    """Best-effort provision a durably-recorded audit wrapping key."""
+
+    from ..keyvault._exceptions import WrapError
+    from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+    root = _storage.resolve_keyvault_dir(home)
+    backend = _native_key_id.bind_backend_to_root(backend, root)
+    try:
+        # The lock joins reset's stable lifecycle lock and makes every pending
+        # / ownership transition authoritative against concurrent reset.
+        with _storage.keyvault_lock(root):
+            _provision_audit_log_key_locked(root, backend, AUDIT_LOG_KEY_ID)
+    except (WrapError, OSError, _storage.KeyvaultCorruptError, _native_key_id.NativeKeyIdMismatch) as exc:
+        # Name the persistent consequence. This note is printed once, during
+        # init/recover, but the degraded state outlives it: a stranded pending
+        # record is deliberately not adopted on retry, so the audit log stays
+        # plaintext indefinitely. Point at the surface that keeps reporting it
+        # rather than implying a repair happens on its own.
         _term.emit_note(
-            f"audit-log wrapping key not provisioned ({exc}); the audit log "
-            "stays plaintext until the keyvault is repaired."
+            f"audit-log wrapping key not provisioned ({exc}); the audit log stays plaintext. "
+            "This does not clear by itself — check `hermes-mordred status` (keyvault line) "
+            "to confirm whether audit-log encryption is active."
         )
 
 
@@ -607,7 +822,7 @@ def init_keyvault(
     if result is None:
         return 1
 
-    _provision_audit_log_key(backend)
+    _provision_audit_log_key(backend, home=home)
 
     # HD mode (Option A): SE-encrypt the just-generated seed so the HD wallet can
     # derive Ethereum accounts later without re-entering the 24 words. Best-effort

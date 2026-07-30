@@ -10,8 +10,9 @@ disk *before* ``cli.py`` imports and eagerly reads it (the structural reason a
 Two hard requirements, because this code can run in any interpreter sharing the
 venv:
 
-* **Engage narrowly** — only an actual ``hermes`` / ``hermes-mordred`` console
-  script (or an explicit ``MORDRED_CONFIG_DECRYPT=1`` override) is touched.
+* **Engage narrowly** — only an actual Hermes console script (``hermes``,
+  ``hermes-agent``, ``hermes-acp``, or ``hermes-mordred``; or an explicit
+  ``MORDRED_CONFIG_DECRYPT=1`` override) is touched.
   pytest, pip, a bare REPL, or a venv merely *named* "hermes" are left completely
   alone, and the device key store is never probed for them. (``python -m
   hermes_cli`` is *not* covered: at site-init ``sys.argv[0]`` is still ``'-m'``,
@@ -42,13 +43,14 @@ _FORCE_ENV = "MORDRED_CONFIG_DECRYPT"
 def _looks_like_hermes(argv: Sequence[str]) -> bool:
     """Whether ``argv`` is an actual Hermes CLI invocation.
 
-    Precise on purpose: matches the ``hermes`` / ``hermes-mordred`` console
-    scripts (by basename, tolerating a ``.py`` / ``.exe`` suffix) and a script
-    path that lives *inside* the ``hermes_cli`` package dir (defensive, for a
-    direct-path execution). A venv whose *directory* happens to contain "hermes"
-    while running some other tool (e.g. ``.../hermes-venv/bin/pytest``) must NOT
-    match — so the whole-path is only consulted for the ``hermes_cli`` package
-    segment, never a loose substring.
+    Precise on purpose: matches every console script shipped by hermes-agent
+    that can construct an AIAgent (plus ``hermes-mordred``), tolerating a
+    ``.py`` / ``.exe`` suffix, and a script path that lives *inside* the
+    ``hermes_cli`` package dir (defensive, for a direct-path execution). A venv
+    whose *directory* happens to contain "hermes" while running some other tool
+    (e.g. ``.../hermes-venv/bin/pytest``) must NOT match — so the whole-path is
+    only consulted for the ``hermes_cli`` package segment, never a loose
+    substring.
 
     Note ``python -m hermes_cli`` is **not** matched: at ``.pth`` / site-init
     time ``sys.argv[0]`` is ``'-m'`` (the module name is not in ``argv`` yet; the
@@ -59,14 +61,15 @@ def _looks_like_hermes(argv: Sequence[str]) -> bool:
     if not argv:
         return False
     arg0 = argv[0] or ""
-    base = os.path.basename(arg0)
-    if base.endswith(".py"):
-        base = base[:-3]
-    elif base.endswith(".exe"):
-        base = base[:-4]
-    if base in ("hermes", "hermes-mordred"):
-        return True
     norm = arg0.replace("\\", "/")
+    base = os.path.basename(norm)
+    folded_base = base.casefold()
+    if folded_base.endswith(".py"):
+        base = base[:-3]
+    elif folded_base.endswith(".exe"):
+        base = base[:-4]
+    if base.casefold() in ("hermes", "hermes-agent", "hermes-acp", "hermes-mordred"):
+        return True
     return "/hermes_cli/" in norm or norm.endswith("/hermes_cli")
 
 

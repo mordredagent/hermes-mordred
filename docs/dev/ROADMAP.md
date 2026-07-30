@@ -14,17 +14,37 @@ Expected to be updated more frequently than SPEC/PLAN. Priority and ordering are
 
 ---
 
-## Known gap: Browser-extension gateway counterpart (deferred)
+## Remaining browser-extension gateway integration
 
-- **Background**: while still part of `Mordred-Hermes-monorepo`, #204 (`feat(mordred): browser-extension WebSocket API + localhost web app`) shipped `gateway/extension_api.py` / `extension_pairing.py` / `extension_crypto.py` / `extension_chat.py` / `extension_rpc.py` / `extension_history.py` (a repo-root top-level `gateway/` package on the Hermes-fork side — a core change) together with `src/mordred_hermes/keyvault/extension_sign.py` / `wizard/extension_pair_cli.py` (the plugin side). The 2026-06-30/07-01 standalone-repo split left the `gateway/` side in the monorepo; only the two plugin-side files came to this repo
-- **Current state**: `hermes mordred extension pair` fails closed (exit code 2, clear stderr message) because `gateway.extension_pairing` can't be imported. `keyvault/extension_sign.py` doesn't depend on `gateway` so it imports fine, but its caller (the gateway-side WebSocket server) isn't in this repo's dependency closure, so it's unreachable. The original commit's "36 tests" weren't copied into this repo either
-- **Plan going forward**: the `gateway/`-side implementation (including starting the WebSocket server) is **planned to be added later** (confirmed with the operator, 2026-07-01). Until then, the two plugin-side files stay "unused but fail safely"
-- **Update (2026-07-10)**: the WS server (and the 36 tests) were ported into `mordred_hermes.extension` (#30), gained a standalone foreground launcher `hermes-mordred extension serve` (#32), and `extension pair` now prefers the ported `mordred_hermes.extension.pairing` (keeping `gateway.extension_pairing` as a fallback for pre-port full-gateway checkouts) — code generation and standalone pairing complete without the Hermes-fork `gateway/` package. Remaining gap: auto-start at gateway boot (no plugin boot hook upstream) and the agent-backed chat handler still require the fork counterpart
-- **Checklist for when work resumes**:
-  - Decide how `gateway/extension_*.py` will be distributed (a separate repo declared as an explicit `pip install` dependency / folded into a vendored-fork `[hard-lock]`-style extra / other). Re-check alignment with the zero-PR/plugin-only principle (`PLAN.md` §Boundary discipline)
-  - Decide whether to port the 36 tests from `tests/extension/` into this repo or keep them in whichever repo hosts the dependency
-  - Confirm the `ethereum` / `messaging` extras in `pyproject.toml` (already extended on 2026-07-01 with `eth-account`/`rlp`/`qrcode`) are still sufficient once implementation resumes
-- **Priority**: M (explicitly deferred pending the operator's own timeline; until then, only the fail-closed behavior needs to be maintained)
+- **Background**: the 2026-06-30/07-01 standalone-repo split initially left the
+  browser-extension server in the old repo-root `gateway/extension_*.py`
+  package. At that point this repository contained only the pairing CLI and
+  keyvault signing surface, so pairing correctly failed closed when the
+  counterpart was absent.
+- **Completed (2026-07-10)**: the server, pairing, crypto, chat, RPC, history,
+  and their tests were ported into `mordred_hermes.extension` (#30). The
+  packaged foreground launcher `hermes-mordred extension serve` followed in
+  #32. `extension pair` now uses the packaged pairing backend first and keeps
+  `gateway.extension_pairing` only as a compatibility fallback for older
+  full-gateway checkouts.
+- **Current state**: standalone pairing and serving work from this
+  distribution. The packaged chat bridge binds to the `gateway` / `run_agent`
+  runtime shipped by `hermes-agent`, and the wallet/RPC bridge calls
+  `keyvault.extension_sign`; neither requires the old fork-side modules. The
+  ported extension test suite lives under `tests/extension/`.
+- **Remaining gap**: the server is foreground-only unless an operator manages
+  it with a supervisor. Hermes exposes no plugin boot hook that can
+  automatically start it as part of normal gateway startup.
+- **Checklist**:
+  - Decide whether to add an upstream plugin boot hook, document a
+    launchd/systemd service, or keep explicit `extension serve` as the
+    permanent lifecycle boundary.
+  - Preserve compatibility with a full gateway already listening on the
+    extension port and with the legacy `gateway.extension_pairing` fallback.
+  - Keep the `extension`, `ethereum`, and optional `messaging` extras plus the
+    ported tests aligned as the protocol evolves.
+- **Priority**: M (lifecycle integration only; standalone functionality is
+  already shipped)
 
 ---
 
@@ -76,16 +96,29 @@ Territory unreachable from the Plugin SDK. Requires native bindings / OS-level i
 - **Risk**: an improper profile could break legitimate skills. Apple Endpoint Security requires an entitlement review
 - **Priority**: H (directly tied to credibility as a privacy tool)
 
-### v2-OS2: Keyvault on Linux / Windows / Intel-Mac
+### v2-OS2: Remaining keyvault platforms and authorization tiers
 
-- **Motivation**: v1 Phase 4 is limited to Apple Silicon + Secure Enclave (macOS only)
+- **Current baseline**:
+  - macOS: Secure Enclave on supported systems, with a software P-256
+    login-Keychain fallback
+  - Linux: TPM 2.0 **MVP complete** through the packaged helper; machine-bound,
+    no software fallback
+- **Remaining motivation**: add Windows-native custody and stronger
+  authorization choices without weakening the shipped platform floors.
 - **Depends on**:
-  - Linux: `libsecret` / GNOME Keyring / KWallet backend, or an HSM (TPM 2.0)
-  - Windows: DPAPI / TPM, or running inside WSL
-  - Intel-Mac: Keychain (no Secure Enclave) fallback
-- **Scope**: `mordred_keyvault` backend abstraction, OS-specific Tor/VPN client implementations for `mordred_network`
-- **Priority**: M (decide after validating value on macOS)
-- **Status (2026-06-09)**: Linux TPM 2.0 = **MVP complete**. Phase 1 (platform-neutral seam) + Phase 2a (`native/tpmkey-helper` Rust crate, pure layer) + Phase 2b (`src/tpm.rs`'s `tss-esapi` backend: a deterministic ECC P-256 storage primary wraps the ECDH child key, on-chip key agreement via `ECDH_ZGen`, the `tpmkey-helper-tpm` CI job verifies with `swtpm`, and an ECDH-parity test against software P-256 demonstrates `wrap.py` HKDF compatibility) + Phase 2c (`keyvault enable-tpm` CLI + wheel packaging) — all landed. Tier 2 = machine-bound, not equivalent to Touch ID, with no per-use presence gate (a PIN/PCR prompt is a deferred follow-up; see SPEC §Protection-tier hierarchy)
+  - Windows: DPAPI / CNG TPM
+  - External hardware: PKCS#11 / FIDO2 token integration
+  - Linux TPM presence: a PIN/PCR policy above the current machine-binding tier
+- **Scope**: extend the existing `NativeBackend` selection and migration
+  surfaces; OS-specific Tor/VPN work is tracked separately from key custody
+- **Priority**: M
+- **Linux completion detail (2026-06-09)**: Phase 1 (platform-neutral seam) +
+  Phase 2a (`native/tpmkey-helper` Rust crate) + Phase 2b (`tss-esapi`
+  backend with a deterministic ECC P-256 storage primary and on-chip
+  `ECDH_ZGen`) + Phase 2c (`keyvault enable-tpm` CLI and wheel packaging) all
+  landed. The `tpmkey-helper-tpm` CI job verifies with `swtpm`, and ECDH parity
+  against software P-256 demonstrates `wrap.py` HKDF compatibility. This is
+  machine binding, not Touch-ID-equivalent per-use presence.
 
 ---
 
@@ -95,9 +128,9 @@ Increases the granularity and coverage of the existing plugins.
 
 ### v2-F1: Per-skill independent network paths
 
-- **Motivation**: in v1 the gateway has a single global state (last-write-wins). Concurrent skills can end up issuing requests over an unintended path
-- **Depends on**: v2-H2 (`origin_skill` in `pre_tool_call`) + injecting per-subprocess proxy env vars via the Hermes child-process spawn API
-- **Scope**: `mordred_network` switches paths per skill, enforcing them as declared in skill metadata
+- **Motivation**: v1 activates one process-wide route before provider clients are constructed and freezes it for the process lifetime. Same-route reuse is idempotent; a conflicting route is refused and requires a Hermes restart. Concurrent skills therefore intentionally share that route and cannot request independent transports
+- **Depends on**: v2-H2 (`origin_skill` in `pre_tool_call`) + independent per-request/provider-client transports + per-subprocess proxy env injection via the Hermes child-process spawn API
+- **Scope**: `mordred_network` provisions independent paths per skill and enforces the path declared in skill metadata, without mutating the process-global transport captured by other clients
 - **Priority**: M
 
 ### v2-F2: Skill metadata signing / integrity verification
@@ -199,7 +232,10 @@ The other half of Mordred's reason for existing. Large-scale work to begin once 
 ### v2-X1: Mordred-branded mobile apps
 
 - **Motivation**: Hermes only supports Termux; there's no dedicated mobile UI for Mordred
-- **Scope**: PWA or native iOS/Android (if it assumes integration with the Phase 4 keyvault, it remains limited to macOS Apple Silicon)
+- **Scope**: PWA or native iOS/Android. Existing desktop keyvault custody is
+  available on macOS and Linux TPM 2.0, but neither backend makes keys directly
+  available to a mobile app; mobile custody and pairing require their own
+  design
 - **Priority**: L
 
 ### v2-X2: Mordred-specific telemetry / crash reporting

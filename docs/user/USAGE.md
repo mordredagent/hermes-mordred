@@ -2,20 +2,21 @@
 
 > **Audience**: operators running Mordred locally. For the design rationale see [`SPEC.md`](../dev/SPEC.md), [`POLICY.md`](../dev/POLICY.md), [`SECRETS_ENV_ENCRYPTION.md`](../dev/SECRETS_ENV_ENCRYPTION.md), [`KEYVAULT_BACKENDS.md`](../dev/KEYVAULT_BACKENDS.md). For developer environment setup see [`setup.md`](../dev/setup.md).
 >
-> **Scope**: the `mordred_wizard` CLI surface — `hermes-mordred …` (standalone) and `hermes mordred …` (once wired into the host Hermes CLI).
+> **Scope**: the `mordred_wizard` CLI surface exposed today through the standalone `hermes-mordred …` command.
 
 ---
 
 ## 1. How to invoke
 
-Mordred ships two equivalent entry points to the same subcommand tree:
+Mordred currently ships one working command entry point:
 
 | Form | When it works | Notes |
 |------|---------------|-------|
-| `hermes-mordred <cmd>` | Always, once the package is installed in a venv | Standalone console script. **Recommended** for this dev repo. |
-| `hermes mordred <cmd>` | Only when the plugin is **enabled** in `~/.hermes/config.yaml` | The `mordred` subcommand is registered by the plugin loader at CLI init. |
+| `hermes-mordred <cmd>` | Once the package is installed in a venv | Standalone console script. |
 
-In this development checkout the fully-wired venv is `.venv`:
+Hermes does not yet add entry-point plugin CLI registrations to its top-level
+argparse tree, so `hermes mordred …` is not currently available even when the
+plugin is enabled. In this development checkout the fully-wired venv is `.venv`:
 
 ```sh
 cd <repo-root>            # /Users/.../Mordred-Hermes
@@ -29,10 +30,10 @@ M=.venv/bin/hermes-mordred
 $M status
 ```
 
-### Wiring `hermes mordred …` into the host CLI (optional)
+### Enabling all Mordred plugins
 
-The plugin is discovered by the loader but the `mordred` subcommand only appears
-after you enable it. Edit `~/.hermes/config.yaml`:
+`hermes-mordred configure` manages this automatically. The resulting
+`~/.hermes/config.yaml` includes:
 
 ```yaml
 plugins:
@@ -42,11 +43,11 @@ plugins:
     - mordred_llm_guard
     - mordred_network
     - mordred_keyvault
+    - mordred_e2e
 ```
 
-Then `hermes mordred status` works from the same venv. Until then, use
-`hermes-mordred` directly. (`hermes plugins list` does not surface entry-point
-plugins; use `hermes-mordred plugins list`.)
+Use `hermes-mordred` for commands. (`hermes plugins list` does not surface
+entry-point plugins; use `hermes-mordred plugins list`.)
 
 ---
 
@@ -140,7 +141,7 @@ $M install <skill-name>         # or a path to a dir containing SKILL.md
 $M audit tail                        # most recent entries
 $M audit grep <regex>                # line-wise regex search
 $M audit decrypt --date YYYY-MM-DD   # decrypt that day's encrypted entries
-$M audit purge  --before YYYY-MM-DD  # purge plaintext entries before a date
+$M audit purge --before YYYY-MM-DD --yes  # delete dated rotated logs before a date
 ```
 
 ### `encryption` — the recommended on/off switch
@@ -169,11 +170,34 @@ $M keyvault init                # initialise the keyvault
 $M keyvault list                # list key IDs
 $M keyvault verify-digest       # integrity check
 $M keyvault recover --blob <path>   # restore from a backup blob
-$M keyvault reset               # DESTROY all key material + remove the keyvault (irreversible; --yes to skip the prompt)
+$M keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
 $M keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
-                                # recommended: --unattended, run BEFORE `keyvault init` — see §4.3
+                                # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
 $M keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
 ```
+
+Keys created by current releases are isolated per `HERMES_HOME`. A legacy
+keyvault (created before profile-scoped native IDs) remains readable, but
+`keyvault reset` intentionally retains its machine-global legacy Keychain tag
+because another profile may share it. To migrate safely, verify and export a
+backup, reset the old profile, then recover the backup into the fresh profile.
+The logical key ID in the backup does not change.
+
+Legacy helper keys created with an explicit API `home=` may physically remain
+in the helper store selected by the process's old ambient `HERMES_HOME`.
+Mordred tries the current profile store first and that historical ambient store
+second for legacy reads only. If the old home is no longer the ambient one, set
+`MORDRED_SEKEY_STORE=/old/home/mordred/keyvault/sekey` on macOS or
+`MORDRED_TPMKEY_STORE=/old/home/mordred/keyvault/tpm` on Linux while exporting
+the legacy backup. These overrides are authoritative; remove them before
+recovering into the fresh profile.
+
+Current profiles also record the profile-scoped audit wrapping key separately
+from the main key. If audit-key generation or its durability check is
+interrupted, Mordred will not use the uncertain key: auditing continues in
+plaintext with a downgrade marker until the incomplete keyvault is reset and
+recovered. This does not make a partially committed audit key authoritative
+merely because its native blob is visible.
 
 ### `vault` — the underlying encrypted store (advanced)
 Normally driven by `encryption`; rarely used directly.
@@ -242,7 +266,9 @@ $M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:77
 > real agent replies (a stub reply appears only if that runtime is missing);
 > see the README's "Browser-extension WebSocket gateway" section.
 > Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
-> with a one-line error.
+> with a one-line error. Non-loopback `--host` values are refused. To open the
+> localhost web app, copy the complete private `Web page:` URL printed at
+> startup, including its `#token=…` fragment.
 
 ---
 
@@ -280,9 +306,10 @@ Three steps, in order:
    It asks for three values in order: ① the 24-word Seed Phrase, ② the Passphrase,
    ③ the top4(PoW) hex (shown on the init screen).
 
-> No hardware key? `keyvault init` degrades to a software-protected key by
-> design — at-rest encryption still holds, the hardware-binding guarantee is
-> lower. The ceremony itself is unchanged.
+> On macOS, `keyvault init` can degrade to a software P-256 key in the login
+> Keychain when Secure Enclave access is unavailable. Linux has no software
+> floor: install the TPM helper with `keyvault enable-tpm`, or initialization
+> fails closed. The ceremony itself is otherwise unchanged.
 
 > The **first** `encryption enable` creates the underlying vault and asks once
 > for a recovery passphrase (keep it safe — it is the cold-path recovery if the
@@ -342,33 +369,42 @@ unwrapped**. Each component that opens the vault prompts independently, so a
 So with `env` + `config` on you will typically see **2–3 Touch ID prompts per
 command** — expected, not a bug.
 
-**Recommended: build the SE helper in unattended mode** — especially if anything
+**Recommended: create the SE key in unattended mode** — especially if anything
 starts Hermes in the **background** (a launchd-started gateway, `extension
 serve`). An attended key blocks a background process on a Touch ID prompt it can
 never answer: after the 120 s helper timeout the process starts **without** the
 vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
 that platform, with only a `Failed to load plugin 'mordred_keyvault':
 auth_failed` warning in the logs). To make the hot path **silent** (no Touch ID
-while the Mac is unlocked), build the SE helper in **unattended** mode
-**before** the device key is first created:
+while the Mac is unlocked), install the helper and select **unattended** policy
+on a later fresh device-key creation command:
 
 ```sh
-$M keyvault enable-se --unattended   # build + install the SE helper as a no-Touch-ID key
-$M keyvault init                      # the device key is now created unattended
+$M keyvault enable-se                # build + install/probe the SE helper
+MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+                                     # create the device key unattended
 ```
 
 After this the vault decrypts with **zero Touch ID prompts** while your session is
 unlocked.
+
+`keyvault enable-se` may install or refresh the helper with an existing
+keyvault, but never creates, promotes, or migrates a wrapping key. Existing
+helper-store, legacy PyObjC-Keychain, and software keys remain in their original
+namespace and continue through ordered backend fallback. The same
+`MORDRED_SEKEY_UNATTENDED=1` policy can be placed on a recovery command when
+restoring into a genuinely fresh vault.
 
 > **Trade-off**: an unattended SE key (access control `.privateKeyUsage` only) can
 > be unwrapped by any process running as you while the Mac is unlocked — you trade
 > per-use biometric confirmation for convenience. Ciphertext-at-rest and the
 > recovery passphrase (②) are unaffected.
 
-> **Already created an attended key?** The attended/unattended choice is fixed when
-> the key is created, so switching means re-keying the vault onto a fresh
-> unattended key — see [SECRETS_ENV_ENCRYPTION.md](../dev/SECRETS_ENV_ENCRYPTION.md)
-> (`keyvault enable-se`).
+> **Already created an attended key?** The attended/unattended choice is fixed
+> when the key is created. Re-running `enable-se` safely refreshes the helper
+> but cannot convert that key; use the
+> documented verified-backup/recovery workflow to restore into a fresh vault
+> whose recovery command carries `MORDRED_SEKEY_UNATTENDED=1`.
 
 ### 4.4 `network init` — the dialog and prompts
 
@@ -386,8 +422,9 @@ unlocked.
 ```
 
 It picks the **default** route written to config — `(*)` marks the current
-choice (`clearnet` on a fresh setup). This is just the default; you can still
-switch any time later with `network use`.
+choice (`clearnet` on a fresh setup). `network use` can change that saved
+choice later; restart Hermes to activate the route before provider clients are
+built. A running Hermes process never switches its frozen route live.
 
 **How to operate it**: **↑ / ↓** move the highlight, **Space** selects (moves
 the `*`), **Tab** jumps to the `< Ok >` / `< Cancel >` buttons, **Enter**
@@ -483,15 +520,22 @@ through all of them**: the defaults are the safe, private choice.
 | 1 | Mordred policy mode | `lenient` | How strictly rules are enforced (detail below). | Enter |
 | 2 | Allow cloud LLM providers? | `N` | Permit cloud LLMs at all. | Enter |
 | 3 | Cloud provider allowlist | (hidden) | Only shown if you answered `y` above. Pick providers from a checkbox list (Space to toggle, Enter to confirm). | Skipped on `N` |
-| 4 | Local LLM endpoint URL | `http://localhost:1234/v1` | Where your local LLM is reached. | Enter |
+| 4 | Local LLM endpoint URL | `http://localhost:1234/v1` | Where your local LLM is reached. Under strict mode this must be loopback HTTP(S). | Enter |
 | 5 | Local LLM model id | empty | Local LLM model name. | Enter |
 | 6 | On cloud LLM attempt under strict mode | `always-block` | What to do when a cloud LLM is attempted under strict. | Enter |
 | 7 | Agent harness | `none` | Which agent tool drives Hermes (Claude CLI / Codex / Cursor / …). | Enter |
 
 > - Questions 2–7 only change runtime behaviour under **strict** mode; with the
 >   default `lenient`, nothing is blocked.
-> - `prompt-once` (Q6) asks once per provider whether to allow a one-time call to
->   a non-allowlisted cloud provider under strict mode — but only at an
+> - Under `strict`, `mordred-local` accepts only the exact HTTP(S) loopback IP
+>   `127.0.0.1` / `::1`, or `localhost` whose DNS results are all loopback.
+>   URLs containing credentials are refused. This check applies equally to the
+>   configured endpoint and Hermes's resolved runtime URL, before any health
+>   probe or model request. Active process proxies are bypassed for these exact
+>   hosts, and the health probe never trusts ambient proxy variables.
+>   Non-strict modes keep their existing behaviour.
+> - `prompt-once` (Q6) asks once per provider whether to allow that provider for
+>   the remainder of the current Hermes process under strict mode — but only at an
 >   interactive terminal. Headless / harness / CI sessions have no TTY, so it
 >   fails closed to `always-block` there. The decision is cached for the session
 >   and audited as `policy.strict.cloud_prompted_allow` / `_deny`.
@@ -628,5 +672,6 @@ including under strict mode).
   idle" only (not while mounted under the same user).
 - **Linux**: TPM 2.0 is the key backend (`keyvault enable-tpm`). MVP binding is
   machine-only (Tier 2 — no per-use PIN/PCR prompt).
-- Where there is no hardware backend, the vault degrades to a software-protected
-  key by design (still encrypted at rest, lower hardware-binding guarantee).
+- **Fallback behavior**: macOS can use a software P-256 key in the login
+  Keychain when Secure Enclave access is unavailable. Linux deliberately has no
+  software fallback and fails closed without the TPM helper.

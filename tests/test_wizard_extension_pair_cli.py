@@ -33,14 +33,27 @@ def _isolated_home(tmp_path, monkeypatch):
 
 
 def _hide_ported_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``from mordred_hermes.extension import pairing`` raise ImportError.
+    """Make the ported pairing import raise ``ModuleNotFoundError``.
 
     Both knobs are needed: deleting the package attribute defeats the
-    from-import shortcut (the eager ``__init__`` already bound it), and the
-    ``None`` sentinel makes the fresh submodule import fail.
+    from-import shortcut cached by this test module's import above, and the
+    ``None`` sentinel makes the fresh lazy submodule import fail.
     """
     monkeypatch.delattr(mordred_hermes.extension, "pairing")
     monkeypatch.setitem(sys.modules, "mordred_hermes.extension.pairing", None)
+
+
+def _break_ported_pairing_import(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    """Make the lazy package loader surface an error from inside pairing."""
+    original_getattr = mordred_hermes.extension.__getattr__
+    monkeypatch.delattr(mordred_hermes.extension, "pairing")
+
+    def broken_getattr(name: str) -> Any:
+        if name == "pairing":
+            raise error
+        return original_getattr(name)
+
+    monkeypatch.setattr(mordred_hermes.extension, "__getattr__", broken_getattr)
 
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +75,48 @@ def test_import_pairing_falls_back_to_gateway(monkeypatch: pytest.MonkeyPatch) -
     assert extension_pair_cli._import_pairing() is fake_pairing
 
 
+def test_import_pairing_presents_internal_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A present-but-broken ported module gets the friendly exit-2 shape.
+
+    Review 2026-07-29: re-raising the raw ImportError gave a CLI user a
+    traceback instead of the failure and the fix. The broken-install cause
+    stays attached as ``__cause__`` and the wording distinguishes it from
+    an old build, so it is still never mistaken for one.
+    """
+    error = ImportError("ported pairing implementation is broken")
+    _break_ported_pairing_import(monkeypatch, error)
+
+    with pytest.raises(extension_pair_cli.ExtensionGatewayUnavailable, match="broken installation") as exc_info:
+        extension_pair_cli._import_pairing()
+
+    assert exc_info.value.__cause__ is error
+    assert "ported pairing implementation is broken" in str(exc_info.value)
+
+
+def test_import_pairing_presents_missing_internal_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = ModuleNotFoundError("No module named 'cryptography'", name="cryptography")
+    _break_ported_pairing_import(monkeypatch, error)
+
+    with pytest.raises(extension_pair_cli.ExtensionGatewayUnavailable, match="broken installation") as exc_info:
+        extension_pair_cli._import_pairing()
+
+    assert exc_info.value.__cause__ is error
+    assert "'cryptography'" in str(exc_info.value)
+
+
+def test_import_pairing_presents_syntax_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated/partially-written module raises SyntaxError at import —
+    the same broken-installation class, and it must get the same friendly
+    exit-2 shape instead of a raw traceback (review 2026-07-29)."""
+    error = SyntaxError("unexpected EOF while parsing")
+    _break_ported_pairing_import(monkeypatch, error)
+
+    with pytest.raises(extension_pair_cli.ExtensionGatewayUnavailable, match="broken installation") as exc_info:
+        extension_pair_cli._import_pairing()
+
+    assert exc_info.value.__cause__ is error
+
+
 def test_extension_pair_fails_closed_without_any_backend(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -75,7 +130,7 @@ def test_extension_pair_fails_closed_without_any_backend(
     assert rc == 2
     err = capsys.readouterr().err
     assert "not available in this build" in err
-    assert "extension` extra" in err
+    assert "complete mordred-hermes build" in err
 
 
 # --------------------------------------------------------------------------- #
@@ -195,6 +250,68 @@ def test_extension_pair_expiry_warns_on_stderr(
     assert "warning:" in err
     assert "expired" in err
     assert "extension serve" in err
+
+
+def test_extension_pair_timeout_revokes_pending_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    revoked: list[str] = []
+    code = "MORT-TEST0000-TEST0000"
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: (code, time.time() + 60.0),
+        pair_outcome=lambda _code: ("pending", None),
+        revoke_code=lambda value: revoked.append(value) or True,
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(extension_pair_cli, "_POLL_SECONDS", 0.001)
+
+    assert extension_pair_cli.extension_pair(timeout=0.0) == 1
+    assert revoked == [code]
+    assert "no pairing" in capsys.readouterr().err
+
+
+def test_extension_pair_ctrl_c_revokes_pending_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revoked: list[str] = []
+    code = "MORT-TEST0000-TEST0000"
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: (code, time.time() + 60.0),
+        revoke_code=lambda value: revoked.append(value) or True,
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(
+        extension_pair_cli,
+        "_await_outcome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    assert extension_pair_cli.extension_pair(timeout=5.0) == 1
+    assert revoked == [code]
+
+
+def test_extension_pair_ctrl_c_reports_pairing_that_committed_before_revoke(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = "MORT-TEST0000-TEST0000"
+    fake_pairing = types.SimpleNamespace(
+        generate_code=lambda: (code, time.time() + 60.0),
+        revoke_code=lambda _value: False,
+        pair_outcome=lambda _value: ("paired", None),
+    )
+    monkeypatch.setattr(extension_pair_cli, "_import_pairing", lambda: fake_pairing)
+    monkeypatch.setattr(
+        extension_pair_cli,
+        "_await_outcome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    assert extension_pair_cli.extension_pair(timeout=5.0) == 0
+    captured = capsys.readouterr()
+    assert "completed before cancellation" in captured.err
+    assert "Paired (" in captured.out
 
 
 def test_cli_extension_pair_passes_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

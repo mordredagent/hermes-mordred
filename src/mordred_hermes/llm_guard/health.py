@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from typing import Final
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -45,18 +46,34 @@ def probe(
         MordredLocalUnreachable: On any non-2xx status, connect failure,
             or timeout. The exception message includes a short reason.
     """
-    url = endpoint.rstrip("/") + "/models"
-    client_kwargs: dict[str, object] = {"timeout": timeout}
+    parsed_endpoint = urlsplit(endpoint)
+    model_path = parsed_endpoint.path.rstrip("/") + "/models"
+    # Query/fragment are never part of an OpenAI-compatible base URL and may
+    # carry credentials. Drop them defensively even though strict enforcement
+    # rejects them before calling this probe.
+    url = urlunsplit(
+        (
+            parsed_endpoint.scheme,
+            parsed_endpoint.netloc,
+            model_path,
+            "",
+            "",
+        )
+    )
+    # This module probes only a previously validated local endpoint. Ambient
+    # HTTP(S)_PROXY must never receive even the health request, regardless of
+    # hook ordering or a user's pre-existing proxy environment.
+    client_kwargs: dict[str, object] = {"timeout": timeout, "trust_env": False}
     if transport is not None:
         client_kwargs["transport"] = transport
     try:
         with httpx.Client(**client_kwargs) as client:  # type: ignore[arg-type]
             response = client.get(url)
     except httpx.TimeoutException as e:
-        raise MordredLocalUnreachable(f"local LLM probe timed out: {e!s}") from e
+        raise MordredLocalUnreachable("local LLM probe timed out") from e
     except httpx.RequestError as e:
         # ConnectError, ReadError, etc. — everything below the transport.
-        raise MordredLocalUnreachable(f"local LLM probe failed: {e!s}") from e
+        raise MordredLocalUnreachable(f"local LLM probe failed ({type(e).__name__})") from e
 
     if response.status_code >= 400:
         raise MordredLocalUnreachable(f"local LLM probe returned HTTP {response.status_code}")

@@ -10,6 +10,7 @@ find them post-install — while the Swift ``.build/`` artifacts stay out.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import zipfile
@@ -24,7 +25,7 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 _WHEEL_PREFIX = "mordred_hermes/_native/sekey-helper/"
 
 
-def _build_wheel(out_dir: Path) -> Path:
+def _build_wheel(out_dir: Path, *, uv_cache_dir: Path) -> Path:
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv not available to build the wheel")
@@ -33,6 +34,7 @@ def _build_wheel(out_dir: Path) -> Path:
         cwd=_PKG_ROOT,
         capture_output=True,
         text=True,
+        env={**os.environ, "UV_CACHE_DIR": str(uv_cache_dir)},
     )
     assert proc.returncode == 0, f"wheel build failed:\n{proc.stdout}\n{proc.stderr}"
     wheels = list(out_dir.glob("*.whl"))
@@ -40,15 +42,24 @@ def _build_wheel(out_dir: Path) -> Path:
     return wheels[0]
 
 
-def test_wheel_bundles_sekey_helper_sources(tmp_path: Path) -> None:
-    names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
+@pytest.fixture(scope="module")
+def wheel_names(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
+    """Build once with a test-owned cache and share the immutable manifest."""
+    root = tmp_path_factory.mktemp("native-wheel")
+    wheel = _build_wheel(root / "dist", uv_cache_dir=root / "uv-cache")
+    with zipfile.ZipFile(wheel) as archive:
+        return frozenset(archive.namelist())
+
+
+def test_wheel_bundles_sekey_helper_sources(wheel_names: frozenset[str]) -> None:
+    names = wheel_names
     assert _WHEEL_PREFIX + "build.sh" in names
     assert _WHEEL_PREFIX + "Package.swift" in names
     assert any(n.startswith(_WHEEL_PREFIX + "Sources/") and n.endswith("main.swift") for n in names)
 
 
-def test_wheel_excludes_swift_build_artifacts(tmp_path: Path) -> None:
-    names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
+def test_wheel_excludes_swift_build_artifacts(wheel_names: frozenset[str]) -> None:
+    names = wheel_names
     assert not any(".build/" in n for n in names), "Swift .build/ artifacts must not ship in the wheel"
     assert not any(n.endswith(".o") for n in names), "object files must not ship in the wheel"
 
@@ -57,13 +68,13 @@ def test_wheel_excludes_swift_build_artifacts(tmp_path: Path) -> None:
 _TPMKEY_WHEEL_PREFIX = "mordred_hermes/_native/tpmkey-helper/"
 
 
-def test_wheel_bundles_tpmkey_helper_sources(tmp_path: Path) -> None:
-    names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
+def test_wheel_bundles_tpmkey_helper_sources(wheel_names: frozenset[str]) -> None:
+    names = wheel_names
     assert _TPMKEY_WHEEL_PREFIX + "build.sh" in names
     assert _TPMKEY_WHEEL_PREFIX + "Cargo.toml" in names
     assert any(n.startswith(_TPMKEY_WHEEL_PREFIX + "src/") and n.endswith("main.rs") for n in names)
 
 
-def test_wheel_excludes_rust_target_artifacts(tmp_path: Path) -> None:
-    names = zipfile.ZipFile(_build_wheel(tmp_path)).namelist()
+def test_wheel_excludes_rust_target_artifacts(wheel_names: frozenset[str]) -> None:
+    names = wheel_names
     assert not any("tpmkey-helper/target/" in n for n in names), "Rust target/ artifacts must not ship in the wheel"

@@ -65,24 +65,52 @@ def _import_pairing() -> Any:
     1. ``mordred_hermes.extension.pairing`` — ships with this plugin (#30
        port). Same ``pending.json`` contract as the full-gateway code, so
        codes generated here are consumable by either server implementation.
-       Note the package ``__init__`` eagerly imports ``.api`` (aiohttp), so
-       this import needs the ``extension`` extra installed.
+       The extension package is lazy, so this pairing-only path does not need
+       the WebSocket server's optional aiohttp dependency.
     2. ``gateway.extension_pairing`` — Hermes-fork layout, kept as a fallback
        for full-gateway checkouts whose plugin copy predates the port (the
        repo root is added to sys.path when running from such a checkout).
 
-    Raises :class:`ExtensionGatewayUnavailable` — instead of leaking the raw
-    ``ImportError`` — when neither is importable: e.g. the published
-    ``0.1.0a1`` wheel (predates the extension package) or a newer build
-    without the ``extension`` extra's dependencies.
+    Raises :class:`ExtensionGatewayUnavailable` (which the CLI presents as
+    an exit-2 error) in both failure shapes, with wording that keeps them
+    distinct so a broken installation is never mistaken for an old one:
+
+    - The ported module is *absent* and neither legacy backend location is
+      importable: e.g. the published ``0.1.0a1`` wheel, which predates the
+      extension package.
+    - The ported module is *present but fails to import* (broken
+      ``cryptography`` build, missing subdependency, or a truncated
+      source file raising ``SyntaxError``). Previously this was re-raised
+      raw; a CLI entry point should present the failure and the fix, not
+      a traceback (review 2026-07-29). The gateway fallback is
+      deliberately not attempted for this shape — it would mask the broken
+      install.
     """
-    ported_exc: ImportError
+    ported_exc: ModuleNotFoundError
     try:
         from mordred_hermes.extension import pairing as ported
 
         return ported
-    except ImportError as exc:
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "mordred_hermes.extension",
+            "mordred_hermes.extension.pairing",
+        }:
+            raise ExtensionGatewayUnavailable(
+                "extension pairing is installed but failed to import (missing "
+                f"module {exc.name!r}: {exc}). This is a broken installation, "
+                "not an old build — reinstall with "
+                '`pip install "mordred-hermes[extension]"`.'
+            ) from exc
         ported_exc = exc
+    except (ImportError, SyntaxError) as exc:
+        # SyntaxError covers a truncated/partially-written module file —
+        # the same broken-installation class, raised at compile time.
+        raise ExtensionGatewayUnavailable(
+            f"extension pairing is installed but failed to import: {exc}. "
+            "This is a broken installation, not an old build — reinstall "
+            'with `pip install "mordred-hermes[extension]"`.'
+        ) from exc
 
     try:
         from gateway import extension_pairing as pairing
@@ -98,15 +126,13 @@ def _import_pairing() -> Any:
             from gateway import extension_pairing as pairing
         except ImportError as gw_exc:
             # Surface BOTH failures: chaining alone would suppress whichever
-            # one isn't the explicit cause, and they can differ (missing
-            # aiohttp vs. a broken fallback checkout).
+            # one isn't the explicit cause, and they can differ (a broken
+            # plugin install vs. a broken fallback checkout).
             raise ExtensionGatewayUnavailable(
                 "extension pairing is not available in this build: importing "
                 f"`mordred_hermes.extension.pairing` failed ({ported_exc}); the "
                 f"`gateway.extension_pairing` fallback also failed ({gw_exc}). "
-                'Install the `extension` extra (`pip install "mordred-hermes[extension]"` '
-                "or, inside this repo, `uv sync --extra extension`) on a build newer "
-                "than 0.1.0a1."
+                "Install a complete mordred-hermes build newer than 0.1.0a1."
             ) from ported_exc
     return pairing
 
@@ -121,6 +147,25 @@ def _poll_state(pairing: Any, code: str) -> tuple[str, str | None]:
         state, fail_reason = outcome(code)
         return str(state), None if fail_reason is None else str(fail_reason)
     return ("consumed" if pairing.code_consumed(code) else "pending", None)
+
+
+def _revoke_or_observe(pairing: Any, code: str) -> tuple[bool, str, str | None]:
+    """Try to revoke *code*, then report its terminal/observed state."""
+    revoke = getattr(pairing, "revoke_code", None)
+    if callable(revoke):
+        try:
+            if bool(revoke(code)):
+                return True, "failed", "cancelled"
+        except Exception:
+            # Cancellation/timeout handling must not turn a backend I/O error
+            # into a traceback. The status probe below may still tell us that
+            # the pairing committed before revocation took effect.
+            pass
+    try:
+        state, fail_reason = _poll_state(pairing, code)
+    except Exception:
+        return False, "unknown", None
+    return False, state, fail_reason
 
 
 def _sanitize_reason(reason: str | None) -> str:
@@ -139,7 +184,8 @@ def _print_paired(*, color: bool, ascii_only: bool, assumed: bool = False) -> in
     print(f"{_term.success(mark, enabled=color)} Paired ({time.strftime('%Y-%m-%d %H:%M:%S')}).")
     print(
         "Next: chat from the extension, or open the local page served by "
-        "`hermes-mordred extension serve` (http://127.0.0.1:7788/ by default)."
+        "`hermes-mordred extension serve` using the private `Web page:` URL "
+        "printed at startup."
     )
     if assumed:
         _term.emit_note(
@@ -213,18 +259,44 @@ def extension_pair(*, timeout: float = 600.0) -> int:
     try:
         rc = _await_outcome(pairing, code, deadline, color=color, ascii_only=ascii_only)
     except KeyboardInterrupt:
-        print("\nCancelled — no pairing was completed.", file=sys.stderr)
+        revoked, state, fail_reason = _revoke_or_observe(pairing, code)
+        if state == "paired":
+            print("\nPairing completed before cancellation took effect.", file=sys.stderr)
+            return _print_paired(color=color, ascii_only=ascii_only)
+        if revoked:
+            print("\nCancelled — the pairing code was revoked before completion.", file=sys.stderr)
+        elif state == "failed":
+            print(
+                f"\nCancelled — pairing had already ended ({_sanitize_reason(fail_reason)}).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\nCancelled locally, but the pairing code could not be revoked or its status confirmed; "
+                "verify the extension before relying on cancellation.",
+                file=sys.stderr,
+            )
         return 1
     if rc is not None:
         return rc
+
+    revoked, state, _fail_reason = _revoke_or_observe(pairing, code)
+    if state == "paired":
+        _term.emit_note("pairing completed at the timeout boundary")
+        return _print_paired(color=color, ascii_only=ascii_only)
 
     reason = (
         "the pairing code expired before the extension connected"
         if time.time() >= expires_at
         else f"no pairing within {int(timeout)} seconds"
     )
+    revocation_note = (
+        " The pending code was revoked."
+        if revoked
+        else " The code could not be revoked or its status confirmed; verify the extension before retrying."
+    )
     _term.emit_warn(
-        f"{reason} — run `hermes-mordred extension pair` for a new code "
+        f"{reason}.{revocation_note} Run `hermes-mordred extension pair` for a new code "
         "(check a server is running: `hermes-mordred extension serve` or a "
         "full Hermes gateway)."
     )

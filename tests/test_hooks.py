@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from mordred_hermes.privacy_check import _runtime, hooks
+from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 
 def _audit_entries(log_path: Path) -> list[dict[str, object]]:
@@ -37,6 +41,13 @@ def strict_config(tmp_path: Path) -> Path:
         tmp_path / "config.yaml",
         """\
 plugins:
+  enabled:
+    - mordred_privacy_check
+    - mordred_wizard
+    - mordred_llm_guard
+    - mordred_network
+    - mordred_keyvault
+    - mordred_e2e
   mordred_privacy_check:
     policy: strict
 """,
@@ -87,7 +98,52 @@ class TestOnSessionStartNoSiblingsDisabled:
 
 
 class TestOnSessionStartStrictAbort:
-    def test_strict_with_disabled_sibling_raises_systemexit(self, tmp_path: Path) -> None:
+    def test_enabled_sibling_with_registration_error_is_refused(
+        self,
+        strict_config: Path,
+        tmp_path: Path,
+    ) -> None:
+        _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        plugins = {
+            name: SimpleNamespace(
+                enabled=True,
+                error=None,
+                module=object(),
+                hooks_registered=list(_runtime.SIBLING_REQUIRED_HOOKS[name]),
+            )
+            for name in _runtime.SIBLING_PLUGINS
+        }
+        plugins["mordred_network"].error = "synthetic register failure"
+        manager = SimpleNamespace(_plugins=plugins)
+
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.check_plugin_integrity(plugin_manager=manager)
+
+        assert _runtime.is_poisoned()
+
+    def test_enabled_sibling_missing_mandatory_hook_is_refused(
+        self,
+        strict_config: Path,
+        tmp_path: Path,
+    ) -> None:
+        _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        plugins = {
+            name: SimpleNamespace(
+                enabled=True,
+                error=None,
+                module=object(),
+                hooks_registered=list(_runtime.SIBLING_REQUIRED_HOOKS[name]),
+            )
+            for name in _runtime.SIBLING_PLUGINS
+        }
+        plugins["mordred_llm_guard"].hooks_registered.remove("pre_api_request")
+
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.check_plugin_integrity(
+                plugin_manager=SimpleNamespace(_plugins=plugins),
+            )
+
+    def test_strict_with_disabled_sibling_raises_integrity_refusal(self, tmp_path: Path) -> None:
         config = _write_config(
             tmp_path / "config.yaml",
             """\
@@ -100,15 +156,42 @@ plugins:
         )
         audit = tmp_path / "audit.log"
         _runtime.ensure_state(config_path=config, audit_path=audit)
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
-        # Audit landed before SystemExit
+        # Audit landed before the refusal
         entries = _audit_entries(audit)
         block_entries = [e for e in entries if e.get("decision") == "block"]
         assert len(block_entries) == 1
         assert block_entries[0]["reason"] == "mordred.degraded.disable_unprotected"
         assert "mordred_network" in block_entries[0]["disabled_siblings"]
         # Process is poisoned
+        assert _runtime.is_poisoned()
+
+    def test_refusal_survives_a_broken_stderr(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The stderr presenter must never outrank the refusal.
+
+        Review 2026-07-29: in a host with a closed stderr (daemonized
+        gateway) the presenter's ``print`` raises an ordinary
+        ``ValueError``, which Hermes's except-Exception hook wrapper would
+        swallow — the session would start instead of aborting. Pin that
+        the refusal still escapes.
+        """
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_network
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        closed_stderr = io.StringIO()
+        closed_stderr.close()
+        monkeypatch.setattr(sys, "stderr", closed_stderr)
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.on_session_start()
         assert _runtime.is_poisoned()
 
     def test_strict_with_enabled_allowlist_excluding_sibling_raises(self, tmp_path: Path) -> None:
@@ -128,8 +211,40 @@ plugins:
 """,
         )
         _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
+
+    def test_shared_integrity_hook_detects_disabled_privacy_plugin(self, tmp_path: Path) -> None:
+        """Another runtime sibling still protects strict mode when privacy is disabled."""
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_privacy_check
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.check_plugin_integrity()
+        assert _runtime.is_poisoned()
+
+    def test_shared_integrity_hook_detects_disabled_e2e_plugin(self, tmp_path: Path) -> None:
+        config = _write_config(
+            tmp_path / "config.yaml",
+            """\
+plugins:
+  disabled:
+    - mordred_e2e
+  mordred_privacy_check:
+    policy: strict
+""",
+        )
+        _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.check_plugin_integrity()
 
 
 class TestOnSessionStartLenientWithDisabled:
@@ -181,6 +296,20 @@ class TestPreToolCallStrict:
         # No pre_tool_call entries for allows
         entries = _audit_entries(audit)
         assert all(e.get("event") != "pre_tool_call" for e in entries)
+
+    @pytest.mark.parametrize("active_path", ["tor", "vpn"])
+    def test_allows_web_tools_on_ready_protected_path(
+        self,
+        strict_config: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        active_path: str,
+    ) -> None:
+        _runtime.ensure_state(config_path=strict_config, audit_path=tmp_path / "audit.log")
+        monkeypatch.setattr(hooks, "_resolve_active_network_path", lambda: active_path)
+
+        assert hooks.pre_tool_call(tool_name="web_fetch") is None
+        assert hooks.pre_tool_call(tool_name="web_search") is None
 
 
 class TestPreToolCallLenientAndOff:
@@ -292,7 +421,7 @@ plugins:
 
 # --------------------------------------------------------------------------- #
 # safe_audit_append routing — an audit-write failure must not bypass a        #
-# refusal decision (block / SystemExit)                                      #
+# refusal decision (block / MordredIntegrityRefused)                         #
 # --------------------------------------------------------------------------- #
 
 
@@ -303,7 +432,8 @@ class _RaisingAudit:
     Hermes wraps every hook callback in ``except Exception: log & continue``.
     Before the fix, ``state.audit.append(...)`` was called directly and its
     exception propagated straight into that wrapper — swallowed BEFORE the
-    ``raise SystemExit`` / ``return {"action": "block"}`` a few lines later
+    ``raise MordredIntegrityRefused`` / ``return {"action": "block"}`` a few
+    lines later
     ever executed. That let a broken audit sink silently unblock a strict
     session. ``safe_audit_append`` must swallow this itself so the refusal
     below it is unconditionally reached.
@@ -320,7 +450,7 @@ class TestAuditWriteFailureCannotBypassEnforcement:
     even when the audit sink itself is broken.
     """
 
-    def test_on_session_start_strict_disabled_sibling_still_raises_systemexit(self, tmp_path: Path) -> None:
+    def test_on_session_start_strict_disabled_sibling_still_refuses(self, tmp_path: Path) -> None:
         config = _write_config(
             tmp_path / "config.yaml",
             """\
@@ -333,10 +463,10 @@ plugins:
         )
         state = _runtime.ensure_state(config_path=config, audit_path=tmp_path / "audit.log")
         _runtime._state = dataclasses.replace(state, audit=_RaisingAudit())
-        with pytest.raises(SystemExit):
+        with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
         # Defense in depth must still engage — the poison flag is the
-        # backstop if a higher harness swallows the SystemExit.
+        # backstop if a higher harness swallows the refusal.
         assert _runtime.is_poisoned()
 
     def test_pre_tool_call_poisoned_still_blocks(self, strict_config: Path, tmp_path: Path) -> None:

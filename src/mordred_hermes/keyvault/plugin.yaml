@@ -1,9 +1,9 @@
 # Mordred plugin manifest. Hermes core ignores unknown fields; `privacy_lock`
-# is a Mordred-internal hint used by sibling plugins to detect peer disable
-# (TODO §1.1 H3 Path B / SPEC §Plugin-disable protection Tier A).
+# is a Mordred-internal hint used by the shared integrity gate to detect a
+# disabled sibling (SPEC §Plugin-disable protection Tier A).
 name: mordred_keyvault
-version: 0.1.0a8
-description: Mordred keyvault plugin (Phase 0 stub)
+version: 0.1.0a9
+description: Hardware-backed secret storage and runtime environment injection
 author: InternetMaximalism
 privacy_lock: true
 config_schema:

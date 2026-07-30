@@ -5,8 +5,57 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mordred</title>
     <script>
-      // Hermes injects the per-process page token here when serving this file.
-      window.__MORDRED_PAGE_TOKEN__ = '%%MORDRED_PAGE_TOKEN%%'
+      // The launcher delivers the page principal in a URL fragment. Keep it
+      // only in this tab's sessionStorage so a same-tab reload can reconnect;
+      // fragments are never sent in HTTP requests or Referer headers.
+      const pageTokenStorageKey = 'mordred-page-token'
+      const launchParams = new URLSearchParams(window.location.hash.slice(1))
+      const launchToken = launchParams.get('token') || ''
+      let pageToken = launchToken
+      try {
+        if (launchToken) {
+          window.sessionStorage.setItem(pageTokenStorageKey, launchToken)
+        } else {
+          pageToken = window.sessionStorage.getItem(pageTokenStorageKey) || ''
+        }
+      } catch {
+        // Storage may be disabled. A launch-fragment token still works for the
+        // current load; an empty token stays empty and is never reload-looped.
+      }
+      window.__MORDRED_PAGE_TOKEN__ = pageToken
+      if (window.location.hash) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      }
+      window.__MORDRED_HANDLE_AUTH_FAILURE__ = () => {
+        try {
+          window.sessionStorage.removeItem(pageTokenStorageKey)
+          window.sessionStorage.removeItem('mordred-page-auth-reload')
+        } catch {
+          // Storage may be unavailable; still invalidate the in-memory token.
+        }
+        window.__MORDRED_PAGE_TOKEN__ = ''
+        const notice = document.createElement('main')
+        notice.setAttribute('role', 'alert')
+        notice.style.cssText =
+          'max-width:42rem;margin:15vh auto;padding:2rem;font:16px/1.6 system-ui;color:#e7e9ee;background:#15171f;border:1px solid #2a2e3c;border-radius:10px'
+        notice.textContent =
+          'Mordred の認証情報が期限切れです。起動元のターミナルに表示された新しい private URL を開き直してください。'
+        document.body.replaceChildren(notice)
+      }
+      // The self-contained generated client predates fragment persistence and
+      // schedules location.reload() after auth_fail. Intercept that one
+      // generated callback: reloading an empty/stale token would otherwise
+      // create an authentication loop. Restore the native timer immediately
+      // once the callback is identified.
+      const nativeSetTimeout = window.setTimeout.bind(window)
+      window.setTimeout = (callback, delay, ...args) => {
+        const source = typeof callback === 'function' ? Function.prototype.toString.call(callback) : ''
+        if (source.includes('window.location.reload()')) {
+          window.setTimeout = nativeSetTimeout
+          return nativeSetTimeout(window.__MORDRED_HANDLE_AUTH_FAILURE__, delay, ...args)
+        }
+        return nativeSetTimeout(callback, delay, ...args)
+      }
     </script>
     <script type="module" crossorigin>(function(){const n=document.createElement("link").relList;if(n&&n.supports&&n.supports("modulepreload"))return;for(const r of document.querySelectorAll('link[rel="modulepreload"]'))a(r);new MutationObserver(r=>{for(const i of r)if(i.type==="childList")for(const s of i.addedNodes)s.tagName==="LINK"&&s.rel==="modulepreload"&&a(s)}).observe(document,{childList:!0,subtree:!0});function t(r){const i={};return r.integrity&&(i.integrity=r.integrity),r.referrerPolicy&&(i.referrerPolicy=r.referrerPolicy),r.crossOrigin==="use-credentials"?i.credentials="include":r.crossOrigin==="anonymous"?i.credentials="omit":i.credentials="same-origin",i}function a(r){if(r.ep)return;r.ep=!0;const i=t(r);fetch(r.href,i)}})();var Vl={exports:{}},tr={},Wl={exports:{}},N={};/**
  * @license React

@@ -13,7 +13,8 @@ The canonical source for the official order and task breakdown is `PLAN.md` Phas
 - Python 3.11 or later (`requires-python = ">=3.11"`, `pyproject.toml` L10 + the Hermes upstream root `pyproject.toml` is pinned to the same). The CI matrix covers both 3.11 / 3.12 (see `CI.md` §`ci.yml` details)
 - [uv](https://docs.astral.sh/uv/) — used to create the dev venv (`.venv/`) and reproduce `uv.lock`
 - git 2.30+
-- macOS / Linux (only Phase 4 `mordred_keyvault` is limited to macOS Apple Silicon, see `SPEC.md` Phase 4)
+- macOS / Linux (`mordred_keyvault` uses Secure Enclave/login Keychain on
+  macOS and the fail-closed TPM 2.0 helper on Linux; see `SPEC.md` Phase 4)
 - `hermes-agent` is **installed automatically from PyPI by `uv sync`** (it's a dependency in `pyproject.toml`; no adjacent clone is needed)
 
 ## Repository layout
@@ -22,14 +23,15 @@ This repository is a **standalone Mordred plugin package repository** — it is 
 
 ```
 mordred-hermes-plugin/
-├── pyproject.toml                    # mordred-hermes package config (5 entry point)
+├── pyproject.toml                    # mordred-hermes package config (6 entry points)
 ├── uv.lock                           # uv lockfile (for local dev use; CI resolves the latest from PyPI via pip)
-├── src/mordred_hermes/               # plugin body (5 subpackages + shared _*.py helpers)
+├── src/mordred_hermes/               # plugin body (6 entry points + shared helpers)
 │   ├── privacy_check/
 │   ├── wizard/
 │   ├── llm_guard/
 │   ├── network/
-│   └── keyvault/
+│   ├── keyvault/
+│   └── extension/                    # mordred_e2e + extension server
 ├── tests/                            # default suite + integration/ (opt-in) + fixtures/
 ├── docs/dev/                         # SPEC / PLAN / TODO / ROADMAP / CI / setup, etc.
 ├── docs/user/                        # QUICKSTART / USAGE
@@ -87,13 +89,13 @@ The extras defined by `[project.optional-dependencies]` in `pyproject.toml`. `uv
 | `dev` | `pytest` / `pytest-cov` / `ruff` (pinned) / `mypy` (pinned) | **Required for everyday commands (below)**. Linters are strictly pinned to match CI |
 | `keyvault` | cross-platform crypto stack (`cryptography` / `argon2-cffi` / `blake3`) | Type-checking / testing keyvault. Recommended on all platforms |
 | `macos` | `keyvault` + pyobjc bridge (`Security` / `SystemConfiguration` / `Quartz`) | Developing Secure Enclave features on macOS |
-| `extension` | `aiohttp` + `cryptography` | Browser extension WebSocket gateway (`extension serve`) |
+| `extension` | `aiohttp` + `cryptography` + `requests[socks]` + `urllib3` | Browser extension WebSocket gateway and Tor-routed wallet RPC (`extension serve`) |
 | `ethereum` | `eth-keys` / `eth-account` / `rlp` / `eth-hash` | keyvault signing feature (`extension_sign.py`) |
 | `tor-control` | `stem` (Tor ControlPort cookie auth + liveness probe) | Tor liveness in strict mode |
 | `messaging` | `qrcode` | Device QR display for `extension pair` (falls back to plaintext if absent) |
 | `integration` | SOCKS5h client library + provider SDK | `pytest -m integration` §0.8 verification suite |
 
-> **⚠️ CI does not use `--all-extras`**: CI's `mypy --strict src` runs without the `ethereum` / `tor-control` extras. As a result, type errors around `eth_hash` / `eth_account` / `stem` **pass locally but fail in CI**. If you touch that code, reproduce it in a venv with only `.[dev,keyvault,extension]` before pushing (see `CI.md` for details).
+> **CI uses two dependency profiles**: the main strict lane intentionally runs with only `.[dev,keyvault,extension]`, while `feature-extras` installs `ethereum` / `messaging` / `tor-control`, requires their imports, and runs the focused feature suites so `importorskip` cannot hide missing coverage. Use `uv sync --all-extras` when developing those optional features, and also reproduce the main profile before pushing (see `CI.md`).
 
 > **Verifying discovery**: `hermes plugins list` does not show entry-point plugins (upstream's `_discover_all_plugins` is designed to scan directory-based plugins only). The loader side (`PluginManager.discover_and_load`) performs discovery + `register()`. To confirm that all Mordred plugins actually load:
 > ```sh
@@ -149,7 +151,7 @@ Only for when you want to do an end-to-end check via the `hermes` on PATH, inclu
 ```sh
 # Swap the production venv's mordred-hermes for an editable install from your local checkout
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  -e "/path/to/mordred-hermes[macos,extension]"
+  -e "/path/to/mordred-hermes[macos,extension,ethereum]"
 
 # Confirm the swap took effect (should point at src/...)
 ~/.hermes/hermes-agent/venv/bin/python3 -c "import mordred_hermes; print(mordred_hermes.__file__)"
@@ -159,7 +161,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "mordred-hermes[macos]==0.1.0a8"   # ← substitute the current PyPI version here
+  --reinstall "mordred-hermes[macos]==0.1.0a9"   # ← substitute the current PyPI version here
 ```
 
 ## (Optional) Hermes upstream remote
@@ -184,10 +186,10 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 | Integration tests | `uv run pytest -m integration` | Requires Docker / a real Mullvad account / a real network. `integration` extra required |
 | Lint | `uv run ruff check src tests` | `PLAN.md` §0.6 |
 | Format check | `uv run ruff format --check src tests` | Blocking in CI |
-| Type-check | `uv run mypy --strict src` | ⚠️ CI runs without the `ethereum` / `tor-control` extras (see the extras warning above) |
+| Type-check | `uv run mypy --strict src tools` | The main strict lane omits feature extras; the separate feature lane exercises them at runtime |
 | Mordred initial configuration | `.venv/bin/hermes-mordred configure` | Configures policy / LLM / harness. Does not include network privacy. CI/scripts drive it via flags with `--non-interactive --policy strict --harness codex ...` (unspecified flags keep the existing setting). **Destructive — `HERMES_HOME` isolation recommended** |
 | Network privacy configuration | `.venv/bin/hermes-mordred network init` | Sets up Tor / VPN / clearnet + Mullvad on demand. Re-runnable (seeds existing values as prompt defaults; an empty Mullvad input keeps the existing secret). CI/scripts drive it via `--non-interactive --path tor --mullvad-relay jp ...` (secrets are not passed via CLI flags). Delete a saved secret with `--clear-mullvad`. **Destructive — `HERMES_HOME` isolation recommended** |
-| Switch / check network route | `.venv/bin/hermes-mordred network use <tor\|vpn\|clearnet>` / `network status` | Switches the default route and shows current state (`network status --json` for machine-readable output) |
+| Select / check network route | `.venv/bin/hermes-mordred network use <tor\|vpn\|clearnet>` / `network status` | Saves the next process route; restart Hermes to activate a changed route. `network status --json` shows the current process state |
 | Check overall status | `.venv/bin/hermes-mordred status` | Shows policy / network / keyvault / encryption on one screen (`--json` available). Read-only, no prompts or Secure Enclave access |
 | Start extension gateway | `.venv/bin/hermes-mordred extension serve --port 7799` | ⚠️ The default 7788 conflicts with the production LaunchAgent |
 

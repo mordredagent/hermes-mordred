@@ -41,16 +41,23 @@ absent, and it persists a *real* Enclave key solely on an entitled
 interpreter; on an ordinary unsigned Python every SE write fails
 ``errSecMissingEntitlement`` (-34018) and :class:`_SecKeyBackend`
 transparently degrades to a software P-256 key (:class:`_SoftwareFallbackOps`).
-Effective hierarchy: signed helper → in-process pyobjc SE (entitled only) →
-software P-256. The pyobjc path is retained — rather than deleted in favour
-of helper-or-software — so an entitled embedded interpreter keeps an
-in-process SE option (decision recorded 2026-06-03).
+Effective lookup hierarchy: signed helper → legacy in-process pyobjc SE
+(entitled only) → software P-256. Keeping the pyobjc namespace as a lookup
+fallback even after helper installation is an availability and integrity
+requirement: a process can resolve the old backend immediately before the
+global helper is installed, then create its key afterwards. Future processes
+must still find that committed key instead of letting helper priority hide it.
+The pyobjc path is also retained as the primary when the helper is absent so an
+entitled embedded interpreter keeps an in-process SE option (decision recorded
+2026-06-03).
 """
 
 from __future__ import annotations
 
 import enum
+import os
 import sys
+from pathlib import Path
 from typing import Final
 
 from ._exceptions import WrapError, WrapKeyAlreadyExists, WrapKeyNotFound, WrapNativeUnavailable
@@ -139,18 +146,30 @@ def _default_ops() -> _SecKeyOps:
     now source the shared failure taxonomy from the leaf ``_seckey_errors``
     module, so there is no load-time cycle between them either way.
     """
+    return _default_ops_with_legacy()[0]
+
+
+def _default_ops_with_legacy() -> tuple[_SecKeyOps, _SecKeyOps | None]:
+    """Return ``(primary, legacy_same-tag_fallback)`` for this platform.
+
+    On macOS, installing the helper changes the primary namespace globally.
+    The former pyobjc namespace remains readable so an already-running process
+    that selected pyobjc before installation cannot commit a key that all
+    subsequent helper-backed processes would hide. Other platforms have no
+    legacy same-tag namespace.
+    """
     from . import _seckey_helper
 
     if sys.platform == "darwin":
         binary = _seckey_helper._find_helper()
         if binary is not None:
-            return _seckey_helper._HelperSecKeyOps(binary)
-        return _PyobjcSecKeyOps()
+            return _seckey_helper._HelperSecKeyOps(binary), _PyobjcSecKeyOps()
+        return _PyobjcSecKeyOps(), None
 
     if sys.platform == "linux":
         binary = _seckey_helper.find_tpmkey_helper()
         if binary is not None:
-            return _seckey_helper._HelperSecKeyOps(binary)
+            return _seckey_helper._HelperSecKeyOps(binary), None
         raise WrapNativeUnavailable(
             "Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; "
             "none found (set MORDRED_TPMKEY_HELPER or install it). See v2-OS2."
@@ -159,7 +178,7 @@ def _default_ops() -> _SecKeyOps:
     if sys.platform == "win32":
         binary = _seckey_helper.find_winkey_helper()
         if binary is not None:
-            return _seckey_helper._HelperSecKeyOps(binary)
+            return _seckey_helper._HelperSecKeyOps(binary), None
         raise WrapNativeUnavailable(
             "Windows keyvault requires the mordred-hermes-winkey CNG helper; "
             "none found (set MORDRED_WINKEY_HELPER or install it). See v2-OS2."
@@ -251,14 +270,75 @@ class _SecKeyBackend:
         *,
         ops: _SecKeyOps | None = None,
         sw_ops: _SecKeyOps | None | _UnsetSwOps = _DEFAULT_SW_OPS,
+        legacy_ops: _SecKeyOps | None = None,
     ) -> None:
-        self._ops: _SecKeyOps = ops if ops is not None else _default_ops()
+        if ops is None:
+            self._ops, self._legacy_ops = _default_ops_with_legacy()
+        else:
+            self._ops = ops
+            self._legacy_ops = legacy_ops
         self._sw_ops: _SecKeyOps | None = _default_sw_ops() if isinstance(sw_ops, _UnsetSwOps) else sw_ops
+
+    def _for_keyvault_root(self, root: Path) -> _SecKeyBackend:
+        """Clone the backend with file-backed helpers bound to ``root``.
+
+        Native helper binaries normally derive their blob store from ambient
+        ``HERMES_HOME``. High-level APIs also accept an explicit ``home=``;
+        binding the helper store here keeps those two resolution paths from
+        diverging and losing a newly-created key on the next process.
+        """
+        from ._seckey_helper import _HelperSecKeyOps
+
+        def bind(ops: _SecKeyOps | None) -> _SecKeyOps | None:
+            if not isinstance(ops, _HelperSecKeyOps):
+                return ops
+            if sys.platform == "darwin":
+                explicit = os.environ.get("MORDRED_SEKEY_STORE")
+                return ops.with_store_override(
+                    "MORDRED_SEKEY_STORE",
+                    Path(explicit) if explicit else root / "sekey",
+                )
+            if sys.platform == "linux":
+                explicit = os.environ.get("MORDRED_TPMKEY_STORE")
+                return ops.with_store_override(
+                    "MORDRED_TPMKEY_STORE",
+                    Path(explicit) if explicit else root / "tpm",
+                )
+            # The Windows CNG helper persists in the OS provider rather than a
+            # HERMES_HOME-relative blob directory; the physical id provides
+            # its profile namespace.
+            return ops
+
+        primary = bind(self._ops)
+        if primary is None:  # pragma: no cover - self._ops is never None
+            raise RuntimeError("native backend has no primary ops")
+        return _SecKeyBackend(
+            ops=primary,
+            legacy_ops=bind(self._legacy_ops),
+            sw_ops=bind(self._sw_ops),
+        )
 
     # ----- generate -----
 
     def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
         resolved = _resolve_unattended(unattended)
+        # A helper install changes the primary namespace, not ownership of
+        # already-created keys. Refuse to create a helper key that would shadow
+        # the same logical id in the legacy pyobjc or software namespace.
+        if self._legacy_ops is not None:
+            self._assert_namespace_absent(
+                self._legacy_ops,
+                _application_tag(key_id),
+                key_id,
+                "legacy Secure-Enclave",
+            )
+        if self._sw_ops is not None:
+            self._assert_namespace_absent(
+                self._sw_ops,
+                _sw_application_tag(key_id),
+                key_id,
+                "software fallback",
+            )
         try:
             return self._ops.create_keypair(_application_tag(key_id), _keychain_label(key_id), unattended=resolved)
         except _OpsError as exc:
@@ -275,6 +355,16 @@ class _SecKeyBackend:
                 # off macOS.
                 return self._generate_software(key_id, unattended=resolved)
             raise WrapError(f"failed to generate Enclave key for {key_id!r}") from exc
+
+    @staticmethod
+    def _assert_namespace_absent(ops: _SecKeyOps, tag: bytes, key_id: str, namespace: str) -> None:
+        try:
+            ops.copy_public_key(tag)
+        except _OpsError as exc:
+            if _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
+                return
+            raise WrapError(f"failed to inspect {namespace} wrapping-key namespace for {key_id!r}") from exc
+        raise WrapKeyAlreadyExists(f"wrapping key {key_id!r} already exists in the {namespace} namespace")
 
     def _generate_software(self, key_id: str, *, unattended: bool = False) -> bytes:
         # Only reached on the macOS entitlement-fallback path (caller guards
@@ -296,46 +386,52 @@ class _SecKeyBackend:
             return self._ops.copy_public_key(_application_tag(key_id))
         except _OpsError as exc:
             if _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
-                if self._sw_ops is None:
-                    # Fail closed: no software namespace off macOS.
-                    raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
-                # Not in SE namespace — try software namespace.
-                return self._get_software_public_key(key_id, exc)
+                return self._get_fallback_public_key(key_id, exc)
             raise WrapError(f"failed to read Enclave public key for {key_id!r}") from exc
 
-    def _get_software_public_key(self, key_id: str, se_exc: _OpsError) -> bytes:
-        # Only reached on the macOS dual-namespace path: the caller already
-        # returned/raised when ``sw_ops is None``, so it is non-None here.
-        assert self._sw_ops is not None
-        try:
-            return self._sw_ops.copy_public_key(_sw_application_tag(key_id))
-        except _OpsError as exc:
-            if exc.status == errSecItemNotFound:
-                raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from se_exc
-            raise WrapError(f"failed to read wrapping key for {key_id!r}") from exc
+    def _get_fallback_public_key(self, key_id: str, primary_exc: _OpsError) -> bytes:
+        if self._legacy_ops is not None:
+            try:
+                return self._legacy_ops.copy_public_key(_application_tag(key_id))
+            except _OpsError as exc:
+                if not _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
+                    raise WrapError(f"failed to read legacy Enclave public key for {key_id!r}") from exc
+
+        if self._sw_ops is not None:
+            try:
+                return self._sw_ops.copy_public_key(_sw_application_tag(key_id))
+            except _OpsError as exc:
+                if not _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
+                    raise WrapError(f"failed to read wrapping key for {key_id!r}") from exc
+
+        raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in any configured namespace") from primary_exc
 
     # ----- delete -----
 
     def delete_enclave_key(self, key_id: str) -> None:
-        # Attempt SE delete; suppress errSecMissingEntitlement — unsigned
-        # Python cannot delete SE items (key was stored under SW prefix).
-        # That suppression is macOS-only (reason is None); any reason-carrying
-        # helper error propagates.
-        try:
-            self._ops.delete_key(_application_tag(key_id))
-        except _OpsError as exc:
-            if not (exc.reason is None and exc.status == errSecMissingEntitlement):
-                raise WrapError(f"failed to delete Enclave key for {key_id!r}") from exc
+        first_error: _OpsError | None = None
 
-        # No software namespace off macOS — nothing more to delete.
-        if self._sw_ops is None:
-            return
+        def attempt(ops: _SecKeyOps, tag: bytes) -> None:
+            nonlocal first_error
+            try:
+                ops.delete_key(tag)
+            except _OpsError as exc:
+                # Unsigned Python cannot access the pyobjc SE namespace. Keep
+                # deleting the helper/software namespaces; the key could only
+                # have been created there in that process.
+                if exc.reason is None and exc.status == errSecMissingEntitlement:
+                    return
+                if first_error is None:
+                    first_error = exc
 
-        # Always attempt SW delete (idempotent — errSecItemNotFound = success).
-        try:
-            self._sw_ops.delete_key(_sw_application_tag(key_id))
-        except _OpsError as exc:
-            raise WrapError(f"failed to delete wrapping key for {key_id!r}") from exc
+        attempt(self._ops, _application_tag(key_id))
+        if self._legacy_ops is not None and self._legacy_ops is not self._ops:
+            attempt(self._legacy_ops, _application_tag(key_id))
+        if self._sw_ops is not None:
+            attempt(self._sw_ops, _sw_application_tag(key_id))
+
+        if first_error is not None:
+            raise WrapError(f"failed to delete wrapping key for {key_id!r}") from first_error
 
     # ----- ECDH -----
 
@@ -344,28 +440,30 @@ class _SecKeyBackend:
             return self._ops.key_exchange(_application_tag(key_id), peer_pub)
         except _OpsError as exc:
             if _is_reason(exc, OPS_NOT_FOUND, errSecItemNotFound):
-                if self._sw_ops is None:
-                    # Fail closed: no software namespace off macOS.
-                    raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
-                # Key not in SE namespace — try software namespace.
-                return self._ecdh_software(key_id, peer_pub, exc)
+                return self._ecdh_fallback(key_id, peer_pub, exc)
             code = _translate_error(exc.status, exc.domain, exc.reason)
             if code == "key_not_found":
                 raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from exc
             raise NativeBackendError(code) from exc
 
-    def _ecdh_software(self, key_id: str, peer_pub: bytes, se_exc: _OpsError) -> bytes:
-        # Only reached on the macOS dual-namespace path: the caller already
-        # raised when ``sw_ops is None``, so ``_sw_ops`` is non-None here.
-        assert self._sw_ops is not None
-        try:
-            return self._sw_ops.key_exchange(_sw_application_tag(key_id), peer_pub)
-        except _OpsError as exc:
-            code = _translate_error(exc.status, exc.domain, exc.reason)
-            if code == "key_not_found":
-                # Neither SE nor SW namespace has this key.
-                raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in the Keychain") from se_exc
-            raise NativeBackendError(code) from exc
+    def _ecdh_fallback(self, key_id: str, peer_pub: bytes, primary_exc: _OpsError) -> bytes:
+        if self._legacy_ops is not None:
+            try:
+                return self._legacy_ops.key_exchange(_application_tag(key_id), peer_pub)
+            except _OpsError as exc:
+                code = _translate_error(exc.status, exc.domain, exc.reason)
+                if code != "key_not_found":
+                    raise NativeBackendError(code) from exc
+
+        if self._sw_ops is not None:
+            try:
+                return self._sw_ops.key_exchange(_sw_application_tag(key_id), peer_pub)
+            except _OpsError as exc:
+                code = _translate_error(exc.status, exc.domain, exc.reason)
+                if code != "key_not_found":
+                    raise NativeBackendError(code) from exc
+
+        raise WrapKeyNotFound(f"no wrapping key for {key_id!r} in any configured namespace") from primary_exc
 
 
 def probe_capability() -> bool:

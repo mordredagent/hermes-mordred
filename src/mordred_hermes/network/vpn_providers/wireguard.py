@@ -26,6 +26,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from .._exceptions import BringupFailed
 from ..paths.vpn import DEFAULT_MAX_HANDSHAKE_AGE_SECONDS, parse_handshake_age
@@ -34,6 +35,7 @@ from .base import DEFAULT_RUNNER, PolicyMode, SubprocessRunner, VpnCapabilities
 __all__ = ["WireGuardHandle", "WireGuardProvider", "wireguard_install_guidance"]
 
 _LOG = logging.getLogger("mordred.network.vpn")
+DEFAULT_COMMAND_TIMEOUT: Final[float] = 30.0
 
 
 def wireguard_install_guidance() -> str:
@@ -96,7 +98,13 @@ class WireGuardProvider:
             )
         if not self._exists(self._config_path):
             raise BringupFailed(f"wireguard config not found: {self._config_path!r}. {wireguard_install_guidance()}")
-        result = runner((cli_path, "up", self._config_path))
+        try:
+            result = runner(
+                (cli_path, "up", self._config_path),
+                timeout=DEFAULT_COMMAND_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise BringupFailed(f"`wg-quick up {self._config_path}` failed or timed out: {exc}") from exc
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise BringupFailed(f"`wg-quick up {self._config_path}` failed (rc={result.returncode}): {detail!r}")
@@ -117,7 +125,14 @@ class WireGuardProvider:
     ) -> None:
         # No kill-switch to preserve for generic WireGuard.
         del preserve_lockdown
-        result = runner((handle.wg_quick_path, "down", handle.config_path))
+        try:
+            result = runner(
+                (handle.wg_quick_path, "down", handle.config_path),
+                timeout=DEFAULT_COMMAND_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOG.warning("`wg-quick down %s` failed or timed out: %s", handle.config_path, exc)
+            return
         if result.returncode != 0:
             # Teardown failures must not raise (callers swallow-and-continue),
             # but a silently-still-up tunnel is worth surfacing.
@@ -132,7 +147,10 @@ class WireGuardProvider:
         # unhealthy so the liveness worker records the path as down.
         interface = Path(handle.config_path).stem
         try:
-            result = runner(("wg", "show", interface))
+            result = runner(
+                ("wg", "show", interface),
+                timeout=DEFAULT_COMMAND_TIMEOUT,
+            )
         except (FileNotFoundError, PermissionError, subprocess.SubprocessError, OSError):
             return False
         if result.returncode != 0:

@@ -1,0 +1,345 @@
+"""Context binding and replay guarantees for the gateway-only E2E v3 wire."""
+
+from __future__ import annotations
+
+import json
+import secrets
+from types import SimpleNamespace
+
+import pytest
+
+from mordred_hermes.extension import crypto, e2e, gateway_plugin, pairing
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+
+@pytest.fixture
+def channel_key() -> bytes:
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=secrets.token_bytes(32),
+            ext_token="active-pairing",
+            ext_pubkey_b64="",
+            hermes_pubkey_b64="",
+            paired_at=0.0,
+        )
+    )
+    raw_key = secrets.token_bytes(32)
+    pairing.save_channel_key("C-v3", raw_key)
+    return raw_key
+
+
+def _command(
+    raw_key: bytes,
+    plaintext: str = "authenticated command",
+    *,
+    platform: str = "slack",
+    chat_id: str = "C-v3",
+    thread_root: str | None = None,
+    message_id: str | None = None,
+    nonce: bytes | None = None,
+) -> str:
+    return crypto.encrypt_message_v3(
+        raw_key,
+        plaintext,
+        crypto.key_id(raw_key),
+        direction="command",
+        platform=platform,
+        chat_id=chat_id,
+        thread_root=thread_root,
+        message_id=message_id,
+        nonce=nonce,
+    )
+
+
+@pytest.mark.parametrize("wire_prefix", ["🔒", "", ":lock:"])
+def test_gateway_accepts_only_canonical_v3_prefix_variants(channel_key: bytes, wire_prefix: str) -> None:
+    token = _command(channel_key)
+    wire = wire_prefix + token.removeprefix("🔒")
+
+    plaintext, kid, replay = e2e.decrypt_gateway_envelope(
+        wire,
+        "slack",
+        chat_id="C-v3",
+        thread_root=None,
+    )
+
+    assert plaintext == "authenticated command"
+    assert kid == crypto.key_id(channel_key)
+    assert replay is not None
+
+
+@pytest.mark.parametrize(
+    ("platform", "chat_id", "thread_root"),
+    [
+        ("discord", "C-v3", None),
+        ("slack", "C-other", None),
+        ("slack", "C-v3", "wrong-thread"),
+    ],
+)
+def test_v3_aad_rejects_cross_context_replay(
+    channel_key: bytes,
+    platform: str,
+    chat_id: str,
+    thread_root: str | None,
+) -> None:
+    token = _command(channel_key)
+    with pytest.raises(e2e.InvalidEncryptedEnvelope):
+        e2e.decrypt_gateway_envelope(
+            token,
+            platform,
+            chat_id=chat_id,
+            thread_root=thread_root,
+        )
+
+
+def test_v3_key_must_be_registered_for_event_channel(channel_key: bytes) -> None:
+    # The AAD itself is valid for this destination, but its key is registered
+    # only under C-v3. A global kid→key lookup would wrongly accept it.
+    token = _command(channel_key, chat_id="C-other")
+    with pytest.raises(e2e.InvalidEncryptedEnvelope, match="key_not_bound_to_channel"):
+        e2e.decrypt_gateway_envelope(
+            token,
+            "slack",
+            chat_id="C-other",
+            thread_root=None,
+        )
+
+
+def test_discord_thread_can_resolve_key_from_authenticated_parent(channel_key: bytes) -> None:
+    token = _command(
+        channel_key,
+        platform="discord",
+        chat_id="T-v3",
+        thread_root="T-v3",
+    )
+    plaintext, _kid, replay = e2e.decrypt_gateway_envelope(
+        token,
+        "discord",
+        chat_id="T-v3",
+        thread_root="T-v3",
+        parent_chat_id="C-v3",
+    )
+    assert plaintext == "authenticated command"
+    assert replay is not None
+
+
+def test_gateway_rejects_legacy_commands_but_legacy_helper_remains(channel_key: bytes) -> None:
+    legacy = crypto.encrypt_message_v2(channel_key, "legacy", crypto.key_id(channel_key))
+    with pytest.raises(e2e.InvalidEncryptedEnvelope):
+        e2e.decrypt_gateway_envelope(
+            legacy,
+            "slack",
+            chat_id="C-v3",
+            thread_root=None,
+        )
+    assert e2e.decrypt_inbound_keyed(legacy)[0] == "legacy"
+
+
+def test_gateway_rejects_multi_token_splicing(channel_key: bytes) -> None:
+    first = _command(channel_key, "first")
+    second = _command(channel_key, "second")
+    with pytest.raises(e2e.InvalidEncryptedEnvelope, match="mixed_or_multiple_content"):
+        e2e.decrypt_gateway_envelope(
+            f"{first} {second}",
+            "slack",
+            chat_id="C-v3",
+            thread_root=None,
+        )
+
+
+def test_reply_token_cannot_be_reflected_as_a_command(channel_key: bytes) -> None:
+    reply = crypto.encrypt_message_v3(
+        channel_key,
+        "agent reply",
+        crypto.key_id(channel_key),
+        direction="reply",
+        platform="slack",
+        chat_id="C-v3",
+        thread_root=None,
+    )
+    with pytest.raises(e2e.InvalidEncryptedEnvelope, match="authentication_failed"):
+        e2e.decrypt_gateway_envelope(
+            reply,
+            "slack",
+            chat_id="C-v3",
+            thread_root=None,
+        )
+    assert (
+        crypto.decrypt_message_v3(
+            channel_key,
+            reply,
+            direction="reply",
+            platform="slack",
+            chat_id="C-v3",
+            thread_root=None,
+        )
+        == "agent reply"
+    )
+
+
+def test_replay_claim_survives_gateway_restart_state(channel_key: bytes, tmp_path) -> None:
+    token = _command(channel_key)
+    _plaintext, _kid, first_claim = e2e.decrypt_gateway_envelope(
+        token,
+        "slack",
+        chat_id="C-v3",
+        thread_root=None,
+    )
+    assert first_claim is not None
+    assert e2e.claim_gateway_replay(first_claim) is True
+
+    # Authentication is deliberately separate from the release-time commit.
+    # A restarted process can authenticate the capture again, but the private
+    # persisted claim still rejects it before plaintext is released.
+    _plaintext, _kid, replayed_claim = e2e.decrypt_gateway_envelope(
+        token,
+        "slack",
+        chat_id="C-v3",
+        thread_root=None,
+    )
+    assert replayed_claim is not None
+    assert e2e.claim_gateway_replay(replayed_claim) is False
+
+    state_text = (tmp_path / "extension" / "state.json").read_text(encoding="utf-8")
+    _kid, message_id, _sequence, _total, nonce, _ciphertext = crypto.parse_token_v3(token)
+    assert message_id not in state_text
+    assert crypto.b64u_encode(nonce) not in state_text
+    assert isinstance(json.loads(state_text)["e2e_replay_v3"], list)
+
+
+def test_corrupt_persisted_replay_state_fails_closed(channel_key: bytes, tmp_path) -> None:
+    token = _command(channel_key)
+    _plaintext, _kid, claim = e2e.decrypt_gateway_envelope(
+        token,
+        "slack",
+        chat_id="C-v3",
+        thread_root=None,
+    )
+    assert claim is not None
+    state_path = tmp_path / "extension" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["e2e_replay_v3"] = {"malformed": True}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="invalid E2E replay state"):
+        e2e.claim_gateway_replay(claim)
+
+
+@pytest.mark.parametrize("payload", [b"{not-json", b"[]"])
+def test_corrupt_pairing_store_is_not_replaced_by_replay_claim(
+    channel_key: bytes,
+    tmp_path,
+    payload: bytes,
+) -> None:
+    state_path = tmp_path / "extension" / "state.json"
+    state_path.write_bytes(payload)
+
+    with pytest.raises(RuntimeError, match="E2E replay state store is missing, unreadable, or corrupt"):
+        pairing.claim_e2e_replay_identities(("a" * 64,))
+
+    assert state_path.read_bytes() == payload
+
+
+def test_missing_pairing_store_rejects_replay_claim(channel_key: bytes, tmp_path) -> None:
+    state_path = tmp_path / "extension" / "state.json"
+    state_path.unlink()
+
+    with pytest.raises(RuntimeError, match="E2E replay state store is missing, unreadable, or corrupt"):
+        pairing.claim_e2e_replay_identities(("b" * 64,))
+
+    assert not state_path.exists()
+
+
+def test_replay_capacity_fails_closed_without_evicting_unexpired_evidence(channel_key: bytes, tmp_path) -> None:
+    state_path = tmp_path / "extension" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    accepted_at = 1_000_000.0
+    capacity = 32_768
+    state["e2e_replay_v3"] = [{"id": f"{index:064x}", "accepted_at": accepted_at} for index in range(capacity)]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    fresh = (f"{capacity:064x}", f"{capacity + 1:064x}")
+
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        pairing.claim_e2e_replay_identities(fresh, now=accepted_at + 1.0)
+    assert pairing.claim_e2e_replay_identities((f"{0:064x}",), now=accepted_at + 2.0) is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["e2e_replay_v3"]
+    assert len(persisted) == capacity
+    assert {entry["id"] for entry in persisted}.isdisjoint(fresh)
+
+    after_ttl = accepted_at + pairing._E2E_REPLAY_TTL_SECONDS + 1.0
+    assert pairing.claim_e2e_replay_identities(fresh, now=after_ttl) is True
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["e2e_replay_v3"]
+    assert [entry["id"] for entry in persisted] == list(fresh)
+
+
+def test_gateway_commits_replay_only_after_outbound_path_is_ready(channel_key: bytes) -> None:
+    token = _command(channel_key, "release exactly once")
+    event = SimpleNamespace(
+        text=token,
+        source=SimpleNamespace(
+            platform="slack",
+            chat_id="C-v3",
+            thread_id=None,
+            profile=None,
+        ),
+    )
+
+    class FrozenAdapterMeta(type):
+        def __setattr__(cls, name, value):
+            if name == "send":
+                raise TypeError("adapter cannot be wrapped")
+            return super().__setattr__(name, value)
+
+    class FrozenAdapter(metaclass=FrozenAdapterMeta):
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("plaintext must never be sent")
+
+    assert gateway_plugin.pre_gateway_dispatch(
+        event=event,
+        gateway=SimpleNamespace(adapters={"slack": FrozenAdapter()}),
+    ) == {
+        "action": "skip",
+        "reason": "mordred-outbound-encryption-unavailable",
+    }
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("not called by inbound verification")
+
+    protected_gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=protected_gateway) == {
+        "action": "rewrite",
+        "text": "release exactly once",
+    }
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=protected_gateway) == {
+        "action": "skip",
+        "reason": "mordred-replayed-encrypted-envelope",
+    }
+
+
+@pytest.mark.parametrize("reuse", ["message_id", "nonce"])
+def test_replay_cache_rejects_authenticated_identity_reuse(channel_key: bytes, reuse: str) -> None:
+    message_id = crypto.b64u_encode(secrets.token_bytes(16))
+    nonce = secrets.token_bytes(12)
+    first = _command(channel_key, "first", message_id=message_id, nonce=nonce)
+    second = _command(
+        channel_key,
+        "second",
+        message_id=message_id if reuse == "message_id" else None,
+        nonce=secrets.token_bytes(12) if reuse == "message_id" else nonce,
+    )
+
+    for index, token in enumerate((first, second)):
+        _plaintext, _kid, claim = e2e.decrypt_gateway_envelope(
+            token,
+            "slack",
+            chat_id="C-v3",
+            thread_root=None,
+        )
+        assert claim is not None
+        assert e2e.claim_gateway_replay(claim) is (index == 0)

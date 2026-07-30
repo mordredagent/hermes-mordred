@@ -65,12 +65,15 @@ In the revised strategy, we do not submit a PR upstream to Hermes, and instead r
 
 ### Tier A: Plugin-side guard (v1 default, zero core change)
 
-> **Decided 2026-05-07 (H3 Path B)**: For Tier A, **fail-closed under strict mode (RuntimeError raise + session abort)** is the default. It is not an audit-only spec. Same definition as SPEC.md §Plugin-disable protection §Tier A / TODO §1.1 H3 Path B.
+> **Decided 2026-05-07 (H3 Path B)**: For Tier A, **fail-closed under strict mode (dedicated refusal + session abort)** is the default. It is not an audit-only spec. Same definition as SPEC.md §Plugin-disable protection §Tier A / TODO §1.1 H3 Path B.
 
-- Each Mordred plugin declares `privacy_lock: true` in its `plugin.yaml` (the Hermes core ignores this field, but Mordred plugins reference it among themselves)
+- The five manifest-backed plugins declare `privacy_lock: true` as a
+  declarative marker. Hermes ignores the field, and no runtime code discovers
+  siblings from it; enforcement uses the fixed six-entry
+  `privacy_check._runtime.SIBLING_PLUGINS` canonical list.
 - `mordred_wizard` provides the `hermes mordred plugins disable <plugin>` wrapper CLI, and plugins under `mordred_*` refuse when an attempt is made to disable them without the `--unlock` flag (defense-in-depth at the UX layer)
-- **At the start of each Mordred plugin's `on_session_start`, scan the sibling list (`mordred_network` / `mordred_privacy_check` / `mordred_llm_guard` / `mordred_keyvault` / `mordred_wizard`)**:
-  - **If `policy=strict` and even one sibling is disabled**: raise a refusal exception equivalent to `RuntimeError("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` and abort the session. At the same time, record an audit log entry `mordred.degraded.disable_unprotected` (decision=`block`). **The choice of derived class follows the Exception propagation contract in SPEC.md §Plugin-disable protection §Tier A** (`privacy_check` legacy = derives from `SystemExit`, `llm_guard` onward = derives directly from `BaseException`)
+- **At the start of each runtime Mordred plugin's `on_session_start`, scan the canonical list (`mordred_privacy_check` / `mordred_network` / `mordred_llm_guard` / `mordred_keyvault` / `mordred_e2e` / `mordred_wizard`)**:
+  - **If `policy=strict` and even one sibling is disabled**: raise `MordredIntegrityRefused(BaseException)` with the disabled sibling list and abort the session. At the same time, record an audit log entry `mordred.degraded.disable_unprotected` (decision=`block`). Direct `BaseException` inheritance lets the refusal escape Hermes's `except Exception:` wrapper without being mistaken for an ordinary `SystemExit`.
   - **If `policy=lenient` / `off`**: warning only (the audit `mordred.degraded.disable_unprotected` (decision=`warn`) is likewise recorded, to ensure compatibility)
 - If a user uses Hermes's standard `hermes plugins disable mordred_*`, the disable itself goes through on the Hermes side, but **the design is such that the fail-closed behavior above fires and blocks at the next strict session start**
 - **Important caveat**: Tier A blocks **at the next session start**. "Immediate stop when disabled during execution" is out of scope for v1 (on the assumption that Hermes does not reflect dynamic plugin disabling while a session is running; to be verified in Phase 0.8)

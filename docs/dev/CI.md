@@ -18,7 +18,7 @@ Everything else is upstream's responsibility, and runs in upstream's CI.
 
 ## Standalone-repo adaptations (2026-07-01)
 
-When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Browser-extension gateway counterpart (deferred)"), `.github/workflows/` was left out entirely, and this document was the only thing that survived the split — still describing workflows that no longer existed. Restoring them requires reflecting the following changed assumptions:
+When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Remaining browser-extension gateway integration"), `.github/workflows/` was left out entirely, and this document was the only thing that survived the split — still describing workflows that no longer existed. Restoring them requires reflecting the following changed assumptions:
 
 - **`hermes-agent` is now published on PyPI** (confirmed `hermes-agent==0.14.0`, 2026-07-01). The old design's premises — "`hermes-agent` isn't on PyPI so a root install is required" and "the `fresh-venv-resolution` job (H1) asserts install **fails** without it" — no longer hold. `pip install -e .` resolves `hermes-agent` on its own. The `fresh-venv-resolution` job is **retired**: H1's purpose (fail-fast when `hermes-agent` is absent) is moot now that it's always resolvable from PyPI
 - **`upstream-check.yml` no longer needs `git clone`**: `pip install hermes-agent` unpacks its source (plain `.py` files, not compiled) into site-packages, so `tools/check_hook_payload_drift.py --hermes-root <site-packages>` works directly (verified locally)
@@ -31,7 +31,7 @@ When this repo split off from `Mordred-Hermes-monorepo` (see ROADMAP.md §"Brows
 
 | Path | Purpose | Status |
 |------|---------|--------|
-| `.github/workflows/ci.yml` | Per-PR / push: `test` (matrix; ruff + mypy + pytest) + `hermes-floor` + `integration-tor` + `tpmkey-helper` + `tpmkey-helper-tpm` jobs | **restored** (5 jobs) |
+| `.github/workflows/ci.yml` | Per-PR / push: Python matrix, feature extras, installed-wheel smoke, Tor integration, Swift and Rust helper builds | **restored** (8 jobs) |
 | `.github/workflows/upstream-check.yml` | Weekly detection of Hermes hook signature + payload drift | **restored** (simplified `git clone` to `pip install hermes-agent`) |
 | `.github/workflows/labeler.yml` | Auto-labels PRs by path (mordred-* paths) | **restored** |
 | `.github/workflows/integration-vpn.yml` | `workflow_dispatch`-only: live Mullvad VPN integration test (PR3b, pairs with the `integration-tor` job) | **restored** (needs `MORDRED_MULLVAD_ACCOUNT` secret before dispatch) |
@@ -41,30 +41,32 @@ The detail sections below are left as they were in the pre-split design (histori
 
 ## `ci.yml` details
 
-See `.github/workflows/ci.yml` for the implementation. `ci.yml` consists of **5 jobs**:
+See `.github/workflows/ci.yml` for the implementation. `ci.yml` consists of **8 jobs**:
 
 1. **`test`** — the unit-test job across the matrix (OS × Python). ruff + mypy + pytest, plus a cheap `hermes-mordred policy dry-run skills/mordred-status` step that guards against `skills/mordred-status/SKILL.md` drifting out of sync with the live CLI
-2. **`hermes-floor`** — pins `hermes-agent==0.13.0` (the floor declared by `pyproject.toml`'s `hermes-agent>=0.13.0`; 0.13.0 is hermes-agent's first PyPI release — the job's own first run proved the old 0.11.0 floor was never installable), installs `mordred-hermes` on top of it, asserts the resolver did not silently upgrade it off the pin, then runs the unit suite against that exact combination. Every other job resolves the latest PyPI `hermes-agent`, so without this job the declared floor is never actually exercised
-3. **`integration-tor`** — hermetic Tor Docker integration-test job (Linux-only; macOS runners have no Docker)
-4. **`tpmkey-helper`** — verifies the `native/tpmkey-helper` Rust crate (the Linux TPM 2.0 helper) on both ubuntu and macOS with `cargo fmt --check` / `cargo clippy -D warnings` / `cargo test`. Builds the pure-function layer (wire / SEC1 codec / 32-byte ECDH-Z left-pad / blob store / neutral error taxonomy) on both OSes to guarantee, on real Linux, "a Linux build that can't be verified on a macOS dev host." The Linux leg also builds the v2-OS2 Phase 2b `tss-esapi` TPM backend (`cfg(target_os="linux")`), so it installs libtss2-dev + libclang; the backend's live tests are gated behind `MORDRED_TPM_TEST` and run in job 5
-5. **`tpmkey-helper-tpm`** — v2-OS2 Phase 2b. Starts a `swtpm` software TPM on ubuntu and verifies the `tss-esapi` backend end-to-end with `MORDRED_TPM_TEST=1` (generate / public_key / delete / ECDH parity against software P-256). Tests share a single swtpm command server, so `--test-threads=1`
+2. **`feature-extras`** — installs `ethereum`, `messaging`, and `tor-control`, fails immediately if any declared dependency is absent, exercises QR rendering, and runs the focused Ethereum / Tor / pairing suites. This prevents `pytest.importorskip` from silently erasing optional-feature coverage
+3. **`package-smoke`** — builds via the release-equivalent sdist → wheel path, installs the wheel in a fresh venv outside the checkout, loads all six plugin entry points and the console entry point, and checks native/offline/web assets plus the site-packages-root `.pth`
+4. **`hermes-floor`** — pins `hermes-agent==0.13.0` (the floor declared by `pyproject.toml`'s `hermes-agent>=0.13.0`; 0.13.0 is hermes-agent's first PyPI release — the job's own first run proved the old 0.11.0 floor was never installable), installs `mordred-hermes` on top of it, asserts the resolver did not silently upgrade it off the pin, then runs the unit suite against that exact combination. Every other job resolves the latest PyPI `hermes-agent`, so without this job the declared floor is never actually exercised
+5. **`integration-tor`** — hermetic Tor Docker integration-test job (Linux-only; macOS runners have no Docker)
+6. **`sekey-helper`** — compiles the shipped Secure Enclave Swift helper on a macOS runner. Live Secure Enclave operations remain hardware-gated
+7. **`tpmkey-helper`** — verifies the `native/tpmkey-helper` Rust crate on ubuntu and macOS with locked dependencies. The Linux leg also checks the declared Rust 1.85 MSRV and builds the `tss-esapi` backend
+8. **`tpmkey-helper-tpm`** — starts a `swtpm` software TPM on ubuntu and verifies the `tss-esapi` backend end-to-end with locked dependencies and `MORDRED_TPM_TEST=1`
 
 Key points:
 
-- **paths filter (differs by trigger type)**:
-  - `pull_request` trigger: `src/**`, `tests/**`, `tools/**`, `native/**`, `pyproject.toml`, `uv.lock`, `.github/workflows/ci.yml`, `docs/dev/CI.md`
-  - `push` (`main`, `dev`) trigger: the same list minus `docs/dev/CI.md` (docs-only changes are checked in the PR and not re-run on push)
+- **paths filter**: both PRs and pushes to `main` / `dev` cover shipped source and test trees plus `tools/**`, `native/**`, `packaging/**`, `scripts/**`, `skills/**`, `docs/**`, `README.md`, `LICENSE`, `pyproject.toml`, `uv.lock`, all workflow definitions, and the labeler configuration
 - **concurrency**: the `ci-${{ github.ref }}` group + `cancel-in-progress: true` automatically cancels older runs on the same PR
 - **permissions**: top-level `contents: read` — every job in this workflow only reads the checked-out source; nothing here needs to write anywhere
 - **`test` job — install**: `pip install -e ".[dev,keyvault,extension]"` resolves `hermes-agent` directly from PyPI (no monorepo root install step); macOS runners additionally install the `macos` extra (pyobjc Security/SystemConfiguration/Quartz bridges)
 - **`keyvault` extra (all platforms)**: installs the cross-platform crypto stack (`cryptography` / `argon2-cffi` / `blake3`) on every runner, so that `mypy --strict src tools` / pytest can resolve the keyvault modules on Linux too (these packages themselves are cross-platform; the macOS-only restriction on keyvault *functionality* is gated by the pyobjc bridge below)
 - **`test` job — steps**: ruff lint → ruff format check → `mypy --strict src tools` → pytest (coverage XML) → SKILL.md drift guard. `mypy` covers `tools/` as well as `src/` to match `pyproject.toml`'s `[tool.mypy] files` setting — CLI args override config `files`, so omitting `tools` here would silently stop checking it
 - **Matrix**: macOS Apple Silicon (confirms Phase 4 keyvault behavior) × Ubuntu (confirms Phase 1-3 multi-platform behavior) × Python 3.11 / 3.12 / 3.13 (aligned with Hermes upstream's `requires-python = ">=3.11"`). 3.13 was added as a new cell and should be watched for a cycle — `fail-fast: false` means a 3.13-only failure (e.g. a lagging pyobjc/blake3 wheel) won't block the 3.11/3.12 cells
-- **pip caching**: `test`, `hermes-floor`, and `integration-tor` all pass `cache: pip` to `actions/setup-python@v5`
+- **pip caching**: Python jobs use setup-python's pip cache where useful
 - **`hermes-floor` job**: standalone (no `needs:`), Python 3.12 on ubuntu-24.04. Pins `hermes-agent==0.13.0`, installs `mordred-hermes[dev,keyvault,extension]` on top of it, then a guard step reads back the installed `hermes-agent` version via `importlib.metadata` and fails the job if it isn't still `0.13.0` (which would mean the floor itself went untested). Runs the default unit suite (`pytest`; `pyproject.toml`'s `addopts` already excludes `-m integration`) **minus two deselected latest-tracking drift detectors** (`test_replica_matches_hermes_source` — the provider replica byte-matches the *installed* hermes and deliberately tracks PyPI-latest; `test_known_provider_slugs_are_real_hermes_ids` — requires provider ids only recognised from hermes-agent 0.18.0). Including them would force floor == latest forever; both still run at latest in the `test` job
 - **`integration-tor` job**: `needs: test`. Installs `mordred-hermes[dev,integration]`, builds the Docker image under `tests/integration/docker/tor/`, and runs the Tor + SOCKS5h + provider-transport integration tests with `pytest -m integration`
-- **`tpmkey-helper` / `tpmkey-helper-tpm` caching**: both jobs cache `~/.cargo/registry`, `~/.cargo/git`, and `native/tpmkey-helper/target` via the GitHub-owned `actions/cache@v4` (not the third-party `Swatinem/rust-cache`, consistent with this repo's supply-chain stance — see the `tor-control` extra's `stem`-gating rationale in `pyproject.toml`), keyed on `${{ runner.os }}-...-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}`
-- **coverage**: saved as an artifact named `coverage-${os}-py${version}` via `actions/upload-artifact@v4`. Codecov integration is a separate PR (to be enabled after adding the token as a repo secret)
+- **dependency locks and action integrity**: Cargo build/test/clippy commands use `--locked`; GitHub Actions are referenced by verified immutable commit SHA (the trailing comments retain the familiar major-version family)
+- **`tpmkey-helper` / `tpmkey-helper-tpm` caching**: both jobs cache `~/.cargo/registry`, `~/.cargo/git`, and `native/tpmkey-helper/target` via the SHA-pinned GitHub-owned `actions/cache` action (not the third-party `Swatinem/rust-cache`), keyed on `${{ runner.os }}-...-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}`
+- **coverage**: saved as an artifact named `coverage-${os}-py${version}` via the SHA-pinned GitHub-owned upload action. Codecov integration is a separate PR (to be enabled after adding the token as a repo secret)
 - **Live tests** (`MORDRED_LIVE_LLM_TEST=1` / `MORDRED_KEYVAULT_LIVE=1`) do not run by default and have **no** CI workflow automation — there is no `workflow_dispatch` for either suite. The only live-gated suite with a `workflow_dispatch` is VPN (`MORDRED_LIVE_VPN_TEST=1`, `integration-vpn.yml`, see below). For the keyvault/LLM suites, the compensating control is the manual on-device validation log below (§Manual live-device validation log)
 
 ## `integration-vpn.yml` details
@@ -91,7 +93,9 @@ See `.github/workflows/upstream-check.yml` for the implementation (DECIDE 0.1: c
 - **schedule**: weekly on Monday 03:00 UTC (`cron: "0 3 * * 1"`) + `workflow_dispatch`
 - **permissions**: `contents: read` + `issues: write` (for automatically filing an issue when drift is detected)
 - **Drift detection**: after `git clone --depth 1` of Hermes upstream, run `pip install -e ./hermes-upstream` to reliably pull in transitive deps (PyYAML, etc.) before importing `hermes_cli.plugins.VALID_HOOKS` (relying on a sys.path hack instead would misdetect the runner's missing deps as `__MISSING__`). Compares the retrieved hook list against the results of grepping the Mordred plugin's `register_hook("...")` calls
-- **Phase 0 caveat**: since the Phase 0 plugin is a no-op stub, there are 0 `register_hook` calls. Don't fail even when the required-set is empty (drift detection becomes meaningful once Phase 1.x starts calling hooks)
+- **Empty-set compatibility**: the check still accepts repositories with no
+  `register_hook` calls, preserving the behavior needed by the former Phase 0
+  stubs. The current plugins register hooks, so drift detection is active.
 - **If `VALID_HOOKS` disappears**: a constant rename on the Hermes upstream side is also treated as a drift signal, and an issue is filed as `__VALID_HOOKS_REMOVED__`
 - **Issue filing**: when a diff occurs, an issue is automatically filed with the `actionable` + `upstream-drift` labels. If an `upstream-drift` issue is already open, dedup logic **appends a comment instead of filing a new issue** (preventing issue pile-up from weekly reruns). When payload field drift is detected, the issue body also lists the missing fields per call site
 - **Payload field drift detection (added 2026-06-12, TODO L474)**: in addition to hook **names** (`VALID_HOOKS` membership), `tools/check_hook_payload_drift.py` scans the upstream source with pure `ast` and cross-checks whether every `invoke_hook("<name>", key=value, ...)` dispatch site in core passes the payload fields Mordred consumes (`tools/hook_payload_contract.json`) — no import or install required. `tests/test_hook_payload_drift.py` enforces that the contract keys exactly match the plugin's `register_hook` calls, and that same test's canary runs the identical check against the vendored fork (this repository's own Hermes tree) on every CI run
@@ -128,7 +132,9 @@ See `.github/workflows/release.yml` for the implementation (M7, TODO §0.5 L70).
 - **`mode` input**:
   - `reserve` — builds the empty stub in `packaging/name-reservation/` (`0.0.0.dev0`). A one-time reservation to protect the name from squatting before v1 docs go public
   - `release` — builds the real package (`mordred-hermes/`, `0.1.0a0`+). Used for normal releases after the name reservation
-- **build job guard**: `reserve` mode verifies the artifact is `0.0.0.dev0`, and `release` mode conversely verifies it is *not* `0.0.0.dev0`, preventing mode mix-ups
+- **`expected-version` input**: exact canonical PEP 440 version expected from the selected source and in both wheel `METADATA` and sdist `PKG-INFO`. `reserve` requires `0.0.0.dev0`; every `release` dispatch must provide the bumped real version
+- **production fail-closed rules**: `target=pypi` is accepted only from `refs/heads/main`, and production always rejects `skip-ci-gate=true`. The escape hatch remains available only for deliberate TestPyPI checks of an old SHA whose CI records expired
+- **build job guard**: verifies exactly one wheel and one sdist, the distribution name, and an exact source/artifact version match before uploading the workflow artifact
 - **Version-ordering invariant**: `0.0.0.dev0 < 0.1.0a0` (PEP 440). Because the stub sorts lower than the real package, the reservation stub never blocks a subsequent real release. `tests/test_packaging_versions.py` pins this invariant
 
 ### Initial setup (one-time, manual by the operator)
@@ -154,9 +160,9 @@ After the name reservation, every real release follows this procedure (the flow 
 1. **Version bump (mandatory)** — `python tools/bump_version.py <new-version>` bulk-updates `src/mordred_hermes/__about__.py` (canonical) + `docs/dev/VERSION` + every `plugin.yaml` + the README.md / docs/dev/setup.md install pins. PEP 440-compliant (`0.1.0a1` / `0.1.0b0` / `0.1.0rc0` / `0.1.0` GA / `0.1.1` patch, etc.). **PyPI can never reuse a filename once it's been used** (yanking/deleting doesn't allow re-upload), so re-releasing a version that's already been published is physically impossible — always bump. `tests/test_packaging_versions.py` guarantees in CI that all 9 surfaces (including the README / docs/dev/setup.md install pins) agree and that stub < real
 2. Merge the bump into `dev` via a normal PR
 3. **dev→main release PR** — write the aggregated release notes (each PR's `### Changes` / `### Fixes`, per §Changelog convention) in the PR description, confirm CI is green, and merge. Dispatch `release.yml` from the `main` ref (the release artifact reflects main's content)
-4. **Dry run on TestPyPI**: `gh workflow run release.yml --ref main -f target=testpypi -f mode=release` → confirm the run succeeds
+4. **Dry run on TestPyPI**: `gh workflow run release.yml --ref main -f target=testpypi -f mode=release -f expected-version=<version>` → confirm the run succeeds
 5. **Verify the TestPyPI install**: in a fresh venv, `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "mordred-hermes==<version>"` (the extra-index is for resolving dependencies like `hermes-agent`) → confirm entry-point discovery 6/6 (`PluginManager.discover_and_load`) + `hermes-mordred --version`
-6. **Production publish**: `gh workflow run release.yml --ref main -f target=pypi -f mode=release` → confirm it's live via the PyPI JSON / simple index. **Note**: while the `pypi` Environment has no required reviewers configured (a billing-plan constraint, the deviation noted in §Initial setup), dispatch ≈ immediate publication
+6. **Production publish**: `gh workflow run release.yml --ref main -f target=pypi -f mode=release -f expected-version=<version>` → confirm it's live via the PyPI JSON / simple index. The workflow rejects non-`main` refs and refuses a production CI-gate bypass. **Note**: while the `pypi` Environment has no required reviewers configured (a billing-plan constraint, the deviation noted in §Initial setup), a valid dispatch proceeds without an Environment reviewer
 7. **Verify the production install**: in a fresh venv, install with a pin → re-confirm discovery + CLI
 8. **Tag + GitHub Release**: put an annotated tag `v<version>` on main's release merge commit → create a GitHub Release (use `--prerelease` for pre-release versions; copy the notes from the aggregation done in step 3)
 

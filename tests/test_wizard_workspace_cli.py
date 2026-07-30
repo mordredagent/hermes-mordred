@@ -39,9 +39,12 @@ def _env(tmp_path: Path) -> workspace_cli.WorkspaceEnv:
 def _set_up(env: workspace_cli.WorkspaceEnv) -> None:
     """Materialise a 'set up' workspace: sparsebundle dir + wrapped passphrase."""
     env.image.mkdir(parents=True)
-    (env.image / "token.sparseimage").write_bytes(b"x")
+    (env.image / "Info.plist").write_bytes(b"plist")
+    (env.image / "bands").mkdir()
     env.keydir.mkdir(parents=True)
     env.blob.write_bytes(b"wrapped")
+    (env.keydir / "se.key").write_bytes(b"private")
+    (env.keydir / "se.pub").write_bytes(b"public")
 
 
 class _Runner:
@@ -148,6 +151,8 @@ class TestPurge:
         env.image.write_bytes(b"dmg")  # file, not a directory bundle
         env.keydir.mkdir(parents=True)
         env.blob.write_bytes(b"wrapped")
+        (env.keydir / "se.key").write_bytes(b"private")
+        (env.keydir / "se.pub").write_bytes(b"public")
         rc = workspace_cli.purge(env=env, platform="darwin", is_mounted=lambda _p: False)
         assert rc == 0
         assert not env.image.exists()
@@ -171,6 +176,102 @@ class TestPurge:
     def test_noop_when_not_set_up(self, tmp_path: Path) -> None:
         rc = workspace_cli.purge(env=_env(tmp_path), platform="darwin", is_mounted=lambda _p: False)
         assert rc == 0
+
+    @pytest.mark.parametrize("target_name", ["image", "keydir"])
+    def test_dangling_symlink_is_refused_not_treated_as_absent(
+        self,
+        tmp_path: Path,
+        target_name: str,
+    ) -> None:
+        env = _env(tmp_path)
+        target = getattr(env, target_name)
+        target.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+
+        assert workspace_cli.purge(env=env, platform="darwin", is_mounted=lambda _p: False) == 1
+        assert target.is_symlink()
+
+    def test_remove_path_never_reports_a_dangling_symlink_as_gone(self, tmp_path: Path) -> None:
+        dangling = tmp_path / "dangling"
+        dangling.symlink_to(tmp_path / "missing")
+
+        assert workspace_cli._remove_path(dangling) is False
+        assert dangling.is_symlink()
+
+    @pytest.mark.parametrize("dangerous", [Path("/"), Path.home(), Path.cwd()])
+    def test_refuses_broad_key_directory(self, tmp_path: Path, dangerous: Path) -> None:
+        env = _env(tmp_path)
+        _set_up(env)
+        unsafe = workspace_cli.WorkspaceEnv(
+            image=env.image,
+            blob=dangerous / "passphrase.wrapped",
+            mount=env.mount,
+            keydir=dangerous,
+        )
+
+        assert workspace_cli.purge(env=unsafe, platform="darwin", is_mounted=lambda _p: False) == 1
+        assert env.image.exists()
+
+    def test_refuses_overlapping_targets(self, tmp_path: Path) -> None:
+        env = _env(tmp_path)
+        _set_up(env)
+        unsafe = workspace_cli.WorkspaceEnv(
+            image=env.image,
+            blob=env.image / "passphrase.wrapped",
+            mount=env.mount,
+            keydir=env.image,
+        )
+
+        assert workspace_cli.purge(env=unsafe, platform="darwin", is_mounted=lambda _p: False) == 1
+        assert env.image.exists()
+
+    def test_refuses_key_directory_with_unexpected_files(self, tmp_path: Path) -> None:
+        env = _env(tmp_path)
+        _set_up(env)
+        (env.keydir / "unrelated-document.txt").write_text("keep", encoding="utf-8")
+
+        assert workspace_cli.purge(env=env, platform="darwin", is_mounted=lambda _p: False) == 1
+        assert (env.keydir / "unrelated-document.txt").exists()
+
+    def test_refuses_parent_symlink_without_deleting_external_targets(self, tmp_path: Path) -> None:
+        external_env = _env(tmp_path / "external")
+        _set_up(external_env)
+        linked_parent = tmp_path / "linked-parent"
+        linked_parent.symlink_to(external_env.image.parent, target_is_directory=True)
+        redirected = workspace_cli.WorkspaceEnv(
+            image=linked_parent / external_env.image.name,
+            blob=linked_parent / external_env.keydir.name / "passphrase.wrapped",
+            mount=tmp_path / "mnt",
+            keydir=linked_parent / external_env.keydir.name,
+        )
+
+        assert workspace_cli.purge(env=redirected, platform="darwin", is_mounted=lambda _p: False) == 1
+        assert external_env.image.exists()
+        assert external_env.blob.exists()
+        assert linked_parent.is_symlink()
+
+    def test_rechecks_parent_symlinks_immediately_before_deletion(self, tmp_path: Path) -> None:
+        safe_root = tmp_path / "safe"
+        safe_env = _env(safe_root)
+        _set_up(safe_env)
+        external_env = _env(tmp_path / "external")
+        _set_up(external_env)
+
+        def swap_parent_before_delete(_mount: Path) -> bool:
+            workspace_cli.shutil.rmtree(safe_root)
+            safe_root.symlink_to(external_env.image.parent, target_is_directory=True)
+            return False
+
+        assert workspace_cli.purge(env=safe_env, platform="darwin", is_mounted=swap_parent_before_delete) == 1
+        assert external_env.image.exists()
+        assert external_env.blob.exists()
+
+    def test_purges_valid_partial_setup(self, tmp_path: Path) -> None:
+        env = _env(tmp_path)
+        env.keydir.mkdir(parents=True)
+        env.blob.write_bytes(b"wrapped")
+
+        assert workspace_cli.purge(env=env, platform="darwin", is_mounted=lambda _p: False) == 0
+        assert not env.keydir.exists()
 
 
 # -----------------------------------------------------------------------------

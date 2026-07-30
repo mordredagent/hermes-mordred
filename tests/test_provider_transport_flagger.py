@@ -16,7 +16,7 @@ Tests cover:
 - Localhost-only provider is exempt from Tor flagging.
 - Lenient mode downgrades ``abort`` to ``warning``.
 - Off mode emits no flags regardless of path.
-- Unknown provider produces a ``warning`` (no data ≠ safe).
+- Unknown/unverified providers abort on strict Tor and warn in lenient mode.
 - Overrides may add new providers but must not replace baseline entries.
 """
 
@@ -143,13 +143,27 @@ class TestOffMode:
 
 
 class TestUnknown:
-    def test_unknown_provider_warns_under_strict(self) -> None:
+    def test_unknown_provider_aborts_under_strict_tor(self) -> None:
         from mordred_hermes.network import provider_transport_flagger as ptf
 
         flags = ptf.evaluate(active_path="tor", providers=("custom-llm",), policy_mode="strict")
         assert len(flags) == 1
         assert flags[0].provider == "custom-llm"
-        assert flags[0].severity in {"warning", "abort"}
+        assert flags[0].severity == "abort"
+
+    def test_unknown_provider_warns_under_lenient_tor(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(active_path="tor", providers=("custom-llm",), policy_mode="lenient")
+        assert len(flags) == 1
+        assert flags[0].severity == "warning"
+
+    def test_unknown_provider_warns_under_strict_clearnet(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(active_path="clearnet", providers=("custom-llm",), policy_mode="strict")
+        assert len(flags) == 1
+        assert flags[0].severity == "warning"
 
     def test_alias_resolves_to_canonical_entry(self) -> None:
         """An aliased provider id resolves to its canonical registry entry
@@ -322,8 +336,10 @@ class TestProviderEntryExtensions:
 
 
 class TestIPv6Flagging:
-    """``respects_ipv6_proxy=False`` on Tor produces a flag unless IPv6 is
-    disabled at the OS / resolver level (``disable_ipv6=True``, strict default).
+    """``respects_ipv6_proxy=False`` on Tor always produces a flag.
+
+    ``disable_ipv6=True`` only configures Tor's own client connections; it
+    does not disable host IPv6 or constrain provider SDK sockets.
     """
 
     def test_strict_tor_ipv6_enabled_provider_respects_ipv6_proxy_false_aborts(self) -> None:
@@ -342,13 +358,8 @@ class TestIPv6Flagging:
         assert any("ipv6" in f.reason.lower() for f in flags), [f.reason for f in flags]
         assert any(f.severity == "abort" for f in flags)
 
-    def test_strict_tor_ipv6_disabled_no_ipv6_flag(self) -> None:
-        """strict + Tor + IPv6 disabled at OS → no IPv6-specific flag.
-
-        The flagger trusts the IPv4-only resolver hint; provider IPv6 misuse
-        is moot when the kernel resolver isn't returning AAAA records. (Note
-        that other flags like socks5h=False still apply.)
-        """
+    def test_strict_tor_disable_ipv6_setting_does_not_suppress_flag(self) -> None:
+        """Tor ``ClientUseIPv6 0`` is not host-level IPv6 enforcement."""
         from mordred_hermes.network import provider_transport_flagger as ptf
 
         flags = ptf.evaluate(
@@ -358,7 +369,9 @@ class TestIPv6Flagging:
             disable_ipv6=True,
         )
         ipv6_flags = [f for f in flags if "ipv6" in f.reason.lower()]
-        assert ipv6_flags == [], "IPv6 flag must not be emitted when disable_ipv6=True"
+        assert ipv6_flags, "Tor-only disable_ipv6 must not suppress the SDK IPv6 flag"
+        assert all(f.severity == "abort" for f in ipv6_flags)
+        assert all("does not enforce host/sdk" in f.reason.lower() for f in ipv6_flags)
 
     def test_lenient_tor_ipv6_enabled_downgrades_to_warning(self) -> None:
         from mordred_hermes.network import provider_transport_flagger as ptf
@@ -384,6 +397,44 @@ class TestIPv6Flagging:
         )
         ipv6_flags = [f for f in flags if "ipv6" in f.reason.lower()]
         assert ipv6_flags == []
+
+
+class TestUnverifiedBaseline:
+    def test_strict_tor_unverified_provider_aborts(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("openrouter",),
+            policy_mode="strict",
+            disable_ipv6=True,
+        )
+        verification = [f for f in flags if "not packet-capture verified" in f.reason]
+        assert verification
+        assert all(f.severity == "abort" for f in verification)
+
+    def test_lenient_tor_unverified_provider_warns(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="tor",
+            providers=("openrouter",),
+            policy_mode="lenient",
+            disable_ipv6=True,
+        )
+        verification = [f for f in flags if "not packet-capture verified" in f.reason]
+        assert verification
+        assert all(f.severity == "warning" for f in verification)
+
+    def test_strict_clearnet_unverified_provider_not_transport_gated(self) -> None:
+        from mordred_hermes.network import provider_transport_flagger as ptf
+
+        flags = ptf.evaluate(
+            active_path="clearnet",
+            providers=("openrouter",),
+            policy_mode="strict",
+        )
+        assert all("not packet-capture verified" not in f.reason for f in flags)
 
 
 class TestNonHTTPTransportFlagging:

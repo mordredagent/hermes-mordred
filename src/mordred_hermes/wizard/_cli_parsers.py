@@ -71,7 +71,7 @@ def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     p_serve.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Bind host (default: 127.0.0.1 — non-loopback exposes the no-TLS API to your network)",
+        help="Loopback bind host (default: 127.0.0.1; non-loopback values are refused)",
     )
     p_serve.add_argument("--port", type=int, default=7788, help="Bind port (default: 7788)")
     p_serve.set_defaults(func=_handle_extension_serve)
@@ -235,7 +235,7 @@ def _add_policy(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
 
 
 def _add_audit(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("audit", help="Tail / grep / decrypt the Mordred audit log")
+    p = sub.add_parser("audit", help="Tail / grep / decrypt / purge the Mordred audit log")
     asub = p.add_subparsers(dest="audit_command", required=True, metavar="COMMAND")
 
     p_tail = asub.add_parser("tail", help="Tail the most recent audit entries")
@@ -250,7 +250,7 @@ def _add_audit(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     p_decrypt.add_argument("--date", required=True, help="YYYY-MM-DD")
     p_decrypt.set_defaults(func=_handle_audit_decrypt)
 
-    p_purge = asub.add_parser("purge", help="Manually purge plaintext audit entries (destructive; needs --yes)")
+    p_purge = asub.add_parser("purge", help="Delete dated rotated audit logs (destructive; needs --yes)")
     p_purge.add_argument("--before", required=True, help="YYYY-MM-DD")
     p_purge.add_argument("-y", "--yes", action="store_true", help="Confirm the destructive purge")
     p_purge.set_defaults(func=_handle_audit_purge)
@@ -302,11 +302,6 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         help="Build + install the hardware Secure Enclave helper (ad-hoc signed; no Apple Developer account)",
     )
     p_enable_se.add_argument("--install-dir", help="Install directory for the helper (default: ~/.local/bin)")
-    p_enable_se.add_argument(
-        "--unattended",
-        action="store_true",
-        help="Create an unattended SE key (decrypt runs without a Touch ID prompt while the session is unlocked)",
-    )
     p_enable_se.set_defaults(func=_handle_keyvault_enable_se)
     p_enable_tpm = ksub.add_parser(
         "enable-tpm",
@@ -750,22 +745,9 @@ def _handle_extension_pair(args: argparse.Namespace) -> int:
 
 
 def _handle_extension_serve(args: argparse.Namespace) -> int:
-    # The import below executes mordred_hermes/extension/__init__.py, which
-    # eagerly imports .api and therefore aiohttp — so a missing `extension`
-    # extra surfaces HERE, not inside serve()'s own lazy-import guard.
-    try:
-        from mordred_hermes.extension.__main__ import serve
-    except ImportError as exc:
-        import sys
-
-        # Echo the underlying error so a genuine import bug inside the
-        # package isn't misdiagnosed as a missing extra.
-        print(
-            "error: the extension server needs the `extension` extra (aiohttp). "
-            'Install it with `pip install "mordred-hermes[extension]"` or, inside '
-            f"this repo, `uv sync --extra extension`. (import failed: {exc})",
-            file=sys.stderr,
-        )
-        return 2
+    # The extension package and launcher are dependency-light. ``serve`` owns
+    # the optional aiohttp check so unrelated import bugs are never relabelled
+    # as a missing ``extension`` extra here.
+    from mordred_hermes.extension.__main__ import serve
 
     return serve(host=args.host, port=args.port)

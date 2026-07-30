@@ -4,7 +4,7 @@ This module is read-only by design. It computes the ``{HTTPS_PROXY: ...}``
 dict that **should** be in ``os.environ`` for a given network path; PR2
 ``runtime`` is the sole writer that actually mutates the process
 environment (and tracks the prior values so it can restore on
-``on_session_end``).
+process exit).
 
 The Tor URL scheme is always ``socks5h://`` so DNS resolution happens
 inside the Tor circuit (TODO §3.1 L317). Plain ``http://`` proxy URLs are
@@ -75,10 +75,12 @@ def desired_env(
     config-file-driven flips (the policy.json field is plain string at
     the storage layer).
 
-    ``isolation_token`` (Tor path only) injects a per-context SOCKS5
-    credential so Tor's ``IsolateSOCKSAuth`` assigns the context its own
-    circuit. ``None`` / empty leaves the URL credential-free. It is a
-    silent no-op on the clearnet / vpn paths, which carry no SOCKS proxy.
+    ``isolation_token`` (Tor path only) injects an optional process-scoped
+    SOCKS5 credential so Tor's ``IsolateSOCKSAuth`` assigns that Hermes
+    process its own circuit pool. The runtime must choose it before route
+    activation; per-session/per-skill tokens are deferred. ``None`` / empty
+    leaves the URL credential-free. It is a silent no-op on clearnet / vpn,
+    which carry no SOCKS proxy.
     """
     if path not in ACTIVE_PATHS:
         raise UnknownPath(f"unknown network path: {path!r}")
@@ -100,13 +102,14 @@ def desired_env(
 
 def _tor_proxy_url(socks_port: int, isolation_token: str | None) -> str:
     """Build the ``socks5h://`` Tor proxy URL, optionally carrying a
-    per-context SOCKS credential for circuit isolation.
+    process-scoped preactivation credential for circuit isolation.
 
     When ``isolation_token`` is a non-empty string it becomes both the
     SOCKS username and password (percent-encoded), so Tor's
     ``IsolateSOCKSAuth`` (set in ``paths.tor.render_torrc``) maps the
-    context to its own circuit. An empty or ``None`` token yields the bare
-    URL with no userinfo — backward compatible with non-isolated callers.
+    process to its own circuit pool. An empty or ``None`` token yields the
+    bare URL with no userinfo — backward compatible with callers that do not
+    opt into a process token.
 
     The credential is percent-encoded with ``safe=""`` so a token
     containing ``:`` / ``@`` / ``/`` cannot break out of the userinfo and

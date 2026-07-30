@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import ethereum
+from mordred_hermes.keyvault import _storage, ethereum
 from mordred_hermes.keyvault.ethereum import (
     _PURPOSE,
     EthereumSignature,
@@ -39,6 +39,13 @@ def _wrap_backend(tmp_path: Path) -> tuple[FakeBackend, list[dict], dict]:
     """Return (backend, audit_log, kwargs) wired to tmp_path."""
     backend = FakeBackend()
     backend.generate_enclave_key("default")
+    root = _storage.resolve_keyvault_dir(tmp_path)
+    _storage.ensure_layout(root)
+    key_hash = hashlib.sha256(b"default").digest()[:16].hex()
+    _storage.atomic_write(root / "digests" / f"{key_hash}.commit", b"\x00" * 32)
+    meta = _storage.load_meta(root)
+    meta["keys"][key_hash] = {"key_id": "default", "created_at": "2026-01-01T00:00:00Z"}
+    _storage.save_meta(root, meta)
     log: list[dict] = []
     kwargs: dict = {"backend": backend, "audit_sink": log.append, "home": tmp_path}
     return backend, log, kwargs
@@ -262,6 +269,19 @@ def test_store_seed_phrase_rejects_invalid_checksum(tmp_path: Path) -> None:
     bad = "test test test test test test test test test test test test"  # bad BIP39 checksum
     with pytest.raises(ValueError):
         store_seed_phrase("default", bad, **kw)
+
+
+def test_store_seed_phrase_canonicalizes_accepted_whitespace(tmp_path: Path) -> None:
+    from mordred_hermes.keyvault import api
+    from mordred_hermes.keyvault.ethereum import _SEED_PURPOSE, derive_ethereum_key, store_seed_phrase
+
+    _, _, kw = _wrap_backend(tmp_path)
+    spaced = "\n  " + _HARDHAT_MNEMONIC.replace(" ", "  \t") + "  \n"
+    seed_env = store_seed_phrase("default", spaced, **kw)
+
+    stored = api.decrypt("default", seed_env, _SEED_PURPOSE, **kw)
+    assert stored.decode("utf-8") == _HARDHAT_MNEMONIC
+    assert derive_ethereum_key("default", seed_env, 0, **kw)[0] == _HARDHAT_ADDR0
 
 
 def test_derive_ethereum_key_matches_known_bip44_address(tmp_path: Path) -> None:

@@ -39,8 +39,8 @@ keyvault = [
   "cryptography>=42",
   "blake3>=0.4",
 ]
-# Browser-extension WebSocket API server (mordred_hermes.extension). aiohttp is
-# the only extra dependency; it's kept out of the base install so users who only
+# Browser-extension WebSocket API server and wallet RPC transport
+# (mordred_hermes.extension). Kept out of the base install so users who only
 # want the tor/keyvault plugins don't pull it. CI installs this extra so
 # `mypy --strict src` and pytest can resolve the extension modules.
 extension = [
@@ -49,6 +49,13 @@ extension = [
   # rode along transitively via hermes-agent's own pin, which this extra must
   # not silently depend on.
   "cryptography>=42",
+  # Wallet JSON-RPC uses requests for an explicit gateway-selected proxy and
+  # urllib3 directly for DNS-pinned HTTPS. Both are direct runtime imports;
+  # do not rely on hermes-agent's transitive dependency graph.
+  # Tor routes use socks5h://. Requests requires its own PySocks backend;
+  # hermes-agent's httpx/socksio dependency does not satisfy that import.
+  "requests[socks]>=2.32",
+  "urllib3>=2",
 ]
 macos = [
   # Everything keyvault needs on a Mac = the cross-platform crypto stack
@@ -188,6 +195,11 @@ packages = ["src/mordred_hermes"]
 # Opt-in at runtime via `hermes-mordred vault enable-config-decrypt` (the marker);
 # absent that marker the hook is a no-op even for Hermes.
 "packaging/pth/mordred_hermes_config_decrypt.pth" = "mordred_hermes_config_decrypt.pth"
+# Runtime guards that must precede model-client construction and must not
+# depend on any entry-point plugin being present in ``plugins.enabled``.
+# The inline .pth gate engages only for a Hermes console process; the imported
+# module installs a loopback proxy bypass and the mandatory integrity hook.
+"packaging/pth/mordred_hermes_runtime.pth" = "mordred_hermes_runtime.pth"
 # The offline verification-digest tool for `keyvault init`. Deliberately a
 # standalone file (stdlib + blake3 only) the operator copies to the air-gapped
 # second device; shipped in the wheel so the init banner can print a path that
@@ -221,7 +233,7 @@ testpaths = ["tests"]
 # `integration-vpn` CI jobs opt back in via `-m integration`.
 addopts = "-q --strict-markers -m 'not integration'"
 markers = [
-    "integration: requires external services (Docker, real Mullvad daemon, live network); excluded from default runs",
+    "integration: requires external services, live network, or device hardware; excluded from default runs",
 ]
 xfail_strict = true
 
@@ -355,4 +367,3 @@ ignore_missing_imports = true
 module = ["gateway", "gateway.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
-

@@ -336,3 +336,4 @@ class TestPromptedReasonsFrozen:
         frozen = set(get_args(_audit_reasons.ReasonCode))
         assert "policy.strict.cloud_prompted_allow" in frozen
         assert "policy.strict.cloud_prompted_deny" in frozen
+        assert "policy.strict.cloud_endpoint_mismatch" in frozen

@@ -19,16 +19,53 @@ import contextlib
 import functools
 import json
 import logging
+import os
+import re
+import stat
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 from . import ethereum
+from ._storage import atomic_write, safe_read
 
 if TYPE_CHECKING:
     from ..privacy_check.audit import Writer
 
 _log = logging.getLogger(__name__)
 _KEY_ID_DEFAULT = "default"
+_WALLET_FILE = "wallet.json"
+_WALLET_LOCK_FILE = ".wallet.lock"
+_WALLET_CONFIG_MAX_BYTES = 1024 * 1024
+_WALLET_CONFIG_ERROR = "extension wallet configuration is unreadable or invalid; refusing automatic wallet fallback"
+_WALLET_DIRECTORY_ERROR = "extension wallet directory is unsafe; refusing wallet access"
+_WALLET_THREAD_LOCK = threading.RLock()
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_CANONICAL_CHAIN_HEX = re.compile(r"0x[1-9a-f][0-9a-f]*\Z")
+_CANONICAL_CHAIN_DECIMAL = re.compile(r"[1-9][0-9]*\Z")
+_BIP32_CHILD_INDEX_LIMIT = 1 << 31
+_WALLET_FIELDS = frozenset(
+    {
+        "kind",
+        "key_id",
+        "seed_envelope_id",
+        "envelope_id",
+        "index",
+        "account",
+        "change",
+        "chain_id",
+        "rpc",
+        "rpc_url",
+    }
+)
 
 # Public fallback RPC endpoints; users should set their own via wallet.json.
 _DEFAULT_RPC: dict[int, str] = {
@@ -39,6 +76,10 @@ _DEFAULT_RPC: dict[int, str] = {
 
 class WalletNotConfigured(Exception):
     """No Ethereum account is configured/discoverable for the extension."""
+
+
+class WalletConfigError(WalletNotConfigured):
+    """An explicit wallet config exists but cannot safely select an account."""
 
 
 class TransactionFieldsMissing(Exception):
@@ -95,13 +136,14 @@ def _audit_log_path() -> Path:
 
 @functools.lru_cache(maxsize=1)
 def _audit_writer() -> Writer:
-    """Per-process memoized audit writer for extension-driven signs.
+    """Module-local reference to the shared extension-sign audit writer.
 
     Zero-arg (unlike ``network`` / ``llm_guard``'s ``_build_audit_writer(path)``)
     because this module deliberately never freezes ``HERMES_BASE`` at import
     time (see :func:`_audit_log_path`); the path is recomputed on the first
-    call instead, then the resulting writer is cached for the process the same
-    way ``network`` / ``llm_guard`` cache theirs. The
+    call. The local cache preserves the test ``cache_clear()`` API, while
+    :mod:`mordred_hermes._audit_support` owns the normalized-path singleton so
+    clearing this cache never closes a writer another plugin is using. The
     :mod:`mordred_hermes._audit_support` import happens here, at first call,
     not at module scope, so plugin discovery stays cheap.
     """
@@ -141,30 +183,250 @@ def _audit_sink(entry: dict[str, Any]) -> None:
         _log.error("extension_sign audit writer unavailable: %s", exc)
 
 
-def _load_wallet_cfg() -> dict[str, Any]:
+def _raise_wallet_config_error(message: str = _WALLET_CONFIG_ERROR) -> NoReturn:
+    """Raise a content-free config error suitable for extension responses."""
+    raise WalletConfigError(message)
+
+
+def _validate_extension_dir(path: Path, *, create: bool) -> bool:
+    """Validate the private extension directory, creating it for writes.
+
+    ``False`` is returned only when the directory is genuinely absent during a
+    read. A symlink, non-directory, or overly broad mode is never interpreted as
+    a missing wallet configuration.
+    """
     try:
-        data = json.loads((_ext_dir() / "wallet.json").read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        info = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            return False
+        try:
+            path.mkdir(mode=0o700, parents=True)
+        except FileExistsError:
+            pass
+        except OSError:
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        try:
+            info = path.lstat()
+        except OSError:
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+    mode = stat.S_IMODE(info.st_mode)
+    if mode != 0o700 and create:
+        # Older set_wallet releases created this real directory using the
+        # process umask. Repair that legacy state, but never chmod a symlink.
+        try:
+            os.chmod(path, 0o700, follow_symlinks=False)
+            info = path.lstat()
+            mode = stat.S_IMODE(info.st_mode)
+        except (NotImplementedError, OSError):
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+    if mode != 0o700:
+        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+    return True
+
+
+@contextmanager
+def _wallet_file_lock(directory: Path) -> Iterator[None]:
+    """Exclusive cross-process lock for wallet config reads and writes."""
+    lock_path = directory / _WALLET_LOCK_FILE
+    try:
+        fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW,
+            0o600,
+        )
+    except OSError:
+        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _required_nonempty_string(cfg: dict[str, Any], field: str) -> None:
+    value = cfg.get(field)
+    if not isinstance(value, str) or not value.strip():
+        _raise_wallet_config_error()
+
+
+def _canonical_chain_id(value: object) -> int:
+    if isinstance(value, bool):
+        _raise_wallet_config_error()
+    if isinstance(value, int):
+        if value <= 0:
+            _raise_wallet_config_error()
+        return value
+    if isinstance(value, str) and _CANONICAL_CHAIN_HEX.fullmatch(value):
+        return int(value, 16)
+    _raise_wallet_config_error()
+
+
+def _validate_rpc_url(value: object) -> None:
+    if not isinstance(value, str):
+        _raise_wallet_config_error()
+    try:
+        # Reuse the exact structural/public-HTTPS boundary enforced before the
+        # extension makes an RPC request. It deliberately permits path/query
+        # API keys while rejecting userinfo and local/private literal targets.
+        from ..extension import rpc as extension_rpc
+
+        extension_rpc._validate_rpc_url(value)
+    except Exception:
+        _raise_wallet_config_error()
+
+
+def _validate_account_cfg(cfg: dict[str, Any]) -> None:
+    """Validate the key-selection half of a wallet config."""
+    kind = cfg.get("kind")
+    if kind not in {"hd", "raw"}:
+        _raise_wallet_config_error()
+    _required_nonempty_string(cfg, "key_id")
+    if kind == "hd":
+        _required_nonempty_string(cfg, "seed_envelope_id")
+        if "envelope_id" in cfg:
+            _raise_wallet_config_error()
+        for field in ("index", "account", "change"):
+            value = cfg.get(field, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= _BIP32_CHILD_INDEX_LIMIT:
+                _raise_wallet_config_error()
+    else:
+        _required_nonempty_string(cfg, "envelope_id")
+        if any(field in cfg for field in ("seed_envelope_id", "index", "account", "change")):
+            _raise_wallet_config_error()
+
+
+def _validate_rpc_cfg(cfg: dict[str, Any]) -> None:
+    """Validate chain and endpoint selections without performing network I/O."""
+    if "chain_id" in cfg:
+        _canonical_chain_id(cfg["chain_id"])
+    if "rpc_url" in cfg:
+        _validate_rpc_url(cfg["rpc_url"])
+    if "rpc" in cfg:
+        rpc = cfg["rpc"]
+        if not isinstance(rpc, dict):
+            _raise_wallet_config_error()
+        normalized_chains: set[int] = set()
+        for chain, url in rpc.items():
+            if not isinstance(chain, str):
+                _raise_wallet_config_error()
+            if _CANONICAL_CHAIN_HEX.fullmatch(chain):
+                normalized_chain = _canonical_chain_id(chain)
+            elif _CANONICAL_CHAIN_DECIMAL.fullmatch(chain):
+                normalized_chain = _canonical_chain_id(int(chain))
+            else:
+                _raise_wallet_config_error()
+            if normalized_chain in normalized_chains:
+                _raise_wallet_config_error()
+            normalized_chains.add(normalized_chain)
+            _validate_rpc_url(url)
+
+
+def _validate_wallet_cfg(data: object) -> dict[str, Any]:
+    """Validate the fields that can select a key, chain, or RPC endpoint."""
+    if not isinstance(data, dict) or any(not isinstance(key, str) for key in data):
+        _raise_wallet_config_error()
+    cfg = data
+    if set(cfg).difference(_WALLET_FIELDS):
+        _raise_wallet_config_error()
+    _validate_account_cfg(cfg)
+    _validate_rpc_cfg(cfg)
+    return cfg
+
+
+class _DuplicateWalletKey(ValueError):
+    """Internal signal used to reject ambiguous duplicate JSON members."""
+
+
+def _wallet_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise _DuplicateWalletKey
+        obj[key] = value
+    return obj
+
+
+def _load_wallet_cfg() -> dict[str, Any]:
+    """Load an explicit wallet, allowing discovery only when it is absent."""
+    with _WALLET_THREAD_LOCK:
+        directory = _ext_dir()
+        if not _validate_extension_dir(directory, create=False):
+            return {}
+        with _wallet_file_lock(directory):
+            try:
+                raw = safe_read(directory / _WALLET_FILE)
+            except FileNotFoundError:
+                return {}
+            except OSError:
+                _raise_wallet_config_error()
+            if len(raw) > _WALLET_CONFIG_MAX_BYTES:
+                _raise_wallet_config_error()
+            try:
+                data = json.loads(
+                    raw.decode("utf-8"),
+                    object_pairs_hook=_wallet_json_object,
+                )
+            except (UnicodeDecodeError, ValueError):
+                _raise_wallet_config_error()
+            return _validate_wallet_cfg(data)
+
+
+def _normalize_wallet_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return an independent, JSON-native config snapshot for persistence.
+
+    The public ``set_wallet`` input remains owned by its caller. Serializing it
+    before validation both detaches nested mappings and closes the
+    validate-then-serialize window in which another thread could otherwise
+    mutate the already-approved object.
+    """
+    try:
+        encoded = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+        data = json.loads(encoded, object_pairs_hook=_wallet_json_object)
+    except (TypeError, ValueError, RuntimeError):
+        _raise_wallet_config_error()
+    return _validate_wallet_cfg(data)
 
 
 def set_wallet(cfg: dict[str, Any]) -> None:
-    """Persist the extension wallet config (used by setup tooling)."""
-    import os
-
-    d = _ext_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / "wallet.json"
-    path.write_text(json.dumps(cfg), "utf-8")
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    """Validate and durably persist the extension wallet config."""
+    validated = _normalize_wallet_cfg(cfg)
+    payload = json.dumps(validated, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(payload) > _WALLET_CONFIG_MAX_BYTES:
+        _raise_wallet_config_error()
+    with _WALLET_THREAD_LOCK:
+        directory = _ext_dir()
+        _validate_extension_dir(directory, create=True)
+        with _wallet_file_lock(directory):
+            try:
+                atomic_write(directory / _WALLET_FILE, payload)
+            except OSError:
+                _raise_wallet_config_error("extension wallet configuration could not be saved safely")
 
 
 def chain_id_int() -> int:
     cfg = _load_wallet_cfg()
     cid = cfg.get("chain_id", 1)
-    return int(cid, 16) if isinstance(cid, str) and cid.startswith("0x") else int(cid)
+    return _canonical_chain_id(cid)
 
 
 def rpc_url_for(chain_id: int) -> str | None:
@@ -178,8 +440,7 @@ def rpc_url_for(chain_id: int) -> str | None:
     return _DEFAULT_RPC.get(chain_id)
 
 
-def _resolve_account() -> dict[str, Any]:
-    cfg = _load_wallet_cfg()
+def _resolve_account_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     if cfg.get("kind"):
         return cfg
     key_id = cfg.get("key_id", _KEY_ID_DEFAULT)
@@ -199,6 +460,10 @@ def _resolve_account() -> dict[str, Any]:
         if not seeds
         else "Multiple HD seeds stored; pin one in ~/.hermes/extension/wallet.json."
     )
+
+
+def _resolve_account() -> dict[str, Any]:
+    return _resolve_account_from_cfg(_load_wallet_cfg())
 
 
 # --------------------------------------------------------------------------- #
@@ -229,8 +494,7 @@ def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
     )
 
 
-def get_address() -> str:
-    acct = _resolve_account()
+def _address_for_account(acct: dict[str, Any]) -> str:
     backend, sink = _backend(), _audit_sink
     if acct["kind"] == "hd":
         address, _path = ethereum.derive_ethereum_key(
@@ -244,6 +508,22 @@ def get_address() -> str:
         )
         return address
     return ethereum.get_ethereum_address(acct["key_id"], acct["envelope_id"], backend=backend, audit_sink=sink)
+
+
+def get_address() -> str:
+    return _address_for_account(_resolve_account())
+
+
+def account_snapshot() -> tuple[str, int]:
+    """Resolve one internally consistent address/chain pair.
+
+    ``accounts_request`` must not read ``wallet.json`` twice: an atomic config
+    replacement between those reads could otherwise advertise account A on
+    chain B (or silently advertise mainnet after a corrupt replacement).
+    """
+    cfg = _load_wallet_cfg()
+    account = _resolve_account_from_cfg(cfg)
+    return _address_for_account(account), _canonical_chain_id(cfg.get("chain_id", 1))
 
 
 # --------------------------------------------------------------------------- #
@@ -294,60 +574,251 @@ def sign_typed_data_v4(typed_data: str | dict[str, Any]) -> str:
 # Transaction signing (raw signed tx; broadcasting is out of scope in v1)
 # --------------------------------------------------------------------------- #
 
+_MAX_TRANSACTION_QUANTITY = (1 << 256) - 1
+_TRANSACTION_FIELDS = frozenset(
+    {
+        "type",
+        "chainId",
+        "nonce",
+        "gas",
+        "gasPrice",
+        "maxPriorityFeePerGas",
+        "maxFeePerGas",
+        "to",
+        "value",
+        "data",
+        "accessList",
+        "from",
+    }
+)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
-def _to_int(v: Any) -> int:
-    if v is None or v == "":
-        return 0
-    if isinstance(v, int):
-        return v
-    s = str(v)
-    return int(s, 16) if s.startswith("0x") else int(s)
+
+def _transaction_quantity(field: str, value: Any) -> int:
+    """Parse one unsigned Ethereum JSON-RPC quantity without coercion.
+
+    ``bool``, floats, signed strings and objects with a surprising ``__str__``
+    are deliberately rejected.  The old permissive conversion made negative
+    values serialize as zero and let the approval prompt describe a different
+    transaction from the bytes that were ultimately signed.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"invalid_transaction_quantity:{field}")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str):
+        if value.startswith("0x"):
+            digits = value[2:]
+            if not digits or any(char not in _HEX_DIGITS for char in digits):
+                raise ValueError(f"invalid_transaction_quantity:{field}")
+            number = int(digits, 16)
+        else:
+            if not value or not value.isascii() or not value.isdecimal():
+                raise ValueError(f"invalid_transaction_quantity:{field}")
+            number = int(value, 10)
+    else:
+        raise ValueError(f"invalid_transaction_quantity:{field}")
+    if number < 0 or number > _MAX_TRANSACTION_QUANTITY:
+        raise ValueError(f"invalid_transaction_quantity:{field}")
+    return number
+
+
+def _canonical_address(field: str, value: Any, *, allow_empty: bool) -> str | None:
+    if allow_empty and value in (None, ""):
+        return None
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise ValueError(f"invalid_transaction_address:{field}")
+    digits = value[2:]
+    if len(digits) != 40 or any(char not in _HEX_DIGITS for char in digits):
+        raise ValueError(f"invalid_transaction_address:{field}")
+    return "0x" + digits.lower()
+
+
+def _canonical_data(value: Any) -> str:
+    if value in (None, ""):
+        return "0x"
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise ValueError("invalid_transaction_data")
+    digits = value[2:]
+    if len(digits) % 2 or any(char not in _HEX_DIGITS for char in digits):
+        raise ValueError("invalid_transaction_data")
+    return "0x" + digits.lower()
+
+
+def _validated_transaction_chain_id(tx: dict[str, Any], chain_id: int) -> int:
+    parsed_chain_id = _transaction_quantity("chainId", chain_id)
+    if parsed_chain_id == 0:
+        raise ValueError("invalid_transaction_chain_id")
+    supplied_chain_id = tx.get("chainId")
+    if supplied_chain_id not in (None, "") and _transaction_quantity("chainId", supplied_chain_id) != parsed_chain_id:
+        raise ValueError("transaction_chain_id_mismatch")
+    return parsed_chain_id
+
+
+def _transaction_fee_mode(tx: dict[str, Any]) -> str | None:
+    """Return ``legacy`` / ``eip1559`` or ``None`` when fees are unspecified."""
+    supplied_type = tx.get("type")
+    explicit_type: int | None = None
+    if supplied_type not in (None, ""):
+        explicit_type = _transaction_quantity("type", supplied_type)
+        if explicit_type not in (0, 2):
+            raise ValueError("unsupported_transaction_type")
+
+    has_legacy_fee = tx.get("gasPrice") not in (None, "")
+    has_max_fee = tx.get("maxFeePerGas") not in (None, "")
+    has_priority_fee = tx.get("maxPriorityFeePerGas") not in (None, "")
+    has_eip1559_fee = has_max_fee or has_priority_fee
+    if has_legacy_fee and has_eip1559_fee:
+        raise ValueError("conflicting_transaction_fee_fields")
+    if explicit_type == 0 and has_eip1559_fee:
+        raise ValueError("conflicting_transaction_fee_fields")
+    if explicit_type == 2 and has_legacy_fee:
+        raise ValueError("conflicting_transaction_fee_fields")
+    if explicit_type == 2 or (explicit_type is None and has_eip1559_fee):
+        return "eip1559"
+    if explicit_type == 0 or has_legacy_fee:
+        return "legacy"
+    return None
+
+
+def _validate_present_transaction_values(tx: dict[str, Any]) -> None:
+    if "accessList" in tx and tx["accessList"] != []:
+        raise ValueError("unsupported_transaction_access_list")
+    for field in ("nonce", "gas", "gasPrice", "maxPriorityFeePerGas", "maxFeePerGas"):
+        if tx.get(field) not in (None, ""):
+            _transaction_quantity(field, tx[field])
+    if "value" in tx:
+        _transaction_quantity("value", tx["value"])
+    if tx.get("to") not in (None, ""):
+        _canonical_address("to", tx["to"], allow_empty=True)
+    if tx.get("from") not in (None, ""):
+        _canonical_address("from", tx["from"], allow_empty=False)
+    if "data" in tx:
+        _canonical_data(tx["data"])
+
+    if tx.get("maxPriorityFeePerGas") not in (None, "") and tx.get("maxFeePerGas") not in (None, ""):
+        max_priority_fee = _transaction_quantity("maxPriorityFeePerGas", tx["maxPriorityFeePerGas"])
+        max_fee = _transaction_quantity("maxFeePerGas", tx["maxFeePerGas"])
+        if max_priority_fee > max_fee:
+            raise ValueError("transaction_priority_fee_exceeds_max_fee")
+
+
+def validate_transaction_request(tx: dict[str, Any], *, chain_id: int) -> str | None:
+    """Validate every caller-supplied field without requiring RPC-filled ones.
+
+    This preflight is shared by the RPC filler and final canonicalizer so an
+    unsupported type, conflicting fee model, malformed quantity/address/data,
+    or ignored field is rejected before any request reaches the configured RPC.
+    """
+    if not isinstance(tx, dict):
+        raise ValueError("invalid_transaction")
+    unknown = sorted(field for field in tx if field not in _TRANSACTION_FIELDS)
+    if unknown:
+        raise ValueError("unsupported_transaction_fields:" + ",".join(unknown))
+
+    _validated_transaction_chain_id(tx, chain_id)
+    fee_mode = _transaction_fee_mode(tx)
+    _validate_present_transaction_values(tx)
+    if "accessList" in tx and fee_mode != "eip1559":
+        raise ValueError("transaction_access_list_requires_type_2")
+    return fee_mode
+
+
+def _validate_transaction_shape(tx: dict[str, Any], *, is_eip1559: bool) -> None:
+    required = ["nonce", "gas"]
+    if is_eip1559:
+        required.extend(("maxFeePerGas", "maxPriorityFeePerGas"))
+    else:
+        required.append("gasPrice")
+    missing = [field for field in required if tx.get(field) in (None, "")]
+    if missing:
+        raise TransactionFieldsMissing(missing)
+
+
+def _canonical_fee_fields(tx: dict[str, Any], *, is_eip1559: bool) -> dict[str, str]:
+    if not is_eip1559:
+        return {"gasPrice": hex(_transaction_quantity("gasPrice", tx["gasPrice"]))}
+    max_priority_fee = _transaction_quantity("maxPriorityFeePerGas", tx["maxPriorityFeePerGas"])
+    max_fee = _transaction_quantity("maxFeePerGas", tx["maxFeePerGas"])
+    if max_priority_fee > max_fee:
+        raise ValueError("transaction_priority_fee_exceeds_max_fee")
+    return {
+        "maxPriorityFeePerGas": hex(max_priority_fee),
+        "maxFeePerGas": hex(max_fee),
+    }
+
+
+def canonicalize_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, Any]:
+    """Validate and freeze the exact transaction representation Hermes signs.
+
+    Only legacy EIP-155 transactions and type-2 EIP-1559 transactions with an
+    empty access list are supported.  Returning a JSON-friendly canonical dict
+    gives the approval UI and :func:`sign_transaction` one shared source of
+    truth: unsupported or ignored fields can no longer appear in the prompt and
+    then disappear from the signed bytes.
+    """
+    fee_mode = validate_transaction_request(tx, chain_id=chain_id)
+    parsed_chain_id = _transaction_quantity("chainId", chain_id)
+    is_eip1559 = fee_mode == "eip1559"
+    _validate_transaction_shape(tx, is_eip1559=is_eip1559)
+
+    canonical: dict[str, Any] = {
+        "type": "0x2" if is_eip1559 else "0x0",
+        "chainId": hex(parsed_chain_id),
+        "nonce": hex(_transaction_quantity("nonce", tx["nonce"])),
+        **_canonical_fee_fields(tx, is_eip1559=is_eip1559),
+    }
+    canonical.update(
+        {
+            "gas": hex(_transaction_quantity("gas", tx["gas"])),
+            "to": _canonical_address("to", tx.get("to"), allow_empty=True),
+            "value": hex(_transaction_quantity("value", tx.get("value", 0))),
+            "data": _canonical_data(tx.get("data")),
+        }
+    )
+    if is_eip1559:
+        canonical["accessList"] = []
+    supplied_from = tx.get("from")
+    if supplied_from not in (None, ""):
+        canonical["from"] = _canonical_address("from", supplied_from, allow_empty=False)
+    return canonical
 
 
 def _rlp_int(n: int) -> bytes:
-    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n > 0 else b""
-
-
-def _addr_bytes(to: Any) -> bytes:
-    if not to:
-        return b""  # contract creation
-    return bytes.fromhex(str(to).removeprefix("0x"))
-
-
-def _data_bytes(data: Any) -> bytes:
-    if not data:
+    if n < 0:
+        raise ValueError("negative_transaction_quantity")
+    if n == 0:
         return b""
-    return bytes.fromhex(str(data).removeprefix("0x"))
+    return n.to_bytes((n.bit_length() + 7) // 8, "big")
 
 
 def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]:
     """Sign a transaction, returning ``{"raw": "0x..", "hash": "0x.."}``.
 
-    Hermes has no RPC node wired in v1, so ``nonce``/``gas``/fee fields must be
-    present in ``tx`` (most DApps that call ``eth_sendTransaction`` supply them).
-    EIP-1559 (``maxFeePerGas``) and legacy (``gasPrice``) are both supported.
-    Broadcasting the returned raw tx over Tor is a follow-up (SPEC §5.3).
+    All nonce/gas/fee fields must already be present. The extension wallet fills
+    and freezes them through its configured RPC before user approval, then
+    broadcasts the returned bytes only after rechecking the chain. Direct
+    callers remain responsible for filling those fields. EIP-1559
+    (``maxFeePerGas``) and legacy (``gasPrice``) are both supported.
     """
     import rlp
     from eth_hash.auto import keccak
 
-    is_1559 = "maxFeePerGas" in tx or tx.get("type") in (2, "0x2")
-    required = ["nonce", "gas"] + (["maxFeePerGas", "maxPriorityFeePerGas"] if is_1559 else ["gasPrice"])
-    missing = [f for f in required if tx.get(f) in (None, "")]
-    if missing:
-        raise TransactionFieldsMissing(missing)
-
-    nonce = _to_int(tx["nonce"])
-    gas = _to_int(tx["gas"])
-    to = _addr_bytes(tx.get("to"))
-    value = _to_int(tx.get("value"))
-    data = _data_bytes(tx.get("data"))
+    canonical = canonicalize_transaction(tx, chain_id=chain_id)
+    is_1559 = canonical["type"] == "0x2"
+    signing_chain_id = int(canonical["chainId"], 16)
+    nonce = int(canonical["nonce"], 16)
+    gas = int(canonical["gas"], 16)
+    to_value = canonical["to"]
+    to = b"" if to_value is None else bytes.fromhex(to_value[2:])
+    value = int(canonical["value"], 16)
+    data = bytes.fromhex(canonical["data"][2:])
 
     if is_1559:
-        max_prio = _to_int(tx["maxPriorityFeePerGas"])
-        max_fee = _to_int(tx["maxFeePerGas"])
+        max_prio = int(canonical["maxPriorityFeePerGas"], 16)
+        max_fee = int(canonical["maxFeePerGas"], 16)
         unsigned = [
-            _rlp_int(chain_id),
+            _rlp_int(signing_chain_id),
             _rlp_int(nonce),
             _rlp_int(max_prio),
             _rlp_int(max_fee),
@@ -355,7 +826,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             to,
             _rlp_int(value),
             data,
-            [],
+            canonical["accessList"],
         ]
         sighash = keccak(b"\x02" + rlp.encode(unsigned))
         sig = _sign_hash(sighash)
@@ -365,7 +836,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
         signed = [*unsigned, _rlp_int(y), _rlp_int(r), _rlp_int(s_int)]
         raw = b"\x02" + rlp.encode(signed)
     else:
-        gas_price = _to_int(tx["gasPrice"])
+        gas_price = int(canonical["gasPrice"], 16)
         unsigned = [
             _rlp_int(nonce),
             _rlp_int(gas_price),
@@ -373,13 +844,13 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             to,
             _rlp_int(value),
             data,
-            _rlp_int(chain_id),
+            _rlp_int(signing_chain_id),
             b"",
             b"",
         ]
         sighash = keccak(rlp.encode(unsigned))
         sig = _sign_hash(sighash)
-        v = (sig.v - 27) + 35 + 2 * chain_id
+        v = (sig.v - 27) + 35 + 2 * signing_chain_id
         signed = [
             _rlp_int(nonce),
             _rlp_int(gas_price),

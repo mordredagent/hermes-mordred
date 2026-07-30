@@ -24,18 +24,28 @@ the previous file intact.
 from __future__ import annotations
 
 import contextlib
+import copy
+import errno
 import io
 import json
 import logging
 import os
+import stat
 import tempfile
-from collections.abc import Callable, Mapping, MutableMapping
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from ruamel.yaml import YAML
 
+from .._policy_io import (
+    load_policy_mapping,
+    policy_transaction_marker_for_policy,
+)
 from ._runtime import (
     DEFAULT_HERMES_CONFIG_PATH,
     DEFAULT_MORDRED_DIR,
@@ -43,6 +53,17 @@ from ._runtime import (
 )
 
 _LOG = logging.getLogger("mordred.wizard.policy_writer")
+_POLICY_LOCK_FILENAME = ".policy-write.lock"
+_POLICY_THREAD_LOCK = threading.RLock()
+_POLICY_LOCK_STATE = threading.local()
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 MORDRED_PLUGIN_NAMES: Final = (
     "mordred_privacy_check",
@@ -84,6 +105,102 @@ def _round_trip_yaml() -> YAML:
     return yaml
 
 
+def _fsync_durable(fd: int) -> None:
+    """Flush an fd durably, using F_FULLFSYNC where macOS provides it."""
+    full_fsync = getattr(fcntl, "F_FULLFSYNC", None)
+    if full_fsync is not None:
+        try:
+            fcntl.fcntl(fd, full_fsync)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL):
+                raise
+    os.fsync(fd)
+
+
+def _fsync_parent(path: Path) -> None:
+    if os.name != "posix":  # pragma: no cover - Windows directory-open semantics
+        return
+    fd = os.open(path.parent, os.O_RDONLY | _O_CLOEXEC)
+    try:
+        _fsync_durable(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_regular_text(path: Path) -> str | None:
+    """Read an existing regular file without following or blocking on specials."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError(errno.EINVAL, "configuration source must be a regular file", str(path))
+    fd = os.open(path, os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError(errno.EAGAIN, "configuration source changed while opening", str(path))
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _ensure_real_directory(directory: Path) -> None:
+    """Create or validate a directory without accepting a symlink endpoint."""
+    try:
+        metadata = directory.lstat()
+    except FileNotFoundError:
+        with contextlib.suppress(FileExistsError):
+            directory.mkdir(mode=0o700, parents=True)
+        metadata = directory.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise OSError(errno.ENOTDIR, "writer parent must be a real directory", str(directory))
+
+
+@contextmanager
+def _policy_write_lock(directory: Path) -> Iterator[None]:
+    """Serialize policy/config read-modify-write cycles across threads/processes."""
+    with _POLICY_THREAD_LOCK:
+        depth = getattr(_POLICY_LOCK_STATE, "depth", 0)
+        if depth:
+            _POLICY_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                _POLICY_LOCK_STATE.depth = depth
+            return
+
+        _ensure_real_directory(directory)
+        lock_path = directory / _POLICY_LOCK_FILENAME
+        flags = os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            raise OSError(errno.EPERM, "policy writer lock is unsafe or unavailable", str(lock_path)) from exc
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise OSError(errno.EPERM, "policy writer lock must be a mode-0600 regular file", str(lock_path))
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            _POLICY_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                _POLICY_LOCK_STATE.depth = 0
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     """Write ``text`` to ``path`` via tmp + replace.
 
@@ -105,15 +222,47 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
     argument when provided; otherwise the tmpfile's 0o600 (tightest safe
     default — the parent directory is 0o700 so this doesn't restrict
     legitimate access).
+
+    An existing file must be readable before it can be replaced. A read error
+    may hide operator-managed fields or secrets; treating it as merely a failed
+    idempotency comparison would allow a writable parent directory to turn a
+    transient ACL/ownership problem into silent data loss.
     """
-    if path.exists():
+    try:
+        path_metadata = path.lstat()
+    except FileNotFoundError:
+        path_metadata = None
+    if path_metadata is not None and stat.S_ISREG(path_metadata.st_mode):
+        # Read through a descriptor opened without following symlinks where the
+        # platform supports it. O_NONBLOCK plus the post-open fstat also avoids
+        # hanging if a regular path is raced into a FIFO between lstat/open.
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        existing_fd = os.open(path, flags)
         try:
-            existing = path.read_text(encoding="utf-8")
-        except OSError as e:
-            _LOG.warning("could not read existing %s for compare: %s; will overwrite", path, e)
-            existing = None
-        if existing == text:
-            return  # no-op -- content unchanged
+            opened_metadata = os.fstat(existing_fd)
+            same_object = (path_metadata.st_dev, path_metadata.st_ino) == (
+                opened_metadata.st_dev,
+                opened_metadata.st_ino,
+            )
+            if stat.S_ISREG(opened_metadata.st_mode) and same_object:
+                with os.fdopen(os.dup(existing_fd), encoding="utf-8") as existing_file:
+                    existing = existing_file.read()
+                if existing == text:
+                    if mode is None or stat.S_IMODE(opened_metadata.st_mode) == mode:
+                        return  # no-op -- content and requested metadata match
+                    fchmod = getattr(os, "fchmod", None)
+                    if callable(fchmod):
+                        fchmod(existing_fd, mode)
+                        _fsync_durable(existing_fd)
+                        return
+                    # Windows may not expose fchmod. Fall through to the same
+                    # private tmp + atomic replacement used for content changes.
+        finally:
+            os.close(existing_fd)
+    # Symlinks and other non-regular entries are never opened for comparison:
+    # following one could disclose another file, while reading a FIFO/device
+    # can block forever. The atomic replace below safely replaces the directory
+    # entry itself (or fails closed for an unreplaceable directory).
 
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -127,15 +276,65 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+            f.flush()
+            _fsync_durable(f.fileno())
         if mode is not None and mode != 0o600:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
+        _fsync_parent(path)
     except BaseException:
         # Best-effort cleanup -- if replace already happened the unlink is
         # a no-op (the path no longer points at our tmpfile).
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
         raise
+
+
+def _begin_policy_transaction(policy_json_path: Path) -> Path:
+    marker = policy_transaction_marker_for_policy(policy_json_path)
+    # Record who/when so a marker surviving an interrupted run is diagnosable
+    # rather than an unexplained file that silently forces strict mode.
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _atomic_write_text(marker, f"pending pid={os.getpid()} since={stamp}\n", mode=0o600)
+    # Even an idempotent pre-existing marker must be re-synchronized. A prior
+    # begin may have made the directory entry visible and then failed its
+    # parent fsync; simply returning on identical content could otherwise let
+    # the two mirrors update while the marker is still non-durable.
+    fd = os.open(marker, os.O_RDONLY | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise OSError(errno.EPERM, "policy transaction marker must be a mode-0600 regular file", str(marker))
+        _fsync_durable(fd)
+    finally:
+        os.close(fd)
+    _fsync_parent(marker)
+    return marker
+
+
+def _finish_policy_transaction(marker: Path) -> None:
+    """Clear the marker, failing loudly enough to be actionable if it survives.
+
+    A surviving marker forces every reader closed to strict mode with empty
+    settings. Re-raising a bare ``PermissionError`` here would leave the operator
+    with refusals and no named cause, so the message states the consequence and
+    the remedy.
+    """
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return  # already cleared (concurrent writer finished the transaction)
+    except OSError as exc:
+        raise OSError(
+            errno.EACCES,
+            (
+                f"the Mordred policy files were written, but the transaction marker {marker} "
+                f"could not be removed ({exc}). Every policy read fails closed to strict mode "
+                "with empty settings until it is gone — delete it by hand"
+            ),
+            str(marker),
+        ) from exc
+    _fsync_parent(marker)
 
 
 def _ensure_plugins_enabled(root: Any) -> None:
@@ -167,10 +366,23 @@ def _ensure_plugins_enabled(root: Any) -> None:
         return
 
     if not isinstance(enabled, list):
-        # Pathological config -- leave alone, log, and bail. Wizard upgrade
-        # path will surface the conflict to the user via diff + prompt.
-        _LOG.warning("plugins.enabled is %s, not list; skipping mordred plugin auto-add", type(enabled).__name__)
-        return
+        # Hermes treats a malformed allow-list exactly like a missing one:
+        # no entry-point plugin loads.  Leaving it untouched after a successful
+        # configure therefore strands every runtime guard.  Preserve a scalar
+        # plugin name when possible, otherwise replace the unusable value, then
+        # extend the repaired list below.
+        recovered = [enabled] if isinstance(enabled, str) and enabled.strip() else []
+        _LOG.warning(
+            "plugins.enabled is %s, not list; replacing with a valid enabled list",
+            type(enabled).__name__,
+        )
+        plugins["enabled"] = recovered
+        enabled = recovered
+
+    sanitized = [item for item in enabled if isinstance(item, str) and item.strip()]
+    if len(sanitized) != len(enabled):
+        _LOG.warning("plugins.enabled contains invalid plugin names; removing non-string or empty entries")
+        enabled[:] = sanitized
 
     existing = {str(x) for x in enabled if isinstance(x, str)}
     for name in MORDRED_PLUGIN_NAMES:
@@ -273,9 +485,18 @@ class PolicySnapshot:
     # ``"none"`` is a sentinel that doesn't match any harness regex pattern.
     harness_primary: str = "none"
     # Phase 3 PR3a Task #7: persisted to policy.json so the network reader
-    # (mordred_hermes.network._resolve_disable_ipv6) can consume it.
+    # (mordred_hermes.network.settings.resolve_disable_ipv6) can consume it.
     # Default ``True`` matches the safe-by-default in RuntimeConfig.
     disable_ipv6: bool = True
+    # Phase 3 transport facts are an intentionally opaque JSON value here.
+    # A valid value is an object keyed by provider id, but keeping the wider
+    # ``object`` type is security-significant: if a hand edit leaves a list,
+    # scalar, or malformed entry, configure/upgrade must preserve that value
+    # so the network gate continues to reject it rather than silently
+    # sanitising it to the permissive empty-object default.
+    # Exclude the opaque JSON container from the generated hash so adding the
+    # field does not make this previously-hashable frozen snapshot unhashable.
+    provider_overrides: object = field(default_factory=dict, hash=False)
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +508,9 @@ class PolicySnapshot:
             "local_llm_model_id": self.local_llm_model_id,
             "cloud_attempt_action": self.cloud_attempt_action,
             "disable_ipv6": self.disable_ipv6,
+            # Defensive copy: callers receive a serialisation payload, not a
+            # mutable alias to the snapshot's preserved extension value.
+            "provider_overrides": copy.deepcopy(self.provider_overrides),
         }
 
     def to_llm_guard_section(self) -> dict[str, Any]:
@@ -316,6 +540,39 @@ class PolicySnapshot:
         if self.audit_log_path is not None:
             body["audit_log_path"] = self.audit_log_path
         return body
+
+
+def _preserve_provider_overrides(snapshot: PolicySnapshot, policy_json_path: Path) -> PolicySnapshot:
+    """Carry the existing opaque ``provider_overrides`` value into ``snapshot``.
+
+    The wizard owns all other policy.json fields, but provider overrides are
+    operator-managed transport evidence. A configure/upgrade rewrite therefore
+    preserves that one field verbatim. Crucially, this helper does *not*
+    validate or coerce it: invalid types and unknown nested fields must survive
+    so ``network.hooks._read_provider_overrides`` retains its fail-closed
+    behaviour under strict + Tor.
+
+    A non-empty/non-default value already supplied by the caller is explicit
+    and wins. Missing/unreadable/non-object policy files have no preservable
+    field and leave the snapshot unchanged.
+    """
+    if snapshot.provider_overrides != {}:
+        return snapshot
+    # A recovery write intentionally runs while a stale/pending transaction
+    # marker is present. The writer holds the exclusive policy lock, so it may
+    # inspect the previous mirror to preserve operator-managed overrides even
+    # though runtime readers must treat the same state as fail-closed.
+    existing = load_policy_mapping(
+        policy_json_path,
+        log=_LOG,
+        allow_pending_transaction=True,
+    )
+    if "provider_overrides" not in existing:
+        return snapshot
+    return replace(
+        snapshot,
+        provider_overrides=copy.deepcopy(existing["provider_overrides"]),
+    )
 
 
 def _section_matches_dict(existing: Mapping[str, Any], want: Mapping[str, Any]) -> bool:
@@ -355,7 +612,8 @@ class PolicyWriter:
         Also ensures all Mordred plugin names appear in ``plugins.enabled``
         (Hermes entry-point loader requires this -- HOOK_PAYLOADS §1).
         """
-        self._edit_config(sections, _upsert_mordred_section)
+        with _policy_write_lock(self.policy_json_path.parent):
+            self._edit_config(sections, _upsert_mordred_section)
 
     def merge_mordred_sections(self, sections: Mapping[str, Mapping[str, Any]]) -> None:
         """In-place merge sub-fields into ``plugins.<plugin_name>`` sections.
@@ -368,7 +626,8 @@ class PolicyWriter:
         Pathological cases (the on-disk value is a scalar / list) fall back
         to whole-replacement -- a corrupted section is no longer mergeable.
         """
-        self._edit_config(sections, _merge_mordred_section)
+        with _policy_write_lock(self.policy_json_path.parent):
+            self._edit_config(sections, _merge_mordred_section)
 
     def _edit_config(
         self,
@@ -382,9 +641,9 @@ class PolicyWriter:
         writes back atomically via :func:`_atomic_write_text`.
         """
         yaml = _round_trip_yaml()
-        if self.config_path.exists():
-            with self.config_path.open(encoding="utf-8") as f:
-                root = yaml.load(f)
+        existing = _read_regular_text(self.config_path)
+        if existing is not None:
+            root = yaml.load(existing)
             if root is None:
                 root = {}
         else:
@@ -406,10 +665,14 @@ class PolicyWriter:
 
         ``json.dumps`` with ``sort_keys=False`` to honour :class:`PolicySnapshot`
         field order; a 2-space indent for human readability. Idempotent --
-        rewrite is skipped if content matches.
+        rewrite is skipped if content matches. Existing operator-managed
+        ``provider_overrides`` are carried forward verbatim, including invalid
+        values that the strict transport gate must continue to reject.
         """
-        text = json.dumps(snapshot.to_json_dict(), indent=2, sort_keys=False) + "\n"
-        _atomic_write_text(self.policy_json_path, text, mode=0o600)
+        with _policy_write_lock(self.policy_json_path.parent):
+            snapshot = _preserve_provider_overrides(snapshot, self.policy_json_path)
+            text = json.dumps(snapshot.to_json_dict(), indent=2, sort_keys=False) + "\n"
+            _atomic_write_text(self.policy_json_path, text, mode=0o600)
 
     def write(
         self,
@@ -431,12 +694,15 @@ class PolicyWriter:
         network use <path>`` invocations don't clobber the wizard's
         choices.
         """
-        self.emit_policy_json(snapshot)
-        self.upsert_mordred_sections(
-            {
-                "mordred_privacy_check": snapshot.to_config_yaml_section(),
-                "mordred_llm_guard": snapshot.to_llm_guard_section(),
-            }
-        )
-        if network_answers is not None:
-            self.merge_mordred_sections({"mordred_network": network_answers.to_config_yaml_section()})
+        with _policy_write_lock(self.policy_json_path.parent):
+            marker = _begin_policy_transaction(self.policy_json_path)
+            self.emit_policy_json(snapshot)
+            self.upsert_mordred_sections(
+                {
+                    "mordred_privacy_check": snapshot.to_config_yaml_section(),
+                    "mordred_llm_guard": snapshot.to_llm_guard_section(),
+                }
+            )
+            if network_answers is not None:
+                self.merge_mordred_sections({"mordred_network": network_answers.to_config_yaml_section()})
+            _finish_policy_transaction(marker)

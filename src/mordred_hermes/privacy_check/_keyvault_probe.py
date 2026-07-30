@@ -46,11 +46,19 @@ def keyvault_initialized(home: Path | None = None) -> bool:
     operator must repair, and failing loud is safer than silently treating
     it as uninitialized.
     """
-    from ..keyvault import _storage
+    from ..keyvault import _native_key_id, _storage
 
     root = _storage.resolve_keyvault_dir(home)
     try:
-        meta = _storage.load_meta(root)
+        with _storage.keyvault_read_lock(root) as profile_present:
+            if not profile_present:
+                return False
+            _storage.assert_keyvault_active(root)
+            meta = _storage.load_meta(root)
+    except _storage.KeyvaultResetInProgressError as exc:
+        raise KeyvaultProbeError("keyvault reset is incomplete; retry reset before use") from exc
     except _storage.KeyvaultCorruptError as exc:
         raise KeyvaultProbeError(f"keyvault meta.json is corrupt: {exc}") from exc
+    if _native_key_id.PENDING_NATIVE_KEY_FIELD in meta:
+        raise KeyvaultProbeError("keyvault has an incomplete native-key provisioning journal; reset required")
     return bool(meta["keys"])

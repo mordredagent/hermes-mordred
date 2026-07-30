@@ -59,6 +59,12 @@ def test_network_path_dropped_in_freeze() -> None:
     assert "network.path_dropped" in get_args(ReasonCode)
 
 
+def test_network_transport_incompatible_in_freeze() -> None:
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    assert "network.transport_incompatible" in get_args(ReasonCode)
+
+
 def test_phase1_freeze_preserved() -> None:
     """Adding Phase 3 codes must not remove or rename Phase 1 codes."""
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
@@ -82,13 +88,15 @@ def test_phase1_freeze_preserved() -> None:
     assert not missing, f"Phase 1 codes accidentally removed: {sorted(missing)}"
 
 
-def test_total_freeze_size_after_prompt_once() -> None:
+def test_total_freeze_size_after_transport_gate_followup() -> None:
     """After the prompt-once freeze: 12 Phase 1 + 4 Phase 3 +
     2 Phase 4 PR2 + 2 Phase 4 PR3 + 3 Phase 4 PR4c (keyvault.init_*) +
     1 Phase 4 PR4 step-E (keyvault.backup_exported) + 2 Phase 4 §4.1
     (policy.*.keyvault_uninitialized) + 1 PR #39 review follow-up
     (mordred.degraded.audit_encryption_unavailable) + 2 prompt-once
-    (policy.strict.cloud_prompted_allow / _deny) = 29.
+    (policy.strict.cloud_prompted_allow / _deny) + 1 Phase 3 transport-gate
+    follow-up (network.transport_incompatible) + 1 strict cloud endpoint
+    binding follow-up (policy.strict.cloud_endpoint_mismatch) = 31.
 
     The §4.1 codes graduated into the freeze because their emit site —
     ``install_wrapper.run``'s ``requires_keyvault`` enforcement — exists.
@@ -102,7 +110,7 @@ def test_total_freeze_size_after_prompt_once() -> None:
     """
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    assert len(get_args(ReasonCode)) == 29
+    assert len(get_args(ReasonCode)) == 31
 
 
 def test_no_underscore_typo_legacy_name() -> None:

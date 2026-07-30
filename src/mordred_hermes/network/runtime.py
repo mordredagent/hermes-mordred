@@ -35,7 +35,7 @@ import os
 import subprocess
 import threading
 from collections.abc import Callable, MutableMapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import Any, Final, cast
@@ -50,6 +50,7 @@ from ._exceptions import (
     AlreadySwitching,
     BringupFailed,
     MordredNetworkError,
+    PathSwitchRequiresRestart,
     UnknownPath,
 )
 from .api import NetworkStatus
@@ -99,7 +100,23 @@ class RuntimeConfig:
     no_proxy_extra: tuple[str, ...] = ()
     liveness_interval_seconds: float = 30.0
     liveness_failure_threshold: int = 2
-    isolation_token: str | None = None  # per-session Tor circuit-isolation key (v2-N1)
+    # Optional process-scoped Tor SOCKS credential. It must be fixed before
+    # first activation because provider clients snapshot proxy URLs.
+    isolation_token: str | None = None
+
+
+RouteConfigFingerprint = tuple[tuple[str, object], ...]
+
+
+def route_config_fingerprint(config: RuntimeConfig) -> RouteConfigFingerprint:
+    """Return a future-proof snapshot of every runtime configuration field.
+
+    Provider clients, Tor/VPN subprocesses, proxy environment, and liveness
+    workers are all constructed from ``RuntimeConfig``. Comparing every field
+    prevents a force re-discovery or session reload from silently reusing a
+    route built with stale binary, port, provider, policy, or leak settings.
+    """
+    return tuple((item.name, getattr(config, item.name)) for item in fields(config))
 
 
 @dataclass(slots=True)
@@ -176,16 +193,17 @@ class Runtime:
         self._tor_start = tor_start_process or tor_mod.start_process
         self._tor_wait = tor_wait_for_bootstrap or tor_mod.wait_for_bootstrap
         self._tor_stop = tor_stop or tor_mod.stop
-        # Deep-by-default liveness (2026-07-13): circuit_status_health probes
-        # the Tor ControlPort (GETINFO circuit-status) and reports unhealthy
-        # when the daemon is running but has NO BUILT circuit — a
-        # dead-but-alive Tor the shallow process.poll() check (tor_mod.health)
-        # can never detect. It is signature-compatible with health(handle) and
-        # SELF-DEGRADES to that shallow check when the optional [tor-control]
-        # extra (stem) is absent or the control cookie is missing, so this is a
-        # safe drop-in: without stem it behaves exactly as before; WITH stem +
-        # the cookie (render_torrc already emits ControlPort +
-        # CookieAuthentication 1) it catches the running-but-no-circuit case.
+        # Deep-by-default liveness: circuit_status_health verifies ControlPort
+        # reachability, cookie authentication, and a structurally valid
+        # GETINFO circuit-status response. A BUILT circuit is healthy on its
+        # own; an empty/LAUNCHED-only response is inconclusive and resolves
+        # via Tor's GETINFO network-liveness verdict ("up" → healthy, "down"
+        # or query failure → unhealthy), so an idle Tor stays healthy while
+        # a running-but-circuit-less Tor whose upstream died reads unhealthy;
+        # auth/control/protocol failures remain unhealthy. The probe is
+        # signature-compatible with health(handle) and self-degrades to that
+        # shallow process check when the optional [tor-control] extra (stem) or
+        # control cookie is absent.
         # Tests still override via the tor_health= injection param.
         self._tor_health = tor_health or tor_mod.circuit_status_health
         # The "vpn" path delegates to a selectable provider (Mullvad by
@@ -203,12 +221,30 @@ class Runtime:
             )
         )
 
+        # Serializes whole mutating lifecycle operations across the deliberate
+        # ``_lock`` release used while joining the liveness worker. Without a
+        # second lock, ``stop()`` can enter that window, tear down the handle,
+        # and leave the switching caller to resume against ``None``.
+        self._operation_lock = threading.RLock()
         self._lock = threading.RLock()
         self._state: State = State.IDLE
         self._active_path: ActivePath = "clearnet"
         self._handle: _ActiveHandle | None = None
         self._env_snapshot: dict[str, str | None] | None = None
         self._last_health: bool = True
+        # ``register()`` freezes the route before returning to Hermes, hence
+        # before AIAgent constructs any provider client. A different live path
+        # after that point would only rewrite os.environ; already-created
+        # clients would retain their old direct/proxy transport.
+        self._process_route_frozen: bool = False
+        self._frozen_path: ActivePath | None = None
+        # The configured request can differ from the effective path only when
+        # lenient/off bring-up deliberately degraded to clearnet. Remembering
+        # both lets session hooks reassert the original configuration as a
+        # no-op without mistaking it for a live route change.
+        self._last_requested_path: ActivePath | None = None
+        self._frozen_requested_path: ActivePath | None = None
+        self._frozen_route_config: RouteConfigFingerprint | None = None
 
         # Liveness worker state.
         self._worker_thread: threading.Thread | None = None
@@ -222,9 +258,41 @@ class Runtime:
 
     def use(self, path: str) -> None:
         """Switch the active path, mutating env + audit log accordingly."""
+        self._acquire_operation_or_raise()
+        try:
+            self._use(path)
+        finally:
+            self._operation_lock.release()
+
+    def _acquire_operation_or_raise(self) -> None:
+        """Claim a mutation slot without hiding an in-progress lifecycle.
+
+        ``stop`` deliberately waits for a switch to finish so it cannot tear
+        down a handle still owned by that switch. A second switch has the
+        opposite API contract: fail immediately with ``AlreadySwitching``
+        instead of blocking for daemon bring-up or worker shutdown.
+        """
+        if self._operation_lock.acquire(blocking=False):
+            return
+        # Do not acquire ``_lock`` on the contention path. The active switch
+        # normally holds it across daemon bring-up, so taking it merely to
+        # improve an error-message snapshot would turn this fail-immediate API
+        # into a wait-for-bring-up API. Enum reference reads are sufficient for
+        # this best-effort diagnostic.
+        state = self._state.value
+        raise AlreadySwitching(f"path lifecycle operation already in progress (state={state})")
+
+    def _use(self, path: str) -> None:
+        """Serialized implementation of :meth:`use`."""
         if path not in ACTIVE_PATHS:
             raise UnknownPath(f"unknown network path: {path!r}")
         target = cast(ActivePath, path)
+        # Fast path for the process-global route. Session-start hooks may call
+        # use() repeatedly, but a ready tor->tor/vpn->vpn request must not
+        # restart the daemon or invalidate clients already bound to its port.
+        with self._lock:
+            if not self._transition_needed(target):
+                return
         # Snapshot the subprocess count OUTSIDE the lock (review M1,
         # 2026-05-14): the default counter runs ``pgrep`` with a 2 s
         # timeout. Holding the lock that whole time would block
@@ -234,8 +302,10 @@ class Runtime:
         # as one taken at the end.
         subprocess_count = self._count_subprocesses()
         with self._lock:
-            if self._state in (State.BRINGING_UP, State.TEARING_DOWN):
-                raise AlreadySwitching(f"path switch already in progress (state={self._state.value})")
+            # State may have changed while the informational subprocess count
+            # was sampled, so repeat the complete transition check.
+            if not self._transition_needed(target):
+                return
             prev = self._active_path
             try:
                 self._switch(target)
@@ -251,6 +321,7 @@ class Runtime:
                     }
                 )
                 raise
+            self._last_requested_path = target
             self._emit_audit(
                 {
                     "event": _REASON_USE,
@@ -261,6 +332,20 @@ class Runtime:
                     "live_subprocess_count": subprocess_count,
                 }
             )
+
+    def activate_and_freeze(self, path: str) -> None:
+        """Atomically activate the initial route and seal its configuration.
+
+        Registration keeps the runtime private until this method returns. The
+        outer re-entrant lock also prevents a direct reference from interleaving
+        another ``use`` between activation and freeze.
+        """
+        self._acquire_operation_or_raise()
+        try:
+            self._use(path)
+            self.freeze_process_route(expected_path=path)
+        finally:
+            self._operation_lock.release()
 
     def status(self) -> NetworkStatus:
         with self._lock:
@@ -309,17 +394,18 @@ class Runtime:
     def stop(self) -> None:
         """Tear down the active path and join the liveness worker.
 
-        Idempotent: callable from ``on_session_end`` even if no path
+        Idempotent: callable from process-exit cleanup even if no path
         was ever activated.
         """
-        self._stop_worker()
-        with self._lock:
-            if self._handle is not None:
-                self._teardown_current()
-            self._restore_env()
-            self._state = State.IDLE
-            self._active_path = "clearnet"
-            self._reset_liveness()
+        with self._operation_lock:
+            self._stop_worker()
+            with self._lock:
+                if self._handle is not None:
+                    self._teardown_current()
+                self._restore_env()
+                self._state = State.IDLE
+                self._active_path = "clearnet"
+                self._reset_liveness()
 
     # ------------------------------------------------------------------ #
     # Public helpers for hooks layer (PR2-B)                              #
@@ -345,20 +431,78 @@ class Runtime:
             self._config.policy_mode = policy_mode
 
     def set_isolation_token(self, token: str | None) -> None:
-        """Set the per-session Tor circuit-isolation token (v2-N1).
+        """Set an optional process-scoped Tor circuit-isolation token.
 
-        The hooks layer pushes the Hermes ``session_id`` here at session
-        start so :meth:`_apply_env` injects it as the SOCKS credential and
-        Tor's ``IsolateSOCKSAuth`` gives the session its own circuit. Takes
-        effect on the next path application (``on_session_start`` sets it
-        before bring-up). Held under ``_lock`` for the same reason as
-        :meth:`update_policy_mode`.
-
-        The token must be a non-secret identifier — it lands in
-        ``os.environ`` (HTTPS_PROXY) and is inherited by child processes.
+        The value may only change before first path activation. Provider HTTP
+        clients retain the proxy URL they saw at construction, so rewriting
+        its SOCKS credential after activation would split one Hermes process
+        between stale and current transports.
         """
         with self._lock:
+            if token == self._config.isolation_token:
+                return
+            if self._process_route_frozen or self._handle is not None or self._state in (State.READY, State.DEGRADED):
+                raise PathSwitchRequiresRestart(
+                    "Tor isolation credentials are process-scoped; changing them after route activation "
+                    "would leave existing provider clients stale. Restart Hermes to apply the new credential."
+                )
             self._config.isolation_token = token
+
+    def freeze_process_route(self, *, expected_path: str | None = None) -> None:
+        """Prevent live path changes after provider clients may be constructed.
+
+        ``network.register`` calls this immediately after the configured path
+        reaches a ready/degraded state and before returning control to Hermes.
+        Reusing the same ready path remains a no-op; selecting another path
+        raises :class:`PathSwitchRequiresRestart`.
+        """
+        with self._lock:
+            if self._handle is None or self._state not in (State.READY, State.DEGRADED):
+                raise MordredNetworkError("cannot freeze a network route that is not ready")
+            if expected_path is not None and self._last_requested_path != expected_path:
+                raise MordredNetworkError(
+                    f"cannot freeze route: expected configured path {expected_path!r}, "
+                    f"but activation completed for {self._last_requested_path!r}"
+                )
+            if self._process_route_frozen and self._frozen_path != self._active_path:
+                raise PathSwitchRequiresRestart(
+                    f"process route was already frozen at {self._frozen_path!r}; "
+                    f"it cannot be re-frozen at {self._active_path!r}. Restart Hermes."
+                )
+            self._process_route_frozen = True
+            self._frozen_path = self._active_path
+            self._frozen_requested_path = self._last_requested_path or self._active_path
+            self._frozen_route_config = route_config_fingerprint(self._config)
+
+    @property
+    def process_route_frozen(self) -> bool:
+        """Whether provider-client construction has sealed this route."""
+        with self._lock:
+            return self._process_route_frozen and self._frozen_path is not None
+
+    @property
+    def frozen_requested_path(self) -> ActivePath | None:
+        """Configured path whose effective transport was frozen."""
+        with self._lock:
+            return self._frozen_requested_path
+
+    @property
+    def frozen_route_config(self) -> RouteConfigFingerprint | None:
+        """Configuration snapshot used to build the frozen route."""
+        with self._lock:
+            return self._frozen_route_config
+
+    def assert_route_config(self, config: RuntimeConfig) -> None:
+        """Require ``config`` to match the process-frozen activation snapshot."""
+        expected = route_config_fingerprint(config)
+        with self._lock:
+            if not self._process_route_frozen or self._frozen_route_config is None:
+                raise PathSwitchRequiresRestart("process route has no frozen activation configuration; restart Hermes.")
+            if expected != self._frozen_route_config:
+                raise PathSwitchRequiresRestart(
+                    "network configuration changed after the process route was activated. "
+                    "Restart Hermes so provider clients, route daemons, and leak controls use one configuration."
+                )
 
     def is_dropped(self) -> bool:
         """Sticky flag - True iff the liveness worker observed
@@ -371,6 +515,36 @@ class Runtime:
     # ------------------------------------------------------------------ #
     # Internals                                                          #
     # ------------------------------------------------------------------ #
+
+    def _transition_needed(self, target: ActivePath) -> bool:
+        """Validate a requested transition while ``_lock`` is held."""
+        if self._state in (State.BRINGING_UP, State.TEARING_DOWN):
+            raise AlreadySwitching(f"path switch already in progress (state={self._state.value})")
+        if self._process_route_frozen:
+            frozen_path = self._frozen_path
+            frozen_requested_path = self._frozen_requested_path
+            route_is_reusable = (
+                frozen_path is not None
+                and frozen_requested_path is not None
+                and target == frozen_requested_path
+                and self._active_path == frozen_path
+                and self._handle is not None
+                and self._state in (State.READY, State.DEGRADED)
+                and not self._dropped
+            )
+            if route_is_reusable:
+                return False
+            raise PathSwitchRequiresRestart(
+                f"process network route for configured path {frozen_requested_path!r} is frozen at "
+                f"effective path {frozen_path!r}, but the requested path is {target!r} and the current "
+                "route is no longer safely reusable "
+                f"(active_path={self._active_path!r}, state={self._state.value}, "
+                f"handle_present={self._handle is not None}, dropped={self._dropped}). "
+                "Restart Hermes so provider clients and the process route are rebuilt together."
+            )
+        if self._handle is not None and self._state in (State.READY, State.DEGRADED) and target == self._active_path:
+            return self._dropped
+        return True
 
     def _reset_liveness(self) -> None:
         """Zero the M9 liveness-worker counters for a fresh observation run.
@@ -403,8 +577,21 @@ class Runtime:
             self._teardown_current()
         try:
             handle = self._bring_up(target)
-        except BringupFailed as e:
+        except Exception as raw_error:
+            failure = (
+                raw_error
+                if isinstance(raw_error, BringupFailed)
+                else BringupFailed(f"{target} bring-up failed unexpectedly ({type(raw_error).__name__})")
+            )
             self._handle = None
+            # Normalize the truthful no-route state before either raising or
+            # attempting a lenient clearnet fallback. This also covers an
+            # unexpected provider/plugin Exception, which previously left the
+            # runtime stuck in BRINGING_UP.
+            self._restore_env()
+            self._active_path = "clearnet"
+            self._state = State.IDLE
+            self._reset_liveness()
             if self._config.policy_mode == "strict":
                 # Codex P2 fix (2026-05-14): the previous path was already
                 # torn down before the new bring-up was attempted. If we
@@ -415,11 +602,9 @@ class Runtime:
                 # killed SOCKS port. Restore the pre-runtime env and reset
                 # the active path to clearnet so the truthful failure is
                 # visible to callers + downstream subprocesses.
-                self._restore_env()
-                self._active_path = "clearnet"
-                self._state = State.IDLE
-                self._reset_liveness()
-                raise
+                if failure is raw_error:
+                    raise
+                raise failure from raw_error
             # lenient / off: fall back to clearnet and audit it.
             self._emit_audit(
                 {
@@ -428,10 +613,20 @@ class Runtime:
                     "reason": _REASON_BRINGUP_FAILED,
                     "attempted_path": target,
                     "fallback_path": "clearnet",
-                    "error": str(e),
+                    "error": str(failure),
                 }
             )
-            fallback_handle = self._bring_up("clearnet")
+            try:
+                fallback_handle = self._bring_up("clearnet")
+            except Exception as fallback_error:
+                self._handle = None
+                self._restore_env()
+                self._active_path = "clearnet"
+                self._state = State.IDLE
+                self._reset_liveness()
+                raise BringupFailed(
+                    f"clearnet fallback failed unexpectedly ({type(fallback_error).__name__})"
+                ) from fallback_error
             self._handle = fallback_handle
             self._active_path = "clearnet"
             self._apply_env("clearnet")
@@ -475,6 +670,7 @@ class Runtime:
 
     def _bring_up_tor(self) -> _ActiveHandle:
         port = self._config.tor_socks_port or self._tor_pick_port()
+        tor_mod.validate_port_pair(port)
         control_port = port + 1
         torrc = tor_mod.render_torrc(
             socks_port=port,
@@ -565,14 +761,17 @@ class Runtime:
             )
         except OSError as bring_err:
             raise BringupFailed(f"vpn provider bring-up failed: {bring_err}") from bring_err
-        # Codex r8-P1-B (2026-05-14): preserve the user's pre-existing
-        # lockdown setting on cleanup; only clear what WE applied.
-        # ``MullvadHandle.lockdown_applied_by_us`` records whether we
-        # flipped it so we never strip security posture the user
-        # established before Mordred ran. ``getattr`` keeps this generic
-        # for providers whose handle has no lockdown concept (WireGuard,
-        # custom) — they default to "preserve" (a no-op for them).
-        preserve_on_cleanup = not getattr(vpn_handle, "lockdown_applied_by_us", False)
+        # Strict cleanup always preserves lockdown. Mullvad has no atomic
+        # compare-and-swap operation, so observing OFF followed by a successful
+        # ``set on`` cannot prove exclusive ownership: another actor may have
+        # enabled it in between. Turning it OFF after a wait failure could
+        # therefore weaken that actor's security posture. Non-strict providers
+        # retain the historical applied-by-us cleanup behavior.
+        preserve_on_cleanup = self._config.policy_mode == "strict" or not getattr(
+            vpn_handle,
+            "lockdown_applied_by_us",
+            False,
+        )
         try:
             self._vpn_provider.wait_connected(cli_path=cli_path)
         except (BringupFailed, OSError) as wait_err:
@@ -632,12 +831,19 @@ class Runtime:
         if self._handle is not None and self._handle.path == "tor":
             tor_handle = self._handle.handle
             port = tor_handle.socks_port
-        desired = proxy_env_mod.desired_env(
-            path=target,
-            tor_socks_port=port,
-            no_proxy_extra=self._config.no_proxy_extra,
-            isolation_token=self._config.isolation_token,
-        )
+        if self._config.policy_mode == "off" and target != "tor":
+            # Policy-off must not silently disable an ambient corporate/user
+            # proxy. Restore the exact pre-runtime managed environment when
+            # entering clearnet/VPN (also handles an explicit Tor->clearnet
+            # switch without leaving Tor's now-dead SOCKS URL behind).
+            desired = {key: value for key, value in self._env_snapshot.items() if value is not None}
+        else:
+            desired = proxy_env_mod.desired_env(
+                path=target,
+                tor_socks_port=port,
+                no_proxy_extra=self._config.no_proxy_extra,
+                isolation_token=self._config.isolation_token,
+            )
         # Set-then-prune, never pop-then-set. ``self._env`` is the process-global
         # ``os.environ``, and ``_lock`` only serialises the runtime's OWN writers
         # — it cannot stop another thread in this process (a tool-call handler,

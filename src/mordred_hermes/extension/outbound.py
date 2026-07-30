@@ -1,4 +1,4 @@
-"""Outbound reply re-encryption (SPEC-v2 §4 reply-in-kind), as a plugin.
+"""Context-bound v3 outbound reply encryption, as a plugin.
 
 No hermes-agent hook carries channel/thread context on the *send* path
 (``transform_llm_output`` only sees ``response_text``/``session_id``/``platform``),
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _patched: set[str] = set()
 
 _LOCKED_NOTICE = "🔒 (暗号化できないため本文を送信できませんでした)"
+_CONTEXT_UNAVAILABLE = "mordred_encrypt_context_unavailable"
 
 
 def _SendResult() -> Any:
@@ -50,7 +51,15 @@ async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts
             await client.chat_postMessage(**kw)
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
-    chunks = e2e.encrypt_reply(key, content, self.MAX_MESSAGE_LENGTH, e2e.SLACK_MENTION_PREFIX_RE)
+    chunks = e2e.encrypt_reply(
+        key,
+        content,
+        self.MAX_MESSAGE_LENGTH,
+        e2e.SLACK_MENTION_PREFIX_RE,
+        platform="slack",
+        chat_id=str(chat_id),
+        thread_root=thread_ts,
+    )
     last = None
     for chunk in chunks:
         kw = {"channel": chat_id, "text": chunk, "mrkdwn": False}  # ciphertext: never mrkdwn
@@ -80,8 +89,13 @@ def _wrap_slack(cls: Any) -> None:
             try:
                 thread_ts = self._resolve_thread_ts(reply_to, metadata)
                 encrypted = e2e.is_encrypted_thread("slack", chat_id, thread_ts)
-            except Exception:
-                encrypted, thread_ts = False, None
+            except Exception as exc:
+                # Context resolution is part of the confidentiality boundary.
+                # Adapter API drift or a registry failure must not turn a
+                # possibly encrypted reply into a call to the plaintext sender.
+                logger.warning("mordred_e2e: Slack encryption-context lookup failed: %s", exc)
+                SendResult = _SendResult()
+                return SendResult(success=False, error=_CONTEXT_UNAVAILABLE)
             if encrypted:  # fail-closed: never delegate to the plaintext path
                 return await _slack_encrypted_send(self, chat_id, content, thread_ts)
         return await orig_send(self, chat_id, content, reply_to, metadata)
@@ -122,7 +136,15 @@ async def _discord_encrypted_send(self: Any, chat_id: str, content: str, thread_
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
     mids: list[str] = []
-    for chunk in e2e.encrypt_reply(key, content, self.MAX_MESSAGE_LENGTH, e2e.DISCORD_MENTION_PREFIX_RE):
+    for chunk in e2e.encrypt_reply(
+        key,
+        content,
+        self.MAX_MESSAGE_LENGTH,
+        e2e.DISCORD_MENTION_PREFIX_RE,
+        platform="discord",
+        chat_id=str(tid),
+        thread_root=thread_id,
+    ):
         msg = await channel.send(chunk)
         mids.append(str(msg.id))
     return SendResult(success=True, message_id=mids[0] if mids else None, raw_response={"message_ids": mids})
@@ -133,13 +155,17 @@ def _wrap_discord(cls: Any) -> None:
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):  # type: ignore[no-untyped-def]
         if getattr(self, "_client", None):
-            raw_thread_id = (metadata or {}).get("thread_id")
-            thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
-            ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
             try:
+                raw_thread_id = (metadata or {}).get("thread_id")
+                thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
+                ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
                 encrypted = any(e2e.is_encrypted_thread("discord", x, thread_id) for x in ids)
-            except Exception:
-                encrypted = False
+            except Exception as exc:
+                # As with Slack, an indeterminate encryption context is a send
+                # failure. Falling through would expose the reply via orig_send.
+                logger.warning("mordred_e2e: Discord encryption-context lookup failed: %s", exc)
+                SendResult = _SendResult()
+                return SendResult(success=False, error=_CONTEXT_UNAVAILABLE)
             if encrypted:  # fail-closed
                 return await _discord_encrypted_send(self, chat_id, content, thread_id, ids)
         return await orig_send(self, chat_id, content, reply_to, metadata)
@@ -162,7 +188,54 @@ _TARGETS = [
 _WRAPPERS = {"slack": _wrap_slack, "discord": _wrap_discord}
 
 
-def wrap_live_adapters(gateway: Any) -> list[str]:
+def _live_adapter_items(gateway: Any, profile: str | None = None) -> list[tuple[Any, Any]]:
+    """Return the adapter registry selected by an inbound event's profile.
+
+    Hermes 0.19+ stores secondary multiplex-profile adapters under
+    ``gateway._profile_adapters[profile]`` while the active/default profile
+    continues to use ``gateway.adapters``. Older supported Hermes releases
+    only expose ``gateway.adapters``. A stamped secondary profile must never
+    fall back to the default registry: that could verify one bot's wrapped
+    adapter while the reply is actually routed through another bot.
+
+    Gateway/plugin objects are outside Mordred's trust boundary. Attribute,
+    mapping and iterator failures therefore resolve to an empty registry so
+    callers fail closed.
+    """
+    try:
+        profile_name = profile.strip() if isinstance(profile, str) else None
+        if profile_name and profile_name != "default":
+            profile_adapters = getattr(gateway, "_profile_adapters", None)
+            if profile_adapters is None:
+                return []
+            adapters = profile_adapters.get(profile_name)
+        else:
+            adapters = getattr(gateway, "adapters", None)
+        if adapters is None:
+            return []
+        return list(adapters.items())
+    except BaseException:
+        return []
+
+
+def live_adapter_for(gateway: Any, platform: str, profile: str | None = None) -> Any | None:
+    """Resolve the exact live adapter for ``platform`` and ``profile``.
+
+    This shares the same fail-closed profile selection as wrapping and
+    verification, and is also used for the mandatory-E2E setup notice.
+    """
+    try:
+        wanted = str(platform or "").lower()
+        for raw_platform, adapter in _live_adapter_items(gateway, profile):
+            name = str(getattr(raw_platform, "value", raw_platform) or "").lower()
+            if name == wanted:
+                return adapter
+    except BaseException:
+        return None
+    return None
+
+
+def wrap_live_adapters(gateway: Any, profile: str | None = None) -> list[str]:
     """Wrap the ``send`` of the adapter classes the gateway ACTUALLY built.
 
     This is the reliable path. Guessing import paths does not work: the concrete
@@ -174,16 +247,13 @@ def wrap_live_adapters(gateway: Any) -> list[str]:
     in cleartext.
 
     ``GatewayRunner.adapters`` is ``Dict[Platform, BasePlatformAdapter]`` of the
-    live instances, so ``type(adapter)`` is exactly the class that will send.
-    Idempotent and cheap: safe to call on every inbound event.
+    active profile's live instances; newer multiplex builds additionally use
+    ``GatewayRunner._profile_adapters[profile]`` for secondary profiles.
+    ``type(adapter)`` is exactly the class that will send. Idempotent and cheap:
+    safe to call on every inbound event.
     """
     installed: list[str] = []
-    adapters = getattr(gateway, "adapters", None) or {}
-    try:
-        items = list(adapters.items())
-    except Exception:
-        return installed
-    for plat, adapter in items:
+    for plat, adapter in _live_adapter_items(gateway, profile):
         try:
             name = str(getattr(plat, "value", plat) or "").lower()
             wrap = _WRAPPERS.get(name)
@@ -198,9 +268,29 @@ def wrap_live_adapters(gateway: Any) -> list[str]:
             _patched.add(name)
             installed.append(name)
             logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
-        except Exception as e:
-            logger.debug("mordred_e2e: could not wrap %s: %s", plat, e)
+        except BaseException:
+            # Adapter objects and classes come from third-party plugins. Treat
+            # even hostile descriptors/metaclasses as an unwrappable adapter;
+            # the inbound gate will then fail closed.
+            logger.debug("mordred_e2e: could not wrap a live adapter")
     return installed
+
+
+def live_adapter_is_wrapped(gateway: Any, platform: str, profile: str | None = None) -> bool:
+    """Return whether the live adapter has fail-closed send.
+
+    This is a total security predicate: plugin-owned mappings, iterators,
+    descriptors, enum values and metaclasses are all untrusted. Any failure is
+    conservatively ``False`` and never escapes into the gateway dispatch path.
+    """
+    try:
+        adapter = live_adapter_for(gateway, platform, profile)
+        if adapter is None:
+            return False
+        send = getattr(type(adapter), "send", None)
+        return bool(send is not None and getattr(send, "__mordred_wrapped__", False))
+    except BaseException:
+        return False
 
 
 def install_outbound_patches() -> list[str]:

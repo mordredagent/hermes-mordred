@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _bip39, _storage, api
+from mordred_hermes.keyvault import _bip39, _native_key_id, _storage, api
 from mordred_hermes.keyvault import digest as kvdigest
 from mordred_hermes.keyvault import pow as kvpow
 from mordred_hermes.keyvault.network_fallback import BlackoutNotAsserted
@@ -82,6 +84,27 @@ class TestList:
         assert _key_id_hash("default") in out
         assert "2026-05-16T00:00:00Z" in out
 
+    def test_plain_list_escapes_metadata_terminal_controls(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        key_id = "payments\n\x1b[31mowned"
+        created_at = "2026-05-16T00:00:00Z\n\x1b]52;c;Y2xpcGJvYXJk\x07"
+        root = _build_keyvault(tmp_path, {key_id: b"\x11" * 32})
+        meta = _storage.load_meta(root)
+        meta["keys"][_key_id_hash(key_id)]["created_at"] = created_at
+        _storage.save_meta(root, meta)
+
+        assert keyvault_cli.list_keys(home=tmp_path) == 0
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert key_id not in out
+        assert created_at not in out
+        assert "payments\\n\\x1b[31mowned" in out
+        assert "2026-05-16T00:00:00Z\\n\\x1b]52;c;Y2xpcGJvYXJk\\x07" in out
+
     def test_list_does_not_leak_key_material(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """``list`` must not print the verification digest (key material)."""
         _build_keyvault(tmp_path, {"default": b"\xab" * 32})
@@ -109,6 +132,37 @@ class TestList:
         # A remediation hint — recover from backup or reset the keyvault.
         assert "recover" in err or "reset" in err
 
+    def test_non_utf8_meta_returns_1_without_traceback(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_bytes(b"\xffnot-utf8")
+
+        assert keyvault_cli.list_keys(home=tmp_path) == 1
+
+        err = capsys.readouterr().err.lower()
+        assert "corrupt" in err
+        assert "utf-8" in err
+
+    def test_non_object_row_returns_1_without_traceback(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        meta = _storage.load_meta(root)
+        meta["keys"][_key_id_hash("default")] = ["not", "an", "object"]
+        _storage.save_meta(root, meta)
+
+        rc = keyvault_cli.list_keys(home=tmp_path)
+
+        assert rc == 1
+        assert "invalid key row" in capsys.readouterr().err.lower()
+
     def test_unreadable_meta_returns_1_with_friendly_message(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -122,6 +176,45 @@ class TestList:
         rc = keyvault_cli.list_keys(home=tmp_path)
         assert rc == 1
         assert "meta.json" in capsys.readouterr().err.lower()
+
+    def test_pending_reset_journal_is_not_listed_as_initialized(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x11" * 32})
+        with _storage.keyvault_lifecycle_lock(root):
+            _storage.write_reset_journal(root, b"pending reset")
+
+        assert keyvault_cli.list_keys(home=tmp_path) == 1
+        assert "reset" in capsys.readouterr().err.lower()
+
+    def test_list_waits_for_lifecycle_then_observes_reset_journal(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x11" * 32})
+        started = threading.Event()
+        finished = threading.Event()
+        results: list[int] = []
+
+        def list_from_thread() -> None:
+            started.set()
+            results.append(keyvault_cli.list_keys(home=tmp_path))
+            finished.set()
+
+        with _storage.keyvault_lifecycle_lock(root):
+            thread = threading.Thread(target=list_from_thread)
+            thread.start()
+            assert started.wait(timeout=5)
+            assert not finished.wait(timeout=0.1)
+            _storage.write_reset_journal(root, b"pending reset")
+
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert results == [1]
+        assert "reset" in capsys.readouterr().err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +238,23 @@ class TestVerifyDigest:
         assert digest.hex() in out  # full 64-hex digest, not a prefix
         assert "default" in out
 
+    def test_verify_escapes_metadata_key_id_terminal_controls(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        key_id = "payments\n\x1b[2Jowned"
+        digest = b"\x23" * 32
+        _build_keyvault(tmp_path, {key_id: digest})
+
+        assert keyvault_cli.verify_digest(home=tmp_path) == 0
+
+        captured = capsys.readouterr()
+        assert "\x1b" not in captured.out + captured.err
+        assert key_id not in captured.out + captured.err
+        assert "payments\\n\\x1b[2Jowned" in captured.out
+        assert digest.hex() in captured.out
+
     def test_displays_every_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _build_keyvault(tmp_path, {"default": b"\x01" * 32, "payments": b"\x02" * 32})
         rc = keyvault_cli.verify_digest(home=tmp_path)
@@ -152,6 +262,50 @@ class TestVerifyDigest:
         out = capsys.readouterr().out
         assert (b"\x01" * 32).hex() in out
         assert (b"\x02" * 32).hex() in out
+
+    def test_holds_lifecycle_through_commit_snapshot(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        reading_commit = threading.Event()
+        release_commit = threading.Event()
+        reset_acquired = threading.Event()
+        results: list[int] = []
+        real_safe_read = _storage.safe_read
+
+        def pausing_safe_read(path: Path) -> bytes:
+            data = real_safe_read(path)
+            if path.suffix == ".commit":
+                reading_commit.set()
+                assert release_commit.wait(timeout=5)
+            return data
+
+        def verify() -> None:
+            results.append(keyvault_cli.verify_digest(home=tmp_path))
+
+        def resetter() -> None:
+            with _storage.keyvault_lifecycle_lock(root):
+                reset_acquired.set()
+
+        monkeypatch.setattr(_storage, "safe_read", pausing_safe_read)
+        verify_thread = threading.Thread(target=verify)
+        reset_thread = threading.Thread(target=resetter)
+        verify_thread.start()
+        assert reading_commit.wait(timeout=5)
+        reset_thread.start()
+        try:
+            assert not reset_acquired.wait(timeout=0.1)
+        finally:
+            release_commit.set()
+
+        verify_thread.join(timeout=5)
+        reset_thread.join(timeout=5)
+        assert not verify_thread.is_alive()
+        assert not reset_thread.is_alive()
+        assert results == [0]
+        assert reset_acquired.is_set()
 
     def test_missing_commit_file_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A meta row whose digests/<hash>.commit is gone is surfaced, not crashed."""
@@ -161,6 +315,106 @@ class TestVerifyDigest:
         assert rc == 1
         combined = capsys.readouterr()
         assert "default" in (combined.out + combined.err)
+
+    @pytest.mark.parametrize("digest", [b"", b"\x01" * 31, b"\x01" * 33])
+    def test_wrong_length_commit_returns_1(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        digest: bytes,
+    ) -> None:
+        _build_keyvault(tmp_path, {"default": digest})
+
+        rc = keyvault_cli.verify_digest(home=tmp_path)
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "exactly 32 bytes" in captured.err.lower()
+        if digest:
+            assert digest.hex() not in captured.out
+
+    @pytest.mark.parametrize("row", [None, ["not", "an", "object"], {}, {"key_id": 7}])
+    def test_invalid_metadata_row_returns_1_without_traceback(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        row: object,
+    ) -> None:
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        meta = _storage.load_meta(root)
+        meta["keys"][_key_id_hash("default")] = row
+        _storage.save_meta(root, meta)
+
+        rc = keyvault_cli.verify_digest(home=tmp_path)
+
+        assert rc == 1
+        assert "invalid key row or hash" in capsys.readouterr().err.lower()
+
+    def test_traversal_hash_is_rejected_before_external_digest_read(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        meta = _storage.load_meta(root)
+        [(_key_hash, row)] = meta["keys"].items()
+        hostile_hash = "../../../victim"
+        meta["keys"] = {hostile_hash: row}
+        _storage.save_meta(root, meta)
+        victim = (root / "digests" / f"{hostile_hash}.commit").resolve()
+        victim.write_bytes(b"V" * 32)
+        os.chmod(victim, 0o600)
+        victim_before = victim.read_bytes()
+        read_paths: list[Path] = []
+        real_safe_read = _storage.safe_read
+
+        def tracking_safe_read(path: Path) -> bytes:
+            read_paths.append(path.resolve(strict=False))
+            return real_safe_read(path)
+
+        monkeypatch.setattr(_storage, "safe_read", tracking_safe_read)
+
+        rc = keyvault_cli.verify_digest(home=tmp_path)
+
+        assert rc == 1
+        assert "invalid key row or hash" in capsys.readouterr().err.lower()
+        assert victim.resolve() not in read_paths
+        assert victim.read_bytes() == victim_before
+
+    def test_symlinked_digests_is_rejected_before_external_digest_read(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        digests = root / "digests"
+        digests.rename(root / "original-digests")
+        external = tmp_path / "external-digests"
+        external.mkdir(mode=0o700)
+        os.chmod(external, 0o700)
+        victim = external / f"{_key_id_hash('default')}.commit"
+        victim.write_bytes(b"V" * 32)
+        os.chmod(victim, 0o600)
+        digests.symlink_to(external, target_is_directory=True)
+        victim_before = victim.read_bytes()
+        read_paths: list[Path] = []
+        real_safe_read = _storage.safe_read
+
+        def tracking_safe_read(path: Path) -> bytes:
+            read_paths.append(path.resolve(strict=False))
+            return real_safe_read(path)
+
+        monkeypatch.setattr(_storage, "safe_read", tracking_safe_read)
+
+        rc = keyvault_cli.verify_digest(home=tmp_path)
+
+        assert rc == 1
+        assert "digest directory" in capsys.readouterr().err.lower()
+        assert victim.resolve() not in read_paths
+        assert victim.read_bytes() == victim_before
 
     def test_cli_verify_digest_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _build_keyvault(tmp_path, {"default": b"\x09" * 32})
@@ -304,7 +558,15 @@ def _make_backup_blob(home: Path, backend: FakeBackend) -> bytes:
     _handle, digest = api.prepare_generate(RECOVER_SEED, RECOVER_PASS, pow_bytes)
     result = api.generate(RECOVER_SEED, RECOVER_PASS, pow_bytes, digest, backend=backend, audit_sink=_sink(), home=home)
     api.encrypt(result.key_id, b"the-secret", "vault", backend=backend, audit_sink=_sink(), home=home)
-    return api.export_backup(result.key_id, RECOVER_PASS, backend=backend, audit_sink=_sink(), home=home)
+    return api.export_backup(
+        result.key_id,
+        RECOVER_PASS,
+        backend=backend,
+        audit_sink=_sink(),
+        home=home,
+        seed_phrase=RECOVER_SEED,
+        pow_bytes=pow_bytes,
+    )
 
 
 class TestRecover:
@@ -360,6 +622,32 @@ class TestRecover:
         meta = _storage.load_meta(_storage.resolve_keyvault_dir(home_b))
         assert meta["keys"]  # the imported key landed on device B
 
+    def test_recover_escapes_imported_key_id_terminal_controls(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        _fast_pow: None,
+    ) -> None:
+        hostile_key_id = "restored\n\x1b[31mowned"
+        blob_file = tmp_path / "backup.mrkv"
+        blob_file.write_bytes(b"authenticated-by-test-double")
+        monkeypatch.setattr(api, "import_backup", lambda *args, **kwargs: hostile_key_id)
+        monkeypatch.setattr(keyvault_cli, "_provision_audit_log_key", lambda *args, **kwargs: None)
+
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert hostile_key_id not in out
+        assert "restored\\n\\x1b[31mowned" in out
+
     def test_wrong_passphrase_returns_1(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
     ) -> None:
@@ -375,6 +663,72 @@ class TestRecover:
         )
         assert rc == 1
         assert "mis-transcribed" in capsys.readouterr().err.lower()
+
+    def test_recovers_legacy_blob_with_separate_backup_passphrase(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
+    ) -> None:
+        from mordred_hermes.keyvault import backup
+
+        current_blob = _make_backup_blob(tmp_path / "a", FakeBackend())
+        parsed = backup.parse_header(current_blob)
+        manifest_json = backup.decrypt_body(parsed, RECOVER_PASS)
+        legacy_backup_passphrase = "legacy-export-typo"
+        legacy_blob = backup.export(
+            manifest_json,
+            legacy_backup_passphrase,
+            verification_digest=parsed.verification_digest,
+        )
+        blob_file = tmp_path / "legacy.mrkv"
+        blob_file.write_bytes(legacy_blob)
+
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path / "b",
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS, legacy_backup_passphrase]),
+        )
+
+        assert rc == 0
+        assert "recovered" in capsys.readouterr().out.lower()
+
+    def test_authenticated_ciphertext_tamper_returns_1_without_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
+    ) -> None:
+        blob = bytearray(_make_backup_blob(tmp_path / "a", FakeBackend()))
+        blob[-1] ^= 1
+        blob_file = tmp_path / "tampered.mrkv"
+        blob_file.write_bytes(blob)
+
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=tmp_path / "b",
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS, ""]),
+        )
+
+        assert rc == 1
+        assert "authentication failed" in capsys.readouterr().err.lower()
+
+    def test_existing_destination_is_rejected_without_traceback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], _fast_pow: None
+    ) -> None:
+        blob_file = tmp_path / "backup.mrkv"
+        blob_file.write_bytes(_make_backup_blob(tmp_path / "source", FakeBackend()))
+        destination = tmp_path / "destination"
+        existing_backend = FakeBackend()
+        _make_backup_blob(destination, existing_backend)
+
+        rc = keyvault_cli.recover(
+            blob_path=blob_file,
+            home=destination,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(passwords=[RECOVER_SEED, RECOVER_PASS]),
+        )
+
+        assert rc == 1
+        err = capsys.readouterr().err.lower()
+        assert "not fresh" in err
+        assert "reset" in err
 
     def test_cli_recover_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, Path] = {}
@@ -486,6 +840,68 @@ class TestInit:
         )
         assert rc == 1
         assert "already" in capsys.readouterr().err.lower()
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            _native_key_id.AUDIT_KEY_FIELD,
+            _native_key_id.PENDING_AUDIT_KEY_FIELD,
+        ],
+    )
+    def test_residual_audit_ownership_refuses_before_ceremony(
+        self,
+        field: str,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        meta = _storage.load_meta(root)
+        meta[field] = {"residual": True}
+        _storage.save_meta(root, meta)
+        before_meta = _storage.safe_read(root / "meta.json")
+        prompt_io = _RecordingPromptIO(seed=self.FIXED_SEED, passphrase=self.PASSPHRASE)
+        backend = FakeBackend()
+        audit_entries: list[dict[str, Any]] = []
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=backend,
+            prompt_io=prompt_io,
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+            audit_sink=audit_entries.append,
+        )
+
+        assert rc == 1
+        assert prompt_io.calls == []
+        assert backend.calls == []
+        assert audit_entries == []
+        assert _storage.safe_read(root / "meta.json") == before_meta
+        assert "residual native-key ownership" in capsys.readouterr().err.lower()
+
+    def test_pending_reset_refuses_before_ceremony_prompts(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        root.parent.mkdir(mode=0o700, parents=True)
+        with _storage.keyvault_lifecycle_lock(root):
+            _storage.write_reset_journal(root, b"pending reset")
+        prompt_io = _RecordingPromptIO(seed=self.FIXED_SEED, passphrase=self.PASSPHRASE)
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=prompt_io,
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+
+        assert rc == 1
+        assert prompt_io.calls == []
+        assert "reset is incomplete" in capsys.readouterr().err.lower()
 
     def test_passphrase_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
@@ -718,7 +1134,12 @@ class TestInit:
             display_fn=self._noop_display,
         )
         assert rc == 0
-        assert ("generate", AUDIT_LOG_KEY_ID) in backend.calls
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        audit_native_key_id = _native_key_id.scoped_native_key_id(root, AUDIT_LOG_KEY_ID)
+        assert ("generate", audit_native_key_id) in backend.calls
+        meta = _storage.load_meta(root)
+        assert _native_key_id.PENDING_AUDIT_KEY_FIELD not in meta
+        assert _native_key_id.committed_audit_key_from_meta(root, meta, AUDIT_LOG_KEY_ID) == audit_native_key_id
 
     def test_init_store_seed_for_hd_persists_seed_and_derives(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -944,6 +1365,26 @@ class TestListJson:
                 "created_at": "2026-05-16T00:00:00Z",
             }
         ]
+
+    def test_list_json_preserves_control_characters_as_data(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import json
+
+        key_id = "payments\n\x1b[31mowned"
+        created_at = "2026-05-16\n\x1b[2J"
+        root = _build_keyvault(tmp_path, {key_id: b"\x11" * 32})
+        meta = _storage.load_meta(root)
+        meta["keys"][_key_id_hash(key_id)]["created_at"] = created_at
+        _storage.save_meta(root, meta)
+
+        assert keyvault_cli.list_keys(home=tmp_path, as_json=True) == 0
+
+        [row] = json.loads(capsys.readouterr().out)
+        assert row["key_id"] == key_id
+        assert row["created_at"] == created_at
 
     def test_empty_keyvault_json_is_empty_array(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         import json

@@ -7,12 +7,12 @@ H3 Path B (HOOK_PAYLOADS.md §2): sibling-disable detection prefers
 ``hermes_cli.plugins._get_disabled_plugins`` / ``_get_enabled_plugins``
 when available, falling back to direct ``~/.hermes/config.yaml`` reads.
 
-Why "poison flag" alongside ``SystemExit``: Hermes's ``invoke_hook``
-wraps every callback in ``try: ... except Exception:`` and logs as a
-warning. ``SystemExit`` (from ``BaseException``) propagates past that
-guard, but if a higher-level harness catches it, the in-process poison
-flag still forces ``pre_tool_call`` to refuse every tool — defense in
-depth for strict mode.
+Why "poison flag" alongside ``MordredIntegrityRefused``: Hermes's
+``invoke_hook`` wraps every callback in ``try: ... except Exception:``
+and logs as a warning. The direct ``BaseException`` subclass propagates
+past that guard, but if a higher-level harness catches it, the in-process
+poison flag still forces ``pre_tool_call`` to refuse every tool — defense
+in depth for strict mode.
 """
 
 from __future__ import annotations
@@ -24,20 +24,41 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
+from .._audit_support import build_audit_writer
 from .._home import HERMES_BASE, hermes_home
+from .._policy_io import (
+    policy_transaction_marker_for_config,
+    policy_transaction_pending,
+)
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section, load_yaml_mapping
-from .audit import Writer, make_audit_writer
+from .audit import Writer
 from .policy import PolicyMode
 
 _LOG = logging.getLogger("mordred.privacy_check")
 
 SIBLING_PLUGINS: Final = (
+    "mordred_privacy_check",
     "mordred_network",
     "mordred_llm_guard",
     "mordred_keyvault",
+    "mordred_e2e",
     "mordred_wizard",
 )
+
+# Minimum runtime surface each sibling promises. ``hooks_registered`` is
+# populated by Hermes only after register() returns successfully, so checking
+# it catches both swallowed registration errors and partial/upstream-drifted
+# registrations. The wizard is CLI-only and therefore has no hook requirement;
+# it still must be loaded and error-free.
+SIBLING_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
+    "mordred_privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
+    "mordred_network": frozenset({"on_session_start", "on_session_end", "pre_api_request", "pre_tool_call"}),
+    "mordred_llm_guard": frozenset({"on_session_start", "pre_api_request"}),
+    "mordred_keyvault": frozenset({"on_session_start", "on_session_end"}),
+    "mordred_e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
+    "mordred_wizard": frozenset(),
+}
 
 # Backwards-compat aliases — pre-Phase-1.3 code (and in-module uses below)
 # read these names directly. The resolver itself was promoted to
@@ -108,31 +129,33 @@ def reload_state() -> None:
         _state = None
 
 
-def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, Any]]:
-    """``(policy_mode, section)`` — the MODE fails closed, the section degrades.
+def _load_config_document(config_path: Path, transaction_marker: Path) -> tuple[PolicyMode, None] | tuple[None, Any]:
+    """Load ``config.yaml``, or decide the fail-closed mode without it.
 
-    M1 port (the fix originally landed only on network's policy.json
-    reader): an absent ``config.yaml`` or an absent / not-yet-written
-    ``plugins.mordred_privacy_check`` section is a fresh or unconfigured
-    install and keeps ``"lenient"`` — but a config.yaml that EXISTS and
-    cannot be opened, read, or parsed, a non-mapping root, and an invalid
-    ``policy`` value all read as ``"strict"``. Collapsing those to lenient
-    (the old ``_load_own_section`` path) meant corrupting or chmod-ing
-    config.yaml silently downgraded install-time enforcement.
-
-    Open-first for the same reason as ``_policy_io.read_policy_mode_fail_closed``:
-    an ``exists()`` pre-check would misread a stat failure as "absent" →
-    lenient. The non-mode fields keep their own degraded defaults — the
-    returned section is ``{}`` whenever the file is unreadable, and
-    ``allow_cloud_llm``/``audit_log_path`` defaults are already safe.
+    Returns ``(mode, None)`` when the decision is already settled (pending
+    transaction, absent file, unreadable file) and ``(None, document)`` when the
+    caller should inspect the parsed YAML.
     """
+    if policy_transaction_pending(transaction_marker):
+        _LOG.error(
+            "policy transaction marker %s is present; failing closed to strict",
+            transaction_marker,
+        )
+        return "strict", None
     try:
         f = config_path.open(encoding="utf-8")
     except FileNotFoundError:
-        return "lenient", {}
+        if policy_transaction_pending(transaction_marker):
+            _LOG.error(
+                "policy transaction began while opening %s; failing closed to strict",
+                config_path,
+            )
+            return "strict", None
+        return "lenient", None
     except OSError as e:
         _LOG.error("config file %s exists but is unreadable (%s); failing closed to strict", config_path, e)
-        return "strict", {}
+        return "strict", None
+
     from ruamel.yaml import YAML
     from ruamel.yaml.error import YAMLError
 
@@ -141,7 +164,23 @@ def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, 
             data = YAML(typ="safe", pure=True).load(f)
     except (OSError, YAMLError) as e:
         _LOG.error("config file %s exists but is unreadable (%s); failing closed to strict", config_path, e)
-        return "strict", {}
+        return "strict", None
+    if policy_transaction_pending(transaction_marker):
+        _LOG.error(
+            "policy transaction began while reading %s; failing closed to strict",
+            config_path,
+        )
+        return "strict", None
+    return None, data
+
+
+def _section_from_document(data: Any, config_path: Path) -> tuple[PolicyMode, dict[str, Any]]:
+    """Extract ``(policy_mode, section)`` from an already-parsed config document.
+
+    Absence stays lenient; anything PRESENT but wrong-typed is damage and fails
+    closed, because collapsing damage into "not configured yet" would silently
+    downgrade enforcement.
+    """
     if data is None:
         return "lenient", {}  # empty file == freshly-touched config, not damage
     if not isinstance(data, dict):
@@ -174,6 +213,33 @@ def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, 
         return cast(PolicyMode, raw), section
     _LOG.error("invalid policy %r in %s; failing closed to strict", raw, config_path)
     return "strict", section
+
+
+def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, Any]]:
+    """``(policy_mode, section)`` — the MODE fails closed, the section degrades.
+
+    M1 port (the fix originally landed only on network's policy.json
+    reader): an absent ``config.yaml`` or an absent / not-yet-written
+    ``plugins.mordred_privacy_check`` section is a fresh or unconfigured
+    install and keeps ``"lenient"`` — but a config.yaml that EXISTS and
+    cannot be opened, read, or parsed, a non-mapping root, and an invalid
+    ``policy`` value all read as ``"strict"``. Collapsing those to lenient
+    (the old ``_load_own_section`` path) meant corrupting or chmod-ing
+    config.yaml silently downgraded install-time enforcement.
+
+    Open-first for the same reason as ``_policy_io.read_policy_mode_fail_closed``:
+    an ``exists()`` pre-check would misread a stat failure as "absent" →
+    lenient. The non-mode fields keep their own degraded defaults — the
+    returned section is ``{}`` whenever the file is unreadable, and
+    ``allow_cloud_llm``/``audit_log_path`` defaults are already safe.
+    """
+    settled, data = _load_config_document(
+        config_path,
+        policy_transaction_marker_for_config(config_path),
+    )
+    if settled is not None:
+        return settled, {}
+    return _section_from_document(data, config_path)
 
 
 def get_active_policy_mode(*, config_path: Path | None = None) -> PolicyMode:
@@ -238,7 +304,11 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
     # L465: encrypt the audit log once the keyvault is initialized. The
     # factory fails open to plaintext NDJSON. keyvault_home is the Hermes
     # home — the directory holding config.yaml.
-    audit = make_audit_writer(audit_path, keyvault_home=config_path.parent)
+    # All Mordred plugins share one process-wide writer per normalized path.
+    # Reloading this PluginState therefore reuses the active writer (and, for
+    # MRAL, its DEK) instead of rotating the file out from under network,
+    # llm_guard, or extension-sign hooks that still reference it.
+    audit = build_audit_writer(audit_path, keyvault_home=config_path.parent)
 
     return PluginState(
         policy_mode=policy_mode,
@@ -340,7 +410,7 @@ def get_disabled_plugins(config_path: Path | None = None) -> set[str]:
 
 
 def get_enabled_plugins(config_path: Path | None = None) -> set[str] | None:
-    """Return opt-in allow-list (``None`` = key missing = "all loadable").
+    """Return opt-in allow-list (``None`` = key missing/malformed = nothing enabled).
 
     Path-resolution rules mirror :func:`get_disabled_plugins`.
     """
@@ -367,15 +437,49 @@ def find_disabled_siblings(
 ) -> set[str]:
     """Return Mordred sibling plugins that are not loadable.
 
-    A sibling is considered disabled if it appears in ``plugins.disabled``
-    OR if ``plugins.enabled`` is set (not ``None``) and the sibling is not in it.
+    A sibling is considered disabled if it appears in ``plugins.disabled`` or
+    is absent from the opt-in ``plugins.enabled`` list.  Hermes 0.13+ treats a
+    missing or malformed allow-list (reported here as ``None``) as "nothing
+    enabled", not "everything loadable", so every sibling is disabled in that
+    case.
 
     ``config_path=None`` uses production resolution (Hermes API + default YAML).
     Explicit paths read only that YAML — never the user's real config.
     """
     deny = get_disabled_plugins(config_path)
     allow = get_enabled_plugins(config_path)
-    return {s for s in siblings if s in deny or (allow is not None and s not in allow)}
+    if allow is None:
+        return set(siblings)
+    return {s for s in siblings if s in deny or s not in allow}
+
+
+def find_unloaded_siblings(
+    plugin_manager: Any,
+    siblings: Iterable[str] = SIBLING_PLUGINS,
+) -> set[str]:
+    """Return configured siblings absent or incomplete in Hermes's live state."""
+    raw_plugins = getattr(plugin_manager, "_plugins", None)
+    if not isinstance(raw_plugins, dict):
+        # Manager shape drift means no live sibling can be proven loaded.
+        return set(siblings)
+    failed: set[str] = set()
+    for sibling in siblings:
+        loaded = raw_plugins.get(sibling)
+        if loaded is None:
+            failed.add(sibling)
+            continue
+        if (
+            getattr(loaded, "enabled", False) is not True
+            or bool(getattr(loaded, "error", None))
+            or getattr(loaded, "module", None) is None
+        ):
+            failed.add(sibling)
+            continue
+        hooks = getattr(loaded, "hooks_registered", None)
+        required = SIBLING_REQUIRED_HOOKS.get(sibling, frozenset())
+        if not isinstance(hooks, list) or not required.issubset(hook for hook in hooks if isinstance(hook, str)):
+            failed.add(sibling)
+    return failed
 
 
 def poison(reason: str) -> None:

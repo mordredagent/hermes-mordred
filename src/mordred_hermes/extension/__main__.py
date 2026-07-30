@@ -7,12 +7,10 @@ Hermes gateway process; ``hermes-mordred extension serve``
 (``wizard/_cli_parsers.py``) wires the same :func:`serve` into the wizard CLI.
 
 aiohttp is the server's only extra dependency (the ``extension`` optional-
-dependencies group in ``pyproject.toml``). :mod:`.api` is imported lazily
-inside :func:`serve` as defense in depth, but ``python -m`` cannot avoid the
-package ``__init__`` — which eagerly imports :mod:`.api` and thus aiohttp —
-so with the extra missing this module never loads; the friendly install hint
-for that case lives in the wizard's ``extension serve`` handler
-(``wizard/_cli_parsers.py:_handle_extension_serve``).
+dependencies group in ``pyproject.toml``). The extension package and this
+launcher are both lazy, so help and argument parsing work without aiohttp.
+:func:`serve` checks that dependency immediately before importing :mod:`.api`
+and prints the install hint when it is absent.
 """
 
 from __future__ import annotations
@@ -21,6 +19,7 @@ import argparse
 import asyncio
 import contextlib
 import errno
+import importlib
 import logging
 import signal
 import sys
@@ -76,8 +75,13 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     shutdown on Ctrl+C or SIGTERM.
     """
     try:
-        from .api import ExtensionAPIServer
-    except ImportError:
+        importlib.import_module("aiohttp")
+    except ModuleNotFoundError as exc:
+        # Catch only the absent optional dependency itself. A missing aiohttp
+        # subdependency, or an ImportError in this launcher's own API module,
+        # is a genuine broken installation/code path and must remain visible.
+        if exc.name != "aiohttp":
+            raise
         print(
             "error: the extension server needs the `extension` extra (aiohttp). "
             'Install it with `pip install "mordred-hermes[extension]"` or, inside '
@@ -86,21 +90,22 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
         )
         return 2
 
+    from .api import ExtensionAPIServer, _is_loopback_host
+
     # argparse's type=int does no range check; out-of-range values would
     # otherwise surface as an OverflowError traceback from socket.bind().
     if not 0 < port <= 65535:
         print(f"error: port must be 1-65535 (got {port}).", file=sys.stderr)
         return 2
 
-    # The wire protocol is designed localhost-only and carries no TLS (SPEC
-    # §6; the Origin check is the only transport-level gate) — binding a
-    # routable interface exposes pairing/auth attempts to the whole network.
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    # The wire protocol is localhost-only and carries no TLS. Refuse a
+    # routable/wildcard bind instead of relying on a warning that can be missed.
+    if not _is_loopback_host(host):
         print(
-            f"warning: binding {host} exposes the extension API beyond localhost — "
-            "the protocol is localhost-only by design and has no TLS.",
+            f"error: refusing non-loopback extension API host {host!r}; the protocol is localhost-only and has no TLS.",
             file=sys.stderr,
         )
+        return 2
 
     # INFO so ExtensionAPIServer.start()'s "Mordred extension API on ws://..."
     # line reaches the console; this is a foreground/CLI launcher, not a
@@ -171,7 +176,8 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
         print(_term.heading("Mordred Extension server", enabled=color))
         print()
         print(f"WebSocket:  ws://{host}:{port}/ext")
-        print(f"Web page:   http://{host}:{port}/")
+        print(f"Web page:   {server.page_url}")
+        print("            (private launch URL; do not share)")
         print()
         print("Press Ctrl+C to stop.")
 
@@ -197,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--host",
         default=_DEFAULT_HOST,
-        help=f"Bind host (default: {_DEFAULT_HOST} — non-loopback exposes the no-TLS API to your network)",
+        help=f"Loopback bind host (default: {_DEFAULT_HOST}; non-loopback values are refused)",
     )
     parser.add_argument("--port", type=int, default=_DEFAULT_PORT, help=f"Bind port (default: {_DEFAULT_PORT})")
     args = parser.parse_args(argv)

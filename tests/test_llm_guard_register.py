@@ -23,6 +23,21 @@ from typing import Any
 import pytest
 
 
+def _build_real_hermes_http_client(base_url: str) -> Any:
+    """Build Hermes's real model HTTP client across the supported version range."""
+    try:
+        from agent.process_bootstrap import build_keepalive_http_client
+    except ModuleNotFoundError as exc:
+        # Hermes 0.13 keeps this factory as a static method on AIAgent.
+        # Do not hide failures from imports performed *inside* a newer module.
+        if exc.name != "agent.process_bootstrap":
+            raise
+        from run_agent import AIAgent
+
+        return AIAgent._build_keepalive_http_client(base_url)
+    return build_keepalive_http_client(base_url)
+
+
 class _FakeCtx:
     """Records ``register_hook`` calls so tests can assert wiring."""
 
@@ -91,6 +106,66 @@ class TestRegisterEntryPoint:
         assert profile is not None
         assert profile.name == "mordred-local"
 
+    def test_register_bypasses_ambient_proxy_before_real_client_construction(
+        self,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The health hook is too late to change an already-built httpx client.
+
+        Exercise Hermes's real shared-client factory after plugin registration
+        and use a second loopback HTTP server as an ambient proxy.  The request
+        must reach the model endpoint directly and never touch the proxy.
+        """
+        import json
+        from pathlib import Path
+
+        import mordred_hermes.llm_guard as guard
+        from tests.integration._http_target import http_target
+
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        with http_target(host="127.0.0.1") as model_endpoint, http_target(host="127.0.0.1") as proxy:
+            monkeypatch.setenv("HTTP_PROXY", proxy.url)
+            # Hermes scans uppercase spellings first, so this deliberately
+            # empty lowercase spelling must not suppress proxy detection.
+            monkeypatch.setenv("http_proxy", "")
+            policy = Path(str(tmp_path)) / "policy.json"
+            policy.write_text(
+                json.dumps(
+                    {
+                        "policy": "strict",
+                        "local_llm_endpoint": model_endpoint.url,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            monkeypatch.setattr(guard, "DEFAULT_POLICY_JSON_PATH", policy)
+
+            guard.register(_FakeCtx())
+
+            import providers
+
+            profile = providers._REGISTRY["mordred-local"]
+            client = _build_real_hermes_http_client(profile.base_url)
+            assert client is not None
+            with client:
+                response = client.get(profile.base_url)
+            assert response.content == model_endpoint.ok_body
+
+        assert model_endpoint.hits == 1
+        assert proxy.hits == 0, "mordred-local request was captured by the ambient HTTP proxy"
+
     def test_register_wires_on_session_start_hook(self) -> None:
         from mordred_hermes.llm_guard import register
 
@@ -109,18 +184,22 @@ class TestRegisterEntryPoint:
         otherwise pass enforce's allowlist check.
         """
         from mordred_hermes.llm_guard import (
+            _on_session_start_auxiliary,
             _on_session_start_enforce,
             _on_session_start_harness,
             register,
         )
+        from mordred_hermes.privacy_check.hooks import check_plugin_integrity
 
         ctx = _FakeCtx()
         register(ctx)
 
         session_start_callbacks = [cb for name, cb in ctx.hooks if name == "on_session_start"]
-        assert len(session_start_callbacks) == 2, "PR2 wires two on_session_start callbacks"
-        assert session_start_callbacks[0] is _on_session_start_harness
-        assert session_start_callbacks[1] is _on_session_start_enforce
+        assert len(session_start_callbacks) == 4
+        assert session_start_callbacks[0] is check_plugin_integrity
+        assert session_start_callbacks[1] is _on_session_start_harness
+        assert session_start_callbacks[2] is _on_session_start_auxiliary
+        assert session_start_callbacks[3] is _on_session_start_enforce
 
     def test_register_does_not_wire_pre_llm_call(self) -> None:
         """PR1 does NOT touch ``pre_llm_call``.
@@ -480,6 +559,7 @@ class TestRegisterIsIdempotent:
         import providers
 
         assert providers._REGISTRY.get("mordred-local") is not None
-        # 2 on_session_start (harness + enforce) + 1 pre_api_request = 3
-        assert len(ctx1.hooks) == 3
-        assert len(ctx2.hooks) == 3
+        # 4 on_session_start (integrity + harness + auxiliary + enforce)
+        # plus pre_api_request.
+        assert len(ctx1.hooks) == 5
+        assert len(ctx2.hooks) == 5

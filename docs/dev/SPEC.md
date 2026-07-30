@@ -16,9 +16,15 @@ Privacy concerns addressed:
 
 1. **network-path observability** (Phase 3, macOS / Linux / WSL2)
 2. **cloud LLM dependency** (Phase 2, macOS / Linux / WSL2)
-3. **local secret custody at rest** (Phase 4, **macOS Apple Silicon only in v1**. Linux/WSL2 users run v1 with only the Phase 1-3 protections, relying on OS file permissions (`0600`) for at-rest secret protection. Linux TPM 2.0 / Windows DPAPI / master-password Tier 3 fallback is `v2-OS2`)
+3. **local secret custody at rest** (Phase 4: Secure Enclave with a
+   login-Keychain software fallback on macOS; packaged TPM 2.0 helper on
+   Linux. Linux deliberately has no software-key fallback and fails closed
+   when the TPM helper is unavailable. Windows-native protection remains
+   deferred)
 
-The fact that Phase 4 is macOS-only is made explicit at the Vision level too. Read together with the caveats in §Platform Support and §Threat Model (H2).
+The backend-specific guarantees and remaining platform limitations are made
+explicit at the Vision level. Read them together with §Platform Support and
+§Threat Model (H2).
 
 ## Project Identity
 
@@ -26,9 +32,9 @@ The fact that Phase 4 is macOS-only is made explicit at the Vision level too. Re
 
 - **Upstream**: github.com/NousResearch/hermes-agent (MIT License)
 - **Current repo**: `Mordred-Hermes/` (the Mordred plugin development repository; not a fork/clone of Hermes upstream)
-- **Strategy**: **Option C + Vendored-fork escape hatch** (zero-PR commitment, finalized in MIGRATION.md §10 row 1 / §5 on 2026-05-07) — Hermes core is left unmodified, and 5 plugins are distributed via `pip install mordred-hermes` (now 6 with `mordred_e2e`). **No PRs are submitted to Hermes upstream**
+- **Strategy**: **Option C + Vendored-fork escape hatch** (zero-PR commitment, finalized in MIGRATION.md §10 row 1 / §5 on 2026-05-07) — Hermes core is left unmodified, and 6 plugins are distributed via `pip install mordred-hermes`. **No PRs are submitted to Hermes upstream**
   - `Mordred-Hermes/` requires no upstream rebase (a pure plugin development repository + vendored modules when needed)
-  - The 5 plugins are developed under `src/mordred_hermes/<name>/` (the pip distribution layout) and exposed via `[project.entry-points."hermes_agent.plugins"]` in `pyproject.toml` (now 6 with `mordred_e2e`, whose package dir is `extension/` rather than `<name>` matching the entry-point suffix)
+  - The plugins are developed under `src/mordred_hermes/` and exposed via `[project.entry-points."hermes_agent.plugins"]` in `pyproject.toml`; `mordred_e2e` uses the `extension/` package rather than a directory matching its entry-point suffix
   - What the old SPEC called a "core seam" is instead handled by **plugin-side wrapper + audit log** (the `mordred.degraded.*` family) for defense-in-depth (Tier A, v1 default)
   - Items that truly need hard enforcement fall under the **vendored fork extra** (Tier B, v2): a patched version of Hermes core modules is redistributed via e.g. `pip install mordred-hermes[hard-lock]`. Out of scope for v1
 - **Compatibility goal**: Existing Hermes users can add the privacy layer with just `pip install mordred-hermes && hermes mordred upgrade`. Users migrating from OpenClaw follow 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade`
@@ -38,10 +44,13 @@ The fact that Phase 4 is macOS-only is made explicit at the Vision level too. Re
 | Phase | Platform |
 |-------|-------------------|
 | Phase 1-3 (network/privacy-check/llm-guard/wizard) | **macOS / Linux / WSL2** (every environment Hermes runs on) |
-| Phase 4 (keyvault, Tier 1) | **macOS Apple Silicon only** (Secure Enclave, `Security.framework`) |
-| Phase 4 (keyvault, Tier 2/3) | v2: Linux (TPM 2.0) / Windows (DPAPI) deferred to ROADMAP `v2-OS2` |
+| Phase 4 (keyvault, macOS) | Secure Enclave on supported Macs, with a software P-256 key in the login Keychain as the fail-safe fallback |
+| Phase 4 (keyvault, Linux) | **TPM 2.0 MVP complete** via the packaged `mordred-hermes-tpmkey` helper; machine-bound and fail-closed, with no software fallback |
+| Phase 4 (keyvault, Windows native) | Deferred (DPAPI / TPM; ROADMAP `v2-OS2`) |
 
-iOS / Android: Hermes itself has Termux support, but Mordred Phase 4 (keyvault) is out of scope. Only Phase 1-3 can run under Termux (Tor requires additional verification).
+iOS / Android: Hermes itself has Termux support, but Mordred Phase 4
+(keyvault) remains out of scope there. Only Phase 1-3 can run under Termux
+(Tor requires additional verification).
 
 ### License Note
 
@@ -54,7 +63,12 @@ Mordred defends against:
 - **Network observers** (ISP, hostile Wi-Fi, local-network adversaries) — addressed by `mordred_network` (Tor / VPN paths)
 - **Cloud LLM operators** seeing prompts and outputs — addressed by `mordred_llm_guard` redirecting to a local-only provider under strict policy
 - **Accidental cloud egress** when a user thinks they are local-only — addressed by `mordred_llm_guard` unconditional override under strict policy
-- **At-rest secret theft** — addressed by `mordred_keyvault`: local seeds, backups, audit logs, and future signing material are encrypted with AES-GCM data-encryption keys (DEKs) whose wrapping keys are protected by Apple Secure Enclave authorization. The Enclave protects key unwrapping; it does not hold signing keys or run AES itself. Tier 2 (HSM/Keychain/TPM/DPAPI) fallbacks are v2
+- **At-rest secret theft** — addressed by `mordred_keyvault`: local seeds,
+  backups, audit logs, and signing material are encrypted with AES-GCM
+  data-encryption keys (DEKs). The wrapping key is protected by Secure Enclave
+  or the login-Keychain fallback on macOS, and by a non-extractable TPM P-256
+  key on Linux. These backends protect key unwrapping; they do not run AES
+  itself. Windows-native DPAPI/TPM support remains deferred
 
 Mordred does **not** defend against:
 
@@ -76,13 +90,13 @@ These limitations are explicit; mitigation work is v2+ scope.
 Because Hermes has a broader hook palette than OpenClaw, many items that the old SPEC said "require a core seam" are **achievable with plugins alone**:
 
 - **Per-tool gating** (e.g. blocking `web_fetch` under strict mode without VPN/Tor active) → implementable via `pre_tool_call`
-- **LLM provider override under strict mode** → **not implementable** via ~~`pre_llm_call`~~ (Phase 0.8 verify complete, [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). The v0.11.0 `pre_llm_call` payload carries only `model`, not `provider`, and its return value is context-injection only. v1 switches to session-scoped enforcement via `on_session_start` instead (see §Story 4 / §Plugin: `mordred_llm_guard`)
+- **LLM provider rewrite under strict mode** → **not implementable** via ~~`pre_llm_call`~~ (Phase 0.8 verify complete, [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). Its return value is context-injection only. v1 instead treats `on_session_start` as an audit-only disk pre-check and uses the resolved `provider` in `pre_api_request` for the authoritative refusal (see §Story 4 / §Plugin: `mordred_llm_guard`)
 - **Gateway dispatch policy** → implementable via `pre_gateway_dispatch` (an additional defense layer not present in the old SPEC)
 - **Approval lifecycle observability** → implementable via `pre_approval_request` / `post_approval_response` (strengthened audit for dangerous tool execution)
 
 ### Defended via plugin-side strict-mode startup refusal (zero-PR strategy)
 
-- **Silent disablement via `hermes plugins disable mordred_*`** → the v1 default is **plugin-only**: `privacy_lock: true` in `plugin.yaml` functions as an internal Mordred hint, and each Mordred plugin's `on_session_start` aborts strict-mode startup with a `BaseException`-derived exception as soon as it detects a sibling has been disabled (see §Plugin-disable protection below). No PR is submitted to Hermes upstream (MIGRATION.md §10 row 4 zero-PR commitment). If hard enforcement is needed, it is handled in v2 via the `[hard-lock]` extra (vendored fork)
+- **Silent disablement via `hermes plugins disable mordred_*`** → the v1 default is **plugin-only**: `privacy_lock: true` is a declarative marker on the five manifest-backed plugins, mirrored by the fixed six-entry `SIBLING_PLUGINS` canonical list (including `mordred_e2e`). Each runtime plugin's shared `on_session_start` integrity callback aborts strict-mode startup with `MordredIntegrityRefused(BaseException)` as soon as it detects a disabled entry (see §Plugin-disable protection below). No code discovers or expands the list from the marker. No PR is submitted to Hermes upstream (MIGRATION.md §10 row 4 zero-PR commitment). If hard enforcement is needed, it is handled in v2 via the `[hard-lock]` extra (vendored fork)
 
 ### Plugin-only fallback for missing seams
 
@@ -96,30 +110,31 @@ The old SPEC's "Core Minimal-Change Policy" was redefined as **zero upstream PR*
 
 | Old modification proposal | v1 strategy | v2 escape hatch |
 |----------|---------|-------------------|
-| ~~HSeam-1: add `privacy_lock: boolean` to `plugin.yaml` in Hermes upstream~~ | **plugin-side only**: `privacy_lock: true` is kept as an internal Mordred hint, and each Mordred plugin's `on_session_start` detects a sibling being disabled and aborts with a `RuntimeError` (§Plugin-disable protection) | Redistribute a vendored fork (a patched version of `hermes_cli/plugins_cmd.py`) via `pip install mordred-hermes[hard-lock]`. Introduced in v2 if hard enforcement becomes necessary |
+| ~~HSeam-1: add `privacy_lock: boolean` to `plugin.yaml` in Hermes upstream~~ | **plugin-side only**: `privacy_lock: true` is kept as a declarative marker, while a fixed six-plugin canonical list drives the shared integrity callback. Strict refusal raises `MordredIntegrityRefused(BaseException)` (§Plugin-disable protection) | Redistribute a vendored fork (a patched version of `hermes_cli/plugins_cmd.py`) via `pip install mordred-hermes[hard-lock]`. Introduced in v2 if hard enforcement becomes necessary |
 
 **Items that would seem to need core modification run on a plugin-side fallback in v1** (no PRs will be sent in the future either; escape to the v2 vendored fork if necessary):
 
-- ~~extension to include `provider_id` / `model_id` in the `pre_llm_call` payload~~ → **Phase 0.8 verify (2026-05-10) complete**: the v0.11.0 `pre_llm_call` payload carries only `model`, not `provider`, and its return value is **context-injection only** (provider override is structurally impossible). `pre_api_request` does carry provider/model/base_url, but it's **observer-only** (its return value is discarded). See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5 for details and the Phase 2 redesign proposal. v1's `mordred_llm_guard` gives up on per-turn override via `pre_llm_call` and instead switches to a design that refuses-or-rewrites provider configuration (`~/.hermes/config.yaml` or `register_provider`) against strict policy in `on_session_start`
+- ~~extension to include `provider_id` / `model_id` in the `pre_llm_call` payload~~ → **Phase 0.8 verify (2026-05-10) complete**: `pre_llm_call` carries only `model`, not `provider`, and its return value is **context-injection only** (provider rewrite is structurally impossible). `pre_api_request` carries provider/model/base_url and discards callback return values, but a `BaseException`-derived refusal still stops egress through Hermes's hook wrapper. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5. v1 therefore performs an audit-only disk pre-check in `on_session_start`, then authoritatively validates the actual runtime provider in `pre_api_request`
 - ~~extension to include `origin_skill` in the `pre_tool_call` payload~~ → **Phase 0.8 verify complete**: in v0.11.0 the payload does not include `origin_skill` (only `tool_name`/`args`/`task_id`/`session_id`/`tool_call_id`; see [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4 for details). Since per-skill policy cannot be implemented via `pre_tool_call`, the install-time guard (the `hermes mordred install` wrapper CLI) that inspects SKILL.md frontmatter is confirmed as the **sole per-skill enforcement path**. The runtime `pre_tool_call` provides only a generic tool-name allowlist
 - A pre-install hook at skill install time (`hermes_cli/skills_hub.py`) → create new if needed; until then, substitute with the `hermes mordred install` wrapper
-- agent process init / shutdown hook → substituted with the existing `on_session_start` / `on_session_end`
+- agent process init / shutdown hook → network setup uses plugin `register()` plus an `atexit` finalizer so the process route exists before provider clients and outlives turn/session hooks; other plugins continue to use the existing session hooks where process ownership is not required
 
 Each plugin probes the shape of the hook payload in `on_session_start`, and if it's missing, records `mordred.degraded.<seam>` in the audit log and runs in degraded mode. The payload shapes confirmed by the Phase 0.8 verify are consolidated in [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) (canonical) — drift watch is `.github/workflows/upstream-check.yml` (weekly, **hook name** drift only; re-verification of payload field shape is a manual bump of this doc triggered by a name-drift signal).
 
-### What Mordred Adds (5 plugins)
+### What Mordred Adds (6 plugins)
 
-> **Update (0.1.0a6):** a 6th plugin, `mordred_e2e` (package dir `extension/`), was added for the E2E encrypted-gateway feature; see `extension/gateway_plugin.py`. It doesn't yet have its own numbered subsection below.
+All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK (`PluginContext`). Distribution is as a single pip package `mordred-hermes`, supporting loading via the `hermes_agent.plugins` entry point.
 
-All plugins live under `src/mordred_hermes/<name>/` and use only the Hermes plugin SDK (`PluginContext`). Distribution is as a single pip package `mordred-hermes`, supporting loading via the `hermes_agent.plugins` entry point.
-
-1. **`mordred_network`** — dynamic 3-layer path switching across Tor / VPN / Clearnet. Manages the lifecycle of child processes (`tor`/`arti`/Mullvad WireGuard CLI) via Python `subprocess`. Provides proxy environment-variable injection (`HTTPS_PROXY`, `ALL_PROXY`, etc.) into Hermes child processes and an internal Python API (`mordred_network.api.use`, `status`, `blackout_assert`).
+1. **`mordred_network`** — process-scoped route selection across Tor / VPN / Clearnet. Activates and freezes the route before provider construction, then manages child-process lifecycle (`tor`/`arti`/Mullvad WireGuard CLI) via Python `subprocess` until process exit. Provides proxy environment-variable injection (`HTTPS_PROXY`, `ALL_PROXY`, etc.) and an internal Python API (`mordred_network.api.use`, `status`, `blackout_assert`); changing a frozen route requires restart.
 2. **`mordred_privacy_check`** — privacy policy enforcement at two checkpoints:
    - **Skill install guard**: while there's no pure hook available, policy is decided by reading `metadata.mordred.network_requirements` from the frontmatter via the `hermes mordred install <skill>` wrapper CLI. Migrates to a hook-based approach once Hermes adds an install hook in the future
    - `pre_tool_call` — generic per-tool policy (e.g. blocking `web_fetch` over Clearnet under strict mode). Per-skill policy too if `origin_skill` is present in the payload; otherwise just a tool-name allowlist
 3. **`mordred_llm_guard`** — registers `mordred_llm_guard/local_adapter.py` as a Hermes provider adapter + provider override under strict mode via the `pre_llm_call` hook. Turns a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM) into a synthetic provider as `mordred-local`
-4. **`mordred_keyvault`** — Apple Secure Enclave-backed AES key wrapping (calling `Security.framework` from Python via `pyobjc-framework-Security`). Operated from the `hermes mordred keyvault ...` CLI subtree
+4. **`mordred_keyvault`** — AES key wrapping backed by Secure Enclave or the
+   login Keychain on macOS and TPM 2.0 on Linux. Operated from the
+   `hermes mordred keyvault ...` CLI subtree
 5. **`mordred_wizard`** — registers the `hermes mordred ...` subcommand tree via `register_cli_command`. Oversees all CLI for configure / upgrade / install / network / policy / audit / keyvault
+6. **`mordred_e2e`** — gateway messaging E2E enforcement from the `extension/` package: decrypts authenticated inbound envelopes, records reply context, and re-encrypts outbound Slack/Discord replies
 
 ### Conventions (not plugins)
 
@@ -161,7 +176,10 @@ All plugins live under `src/mordred_hermes/<name>/` and use only the Hermes plug
 
 Persona:
 
-- macOS Apple Silicon or Linux / WSL2 users (Phase 1-3 is multi-platform, Phase 4 is macOS Apple Silicon only)
+- macOS or Linux / WSL2 users. Phase 1-3 is multi-platform; Phase 4 key
+  custody supports macOS and Linux TPM 2.0, while transparent startup
+  injection and the direct OS blackout fallback retain the macOS-only
+  limitations documented below
 - Already using Hermes, or a user migrating from OpenClaw (via `hermes claw migrate`)
 - Comfortable with the Python ecosystem
 - Has experience or willingness to learn local LLM operation (Ollama / LM Studio / vLLM)
@@ -204,17 +222,35 @@ This allows Hermes and Mordred to be configured with a single command by passing
 
 ### Story 3: Skill execution and automatic path selection
 
-At skill install time (via the `hermes mordred install <skill>` wrapper), `mordred_privacy_check` parses `metadata.mordred.network_requirements` from the SKILL.md frontmatter and checks it against user policy. Install is blocked on mismatch. At runtime, `mordred_network` injects proxy environment variables into child processes spawned by Hermes. The active path is a single state across the whole gateway (last-write-wins, audited).
+At skill install time (via the `hermes mordred install <skill>` wrapper), `mordred_privacy_check` parses `metadata.mordred.network_requirements` from the SKILL.md frontmatter and checks it against user policy. Install is blocked on mismatch. At process registration, `mordred_network` activates one route and injects its proxy environment before provider clients are constructed; child processes spawned later inherit it where Hermes permits. The active path is process-wide and frozen: same-path reuse is idempotent, while a conflicting path requires a restart.
 
 > **Note**: Once an install hook is added to Hermes core, the wrapper CLI will be retired in favor of going directly through the hook. Until then, the wrapper is the only policy-enforcement path.
 
 ### Story 4: Local LLM enforcement (strict-mode override)
 
-> **Phase 0.8 verify (2026-05-10) complete — redefining Story 4's mechanism**: Hermes v0.11.0's `pre_llm_call` payload carries only `model`, not `provider`, and its return value is **context-injection only** (provider override not possible). `pre_api_request` does carry provider/model/base_url, but it's **observer-only**. Therefore **"redirecting the provider on every turn via `pre_llm_call`" is structurally impossible in v1** ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). v1 switches to **session-scoped enforcement** at `on_session_start`: the combination of strict policy plus a current provider that isn't allowlisted causes startup to be **refused** (v1 default, audit `policy.strict.session_refused`). The alternative of swapping the active provider to the `mordred-local` synthetic provider via `register_provider` + a config patch was confirmed **structurally impossible in v1** by the Codex B2 review (Hermes resolves the active provider before `on_session_start` fires, so a config patch has no effect until the next session) — deferred to the v2 vendored fork (Tier B, `[hard-lock]`). The zero-PR commitment (`MIGRATION.md` §5) is maintained.
+> **Phase 0.8 verify (2026-05-10) complete — redefining Story 4's mechanism**: Hermes's `pre_llm_call` payload cannot support provider rewrite. `pre_api_request` does carry the provider/model/base_url resolved for the actual primary request; although its return value is observer-only, a `BaseException` refusal escapes the hook wrapper. v1 therefore uses `on_session_start` for disk-state pre-checks and enforces primary strict policy authoritatively in `pre_api_request`. A non-allowlisted runtime provider or a provider/endpoint mismatch is refused immediately before egress (`policy.strict.session_refused`). Hermes 0.19 auxiliary LLM calls bypass that hook, so Mordred guards their resolver seams and validates each concrete client before use. Automatic swapping to `mordred-local` remains structurally impossible and is deferred to the v2 vendored fork (Tier B, `[hard-lock]`). The zero-PR commitment (`MIGRATION.md` §5) is maintained.
 
-When policy is `strict`, `mordred_llm_guard` determines the provider configuration **at session start** and refuses the session if the active provider does not match the `cloud_provider_allowlist` (v1 default). Swapping to the `mordred-local` synthetic provider was confirmed impossible in v1 by the Codex B2 review, so it's deferred to v2. Provider switching after a turn has begun is likewise not done in v1 (a structural constraint). When the provider matches `cloud_provider_allowlist` and `allow_cloud_llm: true`, the session continues (passthrough). See §Audit log policy for detailed audit reason codes (`policy.strict.session_refused`, and the v2-deferred `policy.strict.provider_override_at_session_start`).
+When policy is `strict`, `mordred_llm_guard` validates Hermes's request-resolved provider in **every `pre_api_request`**. A provider outside `cloud_provider_allowlist` is refused before egress; an allowlisted cloud provider also requires an actual, provider-owned HTTPS `base_url` without userinfo/query/fragment. Azure Foundry remains strict-unsupported until policy can pin an exact resource endpoint; accepting the vendor suffix would allow a different tenant/resource destination. Missing, malformed, or mismatched endpoints are refused before any `prompt-once` decision and audited as `policy.strict.cloud_endpoint_mismatch` followed by `policy.strict.session_refused`. Audit/log endpoint displays are bounded, origin-only values with credential-bearing components removed. `mordred-local` is revalidated as a loopback endpoint and its runtime URL must equal the configured `local_llm_endpoint` apart from a trailing slash. Swapping providers remains deferred to v2.
 
-When the local endpoint is unreachable, `MordredLocalUnreachable` is raised and the turn is aborted. Lenient mode does not override.
+Hermes 0.19 auxiliary tasks (compression, vision, title generation, and
+fallbacks) call clients outside `pre_api_request`. Their declared routes are
+checked at session start, and the concrete clients returned by Hermes's
+`_get_cached_client`, `_get_provider_chain`, `resolve_provider_client`, and
+`resolve_vision_provider_client` seams pass through the same provider/endpoint
+guard. Strict startup fails closed if a required seam is missing or replaced.
+
+Under `strict`, `mordred-local` is loopback-only. Both the configured
+`local_llm_endpoint` and the resolved runtime `base_url` must be HTTP(S), must
+not contain userinfo/query/fragment, must match apart from a trailing slash, and
+must use either the exact loopback IP literal
+`127.0.0.1` / `::1` or `localhost`; every current DNS result for `localhost`
+must itself be loopback. When a process proxy is active, both `NO_PROXY`
+spellings gain those exact hosts before the model client is used, and the
+health probe independently sets `trust_env=False`. This boundary is checked
+before the probe. An invalid endpoint or failed probe is audited as
+`policy.strict.session_refused` and aborts via `MordredSessionRefused`.
+Lenient/off and other non-strict compatibility modes do not apply the
+loopback boundary.
 
 ### Story 5: Key management
 
@@ -234,41 +270,42 @@ Mordred plugins can coexist with Hermes's memory plugin (honcho/mem0), context e
   - **SOCKS5 listener**: defaults to `127.0.0.1:9050`. If an existing listener (e.g. Tor Browser, the system tor service) is detected via `lsof -i :9050`, v1 shifts through alt port `9150` (colliding with the Tor Browser default) to the port **explicitly specified in `policy.json`'s `tor_socks_port`**. Collision-resolution order: 9050 -> 9150 -> user-specified -> abort with `MordredPathBringupFailed`
   - **ControlPort**: enabled by default at `127.0.0.1:9051` (cookie auth). The cookie file is `~/.hermes/mordred/tor-data/control_auth_cookie`. **Required** for implementing the M9 liveness probe via `getinfo circuit-status`
   - **Bridge / obfs4 / Snowflake**: out of scope for v1 (use in censored environments is v2 `v2-N3`). The startup banner warns that "the v1 default Tor may fail to connect in censorship environments"
-  - **Stream isolation (per-skill SOCKS auth)**: not implemented in v1. All skills share the same circuit pool (Tor itself rotates circuits). Circuit separation via per-skill SOCKS5 username/password is v2 `v2-N1`. **Added 2026-06-02**: per-**session** SOCKS5 isolation has landed — `proxy_env.isolation_token` (SOCKS credential) + torrc `IsolateSOCKSAuth` + `on_session_start` wires the Hermes `session_id` into the circuit token. Per-**skill** isolation remains deferred, pending `origin_skill` (v2-H2)
+  - **Stream isolation (SOCKS auth)**: per-session and per-skill isolation are not implemented in v1. `proxy_env.isolation_token` remains an optional process-scoped building block: when supplied before route activation, it becomes the SOCKS credential used with torrc `IsolateSOCKSAuth` for the lifetime of that Hermes process. Session hooks never replace it, because provider clients snapshot proxy configuration at construction. Changing the token after activation therefore requires a process restart. Per-session/per-skill isolation remains deferred pending a client/runtime architecture that can provide independent transports (and `origin_skill` for per-skill routing, v2-H2)
 - **Mullvad VPN integration (v1 = official `mullvad` CLI)**:
   - **CLI choice**: v1 uses the Mullvad **official client** (`mullvad` binary; on macOS `/Applications/Mullvad VPN.app/Contents/Resources/mullvad`, on Linux a package such as `apt install mullvad-vpn`). Running `wg-quick` directly ourselves is out of scope for v1 (handling `CAP_NET_ADMIN`/sudo is complex across OSes)
   - **Permissions**: the official client runs in the background as a system service (Linux: systemd unit; macOS: LaunchDaemon), and user commands request the daemon via IPC, so **no additional sudo is required**
   - **Killswitch (lockdown mode)**: under strict mode, `mullvad lockdown-mode set on` is enforced at bring-up (in Mullvad CLI 2026.2 the `always-require-vpn` subcommand was removed and folded into `lockdown-mode`). The OS creates no clearnet route at all when the VPN drops. Under lenient/off, the user's setting is respected (if lockdown is off, only a warning is issued)
   - **DNS leak prevention**: since the Mullvad client forces resolution through the in-tunnel resolver, there is no DNS leak in v1 (mitigated, unlike the M8 IPv6 leak)
   - **Relay selection**: defaults to `auto` (Mullvad picks the geographically nearest relay). User override via e.g. `mullvad_relay_country: "jp"` in policy.json. Multihop / wireguard-over-tor are out of scope for v1
-  - **Tear-down**: `mullvad disconnect` is run in `on_session_end`. Under strict mode, `mullvad lockdown-mode set off` is **not** run at the same time (lockdown is kept in place); the user exits it by starting the next session or disabling manually
-  - **Platform**: macOS Apple Silicon, Ubuntu/Debian baseline. Windows is out of scope for v1 (the same platform stance as Phase 4 keyvault being macOS-only)
+  - **Tear-down**: `mullvad disconnect` is run by the process-exit finalizer, not `on_session_end`. Under strict mode, `mullvad lockdown-mode set off` is **not** run at the same time (lockdown is kept in place); the user exits it by starting the next process or disabling manually
+  - **Platform**: macOS and Ubuntu/Debian baseline. Windows is out of scope for v1
 - Clearnet (no-op path)
 - **`provider_transport_flagger` v1 baseline allowlist** (verified on real hardware in Phase 0.8):
   - **Known compatible (respects HTTPS_PROXY + SOCKS5h)**: `anthropic` SDK (httpx), `openai` SDK (httpx), `gemini` (`google-genai` SDK, httpx baseline — corrected from the older `google-generativeai`/requests by the Phase 0.8 real-hardware verify; see the live-verify results in [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §Out of scope)
   - **conditional**: the `mordred-local` localhost provider — excluded from proxy routing by the NO_PROXY default and works that way, though SOCKS5h is irrelevant here
   - **Known partial / needs monitoring**: `bedrock` (boto3) — respects HTTPS_PROXY but has a quirk in botocore's DNS-resolution path, with possible DNS leak under strict + tor. `vertex` (google-cloud SDK) — some transports bypass HTTPS_PROXY; under strict mode a warning is shown and the decision is left to the user
   - **Known incompatible (candidates for startup abort under v1 strict mode when active)**: any provider beyond the above that holds a raw socket / its own transport is enumerated by the Phase 0.8 verify
-  - The above is **finalized via real-hardware testing in the Phase 0.8 task before v1 ships**. The actual allowlist is distributed as a Python dict (a declarative module) bundled with the plugin, and is user-overridable from policy.json (entries can only be added, not removed)
-- Subprocess lifecycle: the Tor/VPN client is started in the `on_session_start` hook (when policy requires it), torn down in `on_session_end`
-- Dynamic path-switching via internal Python API (e.g. `mordred_network.api.use(path)`)
+  - The above is **finalized via real-hardware testing in the Phase 0.8 task before v1 ships**. The actual allowlist is distributed as a Python dict (a declarative module) bundled with the plugin. `policy.json provider_overrides` may add transport facts for internal providers, but cannot replace a bundled baseline entry; missing safety facts default conservatively
+  - **Fail-closed gate integrity**: strict + Tor refuses providers that are incompatible, unverified, unknown, or unresolved. `on_session_start` checks persisted `config.yaml model.provider` / `auth.json active_provider`, and `pre_api_request` repeats the gate against the provider Hermes resolved for that exact request; CLI, environment, one-shot, and gateway overrides therefore cannot evade the transport evidence check. `pre_api_request` also refuses when configured Tor/VPN does not match the active route or that protected route is not ready. Malformed `provider_overrides` and internal errors while reading runtime state or evaluating either gate are audited as `network.transport_incompatible` and raise `MordredPathBringupFailed`. Every provider refusal preserves the process-scoped route so each later event and concurrent gateway session remains protected instead of falling through to clearnet. Lenient/off warn and continue
+- Subprocess lifecycle: `mordred_network.register()` starts the configured Tor/VPN/clearnet route and freezes it before returning, which is before provider clients snapshot proxy settings. `on_session_start` only validates and reuses that route; `on_session_end` never owns it. A single process-exit finalizer tears it down
+- Stable route API: `mordred_network.api.use(path)` is a no-op when the requested path is already ready. Once registration has frozen the route, a different path (or a different SOCKS isolation token) is refused with restart-required semantics; persist the desired setting and restart Hermes so provider clients and the process route are rebuilt together
 - Path injection: sets `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` on spawned child processes. **NO_PROXY default**: `localhost,127.0.0.1,::1` (required to exclude Phase 2's `mordred-local` localhost communication from proxy routing). User-added entries are appended from policy.json's `no_proxy: [...]`
 - **Transport coverage (M8, v1)**: proxy_env tunnels **HTTP(S) traffic only**. The following are out of the v1 defense scope, as stated explicitly in SPEC §Threat Model:
   - **DNS resolution**: with a normal `HTTPS_PROXY=http://...`, Python/curl and similar tools **resolve the name via the system resolver before** connecting to the proxy, so even over Tor the DNS query leaks to the ISP. v1's enforced mitigation: over the Tor path, use `HTTPS_PROXY=socks5h://127.0.0.1:9050` (`socks5h` performs server-side resolution). Libraries that don't respect SOCKS5h (some older HTTP clients) get a warning from provider_transport_flagger. Over the VPN path this is mitigated because the tunnel itself handles the DNS query. v2: full defense via bundled DNS-over-Tor / `mordred-dns-resolver`
-  - **IPv6 traffic**: many HTTP clients bypass proxy_env for IPv6 endpoints. In v1, if a provider has an IPv6-only endpoint, traffic **does not go through the proxy** (a clearnet leak). Under strict mode, `disable_ipv6: true` in policy.json (default true) restricts the v1 baseline to IPv4 only. This is mitigated over the VPN path since the tunnel handles IPv6, and IPv4 is forced over the Tor path (with limited real-world impact since Tor itself has only limited IPv6 exit support)
+  - **IPv6 traffic**: many HTTP clients bypass proxy_env for IPv6 endpoints. In v1, if a provider has an IPv6-only endpoint, traffic may **not go through the proxy** (a clearnet leak). `disable_ipv6: true` renders Tor's `ClientUseIPv6 0`, but that does not disable host IPv6 or constrain provider SDK sockets. Therefore strict + Tor aborts for providers without verified IPv6 proxy support regardless of this advisory setting; lenient warns. This is mitigated over the VPN path since the tunnel handles IPv6. Full host-level enforcement is deferred to v2-N2.
   - **Non-HTTP transport (raw TCP, UDP, QUIC, gRPC, WebSocket)**: whether HTTPS_PROXY takes effect depends on the client library. SSE / standard WebSocket (WS-over-HTTP upgrade) usually respect it, but provider plugins holding a raw socket bypass it. Warned via provider_transport_flagger's static allowlist; under strict mode, startup aborts if a known-incompatible provider is active
 - **Path failure semantics (M9, v1)**:
   - **Bring-up failure** (Tor bootstrap timeout / VPN handshake fail): strict aborts the session with `MordredPathBringupFailed`; lenient shows a user-visible warning + clearnet fallback (emits audit `network.bringup_failed`); off falls back silently
   - **Liveness probe**: an internal worker thread runs `mordred_network.api.health()` at a 30s interval (Tor: SOCKS5 reachability + circuit-established check; VPN: WireGuard handshake recency + interface up). Judged path-dropped after 2 consecutive failures
-  - **Mid-session drop**: strict raises `MordredPathDropped` on the next `pre_tool_call` (blocking tool execution); lenient warns + continues (keeping the path-dropped state; **no automatic clearnet fallback** — the user is expected to switch explicitly via `hermes mordred network use clearnet`). Audit `network.path_dropped` is always emitted
-  - **`use(path)` failure**: raises `MordredNetworkError` (subclasses: `BringupFailed`, `AlreadySwitching`, `UnknownPath`). Silent fallback is prohibited
+  - **Mid-session drop**: strict raises `MordredPathDropped` on the next `pre_tool_call` (blocking tool execution); lenient warns + continues while keeping the path-dropped state. There is **no automatic clearnet fallback**. To choose clearnet, persist it with `hermes mordred network use clearnet` and restart Hermes so provider clients are rebuilt on that route. Audit `network.path_dropped` is always emitted
+  - **`use(path)` failure**: raises `MordredNetworkError` (including `BringupFailed`, `AlreadySwitching`, `UnknownPath`, and `PathSwitchRequiresRestart`). Silent live switching after provider construction is prohibited
 - **Concurrency model (v1)**:
-  - Active path is **gateway-wide single state** — `mordred_network.api.use(path)` is last-write-wins, audit-logged on switch
+  - Active path is **process-wide single state**, activated before provider construction and frozen for the process lifetime. Same-path reuse is idempotent; a conflicting path requires a restart rather than applying last-write-wins
   - **Path mismatch for parallel tool_calls**: runtime per-skill path-mismatch detection is **not done in v1** — since the Phase 0.8 verify confirmed that `origin_skill` is **absent** from the `pre_tool_call` payload ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4), per-skill blocking at runtime is structurally impossible. Per-skill enforcement exists only at install-time (`hermes mordred install <skill>`). Automatic path switching is likewise not done in v1 (to avoid the M3 transitive failure mode). Once the `origin_skill` payload extension lands upstream, runtime detection will be reconsidered in v2-H2
   - **Parallel requests for the same path**: no restriction, executes in parallel as usual
-  - **Parallel requests for different paths**: not serialized (handled via block / warn semantics). Per-skill SOCKS5 stream isolation (Tor only) is under consideration for v2
-- Provider transport flagging: enumerates Hermes provider adapters at startup and issues a warning for any that ignore proxy env vars (v1 uses a static known-incompatible allowlist; per-provider declaration is v2)
-- Strict-mode bootstrap order: registering `mordred_network`'s `on_session_start` before `mordred_privacy_check` ensures privacy-check makes its determination after the active path is settled. **Phase 0.8 verify complete** ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1): the Hermes plugin loader invokes hook callbacks in **registration order** (no priority system), and since entry-point plugins (all 5 of Mordred's) load after bundled/user/project, the registration order among Mordred plugins is determined by the declaration order of the `hermes_agent.plugins` entry-point group. An in-plugin probe wait (`wait_for(api.status().ready, timeout=5s)`) is adopted as the default bootstrap path — since there's no upstream priority control, the design minimizes dependence on registration order
+  - **Parallel requests for different paths**: a process cannot safely provide different routes because provider clients share the frozen transport. A conflicting request is blocked with restart-required semantics. Independent per-session/per-skill routes and SOCKS5 stream isolation are under consideration for v2
+- Provider transport flagging: resolves the active Hermes provider at startup and again from every `pre_api_request` payload, evaluates it against the immutable baseline plus additive `policy.json provider_overrides`, and applies the strict-Tor fail-closed behavior above
+- Strict-mode bootstrap order: `mordred_network.register()` activates and freezes the configured route before it registers session callbacks or returns control to Hermes. Provider clients are therefore constructed only after the route and proxy environment are ready; activation/configuration failures raise `MordredPathBringupFailed(BaseException)` and refuse process startup. Hook registration order and `wait_until_ready()` are no longer the security boundary for initial transport activation
 
 ### Plugin: `mordred_privacy_check`
 
@@ -283,12 +320,14 @@ Mordred plugins can coexist with Hermes's memory plugin (honcho/mem0), context e
 
 ### Plugin: `mordred_llm_guard`
 
-- Implements the synthetic provider `mordred-local` as `mordred_llm_guard/local_adapter.py` (an adapter bundled with the plugin). Follows the Hermes provider adapter pattern and delegates to a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM)
-- **Phase 0.8 verify (2026-05-10) complete**: in v0.11.0, `pre_llm_call` is context-injection only with no provider override possible, and `pre_api_request` is observer-only ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5). Enforcement is therefore **settled session-scoped at `on_session_start`** (per-turn dynamic override is out of scope for v1):
-  - strict policy + current provider **matches** `cloud_provider_allowlist` + `allow_cloud_llm: true` -> session continues (passthrough)
+- Implements the synthetic provider `mordred-local` as `mordred_llm_guard/local_adapter.py` (an adapter bundled with the plugin). Follows the Hermes provider adapter pattern and delegates to a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM). Under strict policy, “local” is enforced as the exact HTTP(S) literal `127.0.0.1` / `::1`, or `localhost` whose DNS results are all loopback; the same check covers policy and runtime URLs before any probe or model request.
+- **Phase 0.8 verify (2026-05-10) complete**: `pre_llm_call` is context-injection only and cannot rewrite providers. `on_session_start` performs an audit-only disk pre-check; `pre_api_request` authoritatively enforces the actual runtime provider before egress ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5):
+  - strict policy + current provider **matches** `cloud_provider_allowlist` + `allow_cloud_llm: true` + concrete `base_url` is a provider-owned HTTPS endpoint -> request continues (passthrough)
+  - strict policy + missing/malformed/non-HTTPS/provider-mismatched `base_url` -> request is refused before prompting (audit `policy.strict.cloud_endpoint_mismatch` then `policy.strict.session_refused`)
   - strict policy + current provider does not match cloud_provider_allowlist, or `allow_cloud_llm: false` -> session is refused and exits (v1 default, audit `policy.strict.session_refused`). The alternative of swapping the active provider to `mordred-local` via `register_provider` + a config patch (audit `policy.strict.provider_override_at_session_start`) was confirmed structurally impossible in v1 by the Codex B2 review, so it's **deferred to v2** (Tier B `[hard-lock]` vendored fork)
   - lenient/off -> do nothing
-- Local-unreachable fail-fast: `mordred-local` raises `MordredLocalUnreachable` on health-check failure
+- Hermes 0.19 auxiliary LLM routes bypass `pre_api_request`; strict validates their declared config at session start and wraps the four resolver seams listed in Story 4. Resolver drift or an unbound returned client fails closed before auxiliary egress.
+- Local endpoint fail-fast: strict mode rejects invalid/non-loopback endpoints before probing, and translates health-check failure into `MordredSessionRefused`
 - Harness refusal: scans configured agents at `on_session_start`; aborts startup under strict mode when a harness-based primary (Codex/Claude CLI/Cursor/ACP client) is configured
 
 ### Plugin: `mordred_keyvault`
@@ -301,14 +340,17 @@ Mordred plugins can coexist with Hermes's memory plugin (honcho/mem0), context e
 secret      = SeedPhrase (24 words) + Passphrase + PoW       ← protected (user transcribes by hand)
 dek         = random 256-bit AES-GCM data-encryption key     ← generated by keyvault
 ciphertext  = AES-GCM(secret, dek)                           ← stored on disk as backup/state
-wrappingKey = Secure Enclave-backed non-exportable key       ← authorizes DEK unwrap only
+wrappingKey = backend-protected P-256 key                    ← authorizes DEK unwrap only
 wrappedDek  = wrap(dek, wrappingKey)                         ← stored next to ciphertext
 ```
 
 Design decisions:
 
-- **Withdrawn**: a design where the Secure Enclave holds/derives the signing key is not adopted in v1
-- **Adopted**: the Secure Enclave is used only as the authorization boundary for wrapping/unwrapping the AES DEK
+- **Withdrawn**: a design where the native hardware backend holds/derives the
+  wallet signing key is not adopted in v1
+- **Adopted**: the selected native backend protects only the P-256 key used
+  for wrapping/unwrapping the AES DEK (Secure Enclave or login Keychain on
+  macOS; TPM 2.0 on Linux)
 - `dek` is never stored in plaintext (exists in memory only during encryption/decryption)
 - `Passphrase + PoW` is part of `secret`, not derivation material for `dek` (if the Enclave is destroyed, the secret the user wrote down allows re-wrapping on a different machine)
 - Biometric authentication is only an authorization mechanism, not a cryptographic operation
@@ -429,12 +471,16 @@ The difficulty-8 vector is for hand-calculation verification (reached at `n = 51
 2. **prepare**: `api.prepare_generate(seed, passphrase, pow_bytes)` → `(SeedDisplayHandle, expected_digest)` (in-memory only, no disk mutation).
 3. **display**: `seed_display.display_seed(handle, surface)` — network blackout assert (fail-closed) → M4/M5 banner → displays **only the Seed** on the terminal with a 60s timer (the Passphrase is never rendered).
 4. **offline confirm**: the user transcribes the seed + passphrase + `top4(PoW)` onto an offline medium, independently computes the digest, and enters that digest into the CLI.
-5. **finalize**: `api.confirm_generate(handle, user_digest, backend=_SecKeyBackend())` — only on digest match does it durably persist the Secure Enclave key + `meta.json`; on mismatch, zero state change and `keyvault.init_denied`.
+5. **finalize**: `api.confirm_generate(handle, user_digest, backend=_SecKeyBackend())` — only on digest match does it durably persist the selected backend key + `meta.json`; on mismatch, zero state change and `keyvault.init_denied`.
 
 #### Seed phrase display security
 
-1. **Network blackout (M4 caveat)**: before display, `mordred_network.api.blackout_assert()` verifies the host is disconnected. On macOS via `SCNetworkReachability` / `nw_path_monitor` (through pyobjc). On Linux, substituted with `ip link show` / `nmcli` (since Phase 4 is macOS-only, the Linux fallback is v2)
-   - **Fallback**: when `mordred_network` is absent, keyvault falls back to a thin wrapper that calls the OS API directly
+1. **Network blackout (M4 caveat)**: before display,
+   `mordred_network.api.blackout_assert()` verifies the host is disconnected
+   and is the supported path on both macOS and Linux. When
+   `mordred_network` is absent, keyvault has a direct
+   `SCNetworkReachability` fallback on macOS only; a Linux `ip` / `nmcli`
+   direct fallback remains deferred and therefore fails closed
    - **Detection scope limits (M4)**: `blackout_assert` detects only **paths visible to the OS's standard network stack**. The following cannot be detected, so physical air-gapping is the user's responsibility:
      - Bluetooth / USB tethering / personal hotspot (when the OS does not, or is not made to, recognize it as WAN)
      - NICs running outside a virtual machine / container, host-side VPNs, virtual switches
@@ -453,11 +499,19 @@ The difficulty-8 vector is for hand-calculation verification (reached at `n = 51
 
 #### Protection-tier hierarchy (fallback)
 
-1. **TEE present (Tier 1, v1)**: Secure Enclave (`Security.framework` via pyobjc)
-2. **No TEE (Tier 2, v2)**: Keychain/HSM/TPM/DPAPI
-3. **Neither (Tier 3, v2)**: master-password-derived key
+1. **macOS Secure Enclave**: hardware-backed P-256 with the configured
+   authorization policy
+2. **macOS login-Keychain fallback**: software P-256, used when Secure
+   Enclave access is unavailable
+3. **Linux TPM 2.0**: non-extractable TPM P-256 key with on-chip ECDH;
+   no software fallback
+4. **Windows native / external HSM / master-password tiers**: deferred
 
-> **Tier 2 — Linux TPM 2.0 (v2-OS2)**: `hermes mordred keyvault enable-tpm` builds the `mordred-hermes-tpmkey` helper, which backs the wrapping key with a non-extractable TPM P-256 key + on-chip ECDH (same WMK wire format). This is **machine-binding** — a copied key-blob is useless on another host — but **NOT Touch-ID-equivalent**: the MVP has no per-use user-presence gate (no PIN/PCR prompt), unlike the Tier-1 Secure Enclave's biometric-per-decrypt. Per-use gating is a deferred follow-up. (Phase 2a/2c shipped the Rust crate + CLI; the `tss-esapi` TPM backend is Phase 2b.)
+> **Linux TPM 2.0 (MVP complete 2026-06-09)**:
+> `hermes mordred keyvault enable-tpm` builds and installs the packaged
+> `mordred-hermes-tpmkey` helper. A copied key blob is useless on another
+> host, but this is machine binding rather than Touch-ID-equivalent presence:
+> the MVP has no per-use PIN/PCR prompt. Per-use gating remains a follow-up.
 
 #### Implementation interface
 
@@ -509,25 +563,32 @@ Field reference for `version = 1`:
 | 0 | 4 | `magic` | ASCII `MRKW`. Dispatch key, never changes across versions. |
 | 4 | 1 | `version` | `1`. Dispatch key for future format bumps. |
 | 5 | 1 | `alg_suite` | `1` = `(P256_ECDH_RAW, HKDF_SHA256, AES256_KW_RFC3394)`. Reserved values: `0` invalid, `2-255` future. |
-| 6 | 16 | `key_id_hash` | First 16 bytes of `SHA-256(key_id_bytes)`. Used for Keychain lookup + audit log; never the cleartext `key_id`. |
+| 6 | 16 | `key_id_hash` | First 16 bytes of `SHA-256(logical_key_id_bytes)`. Binds the portable wire object and identifies audit events; it is not the native-store selector for profile-scoped keys. |
 | 22 | 65 | `ephemeral_pub` | SEC1 uncompressed P-256 (`0x04 ‖ X(32) ‖ Y(32)`). Freshly generated by `wrap_dek` via `cryptography.hazmat.primitives.asymmetric.ec.generate_private_key(SECP256R1())` (which itself draws from the OS RNG via OpenSSL `BN_rand_range`) — wrap is **never** deterministic and never reuses the ephemeral key. Hand-rolled scalar generation via `secrets.token_bytes` is intentionally avoided (codex review-fix-2 NIT-1) because it would require a manual modular-reduction step against the curve order. |
 | 87 | 40 | `wrapped_dek` | RFC 3394 AES-KW output for a 32-byte DEK (`8 + 32 = 40` bytes; the fixed IV/AIV is internal to RFC 3394, so the blob has **no separate IV field** — codex review BLOCKER-2). |
 
 `HEADER_LEN = 127` for `version=1`. The parser rejects any other version with `WrapParseError`.
 
-**Algorithm — `wrap_dek(dek, key_id)`** (offline, no Enclave authorization, no user prompt):
+The wire `key_id` is a portable **logical id**. Current profiles separately
+derive and persist a deterministic `native_key_id` from the absolute keyvault
+root and logical id. The native id selects the physical SE/TPM/Keychain item;
+it is deliberately excluded from MRKW and portable backup manifests. Metadata
+without `native_key_id` is legacy and continues to select the logical id for
+read/ECDH compatibility.
 
-1. Lookup the Enclave **public** key for `key_id` via `SecKeyCopyPublicKey` on a Keychain lookup (`kSecAttrApplicationTag = "mordred-hermes.wrap." + key_id_hash`).
+**Algorithm — `wrap_dek(dek, key_id, native_key_id=...)`** (offline, no Enclave authorization, no user prompt):
+
+1. Lookup the native **public** key using `native_key_id` (or the logical `key_id` for a legacy row). Keychain tags hash that physical selector; file-backed helpers receive the resulting opaque tag.
 2. Generate an ephemeral P-256 keypair in software (`cryptography` library, never persisted).
 3. Raw ECDH: pass the ephemeral private key + Enclave public key to `SecKeyCopyKeyExchangeResult` with `kSecKeyAlgorithmECDHKeyExchangeStandard` (NOT `…X963SHA256` — codex review HIGH-1; we want raw ECDH output, then a single explicit HKDF, not double-derive).
 4. HKDF-SHA256 derive a 32-byte AES-KEK: `salt = b""`, `info = magic || version(1) || alg_suite(1) || key_id_hash(16) || ephemeral_pub(65)` (87 bytes; binds every non-secret blob field to the KEK — codex review HIGH-2).
 5. `wrapped_dek = AES-KW(KEK, dek)` per RFC 3394 (32-byte DEK → 40-byte output, integrity-protected by the AIV).
 6. Emit the blob; do NOT emit an audit-log entry (wrap is unauthorized, fast, no decision boundary).
 
-**Algorithm — `unwrap_dek(blob, key_id)`** (authorized, may prompt the user):
+**Algorithm — `unwrap_dek(blob, key_id, native_key_id=...)`** (authorized, may prompt the user):
 
 1. `parse_header(blob)` — reject if `len(blob) != 127`, `magic != b"MRKW"`, `version != 1`, `alg_suite != 1`, or `key_id_hash != SHA-256(key_id)[:16]`. Each rejection raises `WrapParseError`.
-2. Lookup Enclave **private** key by Keychain query (same `kSecAttrApplicationTag` namespacing). Missing → `WrapKeyNotFound`.
+2. Lookup the native **private** key using the separately resolved physical selector. Missing → `WrapKeyNotFound`.
 3. Decode `ephemeral_pub` as SEC1 P-256; reject invalid curve points with `WrapParseError`.
 4. Call `SecKeyCopyKeyExchangeResult(enclave_private, ECDHKeyExchangeStandard, ephemeral_pub, params)`. This triggers the access-control prompt (Touch ID / Optic ID / passcode). On `errSecUserCancelled` / `errSecAuthFailed` / `errSecInteractionNotAllowed` / `errSecAuthorizationCanceled`, emit `keyvault.unwrap_denied` with translated `native_error_code` and raise `WrapAuthCancelled` (chains the native `NSError` via `__cause__`).
 5. HKDF-SHA256 with the same `info` constructed in wrap step 4 (binds blob fields to KEK; a tampered `ephemeral_pub` produces a different KEK → AES-KW unwrap fails AIV check).
@@ -542,8 +603,8 @@ Field reference for `version = 1`:
 | `kSecAttrKeySizeInBits` | `256` | Required by `ECSECPrimeRandom`. |
 | `kSecAttrTokenID` | `kSecAttrTokenIDSecureEnclave` | Bind the private key to the Enclave; the public key is freely exportable. |
 | `kSecAttrIsPermanent` | `True` | Survives reboot — `wrap` needs to look up the public key without re-prompting. |
-| `kSecAttrApplicationTag` | `b"mordred-hermes.wrap." + key_id_hash` | Namespaced lookup; avoids collision with other apps. |
-| `kSecAttrLabel` | `"Mordred wrapping key " + key_id_hash[:8].hex()` | Human-readable in Keychain Access.app. |
+| `kSecAttrApplicationTag` | `b"mordred-hermes.wrap." + SHA-256(native_key_id)[:16]` | Namespaced, profile-isolated physical lookup. For legacy rows `native_key_id == logical key_id`. |
+| `kSecAttrLabel` | `"Mordred wrapping key " + SHA-256(native_key_id)[:8].hex()` | Human-readable in Keychain Access.app without exposing either id. |
 | `kSecAttrAccessControl` | `SecAccessControlCreateWithFlags(.privateKeyUsage \| .biometryCurrentSet, accessible: .whenPasscodeSetThisDeviceOnly)` | Touch/Optic ID required — `.biometryCurrentSet` is biometry-only with no passcode fallback; an Enclave-capable Mac without enrolled biometry cannot create or use the key (codex review MEDIUM-2; reaffirmed PR9). `.biometryCurrentSet` invalidates the key if the user adds/removes biometrics — protects against the "stolen device with attacker biometric enrolled" attack. `.whenPasscodeSetThisDeviceOnly` ensures the key cannot exist on a device without a passcode and never syncs to iCloud Keychain. |
 
 Capability detection (codex review MEDIUM-1): `is_secure_enclave_available()` does NOT check `platform.machine() == 'arm64'`. Intel Macs with the T2 chip also have a Secure Enclave reachable through the same API. Detection probes capability via a throwaway key-generate-then-delete cycle (with `.privateKeyUsage` only, no biometry, so it cannot prompt) — non-`Darwin` platforms short-circuit to `False` without touching pyobjc.
@@ -559,11 +620,11 @@ class WrapAuthCancelled(WrapError): ...         # user denied biometry / passcod
 class WrapKeyNotFound(WrapError): ...           # Keychain has no item for this key_id (key revoked or wrong device)
 class WrapKeyAlreadyExists(WrapKeyNotFound): ...  # duplicate key_id at generation time; WrapKeyNotFound subclass so historical `except` sites keep catching it
 
-def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> bytes: ...     # returns SEC1 uncompressed P-256 pubkey, 65 bytes
-def get_wrapping_key_public(key_id: str, *, backend: NativeBackend) -> bytes: ...   # SEC1 uncompressed P-256, 65 bytes
-def delete_wrapping_key(key_id: str, *, backend: NativeBackend) -> None: ...        # removes Keychain item; idempotent
-def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend) -> bytes: ...      # offline; returns 127-byte blob
-def unwrap_dek(blob: bytes, key_id: str, *, audit_sink: AuditSink, backend: NativeBackend) -> bytes: ...
+def generate_wrapping_key(key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
+def get_wrapping_key_public(key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
+def delete_wrapping_key(key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> None: ...
+def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
+def unwrap_dek(blob: bytes, key_id: str, *, audit_sink: AuditSink, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
 ```
 
 `api.py` (Phase 4 PR4) is the only callsite — internal API contract for `mordred_keyvault.api.generate` / `encrypt` / `decrypt` / `export_backup` / `import_backup` derives from this surface.
@@ -613,7 +674,7 @@ def prepare_generate(
     pow_bytes: bytes,
 ) -> tuple[SeedDisplayHandle, bytes]:
     # In-memory only. Computes digest from normalized inputs. Returns:
-    #   - handle: opaque SeedDisplayHandle for Seed display flow (PR5 will consume)
+    #   - handle: opaque SeedDisplayHandle consumed by seed_display.display_seed
     #   - expected_digest: 32-byte digest for user to confirm via offline channel
     # NO Keychain creation, NO meta.json write, NO digests/ commit, NO audit emit.
     # Pure function with respect to disk state.
@@ -640,21 +701,28 @@ def confirm_generate(
     #   digest on the same handle.
     # On match:
     #   0. Re-init guard: v1 keyvault is single-key (Story 5). If meta.json
-    #      already has any key, raise RuntimeError. Checked once unlocked
-    #      (before init_started, to avoid a dangling audit event) and again
-    #      authoritatively under the lock (TOCTOU-safe).
+    #      has any main key or any pending/committed native-key ownership
+    #      record (including audit-key records), raise RuntimeError. Checked
+    #      once unlocked (before init_started, to avoid a dangling audit
+    #      event) and again authoritatively under the lock (TOCTOU-safe).
     #   1. Emit keyvault.init_started (audit-sink failure aborts; durability barrier).
-    #   2. Under one .lock hold: re-check the re-init guard, then
-    #      wrap.generate_wrapping_key(key_id, backend=...) — key_id=None
-    #      resolves to the "default" literal; a duplicate raise here is
-    #      OUTSIDE the rollback scope so a pre-existing key is not deleted.
-    #   3. Still under .lock: write digests/<key_id_hash>.commit FIRST, then
-    #      meta.json LAST. meta.json is the transaction commit point —
-    #      save_meta replaces it atomically. Rollback deletes the Enclave
-    #      key + the orphaned commit file, and best-effort repairs the
-    #      meta.json row in the rare case the atomic rename committed before
-    #      a later fsync raised.
-    #   4. Emit keyvault.init_completed (sink failure suppressed; init has already succeeded).
+    #   2. Under the stable lifecycle + per-root lock: re-check the re-init
+    #      guard, derive the profile-scoped native_key_id, and durably write a
+    #      top-level pending_native_key ownership journal BEFORE native
+    #      generation. A helper may publish a key and then report a durability
+    #      error; reset can safely recover that deterministic physical id.
+    #   3. Generate through wrap.generate_wrapping_key(logical_key_id,
+    #      native_key_id=...). key_id=None resolves to logical "default".
+    #   4. Still under the same hold: write digests/<key_id_hash>.commit FIRST,
+    #      then durably save the meta row containing logical key_id +
+    #      native_key_id WHILE RETAINING pending_native_key (ownership commit).
+    #      Only a second durable meta save removes pending_native_key. A
+    #      first-save post-rename error plus failed native rollback therefore
+    #      leaves row+pending and every normal operation fails closed. Failure
+    #      of the second cleanup never rolls back the durably-owned key: a
+    #      visible valid row with no pending is safe; a visible pending remains
+    #      incomplete and requires reset.
+    #   5. Emit keyvault.init_completed (sink failure suppressed; init has already succeeded).
     # ``backend`` is required (no None default) — matches encrypt/decrypt;
     #   the production backend is a later step so there is no None fallback.
     ...
@@ -901,17 +969,22 @@ def import_backup(
     #    keyvault.recovery_digest_mismatch (#17).
     # 3. Argon2id-derive KEK_passphrase from passphrase + parsed salt.
     # 4. AES-GCM-decrypt manifest_body → manifest_json. AAD = PR2 backup header AAD.
-    # 5. Parse manifest JSON; validate "version" == 1.
-    # 6. imported_key_id = manifest["key_id"]. backend.generate_enclave_key(imported_key_id)
-    #    on this device → new Enclave wrapping key.
+    # 5. Parse manifest JSON; validate "version" == 1. Require a genuinely
+    #    fresh destination: no main row, pending main journal, committed audit
+    #    ownership, pending audit journal, digest, or ciphertext artifact.
+    # 6. imported_key_id = manifest["key_id"]. Derive this destination
+    #    profile's native_key_id, persist pending_native_key, then generate the
+    #    physical key on this device. The portable logical id is unchanged.
     # 7. For each manifest entry (in declared order):
     #    a. Recompute manifest_aad = b"MRMN" || sha256(imported_key_id)[:16] ||
     #       bytes.fromhex(entry["purpose_hash_hex"]) (36 bytes, identical to export step 6).
     #    b. plaintext = AES-GCM-decrypt(bytes.fromhex(entry["dek_hex"]),
     #                                   b64decode(entry["manifest_aes_blob_b64"]),
     #                                   aad=manifest_aad).
-    #    c. new_wrapped_dek = wrap.wrap_dek(dek_bytes, imported_key_id, backend=...) — offline,
-    #       produces a fresh 127-byte MRKW blob bound to THIS device's Enclave public key.
+    #    c. new_wrapped_dek = wrap.wrap_dek(dek_bytes, imported_key_id,
+    #       native_key_id=..., backend=...) — offline, and produces a fresh
+    #       127-byte MRKW blob whose wire hash remains logical while its DEK is
+    #       bound to THIS profile's physical public key.
     #    d. new_key_id_hash = sha256(imported_key_id)[:16].
     #       new_envelope_aad = b"MREN" || version(1) || new_key_id_hash ||
     #                           bytes.fromhex(entry["purpose_hash_hex"]) || new_wrapped_dek
@@ -923,13 +996,16 @@ def import_backup(
     #    g. Persist envelope_bytes to
     #       ciphertexts/<new_key_id_hash.hex()>/<entry["purpose_hash_hex"]>/<entry["envelope_id"]>.gcm
     #       via the step-B atomic + fsync + flock helpers.
-    # 8. Write meta.json (add row for imported_key_id) and
-    #    digests/<new_key_id_hash.hex()>.commit (32 bytes = recomputed verification digest)
-    #    under .lock with atomic semantics.
+    # 8. Write digests/<new_key_id_hash.hex()>.commit, then durably save a meta
+    #    row carrying imported_key_id + native_key_id while retaining
+    #    pending_native_key. A separate save clears pending only after that
+    #    ownership commit succeeds, under the same lifecycle/per-root lock.
     # 9. Return imported_key_id.
-    # 10. On any mid-import failure after step 6: rmtree(home / "mordred" / "keyvault"
-    #     / "ciphertexts" / new_key_id_hash.hex()) and backend.delete_enclave_key(imported_key_id),
-    #     then re-raise. Steps 1-5 are pre-mutation (no rollback needed).
+    # 10. On failure through the first ownership save: delete only the scoped
+    #     native_key_id and remove transaction artifacts, then re-raise. If
+    #     native deletion fails, retain row+pending (when the rename landed) or
+    #     pending-only so reset can retry. After ownership save succeeds,
+    #     pending cleanup failure never deletes the key.
     ...
 ```
 
@@ -962,7 +1038,14 @@ All keyvault filesystem operations MUST:
 - Open files with `os.open(path, O_NOFOLLOW)` to refuse symlink-following (symlink → `KeyvaultPermissionError`).
 - Reject existing files whose mode is not `0600` and directories whose mode is not `0700` via `fstat` after open (mode mismatch → `KeyvaultPermissionError`).
 - Write atomically: `<file>.tmp + fsync(tmp_fd) + os.replace(tmp, final) + fsync(parent_dir_fd)`.
-- Hold an exclusive `fcntl.flock` on `~/.hermes/mordred/keyvault/.lock` (mode `0600`) for the duration of any write transaction (covers generate, encrypt, export, import).
+- Acquire the stable parent-side `.keyvault.lifecycle.lock` before the per-root
+  `keyvault/.lock`, and hold them across every operation that must serialize
+  with reset (generate, encrypt/decrypt, export/import, and auxiliary audit-key
+  provisioning). Reset holds the stable lifecycle lock through native deletion
+  and root removal. Public metadata/status snapshots join that lifecycle lock
+  and re-check the parent reset journal before reading. Reset durably flushes
+  root removal before unlinking the journal; a failed journal-unlink flush
+  re-publishes the recovery bytes before returning an error.
 - On `meta.json` corruption (JSON parse failure / missing required keys / `version` mismatch): raise `KeyvaultCorruptError` whose `str()` does NOT include the corrupted contents (audit-safety — corrupted JSON could include secret-shaped bytes from a partially-overwritten file).
 
 ##### Audit emissions for PR4 (4 new reason codes #21-24)
@@ -986,7 +1069,8 @@ See `POLICY.md` §"Phase 4 PR4 step-0 freeze" for the full table. Summary:
 
 - Encryption of binaries/folder names/file names → `v2-F6`
 - per-skill file-encryption mapping → `v2-F6`
-- HSM/TPM/master-password fallback → `v2-OS2`
+- External HSM, Windows-native DPAPI/TPM, and master-password backends →
+  `v2-OS2` (Linux TPM 2.0 is already shipped)
 - Secure Enclave-backed signing isolation, Payment signing → `v3-P1`
 - Session log encryption → requires a session-log writer seam on the Hermes side
 
@@ -999,7 +1083,7 @@ Subcommands:
 - `hermes mordred upgrade` — Story 1 / 1.5 single-command migration
 - `hermes mordred install <skill>` — skill installation via privacy-check (a substitute until a skill install hook is added to Hermes core)
 - `hermes mordred network init` — on-demand network-privacy setup (Tor / VPN / clearnet + Mullvad); separate from `configure`, re-runnable (blank Mullvad answer keeps the current secret). `--non-interactive` is flag-driven (`--path` / `--tor-binary` / `--tor-socks-port` / `--mullvad-relay` / `--mullvad-killswitch`); `--clear-mullvad` removes the stored secret. The Mullvad secret is never accepted as a CLI flag.
-- `hermes mordred network use <tor|vpn|clearnet>` — manual override
+- `hermes mordred network use <tor|vpn|clearnet>` — persist the next process route; same-route use is a live no-op, while a conflicting frozen route requires restart
 - `hermes mordred network status` — show current active path
 - `hermes mordred policy show` — print effective policy
 - `hermes mordred policy explain <skill-id>` — explain why a given skill is allowed/blocked
@@ -1011,7 +1095,7 @@ Subcommands:
 - `hermes mordred keyvault list` — list key IDs (no key material)
 - `hermes mordred keyvault verify-digest` — re-display digest
 - `hermes mordred keyvault recover --blob <path>` — recovery on different machine
-- `hermes mordred audit decrypt --date YYYY-MM-DD` — from Phase 4 onward, decrypts encrypted historical logs via Secure Enclave authorization
+- `hermes mordred audit decrypt --date YYYY-MM-DD` — from Phase 4 onward, decrypts encrypted historical logs via the selected native backend
 
 ## Operational Guarantees & Caveats
 
@@ -1019,10 +1103,13 @@ Subcommands:
 
 - Path: `~/.hermes/mordred/audit.log`
 - File mode: `0600` (user-only)
-- Format: newline-delimited JSON (NDJSON), single writer per Hermes process, append-only
-- Concurrency: serialized via an in-process write queue; multi-process scenarios are unsupported in v1
+- Format: newline-delimited JSON (NDJSON), append-only
+- Concurrency: serialized by an in-process lock and a stable hidden sidecar
+  `fcntl.flock` spanning format checks, rotation, append, and rollback.
+  Encrypted writers also verify active inode/header ownership before reusing
+  their process-local DEK
 - Rotation: daily roll to `audit.log.YYYY-MM-DD`, gzip after rotation, size cap 10 MB per current file (force-rotate), retention 30 days
-- Redaction: `reason` strings are a fixed enum (free-text params / full skill content are never logged). The `ReasonCode` `Literal` in `src/mordred_hermes/privacy_check/_audit_reasons.py` is the type-level source of truth for the enum; see [`POLICY.md`](./POLICY.md) §Audit log `reason` enum for the human-readable canonical list. 12 codes were frozen at Phase 1.1 step-0, with only closed-set additions per phase thereafter (Phase 3 PR1 added `network.*` +4 → Phase 4 PR2-§4.1 added `keyvault.*`/`policy.*` +10 → the PR #39 follow-up added `mordred.degraded.audit_encryption_unavailable` +1, **27 codes currently**). Existing codes are never removed or renamed
+- Redaction: `reason` strings are a fixed enum (free-text params / full skill content are never logged). The `ReasonCode` `Literal` in `src/mordred_hermes/privacy_check/_audit_reasons.py` is the type-level source of truth for the enum; see [`POLICY.md`](./POLICY.md) §Audit log `reason` enum for the human-readable canonical list. Closed-set additions through the prompt, transport-gate, and provider-endpoint-binding follow-ups bring the current total to **31 codes**. Existing codes are never removed or renamed
 - Encryption: Phase 1-3 is plaintext NDJSON at file mode `0600`. From Phase 4 onward, new entries are encrypted with AES-GCM (the DEK is keyvault-wrapped, held in memory only)
 - Phase staging: the `audit.py` writer freezes a swappable Writer interface in Phase 1, factory-swapped to `EncryptedWriter` in Phase 4
 
@@ -1046,17 +1133,54 @@ Fields: `ts` (ISO-8601 UTC), `event` (hook name), `decision` (`allow`/`block`/`o
 From Phase 4 onward, `EncryptedWriter` in `keyvault/log_encryption.py` (a Phase 1 `Writer` Protocol implementation) encrypts new entries with AES-GCM. The file is line-oriented — 1 entry = 1 line, preserving `O_APPEND`'s whole-entry atomicity while avoiding the need to re-encrypt the entire file:
 
 ```
-Line 0   header   {"fmt":"MRAL","ver":1,"key_id":<str>,"wdek":<base64>}
+Line 0   legacy header   {"fmt":"MRAL","ver":1,"key_id":<str>,"wdek":<base64>}
+Line 0   current header  {"fmt":"MRAL","ver":1,"key_id":<str>,"native_key_id":<str>,"wdek":<base64>}
 Line 1+  entry    base64( nonce(12) ‖ AES-GCM-ciphertext ‖ tag(16) )
 ```
 
 - `wdek` is a 127-byte `MRKW` blob produced by wrapping the audit-log DEK with `keyvault.wrap.wrap_dek`. Only the **wrapped DEK** goes to disk; the plaintext 32-byte DEK exists only in the writer's memory (its reference is discarded on `close()`).
-- The DEK is **lazily generated on the first append**, not at writer creation, fresh per file. `wrap_dek` is an offline operation using the Enclave public key with no biometric prompt — **writing does not cross the authorization boundary**.
+- `key_id` remains the logical `mordred.audit-log` id and is what MRKW/audit
+  hashes bind. Current headers additionally persist the deterministic
+  profile-scoped `native_key_id` used for physical lookup. Only an absent
+  field selects the legacy logical native id; JSON null, the wrong type, or a
+  value that does not re-derive for the selected keyvault root fails before
+  native I/O. This lets old and new rotated MRAL files coexist.
+- The DEK is **lazily generated on the first append**, not at writer creation, fresh per file. `wrap_dek` is an offline operation using the selected backend's public key and therefore does not invoke private-key authorization — **writing does not cross the authorization boundary**.
 - Each entry's AES-GCM AAD = `MAGIC ‖ version ‖ SHA-256(header line)`. Since the header line contains a file-specific random `wdek`, the digest differs per file, so splicing entries from another file, or replay after tampering with the header, fails the tag check.
-- Atomicity caveat: an encrypted line at maximum size (4000-byte plaintext) is about 5.4 KiB, exceeding POSIX `PIPE_BUF` (4096). `O_APPEND` atomicity is not guaranteed with concurrent multi-process writers, but since v1 does not support multi-process audit writes (§1.1 M1), invariant #2 holds under the single-process, single writer-lock model.
+- Atomicity: an encrypted line at the 4000-byte plaintext limit is about
+  5.4 KiB. Writers do not rely on `PIPE_BUF` (a pipe/FIFO property) for
+  regular-file atomicity: cooperating processes hold the stable sidecar lock
+  through the write-all loop and any truncate rollback. An MRAL writer whose
+  active inode/header was replaced wipes its stale DEK, rotates the successor
+  intact, and creates a fresh independently decryptable file.
 - Rotation is the same as the Phase 1 NDJSONWriter (daily + size cap + gzip + 30-day retention). Each rotation gets a fresh file + DEK + header. Existing foreign files (pre-Phase-4 plaintext logs, or encrypted files from another session whose DEK cannot be unwrapped without a prompt) are **rotated aside rather than overwritten**.
-- Decryption is `keyvault.log_encryption.decrypt_log_file` — it unwraps the DEK via `wrap.unwrap_dek` (the Secure Enclave authorization boundary, emitting `keyvault.unwrap_authorized`), and transparently handles gzip-rotated files too. Structural / integrity errors raise `AuditLogDecryptError`; prompt rejection (`WrapAuthCancelled`) and missing key (`WrapKeyNotFound`) are propagated unwrapped so the CLI can distinguish them.
-- The Keychain key id for the audit-log wrapping key is `mordred.audit-log` (`AUDIT_LOG_KEY_ID`). No new audit code — the unwrap audit is already emitted by `wrap.unwrap_dek`.
+- Decryption is `keyvault.log_encryption.decrypt_log_file` — it snapshots a
+  regular non-symlink source under the same audit sidecar used by writers,
+  releases that sidecar, then unwraps the DEK via `wrap.unwrap_dek` at the
+  selected native-backend boundary (emitting `keyvault.unwrap_authorized`).
+  The whole logical read holds the keyvault lifecycle lease and transparently
+  handles gzip-rotated files. Structural / integrity errors raise
+  `AuditLogDecryptError`; prompt rejection (`WrapAuthCancelled`) and missing
+  key (`WrapKeyNotFound`) are propagated unwrapped so the CLI can distinguish
+  them.
+- The logical audit wrapping-key id is `mordred.audit-log`
+  (`AUDIT_LOG_KEY_ID`); current profiles derive a separate physical id from
+  the keyvault root. No new audit code is emitted—the unwrap decision still
+  records only the logical key-id hash through `wrap.unwrap_dek`.
+- That logical id is reserved and cannot be selected as the main key id
+  (including through an imported backup). Auxiliary generation first saves
+  `pending_audit_key`, then saves `audit_key` while retaining pending, and
+  finally clears pending in a second durable metadata save. The scoped audit
+  factory uses `EncryptedWriter` only for a validated `audit_key` record with
+  no pending record; a published-but-uncommitted or cleanup-uncertain key stays
+  on the marked plaintext fallback. Re-running provisioning is idempotent. An
+  exact deterministic duplicate may be adopted only when a freshly committed
+  pending record proves the key predated this attempt, or when an existing
+  row+pending state proves generation previously succeeded; pending-only retry
+  after a native durability error remains fail-closed. Legacy main rows
+  continue to select the historical global audit key when these new scoped
+  records are absent; either scoped audit ownership field beside a legacy main
+  row is inconsistent and forces the marked plaintext fallback.
 
 ### Plugin-disable protection (plugin-side only, zero-PR strategy)
 
@@ -1066,19 +1190,23 @@ There is a risk that enforcement gets silently disabled if the user runs e.g. `h
 
 Because **zero upstream PR** was finalized in MIGRATION.md §10 row 4 (2026-05-07), v1 performs a fail-closed startup refusal on the plugin side. This is not "limited to a warning" — it is a defense that raises a `BaseException`-derived exception to stop strict-mode session startup itself:
 
-1. At the start of each Mordred plugin's `on_session_start`, scan the sibling list `["mordred_network", "mordred_privacy_check", "mordred_llm_guard", "mordred_keyvault", "mordred_wizard"]` for any that appear in the disabled-plugins list (the equivalent of `hermes plugins list --disabled` — verified against the real API in Phase 0.8)
-2. If policy is `strict` and even one sibling is disabled: raise a refusal exception equivalent to `MordredSiblingDisabled("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` (a direct `BaseException` subclass — an `Exception` subclass such as `RuntimeError` won't work, since it would be swallowed by Hermes `invoke_hook`'s `except Exception:` wrapper and fail to stop the session), aborting the session
+1. Each runtime plugin (`mordred_privacy_check`, `mordred_network`, `mordred_llm_guard`, `mordred_keyvault`, and `mordred_e2e`) registers the same integrity callback on `on_session_start`. It scans `["mordred_network", "mordred_privacy_check", "mordred_llm_guard", "mordred_keyvault", "mordred_e2e", "mordred_wizard"]` for any entry disabled by either the deny-list or an opt-in allowlist. Registering the callback from every runtime sibling is essential: disabling `mordred_privacy_check` must not disable its own detector.
+2. If policy is `strict` and even one sibling is disabled: raise `MordredIntegrityRefused("Mordred strict mode requires all sibling plugins enabled; disabled: [...]. Re-enable via 'hermes plugins enable <name>' or downgrade policy to lenient.")` (a direct `BaseException` subclass — an `Exception` subclass such as `RuntimeError` would be swallowed by Hermes `invoke_hook`'s `except Exception:` wrapper), aborting the session
 
-   > **Exception propagation contract** (2026-05-13): the refusal exception must escape Hermes `invoke_hook`'s `except Exception:` wrapper. `privacy_check/hooks.py` is legacy and **derives from `SystemExit`**; the new refusal classes from Phase 2 `llm_guard` onward (`MordredHarnessRefused` / `MordredSessionRefused`) **derive directly from `BaseException`** (so that cleanup-style `except SystemExit:` doesn't misdetect a policy refusal as a CLI exit — see `src/mordred_hermes/llm_guard/_exceptions.py`). The latter is canonical, and `privacy_check` is a candidate for unifying onto a `BaseException` subclass (`MordredSiblingDisabled` envisioned) in a follow-up. The exception names/message examples above are illustrative — the implementation follows the derivation rule above, phase by phase.
+   > **Exception propagation contract** (2026-05-13; unified 2026-07-28): refusal exceptions must escape Hermes `invoke_hook`'s `except Exception:` wrapper and must not masquerade as CLI exits. `MordredIntegrityRefused`, `MordredHarnessRefused`, and `MordredSessionRefused` therefore derive directly from `BaseException`, not `Exception` or `SystemExit`.
 3. Simultaneously records `mordred.degraded.disable_unprotected` (decision=`block`) in the audit log
 4. For `policy=lenient` / `off`, only a warning is issued (for compatibility)
-5. `privacy_lock: true` in `plugin.yaml` is kept as an internal Mordred hint (used to auto-expand the sibling list; it carries no meaning on the Hermes upstream side)
+5. `privacy_lock: true` remains a declarative marker on the five plugins that
+   have `plugin.yaml`; Hermes ignores it. Runtime enforcement uses the explicit
+   six-entry `privacy_check._runtime.SIBLING_PLUGINS` tuple, mirrored by the
+   wizard's canonical plugin list. The marker does not auto-discover or expand
+   either list.
 
 **Tier B (v2 deferred, vendored fork extra)**:
 
 Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock]` extra is provided. It carries a patched version of `hermes_cli/plugins_cmd.py` under `vendor/hermes/<version>/`, and while `mordred-hermes[hard-lock]` pins to a specific Hermes version via `dependencies` in `pyproject.toml` at install time, it refuses the disable operation itself on the core side. No PR is submitted to Hermes upstream; it is distributed as a vendored fork. Out of scope for v1.
 
-**Important caveat (see §Threat Model "does NOT defend against")**: Tier A is designed to block **at the next session start**. "Immediate stop if disabled while running" is out of scope for v1 (on the premise that Hermes does not reflect a plugin's dynamic disablement while a session is running, verified in Phase 0.8). The defense flow is: disable edited between sessions → next session's strict startup → block.
+**Important caveat (see §Threat Model "does NOT defend against")**: Tier A is designed to block **at the next session start**. "Immediate stop if disabled while running" is out of scope for v1 (on the premise that Hermes does not reflect a plugin's dynamic disablement while a session is running, verified in Phase 0.8). The defense flow is: disable edited between sessions → next session's strict startup → block. This remains plugin-only enforcement: if every runtime Mordred plugin is disabled, no plugin callback can execute; preventing that operation itself requires Tier B/core control.
 
 ### Policy file caching
 
@@ -1107,7 +1235,7 @@ Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock
 
 > Motivation, dependencies, and priorities for post-v1 work live in [`ROADMAP.md`](./ROADMAP.md). This section only enumerates what is **excluded** from v1.
 
-- Phase 4 keyvault on Linux / Windows native (v2-OS2)
+- Phase 4 keyvault on Windows native (v2-OS2); Linux TPM 2.0 is shipped
 - Harness-aware LLM Guard enforcement (v2)
 - GUI controls (v2)
 - Payment skills using `mordred_keyvault` (v3-P1)
@@ -1124,8 +1252,10 @@ If full v1 scope is too large for a single milestone, ship in this order. Each p
 
 1. **Phase 1 — Privacy primitives**: `mordred_privacy_check` (with skill install wrapper) + `metadata.mordred.network_requirements` + `mordred_wizard configure/upgrade/policy`. Partially achieves Story 2 and Story 3
 2. **Phase 2 — LLM enforcement**: `mordred_llm_guard` + `mordred-local` synthetic provider (full Hermes adapter surface). Achieves Story 4. Adds a `pre_tool_call` generic allowlist to privacy-check
-3. **Phase 3 — Network paths**: `mordred_network` (Tor + VPN + Clearnet switching, on_session_start/end lifecycle, provider transport flagging). Completes Story 3
-4. **Phase 4 — Key management**: `mordred_keyvault` (Secure Enclave-backed AES key wrapping via pyobjc). Achieves Story 5. The largest engineering risk; deferrable
+3. **Phase 3 — Network paths**: `mordred_network` (Tor + VPN + Clearnet process-scoped route, registration/exit lifecycle, provider transport flagging). Completes Story 3
+4. **Phase 4 — Key management**: `mordred_keyvault` (Secure Enclave /
+   login-Keychain wrapping on macOS and TPM 2.0 wrapping on Linux). Achieves
+   Story 5. The largest engineering risk; independently deployable
 
 User-visible MVP = Phase 1 + Phase 2. This is the minimal "Hermes with Privacy" delivery.
 

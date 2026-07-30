@@ -29,10 +29,12 @@ __all__ = [
 # -----------------------------------------------------------------------------
 # enable-se — build + ad-hoc-sign + install the Secure Enclave helper.
 #
-# Upgrades the keyvault wrapping key from the software P-256 fallback to the
-# real hardware Secure Enclave via the CryptoKit ``dataRepresentation`` helper
-# (``native/sekey-helper``). That helper needs only an ad-hoc codesign — no
-# entitlement, no provisioning profile, no paid Apple Developer account.
+# Installs the CryptoKit ``dataRepresentation`` helper
+# (``native/sekey-helper``) for newly-created wrapping keys. Existing helper,
+# PyObjC-Keychain, and software keys stay in their original namespaces and are
+# reached by the backend's ordered fallback; installation never promotes them.
+# The helper needs only an ad-hoc codesign — no entitlement, no provisioning
+# profile, no paid Apple Developer account.
 #
 # Each step is a module-level seam so the orchestration is unit-testable with
 # no Swift toolchain and no Secure Enclave (the build / probe are mocked).
@@ -70,18 +72,19 @@ def _locate_sekey_source() -> Path | None:
 def _run_sekey_build(src: Path, *, install_dir: Path | None, unattended: bool | None) -> tuple[int, str]:
     """Run ``build.sh`` in ``src``; return ``(returncode, combined_output)``.
 
-    ``install_dir`` / ``unattended`` are forwarded as the env vars the build
-    script and helper honour (``MORDRED_SEKEY_INSTALL_DIR`` /
-    ``MORDRED_SEKEY_UNATTENDED``).
+    ``install_dir`` is forwarded as ``MORDRED_SEKEY_INSTALL_DIR``.
+    ``unattended`` is retained in this private seam for call compatibility,
+    but intentionally is not put in the build environment: authorization
+    policy is baked into a key when it is generated, while this command only
+    compiles and installs a binary.
     """
     import os
     import subprocess
 
+    del unattended
     env = dict(os.environ)
     if install_dir is not None:
         env["MORDRED_SEKEY_INSTALL_DIR"] = str(install_dir)
-    if unattended is not None:
-        env["MORDRED_SEKEY_UNATTENDED"] = "1" if unattended else "0"
     try:
         proc = subprocess.run(
             ["bash", str(src / "build.sh")],
@@ -131,13 +134,24 @@ def enable_se(
 ) -> int:
     """Build + ad-hoc-sign + install the SE helper, then verify it works.
 
-    Returns ``0`` on success, ``1`` on any guard / build / verify failure. On
-    failure the keyvault keeps using the software P-256 fallback, so the
-    at-rest guarantee never downgrades. ``home`` is accepted for symmetry with
-    the other keyvault commands; the helper resolves its key-blob store from
-    ``HERMES_HOME`` itself.
+    Returns ``0`` when the helper is usable and ``1`` on any
+    platform/build/verify failure. Installing or refreshing the helper does not
+    migrate an existing wrapping key. The backend continues resolving existing
+    helper-store, legacy PyObjC-Keychain, and software keys in their original
+    namespaces; only later fresh key creation selects the helper.
+
+    ``unattended`` is accepted for CLI/API compatibility but rejected when set:
+    the policy is chosen at key generation, not helper installation. Set
+    ``MORDRED_SEKEY_UNATTENDED=1`` on the later init/recovery command instead.
     """
-    del home  # the helper resolves its store via HERMES_HOME; accepted for symmetry
+    if unattended is not None:
+        _term.emit_error(
+            "--unattended cannot be applied while installing the helper: the "
+            "authorization policy is chosen when a wrapping key is generated. "
+            "Install without this flag, then set MORDRED_SEKEY_UNATTENDED=1 "
+            "when running keyvault init/recovery."
+        )
+        return 1
 
     reason = _se_platform_reason()
     if reason is not None:
@@ -176,19 +190,19 @@ def enable_se(
         return 1
 
     print(output.strip() or "Secure Enclave helper installed.")
-    print("Hardware Secure Enclave is now active for the keyvault.")
+
+    print(
+        "Secure Enclave helper installed and hardware probe succeeded. "
+        "Existing wrapping keys remain in their current backend namespace; "
+        "a later fresh key creation will use the hardware helper."
+    )
     return 0
 
 
 def cli_enable_se(args: argparse.Namespace) -> int:
-    """argparse handler for ``keyvault enable-se [--install-dir P] [--unattended]``.
-
-    ``--unattended`` absent → ``None`` (let ``MORDRED_SEKEY_UNATTENDED`` / the
-    interactive default decide), not ``False``.
-    """
+    """argparse handler for ``keyvault enable-se [--install-dir P]``."""
     install_dir = Path(args.install_dir) if getattr(args, "install_dir", None) else None
-    unattended = True if getattr(args, "unattended", False) else None
-    return enable_se(install_dir=install_dir, unattended=unattended)
+    return enable_se(install_dir=install_dir)
 
 
 # -----------------------------------------------------------------------------
@@ -197,7 +211,7 @@ def cli_enable_se(args: argparse.Namespace) -> int:
 # The Linux counterpart to enable-se: builds the ``mordred-hermes-tpmkey`` Rust
 # helper (``native/tpmkey-helper``) and verifies it. The TPM is Tier 2
 # (machine-bound) — the key cannot leave the chip, but there is no per-use
-# user-presence gate, so (unlike enable-se) there is no ``--unattended`` flag.
+# user-presence gate; helper installers do not expose a key-policy flag.
 # Each step is a module-level seam so the orchestration is unit-testable with
 # no Rust toolchain and no TPM.
 # -----------------------------------------------------------------------------
@@ -291,11 +305,11 @@ def enable_tpm(
 ) -> int:
     """Build + install the TPM helper, then verify it works.
 
-    Returns ``0`` on success, ``1`` on any guard / build / verify failure. On
-    failure the keyvault keeps using the software P-256 fallback, so the
-    at-rest guarantee never downgrades. ``home`` is accepted for symmetry with
-    the other keyvault commands; the helper resolves its key-blob store from
-    ``HERMES_HOME`` itself.
+    Returns ``0`` on success, ``1`` on any guard/build/verify failure. Linux
+    fails closed when no usable TPM helper exists; there is no software P-256
+    fallback. ``home`` is accepted for symmetry with the other keyvault
+    commands; the helper resolves its key-blob store from ``HERMES_HOME``
+    itself.
     """
     del home  # the helper resolves its store via HERMES_HOME; accepted for symmetry
 
@@ -341,15 +355,18 @@ def enable_tpm(
         return 1
 
     print(output.strip() or "TPM 2.0 helper installed.")
-    print("Hardware TPM 2.0 is now active for the keyvault.")
+    print(
+        "TPM 2.0 helper installed and hardware probe succeeded. "
+        "Existing TPM-backed keys remain available; keys created later "
+        "will use this helper."
+    )
     return 0
 
 
 def cli_enable_tpm(args: argparse.Namespace) -> int:
     """argparse handler for ``keyvault enable-tpm [--install-dir P]``.
 
-    The TPM is Tier 2 (machine-bound) with no per-use gate, so there is no
-    ``--unattended`` flag (cf. :func:`cli_enable_se`).
+    The TPM is Tier 2 (machine-bound) with no per-use gate.
     """
     install_dir = Path(args.install_dir) if getattr(args, "install_dir", None) else None
     return enable_tpm(install_dir=install_dir)

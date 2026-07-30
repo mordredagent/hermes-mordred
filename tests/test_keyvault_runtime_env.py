@@ -226,6 +226,10 @@ class TestRegister:
     def test_register_installs_env_decrypt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes import keyvault
 
+        class FakeCtx:
+            def register_hook(self, _name: str, _callback: object) -> None:
+                pass
+
         called = False
 
         def _spy(**_: object) -> int:
@@ -234,5 +238,5 @@ class TestRegister:
             return 0
 
         monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", _spy)
-        keyvault.register(object())  # ctx is unused by this plugin
+        keyvault.register(FakeCtx())
         assert called is True

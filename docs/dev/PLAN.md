@@ -116,8 +116,8 @@ Each Mordred plugin has the following under `src/mordred_hermes/<name>/` (pip di
 
 In v1, the Phase 0.7 tasks are only the following:
 
-- [x] Declare `privacy_lock: true` in `plugin.yaml` as a Mordred-internal hint across all 5 plugins (it has no meaning on Hermes upstream's side, but is used for automatic sibling-list expansion) — **Done**: all 5 plugins (`keyvault`/`network`/`wizard`/`privacy_check`/`llm_guard`) already declare `privacy_lock: true` in `src/mordred_hermes/<name>/plugin.yaml`
-- [x] The implementation of H3 plugin-side strict-mode startup refusal happens in Phase 1.1 (`mordred_privacy_check.on_session_start`) — **Done**: `privacy_check/hooks.on_session_start` detects sibling-disable via `_runtime.find_disabled_siblings`, and in strict mode performs audit + poison + `SystemExit` (H3 Path B, SPEC.md §Plugin-disable protection Tier A). The hook is registered in `privacy_check/__init__.py` and covered by `tests/test_hooks.py`
+- [x] Declare `privacy_lock: true` as a declarative marker in the five manifest-backed plugins (`keyvault` / `network` / `wizard` / `privacy_check` / `llm_guard`) — **Done**. Hermes ignores the field; runtime enforcement uses the explicit six-entry `SIBLING_PLUGINS` canonical list, including the manifest-less `mordred_e2e` entry point. The marker does not auto-expand that list
+- [x] The implementation of H3 plugin-side strict-mode startup refusal happens in Phase 1.1 (`mordred_privacy_check.on_session_start`) — **Done**: `privacy_check/hooks.on_session_start` detects sibling-disable via `_runtime.find_disabled_siblings`, and in strict mode performs audit + poison + `MordredIntegrityRefused(BaseException)` (H3 Path B, SPEC.md §Plugin-disable protection Tier A). The hook is registered in `privacy_check/__init__.py` and covered by `tests/test_hooks.py`
 
 Only if hard-enforce becomes necessary in the future (v2), introduce the vendored fork extra:
 
@@ -128,8 +128,8 @@ Only if hard-enforce becomes necessary in the future (v2), introduce the vendore
 
 **Phase 0 acceptance**:
 
-- `pip install -e ./mordred-hermes` succeeds, and `PluginManager.discover_and_load()` detects the 5 mordred_* entries via the entry-point
-- ~~`hermes plugins list` shows the 5 mordred_* entries~~ → Phase 1.3 wizard provides the `hermes mordred plugins list` wrapper CLI (a known gap where Hermes 0.11.0's `_discover_all_plugins()` doesn't display entry-point plugins; see TODO.md §Acceptance gate L126)
+- `pip install -e ./mordred-hermes` succeeds, and `PluginManager.discover_and_load()` detects the 6 mordred_* entries via the entry-point
+- ~~`hermes plugins list` shows the mordred_* entries~~ → Phase 1.3 wizard provides the `hermes mordred plugins list` wrapper CLI (a known gap where Hermes 0.11.0's `_discover_all_plugins()` doesn't display entry-point plugins; see TODO.md §Acceptance gate L126)
 - pytest is green even with no tests, ruff/mypy are also green (enforced in CI, landed in PR #8. See `docs/dev/CI.md` §`ci.yml` details for specifics)
 - ~~HSeam-1 PR draft~~ → not needed (zero-PR commitment)
 
@@ -139,7 +139,15 @@ Only if hard-enforce becomes necessary in the future (v2), introduce the vendore
 
 Minimal end-to-end slice. Partially achieves Story 2 and Story 3. No network code / native modules whatsoever.
 
-**Privacy-lock guard (Tier A, zero-PR commitment)**: `privacy_lock: true` is declared as a Mordred-internal hint in all 5 plugins' `plugin.yaml`. Since Hermes core ignores this field, each plugin's `on_session_start` aborts strict-mode session startup with a `RuntimeError` and records the audit log `mordred.degraded.disable_unprotected` as soon as a sibling Mordred plugin's disable is detected. If hard-enforce becomes necessary in v2, escalate to the `[hard-lock]` extra (vendored fork).
+**Privacy-lock guard (Tier A, zero-PR commitment)**: `privacy_lock: true`
+is a declarative marker on the five manifest-backed plugins; Hermes ignores
+it. The five runtime plugins (`privacy_check`, `network`, `llm_guard`,
+`keyvault`, and `e2e`) register the shared integrity callback, which checks
+the fixed canonical list of all six Mordred entry points (including
+`wizard`). Under strict policy it records
+`mordred.degraded.disable_unprotected` and raises
+`MordredIntegrityRefused(BaseException)`. If hard-enforce becomes necessary
+in v2, escalate to the `[hard-lock]` extra (vendored fork).
 
 ### 1.1 Plugin: `mordred_privacy_check`
 
@@ -294,7 +302,7 @@ session-scoped LLM enforcement and harness-startup refuse. Achieves Story 4.
 - `plugin.yaml` — config under `plugins.mordred_llm_guard`, `privacy_lock: true`
 - `__init__.py` — in `register(ctx)`, **explicitly registers** the provider adapter (`register_mordred_local`) + 3 hooks (`on_session_start` × 2 + `pre_api_request`) (Codex B1: since `providers._discover_providers()` doesn't scan entry-point plugins, a module-import side effect isn't possible)
 - `local_adapter.py` — **declarative `ProviderProfile` subclass only** (Codex H1: the SPI list the old PLAN version enumerated — `auth/discovery/resolve_synthetic_auth/normalize_config/prepare_dynamic_model/resolve_dynamic_model/augment_model_catalog/wrap_stream_fn/wizard` — doesn't exist in Hermes v0.11.0 and is stale). `name="mordred-local"` / `api_mode="chat_completions"` / `base_url` are dynamically read from `policy.json`. Streaming is owned by Hermes core (`agent/error_classifier.py`)
-- ~~`transport.py`~~ → **out of scope for v1** (Codex H1; only a placeholder remains). Will be revived once a streaming hook lands upstream in v2
+- ~~`transport.py`~~ → **removed from v1** (Codex H1). It will be recreated once a streaming hook lands upstream in v2
 - `health.py` — endpoint health probe (`/models` GET, default timeout 2.0s); raises `MordredLocalUnreachable` on failure
 - `enforce.py` (PR2) — `on_session_start` + `pre_api_request` handler, **v1 = refuse-only** (Codex B2):
   - lenient/off → no-op (audit silent — per-session allow audit will be reconsidered in v2)
@@ -310,7 +318,7 @@ session-scoped LLM enforcement and harness-startup refuse. Achieves Story 4.
   - strict → `MordredHarnessRefused(BaseException)` raise + audit `mordred.degraded.disable_unprotected` (decision=`block`)
   - lenient → audit (decision=`warn`) + log warning + continue (Codex M2)
   - off → no-op
-- `_exceptions.py` — `MordredLocalUnreachable(Exception)` + `MordredHarnessRefused(BaseException)` + `MordredSessionRefused(BaseException)`. The latter two derive directly from `BaseException` so they escape Hermes `invoke_hook`'s `except Exception:` wrapper. They don't derive from `SystemExit` so that a policy refusal isn't misdetected as a CLI exit by a cleanup-style `except SystemExit:` (vs. `privacy_check/hooks.py`, which legacy-derives from `SystemExit` — a candidate for a follow-up refactor to align it with `BaseException` derivation)
+- `_exceptions.py` — `MordredLocalUnreachable(Exception)` + `MordredHarnessRefused(BaseException)` + `MordredSessionRefused(BaseException)`. The latter two derive directly from `BaseException` so they escape Hermes `invoke_hook`'s `except Exception:` wrapper without being misdetected as CLI exits. `privacy_check` now follows the same regime with `MordredIntegrityRefused(BaseException)`.
 - `_typing.py` — `PluginContext` Protocol narrow surface (`register_hook` only)
 - `tests/test_enforce.py`, `tests/test_enforce_audit.py`, `tests/test_harness_detect.py`, `tests/test_health.py`, `tests/test_local_adapter.py`, `tests/test_exceptions.py`, `tests/test_llm_guard_register.py`, `tests/test_llm_guard_typing.py`, `tests/integration/test_llm_local.py` (`MORDRED_LIVE_LLM_TEST=1` gated)
 
@@ -324,7 +332,7 @@ session-scoped LLM enforcement and harness-startup refuse. Achieves Story 4.
 
 Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the streaming pipeline, and the plugin side cannot reliably capture `httpx.RemoteProtocolError` / `httpx.ReadError`." As a result:
 
-- `transport.py` is only a placeholder; stream interrupt detection is not implemented on the plugin side
+- The former `transport.py` placeholder was removed; stream interrupt detection is not implemented on the plugin side
 - The `MordredLocalStreamInterrupted` exception class is **intentionally left undefined** (see `_exceptions.py` docstring)
 - The `policy.strict.local_stream_interrupted` audit reason is already frozen into the 12-code enum (forward-compat reservation, POLICY.md row 12); there's no emit site in v1
 - Once a streaming hook lands upstream in v2, revive the class + implement the emit site + reintroduce `tests/test_enforce.py::test_mid_stream_disconnect` (currently deleted)
@@ -362,7 +370,9 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
 
 ## Phase 3 — Network Paths (`mordred_network`)
 
-3-layer dynamic switching. Completes Story 3.
+Process-scoped selection across Tor / VPN / Clearnet. The selected route is
+activated before provider construction and remains stable until process exit.
+Completes Story 3.
 
 **Hermes feature dependency**:
 
@@ -378,13 +388,13 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
 **Files**
 
 - `src/mordred_hermes/network/plugin.yaml` — config under `plugins.mordred_network`, `privacy_lock: true`
-- `src/mordred_hermes/network/__init__.py` — registers `on_session_start`/`on_session_end`/`pre_tool_call` in `register(ctx)`
+- `src/mordred_hermes/network/__init__.py` — in `register(ctx)`, builds the process-global runtime, activates and freezes the configured route before provider clients are constructed, then registers `on_session_start`/`on_session_end`/`pre_api_request`/`pre_tool_call` and one process-exit finalizer
 - `src/mordred_hermes/network/paths/tor.py` — Tor daemon manager (v1 default = official `tor` binary; `arti` will be re-evaluated in v2):
   - **torrc generation**: generates `~/.hermes/mordred/tor-data/torrc` from a template (`SOCKSPort 127.0.0.1:<port>`, `ControlPort 127.0.0.1:<port>`, `CookieAuthentication 1`, `DataDirectory ~/.hermes/mordred/tor-data/`)
   - **port conflict resolution**: equivalent to `lsof -i :9050` (probed via `socket.socket(AF_INET).bind(('127.0.0.1', port))`) → 9150 → user-specified `tor_socks_port` → abort
   - **ControlPort client**: issues `getinfo circuit-status` via the `stem` library or raw TCP cookie auth
   - **bootstrap progress**: tails `tor`'s stdout and detects `Bootstrapped 100%` within 30s → `MordredPathBringupFailed` on failure
-  - **process management**: launched via `subprocess.Popen`, `process.terminate()` on `on_session_end` (`kill()` after a 5s grace period)
+  - **process management**: launched via `subprocess.Popen`; the process-exit finalizer calls `process.terminate()` (`kill()` after a 5s grace period). Per-turn/session-end hooks do not own the process-global route
 - `src/mordred_hermes/network/paths/vpn.py` — Mullvad official client wrapper (`subprocess`):
   - **CLI detection**: `shutil.which("mullvad")` → on failure, try the known macOS path `/Applications/Mullvad VPN.app/Contents/Resources/mullvad` → on failure, `MordredPathBringupFailed("mullvad client not installed")`
   - **bring-up sequence**: (strict only) `mullvad lockdown-mode set on` → `mullvad relay set location <country|auto>` → `mullvad connect` → confirm `Connected` is reached by polling `mullvad status` every 10s (in Mullvad CLI 2026.2, the `always-require-vpn` subcommand was removed and folded into `lockdown-mode`)
@@ -404,10 +414,10 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
         "vertex": {"transport": "google-cloud", "respects_proxy": "partial", "respects_socks5h": False},
     }
     ```
-  - **strict mode behavior**: if active path = `tor` and a `respects_socks5h=False` provider is enabled, startup abort; if active path = `clearnet` (with `policy=strict + cloud_provider_allowlist`) and a `respects_proxy=False` provider is enabled, warning only
-  - **user override**: entries can be added via `provider_overrides: {"<provider>": {"respects_proxy": true}}` in policy.json (no removal possible; the baseline is immutable)
+  - **strict mode behavior**: if active path = `tor` and a provider is incompatible, unverified, unknown, or cannot be resolved from config/auth, startup/request egress is refused. A configured Tor/VPN route that is mismatched or not ready, and an internal transport-gate error, also fail closed. Provider refusal preserves the process-global route so concurrent/later gateway activity cannot fall through to clearnet. Lenient warns and continues. If active path = `clearnet` (with `policy=strict + cloud_provider_allowlist`) and a `respects_proxy=False` provider is enabled, warning only
+  - **user override**: policy.json may add internal providers, for example `provider_overrides: {"my-internal": {"transport": "httpx", "respects_proxy": true, "respects_socks5h": true, "respects_ipv6_proxy": true, "unverified_baseline": false, "transport_class": "http"}}`. Entries are additive only; the bundled baseline is immutable. Missing safety fields default conservatively. Malformed entries fail closed under strict + Tor and become warnings under lenient/off
 - `src/mordred_hermes/network/api.py` — internal Python API:
-  - `mordred_network.api.use(path: str)` — switch active path
+  - `mordred_network.api.use(path: str)` — activate/reuse a path before freeze; a conflicting frozen route raises restart-required
   - `mordred_network.api.status()` — current state
   - `mordred_network.api.health()` — probe
   - `mordred_network.api.blackout_assert()` — verify network blackout (consumed by keyvault Phase 4)
@@ -417,26 +427,26 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
 
 **Bootstrap order (strict mode)**
 
-- Register `mordred_network`'s `on_session_start` before `mordred_privacy_check`'s `on_session_start` (**Phase 0.8 verify complete**, [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1: the Hermes plugin loader has no priority, only **registration order**, and the 5 Mordred entry-point plugins load after bundled/user/project). Adopt an in-plugin polling fallback (`wait_for(lambda: api.status().ready, timeout=5s)`) as the **default** bootstrap path — minimizing dependence on registration order
-- If forced ordering becomes necessary, a candidate PR to Hermes (`register_hook(name, callback, priority=int)`)
-- Until the above PR is submitted, operate via the in-plugin polling fallback
+- `mordred_network.register()` activates and freezes the configured route before it returns, so provider clients snapshot the already-established proxy environment. Any configuration, activation, or freeze error fails closed with `MordredPathBringupFailed(BaseException)` before client construction
+- `on_session_start` only validates/reuses that process route and runs the persisted-provider transport gate. `wait_until_ready()` remains available for diagnostics/legacy callers, but hook registration order and polling are not the initial transport security boundary
+- `on_session_end` retains the route; a single process-exit callback performs final teardown
 
 **Concurrency model**
 
-- Active path is gateway-wide single state; per-skill independent paths are v2
-- `mordred_network.api.use(path)` is last-write-wins, audit-logged on switch
+- Active path is process-wide single state; independent per-session/per-skill paths are v2
+- `mordred_network.api.use(path)` is idempotent for the active ready route. Registration freezes the route, so a different path or SOCKS isolation token requires a Hermes restart rather than applying last-write-wins
 - **Path mismatch for parallel tool_calls (v1)**: per-tool-call, per-skill determination is not possible in v1 (Phase 0.8 verify confirmed the absence of `origin_skill`, [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4). v1 enforcement paths:
   - **install-time**: the `hermes mordred install` wrapper compares SKILL.md frontmatter's `network_requirements` against the active path; a strict mismatch blocks the install
   - **runtime**: single global state only. Even if a clearnet-only skill runs while the active path is tor, it isn't blocked (per-skill detection is impossible)
   - **No automatic path switching is performed** (to avoid the M3 transitive proxy-env failure mode, and because per-skill determination is impossible)
   - Per-tool-call mismatch detection is planned to be revived in v2-H2
 - **Parallel requests for the same path**: run in parallel as normal (new subprocesses inherit the parent env, so they transparently flow through the active path)
-- **Parallel requests for different paths**: handled with block/warn semantics rather than serializing. Per-skill SOCKS5 stream isolation (Tor only) will be considered for v2 (`v2-N1`)
+- **Parallel requests for different paths**: a process cannot safely serve them with shared provider clients. A conflicting route is refused with restart-required semantics. Independent transports and per-session/per-skill SOCKS5 isolation will be considered for v2 (`v2-N1`)
 
 **Path injection into skills**
 
-- Primary v1 mechanism: sets proxy env vars on `os.environ` on `on_session_start` so spawned child processes inherit them
-- `mordred_network.api.use(path)` refreshes the in-process proxy env state and audit-logs the switch
+- Primary v1 mechanism: `register()` sets proxy env vars on `os.environ` before provider construction, so provider clients and subsequently spawned child processes inherit the same route
+- `mordred_network.api.use(path)` reuses the active ready route as a no-op. To select a different route, persist it and restart Hermes so all captured transports are rebuilt together
 - Per-call env injection from `pre_tool_call` is v2 unless Hermes exposes a subprocess-env hook
 - Provider plugins that respect HTTP_PROXY (most do) automatically go through the active path
 - For provider plugins with hard-coded transport, the flagger warns at startup
@@ -451,7 +461,7 @@ Codex H1 confirmed that "Hermes core (`agent/error_classifier.py`) owns the stre
 Tunneling all traffic with proxy_env alone cannot be achieved in v1. Document the following alongside SPEC §Threat Model M8, and reflect it in the acceptance gate as well:
 
 - **DNS leak (most critical on the Tor path)**: a non-SOCKS5h HTTP_PROXY URL performs name resolution via the system resolver first → even when using Tor, the query reaches the ISP. v1 enforcement: the Tor path only supports the `socks5h://` URL scheme + major HTTP clients (urllib3 / httpx / requests[socks]). Clients without SOCKS5h support (old `aiohttp` versions, providers that directly manipulate sockets) get a startup warning via a static allowlist, and in strict mode, abort when active
-- **IPv6 leak**: many implementations don't respect the HTTPS_PROXY env var. Add a v1 default of `disable_ipv6: true` (strict), `false` (lenient/off) to policy.json. Since enforcement via the `socket.has_ipv6` flag isn't effective, v1 is limited to **IPv4-only resolver configuration + a `provider_transport_flagger` warning for connections to IPv6 endpoints**. Full protection is v2 (`v2-N2`: bundled IPv6 firewall rule injection)
+- **IPv6 leak**: many implementations don't respect the HTTPS_PROXY env var. Keep the v1 `disable_ipv6: true` (strict), `false` (lenient/off) policy field, but treat it only as Tor's `ClientUseIPv6 0` preference — it is not host-level enforcement. `provider_transport_flagger` must still abort strict + Tor for providers without verified IPv6 proxy support (lenient warns). Full protection is v2 (`v2-N2`: bundled IPv6 firewall rule injection).
 - **Non-HTTP transport (raw TCP/UDP/QUIC/gRPC native)**: enumerated in the v1 baseline via `provider_transport_flagger`'s static allowlist (existing Hermes providers were tested on real hardware in Phase 0.8 verify). In strict mode, session abort when a known-incompatible provider is active
 
 **Path failure & liveness (M9)**
@@ -462,35 +472,42 @@ Tunneling all traffic with proxy_env alone cannot be achieved in v1. Document th
   - On failure: strict → raises `MordredPathBringupFailed` + session abort, lenient → user-visible warning + clearnet fallback + audit `network.bringup_failed`, off → silent fallback
 - **Liveness probe (mid-session)**:
   - An internal worker thread runs `mordred_network.api.health()` every 30s
-  - Tor probe: SOCKS5 listener reachable AND at least one BUILT circuit via `getinfo circuit-status` (over ControlPort)
+  - Tor probe: ControlPort reachable + cookie authentication succeeds +
+    `GETINFO circuit-status` is structurally valid. Empty or any reply with a
+    non-terminal circuit is healthy; known `FAILED`/`CLOSED`-only replies are
+    unhealthy. Unknown syntactically valid uppercase statuses are assumed
+    non-terminal for forward compatibility. Auth/control/protocol failures
+    remain unhealthy
   - VPN probe: WireGuard `latest handshake` is < 180s ago AND interface state UP
   - Judged path-dropped after 2 consecutive failures (absorbing transient Tor circuit rebuilds)
 - **On mid-session drop detection**:
   - strict: raises `MordredPathDropped` on the next `pre_tool_call` (blocks tool execution)
-  - lenient: warn + continue (note: rather than a clearnet fallback, the path-dropped state is retained; assumes the user explicitly switches via `hermes mordred network use clearnet`)
+  - lenient: warn + continue (rather than a clearnet fallback, the path-dropped state is retained). To choose clearnet, persist it with `hermes mordred network use clearnet` and restart Hermes so provider clients are rebuilt on that route
   - Always audit `network.path_dropped` (decision=`block` or `warn`, fields `path` / `consecutive_failures` / `last_health_at`)
 - **Failure semantics for `mordred_network.api.use(path)`**:
   - Raises `MordredNetworkError` (silent fallback is forbidden)
-  - subclasses: `BringupFailed` (path startup failure), `AlreadySwitching` (concurrent switch attempt), `UnknownPath` (unknown path name)
+  - subclasses: `BringupFailed` (path startup failure), `AlreadySwitching` (concurrent switch attempt), `UnknownPath` (unknown path name), `PathSwitchRequiresRestart` (the frozen process route/token conflicts with the request)
   - audit `network.use_failed` emit (decision=`raise`, fields `requested_path` / `error_type` / `prev_path`)
 
 **Transitive proxy-env failure mode (M3)**
 
-Injecting proxy env vars into `os.environ` has a **transitive** hole with respect to mid-session path switches. This should be accurately understood for v1:
+Injecting proxy env vars into `os.environ` has a **transitive** hole because
+provider clients and child processes snapshot their transport configuration.
+v1 closes that live-switch boundary rather than attempting an incomplete
+update:
 
-- **Subprocesses already spawned don't see env updates**: if `mordred_network.api.use("clearnet")` is called mid-session, the parent process's `os.environ` updates immediately, but **child processes already alive at that point** (e.g., the Tor daemon, long-running tool subprocesses, sidecars Hermes has left running via `Popen`) **keep holding the old proxy settings**. The reverse is also true (a clearnet child process from before `use("tor")` keeps flowing through clearnet)
-- **A particularly dangerous case**: `use("tor")` → do something → `use("clearnet")` → do something else — if the earlier Tor daemon child is still alive, the later clearnet operation could mix with the Tor daemon's control traffic (in practice, the Tor daemon is a SOCKS5 listener and doesn't read env vars, but this is noted as a generalized warning)
-- **Detection**: on each `mordred_network.api.use(path)` call, emit `network_use` (decision=`override`, fields `prev_path` / `new_path` / `live_subprocess_count`) to the audit log. `live_subprocess_count > 0` is a signal that the env update doesn't take effect transitively
-- **Interim response (v1)**: the docstring of `mordred_network.api.use()` explicitly states "only newly spawned child processes are affected; existing ones need a restart." The wizard CLI `hermes mordred network use` also emits the same warning to stdout
-- **Full resolution (v2)**: `mordred_network.api.use()` enumerates live subprocesses and suggests a restart via `signal.SIGTERM` (interactive prompt), or submit a PR to Hermes to add a subprocess-env hook
-- **Operational recommendation to avoid confusion**: switching paths partway through a session's lifetime is discouraged in v1. Decide the path at session start; if you need to switch, let the session itself go through `on_session_end` first
+- `register()` activates the configured route before provider construction and then freezes it for the process lifetime
+- `api.use()` for the same ready route is a no-op; a different route or isolation token raises `PathSwitchRequiresRestart` without tearing down the current route
+- `hermes mordred network use` persists the desired route, but the operator restarts Hermes to rebuild provider clients and child processes together
+- Initial transitions retain the `network.use` audit (`prev_path` / `new_path` / `live_subprocess_count`). `live_subprocess_count > 0` remains evidence that an unfrozen/test-only environment update would not take effect transitively
+- Independent live transports for separate sessions or skills remain v2 work; a subprocess-env hook alone would not repair provider clients that already captured their proxy transport
 
 ### 3.2 Wizard additions
 
 - `hermes mordred network init` asks: default network path, Tor binary path, Mullvad account number (on-demand, separate from `configure`, re-runnable)
   - Sensitive information is written to `~/.hermes/.env` as `MORDRED_MULLVAD_ACCOUNT=...`; `~/.hermes/mordred/credentials/network.json` records the env var reference (PATHS.md §credentials)
   - An empty input preserves the existing secret (a re-run won't erase it); the prompt's default is seeded from the current on-disk value
-- `hermes mordred network use <tor|vpn|clearnet>` — manual override
+- `hermes mordred network use <tor|vpn|clearnet>` — persist the next process route; same-route use is a live no-op, while a conflicting frozen route requires restart
 - `hermes mordred network status` — print active
 
 ### 3.3 Tests
@@ -498,12 +515,12 @@ Injecting proxy env vars into `os.environ` has a **transitive** hole with respec
 - Unit: path manager state machine
 - Integration: docker-compose with Tor container; SOCKS5 reachable assert
 - Live (gated by `MORDRED_LIVE_TOR_TEST=1`): Mullvad real connection
-- Privacy-check coordination: skill declaring `network_requirements: tor` auto-switches path before tool call (confirmed via `policy explain` on the S2 fallback path)
+- Privacy-check coordination: install-time policy checks a skill declaring `network_requirements: tor`; the operator selects Tor for the next process (confirmed via `policy explain`). There is no tool-time auto-switch
 
 **Phase 3 acceptance**:
 
-- Skill with `network_requirements: tor` auto-routes through Tor at tool-call time (when `origin_skill` is included); when it's not included, confirm the flow of manually running `network use tor` via the wizard
-- Manual `hermes mordred network use vpn` switches path within 2s
+- Skill with `network_requirements: tor` runs through Tor when the process was configured with `network use tor` before startup; `origin_skill`-driven tool-time routing remains deferred
+- `hermes mordred network use vpn` persists VPN, a conflicting live route is refused, and the next Hermes process activates VPN before provider construction
 - `mordred_network.api.status()` returns truthful state
 - All bundled provider plugins continue to function under each path
 
@@ -511,13 +528,20 @@ Injecting proxy env vars into `os.environ` has a **transitive** hole with respec
 
 ## Phase 4 — Key Management (`mordred_keyvault`)
 
-Highest engineering risk. Native module (`pyobjc-framework-Security`), limited to macOS Apple Silicon. Can ship independently of Phase 1-3. v1 only authorizes AES DEK wrapping/unwrapping via the Secure Enclave (it does not hold a signing key or perform signing).
+Highest engineering risk. AES DEK wrapping/unwrapping is backed by Secure
+Enclave or a login-Keychain software key on macOS and by the packaged TPM 2.0
+helper on Linux. The Linux backend is machine-bound and fails closed when the
+helper is absent; it has no software fallback. Transparent startup environment
+injection and the direct OS blackout fallback remain macOS-only integration
+features.
 
 ### 4.1 Plugin: `mordred_keyvault`
 
 **Files**
 
-- `src/mordred_hermes/keyvault/plugin.yaml` — `privacy_lock: true`, depends on the macOS extra
+- `src/mordred_hermes/keyvault/plugin.yaml` — `privacy_lock: true`; the
+  cross-platform crypto stack is in the `keyvault` extra, macOS bridges in
+  `macos`, and Linux builds the packaged TPM helper via `keyvault enable-tpm`
 - `src/mordred_hermes/keyvault/__init__.py` — registers the CLI in `register(ctx)`, exposes the internal API
 - `src/mordred_hermes/keyvault/native.py` — `Security.framework` wrapper (via pyobjc-framework-Security), lazy import (the `_lazy_import` pattern prevents an ImportError on import for non-macOS)
 - `src/mordred_hermes/keyvault/api.py` — public Python API:
@@ -550,7 +574,7 @@ Highest engineering risk. Native module (`pyobjc-framework-Security`), limited t
 **Audit-log encryption coupling (slot into Phase 1 audit logger)**
 
 - At Phase 4 launch, factory-swap `keyvault/log_encryption.py`'s `EncryptedWriter` into the `Writer` interface frozen in Phase 1
-- Pre-Phase-4 plaintext logs are not retroactively encrypted. The wizard provides `hermes mordred audit purge --before YYYY-MM-DD`
+- Pre-Phase-4 plaintext logs are not retroactively encrypted. The wizard provides `hermes mordred audit purge --before YYYY-MM-DD --yes`
 - Decrypt CLI: `hermes mordred audit decrypt --date YYYY-MM-DD` (requires Secure Enclave authorization)
 - Interface contract: `class Writer(Protocol): def append(self, entry: dict) -> None: ...` is frozen in Phase 1; `EncryptedWriter` is implemented in Phase 4, and the factory chooses which to use
 - Session log encryption is out of scope for v1 (would require Hermes to expose a generic session-log writer seam)

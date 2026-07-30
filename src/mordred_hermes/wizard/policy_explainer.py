@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any, Final
 
 from .._home import HERMES_BASE
+from .._policy_io import (
+    policy_transaction_marker_for_policy,
+    policy_transaction_warning,
+)
 from ..privacy_check._keyvault_probe import KeyvaultProbeError, keyvault_initialized
 from ..privacy_check._runtime import (
     DEFAULT_HERMES_CONFIG_PATH,
@@ -59,7 +63,15 @@ def show(
     policy_json_path: Path = DEFAULT_POLICY_JSON_PATH,
     out: Any = sys.stdout,
 ) -> int:
-    """Print the resolved Mordred policy. Exit code 0 on success, 1 if absent."""
+    """Print the resolved Mordred policy. Exit code 0 on success, 1 if absent.
+
+    A pending write marker is warned about first (on stderr, so the JSON on
+    stdout stays parseable): the file below is NOT what readers are currently
+    honouring while that marker exists.
+    """
+    pending = policy_transaction_warning(policy_transaction_marker_for_policy(policy_json_path))
+    if pending is not None:
+        _term.emit_warn(f"{pending} The policy printed below is NOT the one currently in effect.")
     if not policy_json_path.exists():
         _term.emit_error(
             f"No Mordred policy configured at {policy_json_path}.\nRun `hermes-mordred configure` to create one."
