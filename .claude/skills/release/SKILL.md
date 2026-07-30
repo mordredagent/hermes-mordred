@@ -41,7 +41,8 @@ re-read it before proceeding, and update this skill in the same PR.
 4. **TestPyPI dry run** (from the `main` ref):
 
    ```sh
-   gh workflow run release.yml --ref main -f target=testpypi -f mode=release
+   gh workflow run release.yml --ref main -f target=testpypi -f mode=release \
+     -f expected-version=<version>
    gh run watch   # confirm success
    ```
 
@@ -59,7 +60,8 @@ re-read it before proceeding, and update this skill in the same PR.
    irreversible):
 
    ```sh
-   gh workflow run release.yml --ref main -f target=pypi -f mode=release
+   gh workflow run release.yml --ref main -f target=pypi -f mode=release \
+     -f expected-version=<version>
    ```
 
 7. **Verify the production install** — fresh venv, pinned install from PyPI,
