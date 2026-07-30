@@ -134,7 +134,8 @@ def _coerce_tor_socks_port(raw: str) -> int:
     except ValueError:
         _LOG.warning("Invalid Tor SOCKS port %r; falling back to default %d", raw, DEFAULT_TOR_SOCKS_PORT)
         return DEFAULT_TOR_SOCKS_PORT
-    if port <= 0 or port > 65535:
+    # Port + 1 is reserved for Tor's control socket.
+    if port <= 0 or port >= 65535:
         _LOG.warning("Tor SOCKS port %d out of range; falling back to default %d", port, DEFAULT_TOR_SOCKS_PORT)
         return DEFAULT_TOR_SOCKS_PORT
     return port

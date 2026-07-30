@@ -574,7 +574,7 @@ features.
 **Audit-log encryption coupling (slot into Phase 1 audit logger)**
 
 - At Phase 4 launch, factory-swap `keyvault/log_encryption.py`'s `EncryptedWriter` into the `Writer` interface frozen in Phase 1
-- Pre-Phase-4 plaintext logs are not retroactively encrypted. The wizard provides `hermes mordred audit purge --before YYYY-MM-DD`
+- Pre-Phase-4 plaintext logs are not retroactively encrypted. The wizard provides `hermes mordred audit purge --before YYYY-MM-DD --yes`
 - Decrypt CLI: `hermes mordred audit decrypt --date YYYY-MM-DD` (requires Secure Enclave authorization)
 - Interface contract: `class Writer(Protocol): def append(self, entry: dict) -> None: ...` is frozen in Phase 1; `EncryptedWriter` is implemented in Phase 4, and the factory chooses which to use
 - Session log encryption is out of scope for v1 (would require Hermes to expose a generic session-log writer seam)

@@ -22,16 +22,17 @@ The set is closed at the type level via `Literal` in `_audit_reasons.py:ReasonCo
 | 4 | `mordred.degraded.disable_unprotected` | 1.1 | Sibling Mordred plugin disabled (deny-list or opt-in allowlist). Strict aborts (`decision=block`); lenient/off warns. |
 | 5 | `mordred.degraded.no_origin_skill` | 1.1 | One-shot per process. Emitted at `on_session_start` to record that `pre_tool_call` payload lacks `origin_skill` (HOOK_PAYLOADS §4). |
 | 6 | `mordred.degraded.no_resolved_provider` | 2 | One-shot per process. Phase 2 emits when `pre_llm_call` lacks `provider_id`/`model_id` (HOOK_PAYLOADS §5). Frozen now to avoid v1→v2 churn. |
-| 7 | `policy.strict.cloud_allowlisted` | 2 | **Action**. Strict + provider in `cloud_provider_allowlist` + `allow_cloud_llm: true`, or strict + `mordred-local` with a validated loopback endpoint → passthrough (`decision=allow`). |
+| 7 | `policy.strict.cloud_allowlisted` | 2 | **Action**. Strict + provider in `cloud_provider_allowlist` + `allow_cloud_llm: true` + actual runtime `base_url` is a provider-owned HTTPS endpoint, or strict + `mordred-local` with a validated loopback endpoint → passthrough (`decision=allow`). |
 | 8 | `policy.strict.cloud_not_allowlisted` | 2 | **Classification only** (Codex N1, 2026-05-13). Recorded **alongside** the action reason (#10 or #11) so audit consumers can filter on either axis. Emitted as a separate audit entry with `decision=block` (or `override` if #11 applies); the final action is in the immediately-following entry. v1 default ships only #10 (refuse). |
 | 9 | `policy.strict.unconditional_override` | 2 | **Action** (PR2 degraded path). Cloud → local override applied unconditionally because `pre_llm_call` payload lacked provider info. |
-| 10 | `policy.strict.session_refused` | 2 | **Action** (PR2 v1 default). Strict + cloud provider not allowlisted, unreachable local endpoint, or invalid/non-loopback `mordred-local` endpoint → session refused via `MordredSessionRefused(BaseException)`. |
+| 10 | `policy.strict.session_refused` | 2 | **Action** (PR2 v1 default). Strict + cloud provider not allowlisted, missing/mismatched cloud runtime endpoint, unreachable local endpoint, or invalid/non-loopback `mordred-local` endpoint → session refused via `MordredSessionRefused(BaseException)`. |
 | 11 | `policy.strict.provider_override_at_session_start` | 2 | **Action — v2 deferred** (Codex B2). Alternative auto-swap path: provider swapped to `mordred-local` at session start. Hermes resolves the active provider before `on_session_start` fires, so the config patch only takes effect next session. Will be reintroduced when (a) Hermes adds a pre-resolve hook upstream, or (b) Mordred ships a vendored fork (`[hard-lock]` extra, Tier B). |
 | 12 | `policy.strict.local_stream_interrupted` | 2 | **Action — v2 deferred** (Codex H1). Frozen in the enum so consumers can prepare, but **no raise site exists in v1**: Hermes core owns the streaming pipeline (`agent/error_classifier.py` handles `httpx.RemoteProtocolError`), so a plugin-side `transport.py` cannot reliably emit this. The corresponding `MordredLocalStreamInterrupted` exception class is intentionally absent from `src/mordred_hermes/llm_guard/_exceptions.py` to prevent silent half-implementations. |
 
 Under `strict`, `mordred-local` means loopback-only: both the configured
 `local_llm_endpoint` and the resolved runtime `base_url` must be HTTP(S), must
-not contain userinfo, and must use either the exact loopback IP literal
+not contain userinfo/query/fragment, must match each other exactly apart from
+a client-added trailing slash, and must use either the exact loopback IP literal
 `127.0.0.1` / `::1` or `localhost`. Every current DNS result for `localhost`
 must itself be loopback. When a process proxy is active, both `NO_PROXY`
 spellings are populated with those exact hosts before the probe/model client
@@ -39,6 +40,30 @@ runs; the health probe independently disables ambient proxies. Validation
 failure emits #10 with `decision=block` and raises
 `MordredSessionRefused`. Lenient/off and other non-strict compatibility modes
 do not apply this boundary.
+
+Cloud allowlisting under `strict` is also endpoint-bound. The stable provider
+identity must be allowlisted, and the actual resolved `base_url` must be a
+well-formed HTTPS URL without userinfo whose host (and, for shared vendor
+domains such as Bedrock, Vertex, and OpenCode, path/host shape) belongs to that
+provider. Query/fragment components are not accepted. Azure Foundry is
+strict-unsupported until policy stores an exact resource-endpoint pin; a
+suffix such as `*.openai.azure.com` does not identify one trusted tenant.
+A missing or mismatched endpoint is checked before `prompt-once`,
+emits `policy.strict.cloud_endpoint_mismatch` followed by
+`policy.strict.session_refused`, and raises `MordredSessionRefused`; a prompt
+cannot approve an arbitrary `base_url` override.
+
+Endpoint fields written to audit/log output are origin-only
+(`scheme://host[:port]`), bounded, and omit userinfo, path, query, and fragment.
+Malformed values render as a fixed placeholder rather than echoing input.
+
+Hermes 0.19's compression, vision, title-generation, and fallback clients do
+not invoke the primary `pre_api_request` hook. Mordred therefore validates
+declared auxiliary routes at session start and guards all four Hermes
+auxiliary resolver seams, checking each returned client's concrete
+`base_url` against the same local/cloud boundary immediately before use.
+Strict startup refuses if those seams are absent, replaced, or rebound to
+different policy/audit paths.
 
 ### Phase 3 step-0 freeze (added 2026-05-13, PR1)
 
@@ -105,7 +130,7 @@ Found in the post-merge review of PR #39 (Phase 4 PR10): the encrypted-audit fac
 
 ### prompt-once freeze (added 2026-06-24)
 
-`cloud_attempt_action: prompt-once` was previously a reserved wizard value with no enforcement (refuse-only, behaving like `always-block`). It now has a live emit site in `mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (the `pre_api_request` authoritative path): under strict mode, when a non-allowlisted cloud provider is reached, the operator is asked once per provider at an interactive terminal whether to allow that provider for the remainder of the current Hermes process. 2 `policy.strict.cloud_prompted_*` codes appended to `ReasonCode`; the freeze at this historical step became 29 (12 Phase 1 + 4 Phase 3 + 8 Phase 4 PR2–step-E + 2 Phase 4 §4.1 + 1 PR #39 follow-up + 2 prompt-once), before the network follow-up below raised the current total to 30. Same-PR emit site per the scope rule condition (a):
+`cloud_attempt_action: prompt-once` was previously a reserved wizard value with no enforcement (refuse-only, behaving like `always-block`). It now has a live emit site in `mordred_hermes.llm_guard.enforce._resolve_cloud_attempt` (the `pre_api_request` authoritative path): under strict mode, when a non-allowlisted cloud provider is reached, the operator is asked once per provider at an interactive terminal whether to allow that provider for the remainder of the current Hermes process. 2 `policy.strict.cloud_prompted_*` codes appended to `ReasonCode`; the freeze at this historical step became 29 (12 Phase 1 + 4 Phase 3 + 8 Phase 4 PR2–step-E + 2 Phase 4 §4.1 + 1 PR #39 follow-up + 2 prompt-once), before the network follow-up below raised it to 30 and the endpoint-binding follow-up raised the current total to 31. Same-PR emit site per the scope rule condition (a):
 
 | # | Code | Phase | Notes |
 | --- | --- | --- | --- |
@@ -124,6 +149,15 @@ Tor/VPN and expose another gateway session to clearnet.
 | --- | --- | --- | --- |
 | 30 | `network.transport_incompatible` | 3.1 | **Action/classification**. Emitted when a provider is incompatible, unverified, unknown, or unresolved on strict + Tor; when configured Tor/VPN does not match the active ready route; or when the transport gate itself fails. Decision `block` for strict protected-route refusal and `warn` for downgraded diagnostics. Fields: `event` (`on_session_start` or `pre_api_request`), `active_path`, `provider`, `severity`, `detail`, `policy_mode`, and `stage` for internal-gate failures. A blocking entry is paired with `MordredPathBringupFailed`; the process route remains active. |
 
+### Strict cloud endpoint-binding freeze (added 2026-07-30)
+
+The provider/endpoint binding adds one live policy emit site, bringing the
+total freeze to 31.
+
+| # | Code | Phase | Notes |
+| --- | --- | --- | --- |
+| 31 | `policy.strict.cloud_endpoint_mismatch` | 2 | **Classification**. The selected cloud provider's actual `base_url` is missing, malformed, non-HTTPS, contains userinfo, or is not owned by that provider. Decision `block`, emitted before #10 `policy.strict.session_refused`. Fields: `event="pre_api_request"`, `provider_id`, `runtime_base_url`. The check precedes `prompt-once` and also covers Hermes auxiliary resolver clients. |
+
 ### Audit entry shape
 
 Synthetic example:
@@ -137,7 +171,7 @@ Synthetic example:
 | `ts` | string | ISO-8601 UTC with 3-digit millisecond precision, literally `"%Y-%m-%dT%H:%M:%S." + "{ms:03d}" + "Z"` (Python's `%f` is microseconds, so the helper builds the string manually). Auto-added if caller omits. |
 | `event` | string | Hook or lifecycle name (`network.register`, `on_session_start`, `pre_tool_call`, ...) or `pre_install`. |
 | `decision` | `"allow"` \| `"block"` \| `"override"` \| `"warn"` | |
-| `reason` | one of the 30 codes currently in `ReasonCode`, or `null` | `null` only for off-mode allows. The PR4 set (#21–24) is fully frozen as of step-E; the §4.1 set (#25–26) is frozen as of `requires_keyvault` enforcement; #27 is frozen as of the PR #39 review follow-up; #28–29 are frozen as of prompt-once enforcement; #30 is frozen as of the process-scoped network transport gate. |
+| `reason` | one of the 31 codes currently in `ReasonCode`, or `null` | `null` only for off-mode allows. The PR4 set (#21–24) is fully frozen as of step-E; the §4.1 set (#25–26) is frozen as of `requires_keyvault` enforcement; #27 is frozen as of the PR #39 review follow-up; #28–29 are frozen as of prompt-once enforcement; #30 is frozen as of the process-scoped network transport gate; #31 is frozen as of strict cloud endpoint binding. |
 | `skill_id` / `tool_name` / `provider_id` | string (event-conditional) | Skill name from frontmatter; tool name from payload; provider id (Phase 2). |
 | event-specific extras | various | e.g. `disabled_siblings: list[str]` on `mordred.degraded.disable_unprotected`. |
 
@@ -173,8 +207,8 @@ Read from `~/.hermes/config.yaml` at first hook invocation. Schema:
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `policy` | `"strict"` \| `"lenient"` \| `"off"` | `"lenient"` | Invalid values fall back to `"lenient"` (logged warning). |
-| `allow_cloud_llm` | bool | `false` | Phase 2 hookpoint — loaded but not yet enforced. |
-| `cloud_provider_allowlist` | list\[str] | `[]` | Phase 2 hookpoint. |
+| `allow_cloud_llm` | bool | `false` | Under strict, enables only allowlisted providers at their provider-owned HTTPS runtime endpoints. |
+| `cloud_provider_allowlist` | list\[str] | `[]` | Stable provider identities allowed under strict; this never grants arbitrary `base_url` overrides. |
 | `audit_log_path` | str | `~/.hermes/mordred/audit.log` | Tilde expansion supported. |
 
 The `mordred_wizard` plugin (Phase 1.3) writes this section via `ruamel.yaml` round-trip to preserve user comments and key order.

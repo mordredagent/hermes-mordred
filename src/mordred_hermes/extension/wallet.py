@@ -40,6 +40,13 @@ def _get_address() -> str:
     return extension_sign.get_address()
 
 
+def _get_account_snapshot() -> tuple[str, str]:
+    from mordred_hermes.keyvault import extension_sign
+
+    address, chain_id = extension_sign.account_snapshot()
+    return address, hex(chain_id)
+
+
 def _addresses_match(left: str, right: str) -> bool:
     """Compare Ethereum addresses without changing the canonical display form."""
     return left.casefold() == right.casefold()
@@ -314,15 +321,6 @@ def _send_prepared_transaction(
     if remote_hash.casefold() != signed["hash"].casefold():
         raise RuntimeError("broadcast_failed: RPC returned a mismatched transaction hash")
     return remote_hash
-
-
-def _wallet_chain_id_hex() -> str:
-    try:
-        from mordred_hermes.keyvault import extension_sign
-
-        return hex(extension_sign.chain_id_int())
-    except Exception:
-        return "0x1"
 
 
 # --------------------------------------------------------------------------- #

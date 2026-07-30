@@ -142,6 +142,41 @@ class TestRunStory1Apply:
         assert body["policy"] == "lenient"
         assert "unknown_top_level" not in body
 
+    def test_integrated_openclaw_policy_is_resolved_before_default_backfill(self, tmp_path: Path) -> None:
+        w = _writer(tmp_path)
+        w.config_path.write_text("profile: default\n", encoding="utf-8")
+        openclaw_base = tmp_path / "openclaw" / "mordred"
+        openclaw_base.mkdir(parents=True)
+        (openclaw_base.parent / "openclaw.json").write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "entries": {
+                            "mordred-privacy-check": {
+                                "config": {
+                                    "policy": "strict",
+                                    "allow_cloud_llm": False,
+                                    "cloud_provider_allowlist": [],
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        report = upgrade.run(
+            options=upgrade.UpgradeOptions(),
+            policy_writer=w,
+            openclaw_base=openclaw_base,
+        )
+
+        assert report.story1_action == "applied"
+        assert report.story1_5_action == "migrated"
+        assert "policy: strict" in w.config_path.read_text(encoding="utf-8")
+        assert json.loads(w.policy_json_path.read_text(encoding="utf-8"))["policy"] == "strict"
+
 
 class TestRunPolicyConflict:
     """When config.yaml has a different mordred section, --policy-conflict drives behaviour."""

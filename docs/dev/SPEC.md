@@ -228,13 +228,21 @@ At skill install time (via the `hermes mordred install <skill>` wrapper), `mordr
 
 ### Story 4: Local LLM enforcement (strict-mode override)
 
-> **Phase 0.8 verify (2026-05-10) complete — redefining Story 4's mechanism**: Hermes's `pre_llm_call` payload cannot support provider rewrite. `pre_api_request` does carry the provider/model/base_url resolved for the actual request; although its return value is observer-only, a `BaseException` refusal escapes the hook wrapper. v1 therefore uses `on_session_start` only for an audit-only disk-state pre-check and enforces strict policy authoritatively in `pre_api_request`. A non-allowlisted runtime provider is refused immediately before egress (`policy.strict.session_refused`). Automatic swapping to `mordred-local` remains structurally impossible and is deferred to the v2 vendored fork (Tier B, `[hard-lock]`). The zero-PR commitment (`MIGRATION.md` §5) is maintained.
+> **Phase 0.8 verify (2026-05-10) complete — redefining Story 4's mechanism**: Hermes's `pre_llm_call` payload cannot support provider rewrite. `pre_api_request` does carry the provider/model/base_url resolved for the actual primary request; although its return value is observer-only, a `BaseException` refusal escapes the hook wrapper. v1 therefore uses `on_session_start` for disk-state pre-checks and enforces primary strict policy authoritatively in `pre_api_request`. A non-allowlisted runtime provider or a provider/endpoint mismatch is refused immediately before egress (`policy.strict.session_refused`). Hermes 0.19 auxiliary LLM calls bypass that hook, so Mordred guards their resolver seams and validates each concrete client before use. Automatic swapping to `mordred-local` remains structurally impossible and is deferred to the v2 vendored fork (Tier B, `[hard-lock]`). The zero-PR commitment (`MIGRATION.md` §5) is maintained.
 
-When policy is `strict`, `mordred_llm_guard` validates Hermes's request-resolved provider in **every `pre_api_request`**. A provider outside `cloud_provider_allowlist` is refused before egress; `mordred-local` is also revalidated as a loopback endpoint. Swapping providers remains deferred to v2. When a cloud provider matches the allowlist and `allow_cloud_llm: true`, the request continues (passthrough). See §Audit log policy for detailed audit reason codes (`policy.strict.session_refused`, and the v2-deferred `policy.strict.provider_override_at_session_start`).
+When policy is `strict`, `mordred_llm_guard` validates Hermes's request-resolved provider in **every `pre_api_request`**. A provider outside `cloud_provider_allowlist` is refused before egress; an allowlisted cloud provider also requires an actual, provider-owned HTTPS `base_url` without userinfo/query/fragment. Azure Foundry remains strict-unsupported until policy can pin an exact resource endpoint; accepting the vendor suffix would allow a different tenant/resource destination. Missing, malformed, or mismatched endpoints are refused before any `prompt-once` decision and audited as `policy.strict.cloud_endpoint_mismatch` followed by `policy.strict.session_refused`. Audit/log endpoint displays are bounded, origin-only values with credential-bearing components removed. `mordred-local` is revalidated as a loopback endpoint and its runtime URL must equal the configured `local_llm_endpoint` apart from a trailing slash. Swapping providers remains deferred to v2.
+
+Hermes 0.19 auxiliary tasks (compression, vision, title generation, and
+fallbacks) call clients outside `pre_api_request`. Their declared routes are
+checked at session start, and the concrete clients returned by Hermes's
+`_get_cached_client`, `_get_provider_chain`, `resolve_provider_client`, and
+`resolve_vision_provider_client` seams pass through the same provider/endpoint
+guard. Strict startup fails closed if a required seam is missing or replaced.
 
 Under `strict`, `mordred-local` is loopback-only. Both the configured
 `local_llm_endpoint` and the resolved runtime `base_url` must be HTTP(S), must
-not contain userinfo, and must use either the exact loopback IP literal
+not contain userinfo/query/fragment, must match apart from a trailing slash, and
+must use either the exact loopback IP literal
 `127.0.0.1` / `::1` or `localhost`; every current DNS result for `localhost`
 must itself be loopback. When a process proxy is active, both `NO_PROXY`
 spellings gain those exact hosts before the model client is used, and the
@@ -314,9 +322,11 @@ Mordred plugins can coexist with Hermes's memory plugin (honcho/mem0), context e
 
 - Implements the synthetic provider `mordred-local` as `mordred_llm_guard/local_adapter.py` (an adapter bundled with the plugin). Follows the Hermes provider adapter pattern and delegates to a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM). Under strict policy, “local” is enforced as the exact HTTP(S) literal `127.0.0.1` / `::1`, or `localhost` whose DNS results are all loopback; the same check covers policy and runtime URLs before any probe or model request.
 - **Phase 0.8 verify (2026-05-10) complete**: `pre_llm_call` is context-injection only and cannot rewrite providers. `on_session_start` performs an audit-only disk pre-check; `pre_api_request` authoritatively enforces the actual runtime provider before egress ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5):
-  - strict policy + current provider **matches** `cloud_provider_allowlist` + `allow_cloud_llm: true` -> session continues (passthrough)
+  - strict policy + current provider **matches** `cloud_provider_allowlist` + `allow_cloud_llm: true` + concrete `base_url` is a provider-owned HTTPS endpoint -> request continues (passthrough)
+  - strict policy + missing/malformed/non-HTTPS/provider-mismatched `base_url` -> request is refused before prompting (audit `policy.strict.cloud_endpoint_mismatch` then `policy.strict.session_refused`)
   - strict policy + current provider does not match cloud_provider_allowlist, or `allow_cloud_llm: false` -> session is refused and exits (v1 default, audit `policy.strict.session_refused`). The alternative of swapping the active provider to `mordred-local` via `register_provider` + a config patch (audit `policy.strict.provider_override_at_session_start`) was confirmed structurally impossible in v1 by the Codex B2 review, so it's **deferred to v2** (Tier B `[hard-lock]` vendored fork)
   - lenient/off -> do nothing
+- Hermes 0.19 auxiliary LLM routes bypass `pre_api_request`; strict validates their declared config at session start and wraps the four resolver seams listed in Story 4. Resolver drift or an unbound returned client fails closed before auxiliary egress.
 - Local endpoint fail-fast: strict mode rejects invalid/non-loopback endpoints before probing, and translates health-check failure into `MordredSessionRefused`
 - Harness refusal: scans configured agents at `on_session_start`; aborts startup under strict mode when a harness-based primary (Codex/Claude CLI/Cursor/ACP client) is configured
 
@@ -553,25 +563,32 @@ Field reference for `version = 1`:
 | 0 | 4 | `magic` | ASCII `MRKW`. Dispatch key, never changes across versions. |
 | 4 | 1 | `version` | `1`. Dispatch key for future format bumps. |
 | 5 | 1 | `alg_suite` | `1` = `(P256_ECDH_RAW, HKDF_SHA256, AES256_KW_RFC3394)`. Reserved values: `0` invalid, `2-255` future. |
-| 6 | 16 | `key_id_hash` | First 16 bytes of `SHA-256(key_id_bytes)`. Used for Keychain lookup + audit log; never the cleartext `key_id`. |
+| 6 | 16 | `key_id_hash` | First 16 bytes of `SHA-256(logical_key_id_bytes)`. Binds the portable wire object and identifies audit events; it is not the native-store selector for profile-scoped keys. |
 | 22 | 65 | `ephemeral_pub` | SEC1 uncompressed P-256 (`0x04 ‖ X(32) ‖ Y(32)`). Freshly generated by `wrap_dek` via `cryptography.hazmat.primitives.asymmetric.ec.generate_private_key(SECP256R1())` (which itself draws from the OS RNG via OpenSSL `BN_rand_range`) — wrap is **never** deterministic and never reuses the ephemeral key. Hand-rolled scalar generation via `secrets.token_bytes` is intentionally avoided (codex review-fix-2 NIT-1) because it would require a manual modular-reduction step against the curve order. |
 | 87 | 40 | `wrapped_dek` | RFC 3394 AES-KW output for a 32-byte DEK (`8 + 32 = 40` bytes; the fixed IV/AIV is internal to RFC 3394, so the blob has **no separate IV field** — codex review BLOCKER-2). |
 
 `HEADER_LEN = 127` for `version=1`. The parser rejects any other version with `WrapParseError`.
 
-**Algorithm — `wrap_dek(dek, key_id)`** (offline, no Enclave authorization, no user prompt):
+The wire `key_id` is a portable **logical id**. Current profiles separately
+derive and persist a deterministic `native_key_id` from the absolute keyvault
+root and logical id. The native id selects the physical SE/TPM/Keychain item;
+it is deliberately excluded from MRKW and portable backup manifests. Metadata
+without `native_key_id` is legacy and continues to select the logical id for
+read/ECDH compatibility.
 
-1. Lookup the Enclave **public** key for `key_id` via `SecKeyCopyPublicKey` on a Keychain lookup (`kSecAttrApplicationTag = "mordred-hermes.wrap." + key_id_hash`).
+**Algorithm — `wrap_dek(dek, key_id, native_key_id=...)`** (offline, no Enclave authorization, no user prompt):
+
+1. Lookup the native **public** key using `native_key_id` (or the logical `key_id` for a legacy row). Keychain tags hash that physical selector; file-backed helpers receive the resulting opaque tag.
 2. Generate an ephemeral P-256 keypair in software (`cryptography` library, never persisted).
 3. Raw ECDH: pass the ephemeral private key + Enclave public key to `SecKeyCopyKeyExchangeResult` with `kSecKeyAlgorithmECDHKeyExchangeStandard` (NOT `…X963SHA256` — codex review HIGH-1; we want raw ECDH output, then a single explicit HKDF, not double-derive).
 4. HKDF-SHA256 derive a 32-byte AES-KEK: `salt = b""`, `info = magic || version(1) || alg_suite(1) || key_id_hash(16) || ephemeral_pub(65)` (87 bytes; binds every non-secret blob field to the KEK — codex review HIGH-2).
 5. `wrapped_dek = AES-KW(KEK, dek)` per RFC 3394 (32-byte DEK → 40-byte output, integrity-protected by the AIV).
 6. Emit the blob; do NOT emit an audit-log entry (wrap is unauthorized, fast, no decision boundary).
 
-**Algorithm — `unwrap_dek(blob, key_id)`** (authorized, may prompt the user):
+**Algorithm — `unwrap_dek(blob, key_id, native_key_id=...)`** (authorized, may prompt the user):
 
 1. `parse_header(blob)` — reject if `len(blob) != 127`, `magic != b"MRKW"`, `version != 1`, `alg_suite != 1`, or `key_id_hash != SHA-256(key_id)[:16]`. Each rejection raises `WrapParseError`.
-2. Lookup Enclave **private** key by Keychain query (same `kSecAttrApplicationTag` namespacing). Missing → `WrapKeyNotFound`.
+2. Lookup the native **private** key using the separately resolved physical selector. Missing → `WrapKeyNotFound`.
 3. Decode `ephemeral_pub` as SEC1 P-256; reject invalid curve points with `WrapParseError`.
 4. Call `SecKeyCopyKeyExchangeResult(enclave_private, ECDHKeyExchangeStandard, ephemeral_pub, params)`. This triggers the access-control prompt (Touch ID / Optic ID / passcode). On `errSecUserCancelled` / `errSecAuthFailed` / `errSecInteractionNotAllowed` / `errSecAuthorizationCanceled`, emit `keyvault.unwrap_denied` with translated `native_error_code` and raise `WrapAuthCancelled` (chains the native `NSError` via `__cause__`).
 5. HKDF-SHA256 with the same `info` constructed in wrap step 4 (binds blob fields to KEK; a tampered `ephemeral_pub` produces a different KEK → AES-KW unwrap fails AIV check).
@@ -586,8 +603,8 @@ Field reference for `version = 1`:
 | `kSecAttrKeySizeInBits` | `256` | Required by `ECSECPrimeRandom`. |
 | `kSecAttrTokenID` | `kSecAttrTokenIDSecureEnclave` | Bind the private key to the Enclave; the public key is freely exportable. |
 | `kSecAttrIsPermanent` | `True` | Survives reboot — `wrap` needs to look up the public key without re-prompting. |
-| `kSecAttrApplicationTag` | `b"mordred-hermes.wrap." + key_id_hash` | Namespaced lookup; avoids collision with other apps. |
-| `kSecAttrLabel` | `"Mordred wrapping key " + key_id_hash[:8].hex()` | Human-readable in Keychain Access.app. |
+| `kSecAttrApplicationTag` | `b"mordred-hermes.wrap." + SHA-256(native_key_id)[:16]` | Namespaced, profile-isolated physical lookup. For legacy rows `native_key_id == logical key_id`. |
+| `kSecAttrLabel` | `"Mordred wrapping key " + SHA-256(native_key_id)[:8].hex()` | Human-readable in Keychain Access.app without exposing either id. |
 | `kSecAttrAccessControl` | `SecAccessControlCreateWithFlags(.privateKeyUsage \| .biometryCurrentSet, accessible: .whenPasscodeSetThisDeviceOnly)` | Touch/Optic ID required — `.biometryCurrentSet` is biometry-only with no passcode fallback; an Enclave-capable Mac without enrolled biometry cannot create or use the key (codex review MEDIUM-2; reaffirmed PR9). `.biometryCurrentSet` invalidates the key if the user adds/removes biometrics — protects against the "stolen device with attacker biometric enrolled" attack. `.whenPasscodeSetThisDeviceOnly` ensures the key cannot exist on a device without a passcode and never syncs to iCloud Keychain. |
 
 Capability detection (codex review MEDIUM-1): `is_secure_enclave_available()` does NOT check `platform.machine() == 'arm64'`. Intel Macs with the T2 chip also have a Secure Enclave reachable through the same API. Detection probes capability via a throwaway key-generate-then-delete cycle (with `.privateKeyUsage` only, no biometry, so it cannot prompt) — non-`Darwin` platforms short-circuit to `False` without touching pyobjc.
@@ -603,11 +620,11 @@ class WrapAuthCancelled(WrapError): ...         # user denied biometry / passcod
 class WrapKeyNotFound(WrapError): ...           # Keychain has no item for this key_id (key revoked or wrong device)
 class WrapKeyAlreadyExists(WrapKeyNotFound): ...  # duplicate key_id at generation time; WrapKeyNotFound subclass so historical `except` sites keep catching it
 
-def generate_wrapping_key(key_id: str, *, backend: NativeBackend) -> bytes: ...     # returns SEC1 uncompressed P-256 pubkey, 65 bytes
-def get_wrapping_key_public(key_id: str, *, backend: NativeBackend) -> bytes: ...   # SEC1 uncompressed P-256, 65 bytes
-def delete_wrapping_key(key_id: str, *, backend: NativeBackend) -> None: ...        # removes Keychain item; idempotent
-def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend) -> bytes: ...      # offline; returns 127-byte blob
-def unwrap_dek(blob: bytes, key_id: str, *, audit_sink: AuditSink, backend: NativeBackend) -> bytes: ...
+def generate_wrapping_key(key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
+def get_wrapping_key_public(key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
+def delete_wrapping_key(key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> None: ...
+def wrap_dek(dek: bytes, key_id: str, *, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
+def unwrap_dek(blob: bytes, key_id: str, *, audit_sink: AuditSink, backend: NativeBackend, native_key_id: str | None = None) -> bytes: ...
 ```
 
 `api.py` (Phase 4 PR4) is the only callsite — internal API contract for `mordred_keyvault.api.generate` / `encrypt` / `decrypt` / `export_backup` / `import_backup` derives from this surface.
@@ -684,21 +701,28 @@ def confirm_generate(
     #   digest on the same handle.
     # On match:
     #   0. Re-init guard: v1 keyvault is single-key (Story 5). If meta.json
-    #      already has any key, raise RuntimeError. Checked once unlocked
-    #      (before init_started, to avoid a dangling audit event) and again
-    #      authoritatively under the lock (TOCTOU-safe).
+    #      has any main key or any pending/committed native-key ownership
+    #      record (including audit-key records), raise RuntimeError. Checked
+    #      once unlocked (before init_started, to avoid a dangling audit
+    #      event) and again authoritatively under the lock (TOCTOU-safe).
     #   1. Emit keyvault.init_started (audit-sink failure aborts; durability barrier).
-    #   2. Under one .lock hold: re-check the re-init guard, then
-    #      wrap.generate_wrapping_key(key_id, backend=...) — key_id=None
-    #      resolves to the "default" literal; a duplicate raise here is
-    #      OUTSIDE the rollback scope so a pre-existing key is not deleted.
-    #   3. Still under .lock: write digests/<key_id_hash>.commit FIRST, then
-    #      meta.json LAST. meta.json is the transaction commit point —
-    #      save_meta replaces it atomically. Rollback deletes the Enclave
-    #      key + the orphaned commit file, and best-effort repairs the
-    #      meta.json row in the rare case the atomic rename committed before
-    #      a later fsync raised.
-    #   4. Emit keyvault.init_completed (sink failure suppressed; init has already succeeded).
+    #   2. Under the stable lifecycle + per-root lock: re-check the re-init
+    #      guard, derive the profile-scoped native_key_id, and durably write a
+    #      top-level pending_native_key ownership journal BEFORE native
+    #      generation. A helper may publish a key and then report a durability
+    #      error; reset can safely recover that deterministic physical id.
+    #   3. Generate through wrap.generate_wrapping_key(logical_key_id,
+    #      native_key_id=...). key_id=None resolves to logical "default".
+    #   4. Still under the same hold: write digests/<key_id_hash>.commit FIRST,
+    #      then durably save the meta row containing logical key_id +
+    #      native_key_id WHILE RETAINING pending_native_key (ownership commit).
+    #      Only a second durable meta save removes pending_native_key. A
+    #      first-save post-rename error plus failed native rollback therefore
+    #      leaves row+pending and every normal operation fails closed. Failure
+    #      of the second cleanup never rolls back the durably-owned key: a
+    #      visible valid row with no pending is safe; a visible pending remains
+    #      incomplete and requires reset.
+    #   5. Emit keyvault.init_completed (sink failure suppressed; init has already succeeded).
     # ``backend`` is required (no None default) — matches encrypt/decrypt;
     #   the production backend is a later step so there is no None fallback.
     ...
@@ -945,17 +969,22 @@ def import_backup(
     #    keyvault.recovery_digest_mismatch (#17).
     # 3. Argon2id-derive KEK_passphrase from passphrase + parsed salt.
     # 4. AES-GCM-decrypt manifest_body → manifest_json. AAD = PR2 backup header AAD.
-    # 5. Parse manifest JSON; validate "version" == 1.
-    # 6. imported_key_id = manifest["key_id"]. backend.generate_enclave_key(imported_key_id)
-    #    on this device → new Enclave wrapping key.
+    # 5. Parse manifest JSON; validate "version" == 1. Require a genuinely
+    #    fresh destination: no main row, pending main journal, committed audit
+    #    ownership, pending audit journal, digest, or ciphertext artifact.
+    # 6. imported_key_id = manifest["key_id"]. Derive this destination
+    #    profile's native_key_id, persist pending_native_key, then generate the
+    #    physical key on this device. The portable logical id is unchanged.
     # 7. For each manifest entry (in declared order):
     #    a. Recompute manifest_aad = b"MRMN" || sha256(imported_key_id)[:16] ||
     #       bytes.fromhex(entry["purpose_hash_hex"]) (36 bytes, identical to export step 6).
     #    b. plaintext = AES-GCM-decrypt(bytes.fromhex(entry["dek_hex"]),
     #                                   b64decode(entry["manifest_aes_blob_b64"]),
     #                                   aad=manifest_aad).
-    #    c. new_wrapped_dek = wrap.wrap_dek(dek_bytes, imported_key_id, backend=...) — offline,
-    #       produces a fresh 127-byte MRKW blob bound to THIS device's Enclave public key.
+    #    c. new_wrapped_dek = wrap.wrap_dek(dek_bytes, imported_key_id,
+    #       native_key_id=..., backend=...) — offline, and produces a fresh
+    #       127-byte MRKW blob whose wire hash remains logical while its DEK is
+    #       bound to THIS profile's physical public key.
     #    d. new_key_id_hash = sha256(imported_key_id)[:16].
     #       new_envelope_aad = b"MREN" || version(1) || new_key_id_hash ||
     #                           bytes.fromhex(entry["purpose_hash_hex"]) || new_wrapped_dek
@@ -967,13 +996,16 @@ def import_backup(
     #    g. Persist envelope_bytes to
     #       ciphertexts/<new_key_id_hash.hex()>/<entry["purpose_hash_hex"]>/<entry["envelope_id"]>.gcm
     #       via the step-B atomic + fsync + flock helpers.
-    # 8. Write meta.json (add row for imported_key_id) and
-    #    digests/<new_key_id_hash.hex()>.commit (32 bytes = recomputed verification digest)
-    #    under .lock with atomic semantics.
+    # 8. Write digests/<new_key_id_hash.hex()>.commit, then durably save a meta
+    #    row carrying imported_key_id + native_key_id while retaining
+    #    pending_native_key. A separate save clears pending only after that
+    #    ownership commit succeeds, under the same lifecycle/per-root lock.
     # 9. Return imported_key_id.
-    # 10. On any mid-import failure after step 6: rmtree(home / "mordred" / "keyvault"
-    #     / "ciphertexts" / new_key_id_hash.hex()) and backend.delete_enclave_key(imported_key_id),
-    #     then re-raise. Steps 1-5 are pre-mutation (no rollback needed).
+    # 10. On failure through the first ownership save: delete only the scoped
+    #     native_key_id and remove transaction artifacts, then re-raise. If
+    #     native deletion fails, retain row+pending (when the rename landed) or
+    #     pending-only so reset can retry. After ownership save succeeds,
+    #     pending cleanup failure never deletes the key.
     ...
 ```
 
@@ -1006,7 +1038,14 @@ All keyvault filesystem operations MUST:
 - Open files with `os.open(path, O_NOFOLLOW)` to refuse symlink-following (symlink → `KeyvaultPermissionError`).
 - Reject existing files whose mode is not `0600` and directories whose mode is not `0700` via `fstat` after open (mode mismatch → `KeyvaultPermissionError`).
 - Write atomically: `<file>.tmp + fsync(tmp_fd) + os.replace(tmp, final) + fsync(parent_dir_fd)`.
-- Hold an exclusive `fcntl.flock` on `~/.hermes/mordred/keyvault/.lock` (mode `0600`) for the duration of any write transaction (covers generate, encrypt, export, import).
+- Acquire the stable parent-side `.keyvault.lifecycle.lock` before the per-root
+  `keyvault/.lock`, and hold them across every operation that must serialize
+  with reset (generate, encrypt/decrypt, export/import, and auxiliary audit-key
+  provisioning). Reset holds the stable lifecycle lock through native deletion
+  and root removal. Public metadata/status snapshots join that lifecycle lock
+  and re-check the parent reset journal before reading. Reset durably flushes
+  root removal before unlinking the journal; a failed journal-unlink flush
+  re-publishes the recovery bytes before returning an error.
 - On `meta.json` corruption (JSON parse failure / missing required keys / `version` mismatch): raise `KeyvaultCorruptError` whose `str()` does NOT include the corrupted contents (audit-safety — corrupted JSON could include secret-shaped bytes from a partially-overwritten file).
 
 ##### Audit emissions for PR4 (4 new reason codes #21-24)
@@ -1064,10 +1103,13 @@ Subcommands:
 
 - Path: `~/.hermes/mordred/audit.log`
 - File mode: `0600` (user-only)
-- Format: newline-delimited JSON (NDJSON), single writer per Hermes process, append-only
-- Concurrency: serialized via an in-process write queue; multi-process scenarios are unsupported in v1
+- Format: newline-delimited JSON (NDJSON), append-only
+- Concurrency: serialized by an in-process lock and a stable hidden sidecar
+  `fcntl.flock` spanning format checks, rotation, append, and rollback.
+  Encrypted writers also verify active inode/header ownership before reusing
+  their process-local DEK
 - Rotation: daily roll to `audit.log.YYYY-MM-DD`, gzip after rotation, size cap 10 MB per current file (force-rotate), retention 30 days
-- Redaction: `reason` strings are a fixed enum (free-text params / full skill content are never logged). The `ReasonCode` `Literal` in `src/mordred_hermes/privacy_check/_audit_reasons.py` is the type-level source of truth for the enum; see [`POLICY.md`](./POLICY.md) §Audit log `reason` enum for the human-readable canonical list. 12 codes were frozen at Phase 1.1 step-0, with only closed-set additions per phase thereafter (Phase 3 PR1 added `network.*` +4 → Phase 4 PR2-§4.1 added `keyvault.*`/`policy.*` +10 → the PR #39 follow-up added `mordred.degraded.audit_encryption_unavailable` +1, **27 codes currently**). Existing codes are never removed or renamed
+- Redaction: `reason` strings are a fixed enum (free-text params / full skill content are never logged). The `ReasonCode` `Literal` in `src/mordred_hermes/privacy_check/_audit_reasons.py` is the type-level source of truth for the enum; see [`POLICY.md`](./POLICY.md) §Audit log `reason` enum for the human-readable canonical list. Closed-set additions through the prompt, transport-gate, and provider-endpoint-binding follow-ups bring the current total to **31 codes**. Existing codes are never removed or renamed
 - Encryption: Phase 1-3 is plaintext NDJSON at file mode `0600`. From Phase 4 onward, new entries are encrypted with AES-GCM (the DEK is keyvault-wrapped, held in memory only)
 - Phase staging: the `audit.py` writer freezes a swappable Writer interface in Phase 1, factory-swapped to `EncryptedWriter` in Phase 4
 
@@ -1091,17 +1133,54 @@ Fields: `ts` (ISO-8601 UTC), `event` (hook name), `decision` (`allow`/`block`/`o
 From Phase 4 onward, `EncryptedWriter` in `keyvault/log_encryption.py` (a Phase 1 `Writer` Protocol implementation) encrypts new entries with AES-GCM. The file is line-oriented — 1 entry = 1 line, preserving `O_APPEND`'s whole-entry atomicity while avoiding the need to re-encrypt the entire file:
 
 ```
-Line 0   header   {"fmt":"MRAL","ver":1,"key_id":<str>,"wdek":<base64>}
+Line 0   legacy header   {"fmt":"MRAL","ver":1,"key_id":<str>,"wdek":<base64>}
+Line 0   current header  {"fmt":"MRAL","ver":1,"key_id":<str>,"native_key_id":<str>,"wdek":<base64>}
 Line 1+  entry    base64( nonce(12) ‖ AES-GCM-ciphertext ‖ tag(16) )
 ```
 
 - `wdek` is a 127-byte `MRKW` blob produced by wrapping the audit-log DEK with `keyvault.wrap.wrap_dek`. Only the **wrapped DEK** goes to disk; the plaintext 32-byte DEK exists only in the writer's memory (its reference is discarded on `close()`).
+- `key_id` remains the logical `mordred.audit-log` id and is what MRKW/audit
+  hashes bind. Current headers additionally persist the deterministic
+  profile-scoped `native_key_id` used for physical lookup. Only an absent
+  field selects the legacy logical native id; JSON null, the wrong type, or a
+  value that does not re-derive for the selected keyvault root fails before
+  native I/O. This lets old and new rotated MRAL files coexist.
 - The DEK is **lazily generated on the first append**, not at writer creation, fresh per file. `wrap_dek` is an offline operation using the selected backend's public key and therefore does not invoke private-key authorization — **writing does not cross the authorization boundary**.
 - Each entry's AES-GCM AAD = `MAGIC ‖ version ‖ SHA-256(header line)`. Since the header line contains a file-specific random `wdek`, the digest differs per file, so splicing entries from another file, or replay after tampering with the header, fails the tag check.
-- Atomicity caveat: an encrypted line at maximum size (4000-byte plaintext) is about 5.4 KiB, exceeding POSIX `PIPE_BUF` (4096). `O_APPEND` atomicity is not guaranteed with concurrent multi-process writers, but since v1 does not support multi-process audit writes (§1.1 M1), invariant #2 holds under the single-process, single writer-lock model.
+- Atomicity: an encrypted line at the 4000-byte plaintext limit is about
+  5.4 KiB. Writers do not rely on `PIPE_BUF` (a pipe/FIFO property) for
+  regular-file atomicity: cooperating processes hold the stable sidecar lock
+  through the write-all loop and any truncate rollback. An MRAL writer whose
+  active inode/header was replaced wipes its stale DEK, rotates the successor
+  intact, and creates a fresh independently decryptable file.
 - Rotation is the same as the Phase 1 NDJSONWriter (daily + size cap + gzip + 30-day retention). Each rotation gets a fresh file + DEK + header. Existing foreign files (pre-Phase-4 plaintext logs, or encrypted files from another session whose DEK cannot be unwrapped without a prompt) are **rotated aside rather than overwritten**.
-- Decryption is `keyvault.log_encryption.decrypt_log_file` — it unwraps the DEK via `wrap.unwrap_dek` at the selected native-backend boundary (emitting `keyvault.unwrap_authorized`), and transparently handles gzip-rotated files too. Structural / integrity errors raise `AuditLogDecryptError`; prompt rejection (`WrapAuthCancelled`) and missing key (`WrapKeyNotFound`) are propagated unwrapped so the CLI can distinguish them.
-- The native-backend key id for the audit-log wrapping key is `mordred.audit-log` (`AUDIT_LOG_KEY_ID`). No new audit code — the unwrap audit is already emitted by `wrap.unwrap_dek`.
+- Decryption is `keyvault.log_encryption.decrypt_log_file` — it snapshots a
+  regular non-symlink source under the same audit sidecar used by writers,
+  releases that sidecar, then unwraps the DEK via `wrap.unwrap_dek` at the
+  selected native-backend boundary (emitting `keyvault.unwrap_authorized`).
+  The whole logical read holds the keyvault lifecycle lease and transparently
+  handles gzip-rotated files. Structural / integrity errors raise
+  `AuditLogDecryptError`; prompt rejection (`WrapAuthCancelled`) and missing
+  key (`WrapKeyNotFound`) are propagated unwrapped so the CLI can distinguish
+  them.
+- The logical audit wrapping-key id is `mordred.audit-log`
+  (`AUDIT_LOG_KEY_ID`); current profiles derive a separate physical id from
+  the keyvault root. No new audit code is emitted—the unwrap decision still
+  records only the logical key-id hash through `wrap.unwrap_dek`.
+- That logical id is reserved and cannot be selected as the main key id
+  (including through an imported backup). Auxiliary generation first saves
+  `pending_audit_key`, then saves `audit_key` while retaining pending, and
+  finally clears pending in a second durable metadata save. The scoped audit
+  factory uses `EncryptedWriter` only for a validated `audit_key` record with
+  no pending record; a published-but-uncommitted or cleanup-uncertain key stays
+  on the marked plaintext fallback. Re-running provisioning is idempotent. An
+  exact deterministic duplicate may be adopted only when a freshly committed
+  pending record proves the key predated this attempt, or when an existing
+  row+pending state proves generation previously succeeded; pending-only retry
+  after a native durability error remains fail-closed. Legacy main rows
+  continue to select the historical global audit key when these new scoped
+  records are absent; either scoped audit ownership field beside a legacy main
+  row is inconsistent and forces the marked plaintext fallback.
 
 ### Plugin-disable protection (plugin-side only, zero-PR strategy)
 

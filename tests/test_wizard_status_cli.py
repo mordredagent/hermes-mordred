@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes.keyvault import _storage
+from mordred_hermes.keyvault import _native_key_id, _storage
 from mordred_hermes.wizard import status_cli
 from mordred_hermes.wizard.encryption_cli import WORKSPACE_LEGEND_BODY, TargetStatus, WorkspacePaths
 
@@ -113,6 +113,16 @@ class TestKeyvaultSection:
         assert report.keyvault_initialized is False
         assert "corrupt" in report.keyvault_detail
 
+    def test_non_utf8_meta_reports_without_raising(self, tmp_path: Path) -> None:
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        (root / "meta.json").write_bytes(b"\xffnot-utf8")
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is False
+        assert "corrupt" in report.keyvault_detail
+
     def test_unreadable_meta_reports_without_raising(self, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
         root.mkdir(parents=True)
@@ -122,6 +132,75 @@ class TestKeyvaultSection:
         report = _collect(tmp_path)
         assert report.keyvault_initialized is False
         assert "unreadable" in report.keyvault_detail
+
+    def test_pending_reset_journal_is_reported_unavailable(self, tmp_path: Path) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        with _storage.keyvault_lifecycle_lock(root):
+            _storage.write_reset_journal(root, b"pending reset")
+
+        report = _collect(tmp_path)
+        assert report.keyvault_initialized is False
+        assert report.keyvault_key_count == 0
+        assert "reset" in report.keyvault_detail
+
+    def test_pending_native_key_is_unavailable_even_with_committed_rows(self, tmp_path: Path) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        meta = _storage.load_meta(root)
+        meta[_native_key_id.PENDING_NATIVE_KEY_FIELD] = {
+            "key_id": "interrupted",
+            _native_key_id.NATIVE_KEY_ID_FIELD: _native_key_id.scoped_native_key_id(root, "interrupted"),
+        }
+        _storage.save_meta(root, meta)
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is False
+        assert report.keyvault_key_count == 0
+        assert "provisioning" in report.keyvault_detail
+
+    def _audit_record(self, root: Path) -> dict[str, str]:
+        from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID
+
+        return {
+            "key_id": AUDIT_LOG_KEY_ID,
+            _native_key_id.NATIVE_KEY_ID_FIELD: _native_key_id.scoped_native_key_id(root, AUDIT_LOG_KEY_ID),
+        }
+
+    def test_stranded_pending_audit_key_is_reported_not_silently_plaintext(self, tmp_path: Path) -> None:
+        """The worst case must not read as a healthy vault.
+
+        Provisioning refuses to adopt a native audit key of unproven durability,
+        so a pending-without-committed profile keeps a plaintext audit log on
+        every retry. Reporting only "1 key" hid that permanently.
+        """
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        meta = _storage.load_meta(root)
+        meta[_native_key_id.PENDING_AUDIT_KEY_FIELD] = self._audit_record(root)
+        _storage.save_meta(root, meta)
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        assert "INCOMPLETE" in report.keyvault_detail
+        assert "plaintext" in report.keyvault_detail
+        # Machine consumers need it too, not just the rendered dashboard.
+        assert "INCOMPLETE" in json.dumps(report.to_dict())
+
+    def test_committed_audit_key_reports_encrypted(self, tmp_path: Path) -> None:
+        root = _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        meta = _storage.load_meta(root)
+        meta[_native_key_id.AUDIT_KEY_FIELD] = self._audit_record(root)
+        _storage.save_meta(root, meta)
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        assert "audit log encrypted" in report.keyvault_detail
+
+    def test_absent_audit_key_reports_plaintext(self, tmp_path: Path) -> None:
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        report = _collect(tmp_path)
+        assert "audit log plaintext" in report.keyvault_detail
 
     def test_hardware_helper_reported(self, tmp_path: Path) -> None:
         report = _collect(tmp_path, helper_finder=lambda platform: "/usr/local/bin/helper")

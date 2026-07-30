@@ -95,7 +95,7 @@ message.
 - `audit tail -n N` — print the last `N` NDJSON entries.
 - `audit grep PATTERN` — Python regex over raw NDJSON lines. Exit codes:
   `0` (hit), `1` (no match / missing log), `2` (invalid regex).
-- `audit purge --before YYYY-MM-DD` — delete rotated `audit.log.<date>`
+- `audit purge --before YYYY-MM-DD --yes` — delete rotated `audit.log.<date>`
   files dated strictly before the cutoff (manual cleanup of pre-Phase-4
   plaintext history). Never touches the active `audit.log`; non-dated
   rotation files are left alone. Exit codes: `0` (done), `2` (bad date).
@@ -170,11 +170,11 @@ production Secure-Enclave `_SecKeyBackend`.
 - `keyvault recover --blob <path>` — restore a keyvault from an
   `export_backup` blob: prompts for the Seed Phrase + Passphrase,
   recomputes the seed-bound PoW, and calls `api.import_backup`.
-- `keyvault reset` — **irreversibly** destroy all key material: delete
-  every Secure-Enclave wrapping key (each `meta.json` key plus the
-  well-known default + audit-log ids) and remove the on-disk keyvault
-  directory. The interactive path requires the operator to type a
-  confirmation phrase; `--yes` skips it for scripted use. Recovery is
+- `keyvault reset` — **irreversibly** destroy every provably profile-owned
+  wrapping key and remove the on-disk keyvault directory. Legacy
+  machine-global keys are retained when exclusive ownership cannot be proven
+  and are reported explicitly. The interactive path requires the operator to
+  type a confirmation phrase; `--yes` skips it for scripted use. Recovery is
   only possible afterward via `keyvault recover` with the backed-up Seed
   Phrase, Passphrase and blob.
 

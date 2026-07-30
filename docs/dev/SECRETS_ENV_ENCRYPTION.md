@@ -208,24 +208,31 @@ Apple Developer account is needed; an ad-hoc `codesign --sign -` alone runs real
 hardware SE** (the `dataRepresentation` blob is device-bound and meaningless on
 other machines). `native/sekey-helper/build.sh` does build + ad-hoc sign +
 `~/.local/bin` install, and Python `_seckey_helper._find_helper()` auto-detects
-it and switches to the SE path. Distribution ships the source and each user runs
-`build.sh` (free). A signed/notarized build is needed only for "Gatekeeper trust
-when downloading a prebuilt binary," not for SE use itself.
+it as the primary backend for fresh key creation; ordered fallback still finds
+existing legacy keys in their original namespace. Distribution ships the source
+and each user runs `build.sh` (free). A signed/notarized build is needed only
+for "Gatekeeper trust when downloading a prebuilt binary," not for SE use
+itself.
 
-**Enable command (`keyvault enable-se`)**: building and enabling the helper above
-is a single command — `hermes mordred keyvault enable-se [--install-dir PATH]
-[--unattended]`. Internally it calls `native/sekey-helper/build.sh`, running
+**Enable command (`keyvault enable-se`)**: building and installing the helper
+above is a single command — `hermes mordred keyvault enable-se
+[--install-dir PATH]`. It may install or refresh the helper with an existing
+keyvault. Internally it calls `native/sekey-helper/build.sh`, running
 `swift build -c release` → `codesign --sign -` (ad-hoc) → install to
-`~/.local/bin/mordred-hermes-sekey` → an SE probe, in order. Only on probe
-success does it promote the keyvault's wrapping key from the software P-256
-fallback to **hardware SE**; thereafter Python `_seckey_helper._find_helper()`
-auto-detects it. Prerequisites: macOS (Apple Silicon / T2) + Xcode CLI tools
+`~/.local/bin/mordred-hermes-sekey` → an SE probe, in order. Probe success
+confirms the helper is available for a **later** `keyvault init` or recovery;
+the installer does not create, promote, or migrate any wrapping key. Existing
+helper-store, legacy PyObjC-Keychain, and software keys remain in their current
+namespace and are still found through the backend's ordered fallback. Thereafter
+Python `_seckey_helper._find_helper()` auto-detects it for fresh key creation.
+Prerequisites: macOS (Apple Silicon / T2) + Xcode CLI tools
 (`swift` / `codesign`). **fail-safe** — if the platform guard / build / probe
-fails, it stays on the software fallback (the at-rest guarantee never degrades,
-rc 1). `--unattended` creates an SE key that can decrypt without a Touch ID
-prompt while the session is unlocked (access control is `.privateKeyUsage` only;
-the default requires Touch ID). If the helper is off `PATH`, point at it with
-`MORDRED_SEKEY_HELPER`. Implementation: `wizard/keyvault_cli.py:enable_se` /
+fails, no activation is claimed (rc 1). To create an SE key that can decrypt
+without a Touch ID prompt while the session is unlocked, put
+`MORDRED_SEKEY_UNATTENDED=1` on the later init/recovery command (access control
+is `.privateKeyUsage` only; the default requires Touch ID). If the helper is
+off `PATH`, point at it with `MORDRED_SEKEY_HELPER`. Implementation:
+`wizard/keyvault_native_cli.py:enable_se` /
 `keyvault/_seckey_helper.py`; for the full backend picture see the correction
 (2026-06-01) at the top of [`KEYVAULT_BACKENDS.md`](./KEYVAULT_BACKENDS.md).
 

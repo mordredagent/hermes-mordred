@@ -229,6 +229,54 @@ def test_corrupt_persisted_replay_state_fails_closed(channel_key: bytes, tmp_pat
         e2e.claim_gateway_replay(claim)
 
 
+@pytest.mark.parametrize("payload", [b"{not-json", b"[]"])
+def test_corrupt_pairing_store_is_not_replaced_by_replay_claim(
+    channel_key: bytes,
+    tmp_path,
+    payload: bytes,
+) -> None:
+    state_path = tmp_path / "extension" / "state.json"
+    state_path.write_bytes(payload)
+
+    with pytest.raises(RuntimeError, match="E2E replay state store is missing, unreadable, or corrupt"):
+        pairing.claim_e2e_replay_identities(("a" * 64,))
+
+    assert state_path.read_bytes() == payload
+
+
+def test_missing_pairing_store_rejects_replay_claim(channel_key: bytes, tmp_path) -> None:
+    state_path = tmp_path / "extension" / "state.json"
+    state_path.unlink()
+
+    with pytest.raises(RuntimeError, match="E2E replay state store is missing, unreadable, or corrupt"):
+        pairing.claim_e2e_replay_identities(("b" * 64,))
+
+    assert not state_path.exists()
+
+
+def test_replay_capacity_fails_closed_without_evicting_unexpired_evidence(channel_key: bytes, tmp_path) -> None:
+    state_path = tmp_path / "extension" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    accepted_at = 1_000_000.0
+    capacity = 32_768
+    state["e2e_replay_v3"] = [{"id": f"{index:064x}", "accepted_at": accepted_at} for index in range(capacity)]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    fresh = (f"{capacity:064x}", f"{capacity + 1:064x}")
+
+    with pytest.raises(RuntimeError, match="capacity exhausted"):
+        pairing.claim_e2e_replay_identities(fresh, now=accepted_at + 1.0)
+    assert pairing.claim_e2e_replay_identities((f"{0:064x}",), now=accepted_at + 2.0) is False
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["e2e_replay_v3"]
+    assert len(persisted) == capacity
+    assert {entry["id"] for entry in persisted}.isdisjoint(fresh)
+
+    after_ttl = accepted_at + pairing._E2E_REPLAY_TTL_SECONDS + 1.0
+    assert pairing.claim_e2e_replay_identities(fresh, now=after_ttl) is True
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["e2e_replay_v3"]
+    assert [entry["id"] for entry in persisted] == list(fresh)
+
+
 def test_gateway_commits_replay_only_after_outbound_path_is_ready(channel_key: bytes) -> None:
     token = _command(channel_key, "release exactly once")
     event = SimpleNamespace(

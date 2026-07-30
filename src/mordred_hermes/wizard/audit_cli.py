@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._audit_io import exclusive_audit_lock as _exclusive_audit_lock
 from ..privacy_check._runtime import get_active_audit_path
 from . import _term
 from ._defaults import resolve_backend
@@ -48,6 +51,7 @@ __all__ = [
 
 # The active audit log file name; rotated files are ``audit.log.<date>[...]``.
 _AUDIT_LOG_NAME = "audit.log"
+_ROTATED_AUDIT_NAME = re.compile(r"^audit\.log\.(?P<date>\d{4}-\d{2}-\d{2})(?:\.\d+)?(?:\.gz)?$")
 
 # Phase 4 ``MRAL`` encrypted-log format tag. Mirrors
 # ``keyvault.log_encryption.MAGIC`` (b"MRAL") — kept as a literal so the
@@ -55,6 +59,14 @@ _AUDIT_LOG_NAME = "audit.log"
 # (the keyvault crypto stack is macOS-extra-gated; see this module's
 # docstring on platform-independent reads).
 _MRAL_FMT = "MRAL"
+
+
+class _UnsafeAuditDirectoryError(RuntimeError):
+    """Raised when an audit operation cannot safely bind to its directory."""
+
+
+class _UnsafeAuditFileError(RuntimeError):
+    """Raised when an audit read target is not a stable regular file."""
 
 
 def _looks_like_mral_header(first_line: bytes) -> bool:
@@ -87,16 +99,80 @@ def _resolve_active_audit_path() -> Path:
     return get_active_audit_path()
 
 
+def _read_regular_audit_entry(*, directory_fd: int, name: str, display_path: Path) -> bytes | None:
+    """Read one directory entry without following a symlink or opening a FIFO.
+
+    ``None`` means the entry genuinely disappeared or never existed.  Both the
+    pre-open metadata and the opened descriptor must identify the same regular
+    inode; reads then happen through that descriptor, not through the pathname.
+    """
+    try:
+        path_meta = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _UnsafeAuditFileError(f"could not safely inspect audit log {display_path}: {exc}") from exc
+    if not stat.S_ISREG(path_meta.st_mode):
+        raise _UnsafeAuditFileError(f"refusing to read non-regular audit log: {display_path}")
+
+    open_flags = os.O_RDONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    open_flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        file_fd = os.open(name, open_flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _UnsafeAuditFileError(f"could not safely open audit log {display_path}: {exc}") from exc
+
+    try:
+        opened_meta = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(opened_meta.st_mode)
+            or opened_meta.st_dev != path_meta.st_dev
+            or opened_meta.st_ino != path_meta.st_ino
+        ):
+            raise _UnsafeAuditFileError(f"refusing to read audit log changed while opening: {display_path}")
+        chunks: list[bytes] = []
+        while chunk := os.read(file_fd, 65_536):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError as exc:
+        raise _UnsafeAuditFileError(f"could not safely read audit log {display_path}: {exc}") from exc
+    finally:
+        os.close(file_fd)
+
+
+def _read_audit_path(log_path: Path) -> bytes | None:
+    """Securely read a standalone audit path relative to its bound parent."""
+    directory_fd = _open_real_audit_directory(log_path.parent)
+    if directory_fd is None:
+        return None
+    try:
+        return _read_regular_audit_entry(
+            directory_fd=directory_fd,
+            name=log_path.name,
+            display_path=log_path,
+        )
+    finally:
+        os.close(directory_fd)
+
+
 def _iter_lines(log_path: Path) -> Iterator[str] | None:
     """Yield non-empty lines from ``log_path``.
 
     Returns ``None`` when the log is missing or appears encrypted.
     The caller surfaces the appropriate stderr message + exit code.
     """
-    if not log_path.exists():
+    try:
+        raw = _read_audit_path(log_path)
+    except (_UnsafeAuditDirectoryError, _UnsafeAuditFileError) as exc:
+        _term.emit_error(str(exc))
+        return None
+    if raw is None:
         _term.emit_error(f"No audit log at {log_path}")
         return None
-    raw = log_path.read_bytes()
     if raw:
         first_line = raw.split(b"\n", 1)[0]
         # Reject anything that is not Phase 1 plaintext NDJSON. Two cases:
@@ -170,6 +246,90 @@ def grep(*, pattern: str, log_path: Path | None = None) -> int:
     return 0 if hits else 1
 
 
+def _open_real_audit_directory(directory: Path) -> int | None:
+    """Open ``directory`` without following an endpoint symlink.
+
+    ``None`` means the directory genuinely does not exist.  The descriptor is
+    bound to the inode checked by ``lstat`` so subsequent purge operations can
+    remain relative to it even if the pathname is concurrently replaced.
+    """
+    try:
+        directory_meta = directory.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _UnsafeAuditDirectoryError(f"could not inspect audit directory {directory}: {exc}") from exc
+    if not stat.S_ISDIR(directory_meta.st_mode):
+        raise _UnsafeAuditDirectoryError(
+            f"refusing audit operation: audit directory is not a real directory: {directory}"
+        )
+
+    open_flags = os.O_RDONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_DIRECTORY", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(directory, open_flags)
+    except OSError as exc:
+        raise _UnsafeAuditDirectoryError(f"could not safely open audit directory {directory}: {exc}") from exc
+
+    try:
+        opened_meta = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(opened_meta.st_mode)
+            or opened_meta.st_dev != directory_meta.st_dev
+            or opened_meta.st_ino != directory_meta.st_ino
+        ):
+            raise _UnsafeAuditDirectoryError(
+                f"refusing audit operation: audit directory changed while opening: {directory}"
+            )
+    except (OSError, _UnsafeAuditDirectoryError):
+        os.close(directory_fd)
+        raise
+    return directory_fd
+
+
+def _audit_entry_names(directory_fd: int, directory: Path) -> list[str]:
+    """Return sorted entry names from the already-bound audit directory."""
+    try:
+        with os.scandir(directory_fd) as entries:
+            return sorted(entry.name for entry in entries)
+    except OSError as exc:
+        raise _UnsafeAuditDirectoryError(f"could not inspect audit directory {directory}: {exc}") from exc
+
+
+def _purge_rotated_entry(*, name: str, cutoff: date, directory_fd: int) -> tuple[int, int]:
+    """Purge one eligible regular entry, returning ``(deleted, failed)``."""
+    match = _ROTATED_AUDIT_NAME.fullmatch(name)
+    if match is None:
+        return 0, 0
+    try:
+        file_date = datetime.strptime(match.group("date"), "%Y-%m-%d").date()
+    except ValueError:
+        return 0, 0
+    if file_date >= cutoff:
+        return 0, 0
+
+    try:
+        child_meta = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return 0, 0  # another cleanup process already removed it
+    except OSError as exc:
+        _term.emit_error(f"could not inspect purge candidate {name}: {exc}")
+        return 0, 1
+    if not stat.S_ISREG(child_meta.st_mode):
+        _term.emit_error(f"refusing to purge non-regular audit entry: {name}")
+        return 0, 1
+
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except OSError as exc:
+        _term.emit_error(f"could not purge {name}: {exc}")
+        return 0, 1
+    print(f"purged {name}")
+    return 1, 0
+
+
 def purge(*, before: str, audit_dir: Path | None = None) -> int:
     """Delete rotated audit-log files dated strictly before ``before``.
 
@@ -181,8 +341,9 @@ def purge(*, before: str, audit_dir: Path | None = None) -> int:
     This is the manual cleanup path for pre-Phase-4 plaintext audit
     history (PATHS.md §Consumer CLI) — the operator picks the cutoff.
 
-    Returns 0 on success (including "nothing matched"), 2 when ``before``
-    is not a valid ``YYYY-MM-DD`` date.
+    Returns 0 on success (including "nothing matched"), 1 when the audit
+    directory or a deletion candidate cannot be handled safely, and 2 when
+    ``before`` is not a valid ``YYYY-MM-DD`` date.
 
     ``audit_dir=None`` resolves the directory of the active writer path,
     so the CLI cannot drift from where rotations actually land.
@@ -194,49 +355,89 @@ def purge(*, before: str, audit_dir: Path | None = None) -> int:
         return 2
 
     directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
-    prefix = _AUDIT_LOG_NAME + "."
     deleted = 0
-    if directory.exists():
-        for child in sorted(directory.iterdir()):
-            if child.name == _AUDIT_LOG_NAME or not child.name.startswith(prefix):
-                continue
-            date_token = child.name[len(prefix) :].split(".", 1)[0]
-            try:
-                file_date = datetime.strptime(date_token, "%Y-%m-%d").date()
-            except ValueError:
-                continue  # not a dated rotation file — leave it alone
-            if file_date < cutoff:
-                try:
-                    child.unlink()
-                except OSError as exc:
-                    _term.emit_error(f"could not purge {child.name}: {exc}")
-                    continue
-                print(f"purged {child.name}")
-                deleted += 1
+    failed = 0
+
+    # ``Path.exists()`` follows symlinks.  That is unsafe for a destructive
+    # command: an audit-dir symlink could otherwise make purge delete matching
+    # files in an unrelated directory.  Require a real directory, then keep an
+    # O_NOFOLLOW directory descriptor open so a later path swap cannot redirect
+    # child inspection or deletion.
+    try:
+        directory_fd = _open_real_audit_directory(directory)
+    except _UnsafeAuditDirectoryError as exc:
+        _term.emit_error(str(exc))
+        return 1
+    if directory_fd is None:
+        print("0 rotated audit log file(s) purged.")
+        return 0
+
+    try:
+        try:
+            names = _audit_entry_names(directory_fd, directory)
+        except _UnsafeAuditDirectoryError as exc:
+            _term.emit_error(str(exc))
+            return 1
+
+        for name in names:
+            entry_deleted, entry_failed = _purge_rotated_entry(
+                name=name,
+                cutoff=cutoff,
+                directory_fd=directory_fd,
+            )
+            deleted += entry_deleted
+            failed += entry_failed
+    finally:
+        os.close(directory_fd)
+
     print(f"{deleted} rotated audit log file(s) purged.")
-    return 0
+    return 1 if failed else 0
 
 
-def _resolve_decrypt_targets(directory: Path, target: date) -> list[Path]:
-    """Return the encrypted-log files holding ``target``'s entries.
+def _read_decrypt_targets(directory: Path, target: date) -> list[tuple[Path, bytes]]:
+    """Securely snapshot the encrypted-log files holding ``target``'s entries.
 
     Rotated files are ``audit.log.<date>[.N][.gz]``; the active
     ``audit.log`` holds the current UTC day until it rotates, so it is
-    included only when ``target`` is today.
+    included only when ``target`` is today.  The directory remains bound by
+    descriptor while every candidate is opened with ``O_NOFOLLOW`` and checked
+    as a regular file, preventing a symlinked directory/entry or FIFO from
+    redirecting or blocking the read.
     """
-    if not directory.exists():
+    directory_fd = _open_real_audit_directory(directory)
+    if directory_fd is None:
         return []
-    rotated_prefix = f"{_AUDIT_LOG_NAME}.{target.isoformat()}"
-    targets = [
-        child
-        for child in sorted(directory.iterdir())
-        if child.is_file() and (child.name == rotated_prefix or child.name.startswith(rotated_prefix + "."))
-    ]
-    if target == datetime.now(UTC).date():
-        active = directory / _AUDIT_LOG_NAME
-        if active.is_file():
-            targets.append(active)
-    return targets
+    try:
+        # Writers hold this stable sidecar across append rollback, rotation,
+        # gzip, and retention. Snapshot the name set and every selected inode
+        # under the same lock so a partial base64 line or in-progress gzip is
+        # never misreported as audit-log corruption. The lock is released
+        # before DEK unwrap: its audit sink may itself append to audit.log, and
+        # advisory flock recursion is not supported by this helper.
+        with _exclusive_audit_lock(directory / _AUDIT_LOG_NAME):
+            names = _audit_entry_names(directory_fd, directory)
+            target_iso = target.isoformat()
+            target_names = []
+            for name in names:
+                match = _ROTATED_AUDIT_NAME.fullmatch(name)
+                if match is not None and match.group("date") == target_iso:
+                    target_names.append(name)
+            if target == datetime.now(UTC).date() and _AUDIT_LOG_NAME in names:
+                target_names.append(_AUDIT_LOG_NAME)
+
+            snapshots: list[tuple[Path, bytes]] = []
+            for name in target_names:
+                display_path = directory / name
+                raw = _read_regular_audit_entry(
+                    directory_fd=directory_fd,
+                    name=name,
+                    display_path=display_path,
+                )
+                if raw is not None:
+                    snapshots.append((display_path, raw))
+            return snapshots
+    finally:
+        os.close(directory_fd)
 
 
 def _stderr_unwrap_sink(entry: dict[str, Any]) -> None:
@@ -259,6 +460,7 @@ def decrypt(
     *,
     date: str,
     audit_dir: Path | None = None,
+    keyvault_home: Path | None = None,
     backend: NativeBackend | None = None,
     audit_sink: AuditSink | None = None,
 ) -> int:
@@ -270,7 +472,9 @@ def decrypt(
 
     ``backend=None`` constructs the production Secure-Enclave backend;
     tests inject a software backend. ``audit_dir=None`` resolves the
-    directory of the active writer path.
+    directory of the active writer path while preserving the ambient Hermes
+    home. An explicit ``audit_dir`` follows the direct-API
+    ``<home>/mordred`` convention; ``keyvault_home`` overrides either case.
 
     Returns:
         0  every resolved file decrypted;
@@ -285,7 +489,17 @@ def decrypt(
         return 2
 
     directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
-    targets = _resolve_decrypt_targets(directory, target)
+    resolved_keyvault_home = keyvault_home
+    if resolved_keyvault_home is None and audit_dir is not None:
+        resolved_keyvault_home = audit_dir.parent
+    # A configured custom audit path does not move the ambient keyvault.
+    # Only an explicit audit_dir override carries the direct-API
+    # ``<home>/mordred`` convention.
+    try:
+        targets = _read_decrypt_targets(directory, target)
+    except (_UnsafeAuditDirectoryError, _UnsafeAuditFileError) as exc:
+        _term.emit_error(str(exc))
+        return 1
     if not targets:
         _term.emit_error(f"No audit log file found for {date} under {directory}")
         return 1
@@ -297,9 +511,15 @@ def decrypt(
     sink = audit_sink if audit_sink is not None else _stderr_unwrap_sink
 
     rc = 0
-    for path in targets:
+    for path, raw in targets:
         try:
-            entries = log_encryption.decrypt_log_file(path, backend=backend, audit_sink=sink)
+            entries = log_encryption.decrypt_log_file(
+                path,
+                backend=backend,
+                audit_sink=sink,
+                file_bytes=raw,
+                keyvault_home=resolved_keyvault_home,
+            )
         except WrapAuthCancelled:
             _term.emit_error(f"{path.name}: Secure Enclave authorization was cancelled")
             return 1

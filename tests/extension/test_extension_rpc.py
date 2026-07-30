@@ -30,7 +30,7 @@ def fake_rpc(monkeypatch):
             return "0x3b9aca00"
         if method == "eth_sendRawTransaction":
             sent["raw"] = params[0]
-            return "0xtxhash"
+            return "0x" + "12" * 32
         raise AssertionError(f"unexpected method {method}")
 
     monkeypatch.setattr(extension_rpc, "call", fake_call)
@@ -179,7 +179,7 @@ def test_fill_rejects_rpc_chain_mismatch_before_field_queries(monkeypatch):
 
 
 def test_send_raw(fake_rpc):
-    assert extension_rpc.send_raw_transaction("http://rpc", "0xdeadbeef", expected_chain_id=1) == "0xtxhash"
+    assert extension_rpc.send_raw_transaction("http://rpc", "0xdeadbeef", expected_chain_id=1) == "0x" + "12" * 32
     assert fake_rpc["raw"] == "0xdeadbeef"
 
 
@@ -199,6 +199,49 @@ def test_send_raw_rechecks_chain_before_broadcast(monkeypatch):
             expected_chain_id=1,
         )
     assert methods == ["eth_chainId"]
+
+
+@pytest.mark.parametrize("value", [True, 7, "7", None, {}, []])
+def test_remote_nonce_must_be_a_hex_quantity(monkeypatch, value):
+    monkeypatch.setattr(extension_rpc, "call", lambda *_args, **_kwargs: value)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="eth_getTransactionCount must be a hex quantity"):
+        extension_rpc.get_nonce("https://rpc.example.com", "0x" + "aa" * 20)
+
+
+@pytest.mark.parametrize("block", [None, [], "not-a-block", {"baseFeePerGas": True}])
+def test_fee_block_and_base_fee_are_strictly_validated(monkeypatch, block):
+    monkeypatch.setattr(extension_rpc, "call", lambda *_args, **_kwargs: block)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_invalid_response"):
+        extension_rpc.fee_data("https://rpc.example.com")
+
+
+def test_invalid_priority_fee_response_does_not_silently_use_fallback(monkeypatch):
+    def fake_call(_rpc_url, method, _params, timeout=30.0):
+        if method == "eth_getBlockByNumber":
+            return {"baseFeePerGas": "0x1"}
+        if method == "eth_maxPriorityFeePerGas":
+            return True
+        raise AssertionError(method)
+
+    monkeypatch.setattr(extension_rpc, "call", fake_call)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="eth_maxPriorityFeePerGas must be a hex quantity"):
+        extension_rpc.fee_data("https://rpc.example.com")
+
+
+@pytest.mark.parametrize("result", [None, True, 1, "0x1", "0x" + "gg" * 32])
+def test_send_raw_requires_canonical_transaction_hash(monkeypatch, result):
+    monkeypatch.setattr(extension_rpc, "assert_rpc_chain_id", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(extension_rpc, "call", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="must return a transaction hash"):
+        extension_rpc.send_raw_transaction(
+            "https://rpc.example.com",
+            "0xdeadbeef",
+            expected_chain_id=1,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -283,6 +326,69 @@ def test_call_never_posts_when_tor_proxy_is_missing(monkeypatch):
     assert posted == []
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"jsonrpc": "2.0", "id": 1, "error": {}},
+        {"jsonrpc": "2.0", "id": 1, "result": "0x1", "error": {}},
+        {"jsonrpc": "2.0", "id": 1},
+        {"jsonrpc": "2.0", "id": True, "result": "0x1"},
+        {"id": 1, "result": "0x1"},
+    ],
+)
+def test_call_rejects_error_or_malformed_result_envelopes(monkeypatch, response):
+    monkeypatch.setattr(extension_rpc, "_resolve_route", lambda _url: (None, "93.184.216.34"))
+    monkeypatch.setattr(
+        extension_rpc,
+        "_direct_https_post",
+        lambda *_args, **_kwargs: (200, response),
+    )
+
+    with pytest.raises(extension_rpc.JsonRpcError):
+        extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
+
+
+def test_remote_error_diagnostic_is_bounded_structured_and_control_safe():
+    response = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32000,
+            "message": "execution failed\n\x1b[31mred",
+            "data": {"private": "must-not-appear"},
+        },
+    }
+
+    with pytest.raises(extension_rpc.JsonRpcRemoteError) as exc_info:
+        extension_rpc._response_result(response)
+
+    diagnostic = str(exc_info.value)
+    assert diagnostic == r'rpc_error: code=-32000 message="execution failed\n\u001b[31mred"'
+    assert "must-not-appear" not in diagnostic
+    assert "\n" not in diagnostic
+    assert "\x1b" not in diagnostic
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": True, "message": "failure"},
+        {"code": "-32000", "message": "failure"},
+        {"code": -(2**31) - 1, "message": "failure"},
+        {"code": 2**31, "message": "failure"},
+        {"code": -32000, "message": 7},
+        {"code": -32000, "message": "x" * (extension_rpc._MAX_RPC_ERROR_MESSAGE_CHARS + 1)},
+    ],
+)
+def test_remote_error_rejects_invalid_code_or_message(error):
+    response = {"jsonrpc": "2.0", "id": 1, "error": error}
+
+    with pytest.raises(extension_rpc.JsonRpcError) as exc_info:
+        extension_rpc._response_result(response)
+
+    assert type(exc_info.value) is extension_rpc.JsonRpcError
+
+
 def test_direct_route_rejects_private_dns_answer_before_post(monkeypatch):
     _install_gateway_resolver(monkeypatch, lambda *, target_hosts=None: None)
     monkeypatch.setattr(extension_rpc, "_tor_route_active", lambda: False)
@@ -325,6 +431,7 @@ def test_call_refuses_redirect_and_disables_automatic_redirects(monkeypatch):
     with pytest.raises(extension_rpc.JsonRpcError, match="rpc_redirect_refused"):
         extension_rpc.call("https://rpc.example.com", "eth_chainId", [])
     assert seen["allow_redirects"] is False
+    assert seen["stream"] is True
 
 
 def test_direct_route_ignores_ambient_proxy_and_pins_validated_address(monkeypatch):
@@ -386,6 +493,10 @@ def test_direct_https_post_pins_ip_but_keeps_original_host_and_tls_name(monkeypa
         status = 200
         data = b'{"jsonrpc":"2.0","id":1,"result":"0x1"}'
 
+        @staticmethod
+        def close():
+            seen["response_closed"] = True
+
     class _Pool:
         def __init__(self, host, port, **kwargs):
             seen.update(connect_host=host, connect_port=port, pool_kwargs=kwargs)
@@ -412,8 +523,222 @@ def test_direct_https_post_pins_ip_but_keeps_original_host_and_tls_name(monkeypa
     assert seen["pool_kwargs"]["server_hostname"] == "rpc.example.com"
     assert seen["pool_kwargs"]["assert_hostname"] == "rpc.example.com"
     assert seen["request_kwargs"]["headers"]["Host"] == "rpc.example.com:8443"
+    assert seen["request_kwargs"]["preload_content"] is False
     assert seen["target"] == "/v1/key?network=mainnet"
+    assert seen["response_closed"] is True
     assert seen["closed"] is True
+
+
+def test_direct_https_rejects_declared_oversized_success_without_reading(monkeypatch):
+    import urllib3
+
+    seen = {"read": False, "response_closed": False, "pool_closed": False}
+
+    class _Response:
+        status = 200
+
+        def __init__(self):
+            self.headers = {"Content-Length": str(extension_rpc._MAX_RPC_RESPONSE_BYTES + 1)}
+
+        @staticmethod
+        def read(_amount):
+            seen["read"] = True
+            return b""
+
+        @staticmethod
+        def close():
+            seen["response_closed"] = True
+
+    class _Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def urlopen(self, *_args, **_kwargs):
+            return _Response()
+
+        def close(self):
+            seen["pool_closed"] = True
+
+    monkeypatch.setattr(urllib3, "HTTPSConnectionPool", _Pool)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_response_too_large"):
+        extension_rpc._direct_https_post(
+            "https://rpc.example.com",
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+            address="93.184.216.34",
+            timeout=4.0,
+        )
+
+    assert seen == {"read": False, "response_closed": True, "pool_closed": True}
+
+
+def test_direct_https_rejects_chunked_body_over_actual_limit(monkeypatch):
+    import urllib3
+
+    seen = {"response_closed": False, "pool_closed": False}
+
+    class _Response:
+        status = 200
+
+        def __init__(self):
+            self.headers = {}
+            self._chunks = [b"x" * extension_rpc._MAX_RPC_RESPONSE_BYTES, b"x"]
+
+        def read(self, _amount):
+            return self._chunks.pop(0) if self._chunks else b""
+
+        @staticmethod
+        def close():
+            seen["response_closed"] = True
+
+    class _Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def urlopen(self, *_args, **_kwargs):
+            return _Response()
+
+        def close(self):
+            seen["pool_closed"] = True
+
+    monkeypatch.setattr(urllib3, "HTTPSConnectionPool", _Pool)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_response_too_large"):
+        extension_rpc._direct_https_post(
+            "https://rpc.example.com",
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+            address="93.184.216.34",
+            timeout=4.0,
+        )
+
+    assert seen == {"response_closed": True, "pool_closed": True}
+
+
+def test_direct_https_closes_non_success_response(monkeypatch):
+    import urllib3
+
+    seen = {"response_closed": False, "pool_closed": False}
+
+    class _Response:
+        status = 503
+
+        @staticmethod
+        def close():
+            seen["response_closed"] = True
+
+    class _Pool:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def urlopen(self, *_args, **_kwargs):
+            return _Response()
+
+        def close(self):
+            seen["pool_closed"] = True
+
+    monkeypatch.setattr(urllib3, "HTTPSConnectionPool", _Pool)
+
+    status, data = extension_rpc._direct_https_post(
+        "https://rpc.example.com",
+        {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+        address="93.184.216.34",
+        timeout=4.0,
+    )
+
+    assert (status, data) == (503, None)
+    assert seen == {"response_closed": True, "pool_closed": True}
+
+
+def test_proxied_https_rejects_declared_oversized_success_without_reading(monkeypatch):
+    seen = {"read": False, "closed": False}
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self):
+            self.headers = {"Content-Length": str(extension_rpc._MAX_RPC_RESPONSE_BYTES + 1)}
+
+        @staticmethod
+        def iter_content(*, chunk_size):
+            seen["read"] = True
+            yield b""
+
+        @staticmethod
+        def close():
+            seen["closed"] = True
+
+    monkeypatch.setattr("requests.Session.post", lambda *_args, **_kwargs: _Response())
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_response_too_large"):
+        extension_rpc._proxied_https_post(
+            "https://rpc.example.com",
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+            proxies={"https": "socks5h://127.0.0.1:9050"},
+            timeout=4.0,
+        )
+
+    assert seen == {"read": False, "closed": True}
+
+
+def test_proxied_https_rejects_streamed_body_over_actual_limit(monkeypatch):
+    seen = {"closed": False, "request": {}}
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self):
+            self.headers = {}
+
+        @staticmethod
+        def iter_content(*, chunk_size):
+            yield b"x" * extension_rpc._MAX_RPC_RESPONSE_BYTES
+            yield b"x"
+
+        @staticmethod
+        def close():
+            seen["closed"] = True
+
+    def post(_self, *_args, **kwargs):
+        seen["request"] = kwargs
+        return _Response()
+
+    monkeypatch.setattr("requests.Session.post", post)
+
+    with pytest.raises(extension_rpc.JsonRpcError, match="rpc_response_too_large"):
+        extension_rpc._proxied_https_post(
+            "https://rpc.example.com",
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+            proxies={"https": "socks5h://127.0.0.1:9050"},
+            timeout=4.0,
+        )
+
+    assert seen["closed"] is True
+    assert seen["request"]["stream"] is True
+    assert seen["request"]["allow_redirects"] is False
+
+
+def test_proxied_https_keeps_lightweight_json_fake_compatibility(monkeypatch):
+    class _Response:
+        status_code = 200
+
+        def __init__(self):
+            self.headers = {}
+
+        @staticmethod
+        def json():
+            return {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    monkeypatch.setattr("requests.Session.post", lambda *_args, **_kwargs: _Response())
+
+    status, data = extension_rpc._proxied_https_post(
+        "https://rpc.example.com",
+        {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+        proxies={"https": "socks5h://127.0.0.1:9050"},
+        timeout=4.0,
+    )
+
+    assert status == 200
+    assert data["result"] == "0x1"
 
 
 @pytest.mark.parametrize(

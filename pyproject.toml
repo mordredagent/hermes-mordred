@@ -233,7 +233,7 @@ testpaths = ["tests"]
 # `integration-vpn` CI jobs opt back in via `-m integration`.
 addopts = "-q --strict-markers -m 'not integration'"
 markers = [
-    "integration: requires external services (Docker, real Mullvad daemon, live network); excluded from default runs",
+    "integration: requires external services, live network, or device hardware; excluded from default runs",
 ]
 xfail_strict = true
 

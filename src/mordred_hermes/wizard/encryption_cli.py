@@ -630,8 +630,13 @@ def cli_purge(args: argparse.Namespace) -> int:
         scope = (
             "ALL encrypted copies (env, config, memory, workspace)" if args.target == "all" else "the encrypted copy"
         )
+        workspace_targets = ""
+        if args.target in {"workspace", "all"}:
+            workspace = resolve_workspace_env()
+            workspace_targets = f" Workspace targets: volume={workspace.image}; key material={workspace.keydir}."
         _term.emit_error(
-            f"encryption purge {args.target} is destructive (removes {scope}). Re-run with --yes to confirm."
+            f"encryption purge {args.target} is destructive (removes {scope}).{workspace_targets} "
+            "Re-run with --yes to confirm."
         )
         return 2
     if args.target == "all":

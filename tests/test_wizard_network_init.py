@@ -199,6 +199,11 @@ class TestCollectNetworkAnswers:
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.tor_socks_port == 9050
 
+    def test_65535_falls_back_because_control_port_needs_plus_one(self) -> None:
+        prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "65535", "mullvad", "", "auto", False])
+        inputs = collect_network_answers(prompts)
+        assert inputs.network_answers.tor_socks_port == 9050
+
     def test_invalid_relay_country_falls_back_to_auto(self) -> None:
         prompts = _ScriptedPromptIO(answers=["clearnet", "/usr/bin/tor", "9050", "mullvad", "", "unitedstates", False])
         inputs = collect_network_answers(prompts)

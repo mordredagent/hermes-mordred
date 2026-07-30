@@ -17,11 +17,16 @@ re-runs (use --reset to force).
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import stat
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from mordred_hermes.privacy_check.audit import NDJSONWriter
 from mordred_hermes.wizard import openclaw_migration, upgrade
 from mordred_hermes.wizard.policy_writer import PolicyWriter
 
@@ -154,6 +159,26 @@ class TestAuditMigration:
         assert len(lines) == 2
         assert "skill_id" in lines[0]
 
+    def test_hardlinked_source_and_destination_are_refused_before_locking(self, tmp_path: Path) -> None:
+        base = tmp_path / "openclaw" / "mordred"
+        source_line = '{"ts":"2026-05-01T00:00:00.000Z","event":"legacy","decision":"allow"}\n'
+        _seed_openclaw(base, audit_lines=[source_line.strip()])
+        writer = _writer(tmp_path)
+        dest = writer.mordred_dir / "audit.log"
+        dest.parent.mkdir(parents=True)
+        os.link(base / "audit.log", dest)
+
+        with pytest.raises(SystemExit, match="must be different files"):
+            openclaw_migration.migrate(
+                openclaw_base=base,
+                policy_writer=writer,
+                options=upgrade.UpgradeOptions(),
+            )
+
+        assert (base / "audit.log").read_text(encoding="utf-8") == source_line
+        assert dest.read_text(encoding="utf-8") == source_line
+        assert not (writer.mordred_dir / openclaw_migration.MARKER_FILENAME).exists()
+
     def test_marker_written_after_successful_migration(self, tmp_path: Path) -> None:
         base = tmp_path / "openclaw" / "mordred"
         _seed_openclaw(
@@ -244,6 +269,158 @@ class TestAuditMigration:
         )
         assert hermes_audit.read_text(encoding="utf-8") == original
 
+    def test_live_destination_append_waits_for_migration_and_is_preserved(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            audit_lines=['{"ts":"2026-05-01T00:00:00.000Z","event":"legacy","decision":"allow"}'],
+        )
+        writer = _writer(tmp_path)
+        dest = writer.mordred_dir / "audit.log"
+        publish_entered = threading.Event()
+        release_publish = threading.Event()
+        append_done = threading.Event()
+        failures: list[BaseException] = []
+        from mordred_hermes.wizard.policy_writer import _atomic_write_text as real_atomic_write
+
+        def blocked_publish(path: Path, text: str, *, mode: int | None = None) -> None:
+            if path == dest:
+                publish_entered.set()
+                if not release_publish.wait(timeout=5):
+                    raise RuntimeError("test publish release timed out")
+            real_atomic_write(path, text, mode=mode)
+
+        monkeypatch.setattr(
+            "mordred_hermes.wizard.openclaw_migration._atomic_write_text",
+            blocked_publish,
+        )
+
+        def migrate_audit() -> None:
+            try:
+                openclaw_migration.migrate(
+                    openclaw_base=base,
+                    policy_writer=writer,
+                    options=upgrade.UpgradeOptions(),
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        def append_live_entry() -> None:
+            try:
+                NDJSONWriter(dest).append({"event": "live", "decision": "allow"})
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+            finally:
+                append_done.set()
+
+        migration_thread = threading.Thread(target=migrate_audit)
+        append_thread = threading.Thread(target=append_live_entry)
+        migration_thread.start()
+        assert publish_entered.wait(timeout=5)
+        append_thread.start()
+        assert not append_done.wait(timeout=0.1), "live writer bypassed the destination sidecar lock"
+        release_publish.set()
+        migration_thread.join(timeout=5)
+        append_thread.join(timeout=5)
+
+        assert not migration_thread.is_alive() and not append_thread.is_alive()
+        assert failures == []
+        entries = [json.loads(line) for line in dest.read_text(encoding="utf-8").splitlines()]
+        assert [entry["event"] for entry in entries] == ["legacy", "live"]
+
+    def test_encrypted_destination_is_refused_without_mutation(self, tmp_path: Path) -> None:
+        base = tmp_path / "openclaw" / "mordred"
+        source_line = '{"ts":"2026-05-01T00:00:00.000Z","event":"legacy","decision":"allow"}\n'
+        _seed_openclaw(base, audit_lines=[source_line.strip()])
+        writer = _writer(tmp_path)
+        dest = writer.mordred_dir / "audit.log"
+        dest.parent.mkdir(parents=True)
+        original_dest = b'{"fmt":"MRAL","v":1,"key_id":"mordred.audit-log"}\nopaque-ciphertext\n'
+        dest.write_bytes(original_dest)
+
+        with pytest.raises(SystemExit, match="encrypted or foreign destination audit log"):
+            openclaw_migration.migrate(
+                openclaw_base=base,
+                policy_writer=writer,
+                options=upgrade.UpgradeOptions(audit_merge="append-all"),
+            )
+
+        assert dest.read_bytes() == original_dest
+        assert (base / "audit.log").read_text(encoding="utf-8") == source_line
+        assert not (writer.mordred_dir / openclaw_migration.MARKER_FILENAME).exists()
+
+    @pytest.mark.parametrize("foreign_side", ["source", "destination"])
+    def test_missing_timestamp_is_refused_as_foreign_without_mutation(
+        self,
+        tmp_path: Path,
+        foreign_side: str,
+    ) -> None:
+        base = tmp_path / "openclaw" / "mordred"
+        valid_source = '{"ts":"2026-05-01T00:00:00.000Z","event":"legacy","decision":"allow"}\n'
+        _seed_openclaw(base, audit_lines=[valid_source.strip()])
+        writer = _writer(tmp_path)
+        dest = writer.mordred_dir / "audit.log"
+        dest.parent.mkdir(parents=True)
+        valid_dest = '{"ts":"2026-05-02T00:00:00.000Z","event":"current","decision":"allow"}\n'
+        dest.write_text(valid_dest, encoding="utf-8")
+        foreign = '{"event":"not-an-audit-entry"}\n'
+        foreign_path = base / "audit.log" if foreign_side == "source" else dest
+        foreign_path.write_text(foreign, encoding="utf-8")
+
+        with pytest.raises(SystemExit, match=f"foreign {foreign_side} audit log"):
+            openclaw_migration.migrate(
+                openclaw_base=base,
+                policy_writer=writer,
+                options=upgrade.UpgradeOptions(audit_merge="append-all"),
+            )
+
+        expected_source = foreign if foreign_side == "source" else valid_source
+        expected_dest = foreign if foreign_side == "destination" else valid_dest
+        assert (base / "audit.log").read_text(encoding="utf-8") == expected_source
+        assert dest.read_text(encoding="utf-8") == expected_dest
+        assert not (writer.mordred_dir / openclaw_migration.MARKER_FILENAME).exists()
+
+    def test_concurrent_migrations_append_source_only_once(self, tmp_path: Path) -> None:
+        base = tmp_path / "openclaw" / "mordred"
+        _seed_openclaw(
+            base,
+            audit_lines=['{"ts":"2026-05-01T00:00:00.000Z","event":"legacy","decision":"allow"}'],
+        )
+        writer = _writer(tmp_path)
+        ready = threading.Barrier(2)
+        results: list[str] = []
+        failures: list[BaseException] = []
+
+        def migrate_once() -> None:
+            try:
+                ready.wait(timeout=5)
+                results.append(
+                    openclaw_migration.migrate(
+                        openclaw_base=base,
+                        policy_writer=writer,
+                        options=upgrade.UpgradeOptions(),
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        threads = [threading.Thread(target=migrate_once) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert failures == []
+        assert sorted(results) == ["migrated", "skipped-marker"]
+        dest = writer.mordred_dir / "audit.log"
+        entries = [json.loads(line) for line in dest.read_text(encoding="utf-8").splitlines()]
+        assert [entry["event"] for entry in entries] == ["legacy"]
+
 
 # -----------------------------------------------------------------------------
 # Keyvault / credentials -- never overwrite
@@ -297,6 +474,25 @@ class TestKeyvaultCredentialsNeverOverwrite:
         dest_keyvault = tmp_path / "hermes" / "mordred" / "keyvault"
         assert (dest_keyvault / "key1.bin").read_bytes() == b"opaque-keyvault-bytes"
 
+    def test_idempotent_retry_repairs_existing_destination_modes(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        source_nested = src / "nested"
+        source_nested.mkdir(parents=True)
+        source_file = source_nested / "key.bin"
+        source_file.write_bytes(b"secret")
+        dest = tmp_path / "dest"
+        shutil.copytree(src, dest)
+        os.chmod(dest, 0o777)
+        os.chmod(dest / "nested", 0o775)
+        os.chmod(dest / "nested" / "key.bin", 0o644)
+
+        assert openclaw_migration._migrate_directory(src, dest, "keyvault") is False
+
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+        assert stat.S_IMODE((dest / "nested").stat().st_mode) == 0o700
+        assert stat.S_IMODE((dest / "nested" / "key.bin").stat().st_mode) == 0o600
+        assert source_file.read_bytes() == b"secret"
+
     def test_keyvault_content_collision_still_aborts(self, tmp_path: Path) -> None:
         """Idempotency must NOT swallow real data conflicts -- different content
         at dest still aborts (data-loss protection per PATHS.md H5)."""
@@ -311,6 +507,232 @@ class TestKeyvaultCredentialsNeverOverwrite:
             openclaw_migration.migrate(openclaw_base=base, policy_writer=w, options=upgrade.UpgradeOptions())
         # Existing data must remain untouched
         assert (hermes_kv / "key1.bin").read_bytes() == b"different-content"
+
+    def test_dangling_destination_symlink_is_never_replaced(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "key.bin").write_bytes(b"secret")
+        dest = tmp_path / "dest"
+        dest.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+
+        with pytest.raises(SystemExit, match="refusing to overwrite"):
+            openclaw_migration._migrate_directory(src, dest, "keyvault")
+
+        assert dest.is_symlink()
+
+    def test_symlinked_source_root_is_refused(self, tmp_path: Path) -> None:
+        actual = tmp_path / "actual"
+        actual.mkdir()
+        (actual / "key.bin").write_bytes(b"secret")
+        src = tmp_path / "src"
+        src.symlink_to(actual, target_is_directory=True)
+        dest = tmp_path / "dest"
+
+        with pytest.raises(SystemExit, match="unsafe non-directory"):
+            openclaw_migration._migrate_directory(src, dest, "keyvault")
+
+        assert not dest.exists()
+
+    def test_nested_source_symlink_is_refused(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside.bin"
+        outside.write_bytes(b"outside-secret")
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "linked.bin").symlink_to(outside)
+        dest = tmp_path / "dest"
+
+        with pytest.raises(SystemExit, match="symlink or special"):
+            openclaw_migration._migrate_directory(src, dest, "credentials")
+
+        assert not dest.exists()
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO unavailable")
+    def test_nested_source_fifo_is_refused(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        os.mkfifo(src / "pipe", mode=0o600)
+        dest = tmp_path / "dest"
+
+        with pytest.raises(SystemExit, match="symlink or special"):
+            openclaw_migration._migrate_directory(src, dest, "credentials")
+
+        assert not dest.exists()
+
+    def test_staged_tree_is_revalidated_before_publish(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "key.bin").write_bytes(b"secret")
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"outside-secret")
+        dest = tmp_path / "dest"
+
+        def inject_staged_symlink(_src: Path, staged: Path, **_kwargs: object) -> None:
+            staged.mkdir(parents=True)
+            (staged / "linked.bin").symlink_to(outside)
+
+        monkeypatch.setattr(openclaw_migration.shutil, "copytree", inject_staged_symlink)
+
+        with pytest.raises(SystemExit, match="symlink or special"):
+            openclaw_migration._migrate_directory(src, dest, "keyvault")
+
+        assert not dest.exists()
+        assert not list(tmp_path.glob(".dest.migrate-*"))
+
+    def test_source_mutation_during_copy_is_refused_without_publishing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        source_file = src / "key.bin"
+        source_file.write_bytes(b"before")
+        dest = tmp_path / "dest"
+        real_copytree = shutil.copytree
+
+        def copy_then_mutate(source: Path, staged: Path, **kwargs: object) -> Path:
+            result = real_copytree(source, staged, **kwargs)
+            source_file.write_bytes(b"after!")
+            return result
+
+        monkeypatch.setattr(
+            "mordred_hermes.wizard.openclaw_migration.shutil.copytree",
+            copy_then_mutate,
+        )
+
+        with pytest.raises(SystemExit, match="source changed during migration"):
+            openclaw_migration._migrate_directory(src, dest, "keyvault")
+
+        assert not dest.exists()
+        assert source_file.read_bytes() == b"after!"
+        assert not list(tmp_path.glob(".dest.migrate-*"))
+
+    def test_published_sensitive_tree_has_private_modes_without_changing_source(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        nested = src / "nested"
+        nested.mkdir(parents=True)
+        source_file = nested / "key.bin"
+        source_file.write_bytes(b"secret")
+        os.chmod(src, 0o777)
+        os.chmod(nested, 0o775)
+        os.chmod(source_file, 0o644)
+        dest = tmp_path / "dest"
+
+        assert openclaw_migration._migrate_directory(src, dest, "keyvault") is True
+
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+        assert stat.S_IMODE((dest / "nested").stat().st_mode) == 0o700
+        assert stat.S_IMODE((dest / "nested" / "key.bin").stat().st_mode) == 0o600
+        assert stat.S_IMODE(src.stat().st_mode) == 0o777
+        assert stat.S_IMODE(nested.stat().st_mode) == 0o775
+        assert stat.S_IMODE(source_file.stat().st_mode) == 0o644
+
+    def test_sensitive_tree_flushes_files_then_directories_bottom_up(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "copied"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        copied_file = nested / "key.bin"
+        copied_file.write_bytes(b"secret")
+        labels = {
+            (path.stat().st_dev, path.stat().st_ino): label
+            for path, label in ((root, "root"), (nested, "nested"), (copied_file, "file"))
+        }
+        sync_order: list[str] = []
+
+        def observe_sync(fd: int) -> None:
+            metadata = os.fstat(fd)
+            sync_order.append(labels[(metadata.st_dev, metadata.st_ino)])
+
+        monkeypatch.setattr(openclaw_migration, "_fsync_durable", observe_sync)
+
+        openclaw_migration._tighten_sensitive_tree(root, "keyvault")
+
+        assert sync_order == ["file", "nested", "root"]
+
+    def test_parent_fsync_failure_after_publish_is_not_reported_as_success(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "key.bin").write_bytes(b"secret")
+        dest = tmp_path / "dest"
+
+        def fail_parent_sync(path: Path) -> None:
+            assert path == dest
+            raise OSError("forced destination parent fsync failure")
+
+        monkeypatch.setattr(openclaw_migration, "_fsync_parent", fail_parent_sync)
+
+        with pytest.raises(OSError, match="forced destination parent fsync failure"):
+            openclaw_migration._migrate_directory(src, dest, "keyvault")
+
+        # rename already committed in this process, but the caller was not told
+        # migration succeeded without a durable destination directory entry.
+        assert (dest / "key.bin").read_bytes() == b"secret"
+        assert not list(tmp_path.glob(".dest.migrate-*"))
+
+    def test_same_size_and_mtime_with_different_bytes_is_not_identical(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        dest = tmp_path / "dest"
+        src.mkdir()
+        dest.mkdir()
+        src_file = src / "key.bin"
+        dest_file = dest / "key.bin"
+        src_file.write_bytes(b"AAAA")
+        dest_file.write_bytes(b"BBBB")
+        timestamp = 1_700_000_000_000_000_000
+        os.utime(src_file, ns=(timestamp, timestamp))
+        os.utime(dest_file, ns=(timestamp, timestamp))
+
+        assert openclaw_migration._dirs_identical(src, dest) is False
+
+    def test_directory_comparison_does_not_reuse_stale_filecmp_cache(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        dest = tmp_path / "dest"
+        src.mkdir()
+        dest.mkdir()
+        src_file = src / "key.bin"
+        dest_file = dest / "key.bin"
+        src_file.write_bytes(b"AAAA")
+        dest_file.write_bytes(b"AAAA")
+        timestamp = 1_700_000_000_000_000_000
+        os.utime(src_file, ns=(timestamp, timestamp))
+        os.utime(dest_file, ns=(timestamp, timestamp))
+
+        assert openclaw_migration._dirs_identical(src, dest) is True
+
+        dest_file.write_bytes(b"BBBB")
+        os.utime(dest_file, ns=(timestamp, timestamp))
+
+        assert openclaw_migration._dirs_identical(src, dest) is False
+
+    def test_failed_copy_leaves_no_partial_destination(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        src = tmp_path / "src"
+        dest = tmp_path / "dest"
+        src.mkdir()
+        (src / "key.bin").write_bytes(b"secret")
+
+        def partial_then_fail(_src: Path, staged: Path, **_kwargs: object) -> None:
+            staged.mkdir(parents=True)
+            (staged / "partial.bin").write_bytes(b"partial")
+            raise OSError("simulated copy failure")
+
+        monkeypatch.setattr(openclaw_migration.shutil, "copytree", partial_then_fail)
+        with pytest.raises(OSError, match="copy failure"):
+            openclaw_migration._migrate_directory(src, dest, "keyvault")
+
+        assert not dest.exists()
+        assert not list(tmp_path.glob(".dest.migrate-*"))
 
     def test_partial_failure_retry_after_audit_overlap(self, tmp_path: Path) -> None:
         """Codex P1-B (sub-case): keyvault copies, then audit step aborts on

@@ -25,15 +25,20 @@ See ``Mordred-Extension/SPEC.ja.md`` §3.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import logging
 import math
 import os
 import secrets
+import stat
 import sys
+import threading
 import time
 import types
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, TypeGuard, cast
 
@@ -47,7 +52,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from ..keyvault._storage import atomic_write
+from ..keyvault._storage import atomic_write, safe_read
 from . import webauthn as _webauthn
 from .crypto import b64u_decode, b64u_encode, derive_shared_key, x25519_public_raw
 from .webauthn import (
@@ -171,9 +176,16 @@ _CODE_TTL_SECONDS = 10 * 60
 ATTEST_CONTEXT = b"mordred-ext-attest-v1"
 _E2E_REPLAY_FIELD = "e2e_replay_v3"
 _E2E_REPLAY_TTL_SECONDS = 30 * 24 * 3600
-# Two identities are stored per accepted platform message. Capping at 32K
-# keeps the JSON rewrite bounded while retaining the most recent 16K commands.
 _E2E_REPLAY_MAX_IDENTITIES = 32_768
+# Warn while there is still room to act. Exhaustion refuses every authenticated
+# command, so it must not be the first thing the operator learns about.
+_E2E_REPLAY_WARN_THRESHOLD = (_E2E_REPLAY_MAX_IDENTITIES * 9) // 10
+_LOG = logging.getLogger("mordred.extension.pairing")
+_PAIRING_CODE_DIGEST_FIELD = "paired_code_sha256"
+_STATE_THREAD_LOCK = threading.RLock()
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 class PairError(Exception):
@@ -193,9 +205,16 @@ def _ext_dir() -> Path:
     from .._home import hermes_home
 
     d = hermes_home() / "extension"
-    d.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chmod(d, 0o700)
+    try:
+        metadata = d.lstat()
+    except FileNotFoundError:
+        with contextlib.suppress(FileExistsError):
+            d.mkdir(mode=0o700, parents=True)
+        metadata = d.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise OSError("extension state directory must be a real directory")
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        os.chmod(d, 0o700, follow_symlinks=False)
     return d
 
 
@@ -213,11 +232,40 @@ def _write_private(path: Path, data: bytes) -> None:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    """Read a private JSON-object store, tolerating only genuine absence.
+
+    An absent store is the normal first-run state and remains represented by
+    ``{}`` for compatibility with the existing callers.  Once a directory
+    entry exists, however, treating an unreadable, unsafe, malformed, or
+    non-object file as empty would let the next read-modify-write silently
+    replace pairing credentials, pending-code evidence, or channel keys.
+    Existing bad state therefore fails closed and is left byte-for-byte intact.
+    """
     try:
-        data = json.loads(path.read_text("utf-8"))
-    except (OSError, ValueError):
+        raw = safe_read(path)
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except OSError as exc:
+        raise RuntimeError(f"extension JSON store {path.name} is unreadable or corrupt") from exc
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"extension JSON store {path.name} is unreadable or corrupt") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"extension JSON store {path.name} is unreadable or corrupt")
+    return data
+
+
+def _read_json_strict(path: Path, purpose: str) -> dict[str, Any]:
+    """Read a private JSON object, distinguishing missing/corrupt from empty."""
+    try:
+        raw = safe_read(path)
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"{purpose} is missing, unreadable, or corrupt") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{purpose} is missing, unreadable, or corrupt")
+    return data
 
 
 @contextlib.contextmanager
@@ -231,18 +279,26 @@ def _state_lock() -> Iterator[None]:
     (no awaits): callers run on the gateway's event loop and rely on the lock
     being held only for a quick file round-trip.
     """
-    if fcntl is None:  # non-POSIX fallback: single-process best effort
-        yield
-        return
-    fd = os.open(_ext_dir() / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    with _STATE_THREAD_LOCK:
+        lock_path = _ext_dir() / ".lock"
+        fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK,
+            0o600,
+        )
         try:
-            yield
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise OSError("extension state lock must be a mode-0600 regular file")
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+            os.close(fd)
 
 
 # --------------------------------------------------------------------------- #
@@ -281,6 +337,34 @@ def generate_code() -> tuple[str, float]:
         pending[code] = {"expires_at": expires_at, "used": False, "paired_at": None}
         _write_private(path, json.dumps(pending).encode("utf-8"))
     return code, expires_at
+
+
+def revoke_code(code: str) -> bool:
+    """Atomically burn a pairing code that has not committed a pairing.
+
+    A gateway may already have claimed the code and be deriving keys when the
+    CLI is cancelled. Such an in-flight code is still revocable: the final
+    pairing commit checks the cancellation marker under this same state lock.
+    ``False`` therefore means the code was absent or its pairing had already
+    reached a terminal result.
+    """
+    code = normalize_code(code)
+    path = _ext_dir() / "pending.json"
+    with _state_lock():
+        pending = _read_json(path)
+        entry = pending.get(code)
+        if not isinstance(entry, dict) or entry.get("result") is not None:
+            return False
+        state = _read_json(_state_path())
+        if state.get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code):
+            return False
+        entry["used"] = True
+        entry["cancelled_at"] = time.time()
+        entry["result"] = "failed"
+        entry["fail_reason"] = "cancelled"
+        pending[code] = entry
+        _write_private(path, json.dumps(pending).encode("utf-8"))
+        return True
 
 
 def _consume_code(code: str) -> None:
@@ -345,7 +429,12 @@ def pair_outcome(code: str) -> tuple[str, str | None]:
     - ``"consumed"`` — claimed with no outcome recorded: mid-handshake, or a
       server implementation that predates result recording.
     """
-    entry = _read_json(_ext_dir() / "pending.json").get(code)
+    code = normalize_code(code)
+    with _state_lock():
+        entry = _read_json(_ext_dir() / "pending.json").get(code)
+        committed = _read_json(_state_path()).get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code)
+    if committed:
+        return ("paired", None)
     if not entry or not entry.get("used"):
         return ("pending", None)
     result = entry.get("result")
@@ -363,21 +452,27 @@ def pair_outcome(code: str) -> tuple[str, str | None]:
 
 def _load_or_create_attest_key() -> ec.EllipticCurvePrivateKey:
     path = _ext_dir() / "attest_key.pem"
-    if path.exists():
+    with _state_lock():
         try:
-            key = serialization.load_pem_private_key(path.read_bytes(), password=None)
-            if isinstance(key, ec.EllipticCurvePrivateKey):
-                return key
-        except (ValueError, OSError):
-            pass
-    key = ec.generate_private_key(ec.SECP256R1())
-    pem = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    )
-    _write_private(path, pem)
-    return key
+            pem = safe_read(path)
+        except FileNotFoundError:
+            key = ec.generate_private_key(ec.SECP256R1())
+            pem = key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+            _write_private(path, pem)
+            return key
+        except OSError as exc:
+            raise RuntimeError("attestation identity is unreadable; refusing replacement") from exc
+        try:
+            loaded_key = serialization.load_pem_private_key(pem, password=None)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("attestation identity is invalid; refusing replacement") from exc
+        if not isinstance(loaded_key, ec.EllipticCurvePrivateKey) or not isinstance(loaded_key.curve, ec.SECP256R1):
+            raise RuntimeError("attestation identity is invalid; refusing replacement")
+        return loaded_key
 
 
 def attest_pubkey_spki_b64() -> str:
@@ -430,6 +525,10 @@ def _state_path() -> Path:
     return _ext_dir() / "state.json"
 
 
+def _pairing_code_digest(code: str) -> str:
+    return hashlib.sha256(code.encode("ascii")).hexdigest()
+
+
 def load_pairing() -> Pairing | None:
     data = _read_json(_state_path())
     if not data or "aes_key" not in data:
@@ -443,33 +542,71 @@ def load_pairing() -> Pairing | None:
     )
 
 
-def _save_pairing(p: Pairing) -> None:
+def _write_pairing_locked(p: Pairing, *, paired_code_digest: str | None) -> None:
+    """Persist *p* while the caller holds :func:`_state_lock`."""
     # Preserve any v2 keyring fields (channel_keys) already in state.
+    data = _read_json(_state_path()) or {}
+    data.update(
+        {
+            "aes_key": b64u_encode(p.aes_key),
+            "ext_token": p.ext_token,
+            "ext_pubkey": p.ext_pubkey_b64,
+            "hermes_pubkey": p.hermes_pubkey_b64,
+            "paired_at": p.paired_at,
+            # Any WebAuthn file not explicitly bound to this new token is
+            # from an older pairing generation and must be ignored.
+            "reject_unbound_webauthn": True,
+        }
+    )
+    if paired_code_digest is None:
+        data.pop(_PAIRING_CODE_DIGEST_FIELD, None)
+    else:
+        data[_PAIRING_CODE_DIGEST_FIELD] = paired_code_digest
+    _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+    # Normal lifecycle cleanup. The state marker above remains the
+    # authoritative revocation if unlink fails (permissions/race).
+    # Resolved through the webauthn module (the canonical seam), not this
+    # module's static alias: a harness that sandboxes the store by
+    # patching webauthn._webauthn_path must also redirect this unlink,
+    # or a pairing flow would delete the real production credential
+    # while every other patched operation uses the sandbox
+    # (review 2026-07-29).
+    with _suppress_oserror():
+        _webauthn._webauthn_path().unlink()
+
+
+def _save_pairing(p: Pairing) -> None:
     with _state_lock():
-        data = _read_json(_state_path()) or {}
-        data.update(
-            {
-                "aes_key": b64u_encode(p.aes_key),
-                "ext_token": p.ext_token,
-                "ext_pubkey": p.ext_pubkey_b64,
-                "hermes_pubkey": p.hermes_pubkey_b64,
-                "paired_at": p.paired_at,
-                # Any WebAuthn file not explicitly bound to this new token is
-                # from an older pairing generation and must be ignored.
-                "reject_unbound_webauthn": True,
-            }
-        )
-        _write_private(_state_path(), json.dumps(data).encode("utf-8"))
-        # Normal lifecycle cleanup. The state marker above remains the
-        # authoritative revocation if unlink fails (permissions/race).
-        # Resolved through the webauthn module (the canonical seam), not this
-        # module's static alias: a harness that sandboxes the store by
-        # patching webauthn._webauthn_path must also redirect this unlink,
-        # or a pairing flow would delete the real production credential
-        # while every other patched operation uses the sandbox
-        # (review 2026-07-29).
-        with _suppress_oserror():
-            _webauthn._webauthn_path().unlink()
+        _write_pairing_locked(p, paired_code_digest=None)
+
+
+def _commit_pairing(code: str, p: Pairing) -> None:
+    """Commit a claimed code unless the polling CLI cancelled it.
+
+    Cancellation and the state write are ordered by the same cross-process
+    lock. The code digest in ``state.json`` is the authoritative commit marker
+    if the best-effort outcome annotation in ``pending.json`` cannot be saved.
+    """
+    path = _ext_dir() / "pending.json"
+    with _state_lock():
+        pending = _read_json(path)
+        entry = pending.get(code)
+        if not isinstance(entry, dict) or not entry.get("used"):
+            raise PairError("invalid_code")
+        result = entry.get("result")
+        if result is not None:
+            reason = entry.get("fail_reason") if result == "failed" else "already_used"
+            raise PairError(str(reason or "already_used"))
+
+        _write_pairing_locked(p, paired_code_digest=_pairing_code_digest(code))
+
+        entry["result"] = "paired"
+        pending[code] = entry
+        # Outcome metadata improves the polling UX, but state.json already
+        # proves the commit and must not be rolled back if this annotation
+        # fails after the pairing was durably saved.
+        with contextlib.suppress(OSError):
+            _write_private(path, json.dumps(pending).encode("utf-8"))
 
 
 # --- v2 key ring (SPEC-v2 §1.3): per-channel Slack keys + extension-chat key ---
@@ -521,6 +658,28 @@ def _require_active_replay_state(data: dict[str, Any]) -> None:
         raise RuntimeError("active pairing required for E2E replay protection")
 
 
+def _replay_relief_description(kept: list[dict[str, Any]], now: float) -> str:
+    """Describe when TTL pruning will next free replay-cache capacity."""
+    timestamps = [entry["accepted_at"] for entry in kept if isinstance(entry.get("accepted_at"), (int, float))]
+    if not timestamps:
+        return "the next TTL sweep"
+    expires_at = min(timestamps) + _E2E_REPLAY_TTL_SECONDS
+    stamp = datetime.fromtimestamp(expires_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+    hours_left = max(0.0, (expires_at - now) / 3600.0)
+    return f"{stamp} (~{hours_left:.0f}h)"
+
+
+def _warn_if_replay_cache_filling(used: int) -> None:
+    """Log before the cache wedges, so exhaustion is not the first signal."""
+    if used >= _E2E_REPLAY_WARN_THRESHOLD:
+        _LOG.warning(
+            "E2E replay cache is %d/%d full; once full, authenticated commands are "
+            "refused until 30-day-old entries expire.",
+            used,
+            _E2E_REPLAY_MAX_IDENTITIES,
+        )
+
+
 def _retained_replay_entries(
     raw_entries: Any,
     *,
@@ -557,10 +716,12 @@ def claim_e2e_replay_identities(
     """Atomically persist authenticated E2E-v3 replay identities.
 
     Returns ``False`` if any identity was already accepted, otherwise records
-    all of them and returns ``True``. The bounded 30-day cache lives in the
+    all of them and returns ``True``. The 30-day TTL-bounded cache lives in the
     private pairing state so a gateway restart cannot make captured commands
-    fresh again. Callers provide only domain-separated SHA-256 hex digests;
-    raw message IDs and nonces are never persisted.
+    fresh again. Unexpired evidence is never evicted merely to meet its size
+    cap: capacity exhaustion raises and therefore fails the command closed
+    until TTL pruning frees space. Callers provide only domain-separated
+    SHA-256 hex digests; raw message IDs and nonces are never persisted.
     """
     if not identities or any(not _is_replay_identity(identity) for identity in identities):
         raise ValueError("invalid E2E replay identity")
@@ -569,7 +730,7 @@ def claim_e2e_replay_identities(
 
     accepted_at = time.time() if now is None else now
     with _state_lock():
-        data = _read_json(_state_path())
+        data = _read_json_strict(_state_path(), "E2E replay state store")
         _require_active_replay_state(data)
         kept, known = _retained_replay_entries(
             data.get(_E2E_REPLAY_FIELD),
@@ -578,8 +739,23 @@ def claim_e2e_replay_identities(
 
         if any(identity in known for identity in identities):
             return False
+        if len(kept) + len(identities) > _E2E_REPLAY_MAX_IDENTITIES:
+            # Never make room by evicting unexpired evidence: that would
+            # reopen replay of an older authenticated command. Refuse new
+            # commands until normal TTL pruning frees bounded state instead.
+            #
+            # Say *when* capacity returns: the operator's only lever is waiting
+            # for the oldest entry's TTL, so an opaque "exhausted" leaves them
+            # with a dead channel and no idea whether it is permanent.
+            raise RuntimeError(
+                "E2E replay cache capacity exhausted "
+                f"({len(kept)}/{_E2E_REPLAY_MAX_IDENTITIES} unexpired identities). "
+                "Commands are refused rather than evicting replay evidence. "
+                f"Capacity frees up from {_replay_relief_description(kept, accepted_at)}."
+            )
+        _warn_if_replay_cache_filling(len(kept) + len(identities))
         kept.extend({"id": identity, "accepted_at": accepted_at} for identity in identities)
-        data[_E2E_REPLAY_FIELD] = kept[-_E2E_REPLAY_MAX_IDENTITIES:]
+        data[_E2E_REPLAY_FIELD] = kept
         _write_private(_state_path(), json.dumps(data, separators=(",", ":")).encode("utf-8"))
         return True
 
@@ -657,14 +833,15 @@ def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict
             },
         }
 
-        _save_pairing(
+        _commit_pairing(
+            code,
             Pairing(
                 aes_key=aes_key,
                 ext_token=ext_token,
                 ext_pubkey_b64=ext_pubkey_b64,
                 hermes_pubkey_b64=hermes_pub_b64,
                 paired_at=time.time(),
-            )
+            ),
         )
     except PairError as exc:
         # Outcome marking is best-effort UX metadata — never let its I/O
@@ -677,6 +854,4 @@ def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict
             _mark_pair_result(code, "failed", "internal_error")
         raise
 
-    with contextlib.suppress(OSError):
-        _mark_pair_result(code, "paired")
     return payload

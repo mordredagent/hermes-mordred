@@ -120,8 +120,9 @@ M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
 # First run — set up, in order:
 $M configure                       # interactive Mordred setup (policy / LLM / harness)
 $M network init                    # optional — pick a privacy route (Tor / VPN / clearnet)
-$M keyvault enable-se --unattended # macOS, recommended — SE helper as a no-Touch-ID key (see note below)
-$M keyvault init                   # create the hardware-backed key (interactive ceremony)
+$M keyvault enable-se              # macOS — install/refresh and probe the SE helper
+MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+                                    # create a no-Touch-ID hardware key (interactive ceremony)
 $M encryption enable env           # encrypt your .env at rest
 $M status                          # verify — the `env` row reads [on] enrolled
 
@@ -136,12 +137,17 @@ $M configure                       # re-run interactive setup anytime
 $M configure --with-hermes-setup   # re-run and include the upstream `hermes setup` wizard
 ```
 
-> **Why `enable-se --unattended` is recommended (macOS).** The default
+> **Why unattended key creation is recommended on macOS.** The default
 > **attended** device key asks for Touch ID on every vault unwrap — a
 > **background** process (a launchd-started gateway, `extension serve`) can
 > never answer that prompt and silently starts without the vault-managed
-> secrets. Run it **before** `keyvault init`: the attended/unattended choice
-> is fixed at key creation. Already hit this, or want the full trade-off?
+> secrets. `enable-se` only installs/probes the helper; it does not create,
+> promote, or migrate a wrapping key. It is safe to refresh with an existing
+> vault: existing helper, legacy Keychain, and software keys remain in their
+> current namespace and continue through backend fallback. Set
+> `MORDRED_SEKEY_UNATTENDED=1` on a later fresh `keyvault init` (or recovery)
+> command: the attended/unattended choice is fixed at key creation. Already
+> hit this, or want the full trade-off?
 > See [Troubleshooting](#troubleshooting) below.
 
 > **Network troubleshooting.** If network communication drops out now and then,
@@ -364,8 +370,8 @@ bump versions in lockstep with `tools/bump_version.py`. Runbook:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Slack integration silently off after a Touch ID prompt at login | Attended Secure Enclave device key + a launchd-started background process (gateway, `extension serve`) racing for Touch ID — a background process can never answer the prompt, so it blocks until the helper's 120 s timeout and starts **without** the vault-managed secrets (a sealed Slack bot token silently drops the platform, with only a `Failed to load plugin 'mordred_keyvault': auth_failed` warning in the logs). | Run `$M keyvault enable-se --unattended` **before** `$M keyvault init` — the attended/unattended choice is fixed at key creation. Already affected? See [`USAGE.md` §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) for re-keying onto an unattended key without destroying your sealed secrets — do **not** use `keyvault reset`. |
-| `~/.hermes/mordred/audit.log` is plaintext NDJSON whose entries say `mordred.degraded.audit_encryption_unavailable` | A Mordred process started somewhere the Keychain / Secure Enclave helper is unreachable (a sandboxed shell, a pre-unlock launchd start, a container). The audit-writer factory probes the audit-log wrapping key once per process; on failure it rotates the encrypted log aside and that process writes plaintext for its whole lifetime — fail-open by design, so auditing never stops (each downgrade leaves one `warn` marker in the trail). | A healthy log starts with `{"fmt":"MRAL"` — check with `head -c 20 ~/.hermes/mordred/audit.log`. Recovery is automatic: the next audit write from a healthy context (a normal login shell) rotates the plaintext file aside and starts a fresh encrypted log; long-lived services pick that up on restart. Rotated plaintext siblings remain as dated `audit.log.<date>` files — remove them with `$M audit purge --yes` if they must not persist. |
+| Slack integration silently off after a Touch ID prompt at login | Attended Secure Enclave device key + a launchd-started background process (gateway, `extension serve`) racing for Touch ID — a background process can never answer the prompt, so it blocks until the helper's 120 s timeout and starts **without** the vault-managed secrets (a sealed Slack bot token silently drops the platform, with only a `Failed to load plugin 'mordred_keyvault': auth_failed` warning in the logs). | `$M keyvault enable-se` may be installed/refreshed at any time, but it never changes an existing key's policy. Already affected vaults need the documented verified-backup/recovery-to-a-fresh-vault workflow, with `MORDRED_SEKEY_UNATTENDED=1` on the recovery key creation. See [`USAGE.md` §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them). |
+| `~/.hermes/mordred/audit.log` is plaintext NDJSON whose entries say `mordred.degraded.audit_encryption_unavailable` | A Mordred process started somewhere the Keychain / Secure Enclave helper is unreachable (a sandboxed shell, a pre-unlock launchd start, a container). The audit-writer factory probes the audit-log wrapping key once per process; on failure it rotates the encrypted log aside and that process writes plaintext for its whole lifetime — fail-open by design, so auditing never stops (each downgrade leaves one `warn` marker in the trail). | A healthy log starts with `{"fmt":"MRAL"` — check with `head -c 20 ~/.hermes/mordred/audit.log`. Recovery is automatic: the next audit write from a healthy context (a normal login shell) rotates the plaintext file aside and starts a fresh encrypted log; long-lived services pick that up on restart. Rotated plaintext siblings remain as dated `audit.log.<date>` files — remove them with `$M audit purge --before YYYY-MM-DD --yes` if they must not persist. |
 | `extension serve` fails to start, citing port 7788 in use | Something else already owns `127.0.0.1:7788` — usually a full Hermes gateway already hosting the extension API (nothing to start), occasionally a stale `extension serve` process from an earlier run. | Check what's listening: `lsof -i :7788`. A full Hermes gateway there means there's nothing to do — the API is already up. A stale `extension serve` should be stopped, or bind a different port instead with `$M extension serve --port 7799` (see the [`extension` command reference](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#extension--browser-extension-pairing-and-server-preview)). |
 | `extension serve` logs show the extension reconnecting roughly every ~30s | Expected: Chrome kills an idle Manifest V3 service-worker after about 30s, so the extension's background context reconnects — this is Chrome's extension lifecycle, not a server bug. The server already sends an app-level keepalive under that window to help keep the connection alive. | Nothing to fix. If chats or signing requests are actually being dropped (not just reconnect log lines), that's a different problem — file an issue. |
 | Network communication drops out now and then | The active privacy path (Tor / VPN) is down or flagged unhealthy. | See the network-troubleshooting note under [Use it](#use-it) above — run `$M network status` to check `state` / `last_health`, then `$M network use <tor\|vpn\|clearnet>` to re-establish the path. |
@@ -445,10 +451,14 @@ $M encryption status             # verify — every row reads [off]
 plan to reinstall and keep the same vault.
 
 ```sh
-$M keyvault reset --yes          # DESTROY the hardware-backed key + remove the keyvault dir
+$M keyvault reset --yes          # DESTROY profile-owned wrapping keys + remove the keyvault dir
 ```
 
-**3. Disable the plugins.** Remove the five `mordred_*` entries from the
+Current profile-scoped keys are deleted. Legacy machine-global keys are
+retained when exclusive ownership cannot be proven; export a backup before
+reset and follow the migration guidance in `docs/user/USAGE.md`.
+
+**3. Disable the plugins.** Remove the six `mordred_*` entries from the
 `plugins.enabled` list in `~/.hermes/config.yaml` (undo
 [Enable the plugins](#enable-the-plugins)).
 

@@ -19,18 +19,67 @@ Contract (mirrors PATHS.md §193 "credentials directory"):
 
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .policy_writer import _atomic_write_text
+from .policy_writer import _atomic_write_text, _ensure_real_directory, _read_regular_text
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 # POSIX env-var name: start with letter/underscore, followed by alnum/underscore.
 # We also require at least one uppercase letter -- Mordred owns the
 # ``MORDRED_*`` namespace, and the prompts only ever emit fully-uppercase
 # names. Restricting at this layer makes the file shell-injection-safe.
 _VALID_ENV_KEY = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_ENV_THREAD_LOCK = threading.RLock()
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+@contextmanager
+def _dotenv_lock(path: Path) -> Iterator[None]:
+    """Stable sibling lock shared by every Mordred ``.env`` RMW writer."""
+    with _ENV_THREAD_LOCK:
+        _ensure_real_directory(path.parent)
+        lock_path = path.with_name(path.name + ".lock")
+        flags = os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            raise OSError(errno.EPERM, "dotenv lock is unsafe or unavailable", str(lock_path)) from exc
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise OSError(errno.EPERM, "dotenv lock must be a mode-0600 regular file", str(lock_path))
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def update_dotenv_file(path: Path, transform: Callable[[str], str]) -> None:
+    """Atomically transform a regular dotenv file under the shared RMW lock."""
+    with _dotenv_lock(path):
+        existing = _read_regular_text(path)
+        updated = transform(existing if existing is not None else "")
+        _atomic_write_text(path, updated, mode=0o600)
 
 
 @runtime_checkable
@@ -57,20 +106,13 @@ class DotEnvFileWriter:
         if "\n" in value or "\r" in value:
             raise ValueError(f"refusing to write env var value with newline in key {key!r}")
 
-        existing_lines: list[str] = []
-        if path.exists():
-            try:
-                existing_lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                # Treat unreadable file as empty -- the atomic write below
-                # will recreate it with the new line.
-                existing_lines = []
+        def transform(existing: str) -> str:
+            new_lines, found = _replace_or_strip_key(existing.splitlines(), key, value)
+            if not found and value:
+                new_lines.append(f"{key}={value}")
+            return "\n".join(new_lines) + ("\n" if new_lines else "")
 
-        new_lines, found = _replace_or_strip_key(existing_lines, key, value)
-        if not found and value:
-            new_lines.append(f"{key}={value}")
-        new_text = "\n".join(new_lines) + ("\n" if new_lines else "")
-        _atomic_write_text(path, new_text, mode=0o600)
+        update_dotenv_file(path, transform)
 
 
 def _replace_or_strip_key(lines: list[str], key: str, value: str) -> tuple[list[str], bool]:
