@@ -56,6 +56,11 @@ re-read it before proceeding, and update this skill in the same PR.
    Then confirm entry-point discovery is 6/6 (`PluginManager.discover_and_load`
    snippet in `docs/dev/setup.md`) and `hermes-mordred --version` runs.
 
+   **Always run the discovery snippet with an isolated `HERMES_HOME`**
+   (e.g. `HERMES_HOME=$(mktemp -d)`). A bare install has no `argon2`, so a
+   discovery probe against the real home triggers the plaintext audit-writer
+   takeover and rotates the production encrypted audit log aside.
+
 6. **Production publish — STOP and confirm with the user first** (immediate,
    irreversible):
 
