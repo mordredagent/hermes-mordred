@@ -341,8 +341,9 @@ def store_seed_phrase(
     """
     from . import _bip39, api
 
-    _bip39.validate_mnemonic(mnemonic)
-    seed_bytes = mnemonic.encode("utf-8")
+    canonical_mnemonic = _bip39.canonicalize_mnemonic(mnemonic)
+    _bip39.validate_mnemonic(canonical_mnemonic)
+    seed_bytes = canonical_mnemonic.encode("utf-8")
     try:
         return api.encrypt(
             key_id,

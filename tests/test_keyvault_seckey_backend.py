@@ -231,16 +231,19 @@ def test_generate_duplicate_tag_raises_wrap_key_already_exists(backend: _SecKeyB
 
 
 def test_generate_entitlement_fallback_duplicate_raises_wrap_key_already_exists(ops: _FakeOps) -> None:
-    """Same contract on the macOS entitlement-degradation path: when the SE
-    write is blocked (errSecMissingEntitlement) and the software namespace
-    already holds the key, ``_generate_software`` must also raise
-    :class:`WrapKeyAlreadyExists`."""
+    """A newly-entitled pyobjc primary must not shadow an older SW key.
+
+    The software namespace is checked before primary creation even when there
+    is no helper/legacy layer. This covers an interpreter that previously
+    degraded to software and later gains the entitlement needed to create SE.
+    """
     sw = _FakeOps()
     backend = _SecKeyBackend(ops=ops, sw_ops=sw)
     sw.create_keypair(_sw_application_tag("k1"), "preexisting software key")
     ops.create_error = _OpsError(errSecMissingEntitlement, "OSStatus")
     with pytest.raises(WrapKeyAlreadyExists):
         backend.generate_enclave_key("k1")
+    assert not any(operation == "create" for operation, _tag in ops.calls)
 
 
 def test_generate_other_native_error_raises_wrap_error(ops: _FakeOps, backend: _SecKeyBackend) -> None:
@@ -366,6 +369,87 @@ def test_wrap_unwrap_roundtrip_through_seckey_backend(backend: _SecKeyBackend) -
     assert audit and audit[-1]["reason"] == "keyvault.unwrap_authorized"
 
 
+def test_helper_backend_finds_key_created_by_preinstall_backend_after_transition() -> None:
+    """A process may select pyobjc, then generate only after helper install.
+
+    Model that ordering by constructing both backends first and creating the
+    key through the old backend afterwards. The helper-primary backend must
+    fall through to the legacy same-tag namespace for both public lookup and
+    ECDH, so existing envelopes remain usable.
+    """
+    legacy_ops = _FakeOps()
+    helper_ops = _FakeOps()
+    preinstall_backend = _SecKeyBackend(ops=legacy_ops, sw_ops=None)
+    postinstall_backend = _SecKeyBackend(
+        ops=helper_ops,
+        legacy_ops=legacy_ops,
+        sw_ops=None,
+    )
+
+    wrap.generate_wrapping_key("transition-key", backend=preinstall_backend)
+    dek = bytes(range(32))
+    envelope = wrap.wrap_dek(dek, "transition-key", backend=postinstall_backend)
+    recovered = wrap.unwrap_dek(
+        envelope,
+        "transition-key",
+        audit_sink=lambda _entry: None,
+        backend=postinstall_backend,
+    )
+
+    assert recovered == dek
+    assert ("copy_pub", _application_tag("transition-key")) in helper_ops.calls
+    assert ("copy_pub", _application_tag("transition-key")) in legacy_ops.calls
+    assert ("ecdh", _application_tag("transition-key")) in helper_ops.calls
+    assert ("ecdh", _application_tag("transition-key")) in legacy_ops.calls
+
+
+def test_helper_backend_refuses_to_shadow_legacy_key() -> None:
+    legacy_ops = _FakeOps()
+    helper_ops = _FakeOps()
+    legacy_ops.create_keypair(_application_tag("transition-key"), "legacy")
+    backend = _SecKeyBackend(ops=helper_ops, legacy_ops=legacy_ops, sw_ops=None)
+
+    with pytest.raises(WrapKeyAlreadyExists, match="legacy Secure-Enclave"):
+        backend.generate_enclave_key("transition-key")
+    assert not any(operation == "create" for operation, _tag in helper_ops.calls)
+
+
+def test_helper_backend_refuses_to_shadow_software_fallback_key() -> None:
+    legacy_ops = _FakeOps()
+    software_ops = _FakeOps()
+    helper_ops = _FakeOps()
+    software_ops.create_keypair(_sw_application_tag("transition-key"), "software")
+    backend = _SecKeyBackend(
+        ops=helper_ops,
+        legacy_ops=legacy_ops,
+        sw_ops=software_ops,
+    )
+
+    with pytest.raises(WrapKeyAlreadyExists, match="software fallback"):
+        backend.generate_enclave_key("transition-key")
+    assert not any(operation == "create" for operation, _tag in helper_ops.calls)
+
+
+def test_delete_cleans_helper_legacy_and_software_namespaces() -> None:
+    helper_ops = _FakeOps()
+    legacy_ops = _FakeOps()
+    software_ops = _FakeOps()
+    helper_ops.create_keypair(_application_tag("transition-key"), "helper")
+    legacy_ops.create_keypair(_application_tag("transition-key"), "legacy")
+    software_ops.create_keypair(_sw_application_tag("transition-key"), "software")
+    backend = _SecKeyBackend(
+        ops=helper_ops,
+        legacy_ops=legacy_ops,
+        sw_ops=software_ops,
+    )
+
+    backend.delete_enclave_key("transition-key")
+
+    assert _application_tag("transition-key") not in helper_ops._keys
+    assert _application_tag("transition-key") not in legacy_ops._keys
+    assert _sw_application_tag("transition-key") not in software_ops._keys
+
+
 def test_unwrap_denial_emits_audit_through_seckey_backend(ops: _FakeOps, backend: _SecKeyBackend) -> None:
     audit: list[dict[str, Any]] = []
     dek = bytes(range(32))
@@ -474,6 +558,7 @@ def test_helper_ops_is_default_backend_ops_when_helper_present(tmp_path: Any, mo
     monkeypatch.setattr(_seckey_helper, "_find_helper", lambda: str(fake))
     real = _SecKeyBackend()
     assert isinstance(real._ops, _HelperSecKeyOps)
+    assert isinstance(real._legacy_ops, _PyobjcSecKeyOps)
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +808,7 @@ def test_pyobjc_bridge_keyerror_surfaces_as_wrap_error_through_backend(
 
     monkeypatch.setattr(_seckey_ctypes, "create_random_key_via_ctypes", _raising_ctypes_helper)
 
-    backend = _SecKeyBackend(ops=_PyobjcSecKeyOps())
+    backend = _SecKeyBackend(ops=_PyobjcSecKeyOps(), sw_ops=None)
 
     with pytest.raises(WrapError) as excinfo:
         backend.generate_enclave_key("wallet-key")

@@ -19,16 +19,53 @@ import contextlib
 import functools
 import json
 import logging
+import os
+import re
+import stat
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 from . import ethereum
+from ._storage import atomic_write, safe_read
 
 if TYPE_CHECKING:
     from ..privacy_check.audit import Writer
 
 _log = logging.getLogger(__name__)
 _KEY_ID_DEFAULT = "default"
+_WALLET_FILE = "wallet.json"
+_WALLET_LOCK_FILE = ".wallet.lock"
+_WALLET_CONFIG_MAX_BYTES = 1024 * 1024
+_WALLET_CONFIG_ERROR = "extension wallet configuration is unreadable or invalid; refusing automatic wallet fallback"
+_WALLET_DIRECTORY_ERROR = "extension wallet directory is unsafe; refusing wallet access"
+_WALLET_THREAD_LOCK = threading.RLock()
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_CANONICAL_CHAIN_HEX = re.compile(r"0x[1-9a-f][0-9a-f]*\Z")
+_CANONICAL_CHAIN_DECIMAL = re.compile(r"[1-9][0-9]*\Z")
+_BIP32_CHILD_INDEX_LIMIT = 1 << 31
+_WALLET_FIELDS = frozenset(
+    {
+        "kind",
+        "key_id",
+        "seed_envelope_id",
+        "envelope_id",
+        "index",
+        "account",
+        "change",
+        "chain_id",
+        "rpc",
+        "rpc_url",
+    }
+)
 
 # Public fallback RPC endpoints; users should set their own via wallet.json.
 _DEFAULT_RPC: dict[int, str] = {
@@ -39,6 +76,10 @@ _DEFAULT_RPC: dict[int, str] = {
 
 class WalletNotConfigured(Exception):
     """No Ethereum account is configured/discoverable for the extension."""
+
+
+class WalletConfigError(WalletNotConfigured):
+    """An explicit wallet config exists but cannot safely select an account."""
 
 
 class TransactionFieldsMissing(Exception):
@@ -142,30 +183,250 @@ def _audit_sink(entry: dict[str, Any]) -> None:
         _log.error("extension_sign audit writer unavailable: %s", exc)
 
 
-def _load_wallet_cfg() -> dict[str, Any]:
+def _raise_wallet_config_error(message: str = _WALLET_CONFIG_ERROR) -> NoReturn:
+    """Raise a content-free config error suitable for extension responses."""
+    raise WalletConfigError(message)
+
+
+def _validate_extension_dir(path: Path, *, create: bool) -> bool:
+    """Validate the private extension directory, creating it for writes.
+
+    ``False`` is returned only when the directory is genuinely absent during a
+    read. A symlink, non-directory, or overly broad mode is never interpreted as
+    a missing wallet configuration.
+    """
     try:
-        data = json.loads((_ext_dir() / "wallet.json").read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        info = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            return False
+        try:
+            path.mkdir(mode=0o700, parents=True)
+        except FileExistsError:
+            pass
+        except OSError:
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        try:
+            info = path.lstat()
+        except OSError:
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+    mode = stat.S_IMODE(info.st_mode)
+    if mode != 0o700 and create:
+        # Older set_wallet releases created this real directory using the
+        # process umask. Repair that legacy state, but never chmod a symlink.
+        try:
+            os.chmod(path, 0o700, follow_symlinks=False)
+            info = path.lstat()
+            mode = stat.S_IMODE(info.st_mode)
+        except (NotImplementedError, OSError):
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+    if mode != 0o700:
+        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+    return True
+
+
+@contextmanager
+def _wallet_file_lock(directory: Path) -> Iterator[None]:
+    """Exclusive cross-process lock for wallet config reads and writes."""
+    lock_path = directory / _WALLET_LOCK_FILE
+    try:
+        fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW,
+            0o600,
+        )
+    except OSError:
+        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _required_nonempty_string(cfg: dict[str, Any], field: str) -> None:
+    value = cfg.get(field)
+    if not isinstance(value, str) or not value.strip():
+        _raise_wallet_config_error()
+
+
+def _canonical_chain_id(value: object) -> int:
+    if isinstance(value, bool):
+        _raise_wallet_config_error()
+    if isinstance(value, int):
+        if value <= 0:
+            _raise_wallet_config_error()
+        return value
+    if isinstance(value, str) and _CANONICAL_CHAIN_HEX.fullmatch(value):
+        return int(value, 16)
+    _raise_wallet_config_error()
+
+
+def _validate_rpc_url(value: object) -> None:
+    if not isinstance(value, str):
+        _raise_wallet_config_error()
+    try:
+        # Reuse the exact structural/public-HTTPS boundary enforced before the
+        # extension makes an RPC request. It deliberately permits path/query
+        # API keys while rejecting userinfo and local/private literal targets.
+        from ..extension import rpc as extension_rpc
+
+        extension_rpc._validate_rpc_url(value)
+    except Exception:
+        _raise_wallet_config_error()
+
+
+def _validate_account_cfg(cfg: dict[str, Any]) -> None:
+    """Validate the key-selection half of a wallet config."""
+    kind = cfg.get("kind")
+    if kind not in {"hd", "raw"}:
+        _raise_wallet_config_error()
+    _required_nonempty_string(cfg, "key_id")
+    if kind == "hd":
+        _required_nonempty_string(cfg, "seed_envelope_id")
+        if "envelope_id" in cfg:
+            _raise_wallet_config_error()
+        for field in ("index", "account", "change"):
+            value = cfg.get(field, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= _BIP32_CHILD_INDEX_LIMIT:
+                _raise_wallet_config_error()
+    else:
+        _required_nonempty_string(cfg, "envelope_id")
+        if any(field in cfg for field in ("seed_envelope_id", "index", "account", "change")):
+            _raise_wallet_config_error()
+
+
+def _validate_rpc_cfg(cfg: dict[str, Any]) -> None:
+    """Validate chain and endpoint selections without performing network I/O."""
+    if "chain_id" in cfg:
+        _canonical_chain_id(cfg["chain_id"])
+    if "rpc_url" in cfg:
+        _validate_rpc_url(cfg["rpc_url"])
+    if "rpc" in cfg:
+        rpc = cfg["rpc"]
+        if not isinstance(rpc, dict):
+            _raise_wallet_config_error()
+        normalized_chains: set[int] = set()
+        for chain, url in rpc.items():
+            if not isinstance(chain, str):
+                _raise_wallet_config_error()
+            if _CANONICAL_CHAIN_HEX.fullmatch(chain):
+                normalized_chain = _canonical_chain_id(chain)
+            elif _CANONICAL_CHAIN_DECIMAL.fullmatch(chain):
+                normalized_chain = _canonical_chain_id(int(chain))
+            else:
+                _raise_wallet_config_error()
+            if normalized_chain in normalized_chains:
+                _raise_wallet_config_error()
+            normalized_chains.add(normalized_chain)
+            _validate_rpc_url(url)
+
+
+def _validate_wallet_cfg(data: object) -> dict[str, Any]:
+    """Validate the fields that can select a key, chain, or RPC endpoint."""
+    if not isinstance(data, dict) or any(not isinstance(key, str) for key in data):
+        _raise_wallet_config_error()
+    cfg = data
+    if set(cfg).difference(_WALLET_FIELDS):
+        _raise_wallet_config_error()
+    _validate_account_cfg(cfg)
+    _validate_rpc_cfg(cfg)
+    return cfg
+
+
+class _DuplicateWalletKey(ValueError):
+    """Internal signal used to reject ambiguous duplicate JSON members."""
+
+
+def _wallet_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise _DuplicateWalletKey
+        obj[key] = value
+    return obj
+
+
+def _load_wallet_cfg() -> dict[str, Any]:
+    """Load an explicit wallet, allowing discovery only when it is absent."""
+    with _WALLET_THREAD_LOCK:
+        directory = _ext_dir()
+        if not _validate_extension_dir(directory, create=False):
+            return {}
+        with _wallet_file_lock(directory):
+            try:
+                raw = safe_read(directory / _WALLET_FILE)
+            except FileNotFoundError:
+                return {}
+            except OSError:
+                _raise_wallet_config_error()
+            if len(raw) > _WALLET_CONFIG_MAX_BYTES:
+                _raise_wallet_config_error()
+            try:
+                data = json.loads(
+                    raw.decode("utf-8"),
+                    object_pairs_hook=_wallet_json_object,
+                )
+            except (UnicodeDecodeError, ValueError):
+                _raise_wallet_config_error()
+            return _validate_wallet_cfg(data)
+
+
+def _normalize_wallet_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return an independent, JSON-native config snapshot for persistence.
+
+    The public ``set_wallet`` input remains owned by its caller. Serializing it
+    before validation both detaches nested mappings and closes the
+    validate-then-serialize window in which another thread could otherwise
+    mutate the already-approved object.
+    """
+    try:
+        encoded = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+        data = json.loads(encoded, object_pairs_hook=_wallet_json_object)
+    except (TypeError, ValueError, RuntimeError):
+        _raise_wallet_config_error()
+    return _validate_wallet_cfg(data)
 
 
 def set_wallet(cfg: dict[str, Any]) -> None:
-    """Persist the extension wallet config (used by setup tooling)."""
-    import os
-
-    d = _ext_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    path = d / "wallet.json"
-    path.write_text(json.dumps(cfg), "utf-8")
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    """Validate and durably persist the extension wallet config."""
+    validated = _normalize_wallet_cfg(cfg)
+    payload = json.dumps(validated, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(payload) > _WALLET_CONFIG_MAX_BYTES:
+        _raise_wallet_config_error()
+    with _WALLET_THREAD_LOCK:
+        directory = _ext_dir()
+        _validate_extension_dir(directory, create=True)
+        with _wallet_file_lock(directory):
+            try:
+                atomic_write(directory / _WALLET_FILE, payload)
+            except OSError:
+                _raise_wallet_config_error("extension wallet configuration could not be saved safely")
 
 
 def chain_id_int() -> int:
     cfg = _load_wallet_cfg()
     cid = cfg.get("chain_id", 1)
-    return int(cid, 16) if isinstance(cid, str) and cid.startswith("0x") else int(cid)
+    return _canonical_chain_id(cid)
 
 
 def rpc_url_for(chain_id: int) -> str | None:
@@ -179,8 +440,7 @@ def rpc_url_for(chain_id: int) -> str | None:
     return _DEFAULT_RPC.get(chain_id)
 
 
-def _resolve_account() -> dict[str, Any]:
-    cfg = _load_wallet_cfg()
+def _resolve_account_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     if cfg.get("kind"):
         return cfg
     key_id = cfg.get("key_id", _KEY_ID_DEFAULT)
@@ -200,6 +460,10 @@ def _resolve_account() -> dict[str, Any]:
         if not seeds
         else "Multiple HD seeds stored; pin one in ~/.hermes/extension/wallet.json."
     )
+
+
+def _resolve_account() -> dict[str, Any]:
+    return _resolve_account_from_cfg(_load_wallet_cfg())
 
 
 # --------------------------------------------------------------------------- #
@@ -230,8 +494,7 @@ def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
     )
 
 
-def get_address() -> str:
-    acct = _resolve_account()
+def _address_for_account(acct: dict[str, Any]) -> str:
     backend, sink = _backend(), _audit_sink
     if acct["kind"] == "hd":
         address, _path = ethereum.derive_ethereum_key(
@@ -245,6 +508,22 @@ def get_address() -> str:
         )
         return address
     return ethereum.get_ethereum_address(acct["key_id"], acct["envelope_id"], backend=backend, audit_sink=sink)
+
+
+def get_address() -> str:
+    return _address_for_account(_resolve_account())
+
+
+def account_snapshot() -> tuple[str, int]:
+    """Resolve one internally consistent address/chain pair.
+
+    ``accounts_request`` must not read ``wallet.json`` twice: an atomic config
+    replacement between those reads could otherwise advertise account A on
+    chain B (or silently advertise mainnet after a corrupt replacement).
+    """
+    cfg = _load_wallet_cfg()
+    account = _resolve_account_from_cfg(cfg)
+    return _address_for_account(account), _canonical_chain_id(cfg.get("chain_id", 1))
 
 
 # --------------------------------------------------------------------------- #

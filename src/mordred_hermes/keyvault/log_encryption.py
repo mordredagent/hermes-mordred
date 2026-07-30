@@ -29,13 +29,13 @@ Wire format (``MRAL`` v1 — frozen here)::
   another file — or replayed after the header is edited — fails the GCM
   tag check.
 
-Atomicity note: an encrypted+base64 line for a max-size (4000-byte)
-plaintext entry is ~5.4 KiB, above POSIX ``PIPE_BUF`` (4096). The
-``O_APPEND`` atomic-append guarantee therefore does NOT hold for
-concurrent *multi-process* writers — but multi-process audit writing is
-already unsupported in v1 (TODO.md §1.1 M1). Within one process the
-single-writer :class:`threading.Lock` serializes every ``append`` and one
-``os.write`` call delivers the whole line, so invariant #2 holds.
+Every append, rotation, and partial-write rollback is serialized through
+the same stable sidecar ``flock`` used by the plaintext writer. A writer
+also verifies that the active path still names its own inode and header
+before reusing its in-memory DEK. If another process took ownership, the
+stale DEK is wiped and the foreign file is rotated intact before a fresh
+header/DEK is created. A write-all loop completes the whole line even when
+``os.write`` returns short.
 
 The DEK is unwrapped through the Secure Enclave authorization boundary
 (:func:`mordred_keyvault.wrap.unwrap_dek`) only on the *read* side
@@ -53,12 +53,13 @@ from __future__ import annotations
 import base64
 import binascii
 import contextlib
+import errno
 import gzip
 import hashlib
 import json
 import logging
 import os
-import shutil
+import re
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -66,10 +67,26 @@ from typing import TYPE_CHECKING, Any, Final
 
 from cryptography.exceptions import InvalidTag
 
+from .._audit_io import (
+    audit_path_stat as _audit_path_stat,
+)
+from .._audit_io import (
+    compress_rotated_file as _compress_rotated_file,
+)
+from .._audit_io import (
+    exclusive_audit_lock as _exclusive_audit_lock,
+)
+from .._audit_io import (
+    open_audit_file as _open_audit_file,
+)
+from .._audit_io import (
+    read_first_line as _read_first_line,
+)
 from .._log_rotation import next_rotation_target
 from .._log_rotation import sweep_retention as _sweep_retention
 from .._log_rotation import today_utc_date as _today_utc_date
 from .._log_rotation import utcnow_iso as _utcnow_iso
+from . import _native_key_id, _storage
 from ._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
 from .crypto import decrypt as _aes_decrypt
 from .crypto import encrypt as _aes_encrypt
@@ -89,6 +106,9 @@ FORMAT_VERSION: Final = 1
 AUDIT_LOG_KEY_ID: Final = "mordred.audit-log"
 """Keychain key id of the Secure-Enclave wrapping key for the audit-log DEK."""
 
+_LEGACY_HEADER_FIELDS: Final = frozenset({"fmt", "ver", "key_id", "wdek"})
+_SCOPED_HEADER_FIELDS: Final = _LEGACY_HEADER_FIELDS | frozenset({_native_key_id.NATIVE_KEY_ID_FIELD})
+
 # Cap on the *plaintext* entry, matching NDJSONWriter so callers see one
 # uniform limit regardless of which writer the factory installs. (The
 # encrypted on-disk line is larger; see the module docstring atomicity note.)
@@ -98,6 +118,7 @@ DEFAULT_ROTATE_BYTES: Final = 10 * 1024 * 1024  # 10 MB
 DEFAULT_RETENTION_DAYS: Final = 30
 
 _GZIP_MAGIC: Final = b"\x1f\x8b"
+_ROTATED_LOG_NAME: Final = re.compile(r"^(?P<active>.+)\.\d{4}-\d{2}-\d{2}(?:\.\d+)?(?:\.gz)?$")
 
 
 class AuditLogDecryptError(Exception):
@@ -132,6 +153,48 @@ def _serialize(entry: Mapping[str, Any]) -> bytes:
     if len(data) > MAX_ENTRY_BYTES:
         raise ValueError(f"audit entry exceeds {MAX_ENTRY_BYTES} bytes (got {len(data)})")
     return data
+
+
+def _write_all(fd: int, data: bytes, *, rollback_to: int) -> None:
+    """Write every byte, restoring the prior length on any failure.
+
+    ``os.write`` may legally return short. A later no-progress/error result
+    must not leave half a base64 entry (or half a header) behind, because that
+    would make every subsequent decrypt fail. The caller holds the stable
+    cross-process audit lock, so rollback cannot truncate another cooperating
+    writer's later append.
+    """
+    view = memoryview(data)
+    offset = 0
+    try:
+        while offset < len(view):
+            written = os.write(fd, view[offset:])
+            if written <= 0:
+                raise OSError("os.write returned 0 bytes while writing the encrypted audit log")
+            offset += written
+    except BaseException as exc:
+        try:
+            os.ftruncate(fd, rollback_to)
+        except OSError as rollback_exc:
+            exc.add_note(f"failed to remove the partial audit-log write: {rollback_exc}")
+        raise
+
+
+def _read_log_snapshot(path: Path) -> bytes:
+    """Read one stable regular-file snapshot under the writer sidecar lock."""
+    rotated = _ROTATED_LOG_NAME.fullmatch(path.name)
+    lock_owner = path.with_name(rotated.group("active")) if rotated is not None else path
+    with _exclusive_audit_lock(lock_owner):
+        if _audit_path_stat(path) is None:
+            raise FileNotFoundError(errno.ENOENT, "audit log file does not exist", str(path))
+        fd = _open_audit_file(path, os.O_RDONLY)
+        try:
+            chunks: list[bytes] = []
+            while chunk := os.read(fd, 65536):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
 
 
 def _entry_aad(header_bytes: bytes) -> bytes:
@@ -169,8 +232,10 @@ class EncryptedWriter:
     Date-change and size-cap rotations during the writer's lifetime each
     likewise start a new file with a new DEK + header.
 
-    Multi-process writes are unsupported (v1) — the :class:`threading.Lock`
-    serializes only threads of one process.
+    Cooperating processes serialize through the stable audit sidecar lock.
+    Since each process owns a different in-memory DEK, a writer verifies the
+    active inode and header before every append and rotates a successor's file
+    aside before taking ownership again.
     """
 
     def __init__(
@@ -179,12 +244,29 @@ class EncryptedWriter:
         *,
         backend: NativeBackend,
         key_id: str = AUDIT_LOG_KEY_ID,
+        native_key_id: str | None = None,
+        keyvault_root: Path | None = None,
         rotate_bytes: int = DEFAULT_ROTATE_BYTES,
         retention_days: int = DEFAULT_RETENTION_DAYS,
     ) -> None:
         self.path = path
         self.backend = backend
         self.key_id = key_id
+        self.native_key_id = native_key_id
+        self.keyvault_root = Path(keyvault_root) if keyvault_root is not None else None
+        self._keyvault_root_identity: tuple[int, int] | None = None
+        self._keyvault_generation_epoch: bytes | None = None
+        if self.keyvault_root is not None:
+            # Factory-created writers are leases on one concrete keyvault
+            # generation. Capture the root inode under the stable lifecycle
+            # lock so reset + same-path re-init cannot let a stale cached DEK
+            # append into the successor profile.
+            with _storage.keyvault_lifecycle_lock(self.keyvault_root):
+                _storage.assert_keyvault_active(self.keyvault_root)
+                _storage._check_dir_mode(self.keyvault_root)
+                self._keyvault_generation_epoch = _storage.ensure_generation_epoch(self.keyvault_root)
+                metadata = self.keyvault_root.lstat()
+                self._keyvault_root_identity = (metadata.st_dev, metadata.st_ino)
         self.rotate_bytes = rotate_bytes
         self.retention_days = retention_days
         self._lock = threading.Lock()
@@ -194,6 +276,8 @@ class EncryptedWriter:
         # the active file's lifetime; the wrapped form is on disk.
         self._dek: bytearray | None = None
         self._aad = b""
+        self._header_bytes = b""
+        self._active_identity: tuple[int, int] | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def append(self, entry: Mapping[str, Any]) -> None:
@@ -206,15 +290,31 @@ class EncryptedWriter:
         plaintext = _serialize(merged)
         incoming = _encrypted_line_len(len(plaintext))
 
-        with self._lock:
-            self._maybe_rotate(incoming)
-            dek, aad = self._active()
-            token = base64.b64encode(_aes_encrypt(dek, plaintext, aad=aad))
-            fd = os.open(str(self.path), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-            try:
-                os.write(fd, token + b"\n")
-            finally:
-                os.close(fd)
+        lifecycle = (
+            _storage.keyvault_lifecycle_lock(self.keyvault_root)
+            if self.keyvault_root is not None
+            else contextlib.nullcontext()
+        )
+        # Lock order is load-bearing: lifecycle -> writer mutex -> audit
+        # sidecar. Keyvault unwrap paths already hold lifecycle while their
+        # synchronous audit sink appends; the storage lock is reentrant for
+        # exactly that nesting. Taking lifecycle after the sidecar would
+        # deadlock against such an unwrap in another thread/process.
+        with lifecycle, self._lock:
+            self._assert_keyvault_generation()
+            with _exclusive_audit_lock(self.path):
+                self._refresh_active_ownership()
+                self._maybe_rotate(incoming)
+                dek, aad = self._active()
+                token = base64.b64encode(_aes_encrypt(dek, plaintext, aad=aad))
+                fd = _open_audit_file(
+                    self.path,
+                    os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+                )
+                try:
+                    _write_all(fd, token + b"\n", rollback_to=os.fstat(fd).st_size)
+                finally:
+                    os.close(fd)
 
     def close(self) -> None:
         """Zero and drop the in-memory DEK.
@@ -244,8 +344,60 @@ class EncryptedWriter:
             self._dek[:] = bytes(len(self._dek))
         self._dek = None
         self._aad = b""
+        self._header_bytes = b""
+        self._active_identity = None
 
     # -- internals ---------------------------------------------------------
+
+    def _assert_keyvault_generation(self) -> None:
+        """Require the profile root captured when this writer was created.
+
+        A successful reset removes ``keyvault_root``. A later init may recreate
+        that same pathname with a new native key generation while this object
+        still holds the old audit DEK. Comparing both a durable random
+        generation epoch and the root inode prevents that stale writer from
+        appending old-generation ciphertext into the new profile's active
+        audit stream, including the unlikely case where dev/inode is reused.
+
+        Caller holds both the lifecycle lock and ``self._lock``.
+        """
+        if self.keyvault_root is None:
+            return
+        try:
+            _storage.assert_keyvault_active(self.keyvault_root)
+            _storage._check_dir_mode(self.keyvault_root)
+            epoch = _storage.read_generation_epoch(self.keyvault_root)
+            metadata = self.keyvault_root.lstat()
+        except BaseException:
+            self._wipe_dek()
+            raise
+        identity = (metadata.st_dev, metadata.st_ino)
+        if self._keyvault_generation_epoch != epoch or self._keyvault_root_identity != identity:
+            self._wipe_dek()
+            raise _storage.KeyvaultPermissionError(
+                getattr(errno, "ESTALE", errno.EAGAIN),
+                "keyvault root changed since the encrypted audit writer was created",
+                str(self.keyvault_root),
+            )
+
+    def _refresh_active_ownership(self) -> None:
+        """Drop a stale DEK when another process replaced the active file.
+
+        Caller holds both writer and stable process locks. ``_active`` will
+        rotate the successor file intact and mint a fresh DEK/header before
+        this append proceeds.
+        """
+        if self._dek is None:
+            return
+        metadata = _audit_path_stat(self.path)
+        owns_inode = (
+            metadata is not None
+            and self._active_identity is not None
+            and (metadata.st_dev, metadata.st_ino) == self._active_identity
+        )
+        header = _read_first_line(self.path, limit=MAX_ENTRY_BYTES + 1) if owns_inode else None
+        if not owns_inode or header != self._header_bytes:
+            self._wipe_dek()
 
     def _active(self) -> tuple[bytes, bytes]:
         """Return ``(dek, aad)`` for the active file, creating it if needed.
@@ -258,31 +410,44 @@ class EncryptedWriter:
         if self._dek is not None:
             return bytes(self._dek), self._aad
 
-        if self.path.exists():
+        if _audit_path_stat(self.path) is not None:
             self._rotate(_today_utc_date())
 
         dek = bytearray(os.urandom(DEK_LEN))
-        wrapped = wrap_dek(bytes(dek), self.key_id, backend=self.backend)
+        wrapped = wrap_dek(
+            bytes(dek),
+            self.key_id,
+            backend=self.backend,
+            native_key_id=self.native_key_id,
+        )
         header = {
             "fmt": MAGIC.decode("ascii"),
             "ver": FORMAT_VERSION,
             "key_id": self.key_id,
             "wdek": base64.b64encode(wrapped).decode("ascii"),
         }
+        if self.native_key_id is not None:
+            header[_native_key_id.NATIVE_KEY_ID_FIELD] = self.native_key_id
         header_bytes = json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
         aad = _entry_aad(header_bytes)
 
         # O_EXCL: the file must not exist — _rotate above moved any prior
-        # file aside, so a survivor here means a concurrent writer, which
-        # v1 does not support. Fail loudly rather than interleave.
-        fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # file aside. The stable lock excludes cooperating creators; a
+        # survivor therefore means an unsafe external replacement.
+        fd = _open_audit_file(
+            self.path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        )
         try:
-            os.write(fd, header_bytes + b"\n")
+            _write_all(fd, header_bytes + b"\n", rollback_to=0)
+            metadata = os.fstat(fd)
         finally:
             os.close(fd)
 
         self._dek = dek
         self._aad = aad
+        self._header_bytes = header_bytes
+        self._active_identity = (metadata.st_dev, metadata.st_ino)
         return bytes(dek), aad
 
     def _maybe_rotate(self, incoming_bytes: int) -> None:
@@ -294,14 +459,11 @@ class EncryptedWriter:
         fresh file, DEK and header.
         """
         today = _today_utc_date()
-        if self._last_date and self._last_date != today and self._dek is not None and self.path.exists():
+        metadata = _audit_path_stat(self.path)
+        if self._last_date and self._last_date != today and self._dek is not None and metadata is not None:
             self._rotate(self._last_date)
             self._wipe_dek()
-        elif (
-            self._dek is not None
-            and self.path.exists()
-            and self.path.stat().st_size + incoming_bytes > self.rotate_bytes
-        ):
+        elif self._dek is not None and metadata is not None and metadata.st_size + incoming_bytes > self.rotate_bytes:
             self._rotate(today)
             self._wipe_dek()
         self._last_date = today
@@ -313,26 +475,71 @@ class EncryptedWriter:
         rotation: same-day collisions get an ``.N`` suffix; a gzip failure
         keeps the un-gzipped rotated file rather than losing data.
         """
-        if not self.path.exists():
+        before = _audit_path_stat(self.path)
+        if before is None:
             return
 
         target = next_rotation_target(self.path, date_suffix)
         os.replace(self.path, target)
+        moved = _audit_path_stat(target)
+        if moved is None or (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("audit path changed during rotation")
 
         gz_target = target.with_suffix(target.suffix + ".gz")
         try:
-            with target.open("rb") as src, gzip.open(gz_target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            target.unlink()
+            _compress_rotated_file(target, gz_target)
         except Exception as e:
             _LOG.warning("audit gzip rotation failed; raw rotated file kept at %s: %s", target, e)
-            with contextlib.suppress(OSError):
-                gz_target.unlink()
-        else:
-            with contextlib.suppress(OSError):
-                os.chmod(gz_target, 0o600)
 
         _sweep_retention(self.path, self.retention_days)
+
+
+def _reject_duplicate_header_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """JSON object hook that rejects ambiguous duplicate MRAL fields."""
+
+    parsed: dict[str, object] = {}
+    for field, value in pairs:
+        if field in parsed:
+            raise AuditLogDecryptError("header contains a duplicate JSON field")
+        parsed[field] = value
+    return parsed
+
+
+def _parse_log_header(path: Path, header_bytes: bytes) -> tuple[dict[str, object], bytes]:
+    """Parse and validate the unauthenticated MRAL header before backend I/O."""
+
+    try:
+        header = json.loads(header_bytes, object_pairs_hook=_reject_duplicate_header_fields)
+    except AuditLogDecryptError as exc:
+        raise AuditLogDecryptError(f"{path}: {exc}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise AuditLogDecryptError(f"{path}: header line is not valid JSON") from e
+    if (
+        not isinstance(header, dict)
+        or header.get("fmt") != MAGIC.decode("ascii")
+        or type(header.get("ver")) is not int
+        or header.get("ver") != FORMAT_VERSION
+    ):
+        raise AuditLogDecryptError(
+            f"{path}: not a {MAGIC.decode('ascii')} v{FORMAT_VERSION} encrypted audit log "
+            "(a pre-Phase-4 plaintext log is read with `audit tail`, not `audit decrypt`)"
+        )
+    fields = frozenset(header)
+    if fields not in {_LEGACY_HEADER_FIELDS, _SCOPED_HEADER_FIELDS}:
+        raise AuditLogDecryptError(f"{path}: header does not match the exact MRAL v1 schema")
+    key_id = header["key_id"]
+    if key_id != AUDIT_LOG_KEY_ID:
+        raise AuditLogDecryptError(f"{path}: header key_id is not the audit-log key role")
+    wdek_b64 = header.get("wdek")
+    if not isinstance(wdek_b64, str):
+        raise AuditLogDecryptError(f"{path}: header wdek must be a base64 string")
+    try:
+        wrapped = base64.b64decode(wdek_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise AuditLogDecryptError(f"{path}: header wdek is not valid base64") from e
+    if base64.b64encode(wrapped).decode("ascii") != wdek_b64:
+        raise AuditLogDecryptError(f"{path}: header wdek is not canonical base64")
+    return header, wrapped
 
 
 def _unwrap_log_dek(
@@ -341,41 +548,52 @@ def _unwrap_log_dek(
     *,
     backend: NativeBackend,
     audit_sink: AuditSink,
+    keyvault_home: Path | None,
 ) -> bytes:
     """Validate the ``MRAL`` header line and unwrap the audit-log DEK.
 
     Raises:
         AuditLogDecryptError: The header line is not valid JSON, is not a
-            recognised ``MRAL`` header, is missing the ``key_id`` / ``wdek``
-            fields, or carries an unwrappable DEK.
+            recognised exact-schema ``MRAL`` audit header, selects a non-audit
+            logical/native key, or carries an unwrappable DEK.
         WrapAuthCancelled / WrapKeyNotFound: Propagated from the unwrap so
             the CLI can handle a denied prompt and a missing key distinctly
             from a corrupt file.
     """
-    try:
-        header = json.loads(header_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise AuditLogDecryptError(f"{path}: header line is not valid JSON") from e
-    if (
-        not isinstance(header, dict)
-        or header.get("fmt") != MAGIC.decode("ascii")
-        or header.get("ver") != FORMAT_VERSION
-    ):
-        raise AuditLogDecryptError(
-            f"{path}: not a {MAGIC.decode('ascii')} v{FORMAT_VERSION} encrypted audit log "
-            "(a pre-Phase-4 plaintext log is read with `audit tail`, not `audit decrypt`)"
-        )
-    key_id = header.get("key_id")
-    wdek_b64 = header.get("wdek")
-    if not isinstance(key_id, str) or not isinstance(wdek_b64, str):
-        raise AuditLogDecryptError(f"{path}: header is missing the key_id / wdek fields")
-    try:
-        wrapped = base64.b64decode(wdek_b64, validate=True)
-    except (binascii.Error, ValueError) as e:
-        raise AuditLogDecryptError(f"{path}: header wdek is not valid base64") from e
+    header, wrapped = _parse_log_header(path, header_bytes)
 
+    root = _storage.resolve_keyvault_dir(keyvault_home)
     try:
-        return unwrap_dek(wrapped, key_id, audit_sink=audit_sink, backend=backend)
+        if _native_key_id.NATIVE_KEY_ID_FIELD in header:
+            native_key_id = _native_key_id.persisted_native_key_id(
+                root,
+                AUDIT_LOG_KEY_ID,
+                header[_native_key_id.NATIVE_KEY_ID_FIELD],
+            )
+        else:
+            # The exact four-field v1 schema predates profile-scoped native
+            # selectors. It can only mean the historical global audit role.
+            # A current header with this field stripped is byte-for-byte
+            # indistinguishable here; the fixed role hash and wrap integrity
+            # still prevent it from selecting or decrypting with a main key.
+            native_key_id = AUDIT_LOG_KEY_ID
+    except _native_key_id.NativeKeyIdMismatch as e:
+        raise AuditLogDecryptError(f"{path}: header native_key_id does not match this keyvault profile") from e
+
+    backend = _native_key_id.backend_for_persisted_key(
+        backend,
+        root,
+        AUDIT_LOG_KEY_ID,
+        native_key_id,
+    )
+    try:
+        return unwrap_dek(
+            wrapped,
+            AUDIT_LOG_KEY_ID,
+            audit_sink=audit_sink,
+            backend=backend,
+            native_key_id=native_key_id,
+        )
     except (WrapAuthCancelled, WrapKeyNotFound):
         # Propagate unwrapped — the CLI handles a denied prompt and a
         # missing key distinctly from a corrupt file.
@@ -425,6 +643,8 @@ def decrypt_log_file(
     *,
     backend: NativeBackend,
     audit_sink: AuditSink,
+    file_bytes: bytes | None = None,
+    keyvault_home: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Decrypt one ``MRAL`` audit-log file and return its entries in order.
 
@@ -438,6 +658,11 @@ def decrypt_log_file(
         path: The ``audit.log`` (or rotated ``audit.log.<date>.gz``) file.
         backend: Secure-Enclave backend for the DEK unwrap.
         audit_sink: Sink the wrap layer records the unwrap decision into.
+        file_bytes: An optional already-read snapshot of ``path``.  The audit
+            CLI supplies this after opening the source through a bound
+            directory descriptor with ``O_NOFOLLOW``; ordinary callers can
+            omit it to take an equivalent regular-file/no-follow snapshot
+            under the writer's stable audit sidecar.
 
     Returns:
         The decrypted audit entries, oldest first.
@@ -448,18 +673,51 @@ def decrypt_log_file(
         WrapAuthCancelled: The user denied the Enclave prompt.
         WrapKeyNotFound: The audit-log wrapping key is missing.
     """
-    raw = Path(path).read_bytes()
-    if raw[:2] == _GZIP_MAGIC:
-        raw = gzip.decompress(raw)
+    root = _storage.resolve_keyvault_dir(keyvault_home)
+    lifecycle: contextlib.AbstractContextManager[None]
+    try:
+        root.parent.lstat()
+    except FileNotFoundError:
+        # Standalone callers with an injected backend may have no profile tree
+        # at all. Initialization can only begin after creating this stable
+        # parent, so this decrypt linearizes before that future generation.
+        lifecycle = contextlib.nullcontext()
+    else:
+        lifecycle = _storage.keyvault_lifecycle_lock(root)
 
-    lines = raw.splitlines()
-    if not lines:
-        raise AuditLogDecryptError(f"{path}: empty audit log file")
+    with lifecycle:
+        _storage.assert_keyvault_active(root)
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            _storage._check_dir_mode(root)
+        # Lock order matches EncryptedWriter: lifecycle -> audit sidecar. The
+        # sidecar is released after the immutable snapshot is complete and
+        # before unwrap emits to audit_sink, so a sink that appends to this log
+        # cannot self-deadlock.
+        raw = _read_log_snapshot(Path(path)) if file_bytes is None else file_bytes
+        if raw[:2] == _GZIP_MAGIC:
+            raw = gzip.decompress(raw)
 
-    header_bytes = lines[0]
-    dek = _unwrap_log_dek(path, header_bytes, backend=backend, audit_sink=audit_sink)
-    aad = _entry_aad(header_bytes)
-    return _decode_log_entries(path, lines, dek, aad)
+        lines = raw.splitlines()
+        if not lines:
+            raise AuditLogDecryptError(f"{path}: empty audit log file")
+
+        header_bytes = lines[0]
+        dek = _unwrap_log_dek(
+            path,
+            header_bytes,
+            backend=backend,
+            audit_sink=audit_sink,
+            keyvault_home=keyvault_home,
+        )
+        aad = _entry_aad(header_bytes)
+        # Keep reset outside the whole logical read, not only ECDH. Otherwise
+        # reset could report key destruction while this call was still
+        # authenticating entries and preparing plaintext for its caller.
+        return _decode_log_entries(path, lines, dek, aad)
 
 
 if TYPE_CHECKING:  # pragma: no cover - mypy-only Writer Protocol conformance

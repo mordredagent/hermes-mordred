@@ -53,6 +53,18 @@ WORDLIST: tuple[str, ...] = _load_wordlist()
 _WORD_INDEX: dict[str, int] = {word: index for index, word in enumerate(WORDLIST)}
 
 
+def canonicalize_mnemonic(mnemonic: str) -> str:
+    """Return the canonical BIP39 sentence represented by ``mnemonic``.
+
+    BIP39 applies NFKD Unicode normalization, and the mnemonic itself is a
+    sequence of words separated by single spaces. Validation has always used
+    ``str.split()``, so leading/repeated/alternate whitespace was accepted;
+    canonicalizing at the same boundary prevents those ignored characters
+    from later changing the PBKDF2 seed.
+    """
+    return " ".join(unicodedata.normalize("NFKD", mnemonic).split())
+
+
 def entropy_to_mnemonic(entropy: bytes) -> str:
     """Encode 32 bytes of entropy as a 24-word BIP39 mnemonic.
 
@@ -81,7 +93,7 @@ def mnemonic_to_entropy(mnemonic: str) -> bytes:
         ValueError: wrong word count, an unknown word, or a checksum
             mismatch.
     """
-    words = mnemonic.split()
+    words = canonicalize_mnemonic(mnemonic).split()
     if len(words) != _WORD_COUNT:
         raise ValueError(f"v1 keyvault requires a {_WORD_COUNT}-word mnemonic, got {len(words)}")
     bits = 0
@@ -116,7 +128,7 @@ def validate_mnemonic(mnemonic: str) -> None:
     MetaMask phrase). Raises :class:`ValueError` on a wrong word count, an
     unknown word, or a checksum mismatch.
     """
-    words = mnemonic.split()
+    words = canonicalize_mnemonic(mnemonic).split()
     count = len(words)
     if count not in _VALID_WORD_COUNTS:
         raise ValueError(f"BIP39 mnemonic must be one of {_VALID_WORD_COUNTS} words, got {count}")
@@ -149,7 +161,7 @@ def mnemonic_to_seed(mnemonic: str, passphrase: str = "") -> bytes:
     The ``passphrase`` here is the BIP39 "25th word", independent of the
     keyvault's own Passphrase used for the verification digest / backup KDF.
     """
-    norm_mnemonic = unicodedata.normalize("NFKD", mnemonic)
+    norm_mnemonic = canonicalize_mnemonic(mnemonic)
     salt = unicodedata.normalize("NFKD", _SEED_SALT_PREFIX + passphrase)
     return hashlib.pbkdf2_hmac(
         "sha512",

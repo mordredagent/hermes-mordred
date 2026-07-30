@@ -14,10 +14,9 @@ from __future__ import annotations
 import os
 from typing import Final
 
-# ``_key_id_hash`` is imported deliberately: the Keychain tag MUST use the
-# exact SHA-256 prefix that ``wrap`` binds into the blob's ``key_id_hash``
-# field. Reusing the canonical helper — rather than re-deriving the hash —
-# keeps the on-disk blob and the Keychain lookup in lockstep.
+# Reuse the wrap layer's canonical SHA-256-prefix helper for opaque native tag
+# derivation. Current callers pass a profile-scoped physical ``native_key_id``;
+# the MRKW field is independently derived from the portable logical id.
 from .wrap import NativeErrorCode, _key_id_hash
 
 # ---------------------------------------------------------------------------
@@ -98,9 +97,9 @@ def _resolve_unattended(unattended: bool | None) -> bool:
 def _application_tag(key_id: str) -> bytes:
     """Keychain ``kSecAttrApplicationTag`` for ``key_id``.
 
-    Uses the 16-byte ``SHA-256(key_id)`` prefix (the same value bound
-    into the wrap-blob ``key_id_hash`` field) so the cleartext ``key_id``
-    never reaches the Keychain — mirrors POLICY.md #19.
+    ``key_id`` is the native-store selector (profile-scoped for current
+    metadata, logical only for legacy metadata). Its 16-byte SHA-256 prefix
+    keeps the cleartext selector out of the Keychain.
     """
     return _TAG_PREFIX + _key_id_hash(key_id)
 

@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn, SupportsIndex
 
-from . import _secret_ops, _storage, wrap
+from . import _native_key_id, _secret_ops, _storage, wrap
 from ._audit_emit import chain_and_raise, emit_capture
 from ._envelope_codec import (
     _hash_id,
@@ -472,9 +472,10 @@ def confirm_generate(
        during the denied emit is chained as ``__context__`` on the raised
        exception.
     3. Re-init guard — v1 keyvault is single-key (SPEC Story 5). Reject
-       with :class:`RuntimeError` if any key already exists. Checked once
-       unlocked (before ``init_started``, so a rejected re-init leaves no
-       dangling audit event) and re-checked authoritatively under the lock.
+       with :class:`RuntimeError` if any main or auxiliary native-key
+       ownership state already exists. Checked once unlocked (before
+       ``init_started``, so a rejected re-init leaves no dangling audit
+       event) and re-checked authoritatively under the lock.
     4. On match — the durable phase:
 
        a. Emit ``keyvault.init_started``. Durability barrier: if the audit
@@ -486,10 +487,10 @@ def confirm_generate(
           rollback scope so a duplicate-key raise never deletes a
           pre-existing key.
        c. Still under the lock: write ``digests/<key_id_hash>.commit``
-          FIRST, then the ``meta.json`` row LAST (the transaction commit
-          point). Any failure rolls back — delete the Enclave key, remove
-          the commit file, best-effort repair the ``meta.json`` row — then
-          re-raises.
+          FIRST, then save the ``meta.json`` row while retaining its pending
+          ownership journal. Failures through that ownership save roll back.
+          A second durable save clears pending; cleanup failure never deletes
+          the now-owned key, and any remaining pending marker blocks use.
        d. Emit ``keyvault.init_completed``. The init is already durable,
           so a sink failure is suppressed (POLICY.md #22); a line is
           written to stderr for the operator.
@@ -508,6 +509,7 @@ def confirm_generate(
     #    egress, so a real prepare → display-seed → confirm flow works
     #    whether or not the display flow already consumed (codex P1).
     verification_digest = handle.expected_digest()
+    _native_key_id.validate_main_key_id(resolved_key_id)
 
     # 2. Defense-in-depth digest check (hmac.compare_digest — constant time).
     #    A sink failure during the denied emit is chained as __context__ so
@@ -527,7 +529,9 @@ def confirm_generate(
     #    ``load_meta`` on a missing meta.json returns an empty keyvault and
     #    does not mutate the filesystem.
     root = _storage.resolve_keyvault_dir(home)
-    if _storage.load_meta(root)["keys"]:
+    _storage.assert_keyvault_active(root)
+    preflight_meta = _storage.load_meta(root)
+    if _native_key_id.has_native_key_ownership_state(preflight_meta):
         raise RuntimeError("keyvault already initialized — v1 supports a single key")
 
     # 4a. init_started — durability barrier. NO try/except: a sink exception
@@ -545,26 +549,35 @@ def confirm_generate(
     # 4b. Durable phase — the re-init re-check, key generation, and the
     #     commit/meta writes all run under a SINGLE keyvault-lock hold so
     #     the re-init guard is TOCTOU-safe against a concurrent init.
-    #     The commit file is written FIRST and meta.json LAST: meta.json is
-    #     the transaction commit point (codex P2). ``save_meta`` replaces
-    #     meta.json via atomic_write (tmp+rename); a clean failure leaves
-    #     the prior meta.json intact, and the rollback additionally repairs
-    #     the row when the rename committed early (see
-    #     ``_secret_ops._rollback_import``).
+    #     The commit file is written FIRST. Metadata then commits in two
+    #     durable saves: row + pending ownership first, pending removal
+    #     second. A post-rename fsync failure can therefore never expose an
+    #     apparently complete row that lost the cleanup/rollback decision.
     _storage.ensure_layout(root)
+    backend = _native_key_id.bind_backend_to_root(backend, root)
     created_at = _utc_now_iso()
     key_id_hash_hex = _hash_id(resolved_key_id).hex()
     commit_path: Path | None = None
     with _storage.keyvault_lock(root):
         # Authoritative re-init guard — TOCTOU-safe under the lock.
         meta = _storage.load_meta(root)
-        if meta["keys"]:
+        if _native_key_id.has_native_key_ownership_state(meta):
             raise RuntimeError("keyvault already initialized — v1 supports a single key")
 
-        # Create the Enclave wrapping key. OUTSIDE the inner rollback try:
-        # if this raises (e.g. a meta/Keychain inconsistency surfacing as a
-        # duplicate) the key belongs elsewhere and must NOT be deleted.
-        wrap.generate_wrapping_key(resolved_key_id, backend=backend, unattended=unattended)
+        # Journal deterministic ownership durably before native generation.
+        # A helper may publish a key and then report a durability error; the
+        # journal lets reset safely retry cleanup without guessing ownership.
+        native_key_id = _native_key_id.add_pending_native_key(root, meta, resolved_key_id)
+        _storage.save_meta(root, meta)
+
+        # If generation raises, retain the pending journal: the backend may
+        # have made the scoped key visible before reporting its error.
+        wrap.generate_wrapping_key(
+            resolved_key_id,
+            backend=backend,
+            unattended=unattended,
+            native_key_id=native_key_id,
+        )
 
         try:
             commit_path = root / "digests" / f"{key_id_hash_hex}.commit"
@@ -572,7 +585,12 @@ def confirm_generate(
             meta["keys"][key_id_hash_hex] = {
                 "key_id": resolved_key_id,
                 "created_at": created_at,
+                _native_key_id.NATIVE_KEY_ID_FIELD: native_key_id,
             }
+            # Ownership commit: retain the pending journal beside the row.
+            # If save_meta publishes then reports an fsync error and native
+            # rollback also fails, normal key use still sees pending and
+            # fails closed.
             _storage.save_meta(root, meta)
         except BaseException:
             # Rollback — best-effort, so the ORIGINAL failure always
@@ -586,10 +604,23 @@ def confirm_generate(
                 new_key_id_hash_hex=key_id_hash_hex,
                 commit_path=commit_path,
                 imported_key_id=resolved_key_id,
+                native_key_id=native_key_id,
                 backend=backend,
                 remove_ciphertext_tree=False,
             )
             raise
+
+        # Cleanup commit: once row + pending is durably owned, clearing only
+        # the pending marker is never a reason to delete the key. The helper
+        # accepts a post-replace error only when the visible row is complete
+        # and pending-free; otherwise the error propagates and pending blocks
+        # every normal operation until reset.
+        _secret_ops._clear_pending_native_key_after_commit(
+            root,
+            key_id=resolved_key_id,
+            key_id_hash_hex=key_id_hash_hex,
+            native_key_id=native_key_id,
+        )
 
     # 4c. init_completed — success-path emit. The init is already durable,
     #     so a sink exception is suppressed (POLICY.md #22); a single line
