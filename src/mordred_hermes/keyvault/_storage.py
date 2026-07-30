@@ -693,6 +693,21 @@ def _validate_lock_stat(st: os.stat_result, path: Path, *, label: str, from_lsta
         )
 
 
+def _lock_inode_identity(st: os.stat_result) -> tuple[int, int, int]:
+    """Identity used to detect a lock inode replaced during ``open``.
+
+    ``(st_dev, st_ino)`` alone is not sufficient: Linux readily hands the
+    just-freed inode number back to the very next ``create``, so an
+    unlink+recreate race is invisible by device/inode. ``st_ctime_ns`` closes
+    that gap — a recreated inode carries a fresh change time, while merely
+    opening an untouched file for read/write never advances it, so this adds no
+    false positives. Coarse-granularity filesystems can still alias a
+    same-tick recreate, which is why this remains one layer under the mode
+    checks and the ``flock`` itself rather than the only defense.
+    """
+    return (st.st_dev, st.st_ino, st.st_ctime_ns)
+
+
 def _open_validated_lock(path: Path, *, label: str) -> int:
     """Open a lock without following/blocking on special files or inode swaps."""
     before = path.lstat()
@@ -712,8 +727,8 @@ def _open_validated_lock(path: Path, *, label: str) -> int:
         _validate_lock_stat(opened, path, label=label, from_lstat=False)
         after = path.lstat()
         _validate_lock_stat(after, path, label=label, from_lstat=True)
-        opened_identity = (opened.st_dev, opened.st_ino)
-        if (before.st_dev, before.st_ino) != opened_identity or (after.st_dev, after.st_ino) != opened_identity:
+        opened_identity = _lock_inode_identity(opened)
+        if _lock_inode_identity(before) != opened_identity or _lock_inode_identity(after) != opened_identity:
             raise KeyvaultPermissionError(
                 errno.EAGAIN,
                 f"{label} changed while it was being opened",
