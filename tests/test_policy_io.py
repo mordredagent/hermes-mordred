@@ -12,7 +12,46 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._policy_io import load_policy_mapping, read_policy_mode_fail_closed
+from mordred_hermes._policy_io import (
+    load_policy_mapping,
+    policy_transaction_marker_for_policy,
+    policy_transaction_warning,
+    read_policy_mode_fail_closed,
+)
+
+
+class TestPolicyTransactionWarning:
+    """A pending marker silently forces strict mode; it must be explainable."""
+
+    def test_absent_marker_produces_no_warning(self, tmp_path: Path) -> None:
+        marker = policy_transaction_marker_for_policy(tmp_path / "policy.json")
+        assert policy_transaction_warning(marker) is None
+
+    def test_pending_marker_names_consequence_and_remedy(self, tmp_path: Path) -> None:
+        marker = policy_transaction_marker_for_policy(tmp_path / "policy.json")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("pending pid=4242 since=2026-07-30T09:15:02Z\n", encoding="utf-8")
+
+        warning = policy_transaction_warning(marker)
+
+        assert warning is not None
+        # The operator only ever sees provider refusals, so the message has to
+        # carry the cause, the effect, and a way out.
+        assert str(marker) in warning
+        assert "pid=4242" in warning
+        assert "since=2026-07-30T09:15:02Z" in warning
+        assert "strict" in warning
+        assert "configure" in warning
+
+    def test_unreadable_marker_body_still_warns(self, tmp_path: Path) -> None:
+        marker = policy_transaction_marker_for_policy(tmp_path / "policy.json")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(b"\xff\xfe not utf-8")
+
+        warning = policy_transaction_warning(marker)
+
+        assert warning is not None
+        assert str(marker) in warning
 
 
 def test_missing_file_returns_empty(tmp_path: Path) -> None:

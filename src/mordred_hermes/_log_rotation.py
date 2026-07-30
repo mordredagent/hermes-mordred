@@ -96,8 +96,12 @@ def sweep_retention(path: Path, retention_days: int) -> None:
     """
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
     prefix = path.name + "."
+    lock_paths = {
+        path.with_name(f".{path.name}.lock"),
+        path.with_name(f"{path.name}.lock"),
+    }
     for child in path.parent.iterdir():
-        if not child.name.startswith(prefix):
+        if child in lock_paths or not child.name.startswith(prefix):
             continue
         try:
             mtime = datetime.fromtimestamp(child.stat().st_mtime, tz=UTC)

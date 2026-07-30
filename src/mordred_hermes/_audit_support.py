@@ -83,20 +83,21 @@ _PLAINTEXT_RESTART_WARNED: set[Path] = set()
 def _normalized_audit_path(path: Path) -> Path:
     """Return a stable process-local registry key for ``path``.
 
-    ``resolve(strict=False)`` folds relative paths, ``..`` components and
-    existing symlinks without requiring the log to exist yet. The lexical
-    ``abspath`` fallback handles pathological symlink loops or platforms where
-    ``resolve`` fails; it is still safer than allowing two spellings of the
-    same ordinary path to create competing writers.
+    Relative paths and ``..`` components are folded, and existing parent
+    directories are canonicalized. The final component is deliberately not
+    resolved: an ``audit.log`` symlink must reach the writer's no-follow
+    checks instead of silently turning into authorization to chmod/write its
+    target.
     """
     try:
         expanded = path.expanduser()
     except (OSError, RuntimeError):
         expanded = path
+    lexical = Path(os.path.abspath(os.fspath(expanded)))
     try:
-        return expanded.resolve(strict=False)
+        return lexical.parent.resolve(strict=False) / lexical.name
     except (OSError, RuntimeError):
-        return Path(os.path.abspath(os.fspath(expanded)))
+        return lexical
 
 
 def build_audit_writer(path: Path, *, keyvault_home: Path | None = None) -> Writer:
@@ -116,9 +117,9 @@ def build_audit_writer(path: Path, *, keyvault_home: Path | None = None) -> Writ
     side-effect-free until invoked).
 
     The normalized absolute path is both the registry key and the path handed
-    to the writer. Consequently ``audit.log``, ``./audit.log`` and a symlinked
-    spelling cannot acquire independent DEKs and splice mutually
-    unauthenticatable ciphertext into one active MRAL file.
+    to the writer. Consequently ``audit.log`` and ``./audit.log`` cannot
+    acquire independent DEKs. A symlink in the final component remains
+    visible and is refused by the writer rather than followed.
 
     The default log is ``<HERMES_BASE>/mordred/audit.log``, so its keyvault
     home is ``path.parent.parent``. Privacy-check passes ``keyvault_home``

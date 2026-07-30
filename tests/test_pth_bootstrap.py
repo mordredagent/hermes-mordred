@@ -202,8 +202,14 @@ class TestPthGateParity:
             ("/opt/venv/bin/hermes-agent", True),
             ("/opt/venv/bin/hermes-acp", True),
             ("/opt/venv/bin/hermes-mordred", True),
+            (r"C:\venv\Scripts\hermes.EXE", True),
+            (r"C:\venv\Scripts\HERMES.Exe", True),
+            (r"C:\venv\Scripts\HERMES.PY", True),
             ("/x/site-packages/hermes_cli/cli.py", True),
             ("/x/site-packages/hermes_cli", True),  # endswith('/hermes_cli') — the FIX 6 branch
+            ("/opt/venv/bin/hermes.backup", False),
+            ("/opt/venv/bin/hermes.test.py", False),
+            (r"C:\venv\Scripts\hermes.backup.EXE", False),
             ("/x/hermes-venv/bin/pytest", False),  # venv NAMED hermes, but not a hermes process
             ("/usr/bin/python", False),
         ],

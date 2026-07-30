@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,8 +42,14 @@ def _eval_pth_engages(argv0: str) -> bool:
         ("/opt/venv/bin/hermes-agent", True),
         ("/opt/venv/bin/hermes-acp", True),
         ("/opt/venv/bin/hermes-mordred", True),
+        (r"C:\venv\Scripts\hermes.EXE", True),
+        (r"C:\venv\Scripts\HERMES.Exe", True),
+        (r"C:\venv\Scripts\HERMES.PY", True),
         ("/x/site-packages/hermes_cli/cli.py", True),
         ("/x/site-packages/hermes_cli", True),
+        ("/opt/venv/bin/hermes.backup", False),
+        ("/opt/venv/bin/hermes.test.py", False),
+        (r"C:\venv\Scripts\hermes.backup.EXE", False),
         ("/x/hermes-venv/bin/pytest", False),
         ("/usr/bin/python", False),
     ],
@@ -140,13 +147,53 @@ def test_mandatory_integrity_policy_refusal_propagates_unchanged(
     assert not isinstance(exc_info.value, SystemExit)
 
 
+def test_concurrent_manager_installations_keep_their_own_integrity_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each bridge inspects its own manager, independent of discovery order."""
+    from mordred_hermes.privacy_check import hooks
+
+    monkeypatch.delenv("HERMES_SAFE_MODE", raising=False)
+    managers = [SimpleNamespace(_hooks={}), SimpleNamespace(_hooks={})]
+    barrier = threading.Barrier(len(managers) + 1)
+    errors: list[BaseException] = []
+
+    def install_bridge(manager: SimpleNamespace) -> None:
+        try:
+            barrier.wait()
+            _runtime_bootstrap._ensure_integrity_callback(manager)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=install_bridge, args=(manager,)) for manager in managers]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+    assert not errors
+
+    inspected: list[object] = []
+
+    def record_manager(**kwargs: object) -> None:
+        inspected.append(kwargs["plugin_manager"])
+
+    monkeypatch.setattr(hooks, "check_plugin_integrity", record_manager)
+    for manager in managers:
+        callbacks = manager._hooks["on_session_start"]
+        assert len(callbacks) == 1
+        callbacks[0](plugin_manager=object())
+
+    assert inspected == managers
+
+
 _PLUGIN_MANAGER_PROBE = r"""
 import json
 
 from mordred_hermes._runtime_bootstrap import (
     _ensure_integrity_callback,
     _is_integrity_callback,
-    _mandatory_integrity_hook,
+    _is_mandatory_integrity_bridge,
     install,
 )
 from mordred_hermes.privacy_check import _runtime
@@ -175,10 +222,10 @@ def third_party(**_kwargs):
 
 manager._hooks["on_session_start"].insert(0, third_party)
 _ensure_integrity_callback(manager)
-bridge_first = manager._hooks["on_session_start"][0] is _mandatory_integrity_hook
+bridge_first = _is_mandatory_integrity_bridge(manager._hooks["on_session_start"][0])
 bridge_count = sum(
     1 for callback in manager._hooks["on_session_start"]
-    if callback is _mandatory_integrity_hook
+    if _is_mandatory_integrity_bridge(callback)
 )
 
 blocked = False
@@ -262,7 +309,7 @@ def test_real_plugin_manager_always_gets_fail_closed_integrity_hook(
 _SAFE_MODE_PROBE = r"""
 import json
 
-from mordred_hermes._runtime_bootstrap import _mandatory_integrity_hook, install
+from mordred_hermes._runtime_bootstrap import _is_mandatory_integrity_bridge, install
 from hermes_cli.plugins import PluginManager
 
 install()
@@ -270,7 +317,7 @@ manager = PluginManager()
 manager.discover_and_load(force=True)
 callbacks = manager._hooks.get("on_session_start", [])
 print(json.dumps({
-    "bridge_count": sum(1 for callback in callbacks if callback is _mandatory_integrity_hook),
+    "bridge_count": sum(1 for callback in callbacks if _is_mandatory_integrity_bridge(callback)),
     "callback_count": len(callbacks),
 }))
 """
