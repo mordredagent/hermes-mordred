@@ -22,9 +22,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-from typing import Any
+from typing import Any, cast
 
 from .._audit_support import safe_audit_append
+from .._policy_types import VALID_ACTIVE_PATHS, ActivePath
 from . import _runtime
 from ._exceptions import MordredIntegrityRefused
 from .policy import evaluate_pre_tool_call
@@ -32,7 +33,27 @@ from .policy import evaluate_pre_tool_call
 _LOG = logging.getLogger("mordred.privacy_check")
 
 
-def check_plugin_integrity(**_kwargs: Any) -> None:
+def _resolve_active_network_path() -> ActivePath | None:
+    """Return a ready Mordred network path, failing closed to ``None``.
+
+    The privacy plugin is loaded before the network plugin in the default
+    plugin order, so this lookup must stay lazy. A missing runtime, a route
+    still being brought up, or an invalid future status all map to ``None``;
+    :func:`evaluate_pre_tool_call` deliberately treats that as clearnet under
+    strict policy.
+    """
+    try:
+        from ..network import api
+
+        status = api.status()
+    except Exception:
+        return None
+    if not status.ready or status.active_path not in VALID_ACTIVE_PATHS:
+        return None
+    return cast(ActivePath, status.active_path)
+
+
+def check_plugin_integrity(**kwargs: Any) -> None:
     """Detect an explicitly disabled Mordred plugin from any live sibling.
 
     Strict + sibling-disable → audit + poison + integrity refusal.
@@ -45,6 +66,9 @@ def check_plugin_integrity(**_kwargs: Any) -> None:
     """
     state = _runtime.ensure_state()
     disabled = _runtime.find_disabled_siblings(config_path=state.config_path)
+    plugin_manager = kwargs.get("plugin_manager")
+    if plugin_manager is not None:
+        disabled.update(_runtime.find_unloaded_siblings(plugin_manager))
 
     if disabled:
         decision = "block" if state.policy_mode == "strict" else "warn"
@@ -139,7 +163,7 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     outcome = evaluate_pre_tool_call(
         policy_mode=state.policy_mode,
         tool_name=tool_name,
-        active_path=None,
+        active_path=_resolve_active_network_path(),
     )
     if outcome.decision == "block":
         safe_audit_append(

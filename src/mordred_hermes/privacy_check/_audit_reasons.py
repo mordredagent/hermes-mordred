@@ -140,6 +140,12 @@ Phase 3 transport-gate follow-up (2026-07-27) adds
 ``network.transport_incompatible``, bringing the total to 30. The emit sites
 live in :mod:`mordred_hermes.network.hooks` at both process/session startup and
 immediately before provider egress.
+
+Strict cloud endpoint binding (2026-07-30) adds
+``policy.strict.cloud_endpoint_mismatch``, bringing the total to 31. It is
+emitted immediately before ``policy.strict.session_refused`` when an actual
+cloud ``base_url`` is missing, malformed, non-HTTPS, or outside the selected
+provider's owned endpoint set.
 """
 
 from typing import Literal
@@ -150,6 +156,7 @@ ReasonCode = Literal[
     "policy.strict.unconditional_override",
     "policy.strict.cloud_not_allowlisted",
     "policy.strict.cloud_allowlisted",
+    "policy.strict.cloud_endpoint_mismatch",
     "policy.strict.cloud_prompted_allow",
     "policy.strict.cloud_prompted_deny",
     "policy.lenient.unknown_metadata_warning",

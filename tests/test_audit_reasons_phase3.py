@@ -95,7 +95,8 @@ def test_total_freeze_size_after_transport_gate_followup() -> None:
     (policy.*.keyvault_uninitialized) + 1 PR #39 review follow-up
     (mordred.degraded.audit_encryption_unavailable) + 2 prompt-once
     (policy.strict.cloud_prompted_allow / _deny) + 1 Phase 3 transport-gate
-    follow-up (network.transport_incompatible) = 30.
+    follow-up (network.transport_incompatible) + 1 strict cloud endpoint
+    binding follow-up (policy.strict.cloud_endpoint_mismatch) = 31.
 
     The §4.1 codes graduated into the freeze because their emit site —
     ``install_wrapper.run``'s ``requires_keyvault`` enforcement — exists.
@@ -109,7 +110,7 @@ def test_total_freeze_size_after_transport_gate_followup() -> None:
     """
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
 
-    assert len(get_args(ReasonCode)) == 30
+    assert len(get_args(ReasonCode)) == 31
 
 
 def test_no_underscore_typo_legacy_name() -> None:
