@@ -206,6 +206,99 @@ class TestKeyvaultSection:
         report = _collect(tmp_path, helper_finder=lambda platform: "/usr/local/bin/helper")
         assert report.keyvault_helper_installed is True
 
+    def _mral_header_bytes(self) -> bytes:
+        """Build a real MRAL header line from the format's own constants.
+
+        Mirrors ``EncryptedWriter._active``'s header shape rather than a
+        copy-pasted literal, so this stays honest if the wire format changes.
+        """
+        from mordred_hermes.keyvault.log_encryption import FORMAT_VERSION, MAGIC
+
+        header = {
+            "fmt": MAGIC.decode("ascii"),
+            "ver": FORMAT_VERSION,
+            "key_id": "audit-log",
+            "wdek": "aGVsbG8=",
+        }
+        return (json.dumps(header, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+
+    def _audit_log_path(self, home: Path) -> Path:
+        path = home / "mordred" / "audit.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_legacy_row_with_encrypted_log_reports_encrypted_legacy_key(self, tmp_path: Path) -> None:
+        # A legacy row (no NATIVE_KEY_ID_FIELD) is exactly what
+        # ``_build_keyvault`` produces — this is the a9-predating shape
+        # ``privacy_check.audit._select_audit_native_key`` resolves to the
+        # legacy global audit key for, silently, with no manifest trace.
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        self._audit_log_path(tmp_path).write_bytes(self._mral_header_bytes())
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        assert "; audit log encrypted (legacy key)" in report.keyvault_detail
+
+    def test_legacy_row_with_plaintext_ndjson_log_reports_plaintext(self, tmp_path: Path) -> None:
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        entry = json.dumps({"ts": "2026-06-11T00:00:00.000Z", "event": "test"}) + "\n"
+        self._audit_log_path(tmp_path).write_text(entry, encoding="utf-8")
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        # endswith, not `in`: the scoped-profile verdict also starts with
+        # "; audit log plaintext", so only the exact tail pins this branch.
+        assert report.keyvault_detail.endswith("; audit log plaintext")
+
+    def test_legacy_row_with_absent_log_reports_plaintext(self, tmp_path: Path) -> None:
+        # No audit.log file at all — the common case for a fresh legacy
+        # profile that hasn't written any entries yet.
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        # endswith, not `in`: the scoped-profile verdict also starts with
+        # "; audit log plaintext", so only the exact tail pins this branch.
+        assert report.keyvault_detail.endswith("; audit log plaintext")
+
+    def test_legacy_row_with_garbage_log_does_not_raise_and_reports_plaintext(self, tmp_path: Path) -> None:
+        _build_keyvault(tmp_path, {"default": b"\x01" * 32})
+        self._audit_log_path(tmp_path).write_bytes(b"\xff\xfe\x00garbage-not-json-or-utf8\x01\x02")
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        # endswith, not `in`: the scoped-profile verdict also starts with
+        # "; audit log plaintext", so only the exact tail pins this branch.
+        assert report.keyvault_detail.endswith("; audit log plaintext")
+
+    def test_scoped_row_without_audit_fields_still_reports_no_wrapping_key(self, tmp_path: Path) -> None:
+        """Regression guard: a scoped (non-legacy) profile must NOT fall into
+        the legacy file-probing branch just because it has no audit record."""
+        root = _storage.resolve_keyvault_dir(tmp_path)
+        _storage.ensure_layout(root)
+        meta = _storage.load_meta(root)
+        key_id = "default"
+        h = _key_id_hash(key_id)
+        meta["keys"][h] = {
+            "key_id": key_id,
+            "created_at": "2026-06-11T00:00:00Z",
+            _native_key_id.NATIVE_KEY_ID_FIELD: _native_key_id.scoped_native_key_id(root, key_id),
+        }
+        _storage.atomic_write(root / "digests" / f"{h}.commit", b"\x01" * 32)
+        _storage.save_meta(root, meta)
+        # Even an MRAL-encrypted log on disk must not flip a scoped profile's
+        # verdict — only the legacy branch reads the file at all.
+        self._audit_log_path(tmp_path).write_bytes(self._mral_header_bytes())
+
+        report = _collect(tmp_path)
+
+        assert report.keyvault_initialized is True
+        assert report.keyvault_detail.endswith("; audit log plaintext (no audit wrapping key)")
+
 
 class TestRendering:
     def test_text_includes_all_sections(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
