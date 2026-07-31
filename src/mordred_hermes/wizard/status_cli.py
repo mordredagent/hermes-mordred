@@ -144,10 +144,70 @@ def _keyvault_state(home: Path) -> tuple[bool, int, str]:
     if count == 0:
         return False, 0, "not initialised"
     detail = f"{count} key" + ("" if count == 1 else "s")
-    return True, count, f"{detail}{_audit_key_detail(meta)}"
+    # No canonical home->audit-log-path helper exists to reuse: every
+    # existing ``DEFAULT_AUDIT_PATH`` (privacy_check._runtime,
+    # network/__init__, llm_guard/__init__) is a module-global tied to the
+    # real ``HERMES_BASE``, not parameterized by an arbitrary ``home`` — a
+    # bad fit for a status collector that must stay confined to whatever
+    # ``home`` it was given (e.g. a test's ``tmp_path``). The layout itself
+    # is established by :func:`_audit_support.build_audit_writer` ("The
+    # default log is ``<HERMES_BASE>/mordred/audit.log``") and mirrored by
+    # ``keyvault._storage.resolve_keyvault_dir``'s sibling ``mordred`` dir.
+    audit_path = home / "mordred" / "audit.log"
+    return True, count, f"{detail}{_audit_key_detail(meta, audit_path)}"
 
 
-def _audit_key_detail(meta: Mapping[str, object]) -> str:
+def _is_legacy_audit_profile(meta: Mapping[str, object]) -> bool:
+    """True if ``meta`` predates a9's profile-scoped native key ids.
+
+    Mirrors :func:`privacy_check.audit._select_audit_native_key`'s legacy
+    test: exactly one key row, and that row carries no
+    ``NATIVE_KEY_ID_FIELD``. Malformed metadata (missing/wrong-shaped
+    ``keys``) defensively reads as "not legacy" rather than raising —
+    a legacy misclassification just falls through to the ordinary
+    "no audit wrapping key" branch below, which is already correct for a
+    scoped profile.
+    """
+    from ..keyvault import _native_key_id
+
+    keys = meta.get("keys")
+    if not isinstance(keys, Mapping) or len(keys) != 1:
+        return False
+    (row,) = keys.values()
+    if not isinstance(row, Mapping):
+        return False
+    return _native_key_id.NATIVE_KEY_ID_FIELD not in row
+
+
+def _audit_log_is_mral_encrypted(audit_path: Path) -> bool:
+    """Best-effort read of the audit log's own header — never raises.
+
+    Only used for the legacy-profile branch, where meta.json carries no
+    audit-key metadata at all and so cannot prove either outcome (see
+    :func:`_audit_key_detail`). The MRAL wire format's line 0 is a JSON
+    header with ``fmt == MAGIC``; a plaintext NDJSON log's first line never
+    carries that field. A missing file, permission error, empty file,
+    non-JSON first line, or a huge/binary blob must all resolve to "not
+    encrypted" — this reads at most a few KB, never the whole file, and
+    never raises into ``status``'s never-raise contract.
+    """
+    from .._audit_io import read_first_line
+    from ..keyvault.log_encryption import MAGIC
+
+    try:
+        first_line = read_first_line(audit_path, limit=4096)
+    except OSError:
+        return False
+    if not first_line or first_line[:1] != b"{":
+        return False
+    try:
+        header = json.loads(first_line)
+    except ValueError:  # JSONDecodeError / UnicodeDecodeError both subclass it
+        return False
+    return isinstance(header, dict) and header.get("fmt") == MAGIC.decode("ascii")
+
+
+def _audit_key_detail(meta: Mapping[str, object], audit_path: Path) -> str:
     """Describe audit-log encryption state, which is otherwise invisible.
 
     A keyvault whose audit wrapping key never committed still reports as a
@@ -155,7 +215,18 @@ def _audit_key_detail(meta: Mapping[str, object]) -> str:
     plaintext NDJSON. The stranded pending-without-committed case is worse than
     "not provisioned": provisioning refuses to adopt a native key of unproven
     durability, so every retry re-refuses and the audit log stays plaintext
-    permanently. Presence checks only — this must never raise from ``status``.
+    permanently.
+
+    A legacy profile (pre-a9, no profile-scoped native key ids) never gets
+    ``AUDIT_KEY_FIELD``/``PENDING_AUDIT_KEY_FIELD`` written at all — those are
+    only written by ``wizard._keyvault_init`` — even though
+    ``privacy_check.audit.make_audit_writer`` resolves the legacy global audit
+    key and encrypts normally for it. Claiming "plaintext" there would be a
+    false negative and claiming "encrypted" unconditionally would be a false
+    *positive* (the legacy key has a real history of becoming unusable with a
+    silent plaintext fallback), so that branch alone falls back to reading
+    what the audit log file itself shows. Presence/file checks only — this
+    must never raise from ``status``.
     """
     from ..keyvault import _native_key_id
 
@@ -168,6 +239,10 @@ def _audit_key_detail(meta: Mapping[str, object]) -> str:
             "; audit-log encryption INCOMPLETE — a previous provisioning attempt was "
             "interrupted, retries will not recover it, and the audit log stays plaintext"
         )
+    if _is_legacy_audit_profile(meta):
+        if _audit_log_is_mral_encrypted(audit_path):
+            return "; audit log encrypted (legacy key)"
+        return "; audit log plaintext"
     return "; audit log plaintext (no audit wrapping key)"
 
 
