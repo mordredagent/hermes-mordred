@@ -109,6 +109,57 @@ def test_v3_key_must_be_registered_for_event_channel(channel_key: bytes) -> None
         )
 
 
+def test_v3_resolves_a_key_stored_under_the_extension_composite_id() -> None:
+    # The browser extension pushes channel_key_set keyed by its own composite
+    # id, which save_channel_key stores verbatim, while an event only carries
+    # the platform's native chat id. Requiring an exact string match resolved
+    # no real install's keys at all — every v3 command failed as unbound.
+    raw_key = secrets.token_bytes(32)
+    pairing.save_channel_key("slack:T0TEAM:C0BCX916V6Z", raw_key)
+    token = _command(raw_key, chat_id="C0BCX916V6Z")
+
+    plaintext, _kid, replay = e2e.decrypt_gateway_envelope(
+        token,
+        "slack",
+        chat_id="C0BCX916V6Z",
+        thread_root=None,
+    )
+    assert plaintext == "authenticated command"
+    assert replay is not None
+
+
+def test_v3_composite_key_binding_still_requires_the_event_platform() -> None:
+    # Suffix matching must not become a bare "ends with the channel id" rule:
+    # a key stored for another platform never unlocks this one, even when the
+    # channel ids collide.
+    raw_key = secrets.token_bytes(32)
+    pairing.save_channel_key("discord:G0GUILD:C0BCX916V6Z", raw_key)
+    token = _command(raw_key, chat_id="C0BCX916V6Z")
+
+    with pytest.raises(e2e.InvalidEncryptedEnvelope, match="key_not_bound_to_channel"):
+        e2e.decrypt_gateway_envelope(
+            token,
+            "slack",
+            chat_id="C0BCX916V6Z",
+            thread_root=None,
+        )
+
+
+def test_v3_composite_key_binding_rejects_a_partial_channel_id_match() -> None:
+    # The channel id must be the WHOLE last segment, never a suffix of it.
+    raw_key = secrets.token_bytes(32)
+    pairing.save_channel_key("slack:T0TEAM:XC0BCX916V6Z", raw_key)
+    token = _command(raw_key, chat_id="C0BCX916V6Z")
+
+    with pytest.raises(e2e.InvalidEncryptedEnvelope, match="key_not_bound_to_channel"):
+        e2e.decrypt_gateway_envelope(
+            token,
+            "slack",
+            chat_id="C0BCX916V6Z",
+            thread_root=None,
+        )
+
+
 def test_discord_thread_can_resolve_key_from_authenticated_parent(channel_key: bytes) -> None:
     token = _command(
         channel_key,
