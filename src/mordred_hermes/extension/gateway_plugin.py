@@ -290,8 +290,12 @@ def pre_gateway_dispatch(
             thread_root=thread_root,
             parent_chat_id=parent_chat_id,
         )
-    except e2e.InvalidEncryptedEnvelope:
-        logger.warning("mordred_e2e: refusing malformed or unauthenticated encrypted envelope")
+    except e2e.InvalidEncryptedEnvelope as exc:
+        # The reason is a fixed identifier (never message text, keys or
+        # plaintext), and without it an operator cannot tell a wrong channel
+        # key from a mangled wire or a thread-context mismatch — all of which
+        # look identical in the log and need completely different fixes.
+        logger.warning("mordred_e2e: refusing encrypted envelope: %s", exc)
         return {"action": "skip", "reason": "mordred-invalid-encrypted-envelope"}
     except BaseException:
         logger.error("mordred_e2e: encrypted envelope verification failed")
