@@ -373,6 +373,81 @@ def test_gateway_commits_replay_only_after_outbound_path_is_ready(channel_key: b
     }
 
 
+def test_slack_synthetic_thread_root_authenticates_as_top_level(channel_key: bytes) -> None:
+    """A live top-level Slack command must decrypt under the top-level context.
+
+    The Slack adapter's default ``reply_in_thread`` session keying stamps
+    ``thread_id`` with a synthetic root equal to the top-level message's OWN
+    ``ts`` (``thread_ts == ts``). Slack assigns that ts only after the send,
+    so the extension provably encrypted with ``thread_root=None`` — deriving
+    the AAD from the routed synthetic root instead refuses every genuine
+    top-level command as ``authentication_failed`` (live 2026-08-01).
+    """
+    ts = "1785544512.573099"
+    token = _command(channel_key)
+    event = SimpleNamespace(
+        text=token,
+        message_id=ts,
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=ts, profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("not called by inbound verification")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "rewrite",
+        "text": "authenticated command",
+    }
+    # Reply routing must keep the routed synthetic thread: the agent's answer
+    # lands in the thread Slack rooted at the mention, re-encrypted in kind.
+    assert e2e.thread_key_id("slack", "C-v3", ts) == crypto.key_id(channel_key)
+
+
+def test_slack_genuine_thread_reply_keeps_its_real_root(channel_key: bytes) -> None:
+    root, reply_ts = "1785000000.000100", "1785000000.000200"
+    token = _command(channel_key, thread_root=root)
+    event = SimpleNamespace(
+        text=token,
+        message_id=reply_ts,
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=root, profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("not called by inbound verification")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "rewrite",
+        "text": "authenticated command",
+    }
+
+
+def test_slack_top_level_token_is_refused_inside_a_real_thread(channel_key: bytes) -> None:
+    # A captured top-level token pasted into a genuine thread must not
+    # authenticate: canonicalization applies only when the routed root IS the
+    # command's own message id, so the thread binding stays intact.
+    root, reply_ts = "1785000000.000100", "1785000000.000200"
+    token = _command(channel_key)
+    event = SimpleNamespace(
+        text=token,
+        message_id=reply_ts,
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=root, profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("plaintext must never be released")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "skip",
+        "reason": "mordred-invalid-encrypted-envelope",
+    }
+
+
 @pytest.mark.parametrize("reuse", ["message_id", "nonce"])
 def test_replay_cache_rejects_authenticated_identity_reuse(channel_key: bytes, reuse: str) -> None:
     message_id = crypto.b64u_encode(secrets.token_bytes(16))

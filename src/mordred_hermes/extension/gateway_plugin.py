@@ -145,6 +145,23 @@ def _thread_ctx(event: Any) -> tuple[str, str, str | None, str | None]:
     return _platform_name(event), str(chat_id), thread_root, parent_chat_id
 
 
+def _slack_command_thread_root(event: Any, thread_root: str | None) -> str | None:
+    """The thread root a Slack command's sender could actually have bound.
+
+    The Slack adapter's default ``reply_in_thread`` session keying stamps
+    ``thread_id`` with a synthetic root equal to a top-level command's OWN
+    ``ts`` (``thread_ts == ts``). Slack assigns that ts only after the send,
+    so the extension provably encrypted with the top-level context
+    (``thread_root=None``) — authenticate under it. A genuine thread reply
+    arrives with ``thread_ts != ts`` and keeps its real root, so a captured
+    top-level token still cannot be replayed into a thread.
+    """
+    message_id = getattr(event, "message_id", None)
+    if thread_root is not None and message_id not in (None, "") and str(message_id) == thread_root:
+        return None
+    return thread_root
+
+
 def _command_aad_ctx(
     event: Any,
     routed_context: tuple[str, str, str | None, str | None],
@@ -161,11 +178,24 @@ def _command_aad_ctx(
     command authentication uses the original parent channel with no thread.
     Ambiguous floor-version thread events without the original raw channel fail
     closed instead of guessing a context.
+
+    Slack has the mirror problem, canonicalized by
+    :func:`_slack_command_thread_root`.
     """
-    platform, chat_id, thread_root, parent_chat_id = routed_context
+    platform, chat_id, thread_root, _parent_chat_id = routed_context
+    if platform == "slack":
+        return platform, chat_id, _slack_command_thread_root(event, thread_root)
     if platform != "discord":
         return platform, chat_id, thread_root
+    return _discord_command_ctx(event, routed_context)
 
+
+def _discord_command_ctx(
+    event: Any,
+    routed_context: tuple[str, str, str | None, str | None],
+) -> tuple[str, str, str | None]:
+    """Resolve the pre-auto-threading context (rules in :func:`_command_aad_ctx`)."""
+    platform, chat_id, thread_root, parent_chat_id = routed_context
     src = getattr(event, "source", None)
     explicit_auto = getattr(src, "auto_thread_created", _MISSING)
     if explicit_auto is not _MISSING and not isinstance(explicit_auto, bool):
