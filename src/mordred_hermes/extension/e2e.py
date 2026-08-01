@@ -221,9 +221,31 @@ def _canonical_v3_parts(token: str) -> tuple[str, str, int, int, bytes, bytes, s
     )
 
 
+def _channel_key_matches(stored_id: str, *, platform: str, chat_id: str) -> bool:
+    """Does a stored channel-key id name exactly ``chat_id`` on ``platform``?
+
+    The extension pushes ``channel_key_set`` keyed by its own composite id
+    (``slack:{team}:{cid}`` / ``discord:{guild}:{cid}``), which
+    :func:`pairing.save_channel_key` stores verbatim, while a gateway event
+    only ever carries the platform's native ``chat_id``. Matching the exact
+    string alone therefore never resolves a real install's keys, and every v3
+    command fails ``key_not_bound_to_channel``.
+
+    The composite is accepted only when its LAST segment is the channel id and
+    its FIRST segment is this event's platform, so the binding stays as tight
+    as an exact match: a key stored for another platform that happens to share
+    a channel id cannot unlock this one, and no bare suffix match is allowed.
+    """
+    if stored_id == chat_id:
+        return True
+    segments = stored_id.split(":")
+    return len(segments) > 1 and segments[0].lower() == platform and segments[-1] == chat_id
+
+
 def _context_channel_key(
     kid: str,
     *,
+    platform: str,
     chat_id: str,
     parent_chat_id: str | None,
 ) -> bytes:
@@ -236,9 +258,11 @@ def _context_channel_key(
     if parent_chat_id and parent_chat_id not in candidates:
         candidates.append(parent_chat_id)
     for channel_id in candidates:
-        raw_key = channel_keys.get(channel_id)
-        if raw_key is not None and key_id(raw_key) == kid:
-            return raw_key
+        for stored_id, raw_key in channel_keys.items():
+            if not _channel_key_matches(stored_id, platform=platform, chat_id=channel_id):
+                continue
+            if key_id(raw_key) == kid:
+                return raw_key
     raise InvalidEncryptedEnvelope("key_not_bound_to_channel")
 
 
@@ -270,7 +294,12 @@ def _decrypt_gateway_claim(
         raise InvalidEncryptedEnvelope("mixed_or_multiple_content")
 
     kid, _message_id, _sequence, _total, _nonce, _ciphertext, normalized, replay = _canonical_v3_parts(token)
-    raw_key = _context_channel_key(kid, chat_id=chat_id, parent_chat_id=parent_chat_id)
+    raw_key = _context_channel_key(
+        kid,
+        platform=platform,
+        chat_id=chat_id,
+        parent_chat_id=parent_chat_id,
+    )
     try:
         plaintext = decrypt_message_v3(
             raw_key,

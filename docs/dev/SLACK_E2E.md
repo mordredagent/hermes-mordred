@@ -61,6 +61,15 @@ canonical値とします。Hermes 0.19の `auto_thread_created` と、0.13/0.19�
 作成後の `(thread_id, thread_id)` を使います。marker・親・raw channelが矛盾する場合や、
 旧版イベントでauto-threadか既存threadか判定できない場合は推測せず拒否します。
 
+Slackのchannel top levelにも鏡写しの問題があります。Slack adapterのデフォルト
+(`reply_in_thread`)はsession keyingのため、top-level messageの `thread_id` に
+そのmessage自身の `ts` を合成thread rootとして与えます(`thread_ts == ts`)。
+この `ts` は送信後にSlackが採番する値でExtensionは暗号化時点で知り得ないため、
+routed thread rootがcommand自身の `message_id` と一致する場合に限り、command AADは
+`thread_root=None` をcanonical値とします。本物のthread replyは `thread_ts != ts`
+で届くので実rootのまま認証され、top-level tokenを既存threadへ貼り直すreplayは
+今まで通り拒否されます。返信routingは合成threadを使い続けます。
+
 `kid` を全channel共通indexから引くことはしません。イベントの `chat_id`、または
 Discord threadの認証済み `parent_chat_id` に登録された `K_chan` だけを候補にし、
 そのfingerprintが `kid` と一致する場合に限って復号します。
