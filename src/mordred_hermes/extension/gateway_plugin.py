@@ -155,9 +155,21 @@ def _slack_command_thread_root(event: Any, thread_root: str | None) -> str | Non
     (``thread_root=None``) — authenticate under it. A genuine thread reply
     arrives with ``thread_ts != ts`` and keeps its real root, so a captured
     top-level token still cannot be replayed into a thread.
+
+    Canonicalizing requires two adapter-stamped markers to agree: the routed
+    root equals the command's own ``message_id`` AND no
+    ``reply_to_message_id`` was recorded (the adapter stamps that field for
+    every genuine reply). A missing or contradicting marker keeps the
+    stricter routed root, so authentication fails closed.
     """
     message_id = getattr(event, "message_id", None)
-    if thread_root is not None and message_id not in (None, "") and str(message_id) == thread_root:
+    if (
+        thread_root is not None
+        and isinstance(message_id, str)
+        and message_id
+        and message_id == thread_root
+        and getattr(event, "reply_to_message_id", None) in (None, "")
+    ):
         return None
     return thread_root
 

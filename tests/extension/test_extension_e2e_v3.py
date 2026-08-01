@@ -448,6 +448,124 @@ def test_slack_top_level_token_is_refused_inside_a_real_thread(channel_key: byte
     }
 
 
+def test_slack_thread_token_is_refused_at_top_level(channel_key: bytes) -> None:
+    # The converse lift: a token bound to a genuine thread must not
+    # authenticate on a top-level (synthetic-root) event. Guards against a
+    # future "fix" that canonicalizes unconditionally or tries both roots.
+    ts = "1785546061.254429"
+    token = _command(channel_key, thread_root="1785000000.000100")
+    event = SimpleNamespace(
+        text=token,
+        message_id=ts,
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=ts, profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("plaintext must never be released")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "skip",
+        "reason": "mordred-invalid-encrypted-envelope",
+    }
+
+
+def test_synthetic_root_shape_does_not_canonicalize_off_slack(channel_key: bytes) -> None:
+    # Pins the platform gate: a discord event shaped thread_id == message_id
+    # must keep its routed root, so a top-level-bound token stays refused.
+    pairing.save_channel_key("D-v3", secrets.token_bytes(32))
+    raw_key = secrets.token_bytes(32)
+    pairing.save_channel_key("discord:G0GUILD:D-v3", raw_key)
+    token = _command(raw_key, platform="discord", chat_id="D-v3", thread_root=None)
+    event = SimpleNamespace(
+        text=token,
+        message_id="999888777",
+        source=SimpleNamespace(platform="discord", chat_id="D-v3", thread_id="999888777", profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("plaintext must never be released")
+
+    gateway = SimpleNamespace(adapters={"discord": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "skip",
+        "reason": "mordred-invalid-encrypted-envelope",
+    }
+
+
+@pytest.mark.parametrize("bad_message_id", [None, "", 0])
+def test_slack_degenerate_message_id_fails_closed(channel_key: bytes, bad_message_id) -> None:
+    # Without a usable message id the synthetic root cannot be proven, so the
+    # stricter routed root stands and the top-level token is refused.
+    token = _command(channel_key)
+    event = SimpleNamespace(
+        text=token,
+        message_id=bad_message_id,
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id="1785000000.000300", profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("plaintext must never be released")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "skip",
+        "reason": "mordred-invalid-encrypted-envelope",
+    }
+
+
+def test_slack_top_level_replay_is_refused_through_the_hook(channel_key: bytes) -> None:
+    # The replay store is the SOLE defense for the context this fix newly
+    # makes reachable (same channel, top level) — exercise it end to end
+    # through the hook, not just at the claim_gateway_replay level.
+    token = _command(channel_key, "release exactly once, live shape")
+
+    def live_event(ts: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            text=token,
+            message_id=ts,
+            source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=ts, profile=None),
+        )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("not called by inbound verification")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=live_event("1785000000.000400"), gateway=gateway) == {
+        "action": "rewrite",
+        "text": "release exactly once, live shape",
+    }
+    assert gateway_plugin.pre_gateway_dispatch(event=live_event("1785000000.000500"), gateway=gateway) == {
+        "action": "skip",
+        "reason": "mordred-replayed-encrypted-envelope",
+    }
+
+
+def test_slack_flat_reply_mode_top_level_authenticates_identically(channel_key: bytes) -> None:
+    # reply_in_thread=false delivers top-level messages with no thread at all;
+    # both Slack config modes must accept the same top-level-bound token.
+    token = _command(channel_key, "flat mode")
+    event = SimpleNamespace(
+        text=token,
+        message_id="1785000000.000600",
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=None, profile=None),
+    )
+
+    class WrappableAdapter:
+        async def send(self, *_args, **_kwargs):
+            raise AssertionError("not called by inbound verification")
+
+    gateway = SimpleNamespace(adapters={"slack": WrappableAdapter()})
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "rewrite",
+        "text": "flat mode",
+    }
+
+
 @pytest.mark.parametrize("reuse", ["message_id", "nonce"])
 def test_replay_cache_rejects_authenticated_identity_reuse(channel_key: bytes, reuse: str) -> None:
     message_id = crypto.b64u_encode(secrets.token_bytes(16))
