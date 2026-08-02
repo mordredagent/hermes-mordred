@@ -194,12 +194,23 @@ def _python_for_launcher(path: Path) -> Path | None:
         if target is None:
             # Not a recognizable wrapper: guess the python beside it — but never
             # the dev venv running this CLI (that would let it pose as the runtime).
-            sibling = _sibling_python(current)
-            if sibling is not None and _within_current_prefix(sibling):
-                return None
-            return sibling
+            return _guarded_sibling_python(current)
         current = target
     return None
+
+
+def _guarded_sibling_python(current: Path) -> Path | None:
+    """Sibling-python guess that refuses the dev venv running this CLI.
+
+    The sibling fallback exists for unrecognizable wrappers, but a sibling
+    inside ``sys.prefix`` is exactly the venv driving this command — letting
+    it validate itself is the false-pass :func:`_within_current_prefix`
+    guards against, so it yields ``None`` instead.
+    """
+    sibling = _sibling_python(current)
+    if sibling is not None and _within_current_prefix(sibling):
+        return None
+    return sibling
 
 
 def _managed_runtime_python(home: Path) -> Path | None:

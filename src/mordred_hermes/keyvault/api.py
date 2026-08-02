@@ -441,6 +441,93 @@ def _emit_init_denied(audit_sink: AuditSink, *, key_id: str) -> Exception | None
     )
 
 
+def _commit_key_state(
+    root: Path,
+    *,
+    key_id: str,
+    key_id_hash_hex: str,
+    created_at: str,
+    verification_digest: bytes,
+    backend: NativeBackend,
+    unattended: bool | None,
+) -> None:
+    """Durable phase of :func:`confirm_generate` — one keyvault-lock hold.
+
+    The re-init re-check, native key generation, and the commit/meta writes
+    all run under a SINGLE lock hold so the re-init guard is TOCTOU-safe
+    against a concurrent init. The commit file is written FIRST. Metadata
+    then commits in two durable saves: row + pending ownership first,
+    pending removal second. A post-rename fsync failure can therefore never
+    expose an apparently complete row that lost the cleanup/rollback
+    decision. Failure semantics (rollback on write failure, retained pending
+    journal on generation failure) are documented step by step inline.
+    """
+    commit_path: Path | None = None
+    with _storage.keyvault_lock(root):
+        # Authoritative re-init guard — TOCTOU-safe under the lock.
+        meta = _storage.load_meta(root)
+        if _native_key_id.has_native_key_ownership_state(meta):
+            raise RuntimeError("keyvault already initialized — v1 supports a single key")
+
+        # Journal deterministic ownership durably before native generation.
+        # A helper may publish a key and then report a durability error; the
+        # journal lets reset safely retry cleanup without guessing ownership.
+        native_key_id = _native_key_id.add_pending_native_key(root, meta, key_id)
+        _storage.save_meta(root, meta)
+
+        # If generation raises, retain the pending journal: the backend may
+        # have made the scoped key visible before reporting its error.
+        wrap.generate_wrapping_key(
+            key_id,
+            backend=backend,
+            unattended=unattended,
+            native_key_id=native_key_id,
+        )
+
+        try:
+            commit_path = root / "digests" / f"{key_id_hash_hex}.commit"
+            _storage.atomic_write(commit_path, verification_digest)
+            meta["keys"][key_id_hash_hex] = {
+                "key_id": key_id,
+                "created_at": created_at,
+                _native_key_id.NATIVE_KEY_ID_FIELD: native_key_id,
+            }
+            # Ownership commit: retain the pending journal beside the row.
+            # If save_meta publishes then reports an fsync error and native
+            # rollback also fails, normal key use still sees pending and
+            # fails closed.
+            _storage.save_meta(root, meta)
+        except BaseException:
+            # Rollback — best-effort, so the ORIGINAL failure always
+            # propagates via the bare ``raise``. ``BaseException`` (not
+            # ``Exception``) so a KeyboardInterrupt mid-write still triggers
+            # cleanup. confirm_generate wrote no ciphertext envelopes, so
+            # only the Enclave key / commit file / meta.json row are undone
+            # (the step-by-step rationale lives on ``_rollback_import``).
+            _secret_ops._rollback_import(
+                root,
+                new_key_id_hash_hex=key_id_hash_hex,
+                commit_path=commit_path,
+                imported_key_id=key_id,
+                native_key_id=native_key_id,
+                backend=backend,
+                remove_ciphertext_tree=False,
+            )
+            raise
+
+        # Cleanup commit: once row + pending is durably owned, clearing only
+        # the pending marker is never a reason to delete the key. The helper
+        # accepts a post-replace error only when the visible row is complete
+        # and pending-free; otherwise the error propagates and pending blocks
+        # every normal operation until reset.
+        _secret_ops._clear_pending_native_key_after_commit(
+            root,
+            key_id=key_id,
+            key_id_hash_hex=key_id_hash_hex,
+            native_key_id=native_key_id,
+        )
+
+
 def confirm_generate(
     handle: SeedDisplayHandle,
     user_confirmed_digest: bytes,
@@ -546,81 +633,24 @@ def confirm_generate(
         }
     )
 
-    # 4b. Durable phase — the re-init re-check, key generation, and the
-    #     commit/meta writes all run under a SINGLE keyvault-lock hold so
-    #     the re-init guard is TOCTOU-safe against a concurrent init.
-    #     The commit file is written FIRST. Metadata then commits in two
-    #     durable saves: row + pending ownership first, pending removal
-    #     second. A post-rename fsync failure can therefore never expose an
-    #     apparently complete row that lost the cleanup/rollback decision.
+    # 4b. Durable phase — delegated to :func:`_commit_key_state`, which runs
+    #     the re-init re-check, key generation, and the commit/meta writes
+    #     under a SINGLE keyvault-lock hold (TOCTOU-safe against a
+    #     concurrent init; write ordering and rollback semantics documented
+    #     on the helper).
     _storage.ensure_layout(root)
     backend = _native_key_id.bind_backend_to_root(backend, root)
     created_at = _utc_now_iso()
     key_id_hash_hex = _hash_id(resolved_key_id).hex()
-    commit_path: Path | None = None
-    with _storage.keyvault_lock(root):
-        # Authoritative re-init guard — TOCTOU-safe under the lock.
-        meta = _storage.load_meta(root)
-        if _native_key_id.has_native_key_ownership_state(meta):
-            raise RuntimeError("keyvault already initialized — v1 supports a single key")
-
-        # Journal deterministic ownership durably before native generation.
-        # A helper may publish a key and then report a durability error; the
-        # journal lets reset safely retry cleanup without guessing ownership.
-        native_key_id = _native_key_id.add_pending_native_key(root, meta, resolved_key_id)
-        _storage.save_meta(root, meta)
-
-        # If generation raises, retain the pending journal: the backend may
-        # have made the scoped key visible before reporting its error.
-        wrap.generate_wrapping_key(
-            resolved_key_id,
-            backend=backend,
-            unattended=unattended,
-            native_key_id=native_key_id,
-        )
-
-        try:
-            commit_path = root / "digests" / f"{key_id_hash_hex}.commit"
-            _storage.atomic_write(commit_path, verification_digest)
-            meta["keys"][key_id_hash_hex] = {
-                "key_id": resolved_key_id,
-                "created_at": created_at,
-                _native_key_id.NATIVE_KEY_ID_FIELD: native_key_id,
-            }
-            # Ownership commit: retain the pending journal beside the row.
-            # If save_meta publishes then reports an fsync error and native
-            # rollback also fails, normal key use still sees pending and
-            # fails closed.
-            _storage.save_meta(root, meta)
-        except BaseException:
-            # Rollback — best-effort, so the ORIGINAL failure always
-            # propagates via the bare ``raise``. ``BaseException`` (not
-            # ``Exception``) so a KeyboardInterrupt mid-write still triggers
-            # cleanup. confirm_generate wrote no ciphertext envelopes, so
-            # only the Enclave key / commit file / meta.json row are undone
-            # (the step-by-step rationale lives on ``_rollback_import``).
-            _secret_ops._rollback_import(
-                root,
-                new_key_id_hash_hex=key_id_hash_hex,
-                commit_path=commit_path,
-                imported_key_id=resolved_key_id,
-                native_key_id=native_key_id,
-                backend=backend,
-                remove_ciphertext_tree=False,
-            )
-            raise
-
-        # Cleanup commit: once row + pending is durably owned, clearing only
-        # the pending marker is never a reason to delete the key. The helper
-        # accepts a post-replace error only when the visible row is complete
-        # and pending-free; otherwise the error propagates and pending blocks
-        # every normal operation until reset.
-        _secret_ops._clear_pending_native_key_after_commit(
-            root,
-            key_id=resolved_key_id,
-            key_id_hash_hex=key_id_hash_hex,
-            native_key_id=native_key_id,
-        )
+    _commit_key_state(
+        root,
+        key_id=resolved_key_id,
+        key_id_hash_hex=key_id_hash_hex,
+        created_at=created_at,
+        verification_digest=verification_digest,
+        backend=backend,
+        unattended=unattended,
+    )
 
     # 4c. init_completed — success-path emit. The init is already durable,
     #     so a sink exception is suppressed (POLICY.md #22); a single line

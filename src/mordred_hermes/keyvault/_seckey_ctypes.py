@@ -175,6 +175,44 @@ def _str_const_lookup(sec_module: Any) -> dict[str, int]:
     return lookup
 
 
+def _cf_number(bundle: _LibBundle, value: int, owned: list[int]) -> int:
+    """Allocate a CFNumber (SInt64) for ``value`` and record it in ``owned``."""
+    n = c_int64(value)
+    cfn: int = bundle.cf.CFNumberCreate(None, _kCFNumberSInt64Type, byref(n))
+    if not cfn:
+        raise MemoryError("CFNumberCreate returned NULL")
+    owned.append(cfn)
+    return cfn
+
+
+def _cf_data(bundle: _LibBundle, value: bytes | bytearray, owned: list[int]) -> int:
+    """Allocate a CFData copy of ``value`` and record it in ``owned``."""
+    buf = bytes(value)
+    d: int = bundle.cf.CFDataCreate(None, buf, len(buf))
+    if not d:
+        raise MemoryError("CFDataCreate returned NULL")
+    owned.append(d)
+    return d
+
+
+def _cf_string(bundle: _LibBundle, value: str, sec_module: Any, owned: list[int]) -> int:
+    """Return the interned ``kSec*`` constant for ``value``, else a new CFString.
+
+    Only the freshly allocated CFString is recorded in ``owned`` — the
+    interned constants have their own lifetimes.
+    """
+    lookup = _str_const_lookup(sec_module)
+    const_ptr = lookup.get(value)
+    if const_ptr is not None:
+        return const_ptr
+    b = value.encode("utf-8")
+    s: int = bundle.cf.CFStringCreateWithBytes(None, b, len(b), _kCFStringEncodingUTF8, False)
+    if not s:
+        raise MemoryError("CFStringCreateWithBytes returned NULL")
+    owned.append(s)
+    return s
+
+
 def _build_cf(value: Any, sec_module: Any, owned: list[int]) -> int:
     """Convert a Python value to a CF pointer.
 
@@ -190,32 +228,13 @@ def _build_cf(value: Any, sec_module: Any, owned: list[int]) -> int:
         return bundle.kCFBooleanTrue if value else bundle.kCFBooleanFalse
 
     if isinstance(value, int):
-        n = c_int64(value)
-        cfn: int = bundle.cf.CFNumberCreate(None, _kCFNumberSInt64Type, byref(n))
-        if not cfn:
-            raise MemoryError("CFNumberCreate returned NULL")
-        owned.append(cfn)
-        return cfn
+        return _cf_number(bundle, value, owned)
 
     if isinstance(value, (bytes, bytearray)):
-        buf = bytes(value)
-        d: int = bundle.cf.CFDataCreate(None, buf, len(buf))
-        if not d:
-            raise MemoryError("CFDataCreate returned NULL")
-        owned.append(d)
-        return d
+        return _cf_data(bundle, value, owned)
 
     if isinstance(value, str):
-        lookup = _str_const_lookup(sec_module)
-        const_ptr = lookup.get(value)
-        if const_ptr is not None:
-            return const_ptr
-        b = value.encode("utf-8")
-        s: int = bundle.cf.CFStringCreateWithBytes(None, b, len(b), _kCFStringEncodingUTF8, False)
-        if not s:
-            raise MemoryError("CFStringCreateWithBytes returned NULL")
-        owned.append(s)
-        return s
+        return _cf_string(bundle, value, sec_module, owned)
 
     if isinstance(value, dict):
         return _build_dict(value, sec_module, owned)

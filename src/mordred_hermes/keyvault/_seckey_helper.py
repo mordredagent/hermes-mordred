@@ -30,6 +30,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -104,98 +105,118 @@ def _find_helper() -> str | None:
     return find_sekey_helper()
 
 
-def _is_sekey_source(candidate: Path) -> bool:
-    """True when ``candidate`` is a genuine ``mordred-hermes-sekey`` Swift package.
+def _is_native_source(
+    candidate: Path,
+    *,
+    manifest_name: str,
+    entry_rel: tuple[str, ...],
+    needle: str,
+) -> bool:
+    """Shared validation core behind the per-backend ``_is_*_source`` checks.
 
-    ``enable_se`` *executes* the ``build.sh`` that :func:`_locate_helper_source`
-    resolves to, so matching on ``build.sh`` alone would let a writable ancestor
-    (e.g. ``/tmp/native/sekey-helper/build.sh``) hijack the build. Require the
-    Swift manifest with the expected package name and the entry point too, so a
-    bare planted ``build.sh`` is rejected. (Mirror of :func:`_is_tpmkey_source`.)
+    ``enable_se`` / ``enable_tpm`` *execute* the ``build.sh`` their locator
+    resolves to, so matching on ``build.sh`` alone would let a writable
+    ancestor (e.g. ``/tmp/native/sekey-helper/build.sh``) hijack the build.
+    Require the build manifest (``manifest_name``, containing the expected
+    package-name ``needle``) and the entry-point source (``entry_rel``,
+    joined onto ``candidate``) too, so a bare planted ``build.sh`` is
+    rejected.
     """
-    manifest = candidate / "Package.swift"
-    entry = candidate / "Sources" / _HELPER_NAME / "main.swift"
+    manifest = candidate / manifest_name
+    entry = candidate.joinpath(*entry_rel)
     if not ((candidate / "build.sh").is_file() and manifest.is_file() and entry.is_file()):
         return False
     try:
-        return f'name: "{_HELPER_NAME}"' in manifest.read_text(encoding="utf-8")
+        return needle in manifest.read_text(encoding="utf-8")
     except OSError:
         return False
 
 
-def _locate_helper_source() -> Path | None:
-    """Locate the ``sekey-helper`` Swift source tree (``build.sh`` + sources).
+def _locate_native_source(subdir: str, is_source: Callable[[Path], bool]) -> Path | None:
+    """Shared resolution core behind the per-backend ``_locate_*_source`` locators.
 
-    ``hermes mordred keyvault enable-se`` builds the helper from source, so it
-    must find the source directory before invoking ``build.sh``. Resolution:
+    The ``enable-se`` / ``enable-tpm`` ceremonies build their helper from
+    source, so they must find the source directory before invoking
+    ``build.sh``. Resolution (identical for every backend helper):
 
-    1. **Source checkout** — walk up from this module to a ``native/sekey-helper``
-       directory (editable install / repo clone).
-    2. **Installed wheel** — a ``_native/sekey-helper`` copy shipped inside the
+    1. **Source checkout** — walk up from this module to a
+       ``native/<subdir>`` directory (editable install / repo clone).
+    2. **Installed wheel** — a ``_native/<subdir>`` copy shipped inside the
        package (added to the wheel separately; see packaging).
 
-    Each candidate is validated by :func:`_is_sekey_source` so a decoy
-    ``build.sh`` cannot hijack the build. Returns the directory
-    :class:`~pathlib.Path`, or ``None`` when neither is present (e.g. a wheel
-    install without the bundled sources).
+    Each candidate is validated by ``is_source`` so a decoy ``build.sh``
+    cannot hijack the build. Returns the directory :class:`~pathlib.Path`,
+    or ``None`` when neither is present (e.g. a wheel install without the
+    bundled sources).
+
+    The parents-walk anchors on this module's ``__file__``; this helper
+    must stay in a module under ``src/mordred_hermes/keyvault/`` or the
+    source-checkout resolution silently changes origin.
     """
     for parent in Path(__file__).resolve().parents:
-        candidate = parent / "native" / "sekey-helper"
-        if _is_sekey_source(candidate):
+        candidate = parent / "native" / subdir
+        if is_source(candidate):
             return candidate
     # Installed-wheel fallback: a package-data copy under the package root.
     try:
         from importlib.resources import files
 
-        packaged = Path(str(files("mordred_hermes").joinpath("_native", "sekey-helper")))
-        if _is_sekey_source(packaged):
+        packaged = Path(str(files("mordred_hermes").joinpath("_native", subdir)))
+        if is_source(packaged):
             return packaged
     except (ModuleNotFoundError, TypeError, OSError):
         pass
     return None
 
 
+def _is_sekey_source(candidate: Path) -> bool:
+    """True when ``candidate`` is a genuine ``mordred-hermes-sekey`` Swift package.
+
+    Anti-hijack rationale lives on :func:`_is_native_source`; the Swift
+    manifest is ``Package.swift`` and the entry point
+    ``Sources/<name>/main.swift``.
+    """
+    return _is_native_source(
+        candidate,
+        manifest_name="Package.swift",
+        entry_rel=("Sources", _HELPER_NAME, "main.swift"),
+        needle=f'name: "{_HELPER_NAME}"',
+    )
+
+
+def _locate_helper_source() -> Path | None:
+    """Locate the ``sekey-helper`` Swift source tree (``build.sh`` + sources).
+
+    Resolution order and anti-hijack rationale live on
+    :func:`_locate_native_source`; candidates are validated by
+    :func:`_is_sekey_source`.
+    """
+    return _locate_native_source("sekey-helper", _is_sekey_source)
+
+
 def _is_tpmkey_source(candidate: Path) -> bool:
     """True when ``candidate`` is a genuine ``mordred-hermes-tpmkey`` crate.
 
-    ``enable_tpm`` *executes* the ``build.sh`` that :func:`_locate_tpmkey_source`
-    resolves to, so matching on ``build.sh`` alone would let a writable ancestor
-    (e.g. ``/tmp/native/tpmkey-helper/build.sh``) hijack the build. Require the
-    Cargo manifest with the expected package name and the Rust entry point too,
-    so a bare planted ``build.sh`` is rejected.
+    Anti-hijack rationale lives on :func:`_is_native_source`; the Cargo
+    manifest is ``Cargo.toml`` and the entry point ``src/main.rs``.
     """
-    manifest = candidate / "Cargo.toml"
-    if not ((candidate / "build.sh").is_file() and manifest.is_file() and (candidate / "src" / "main.rs").is_file()):
-        return False
-    try:
-        return f'name = "{_TPM_HELPER_NAME}"' in manifest.read_text(encoding="utf-8")
-    except OSError:
-        return False
+    return _is_native_source(
+        candidate,
+        manifest_name="Cargo.toml",
+        entry_rel=("src", "main.rs"),
+        needle=f'name = "{_TPM_HELPER_NAME}"',
+    )
 
 
 def _locate_tpmkey_source() -> Path | None:
     """Locate the ``tpmkey-helper`` Rust source tree (``build.sh`` + Cargo crate).
 
     Mirror of :func:`_locate_helper_source` for the Linux TPM 2.0 helper
-    (``native/tpmkey-helper``). ``hermes mordred keyvault enable-tpm`` builds it
-    from source, so it must find the directory before invoking ``build.sh``.
-    Resolution: a ``native/tpmkey-helper`` source checkout, then a bundled
-    ``_native/tpmkey-helper`` wheel copy. Each candidate is validated by
-    :func:`_is_tpmkey_source` so a decoy ``build.sh`` cannot hijack the build.
+    (``native/tpmkey-helper``); resolution order and anti-hijack rationale
+    live on :func:`_locate_native_source`, with candidates validated by
+    :func:`_is_tpmkey_source`.
     """
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "native" / "tpmkey-helper"
-        if _is_tpmkey_source(candidate):
-            return candidate
-    try:
-        from importlib.resources import files
-
-        packaged = Path(str(files("mordred_hermes").joinpath("_native", "tpmkey-helper")))
-        if _is_tpmkey_source(packaged):
-            return packaged
-    except (ModuleNotFoundError, TypeError, OSError):
-        pass
-    return None
+    return _locate_native_source("tpmkey-helper", _is_tpmkey_source)
 
 
 def _normalize_reason(value: Any) -> str | None:
@@ -368,3 +389,20 @@ class _HelperSecKeyOps:
 
     def probe(self) -> None:
         self._invoke({"cmd": "probe"})
+
+
+def _helper_ops_or_none(find: Callable[[], str | None]) -> _HelperSecKeyOps | None:
+    """Locate a helper binary via ``find`` and wrap it, or ``None`` when absent.
+
+    Centralizes the "``None`` means not installed" construction shared by
+    every platform branch in ``_seckey_backend`` (ops selection and
+    capability probing). Callers decide what an absent helper means — fall
+    back (macOS pyobjc) or fail closed (Linux / Windows). ``find`` is passed
+    as a callable and invoked here, so call sites that spell it
+    ``_seckey_helper._find_helper`` resolve the module attribute at call
+    time and tests monkeypatching the finder still intercept.
+    """
+    binary = find()
+    if binary is None:
+        return None
+    return _HelperSecKeyOps(binary)
