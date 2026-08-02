@@ -8,7 +8,7 @@ at-rest encryption for your secrets (`.env`, config, agent memory), hardware-bac
 key management (Secure Enclave / TPM 2.0), Tor / VPN network routing, and policy
 enforcement for local-only LLM operation.
 
-**Status: active alpha** — current release `0.1.0a11`
+**Status: active alpha** — current release `0.1.0a12`
 ([PyPI](https://pypi.org/project/mordred-hermes/) has the release history and dates).
 
 New here? The step-by-step
@@ -58,10 +58,10 @@ form is `uv pip install --python …` (no `uv` on your machine? Install it first
 
 ```sh
 # macOS — includes the Secure Enclave keyvault stack
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a11"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos]==0.1.0a12"
 
 # Linux — cross-platform crypto stack for `encryption` / `keyvault`
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a11"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[keyvault]==0.1.0a12"
 ```
 
 (If your venv does have pip, `~/.hermes/hermes-agent/venv/bin/pip install …` works
@@ -261,7 +261,7 @@ extra (see the [extras table](#install-users-from-pypi) above).
 flows shown below (swap `macos` for `keyvault` on Linux):
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension,ethereum]==0.1.0a11"
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 "mordred-hermes[macos,extension,ethereum]==0.1.0a12"
 ```
 
 Then use the `$M` alias from [Use it](#use-it):
