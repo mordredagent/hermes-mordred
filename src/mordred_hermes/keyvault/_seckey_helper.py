@@ -148,6 +148,10 @@ def _locate_native_source(subdir: str, is_source: Callable[[Path], bool]) -> Pat
     cannot hijack the build. Returns the directory :class:`~pathlib.Path`,
     or ``None`` when neither is present (e.g. a wheel install without the
     bundled sources).
+
+    The parents-walk anchors on this module's ``__file__``; this helper
+    must stay in a module under ``src/mordred_hermes/keyvault/`` or the
+    source-checkout resolution silently changes origin.
     """
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "native" / subdir

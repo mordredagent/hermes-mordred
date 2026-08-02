@@ -958,6 +958,25 @@ class TestNonRegularFileRefusal:
             _storage.safe_read(fifo)
 
 
+class TestCheckFileModeSymlinkRefusal:
+    """The lstat-side ELOOP refusal in ``_check_file_mode`` is a guard
+    distinct from the shared ``_assert_regular_at_mode`` pair: a symlink
+    pointing at a perfectly valid 0o600 regular file must be refused as
+    ELOOP, never validated through its target. Pinning the errno keeps the
+    symlink branch from being silently folded into (or dropped from) the
+    shared assertion (2026-08-02 security-review MEDIUM)."""
+
+    def test_symlink_to_valid_0600_file_refused_with_eloop(self, tmp_path: Path) -> None:
+        real = tmp_path / "real.bin"
+        real.write_bytes(b"x")
+        os.chmod(real, 0o600)
+        link = tmp_path / "link.bin"
+        link.symlink_to(real)
+        with pytest.raises(_storage.KeyvaultPermissionError) as excinfo:
+            _storage._check_file_mode(link)
+        assert excinfo.value.errno == errno.ELOOP
+
+
 # ---------------------------- exception types ----------------------------
 
 
