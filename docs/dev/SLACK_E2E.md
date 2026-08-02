@@ -120,6 +120,13 @@ Slack / Discordでは暗号化されていない受信をagentへ渡しません
 best-effortで送り、dispatchをskipします。Teams等はplaintext自体を禁止しませんが、
 `ENC`を名乗ったwireは同じv3検証に合格しない限りfail-closedです。
 
+**空 `text` も「未暗号化受信」として拒否します。** Slack adapterはbot mentionを
+strip（`text.replace(f"<@{bot_uid}>", "").strip()`）し、添付は `media_urls` に
+載せるため、`@Hermes` + 画像 / 音声クリップ / mentionのみは `text == ""` で
+hookに到達します。v3 tokenが空textに同伴することは有り得ないので、mandatory
+platformでは他の平文と同様にskip + 設定案内とします（2026-08-02のsecurity
+reviewで、この経路がgateを迂回しagentの応答が平文で流出し得ることが判明）。
+
 ## 6. テスト要件
 
 - Unicode鍵、鍵なし、Slack `:lock:` aliasのcanonical v3
@@ -130,3 +137,5 @@ best-effortで送り、dispatchをskipします。Teams等はplaintext自体を�
 - replay commitがoutbound保護確認より後であること
 - default / secondary profile adapterを取り違えないこと
 - 暗号化判定例外時にplaintext `orig_send` を呼ばないこと
+- 空 / 欠落 `text`（画像・音声添付、mentionのみ）をmandatory platformで拒否し、
+  他platformでは従来どおり通常dispatchすること

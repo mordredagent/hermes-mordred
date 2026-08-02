@@ -635,6 +635,7 @@ class _Connection:
             try:
                 raw_b64 = decrypt_message(ek, key_ct)
             except DecryptError:
+                _log.warning("mordred extension: channel_key_set unwrap failed (wrong K_extchat?)")
                 return  # can't unwrap the pushed key — ignore
         try:
             from .crypto import b64u_decode
@@ -643,7 +644,15 @@ class _Connection:
             await asyncio.get_event_loop().run_in_executor(
                 None, pairing.save_channel_key, channel_id, b64u_decode(raw_b64)
             )
-        except Exception:
+        except Exception as exc:
+            # Never silent: save_channel_key fails closed on a corrupt/unreadable
+            # state.json, and an unstored key makes every later v3 command fail as
+            # `key_not_bound_to_channel` while the extension believes the channel
+            # is configured. That is the write-side twin of the #83 incident, which
+            # took a hand-minted token to diagnose precisely because this path left
+            # no trace. The exception carries no key material (b64u_decode and the
+            # storage layer report shape/IO errors only).
+            _log.warning("mordred extension: channel_key_set persist failed: %s", exc)
             return
 
     async def _on_slack_setup(self, msg: dict[str, Any]) -> None:

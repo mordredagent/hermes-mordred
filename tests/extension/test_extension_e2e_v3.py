@@ -566,6 +566,54 @@ def test_slack_flat_reply_mode_top_level_authenticates_identically(channel_key: 
     }
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["", None],
+    ids=["image-or-voice-attachment", "no-text-field"],
+)
+def test_empty_text_is_refused_on_mandatory_e2e_platforms(text: object) -> None:
+    """An empty ``text`` must not bypass the mandatory-encryption gate.
+
+    The shipped Slack adapter strips the bot mention and carries attachments in
+    ``media_urls``, so `@Hermes` + image / voice clip / a bare mention all reach
+    the hook with ``text == ""``. Returning ``None`` (normal dispatch) would let
+    such an event reach the agent with no encryption check at all, and the
+    answer would leave through the cleartext send path — the leak SLACK_E2E.md
+    §5 forbids. A v3 token cannot accompany an empty text, so the only correct
+    verdict is "unencrypted inbound".
+    """
+
+    class NoticeAdapter:
+        async def send(self, *_args, **_kwargs):
+            return None
+
+    event = SimpleNamespace(
+        text=text,
+        media_urls=["https://files.slack.com/secret-screenshot.png"],
+        source=SimpleNamespace(platform="slack", chat_id="C-v3", thread_id=None, profile=None),
+    )
+    gateway = SimpleNamespace(adapters={"slack": NoticeAdapter()})
+
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=gateway) == {
+        "action": "skip",
+        "reason": "mordred-encryption-required",
+    }
+
+
+def test_empty_text_still_dispatches_normally_off_mandatory_platforms() -> None:
+    """The refusal is scoped to the mandatory-E2E platforms only.
+
+    Telegram and friends have no encryption requirement, so an empty text there
+    remains "nothing for this hook to do" — returning a skip would silently drop
+    legitimate media messages on every other platform.
+    """
+    event = SimpleNamespace(
+        text="",
+        source=SimpleNamespace(platform="telegram", chat_id="123", thread_id=None, profile=None),
+    )
+    assert gateway_plugin.pre_gateway_dispatch(event=event, gateway=None) is None
+
+
 @pytest.mark.parametrize("reuse", ["message_id", "nonce"])
 def test_replay_cache_rejects_authenticated_identity_reuse(channel_key: bytes, reuse: str) -> None:
     message_id = crypto.b64u_encode(secrets.token_bytes(16))
