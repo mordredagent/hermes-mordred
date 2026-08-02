@@ -105,19 +105,26 @@ def install_env_write_guard(
 
     setattr(_wrapped, _WRAPPED_FLAG, True)
     host.save_env_value = _wrapped
+    _rebind_early_bound_writers(host, original, _wrapped)
 
-    # Re-bind early-bound references: a module that did
-    # ``from hermes_cli.config import save_env_value`` before us holds the
-    # original, which our module-level patch would not reach. Point those at the
-    # wrapper too. (Modules imported *after* this resolve the wrapper via config.)
+    return True
+
+
+def _rebind_early_bound_writers(host: Any, original: Any, wrapped: Any) -> None:
+    """Point modules that early-bound the host writer at the wrapper.
+
+    A module that did ``from hermes_cli.config import save_env_value``
+    before us holds the original, which the module-level patch in
+    :func:`install_env_write_guard` would not reach. Point those at the
+    wrapper too. (Modules imported *after* the patch resolve the wrapper
+    via ``hermes_cli.config``.)
+    """
     for module in list(sys.modules.values()):
         if module is None or module is host:
             continue
         if getattr(module, _HOST_WRITER, None) is original:
             with contextlib.suppress(Exception):
-                setattr(module, _HOST_WRITER, _wrapped)
-
-    return True
+                setattr(module, _HOST_WRITER, wrapped)
 
 
 def reseal_stray_env_if_present(

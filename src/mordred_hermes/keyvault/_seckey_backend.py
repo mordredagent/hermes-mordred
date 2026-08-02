@@ -161,24 +161,24 @@ def _default_ops_with_legacy() -> tuple[_SecKeyOps, _SecKeyOps | None]:
     from . import _seckey_helper
 
     if sys.platform == "darwin":
-        binary = _seckey_helper._find_helper()
-        if binary is not None:
-            return _seckey_helper._HelperSecKeyOps(binary), _PyobjcSecKeyOps()
+        ops = _seckey_helper._helper_ops_or_none(_seckey_helper._find_helper)
+        if ops is not None:
+            return ops, _PyobjcSecKeyOps()
         return _PyobjcSecKeyOps(), None
 
     if sys.platform == "linux":
-        binary = _seckey_helper.find_tpmkey_helper()
-        if binary is not None:
-            return _seckey_helper._HelperSecKeyOps(binary), None
+        ops = _seckey_helper._helper_ops_or_none(_seckey_helper.find_tpmkey_helper)
+        if ops is not None:
+            return ops, None
         raise WrapNativeUnavailable(
             "Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; "
             "none found (set MORDRED_TPMKEY_HELPER or install it). See v2-OS2."
         )
 
     if sys.platform == "win32":
-        binary = _seckey_helper.find_winkey_helper()
-        if binary is not None:
-            return _seckey_helper._HelperSecKeyOps(binary), None
+        ops = _seckey_helper._helper_ops_or_none(_seckey_helper.find_winkey_helper)
+        if ops is not None:
+            return ops, None
         raise WrapNativeUnavailable(
             "Windows keyvault requires the mordred-hermes-winkey CNG helper; "
             "none found (set MORDRED_WINKEY_HELPER or install it). See v2-OS2."
@@ -490,22 +490,22 @@ def probe_capability() -> bool:
     from . import _seckey_helper
 
     if sys.platform == "linux":
-        binary = _seckey_helper.find_tpmkey_helper()
-        if binary is not None:
-            _seckey_helper._HelperSecKeyOps(binary).probe()
+        ops = _seckey_helper._helper_ops_or_none(_seckey_helper.find_tpmkey_helper)
+        if ops is not None:
+            ops.probe()
             return True
         raise WrapNativeUnavailable("Linux keyvault requires the mordred-hermes-tpmkey TPM 2.0 helper; none found.")
 
     if sys.platform == "win32":
-        binary = _seckey_helper.find_winkey_helper()
-        if binary is not None:
-            _seckey_helper._HelperSecKeyOps(binary).probe()
+        ops = _seckey_helper._helper_ops_or_none(_seckey_helper.find_winkey_helper)
+        if ops is not None:
+            ops.probe()
             return True
         raise WrapNativeUnavailable("Windows keyvault requires the mordred-hermes-winkey CNG helper; none found.")
 
-    binary = _seckey_helper._find_helper()
-    if binary is not None:
-        _seckey_helper._HelperSecKeyOps(binary).probe()
+    ops = _seckey_helper._helper_ops_or_none(_seckey_helper._find_helper)
+    if ops is not None:
+        ops.probe()
         return True
 
     try:

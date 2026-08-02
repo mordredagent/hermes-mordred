@@ -207,20 +207,18 @@ def _check_dir_mode(path: Path) -> None:
         )
 
 
-def _check_file_mode(path: Path) -> None:
-    """Validate that ``path`` is a real file with mode ``0o600``.
+def _assert_regular_at_mode(st: os.stat_result, path: Path) -> None:
+    """Assert an already-stat'ed keyvault file is regular with mode ``0o600``.
 
-    Uses ``lstat`` so a symlinked file is refused regardless of the
-    target's mode (file-safety contract — codex pre-merge P2-2).
-    Rejects non-regular files (FIFO / device / directory) via
-    ``stat.S_ISREG`` — a 0o600 FIFO would otherwise pass the mode bit
-    check and cause ``safe_read`` / ``keyvault_lock`` to block or
-    operate on the wrong kind of inode (codex second-pass P2-C,
-    2026-05-15).
+    The ``S_ISREG`` + ``S_IMODE`` pair shared verbatim by
+    :func:`_check_file_mode` (lstat side) and :func:`safe_read`'s under-fd
+    re-check (fstat side). Rejecting non-regular files (FIFO / device /
+    directory) matters because a 0o600 FIFO would otherwise pass the mode
+    bit check and cause reads to block or operate on the wrong kind of
+    inode (codex second-pass P2-C, 2026-05-15). The lock-path validator
+    (:func:`_validate_lock_stat`) keeps its own copy — its messages are
+    label-parameterized and must stay byte-stable.
     """
-    st = path.lstat()
-    if stat.S_ISLNK(st.st_mode):
-        raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link to keyvault file", str(path))
     if not stat.S_ISREG(st.st_mode):
         raise KeyvaultPermissionError(
             errno.EINVAL,
@@ -234,6 +232,20 @@ def _check_file_mode(path: Path) -> None:
             f"keyvault file must be mode 0o{_FILE_MODE:o}, got 0o{actual:o}",
             str(path),
         )
+
+
+def _check_file_mode(path: Path) -> None:
+    """Validate that ``path`` is a real file with mode ``0o600``.
+
+    Uses ``lstat`` so a symlinked file is refused regardless of the
+    target's mode (file-safety contract — codex pre-merge P2-2). The
+    regular-file + mode assertion is shared with ``safe_read`` via
+    :func:`_assert_regular_at_mode`.
+    """
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise KeyvaultPermissionError(errno.ELOOP, "refusing to follow symbolic link to keyvault file", str(path))
+    _assert_regular_at_mode(st, path)
 
 
 def ensure_layout(root: Path) -> None:
@@ -644,19 +656,7 @@ def safe_read(path: Path) -> bytes:
         st = os.fstat(fd)
         # Re-check S_ISREG and mode under the open fd to close the TOCTOU
         # window between lstat above and this open (codex second-pass P2-C).
-        if not stat.S_ISREG(st.st_mode):
-            raise KeyvaultPermissionError(
-                errno.EINVAL,
-                "keyvault file must be a regular file (not FIFO, device, directory)",
-                str(path),
-            )
-        mode = stat.S_IMODE(st.st_mode)
-        if mode != _FILE_MODE:
-            raise KeyvaultPermissionError(
-                errno.EPERM,
-                f"keyvault file must be mode 0o{_FILE_MODE:o}, got 0o{mode:o}",
-                str(path),
-            )
+        _assert_regular_at_mode(st, path)
         chunks: list[bytes] = []
         while True:
             chunk = os.read(fd, 65536)
