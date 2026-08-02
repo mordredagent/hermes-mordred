@@ -175,6 +175,9 @@ _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _CODE_TTL_SECONDS = 10 * 60
 ATTEST_CONTEXT = b"mordred-ext-attest-v1"
 _E2E_REPLAY_FIELD = "e2e_replay_v3"
+# Raw K_chan length. AES-256-GCM throughout (crypto.derive_shared_key /
+# derive_subkey both emit 32 bytes), so any other length is a malformed push.
+_CHANNEL_KEY_LEN = 32
 _E2E_REPLAY_TTL_SECONDS = 30 * 24 * 3600
 _E2E_REPLAY_MAX_IDENTITIES = 32_768
 # Warn while there is still room to act. Exhaustion refuses every authenticated
@@ -625,6 +628,16 @@ def load_channel_keys() -> dict[str, bytes]:
 
 
 def save_channel_key(channel_id: str, raw_key: bytes) -> None:
+    """Persist a raw 32-byte channel key, rejecting anything else.
+
+    Validating the length here rather than at the caller makes a truncated or
+    mis-encoded push fail loudly *at push time*. Stored unchecked, it would
+    instead surface later as ``authentication_failed`` on every command in the
+    channel — indistinguishable from a genuinely wrong key, and diagnosable
+    only by hand-minting a token (the #83 experience).
+    """
+    if len(raw_key) != _CHANNEL_KEY_LEN:
+        raise ValueError(f"channel key must be exactly {_CHANNEL_KEY_LEN} bytes, got {len(raw_key)}")
     with _state_lock():
         data = _read_json(_state_path()) or {}
         ck = dict(data.get("channel_keys") or {})

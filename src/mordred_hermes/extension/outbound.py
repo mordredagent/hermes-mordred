@@ -47,8 +47,13 @@ async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts
         kw = {"channel": chat_id, "text": _LOCKED_NOTICE, "mrkdwn": False}
         if thread_ts:
             kw["thread_ts"] = thread_ts
-        with contextlib.suppress(Exception):
+        try:
             await client.chat_postMessage(**kw)
+        except Exception as exc:
+            # Best-effort notice, but never silent: if it fails the user sees no
+            # reply at all, and the operator needs the reason (mirrors the
+            # warning gateway_plugin._safe_send emits for the needs-key notice).
+            logger.warning("mordred_e2e: locked-notice send failed: %s", exc)
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
     chunks = e2e.encrypt_reply(
@@ -76,8 +81,12 @@ async def _slack_encrypted_send(self: Any, chat_id: str, content: str, thread_ts
             self._bot_message_ts.add(sent_ts)
             if thread_ts:
                 self._bot_message_ts.add(thread_ts)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Bookkeeping only — the ciphertext is already posted, so failing the
+            # send here would be wrong. But it is how the adapter recognizes its
+            # own messages, so a silent failure degrades that invariant with no
+            # trace if the attribute ever changes shape upstream.
+            logger.warning("mordred_e2e: bot-message bookkeeping failed: %s", exc)
     return SendResult(success=True, message_id=sent_ts, raw_response={"ts": sent_ts})
 
 
@@ -85,6 +94,12 @@ def _wrap_slack(cls: Any) -> None:
     orig_send = cls.send
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):  # type: ignore[no-untyped-def]
+        # NOTE: a falsy ``_app`` falls through to the plaintext sender. That is
+        # load-bearing — the needs-key notice is itself a plaintext send through
+        # this wrapper, and adapters that expose no ``_app`` must still deliver
+        # it. Tightening this into a fail-closed refusal needs a way to tell
+        # "not an initialized adapter" from "real adapter, transient reconnect";
+        # see the follow-up recorded in the 2026-08-02 extension review.
         if getattr(self, "_app", None):
             try:
                 thread_ts = self._resolve_thread_ts(reply_to, metadata)
@@ -154,6 +169,8 @@ def _wrap_discord(cls: Any) -> None:
     orig_send = cls.send
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):  # type: ignore[no-untyped-def]
+        # See the matching note in _wrap_slack: the falsy-client fallthrough is
+        # deliberate for now (plaintext notices must still reach the user).
         if getattr(self, "_client", None):
             try:
                 raw_thread_id = (metadata or {}).get("thread_id")

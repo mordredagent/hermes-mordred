@@ -161,6 +161,14 @@ def _slack_command_thread_root(event: Any, thread_root: str | None) -> str | Non
     ``reply_to_message_id`` was recorded (the adapter stamps that field for
     every genuine reply). A missing or contradicting marker keeps the
     stricter routed root, so authentication fails closed.
+
+    Note on that pairing: in the *shipped* Slack adapter both markers derive
+    from the same ``(ts, thread_ts)`` pair in the same function, so they are
+    one predicate (``ts == thread_ts``) rather than two independent signals —
+    do not rely on this as defence-in-depth. It is a shape check against an
+    adapter that stops stamping either field, not against a wrong value in
+    both. A genuinely independent marker would be
+    ``event.metadata["slack_thread_ts"]``.
     """
     message_id = getattr(event, "message_id", None)
     if (
@@ -311,6 +319,20 @@ def pre_gateway_dispatch(
 
     text = getattr(event, "text", None)
     if not isinstance(text, str) or not text:
+        # An absent/empty text is NOT "nothing to do" on a mandatory-E2E
+        # platform. The shipped Slack adapter strips the bot mention
+        # (``text.replace(f"<@{bot_uid}>", "").strip()``) and carries
+        # attachments in ``media_urls``, so `@Hermes` + image / voice clip /
+        # a bare mention all arrive here with ``text == ""``. Returning None
+        # means "normal dispatch" to the host, so such an event would reach
+        # the agent without ever passing the encryption check below, and the
+        # agent's answer would leave through the cleartext send path — the
+        # exact leak the mandatory gate exists to prevent (SLACK_E2E.md §5).
+        # A v3 token can never accompany an empty text, so the only correct
+        # verdict here is "unencrypted inbound": refuse it like any other.
+        if _platform_name(event) in _ENFORCE_ENCRYPTION_PLATFORMS:
+            _notify_needs_key(gateway, event, outbound, profile)
+            return {"action": "skip", "reason": "mordred-encryption-required"}
         return None
 
     # 🔑REQ/GRANT are peer-to-peer between extensions — the agent must not see them.
