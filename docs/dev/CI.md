@@ -176,7 +176,7 @@ Mordred **does not** have a dedicated `CHANGELOG.md` file. Change history is rec
 - For contributions from external contributors, append `Thanks @<author>`
 - At release time, aggregate the `### Changes` / `### Fixes` entries from the PRs included in that release and transcribe them into the GitHub Release / tag-annotation release notes
 
-**Don't edit the shared PR template**: `.github/PULL_REQUEST_TEMPLATE.md` at the repository root is owned by Hermes upstream and applies across the whole monorepo, so Mordred-specific headings are not injected into it (soft-fork discipline, `ROADMAP.md` "Forever out of scope"). This convention is followed manually by the author of each Mordred PR.
+**There is no PR template**: this repository ships no `.github/PULL_REQUEST_TEMPLATE.md` — `.github/` holds only `labeler.yml` and the workflows. The `### Changes` / `### Fixes` convention above is therefore applied **manually** by the author of each PR, not prefilled by a template. (This section previously explained why Mordred did not inject its headings into a *shared* upstream-owned template; that predates the standalone split, when Mordred lived inside the Hermes monorepo. The constraint no longer applies — adding a template here would now be a local decision, not a soft-fork violation.)
 
 ## Branching model (dev / main, introduced 2026-07-07)
 

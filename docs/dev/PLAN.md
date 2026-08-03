@@ -619,7 +619,7 @@ features.
 
 ### Documentation
 
-- `docs/UPSTREAM.md` — Hermes upstream tracking strategy (Phase 0)
+- `docs/dev/UPSTREAM.md` — Hermes upstream tracking strategy (Phase 0)
 - `docs/dev/POLICY.md` — policy schema reference (landed Phase 1.1 / 2026-05-10; covers the canonical audit log reason enum + `metadata.mordred.*` spec deviation + `plugins.mordred_privacy_check` config schema + the Phase 3 `disable_ipv6` extension)
 - Each plugin's `README.md` — own paths, config keys, internal Python API surface
 - Changelog: each PR adds a 1-line entry to `### Changes` / `### Fixes` + `Thanks @<author>`

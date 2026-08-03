@@ -8,25 +8,64 @@
 
 ## 1. How to invoke
 
-Mordred currently ships one working command entry point:
+Mordred ships **two** entry points onto the *same* subcommand tree. They take
+identical arguments — use whichever is available to you:
 
 | Form | When it works | Notes |
 |------|---------------|-------|
-| `hermes-mordred <cmd>` | Once the package is installed in a venv | Standalone console script. |
+| `hermes mordred <cmd>` | hermes-agent **0.19.0+**, with the plugins enabled in `~/.hermes/config.yaml` | **Preferred.** `hermes` is on your `PATH`, so this runs from any directory with nothing to type but the command. |
+| `<venv>/bin/hermes-mordred <cmd>` | Always, once the package is installed in a venv | Standalone console script — the bootstrap and the fallback. **Not placed on `PATH`**, so give its full path (or activate the venv first). |
 
-Hermes does not yet add entry-point plugin CLI registrations to its top-level
-argparse tree, so `hermes mordred …` is not currently available even when the
-plugin is enabled. In this development checkout the fully-wired venv is `.venv`:
+> **Where `hermes-mordred` actually lives.** Installing into the Hermes runtime
+> as the README describes puts the script at
+> `~/.hermes/hermes-agent/venv/bin/hermes-mordred` — there is no `~/.local/bin`
+> shim for it, unlike `hermes` itself. That is precisely why `hermes mordred …`
+> is worth using once it works.
+
+**Which should I use?** `hermes mordred …` when it works — no `cd`, no venv
+path. One command tells you:
+
+```sh
+hermes mordred status     # Mordred status → use this form everywhere below
+```
+
+If that prints the top-level `hermes` usage instead, the host-CLI form isn't
+wired on your install — fall back to the console script at its full venv path
+(`~/.hermes/hermes-agent/venv/bin/hermes-mordred`, or `.venv/bin/hermes-mordred`
+in this checkout). Two things gate the `hermes mordred` form:
+
+- **hermes-agent version.** 0.19.0+ discovers entry-point plugin CLI commands
+  and grafts them onto its argparse tree. Older builds — down to Mordred's
+  supported floor of 0.13.0 — do not, so `hermes mordred` falls through to the
+  top-level usage.
+- **Plugins enabled.** The subcommand is registered by the `mordred_wizard`
+  plugin, so it appears only once the plugins are enabled in
+  `~/.hermes/config.yaml`. `hermes-mordred configure` writes that for you —
+  which is why a **fresh install always begins with `hermes-mordred`**.
+
+In this development checkout the fully-wired venv is `.venv`:
 
 ```sh
 cd <repo-root>            # /Users/.../Mordred-Hermes
 .venv/bin/hermes-mordred status
 ```
 
-Tip — alias it for the session:
+Tip — alias it for the session so every example below pastes as-is. **Pick one
+line, not both:**
 
 ```sh
-M=.venv/bin/hermes-mordred
+# sh / bash / zsh
+M="hermes mordred"            # host-CLI form, if it works for you
+M=.venv/bin/hermes-mordred    # otherwise (fresh install, or this dev checkout)
+$M status
+```
+
+```fish
+# fish — note the LIST form: `set M "hermes mordred"` (quoted) does NOT work,
+# because fish does not word-split, and would look for a command literally
+# named "hermes mordred".
+set M hermes mordred          # host-CLI form
+set M .venv/bin/hermes-mordred  # otherwise
 $M status
 ```
 
@@ -174,29 +213,64 @@ $M keyvault reset               # DESTROY profile-owned key material + remove th
 $M keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
                                 # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
 $M keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
+$M keyvault eth <sub>           # Ethereum keys — see below
 ```
 
-Keys created by current releases are isolated per `HERMES_HOME`. A legacy
-keyvault (created before profile-scoped native IDs) remains readable, but
-`keyvault reset` intentionally retains its machine-global legacy Keychain tag
-because another profile may share it. To migrate safely, verify and export a
-backup, reset the old profile, then recover the backup into the fresh profile.
-The logical key ID in the backup does not change.
+#### `keyvault eth` — Ethereum keys (HD wallet)
 
-Legacy helper keys created with an explicit API `home=` may physically remain
-in the helper store selected by the process's old ambient `HERMES_HOME`.
-Mordred tries the current profile store first and that historical ambient store
-second for legacy reads only. If the old home is no longer the ambient one, set
-`MORDRED_SEKEY_STORE=/old/home/mordred/keyvault/sekey` on macOS or
-`MORDRED_TPMKEY_STORE=/old/home/mordred/keyvault/tpm` on Linux while exporting
-the legacy backup. These overrides are authoritative; remove them before
-recovering into the fresh profile.
+`keyvault init` stores your 24-word seed encrypted by default
+(`--store-seed-for-hd`), so accounts can be derived later without re-entering
+it. **The raw private key never leaves the keyvault** — these commands return
+only the EIP-55 address and an opaque `envelope_id` handle.
+
+```sh
+$M keyvault eth new                          # generate a new random key
+$M keyvault eth derive --index 0             # derive BIP-44 account #0 from the seed
+$M keyvault eth address --envelope-id <id>   # show the address for a stored key
+```
+
+| Command | Key flags |
+|---|---|
+| `new` | `--key-id <id>` (default `default`), `--json` |
+| `derive` | `--index N` / `--account N` / `--change N` (all default `0`), `--seed-envelope-id <id>`, `--key-id`, `--json` |
+| `address` | `--envelope-id <id>` **(required)**, `--key-id`, `--json` |
+
+- `derive` walks `m/44'/60'/account'/change/index`. The BIP-39 passphrase (the
+  "25th word") is **not** supported — derivation always uses an empty passphrase.
+- `--seed-envelope-id` is needed only when several seeds are stored.
+- `derive` and `address` decrypt key material, so they trigger a Touch ID /
+  passcode prompt unless the wrapping key is unattended (§4.3).
+- Requires the optional extra: `pip install "mordred-hermes[ethereum]"`.
+
+#### Legacy vaults and cross-profile migration
+
+*Skip this unless you are carrying a vault created before profile-scoped native
+key IDs, or moving one between `HERMES_HOME` profiles.*
+
+Keys created by current releases are isolated per `HERMES_HOME`. A legacy
+keyvault remains readable, but `keyvault reset` intentionally retains its
+machine-global legacy Keychain tag because another profile may share it. To
+migrate safely: verify and export a backup, reset the old profile, then recover
+the backup into the fresh profile. The logical key ID in the backup does not
+change.
+
+Legacy helper keys created with an explicit API `home=` may physically remain in
+the helper store selected by the process's old ambient `HERMES_HOME`. Mordred
+tries the current profile store first and that historical ambient store second,
+for legacy reads only. If the old home is no longer the ambient one, set one of
+these while exporting the legacy backup — they are authoritative, so remove them
+before recovering into the fresh profile:
+
+```sh
+MORDRED_SEKEY_STORE=/old/home/mordred/keyvault/sekey   # macOS
+MORDRED_TPMKEY_STORE=/old/home/mordred/keyvault/tpm    # Linux
+```
 
 Current profiles also record the profile-scoped audit wrapping key separately
 from the main key. If audit-key generation or its durability check is
 interrupted, Mordred will not use the uncertain key: auditing continues in
 plaintext with a downgrade marker until the incomplete keyvault is reset and
-recovered. This does not make a partially committed audit key authoritative
+recovered. A partially committed audit key is not treated as authoritative
 merely because its native blob is visible.
 
 ### `vault` — the underlying encrypted store (advanced)
