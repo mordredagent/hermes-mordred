@@ -252,7 +252,9 @@ The other half of Mordred's reason for existing. Large-scale work to begin once 
   - [`user/`](../user/): for operators (QUICKSTART, USAGE)
   - [`dev/`](./): developer/project docs (SPEC, KEYVAULT_BACKENDS, SECRETS_ENV_ENCRYPTION, PLAN, TODO, PATHS, POLICY, HARNESS_PRIVACY, HOOK_PAYLOADS, MIGRATION, UPSTREAM, CI, ROADMAP, setup, VERSION)
   - [`dev/hermes/`](./hermes/): Hermes upstream reference (DESIGN, STRUCTURE)
-- **Migration**: moved all files with `git mv` (preserving history), bulk-updated cross-references across the repo (~50 locations: src docstrings / tests / CI path-triggers / each README / the `pyproject.toml` Documentation URL), and rewrote the `docs/README.md` index for the user/dev structure.
+- **Migration**: moved all files with `git mv` (preserving history), bulk-updated cross-references across the repo (~50 locations: src docstrings / tests / CI path-triggers / each README / the `pyproject.toml` Documentation URL), and rewrote the `docs/README.md` index for the user/dev structure. *(That index
+  was later removed — `503269b85 chore: remove stale docs/ directory`. The
+  documentation index now lives in the repository `README.md` §Documentation.)*
 - **Priority**: L (non-functional) — complete.
 
 ---

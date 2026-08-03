@@ -4,7 +4,14 @@
 >
 > The `[x]` completion markers in the old TODO reflect work history under the OpenClaw environment; with the migration to Hermes, **all of them are reopened as pending**. Some concepts (e.g., the 5-plugin scaffold) are reusable, but file paths, the test runner, etc. need a full rewrite.
 
-Actionable checklist derived from `docs/SPEC.md` and `docs/PLAN.md`.
+Actionable checklist derived from `docs/dev/SPEC.md` and `docs/dev/PLAN.md`.
+
+> **Path note**: completed `[x]` entries below were written before the docs were
+> reorganised by audience, so they cite the old flat paths (`docs/SPEC.md`,
+> `docs/PATHS.md`, `docs/POLICY.md`, …). Those files now live under `docs/dev/`.
+> The historical wording is left intact deliberately — it records what was true
+> when the box was ticked. See `ROADMAP.md` §"v2-X3: Documentation
+> reorganization".
 Each item is a developer-pickable task. Cross-references point back to SPEC/PLAN sections rather than restating context.
 Update this file whenever a task is completed (check the box) or when SPEC/PLAN evolves (add/remove tasks to match).
 Phases are sequenced; do not start Phase N+1 until the Phase N acceptance gate is green.

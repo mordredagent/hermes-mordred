@@ -170,10 +170,14 @@ Step-by-step guide with expected output:
 Full command reference and interactive-command walkthroughs:
 **[USAGE](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md)**.
 
-> **Why not `hermes mordred …`?** Hermes does not yet wire entry-point CLI
-> commands into its argparse (still true on 0.18.2) — `hermes-mordred` is the
-> same subcommand tree and works today. Once upstream wires it, both forms will
-> coexist without code changes.
+> **Two ways to invoke, same subcommand tree.** `hermes-mordred …` is the
+> standalone console script and always works. `hermes mordred …` — the same tree
+> hanging off the host CLI — additionally needs **hermes-agent 0.19.0+** with the
+> plugins enabled in `~/.hermes/config.yaml` (which `configure` does for you).
+> Older builds, down to the supported floor of 0.13.0, do not wire entry-point
+> CLI commands into their argparse, so there `hermes mordred` falls through to
+> the top-level usage — use `hermes-mordred` instead. On a fresh install, before
+> `configure` has run, `hermes-mordred` is the only form available.
 
 ### Verify discovery
 
@@ -510,13 +514,16 @@ docs/                  user and developer documentation (see below)
 |---|---|---|
 | Users | [QUICKSTART.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md) | Zero → protected install, step by step |
 | Users | [USAGE.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md) | Full command reference, interactive walkthroughs, storage model |
+| Users | [HERMES_BASICS.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/HERMES_BASICS.md) | Driving the base `hermes` agent from this checkout (not Mordred) |
 | Developers | [setup.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md) | Development environment from scratch |
 | Developers | [SPEC.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/SPEC.md), [POLICY.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/POLICY.md) | Design spec and policy model |
 | Developers | [SECRETS_ENV_ENCRYPTION.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/SECRETS_ENV_ENCRYPTION.md), [KEYVAULT_BACKENDS.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/KEYVAULT_BACKENDS.md) | At-rest encryption and key-backend design |
 | Developers | [CI.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/CI.md), [UPSTREAM.md](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/UPSTREAM.md) | CI strategy, release runbook, upstream tracking |
 
 More under [`docs/dev/`](https://github.com/InternetMaximalism/mordred-hermes/tree/main/docs/dev):
-PLAN, TODO, ROADMAP, PATHS, MIGRATION, HARNESS_PRIVACY, HOOK_PAYLOADS.
+PLAN, TODO, ROADMAP, PATHS, MIGRATION, HARNESS_PRIVACY, HOOK_PAYLOADS, SLACK_E2E,
+plus [`docs/dev/hermes/`](https://github.com/InternetMaximalism/mordred-hermes/tree/main/docs/dev/hermes)
+(DESIGN, STRUCTURE — upstream Hermes reference).
 
 ## License
 

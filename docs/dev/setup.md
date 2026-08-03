@@ -54,7 +54,7 @@ During development, **two independent Python environments** coexist. Mixing up w
 
 **If you want to run local code, use the repo `.venv/`.** Since it's an editable install, editing `src/` takes effect immediately without reinstalling.
 
-> **⚠️ You can't tell them apart by version number**: `__version__` in `__about__.py` only bumps at the next release, so there's always a window where the local code on the dev branch and the PyPI release **claim the same version string** (as of 2026-07-14 both are `0.1.0a3`, but local has the diffs from PR #39–#45). `--version` cannot be used to determine "which one is running." The only reliable signal is `__file__` (see §"Verifying the local build").
+> **⚠️ You can't tell them apart by version number**: `__version__` in `__about__.py` only bumps at release time, so between releases the local dev-branch code and the published PyPI wheel **claim the same version string** while their contents differ — every merge to `dev` widens that gap until the next bump. `--version` therefore cannot answer "which one is running." The only reliable signal is `__file__` (see §"Verifying the local build").
 
 ## Initial setup
 
