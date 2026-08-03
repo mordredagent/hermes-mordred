@@ -104,6 +104,13 @@ $M encryption enable env       # 4. encrypt your .env (first run creates the vau
 $M status                      # 5. confirm: the `env` row reads [on] enrolled
 ```
 
+> **If a step doesn't do what this guide says**, check
+> [README — Troubleshooting][tsg] before retrying — it covers the common ones:
+> Touch ID prompts that never arrive, `extension serve` refusing to start on port
+> 7788, a network path that silently dropped, and a lost recovery passphrase.
+
+[tsg]: https://github.com/InternetMaximalism/mordred-hermes/blob/main/README.md#troubleshooting
+
 **In one line**: *build the venv → configure → (optional) choose network route →
 create the key → encrypt → check.* Want the bare minimum? Just steps 3 → 4 → 5
 (see §3).
@@ -128,9 +135,13 @@ $M status                 # show current state
 - **Purpose**: confirm Mordred is callable and see where you stand.
 - **Result**: prints the one-screen status (see the sample in §2).
 
-> `hermes mordred <cmd>` (via the host Hermes CLI) also works, but only once the
-> plugin is enabled in `~/.hermes/config.yaml`. Until then, use `hermes-mordred`
-> directly. See [`USAGE.md` §1](./USAGE.md) for the plugin-enable steps.
+> **A shorter form, once you're set up.** `hermes mordred <cmd>` runs the *same*
+> subcommand tree off the host Hermes CLI — from any directory, no venv path. It
+> needs hermes-agent **0.19.0+** plus the plugins enabled in
+> `~/.hermes/config.yaml`, which step 1 (`configure`) writes for you. So follow
+> this guide with `hermes-mordred`, then try `hermes mordred status` at the end:
+> if it prints Mordred status, you can drop the `$M` alias for good. Details in
+> [`USAGE.md` §1](./USAGE.md#1-how-to-invoke).
 
 ---
 
@@ -201,35 +212,29 @@ prompts**, and how to **migrate the vault to a new machine**, see
 the `vault recover` notes in
 [`USAGE.md` §3 (Migrate to a new machine)](./USAGE.md#migrate-to-a-new-machine).
 
-> **Recommended (macOS): create the device key unattended.** Once `env` /
-> `config` / `memory` are vault-managed, every `hermes` / `$M …` run unlocks the
-> vault to decrypt them, so the default **attended** device key asks for Touch ID —
-> up to 3× per command (one per target). Worse, a **background** process (a
-> launchd-started gateway, `extension serve`) can never answer the prompt: it
-> blocks until the 120 s helper timeout and then starts **without** the
-> vault-managed secrets — a sealed Slack token silently drops the platform. To
-> make the hot path silent while your Mac is unlocked, build the Secure Enclave
-> helper first, then select **unattended** policy when the device key is
-> created:
+> **macOS — decide this *before* you create the device key.** By default the key
+> is **attended**: macOS asks for Touch ID on every vault unwrap, typically 2–3
+> prompts per command. Fine interactively — but a **background** process (a
+> launchd-started gateway, `extension serve`) can never answer that prompt and
+> starts *without* your sealed secrets. To make the hot path silent instead:
 >
 > ```sh
-> $M keyvault enable-se                # install/refresh and probe helper
-> MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
->                                      # create the device key unattended
+> $M keyvault enable-se                        # install + probe the SE helper
+> MORDRED_SEKEY_UNATTENDED=1 $M keyvault init  # create the key unattended
 > ```
 >
-> `enable-se` does not create, promote, or migrate a wrapping key. Existing
-> helper, legacy Keychain, and software keys remain in their original backend
-> namespace and continue to work through fallback. The policy environment
-> variable belongs on a later fresh `keyvault init` (or recovery).
+> `MORDRED_SEKEY_UNATTENDED=1` sets the policy for **whichever command creates
+> the key** — so if you skipped `keyvault init` per the note above, put it on
+> your first `encryption enable env` instead:
 >
-> **Trade-off:** an unattended key can be unwrapped by any process running as you
-> while the Mac is unlocked — you trade per-use biometric confirmation for
-> convenience. Ciphertext-at-rest and the recovery passphrase are unaffected.
-> **Already turned on encryption with an attended key?** The attended/unattended
-> choice is fixed when the key is created, so switching means re-keying the vault
-> onto a fresh unattended key — do **not** use `keyvault reset` (it destroys your
-> sealed secrets). See
+> ```sh
+> MORDRED_SEKEY_UNATTENDED=1 $M encryption enable env
+> ```
+>
+> **The attended/unattended choice is fixed when the key is created** — changing
+> your mind later means re-keying onto a fresh vault, so it is worth a moment
+> now. For the trade-off, the background-process failure in full, and the
+> re-keying procedure, see
 > [`USAGE.md` §4.3](./USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them).
 
 ---
@@ -360,132 +365,30 @@ return only the EIP-55 address and an opaque `envelope_id` handle.
 | Show the address for a stored key | `$M keyvault eth address --envelope-id <id>` |
 
 - `new` prints a checksum address + `envelope_id`; add `--json` for scripting.
-- `derive` walks BIP-44 `m/44'/60'/account'/change/index` (defaults
-  `account=0`, `change=0`). When several seeds are stored, choose one with
-  `--seed-envelope-id <id>`.
-- `derive` / `address` decrypt the seed/key, so they trigger a Touch ID /
+- `derive` / `address` decrypt key material, so they trigger a Touch ID /
   passcode prompt unless the wrapping key is unattended.
 - Needs the optional extra: `pip install "mordred-hermes[ethereum]"`.
+
+Every flag — BIP-44 `--account` / `--change`, `--seed-envelope-id` for
+multi-seed vaults, and the BIP-39-passphrase caveat — is in
+[`USAGE.md` § `keyvault eth`](./USAGE.md#keyvault-eth--ethereum-keys-hd-wallet).
 
 ---
 
 ## Running the base Hermes agent (host CLI)
 
-> **Different CLI from the rest of this guide.** Everything above drives
-> `hermes-mordred` (the privacy layer). This section is the **base Hermes
-> agent** — the `hermes` command itself — run from *this* dev checkout. Both
-> commands live in the **same** `.venv`: `hermes` is pulled in as the
-> `hermes-agent` dependency, so the venv you built above already provides it.
-
-### The `hermes` binary is already in `.venv`
-
-The base `hermes` agent ships inside the **same** `.venv` you built in
-[Build the venv](#build-the-venv) — it comes from the `hermes-agent`
-dependency, so there is **nothing extra to build**. If you skipped that step, a
-plain `uv sync` from the repo root creates `.venv` with both binaries:
-
-```sh
-cd <repo-root>            # /Users/.../Mordred-Hermes
-uv sync                   # reads ./uv.lock, creates ./.venv with `hermes` + `hermes-mordred`
-```
-
-Plain `uv sync` (no `--extra`) is enough to run the base agent below; the
-`--extra macos` / `--extra keyvault` you used above only adds Mordred's keyvault
-crypto stack. (Base-agent integrations such as the messaging gateway and local
-voice are `hermes-agent`'s own extras, not re-exposed by this repo — see the
-hermes-agent docs to enable them.) Confirm it landed:
+Everything above drives `hermes-mordred` — the privacy layer. The **base Hermes
+agent** (the `hermes` command itself) is a different CLI, and it already lives in
+the same `.venv` you built above, arriving as the `hermes-agent` dependency:
 
 ```sh
 .venv/bin/hermes --version   # prints  Project: <repo-root>
 ```
 
-> **No uv?** `brew install uv` (macOS), or
-> `curl -LsSf https://astral.sh/uv/install.sh | sh`. Re-running `uv sync` is safe
-> and idempotent.
-
-### Launch this repo's copy (not the global one)
-
-A global `hermes` may already be on your `PATH` at `~/.local/bin/hermes` — that
-is a **separate install** (`~/.hermes/hermes-agent/`), not this checkout. Once
-you've [built `.venv`](#build-the-venv) above, activate it to run this repo's
-pinned copy:
-
-```sh
-cd <repo-root>                 # /Users/.../Mordred-Hermes
-source .venv/bin/activate      # fish: source .venv/bin/activate.fish
-which hermes                   # → <repo-root>/.venv/bin/hermes  (confirms the repo copy)
-hermes --version               # prints  Project: <repo-root>
-```
-
-- **Purpose**: make `hermes` resolve to this repo's `.venv` copy, overriding the global one.
-- **Result**: activation prepends `.venv/bin` to `PATH`, so `hermes` now runs the
-  `hermes-agent` version pinned in `uv.lock` (installed into `.venv`, not the
-  global `~/.local/bin/hermes`). `deactivate` reverts to the global `hermes`.
-
-> One-shot without activating: run the binary directly — `.venv/bin/hermes <args>`.
-
-### Good first commands to try
-
-No provider or auth needed — pure sanity checks:
-
-| Do (command) | Purpose |
-|---|---|
-| `hermes doctor` | Diagnose environment / config problems. |
-| `hermes status` | One-screen dashboard (model, keys, auth). |
-| `hermes tools` | List / toggle the 40+ tools. |
-| `hermes config list` | Dump current config. |
-| `hermes model` | Interactive provider + model picker. |
-
-Real end-to-end smoke test — needs a provider. The free path is Nous Portal OAuth:
-
-```sh
-hermes auth add nous --type oauth        # free login, opens a browser
-hermes -z "Say hi and list your tools"   # one-shot prompt — fastest "does it work"
-hermes                                    # full interactive TUI
-```
-
-> Have an API key instead? Put e.g. `OPENROUTER_API_KEY=…` in a `.env`, or run
-> `hermes config set`, then skip the Portal login.
-
-### First-time setup
-
-```sh
-hermes setup                  # full interactive wizard
-```
-
-Walks six sections in order: **model** (provider + model — the key one),
-**terminal** (where the agent runs), **gateway** (messaging platforms — skip if
-CLI-only), **tools**, **agent**, **tts** (optional). Variants:
-
-| Do (command) | Purpose |
-|---|---|
-| `hermes setup --quick` | Only prompt for what is missing / unset. |
-| `hermes setup model` | Re-run a single section. |
-| `hermes setup --reset` | Reset config back to defaults. |
-
-Verify with `hermes status` (keys show ✓), then `hermes -z "say hi"`.
-
-### Run it in the background (messaging gateway)
-
-The agent CLI is not a daemon — the long-running background process is the
-**messaging gateway** (Telegram / Discord / Slack / …). Configure a platform
-first, then pick a run mode:
-
-```sh
-hermes gateway setup          # configure a platform (e.g. Telegram bot token)
-```
-
-| Do (command) | Purpose | Result |
-|---|---|---|
-| `hermes gateway install` → `hermes gateway start` | Install + run as a macOS **launchd** service. | Background service surviving logout/restart; manage with `gateway status` / `stop` / `restart`. |
-| `hermes gateway run` | Foreground (good for testing, WSL, Docker, Termux). | Runs until Ctrl-C. |
-| `nohup hermes gateway run > ~/hermes-gateway.log 2>&1 &` | Quick detached background run. | Logs to the file; survives the shell. |
-
-> **Dev-copy caveat.** `gateway install` writes a launchd unit pointing at
-> whichever `hermes` resolves *at install time*. To bind the service to **this
-> repo's** copy, run `install` with the venv activated; otherwise it picks up the
-> global `~/.local/bin/hermes`. For day-to-day repo testing, `gateway run` inside
-> tmux/screen is simpler and unambiguous.
+You need none of it to set Mordred up. If you also want to drive the agent
+underneath — running this repo's copy instead of a global one, `hermes setup`,
+provider auth, or the background messaging gateway — see
+**[`HERMES_BASICS.md`](./HERMES_BASICS.md)**.
 
 ---
 
@@ -503,9 +406,17 @@ Short, plain definitions for the terms used above:
 - **target** — a thing Mordred can encrypt: `env` (your `.env`), `config`
   (`config.yaml`), `memory` (agent memory), `workspace` (your working files).
 - **enrolled** — a target whose encryption is currently switched on.
+- **master key** — the single key that actually encrypts your secrets. You never
+  see or type it; it is sealed behind the two keyholes below.
 - **device key / recovery passphrase** — the two keyholes into the same master
   key: the hardware device key (automatic, this machine) and the passphrase you
   remember (recovery). See [`USAGE.md` §4.2](./USAGE.md#42-the-device-key-and-the-recovery-passphrase-are-different-things).
+- **wrapping key** — the hardware key that seals (“wraps”) the master key on this
+  machine. In everyday terms it *is* the device key; the docs say "wrapping key"
+  when talking about the sealing operation itself.
+- **attended / unattended** — whether unwrapping asks for Touch ID every time
+  (attended, the default) or stays silent while your Mac is unlocked
+  (unattended). Fixed when the key is created — see [`USAGE.md` §4.3](./USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them).
 - **Secure Enclave / TPM** — the security chip (macOS / Linux) that guards the
   key in hardware. Only macOS has the login-Keychain software fallback; Linux
   fails closed without its TPM helper.

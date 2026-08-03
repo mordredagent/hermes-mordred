@@ -125,6 +125,25 @@ Each plugin probes the shape of the hook payload in `on_session_start`, and if i
 
 All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK (`PluginContext`). Distribution is as a single pip package `mordred-hermes`, supporting loading via the `hermes_agent.plugins` entry point.
 
+> **Naming convention — read before copying any code path from this document.**
+> Throughout this SPEC, `mordred_network`, `mordred_keyvault`, … are **entry-point
+> names**, not importable modules. They are the plugin identities Hermes sees (and
+> what you list under `plugins.enabled` in `config.yaml`). The **import path is
+> different** — everything ships inside the single `mordred_hermes` package. So a
+> reference like `mordred_keyvault.api.encrypt(...)` or
+> `mordred_llm_guard/local_adapter.py` designates the *keyvault plugin's* `api`
+> module, importable as `mordred_hermes.keyvault.api`. `import mordred_keyvault`
+> raises `ModuleNotFoundError`.
+>
+> | Entry-point name | Import path (`pyproject.toml` `[project.entry-points."hermes_agent.plugins"]`) |
+> |---|---|
+> | `mordred_network` | `mordred_hermes.network` |
+> | `mordred_privacy_check` | `mordred_hermes.privacy_check` |
+> | `mordred_llm_guard` | `mordred_hermes.llm_guard` |
+> | `mordred_keyvault` | `mordred_hermes.keyvault` |
+> | `mordred_wizard` | `mordred_hermes.wizard` |
+> | `mordred_e2e` | `mordred_hermes.extension.gateway_plugin` |
+
 1. **`mordred_network`** — process-scoped route selection across Tor / VPN / Clearnet. Activates and freezes the route before provider construction, then manages child-process lifecycle (`tor`/`arti`/Mullvad WireGuard CLI) via Python `subprocess` until process exit. Provides proxy environment-variable injection (`HTTPS_PROXY`, `ALL_PROXY`, etc.) and an internal Python API (`mordred_network.api.use`, `status`, `blackout_assert`); changing a frozen route requires restart.
 2. **`mordred_privacy_check`** — privacy policy enforcement at two checkpoints:
    - **Skill install guard**: while there's no pure hook available, policy is decided by reading `metadata.mordred.network_requirements` from the frontmatter via the `hermes mordred install <skill>` wrapper CLI. Migrates to a hook-based approach once Hermes adds an install hook in the future
