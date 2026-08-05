@@ -52,7 +52,7 @@ def _active_webauthn_data(active: Pairing | None = None) -> dict[str, Any]:
     bound_token_hash = data.get("pairing_token_hash")
     if isinstance(bound_token_hash, str):
         return data if secrets.compare_digest(bound_token_hash, _pairing_token_hash(active.ext_token)) else {}
-    state = pairing._read_json(pairing._state_path())
+    state = pairing._read_state_cached()
     # Backward compatibility: pre-upgrade credentials had no token binding.
     # A new pairing writes this marker, so those records cannot cross a re-pair.
     return {} if state.get("reject_unbound_webauthn") is True else data
@@ -202,7 +202,7 @@ def save_webauthn_credential(
         body["rp_id"] = rp_id
         body["rp_id_hash"] = b64u_encode(hashlib.sha256(rp_id.encode("utf-8")).digest())
     with pairing._state_lock():
-        state = pairing._read_json(pairing._state_path())
+        state = pairing._read_state_cached()
         active_token = state.get("ext_token")
         if not isinstance(active_token, str) or not active_token:
             raise ValueError("active pairing required before WebAuthn registration")
@@ -414,7 +414,7 @@ def _persist_legacy_webauthn_binding(
                 and current.get("public_key") == data.get("public_key")
                 and not any(field in current for field in binding_fields)
             )
-            state = pairing._read_json(pairing._state_path())
+            state = pairing._read_state_cached()
             active_token = state.get("ext_token")
             if not unchanged or not isinstance(active_token, str) or not active_token:
                 return False

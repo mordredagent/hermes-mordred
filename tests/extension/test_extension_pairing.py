@@ -4,6 +4,7 @@ valid token."""
 
 from __future__ import annotations
 
+import json
 import stat
 import threading
 
@@ -455,3 +456,110 @@ def test_consume_code_single_use_under_concurrency():
 
     assert results.count("ok") == 1
     assert set(results) <= {"ok", "already_used"}
+
+
+def _count_state_json_parses(monkeypatch) -> list[int]:
+    """Patch ``pairing._read_json`` to count parses of state.json specifically
+    (pending.json/webauthn.json reads are unaffected and uncounted)."""
+    counter = [0]
+    real_read_json = pairing._read_json
+
+    def counting_read_json(path):
+        if path == pairing._state_path():
+            counter[0] += 1
+        return real_read_json(path)
+
+    monkeypatch.setattr(pairing, "_read_json", counting_read_json)
+    return counter
+
+
+def test_load_pairing_parses_state_once_per_generation(monkeypatch):
+    """state.json carries the E2E replay cache and can reach several MB at
+    capacity; repeated load_pairing() calls between writes must not re-parse
+    it every time (PR #88 follow-up)."""
+    code, _ = pairing.generate_code()
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+
+    counter = _count_state_json_parses(monkeypatch)
+
+    first = pairing.load_pairing()
+    for _ in range(4):
+        assert pairing.load_pairing() == first
+
+    assert counter[0] == 1
+
+
+def test_load_channel_keys_parses_state_once_per_generation(monkeypatch):
+    pairing.save_channel_key("C1", b"\x09" * 32)
+
+    counter = _count_state_json_parses(monkeypatch)
+
+    for _ in range(4):
+        assert pairing.load_channel_keys()["C1"] == b"\x09" * 32
+
+    assert counter[0] == 1
+
+
+def test_pairing_state_cache_invalidates_on_each_owned_write_path():
+    """Every write path this module owns (re-pair, channel-key push, replay
+    claim, clear) must be visible on the very next read — never a stale
+    generation, and this must not depend on the filesystem's mtime
+    resolution advancing between two writes in the same test tick."""
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+
+    code1, _ = pairing.generate_code()
+    pairing.handle_pair_init(code1, ext_pub, xc.b64u_encode(b"\x01" * 32))
+    first_pairing = pairing.load_pairing()
+    assert first_pairing is not None
+
+    code2, _ = pairing.generate_code()
+    pairing.handle_pair_init(code2, ext_pub, xc.b64u_encode(b"\x02" * 32))
+    second_pairing = pairing.load_pairing()
+    assert second_pairing is not None
+    assert second_pairing.ext_token != first_pairing.ext_token
+
+    pairing.save_channel_key("C-live", b"\x03" * 32)
+    assert pairing.load_channel_keys()["C-live"] == b"\x03" * 32
+
+    identity_a = "a" * 64
+    assert pairing.claim_e2e_replay_identities((identity_a,)) is True
+    # A second claim of the same identity must see the just-committed entry,
+    # not a cached pre-claim snapshot.
+    assert pairing.claim_e2e_replay_identities((identity_a,)) is False
+
+    pairing.clear_pairing()
+    assert pairing.load_pairing() is None
+    assert pairing.load_channel_keys() == {}
+
+
+def test_state_cache_reloads_after_a_write_outside_this_modules_helpers():
+    """The cache must not serve content older than what is currently on disk
+    even when this module's own write paths never ran — e.g. state.json
+    restored from a backup by another process. This exercises the per-access
+    (mtime, size) guard directly, bypassing every explicit invalidation call
+    this module makes on its own write paths."""
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="first",
+            ext_pubkey_b64="e",
+            hermes_pubkey_b64="h",
+            paired_at=1.0,
+        )
+    )
+    loaded = pairing.load_pairing()
+    assert loaded is not None
+    assert loaded.ext_token == "first"
+
+    # Bypass every helper that calls _invalidate_state_cache() and write
+    # directly, as an external process replacing the file out from under this
+    # one would. A longer token value also changes the file's size, so the
+    # cache key differs regardless of the filesystem's mtime resolution.
+    raw = pairing._read_json(pairing._state_path())
+    raw["ext_token"] = "rewritten-externally-with-a-longer-token-value"
+    pairing._write_private(pairing._state_path(), json.dumps(raw).encode("utf-8"))
+
+    reloaded = pairing.load_pairing()
+    assert reloaded is not None
+    assert reloaded.ext_token == "rewritten-externally-with-a-longer-token-value"
