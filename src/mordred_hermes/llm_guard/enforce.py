@@ -11,38 +11,45 @@ is deferred to v2 (POLICY.md row 11).
 Cycle A surface: off / lenient → silent no-op; strict + cloud provider in
 ``cloud_provider_allowlist`` with ``allow_cloud_llm: true`` → ``allow``
 audit. Refuse paths and the mordred-local branch land in later cycles.
+
+Cloud provider identity/endpoint matching lives in :mod:`._cloud_endpoint`
+and the ``policy.json`` reader lives in :mod:`._policy_settings` (LOC-reduction
+sweep) — both are re-imported here so this module keeps deciding and
+auditing against them without callers noticing the split. Several of their
+names are further re-exported (listed in ``__all__``) so existing callers —
+tests and :mod:`.auxiliary_guard` — that reach them as ``enforce.X`` keep
+working unchanged.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import logging
-import os
-import re
 import socket
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, TypeAlias
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Final, TypeAlias
+from urllib.parse import urlsplit
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
-from .._policy_io import load_policy_mapping
-from .._provider_identity import canonicalize_provider
 from .._proxy_bypass import ensure_loopback_proxy_bypass as _ensure_loopback_proxy_bypass
 from . import health
+from ._cloud_endpoint import _CLOUD_ENDPOINT_HOSTS as _CLOUD_ENDPOINT_HOSTS
+from ._cloud_endpoint import _SDK_BASE_URL_ENV_VARS as _SDK_BASE_URL_ENV_VARS
+from ._cloud_endpoint import _cloud_route_key, _resolve_cloud_endpoint_binding
+from ._cloud_endpoint import ambient_base_url_override as ambient_base_url_override
+from ._cloud_endpoint import cloud_endpoint_matches_provider as cloud_endpoint_matches_provider
+from ._cloud_endpoint import cloud_provider_has_owned_default as cloud_provider_has_owned_default
+from ._cloud_endpoint import infer_cloud_provider as infer_cloud_provider
+from ._cloud_endpoint import policy_provider_id as policy_provider_id
+from ._cloud_endpoint import safe_endpoint_for_audit as safe_endpoint_for_audit
 from ._exceptions import MordredLocalUnreachable, MordredSessionRefused
+from ._policy_settings import CloudAttemptAction, _PolicySettings, _read_policy_settings
 from .local_adapter import LOCAL_PROVIDER_NAME
 
 _LOG = logging.getLogger("mordred.llm_guard.enforce")
-
-# What strict mode does when a non-allowlisted cloud provider is reached.
-# Mirrors the wizard's ``PolicySnapshot.cloud_attempt_action`` Literal
-# (``wizard/policy_writer.py``). ``always-block`` is the safe default;
-# ``prompt-once`` asks the operator once per provider at an interactive
-# terminal (see :func:`_resolve_cloud_attempt`).
-CloudAttemptAction: TypeAlias = Literal["always-block", "prompt-once"]
 
 # Interactive verdict for a single non-allowlisted cloud attempt under
 # ``prompt-once``. ``True`` allow, ``False`` deny, ``None`` no interactive
@@ -75,128 +82,10 @@ _no_resolved_provider_emitted = False
 # via :func:`_reset_state`.
 _cloud_prompt_decisions: dict[str, bool] = {}
 _STRICT_LOOPBACK_LITERALS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1"})
-_MAX_ENDPOINT_DISPLAY_LENGTH: Final = 256
-
-# Hermes 0.19 exposes a few different slugs for the same policy-level
-# provider depending on whether a route came from auth.py, models.py, or the
-# models.dev catalog. Keep the faithful models.py alias replica untouched and
-# collapse only those cross-registry identities at this enforcement boundary.
-_POLICY_PROVIDER_EQUIVALENTS: Final[Mapping[str, str]] = {
-    "deep-infra": "deepinfra",
-    "deepinfra-ai": "deepinfra",
-    "kimi-for-coding": "kimi-coding",
-    "minimax-oauth": "minimax",
-    "openai-api": "openai",
-    "solar": "upstage",
-    "xai-oauth": "xai",
-}
-
-# Provider identity is not an endpoint grant. Hermes permits ``base_url``
-# overrides for first-class providers, so checking only ``provider`` lets a
-# process label an arbitrary collector as e.g. ``openai`` and inherit the
-# allow-list entry. These are the provider-owned endpoint hosts exposed by
-# Hermes 0.19's built-in profiles. A leading dot means "this DNS suffix";
-# exact entries never accept a sibling/lookalike hostname.
-#
-# Every key must already be a ``policy_provider_id`` output. An alias key (e.g.
-# ``xai-oauth``) is unreachable for lookups — callers canonicalize first — and
-# would additionally let ``infer_cloud_provider`` return a non-canonical
-# identity that no allow-list entry can match.
-_CLOUD_ENDPOINT_HOSTS: Final[Mapping[str, tuple[str, ...]]] = {
-    # Present in the hermes-agent floor registry but not in the current one, so
-    # the table has to span the supported version range: a provider missing here
-    # is refused outright under strict mode.
-    "ai-gateway": ("ai-gateway.vercel.sh",),
-    "alibaba": ("dashscope-intl.aliyuncs.com",),
-    "alibaba-coding-plan": ("coding-intl.dashscope.aliyuncs.com",),
-    "anthropic": ("api.anthropic.com",),
-    "arcee": ("api.arcee.ai",),
-    # Azure resource subdomains select an operator/tenant, so a vendor suffix
-    # is not sufficient destination ownership. Strict refuses Azure Foundry
-    # until policy.json has a separately persisted exact-endpoint pin.
-    "azure-foundry": (),
-    # Bedrock and Vertex have shape-specific matchers below. Deliberately do
-    # not use broad ``.amazonaws.com`` / ``.googleapis.com`` suffixes: those
-    # would grant unrelated services such as S3 or Cloud Storage.
-    "bedrock": (),
-    "copilot": ("api.githubcopilot.com",),
-    "deepinfra": ("api.deepinfra.com",),
-    "deepseek": ("api.deepseek.com",),
-    "fireworks": ("api.fireworks.ai",),
-    "gemini": ("generativelanguage.googleapis.com",),
-    "gmi": ("api.gmi-serving.com",),
-    "huggingface": ("router.huggingface.co",),
-    "kilocode": ("api.kilo.ai",),
-    "kimi-coding": ("api.kimi.com", "api.moonshot.ai"),
-    "kimi-coding-cn": ("api.moonshot.cn",),
-    "minimax": ("api.minimax.io",),
-    "minimax-cn": ("api.minimaxi.com",),
-    "nous": ("inference-api.nousresearch.com",),
-    "novita": ("api.novita.ai",),
-    "nvidia": ("integrate.api.nvidia.com",),
-    "ollama-cloud": ("ollama.com",),
-    "openai": ("api.openai.com",),
-    "openai-codex": ("chatgpt.com",),
-    "opencode-go": ("opencode.ai",),
-    "opencode-zen": ("opencode.ai",),
-    "openrouter": ("openrouter.ai",),
-    "qwen-oauth": ("portal.qwen.ai",),
-    "stepfun": ("api.stepfun.ai", "api.stepfun.com"),
-    "tencent-tokenhub": ("tokenhub.tencentmaas.com",),
-    "upstage": ("api.upstage.ai",),
-    "vertex": (),
-    "xai": ("api.x.ai",),
-    "xiaomi": ("api.xiaomimimo.com",),
-    # Hermes probes both the global Z.AI host and its China service
-    # (``hermes_cli.auth.ZAI_ENDPOINTS``); vision resolution uses the same
-    # pair directly.
-    "zai": ("api.z.ai", "open.bigmodel.cn"),
-}
-
-_BEDROCK_ENDPOINT_RE: Final = re.compile(
-    r"^bedrock-runtime(?:-fips)?\.[a-z0-9-]+\."
-    r"(?:amazonaws\.com(?:\.cn)?|api\.aws)$"
-)
-_VERTEX_ENDPOINT_RE: Final = re.compile(r"^(?:[a-z0-9-]+-)?aiplatform\.googleapis\.com$")
-
-
-def policy_provider_id(provider_id: str) -> str:
-    """Return the stable provider identity used by Mordred policy files."""
-    canonical = canonicalize_provider(provider_id)
-    return _POLICY_PROVIDER_EQUIVALENTS.get(canonical, canonical)
 
 
 class _InvalidLocalEndpoint(ValueError):
     """A strict-mode ``mordred-local`` endpoint is not safely loopback-only."""
-
-
-def safe_endpoint_for_audit(endpoint: object) -> str:
-    """Return a bounded URL display with all credential-bearing parts removed."""
-    if not isinstance(endpoint, str) or not endpoint:
-        return "<missing>"
-    if endpoint != endpoint.strip() or any(ord(char) < 0x20 or ord(char) == 0x7F for char in endpoint):
-        return "<invalid>"
-    try:
-        parsed = urlsplit(endpoint)
-        port = parsed.port
-    except (TypeError, ValueError):
-        return "<invalid>"
-    scheme = parsed.scheme.casefold()
-    hostname = parsed.hostname
-    if scheme not in {"http", "https"} or not hostname:
-        return "<invalid>"
-    host = hostname.rstrip(".").casefold()
-    if not host:
-        return "<invalid>"
-    rendered_host = f"[{host}]" if ":" in host else host
-    authority = rendered_host if port is None else f"{rendered_host}:{port}"
-    # Paths can also contain bearer/project secrets on custom or rejected
-    # endpoints. Audit needs only the destination origin; internal route keys
-    # retain normalized paths where provider disambiguation requires them.
-    sanitized = urlunsplit((scheme, authority, "", "", ""))
-    if len(sanitized) > _MAX_ENDPOINT_DISPLAY_LENGTH:
-        return sanitized[: _MAX_ENDPOINT_DISPLAY_LENGTH - 3] + "..."
-    return sanitized
 
 
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
@@ -710,252 +599,6 @@ def _resolve_cloud_attempt(
     return False
 
 
-def _normalized_cloud_endpoint(runtime_base_url: str | None) -> tuple[str, str] | None:
-    """Return ``(host, normalized route id)`` for a safe cloud URL."""
-    if not isinstance(runtime_base_url, str) or not runtime_base_url.strip():
-        return None
-    if runtime_base_url != runtime_base_url.strip() or any(
-        ord(char) < 0x20 or ord(char) == 0x7F for char in runtime_base_url
-    ):
-        return None
-    raw = runtime_base_url.strip()
-    try:
-        parsed = urlsplit(raw)
-        port = parsed.port
-    except ValueError:
-        return None
-    if parsed.scheme.casefold() != "https" or parsed.username is not None or parsed.password is not None:
-        return None
-    if parsed.query or parsed.fragment:
-        return None
-    host = (parsed.hostname or "").rstrip(".").casefold()
-    if not host:
-        return None
-    default_port = port in (None, 443)
-    authority = host if default_port else f"{host}:{port}"
-    path = parsed.path.rstrip("/") or "/"
-    return host, f"https://{authority}{path}"
-
-
-def _host_matches_constraint(host: str, constraint: str) -> bool:
-    if constraint.startswith("."):
-        suffix = constraint[1:]
-        return host == suffix or host.endswith(constraint)
-    return host == constraint
-
-
-def _path_at_or_below(path: str, base: str) -> bool:
-    return path == base or path.startswith(f"{base}/")
-
-
-def cloud_endpoint_matches_provider(provider_id: str, runtime_base_url: str | None) -> bool:
-    """Whether a runtime URL belongs to the named built-in cloud provider."""
-    parsed = _normalized_cloud_endpoint(runtime_base_url)
-    provider = policy_provider_id(provider_id)
-    if parsed is None:
-        return False
-    host = parsed[0]
-    path = urlsplit(parsed[1]).path
-    if provider == "bedrock":
-        return _BEDROCK_ENDPOINT_RE.fullmatch(host) is not None
-    if provider == "vertex":
-        return _VERTEX_ENDPOINT_RE.fullmatch(host) is not None
-    if provider == "opencode-go":
-        return host == "opencode.ai" and _path_at_or_below(path, "/zen/go/v1")
-    if provider == "opencode-zen":
-        return host == "opencode.ai" and _path_at_or_below(path, "/zen/v1")
-    constraints = _CLOUD_ENDPOINT_HOSTS.get(provider)
-    return bool(constraints and any(_host_matches_constraint(parsed[0], constraint) for constraint in constraints))
-
-
-# Provider SDKs silently redirect to these when the caller passes no
-# ``base_url``. Hermes then reports ``base_url=""`` while the request actually
-# leaves for the override, so an absent runtime endpoint may only be trusted
-# once none of these is set. Enumerated from the installed
-# ``openai`` / ``anthropic`` / ``google`` clients rather than guessed.
-_SDK_BASE_URL_ENV_VARS: Final[tuple[str, ...]] = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_BEDROCK_BASE_URL",
-    "ANTHROPIC_FOUNDRY_BASE_URL",
-    "ANTHROPIC_VERTEX_BASE_URL",
-    "AZURE_OPENAI_ENDPOINT",
-    "GEMINI_NEXT_GEN_API_BASE_URL",
-    "OPENAI_BASE_URL",
-)
-
-
-def ambient_base_url_override() -> str | None:
-    """Return the first provider-SDK endpoint override present in the env.
-
-    ``None`` means no ambient redirect exists, so a client constructed without
-    an explicit ``base_url`` really does reach the vendor default.
-    """
-    for name in _SDK_BASE_URL_ENV_VARS:
-        raw = os.environ.get(name)
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
-    return None
-
-
-def cloud_provider_has_owned_default(provider_id: str) -> bool:
-    """Whether omitting ``base_url`` still lands on a provider-owned endpoint.
-
-    Hermes leaves ``base_url`` unset whenever the provider SDK supplies its own
-    endpoint (``agent.base_url = base_url or ""`` in ``agent/agent_init.py``);
-    native Anthropic is the common case. That is NOT an unbound destination — it
-    is the vendor default — so it must not be treated like an operator override
-    pointing at an arbitrary collector.
-
-    Providers whose destination selects a tenant, region, or project (Azure
-    Foundry, Bedrock, Vertex) have no single owned default. They keep failing
-    closed until an explicit endpoint is configured, which is exactly what their
-    empty :data:`_CLOUD_ENDPOINT_HOSTS` entries encode.
-    """
-    provider = policy_provider_id(provider_id)
-    return bool(_CLOUD_ENDPOINT_HOSTS.get(provider))
-
-
-def infer_cloud_provider(runtime_base_url: str | None) -> str | None:
-    """Infer a unique built-in provider from an actual endpoint."""
-    parsed = _normalized_cloud_endpoint(runtime_base_url)
-    if parsed is None:
-        return None
-    matches = [
-        provider for provider in _CLOUD_ENDPOINT_HOSTS if cloud_endpoint_matches_provider(provider, runtime_base_url)
-    ]
-    if not matches:
-        return None
-    # Several Hermes aliases intentionally share one service endpoint. Prefer
-    # a policy identity already canonical in the public allow-list.
-    priority = ("openai", "anthropic", "gemini", "bedrock", "vertex", "openrouter")
-    return next((provider for provider in priority if provider in matches), sorted(matches)[0])
-
-
-def _resolve_cloud_endpoint_binding(
-    provider_id: str,
-    runtime_base_url: str | None,
-) -> tuple[bool, str | None, bool]:
-    """Decide whether the request's real destination belongs to ``provider_id``.
-
-    Returns ``(bound, effective_base_url, overridden)``.
-
-    Endpoint identity is a prerequisite, not an approval decision: an allow-list
-    entry or a provider-only prompt must never bless
-    ``provider=openai, base_url=https://collector...``.
-
-    An absent/blank ``base_url`` is NOT an unbound destination. Hermes stores
-    ``base_url or ""`` and omits it whenever the provider SDK supplies its own
-    endpoint, so the request goes to the vendor default. Such a client is still
-    redirectable through the SDK's own environment overrides while Hermes keeps
-    reporting ``base_url=""``, so bind against the ambient value when one exists
-    and otherwise require the provider to own a single default endpoint.
-    """
-    overridden = isinstance(runtime_base_url, str) and bool(runtime_base_url.strip())
-    if not overridden:
-        ambient = ambient_base_url_override()
-        if ambient is not None:
-            return cloud_endpoint_matches_provider(provider_id, ambient), ambient, True
-        return cloud_provider_has_owned_default(provider_id), runtime_base_url, False
-    return cloud_endpoint_matches_provider(provider_id, runtime_base_url), runtime_base_url, True
-
-
-def _cloud_route_key(provider_id: str, runtime_base_url: str | None) -> str:
-    parsed = _normalized_cloud_endpoint(runtime_base_url)
-    endpoint = parsed[1] if parsed is not None else "<missing-or-invalid-endpoint>"
-    return f"{provider_id}@{endpoint}"
-
-
-# --------------------------------------------------------------------------- #
-# policy.json reader                                                          #
-# --------------------------------------------------------------------------- #
-
-
-class _PolicySettings:
-    """Subset of ``policy.json`` consumed by enforce."""
-
-    __slots__ = ("allow_cloud_llm", "cloud_allowlist", "cloud_attempt_action", "local_endpoint")
-
-    def __init__(
-        self,
-        *,
-        allow_cloud_llm: bool,
-        cloud_allowlist: frozenset[str],
-        local_endpoint: str,
-        cloud_attempt_action: CloudAttemptAction = "always-block",
-    ) -> None:
-        self.allow_cloud_llm = allow_cloud_llm
-        self.cloud_allowlist = cloud_allowlist
-        self.local_endpoint = local_endpoint
-        self.cloud_attempt_action = cloud_attempt_action
-
-
-_DEFAULT_LOCAL_ENDPOINT: Final = "http://localhost:1234/v1"
-
-
-def _read_policy_settings(policy_json_path: Path) -> _PolicySettings:
-    """Read ``allow_cloud_llm`` / ``cloud_provider_allowlist`` / ``local_llm_endpoint``.
-
-    Missing or malformed fields fall back to the safe-by-default values:
-    ``allow_cloud_llm=False``, empty allowlist, default local endpoint.
-    Under strict mode these defaults result in refusal for any cloud
-    provider — i.e. failure-closed. A missing / unreadable / malformed /
-    non-object ``policy.json`` loads as ``{}`` (via
-    :func:`_policy_io.load_policy_mapping`), so the ``.get(...)`` chain
-    below reproduces exactly those safe-by-default values.
-    """
-    data = load_policy_mapping(policy_json_path, log=_LOG)
-
-    # Codex review P2: ``bool("false")`` is ``True`` in Python — using
-    # ``bool(...)`` here would let a hand-edited or migrated
-    # ``allow_cloud_llm: "false"`` (string) flip strict mode open. Require
-    # the JSON value to be a real boolean ``true``; anything else is
-    # failure-closed False.
-    allow_cloud_llm = data.get("allow_cloud_llm") is True
-    raw_allowlist = data.get("cloud_provider_allowlist", [])
-    # Codex review P2 round 5 (revised): normalize allowlist entries through
-    # the SAME alias table the runtime provider id is canonicalized through
-    # (``__init__.py::_on_pre_api_request_enforce`` /
-    # ``_resolve_active_provider`` both call ``canonicalize_provider``). A
-    # bare ``.strip().lower()`` here handled casing/whitespace but not
-    # aliases: a hand-edited ``cloud_provider_allowlist: ["claude"]`` (a real
-    # Hermes alias for ``"anthropic"``) or ``["google"]`` / ``["aws"]`` would
-    # never match the canonicalized runtime id and strict mode would refuse
-    # a provider the user clearly intended to allow. ``canonicalize_provider``
-    # already strips + lowers before the alias lookup, so this is not a
-    # double-normalization. Empty strings still drop out (``if s``) so a
-    # stray comma in the wizard CSV doesn't widen the allowlist.
-    #
-    # ``"custom"`` is dropped: it is Hermes' wildcard bucket for an arbitrary
-    # OpenAI-compatible ``base_url`` (and the canonical form of the ``ollama``
-    # local-endpoint alias). Letting an allowlist entry resolve to it would turn
-    # a narrow grant (e.g. a user writing ``["ollama"]`` meaning "allow my local
-    # model") into permission for ANY custom cloud endpoint — a fail-open
-    # widening in a strict CLOUD allowlist. Fail closed instead; a deliberate
-    # arbitrary-endpoint grant is not something strict mode should make easy.
-    cloud_allowlist = (
-        frozenset(
-            s for s in (policy_provider_id(x) for x in raw_allowlist if isinstance(x, str)) if s and s != "custom"
-        )
-        if isinstance(raw_allowlist, list)
-        else frozenset()
-    )
-    raw_endpoint = data.get("local_llm_endpoint")
-    local_endpoint = raw_endpoint if isinstance(raw_endpoint, str) and raw_endpoint else _DEFAULT_LOCAL_ENDPOINT
-    # Only the exact string ``"prompt-once"`` opts into the prompt path;
-    # missing / unknown / non-string values fall back to the safe default
-    # ``"always-block"`` (failure-closed, mirroring the allow_cloud_llm
-    # ``is True`` coercion above).
-    cloud_attempt_action: CloudAttemptAction = (
-        "prompt-once" if data.get("cloud_attempt_action") == "prompt-once" else "always-block"
-    )
-    return _PolicySettings(
-        allow_cloud_llm=allow_cloud_llm,
-        cloud_allowlist=cloud_allowlist,
-        local_endpoint=local_endpoint,
-        cloud_attempt_action=cloud_attempt_action,
-    )
-
-
 def check_runtime_provider(
     *,
     policy_mode: str,
@@ -1084,6 +727,9 @@ class _RefuseOnlyAuditWriter:
 
 
 __all__ = [
+    "_CLOUD_ENDPOINT_HOSTS",
+    "_SDK_BASE_URL_ENV_VARS",
+    "ambient_base_url_override",
     "check_runtime_provider",
     "check_session_provider",
     "cloud_endpoint_matches_provider",
