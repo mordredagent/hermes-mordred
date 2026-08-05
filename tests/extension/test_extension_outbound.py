@@ -36,6 +36,16 @@ def _isolated_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_needs_key_rate_limit():
+    """The needs-key notice cooldown is module-level in-memory state, so an
+    entry left by an earlier test would silently suppress the notice a later
+    test asserts on (and vice versa)."""
+    gateway_plugin._NEEDS_KEY_NOTICE_TIMES.clear()
+    yield
+    gateway_plugin._NEEDS_KEY_NOTICE_TIMES.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_gateway_import_leak():
     """``outbound._SendResult()`` does a real ``from gateway.platforms.base
     import SendResult`` (the only part of ``gateway.*`` these tests actually
@@ -648,6 +658,108 @@ def test_secondary_profile_needs_key_notice_uses_matching_adapter():
         "reason": "mordred-encryption-required",
     }
     assert default_adapter.sent == []
+    assert secondary_adapter.sent == [gateway_plugin._NEEDS_KEY_NOTICE]
+
+
+_SKIP_UNENCRYPTED = {"action": "skip", "reason": "mordred-encryption-required"}
+
+
+def _recording_slack_adapter():
+    """A Slack-shaped adapter recording every send, on a class of its own.
+
+    ``wrap_live_adapters`` patches the adapter's *class*, so a shared class
+    would carry the wrap (and its state) into every later test.
+    """
+
+    class RecordingSlackAdapter:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, target, content, reply_to=None, metadata=None):
+            self.sent.append(content)
+            return SimpleNamespace(success=True)
+
+    return RecordingSlackAdapter()
+
+
+def _plaintext_slack_event(chat_id: str, profile: str | None = None):
+    return SimpleNamespace(
+        text="plaintext must be refused",
+        source=SimpleNamespace(
+            platform=FakePlatform.SLACK,
+            chat_id=chat_id,
+            thread_id=None,
+            profile=profile,
+        ),
+    )
+
+
+def _dispatch(gateway, *events):
+    """Hook verdicts for ``events``, with the fire-and-forget notice tasks the
+    hook schedules allowed to finish before returning."""
+
+    async def run():
+        verdicts = [gateway_plugin.pre_gateway_dispatch(event=e, gateway=gateway) for e in events]
+        await asyncio.sleep(0)
+        return verdicts
+
+    return asyncio.run(run())
+
+
+def test_needs_key_notice_is_rate_limited_per_conversation():
+    """A plaintext flood must not become a bot-notice flood.
+
+    The notice fires before host authorization, so on a mandatory-E2E platform
+    any workspace member could otherwise amplify one message of their own into
+    one bot post in the channel. Every message still gets the ``skip`` verdict —
+    only the notice send is suppressed.
+    """
+    adapter = _recording_slack_adapter()
+    gateway = SimpleNamespace(adapters={FakePlatform.SLACK: adapter})
+
+    assert _dispatch(gateway, *[_plaintext_slack_event("C-flood") for _ in range(4)]) == [_SKIP_UNENCRYPTED] * 4
+    assert adapter.sent == [gateway_plugin._NEEDS_KEY_NOTICE]
+
+
+def test_needs_key_notice_resumes_after_the_rate_limit_window():
+    """The cooldown suppresses a burst, it does not mute the channel forever."""
+    adapter = _recording_slack_adapter()
+    gateway = SimpleNamespace(adapters={FakePlatform.SLACK: adapter})
+
+    assert _dispatch(gateway, _plaintext_slack_event("C-window")) == [_SKIP_UNENCRYPTED]
+    assert adapter.sent == [gateway_plugin._NEEDS_KEY_NOTICE]
+
+    # Back-date the recorded send rather than mock the clock: the cooldown is a
+    # last-sent timestamp, so this is exactly "the window has elapsed".
+    key = next(iter(gateway_plugin._NEEDS_KEY_NOTICE_TIMES))
+    gateway_plugin._NEEDS_KEY_NOTICE_TIMES[key] -= gateway_plugin._NEEDS_KEY_RATE_LIMIT_SECONDS + 1
+
+    assert _dispatch(gateway, _plaintext_slack_event("C-window")) == [_SKIP_UNENCRYPTED]
+    assert adapter.sent == [gateway_plugin._NEEDS_KEY_NOTICE] * 2
+
+
+def test_needs_key_rate_limit_is_scoped_per_channel_and_profile():
+    """One conversation's cooldown must not silence another channel or bot."""
+    default_adapter = _recording_slack_adapter()
+    secondary_adapter = _recording_slack_adapter()
+    gateway = SimpleNamespace(
+        adapters={FakePlatform.SLACK: default_adapter},
+        _profile_adapters={"work": {FakePlatform.SLACK: secondary_adapter}},
+    )
+
+    assert (
+        _dispatch(
+            gateway,
+            _plaintext_slack_event("C-scope-a"),
+            _plaintext_slack_event("C-scope-a"),
+            _plaintext_slack_event("C-scope-b"),
+            # Same channel id, different bot: a separate conversation, so the
+            # profile has to be part of the key.
+            _plaintext_slack_event("C-scope-a", profile="work"),
+        )
+        == [_SKIP_UNENCRYPTED] * 4
+    )
+    assert default_adapter.sent == [gateway_plugin._NEEDS_KEY_NOTICE] * 2
     assert secondary_adapter.sent == [gateway_plugin._NEEDS_KEY_NOTICE]
 
 
