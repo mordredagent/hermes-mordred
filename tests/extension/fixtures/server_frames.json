@@ -1,0 +1,85 @@
+[
+  {"type": "ping"},
+  {"type": "auth_challenge", "nonce": "bm9uY2U", "webauthn_required": false},
+  {"type": "auth_ok", "hermes_version": "0.1.0a12", "se_available": true},
+  {"type": "auth_fail", "reason": "invalid_token"},
+  {"type": "error", "reason": "bad_json"},
+  {"id": "rpc-error", "type": "error", "reason": "internal_error"},
+  {"id": "webauthn-ok", "type": "webauthn_registered", "ok": true},
+  {
+    "id": "webauthn-fail",
+    "type": "webauthn_registered",
+    "ok": false,
+    "error": "invalid_public_key"
+  },
+  {
+    "id": "history-complete",
+    "type": "history_result",
+    "turns": [{"role": "user", "content": "こんにちは"}],
+    "truncated": false
+  },
+  {
+    "id": "history-truncated",
+    "type": "history_result",
+    "turns": [{"role": "assistant", "content": "newest complete turn"}],
+    "truncated": true
+  },
+  {"id": "history-clear", "type": "history_cleared", "ok": true},
+  {
+    "id": "pair-ok",
+    "type": "pair_complete",
+    "hermes_pubkey": "aGVybWVzLXB1YmxpYy1rZXk",
+    "attestation": {
+      "signed_challenge": "c2lnbmVkLWNoYWxsZW5nZQ",
+      "se_pubkey": "c2UtcHVibGljLWtleQ",
+      "se_available": true
+    },
+    "ext_token": "ZXh0ZW5zaW9uLXRva2Vu"
+  },
+  {"id": "pair-fail", "type": "pair_fail", "reason": "expired"},
+  {"id": "chat-1", "type": "chat_chunk", "content": "partial"},
+  {"id": "chat-1", "type": "chat_end"},
+  {"id": "chat-2", "type": "chat_error", "reason": "agent_unavailable"},
+  {"id": "encrypt-ok", "type": "encrypt_result", "ciphertext": "MORDRED1:example"},
+  {"id": "encrypt-fail", "type": "encrypt_fail", "reason": "not_paired"},
+  {"id": "decrypt-ok", "type": "decrypt_result", "plaintext": "plain text"},
+  {"id": "decrypt-fail", "type": "decrypt_fail", "reason": "tampered"},
+  {
+    "id": "slack-ok",
+    "type": "slack_setup_result",
+    "ok": true,
+    "note": "saved"
+  },
+  {
+    "id": "slack-fail",
+    "type": "slack_setup_result",
+    "ok": false,
+    "error": "bad_token_format"
+  },
+  {
+    "id": "sign-prompt",
+    "type": "sign_prompt",
+    "request_id": "dapp-request",
+    "analysis": {"risk": "low", "summary": "Personal signature", "warnings": []},
+    "decoded": {"function": "personal_sign", "args": {"message": "hello"}},
+    "params": ["0x68656c6c6f"]
+  },
+  {
+    "id": "sign-ok",
+    "type": "sign_result",
+    "request_id": "dapp-request",
+    "signature": "0x12"
+  },
+  {
+    "id": "sign-fail",
+    "type": "sign_result",
+    "request_id": "dapp-request-2",
+    "error": "user_rejected"
+  },
+  {
+    "id": "accounts",
+    "type": "accounts_result",
+    "accounts": ["0x0000000000000000000000000000000000000001"],
+    "chainId": "0x1"
+  }
+]

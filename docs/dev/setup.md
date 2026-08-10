@@ -56,6 +56,13 @@ During development, **two independent Python environments** coexist. Mixing up w
 
 > **⚠️ You can't tell them apart by version number**: `__version__` in `__about__.py` only bumps at release time, so between releases the local dev-branch code and the published PyPI wheel **claim the same version string** while their contents differ — every merge to `dev` widens that gap until the next bump. `--version` therefore cannot answer "which one is running." The only reliable signal is `__file__` (see §"Verifying the local build").
 
+An in-place Hermes update that keeps `~/.hermes/hermes-agent/venv` normally
+keeps the installed Mordred wheel too, but it does not upgrade Mordred. If the
+Hermes updater rebuilds that venv from scratch, reinstall Mordred afterward.
+Either kind of package update only changes files on disk: restart the Hermes
+gateway, or manually stop and restart a standalone `extension serve` process,
+before judging the running code.
+
 ## Initial setup
 
 ```sh
@@ -161,7 +168,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "mordred-hermes[macos]==0.1.0a12"   # ← substitute the current PyPI version here
+  --reinstall "mordred-hermes[macos]==0.1.0a13"   # ← substitute the current PyPI version here
 ```
 
 ## (Optional) Hermes upstream remote
