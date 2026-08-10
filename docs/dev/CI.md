@@ -92,13 +92,11 @@ See `.github/workflows/upstream-check.yml` for the implementation (DECIDE 0.1: c
 
 - **schedule**: weekly on Monday 03:00 UTC (`cron: "0 3 * * 1"`) + `workflow_dispatch`
 - **permissions**: `contents: read` + `issues: write` (for automatically filing an issue when drift is detected)
-- **Drift detection**: after `git clone --depth 1` of Hermes upstream, run `pip install -e ./hermes-upstream` to reliably pull in transitive deps (PyYAML, etc.) before importing `hermes_cli.plugins.VALID_HOOKS` (relying on a sys.path hack instead would misdetect the runner's missing deps as `__MISSING__`). Compares the retrieved hook list against the results of grepping the Mordred plugin's `register_hook("...")` calls
-- **Empty-set compatibility**: the check still accepts repositories with no
-  `register_hook` calls, preserving the behavior needed by the former Phase 0
-  stubs. The current plugins register hooks, so drift detection is active.
-- **If `VALID_HOOKS` disappears**: a constant rename on the Hermes upstream side is also treated as a drift signal, and an issue is filed as `__VALID_HOOKS_REMOVED__`
-- **Issue filing**: when a diff occurs, an issue is automatically filed with the `actionable` + `upstream-drift` labels. If an `upstream-drift` issue is already open, dedup logic **appends a comment instead of filing a new issue** (preventing issue pile-up from weekly reruns). When payload field drift is detected, the issue body also lists the missing fields per call site
-- **Payload field drift detection (added 2026-06-12, TODO L474)**: in addition to hook **names** (`VALID_HOOKS` membership), `tools/check_hook_payload_drift.py` scans the upstream source with pure `ast` and cross-checks whether every `invoke_hook("<name>", key=value, ...)` dispatch site in core passes the payload fields Mordred consumes (`tools/hook_payload_contract.json`) — no import or install required. `tests/test_hook_payload_drift.py` enforces that the contract keys exactly match the plugin's `register_hook` calls, and that same test's canary runs the identical check against the vendored fork (this repository's own Hermes tree) on every CI run
+- **Two tracking targets**: the workflow installs the current floating `hermes-agent` release from PyPI and also shallow-clones `NousResearch/hermes-agent` `main`. A release can therefore remain green while a not-yet-published upstream change is reported early.
+- **Static hook contract**: `tools/check_hook_payload_drift.py` imports neither target. It requires exactly one module-level `VALID_HOOKS` `Assign` or `AnnAssign` in the canonical `hermes_cli/plugins.py`, verifies every Mordred contract hook remains in that set, then checks every literal `invoke_hook("<name>", key=value, ...)` dispatch site for the fields in `tools/hook_payload_contract.json`. Imports from both `hermes_cli.plugins` and `hermes_cli.lifecycle` are resolved under arbitrary aliases.
+- **If `VALID_HOOKS` disappears or becomes dynamic**: the scanner reports drift because it can no longer audit the hook-name surface statically.
+- **Issue filing is informational**: a mismatch opens an `actionable` + `upstream-drift` issue, or comments on the existing open issue. The report keeps PyPI and `main` results separate. It does not patch Hermes or open an upstream PR; the zero-PR commitment remains in force.
+- **Local canary**: `tests/test_hook_payload_drift.py` enforces that contract keys exactly match Mordred's literal `register_hook` calls and runs the same name/payload checks against the installed `hermes-agent` package in the normal test suite.
 
 ## `labeler.yml` details
 

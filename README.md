@@ -239,7 +239,7 @@ and RP ID. After auth:
 | `encrypt` / `decrypt` | Slack-message crypto with the paired key |
 | `accounts_request` | Wallet address + chain id from the keyvault |
 | `sign_request` → `sign_prompt`, then `sign_approve` → `sign_result` | Deterministic risk analysis and keyvault signing. Every prompt freezes the exact requested signer; transactions additionally freeze chain, nonce, gas, fees, and RPC origin after filling. If the selected wallet changes before approval, signing fails |
-| `history_get` / `history_clear` | Encrypted-at-rest conversation history |
+| `history_get` / `history_clear` | Encrypted-at-rest conversation history. If a read would exceed the bounded WebSocket frame, Hermes returns the newest complete suffix with `truncated: true`; stored history is unchanged |
 
 For `eth_sendTransaction`, the extension cannot introduce an arbitrary RPC
 endpoint or chain: both must match the operator-selected values in
@@ -377,7 +377,7 @@ bump versions in lockstep with `tools/bump_version.py`. Runbook:
 | Slack integration silently off after a Touch ID prompt at login | Attended Secure Enclave device key + a launchd-started background process (gateway, `extension serve`) racing for Touch ID — a background process can never answer the prompt, so it blocks until the helper's 120 s timeout and starts **without** the vault-managed secrets (a sealed Slack bot token silently drops the platform, with only a `Failed to load plugin 'mordred_keyvault': auth_failed` warning in the logs). | `$M keyvault enable-se` may be installed/refreshed at any time, but it never changes an existing key's policy. Already affected vaults need the documented verified-backup/recovery-to-a-fresh-vault workflow, with `MORDRED_SEKEY_UNATTENDED=1` on the recovery key creation. See [`USAGE.md` §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them). |
 | `~/.hermes/mordred/audit.log` is plaintext NDJSON whose entries say `mordred.degraded.audit_encryption_unavailable` | A Mordred process started somewhere the Keychain / Secure Enclave helper is unreachable (a sandboxed shell, a pre-unlock launchd start, a container). The audit-writer factory probes the audit-log wrapping key once per process; on failure it rotates the encrypted log aside and that process writes plaintext for its whole lifetime — fail-open by design, so auditing never stops (each downgrade leaves one `warn` marker in the trail). | A healthy log starts with `{"fmt":"MRAL"` — check with `head -c 20 ~/.hermes/mordred/audit.log`. Recovery is automatic: the next audit write from a healthy context (a normal login shell) rotates the plaintext file aside and starts a fresh encrypted log; long-lived services pick that up on restart. Rotated plaintext siblings remain as dated `audit.log.<date>` files — remove them with `$M audit purge --before YYYY-MM-DD --yes` if they must not persist. |
 | `extension serve` fails to start, citing port 7788 in use | Something else already owns `127.0.0.1:7788` — usually a full Hermes gateway already hosting the extension API (nothing to start), occasionally a stale `extension serve` process from an earlier run. | Check what's listening: `lsof -i :7788`. A full Hermes gateway there means there's nothing to do — the API is already up. A stale `extension serve` should be stopped, or bind a different port instead with `$M extension serve --port 7799` (see the [`extension` command reference](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#extension--browser-extension-pairing-and-server-preview)). |
-| `extension serve` logs show the extension reconnecting roughly every ~30s | Expected: Chrome kills an idle Manifest V3 service-worker after about 30s, so the extension's background context reconnects — this is Chrome's extension lifecycle, not a server bug. The server already sends an app-level keepalive under that window to help keep the connection alive. | Nothing to fix. If chats or signing requests are actually being dropped (not just reconnect log lines), that's a different problem — file an issue. |
+| `extension serve` logs show the extension reconnecting | A clean reconnect can still be Chrome's Manifest V3 service-worker lifecycle. A close code `1002` / `invalid_server_frame` is different: the running Extension and Mordred server disagree on the strict WebSocket protocol (often a stale bundled page or one side updated alone). | For a clean lifecycle reconnect, nothing is required. For `1002`, update/reload the browser Extension and update Mordred together, then restart the Hermes gateway or standalone `extension serve`. If it persists, capture the close reason and file an issue. |
 | Network communication drops out now and then | The active privacy path (Tor / VPN) is down or flagged unhealthy. | See the network-troubleshooting note under [Use it](#use-it) above — run `$M network status` to check `state` / `last_health`, then `$M network use <tor\|vpn\|clearnet>` to re-establish the path. |
 | Lost the vault recovery passphrase | The passphrase is the cold-path key and is never stored anywhere by design. | Still on the same device, with its device key intact? Run `$M encryption change-passphrase` — it tries this device's key first, so you can set a new passphrase without knowing the old one (see [`USAGE.md` — `encryption`](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#encryption--the-recommended-onoff-switch)). If the device key is also gone (new machine, `keyvault reset`, hardware failure), there is no documented recovery path — data sealed only behind that passphrase is permanently lost. |
 
@@ -411,6 +411,26 @@ This resolves to the newest pre-release without extra flags — every release
 is currently a pre-release, so the all-prereleases fallback applies (see
 [Install](#install-users-from-pypi) above; the same goes for plain `pip`, if
 your venv has it — the reference setup's venv ships without one).
+
+### When Hermes itself is updated
+
+A normal in-place Hermes update reuses
+`~/.hermes/hermes-agent/venv`, so the installed `mordred-hermes` package is
+normally preserved. Hermes does not upgrade Mordred on your behalf; run the
+Mordred install command above separately when a new Mordred release is needed.
+
+If a Hermes update recreates the venv, third-party packages are removed with
+the old environment. Reinstall `mordred-hermes` into the new venv and verify
+its source path with:
+
+```sh
+~/.hermes/hermes-agent/venv/bin/python3 -c "import mordred_hermes; print(mordred_hermes.__file__)"
+```
+
+Finally, package installation does not replace code already loaded in a
+running process. Restart the Hermes gateway after either update. If you run
+`hermes-mordred extension serve` manually, stop it with Ctrl+C and start it
+again as well.
 
 ### Migrate config with `hermes-mordred upgrade`
 
