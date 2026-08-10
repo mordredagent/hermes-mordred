@@ -2,7 +2,7 @@
 # is a Mordred-internal hint used by the shared integrity gate to detect a
 # disabled sibling (SPEC §Plugin-disable protection Tier A).
 name: mordred_keyvault
-version: 0.1.0a12
+version: 0.1.0a13
 description: Hardware-backed secret storage and runtime environment injection
 author: InternetMaximalism
 privacy_lock: true
