@@ -1,16 +1,8 @@
 name: Upstream drift check
 
-# Detects Hermes (hermes-agent) upstream drift that would silently break
-# Mordred's plugin hooks: (1) hook *names* Mordred registers disappearing
-# from hermes_cli.plugins.VALID_HOOKS, and (2) hook *payload fields*
-# Mordred consumes disappearing from a dispatch site (tools/hook_payload_contract.json).
-#
-# Standalone-repo adaptation (docs/dev/CI.md): the pre-split design
-# `git clone`d the Hermes upstream source tree. hermes-agent now ships on
-# PyPI, so this just `pip install`s it and points the payload-drift
-# scanner at the installed package's site-packages directory (which has
-# the same agent/, gateway/, hermes_cli/, tools/ layout as a source
-# checkout — the AST scanner only needs .py files, not an execution).
+# Detects hook-name and payload drift in both the current hermes-agent PyPI
+# package and the latest upstream main checkout. The AST scanner imports
+# neither target, so main can be checked before it is packaged or installable.
 
 on:
   schedule:
@@ -31,54 +23,31 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install hermes-agent (PyPI) + mordred-hermes
+      - name: Install current hermes-agent from PyPI
         run: |
           python -m pip install --upgrade pip
           pip install hermes-agent
-          pip install -e .
 
-      - name: Check hook name drift
-        id: names
-        run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import subprocess
-          import sys
+      - name: Clone latest Hermes main
+        run: git clone --depth 1 --branch main https://github.com/NousResearch/hermes-agent.git hermes-upstream
 
-          try:
-              from hermes_cli.plugins import VALID_HOOKS
-          except ImportError:
-              print("status=removed")
-              sys.exit(0)
-
-          registered = set(
-              subprocess.run(
-                  ["git", "grep", "-hoE", r'register_hook\(\s*"[a-z_]+"', "--", "src/mordred_hermes"],
-                  capture_output=True,
-                  text=True,
-                  check=True,
-              ).stdout.splitlines()
-          )
-          registered = {line.split('"')[1] for line in registered}
-          missing = sorted(registered - set(VALID_HOOKS))
-          if missing:
-              print(f"status=drift")
-              print(f"missing={','.join(missing)}")
-          else:
-              print("status=ok")
-          PY
-
-      - name: Check hook payload field drift
-        id: payload
+      - name: Check hook contract against PyPI and main
+        id: drift
         run: |
           SITE_PACKAGES="$(python -c 'import hermes_cli, os; print(os.path.dirname(os.path.dirname(hermes_cli.__file__)))')"
-          if python tools/check_hook_payload_drift.py --hermes-root "$SITE_PACKAGES" --contract tools/hook_payload_contract.json > payload_drift.txt; then
-            echo "status=ok" >> "$GITHUB_OUTPUT"
+          if python tools/check_hook_payload_drift.py --hermes-root "$SITE_PACKAGES" --contract tools/hook_payload_contract.json > pypi_drift.txt; then
+            echo "pypi_status=ok" >> "$GITHUB_OUTPUT"
           else
-            echo "status=drift" >> "$GITHUB_OUTPUT"
+            echo "pypi_status=drift" >> "$GITHUB_OUTPUT"
+          fi
+          if python tools/check_hook_payload_drift.py --hermes-root hermes-upstream --contract tools/hook_payload_contract.json > main_drift.txt; then
+            echo "main_status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "main_status=drift" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Find existing upstream-drift issue
-        if: steps.names.outputs.status != 'ok' || steps.payload.outputs.status != 'ok'
+        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
         id: existing
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
@@ -92,34 +61,34 @@ jobs:
             core.setOutput("number", data.length > 0 ? data[0].number : "");
 
       - name: Build drift report
-        if: steps.names.outputs.status != 'ok' || steps.payload.outputs.status != 'ok'
+        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
         id: report
         env:
-          NAMES_STATUS: ${{ steps.names.outputs.status }}
-          NAMES_MISSING: ${{ steps.names.outputs.missing }}
-          PAYLOAD_STATUS: ${{ steps.payload.outputs.status }}
+          PYPI_STATUS: ${{ steps.drift.outputs.pypi_status }}
+          MAIN_STATUS: ${{ steps.drift.outputs.main_status }}
         run: |
           {
             echo "body<<REPORT_EOF"
-            echo "Weekly upstream drift check found a mismatch against the installed \`hermes-agent\` package."
+            echo "Weekly upstream drift check found a Hermes hook-contract mismatch. This report is informational; Mordred does not send upstream PRs."
             echo
-            if [ "$NAMES_STATUS" = "removed" ]; then
-              echo "- \`hermes_cli.plugins.VALID_HOOKS\` no longer exists (upstream renamed/removed the constant)."
-            elif [ "$NAMES_STATUS" = "drift" ]; then
-              printf -- '- Hook names Mordred registers but upstream no longer defines: `%s`\n' "$NAMES_MISSING"
-            fi
-            if [ "$PAYLOAD_STATUS" = "drift" ]; then
-              echo
-              echo "Hook payload field drift (see \`tools/check_hook_payload_drift.py\` output):"
+            if [ "$PYPI_STATUS" = "drift" ]; then
+              echo "Current PyPI \`hermes-agent\`:"
               echo '```'
-              cat payload_drift.txt
+              cat pypi_drift.txt
+              echo '```'
+            fi
+            if [ "$MAIN_STATUS" = "drift" ]; then
+              echo
+              echo "Latest \`NousResearch/hermes-agent\` main:"
+              echo '```'
+              cat main_drift.txt
               echo '```'
             fi
             echo "REPORT_EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: File or update drift issue
-        if: steps.names.outputs.status != 'ok' || steps.payload.outputs.status != 'ok'
+        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           DRIFT_BODY: ${{ steps.report.outputs.body }}

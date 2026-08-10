@@ -16,8 +16,7 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 
 Server-initiated frames: ``ping`` (app-level keepalive, see
 ``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
-Clients ignore unknown frame types (extension ``protocol.ts`` isServerMsg), so
-both are backward-compatible.
+Both are part of the extension's strict frame decoder contract.
 """
 
 from __future__ import annotations
@@ -67,18 +66,6 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # the `authed` table is refused for page sessions unless it is added here too.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
 
-# Reply frame type used when a page session is refused a non-allowed handler, so
-# a client awaiting a reply keyed by `id` never hangs. Falls back to "error".
-_PAGE_REFUSAL_TYPE = {
-    "webauthn_register": "webauthn_registered",
-    "slack_setup": "slack_setup_result",
-    "channel_key_set": "channel_key_result",
-    "encrypt": "encrypt_fail",
-    "decrypt": "decrypt_fail",
-    "sign_request": "sign_result",
-    "sign_approve": "sign_result",
-}
-
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
 # socket dies), so an authed client that never approves would grow it without
 # bound. Cap it and evict the oldest (dicts keep insertion order) — a stale
@@ -90,6 +77,10 @@ _log = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 7788
 
+# Must match Mordred-Extension's protocol.ts. Outbound history is projected to
+# the newest complete suffix that fits this raw text-frame ceiling.
+MAX_WS_FRAME_CHARS = 4 * 1024 * 1024
+
 # App-level keepalive period. Chrome kills an idle MV3 service worker after
 # ~30s; receiving a WS message (any type) fires onmessage and resets that
 # timer, while aiohttp's protocol-level ping/pong never reaches JS. Must stay
@@ -98,6 +89,58 @@ DEFAULT_KEEPALIVE_INTERVAL = 20.0
 
 # A chat handler streams response chunks for a user message.
 ChatHandler = Callable[[str, dict[str, Any]], AsyncIterator[str]]
+
+
+def _serialize_frame(payload: dict[str, Any]) -> str:
+    """Serialize every outbound frame deterministically as ASCII.
+
+    ASCII escaping makes Python's character count identical to both its wire
+    byte count and the JavaScript client's raw-string count.
+    """
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _bounded_history_result(
+    request_id: Any,
+    turns: list[dict[str, str]],
+    *,
+    max_chars: int = MAX_WS_FRAME_CHARS,
+) -> dict[str, Any]:
+    """Return all projected turns or the longest complete newest suffix.
+
+    The encrypted history itself is never modified. Per-turn serialization is
+    reused to compute the exact compact JSON frame size without repeatedly
+    serializing progressively smaller copies of a potentially large history.
+    """
+    full = {
+        "id": request_id,
+        "type": "history_result",
+        "turns": turns,
+        "truncated": False,
+    }
+    encoded_turns = [_serialize_frame(turn) for turn in turns]
+    empty_full = {**full, "turns": []}
+    full_chars = len(_serialize_frame(empty_full))
+    if encoded_turns:
+        full_chars += sum(map(len, encoded_turns)) + len(encoded_turns) - 1
+    if full_chars <= max_chars:
+        return full
+
+    truncated = {**full, "turns": [], "truncated": True}
+    used = len(_serialize_frame(truncated))
+    keep = 0
+    # `truncated: true` must mean at least one turn was actually omitted. The
+    # marker is one character shorter than `false`, so an exact boundary could
+    # otherwise retain every turn merely by changing the marker's value.
+    for encoded in reversed(encoded_turns[1:]):
+        added = len(encoded) + (1 if keep else 0)
+        if used + added > max_chars:
+            break
+        used += added
+        keep += 1
+    if keep:
+        truncated["turns"] = turns[-keep:]
+    return truncated
 
 
 async def _default_chat_handler(content: str, _context: dict[str, Any]) -> AsyncIterator[str]:
@@ -224,7 +267,11 @@ class ExtensionAPIServer:
                 status=503,
                 text="Mordred web app not built. Run `npm run build:page` in the extension repo.",
             )
-        html = index.read_text("utf-8")
+        # The shared bundle retains the legacy placeholder so older Hermes
+        # releases can inject their page token. This server launches with a
+        # private URL fragment instead, so remove the placeholder without ever
+        # placing the process token in an HTTP response.
+        html = index.read_text("utf-8").replace("%%MORDRED_PAGE_TOKEN%%", "")
         return web.Response(
             text=html,
             content_type="text/html",
@@ -301,7 +348,7 @@ class _Connection:
         if self.ws.closed:
             return False
         try:
-            await self.ws.send_str(json.dumps(payload))
+            await self.ws.send_str(_serialize_frame(payload))
             return True
         except Exception as e:
             _log.debug("extension WS send dropped (client gone): %s", e)
@@ -313,7 +360,8 @@ class _Connection:
         Keeps the browser extension's MV3 service worker alive: Chrome only
         extends the worker's ~30s idle deadline on WS *message* events, which
         protocol-level ping/pong (``heartbeat=30``) never produces. Clients
-        ignore the unknown frame type. Ends itself once the socket closes."""
+        accept and ignore this protocol frame. Ends itself once the socket
+        closes."""
         if interval <= 0:
             return
         while True:
@@ -378,9 +426,8 @@ class _Connection:
                 await self._send(
                     {
                         "id": msg.get("id"),
-                        "type": _PAGE_REFUSAL_TYPE.get(mtype, "error"),
-                        "ok": False,
-                        "error": "page_session_forbidden",
+                        "type": "error",
+                        "reason": "page_session_forbidden",
                     }
                 )
             elif mtype in authed:
@@ -738,7 +785,13 @@ class _Connection:
         from . import history as extension_history
 
         turns = await asyncio.get_event_loop().run_in_executor(None, extension_history.projected_turns)
-        await self._send({"id": msg.get("id"), "type": "history_result", "turns": turns})
+        await self._send(
+            _bounded_history_result(
+                msg.get("id"),
+                turns,
+                max_chars=MAX_WS_FRAME_CHARS,
+            )
+        )
 
     async def _on_history_clear(self, msg: dict[str, Any]) -> None:
         from . import history as extension_history

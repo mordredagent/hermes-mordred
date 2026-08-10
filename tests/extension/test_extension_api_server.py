@@ -228,13 +228,13 @@ def test_page_response_is_never_cached():
     assert "%%MORDRED_PAGE_TOKEN%%" not in html
     assert "window.location.hash" in html
     bootstrap = html.split("</script>", 1)[0]
-    assert bootstrap.index("sessionStorage.setItem(pageTokenStorageKey, launchToken)") < bootstrap.index(
+    assert bootstrap.index("sessionStorage.setItem(pageTokenStorageKey, pageToken)") < bootstrap.index(
         "history.replaceState"
     )
     assert "sessionStorage.getItem(pageTokenStorageKey)" in bootstrap
     assert "sessionStorage.removeItem(pageTokenStorageKey)" in bootstrap
-    assert "nativeSetTimeout(window.__MORDRED_HANDLE_AUTH_FAILURE__" in bootstrap
-    assert "private URL を開き直してください" in bootstrap
+    assert "window.__MORDRED_HANDLE_AUTH_FAILURE__" in bootstrap
+    assert "Mordred authentication expired" in bootstrap
 
 
 def test_page_launch_url_keeps_token_out_of_http_url():
@@ -616,12 +616,11 @@ def test_page_session_cannot_touch_credentials(tmp_path):
     out = asyncio.run(_flow(_free_port()))
     assert out["webauthn"] == {
         "id": "w1",
-        "type": "webauthn_registered",
-        "ok": False,
-        "error": "page_session_forbidden",
+        "type": "error",
+        "reason": "page_session_forbidden",
     }
-    assert out["slack"]["error"] == "page_session_forbidden"
-    assert out["channel"]["error"] == "page_session_forbidden"
+    assert out["slack"] == {"id": "s1", "type": "error", "reason": "page_session_forbidden"}
+    assert out["channel"] == {"id": "k1", "type": "error", "reason": "page_session_forbidden"}
     assert pairing.has_webauthn_credential() is True  # second factor survived
     assert not (tmp_path / ".env").exists()  # no Slack tokens written
     assert pairing.load_channel_keys() == {}
@@ -693,10 +692,10 @@ def test_page_session_allowlist_blocks_crypto_and_wallet_but_allows_chat_and_acc
             await server.stop()
 
     out = asyncio.run(_flow(_free_port()))
-    assert out["encrypt"] == {"id": "e1", "type": "encrypt_fail", "ok": False, "error": "page_session_forbidden"}
-    assert out["decrypt"] == {"id": "d1", "type": "decrypt_fail", "ok": False, "error": "page_session_forbidden"}
-    assert out["sign_request"] == {"id": "sr1", "type": "sign_result", "ok": False, "error": "page_session_forbidden"}
-    assert out["sign_approve"] == {"id": "sa1", "type": "sign_result", "ok": False, "error": "page_session_forbidden"}
+    assert out["encrypt"] == {"id": "e1", "type": "error", "reason": "page_session_forbidden"}
+    assert out["decrypt"] == {"id": "d1", "type": "error", "reason": "page_session_forbidden"}
+    assert out["sign_request"] == {"id": "sr1", "type": "error", "reason": "page_session_forbidden"}
+    assert out["sign_approve"] == {"id": "sa1", "type": "error", "reason": "page_session_forbidden"}
     # Never reached the wallet signer -- no pending sign entry was even created.
     assert out["chat"] == "こんにちは、受け取りました: hi"
     assert out["accounts"]["type"] == "accounts_result"
@@ -865,15 +864,12 @@ def test_slack_setup_requires_explicit_overwrite_for_existing_tokens(tmp_path):
     assert "SLACK_APP_TOKEN=xapp-new" in updated
 
 
-def test_encrypt_without_pairing_replies_encrypt_fail():
+def test_page_encrypt_without_pairing_is_forbidden_with_generic_error():
     """A page session hitting ``encrypt`` is now refused BEFORE ``_on_encrypt``
     even runs: the page allowlist (``_PAGE_ALLOWED``) added later blocks
-    ``encrypt`` for page sessions outright, so the reply is the allowlist's
-    ``page_session_forbidden`` on type ``encrypt_fail`` -- not the handler's own
-    ``not_paired`` reason. See ``test_on_encrypt_not_paired_replies_encrypt_fail``
-    below for direct coverage of the ``_on_encrypt`` reply-type-rename fix
-    (``encrypt_fail`` used to be a copy-pasted ``decrypt_fail``), exercised at
-    the unit level since a page session can no longer reach that branch."""
+    ``encrypt`` for page sessions outright, so the reply is a correlated generic
+    ``error`` rather than a malformed operation-specific result. Direct unit
+    coverage below still verifies the handler's own ``encrypt_fail`` response."""
 
     async def _flow(port):
         server = extension_api.ExtensionAPIServer(port=port)
@@ -891,9 +887,8 @@ def test_encrypt_without_pairing_replies_encrypt_fail():
 
     assert asyncio.run(_flow(_free_port())) == {
         "id": "e1",
-        "type": "encrypt_fail",
-        "ok": False,
-        "error": "page_session_forbidden",
+        "type": "error",
+        "reason": "page_session_forbidden",
     }
 
 

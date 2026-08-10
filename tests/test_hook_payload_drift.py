@@ -1,10 +1,7 @@
 """Tests for ``tools/check_hook_payload_drift.py`` (TODO §Cross-cutting L474).
 
-``upstream-check.yml``'s name check only asserts hook *names* survive in
-``hermes_cli.plugins.VALID_HOOKS``. The drift tool goes one level deeper:
-it statically extracts every core ``invoke_hook("<name>", key=value, ...)``
-dispatch site and verifies the payload fields Mordred's plugins consume
-(``tools/hook_payload_contract.json``) are passed at every site.
+The drift tool statically verifies both ``VALID_HOOKS`` membership and every
+core ``invoke_hook("<name>", key=value, ...)`` payload consumed by Mordred.
 """
 
 from __future__ import annotations
@@ -82,6 +79,33 @@ class TestExtract:
         )
         sites = drift.extract_hook_payload_fields(tmp_path)
         assert len(sites["on_session_end"]) == 2
+
+    def test_resolves_plugins_and_lifecycle_import_aliases(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "aliases.py",
+            """\
+            from hermes_cli.lifecycle import invoke_hook as invoke_lifecycle_hook
+            from hermes_cli.plugins import invoke_hook as dispatch_plugin_hook
+
+            invoke_lifecycle_hook("on_session_start", session_id="s")
+            dispatch_plugin_hook("on_session_end", session_id="s")
+            """,
+        )
+        sites = drift.extract_hook_payload_fields(tmp_path)
+        assert set(sites) == {"on_session_start", "on_session_end"}
+
+    def test_does_not_accept_an_alias_imported_from_an_unrelated_module(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "unrelated.py",
+            """\
+            from unrelated import invoke_hook as invoke_lifecycle_hook
+
+            invoke_lifecycle_hook("on_session_start", session_id="s")
+            """,
+        )
+        assert drift.extract_hook_payload_fields(tmp_path) == {}
 
     def test_dynamic_kwargs_are_flagged(self, tmp_path: Path) -> None:
         _write(
@@ -186,6 +210,80 @@ class TestCompare:
         assert len(report) == 1
 
 
+class TestValidHooks:
+    @pytest.mark.parametrize("annotated", [False, True])
+    def test_extracts_assign_and_annassign(self, tmp_path: Path, annotated: bool) -> None:
+        declaration = (
+            'VALID_HOOKS: set[str] = {"pre_tool_call", "on_session_start"}'
+            if annotated
+            else 'VALID_HOOKS = {"pre_tool_call", "on_session_start"}'
+        )
+        _write(tmp_path, "hermes_cli/plugins.py", declaration)
+
+        assert drift.extract_valid_hooks(tmp_path) == {"pre_tool_call", "on_session_start"}
+
+    def test_extracts_a_frozenset_literal(self, tmp_path: Path) -> None:
+        _write(tmp_path, "hermes_cli/plugins.py", 'VALID_HOOKS = frozenset(("pre_tool_call",))')
+        assert drift.extract_valid_hooks(tmp_path) == {"pre_tool_call"}
+
+    def test_dynamic_declaration_is_not_claimed_as_static(self, tmp_path: Path) -> None:
+        _write(tmp_path, "hermes_cli/plugins.py", "VALID_HOOKS = load_hooks()")
+        assert drift.extract_valid_hooks(tmp_path) is None
+
+    def test_ignores_stale_literals_outside_the_canonical_module(self, tmp_path: Path) -> None:
+        _write(tmp_path, "hermes_cli/plugins.py", "VALID_HOOKS = load_hooks()")
+        _write(tmp_path, "dependency.py", 'VALID_HOOKS = {"pre_tool_call"}')
+        _write(
+            tmp_path,
+            "hermes_cli/legacy.py",
+            """\
+            def stale():
+                VALID_HOOKS = {"pre_tool_call"}
+            """,
+        )
+
+        assert drift.extract_valid_hooks(tmp_path) is None
+
+    def test_multiple_or_augmented_canonical_assignments_are_drift(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "hermes_cli/plugins.py",
+            """\
+            VALID_HOOKS = {"pre_tool_call"}
+            VALID_HOOKS = {"pre_tool_call", "on_session_start"}
+            """,
+        )
+        assert drift.extract_valid_hooks(tmp_path) is None
+
+        _write(
+            tmp_path,
+            "hermes_cli/plugins.py",
+            """\
+            VALID_HOOKS = {"pre_tool_call"}
+            VALID_HOOKS |= {"on_session_start"}
+            """,
+        )
+        assert drift.extract_valid_hooks(tmp_path) is None
+
+    def test_nested_dead_code_is_not_a_module_declaration(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "hermes_cli/plugins.py",
+            """\
+            if False:
+                VALID_HOOKS = {"pre_tool_call"}
+            """,
+        )
+        assert drift.extract_valid_hooks(tmp_path) is None
+
+    def test_contract_hooks_must_be_a_subset(self) -> None:
+        report = drift.compare_valid_hooks(
+            {"pre_tool_call": ["tool_name"], "on_session_start": ["session_id"]},
+            {"pre_tool_call"},
+        )
+        assert report == ["VALID_HOOKS missing contract hook(s): on_session_start"]
+
+
 class TestContractFile:
     def _registered_hooks(self) -> set[str]:
         """Hook names Mordred plugins actually register (literal call sites)."""
@@ -243,5 +341,8 @@ class TestInstalledHermesCanary:
         hermes_cli = pytest.importorskip("hermes_cli")
         hermes_root = Path(hermes_cli.__file__).resolve().parent.parent
         sites = drift.extract_hook_payload_fields(hermes_root)
+        valid_hooks = drift.extract_valid_hooks(hermes_root)
         assert sites, "no invoke_hook dispatch sites found in the installed hermes-agent package"
+        assert valid_hooks is not None, "no static VALID_HOOKS declaration found in installed hermes-agent"
+        assert drift.compare_valid_hooks(contract, valid_hooks) == []
         assert drift.compare(contract, sites) == []
