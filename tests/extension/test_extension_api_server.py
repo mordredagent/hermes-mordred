@@ -1573,3 +1573,29 @@ def test_ws_chat_client_disconnect_closes_generator():
             await server.stop()
 
     assert asyncio.run(_flow(_free_port())) is True
+
+
+def test_authed_dispatch_does_not_reparse_state_per_frame(monkeypatch):
+    """Every authed frame re-checks the pairing generation via
+    ``_authentication_is_current`` (extension_api.py), and encrypt/decrypt also
+    re-derive the AES key from the pairing; across many frames on one
+    connection this must not re-parse the (possibly multi-MB) state.json each
+    time (review 2026-08-02, PR #88 follow-up)."""
+    conn = _authed_conn()
+
+    counter = [0]
+    real_read_json = pairing._read_json
+
+    def counting_read_json(path):
+        if path == pairing._state_path():
+            counter[0] += 1
+        return real_read_json(path)
+
+    monkeypatch.setattr(pairing, "_read_json", counting_read_json)
+
+    for i in range(10):
+        asyncio.run(conn.dispatch(json.dumps({"id": f"e{i}", "type": "encrypt", "plaintext": f"msg-{i}"})))
+
+    assert len(conn.ws.sent) == 10
+    assert all(frame["type"] == "encrypt_result" for frame in conn.ws.sent)
+    assert counter[0] == 0

@@ -4,6 +4,7 @@ valid token."""
 
 from __future__ import annotations
 
+import json
 import stat
 import threading
 
@@ -455,3 +456,169 @@ def test_consume_code_single_use_under_concurrency():
 
     assert results.count("ok") == 1
     assert set(results) <= {"ok", "already_used"}
+
+
+def _count_state_json_parses(monkeypatch) -> list[int]:
+    """Patch ``pairing._read_json`` to count parses of state.json specifically
+    (pending.json/webauthn.json reads are unaffected and uncounted)."""
+    counter = [0]
+    real_read_json = pairing._read_json
+
+    def counting_read_json(path):
+        if path == pairing._state_path():
+            counter[0] += 1
+        return real_read_json(path)
+
+    monkeypatch.setattr(pairing, "_read_json", counting_read_json)
+    return counter
+
+
+def test_load_pairing_parses_state_once_per_generation(monkeypatch):
+    """state.json carries the E2E replay cache and can reach several MB at
+    capacity; repeated load_pairing() calls between writes must not re-parse
+    it every time (PR #88 follow-up)."""
+    code, _ = pairing.generate_code()
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+
+    counter = _count_state_json_parses(monkeypatch)
+
+    first = pairing.load_pairing()
+    for _ in range(4):
+        assert pairing.load_pairing() == first
+
+    assert counter[0] == 1
+
+
+def test_load_channel_keys_parses_state_once_per_generation(monkeypatch):
+    pairing.save_channel_key("C1", b"\x09" * 32)
+
+    counter = _count_state_json_parses(monkeypatch)
+
+    for _ in range(4):
+        assert pairing.load_channel_keys()["C1"] == b"\x09" * 32
+
+    assert counter[0] == 1
+
+
+def test_pairing_state_cache_invalidates_on_each_owned_write_path():
+    """Every write path this module owns (re-pair, channel-key push, replay
+    claim, clear) must be visible on the very next read — never a stale
+    generation, and this must not depend on the filesystem's mtime
+    resolution advancing between two writes in the same test tick."""
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+
+    code1, _ = pairing.generate_code()
+    pairing.handle_pair_init(code1, ext_pub, xc.b64u_encode(b"\x01" * 32))
+    first_pairing = pairing.load_pairing()
+    assert first_pairing is not None
+
+    code2, _ = pairing.generate_code()
+    pairing.handle_pair_init(code2, ext_pub, xc.b64u_encode(b"\x02" * 32))
+    second_pairing = pairing.load_pairing()
+    assert second_pairing is not None
+    assert second_pairing.ext_token != first_pairing.ext_token
+
+    pairing.save_channel_key("C-live", b"\x03" * 32)
+    assert pairing.load_channel_keys()["C-live"] == b"\x03" * 32
+
+    identity_a = "a" * 64
+    assert pairing.claim_e2e_replay_identities((identity_a,)) is True
+    # A second claim of the same identity must see the just-committed entry,
+    # not a cached pre-claim snapshot.
+    assert pairing.claim_e2e_replay_identities((identity_a,)) is False
+
+    pairing.clear_pairing()
+    assert pairing.load_pairing() is None
+    assert pairing.load_channel_keys() == {}
+
+
+def test_state_cache_reloads_after_a_write_outside_this_modules_helpers():
+    """The cache must not serve content older than what is currently on disk
+    even when this module's own write paths never ran — e.g. state.json
+    restored from a backup by another process. This exercises the per-access
+    (mtime, size) guard directly, bypassing every explicit invalidation call
+    this module makes on its own write paths."""
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="first",
+            ext_pubkey_b64="e",
+            hermes_pubkey_b64="h",
+            paired_at=1.0,
+        )
+    )
+    loaded = pairing.load_pairing()
+    assert loaded is not None
+    assert loaded.ext_token == "first"
+
+    # Bypass every helper that calls _invalidate_state_cache() and write
+    # directly, as an external process replacing the file out from under this
+    # one would. A longer token value also changes the file's size, so the
+    # cache key differs regardless of the filesystem's mtime resolution.
+    raw = pairing._read_json(pairing._state_path())
+    raw["ext_token"] = "rewritten-externally-with-a-longer-token-value"
+    pairing._write_private(pairing._state_path(), json.dumps(raw).encode("utf-8"))
+
+    reloaded = pairing.load_pairing()
+    assert reloaded is not None
+    assert reloaded.ext_token == "rewritten-externally-with-a-longer-token-value"
+
+
+def test_state_cache_does_not_republish_a_snapshot_a_write_invalidated(monkeypatch):
+    """A reader descheduled past a concurrent write must not install its
+    pre-write snapshot after that write's invalidation.
+
+    Readers deliberately skip ``_state_lock()`` — that is the point of the fast
+    path — so ``stat -> parse -> store`` is not atomic against a writer. The
+    (mtime, size) key normally catches the resulting stale store on the *next*
+    read, but that is exactly the filesystem-resolution dependency the explicit
+    ``_invalidate_state_cache()`` calls exist to remove. Pinning the stat key
+    here reproduces the pathological case (a write that leaves mtime_ns and
+    size unchanged) so the generation guard, not the clock, is what is tested.
+    """
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="before-the-racing-write",
+            ext_pubkey_b64="e",
+            hermes_pubkey_b64="h",
+            paired_at=1.0,
+        )
+    )
+    pinned_key = (pairing._state_path(), 1, 1)
+    monkeypatch.setattr(pairing, "_state_stat_key", lambda: pinned_key)
+    pairing._invalidate_state_cache()
+
+    real_read_json = pairing._read_json
+    raced = [False]
+
+    def read_json_then_let_a_write_land(path):
+        data = real_read_json(path)
+        if path == pairing._state_path() and not raced[0]:
+            # The writer commits between our parse and our cache store. It runs
+            # under _state_lock(), which this reader never took.
+            raced[0] = True
+            monkeypatch.setattr(pairing, "_read_json", real_read_json)
+            pairing._save_pairing(
+                pairing.Pairing(
+                    aes_key=b"\x02" * 32,
+                    ext_token="after-the-racing-write",
+                    ext_pubkey_b64="e",
+                    hermes_pubkey_b64="h",
+                    paired_at=2.0,
+                )
+            )
+        return data
+
+    monkeypatch.setattr(pairing, "_read_json", read_json_then_let_a_write_land)
+    stale = pairing.load_pairing()
+    assert stale is not None
+    assert raced[0] is True
+    # The racing reader may legitimately return its own pre-write snapshot.
+    # What it must not do is leave that snapshot in the cache for everyone else.
+    assert stale.ext_token == "before-the-racing-write"
+
+    fresh = pairing.load_pairing()
+    assert fresh is not None
+    assert fresh.ext_token == "after-the-racing-write"

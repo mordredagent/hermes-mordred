@@ -358,7 +358,7 @@ def revoke_code(code: str) -> bool:
         entry = pending.get(code)
         if not isinstance(entry, dict) or entry.get("result") is not None:
             return False
-        state = _read_json(_state_path())
+        state = _read_state_cached()
         if state.get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code):
             return False
         entry["used"] = True
@@ -435,7 +435,7 @@ def pair_outcome(code: str) -> tuple[str, str | None]:
     code = normalize_code(code)
     with _state_lock():
         entry = _read_json(_ext_dir() / "pending.json").get(code)
-        committed = _read_json(_state_path()).get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code)
+        committed = _read_state_cached().get(_PAIRING_CODE_DIGEST_FIELD) == _pairing_code_digest(code)
     if committed:
         return ("paired", None)
     if not entry or not entry.get("used"):
@@ -532,8 +532,89 @@ def _pairing_code_digest(code: str) -> str:
     return hashlib.sha256(code.encode("ascii")).hexdigest()
 
 
-def load_pairing() -> Pairing | None:
+# --------------------------------------------------------------------------- #
+# state.json parse cache
+# --------------------------------------------------------------------------- #
+#
+# state.json carries the E2E replay cache (up to _E2E_REPLAY_MAX_IDENTITIES
+# entries, several MB at capacity) alongside the pairing key and channel keys.
+# Every authenticated WS frame reads it at least once — _authentication_is_current
+# fingerprints the active pairing on every authed dispatch (extension_api.py) —
+# so a bare _read_json(_state_path()) per frame put a multi-millisecond
+# json.loads on the gateway's single-threaded event loop for every message
+# (review 2026-08-02, PR #88 follow-up).
+#
+# The cache is keyed on (path, mtime_ns, size) rather than a manual dirty flag:
+# the path is included because HERMES_HOME — hence state.json's location — can
+# change within a process (the test suite's per-test isolated homes); mtime/size
+# because that is cheap to check on every access (a stat, not a parse) and also
+# catches a state.json rewritten by another process or restored from backup,
+# not just this module's own writes. Every write path this module owns
+# additionally calls _invalidate_state_cache() explicitly right after the write
+# commits, so a fresh read is never gated on the filesystem's mtime resolution
+# actually advancing between two writes issued back-to-back.
+#
+# That explicit invalidation only holds against a concurrent reader because of
+# the generation counter below. Readers deliberately do NOT take _state_lock()
+# (skipping it is the point of the fast path), so a reader can stat and parse a
+# pre-write state.json, get descheduled, and only reach its cache store after a
+# writer has already invalidated — re-publishing the snapshot the invalidation
+# was meant to retire. Storing only when the generation is unchanged since the
+# read began makes a raced read fall back to leaving the cache cold, so the
+# next reader re-parses instead of trusting mtime to have advanced.
+#
+# Only READ-ONLY consumers of the parsed dict may use _read_state_cached(): it
+# can hand back the very same dict object to multiple callers, so a read-modify
+# -write cycle (_write_pairing_locked / save_channel_key /
+# claim_e2e_replay_identities) must keep reading via the uncached _read_json /
+# _read_json_strict — mutating the cached dict in place would let a concurrent
+# reader observe an uncommitted write before it reaches disk.
+_STATE_CACHE_LOCK = threading.Lock()
+_state_cache: tuple[Path, int, int, dict[str, Any]] | None = None
+_state_cache_generation = 0
+
+
+def _state_stat_key() -> tuple[Path, int, int] | None:
+    """(path, mtime_ns, size) identifying the on-disk state.json, or ``None``
+    if it does not currently exist."""
+    path = _state_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (path, st.st_mtime_ns, st.st_size)
+
+
+def _invalidate_state_cache() -> None:
+    global _state_cache, _state_cache_generation
+    with _STATE_CACHE_LOCK:
+        _state_cache = None
+        _state_cache_generation += 1
+
+
+def _read_state_cached() -> dict[str, Any]:
+    """Read-only, cached equivalent of ``_read_json(_state_path())``."""
+    global _state_cache
+    key = _state_stat_key()
+    with _STATE_CACHE_LOCK:
+        cached = _state_cache
+        generation = _state_cache_generation
+    if key is not None and cached is not None and (cached[0], cached[1], cached[2]) == key:
+        return cached[3]
     data = _read_json(_state_path())
+    with _STATE_CACHE_LOCK:
+        if _state_cache_generation != generation:
+            # A write committed while we were parsing: `data` may predate it,
+            # and `key` certainly does. Leave the cache cold rather than
+            # publish a snapshot the writer already invalidated.
+            _state_cache = None
+        else:
+            _state_cache = (key[0], key[1], key[2], data) if key is not None else None
+    return data
+
+
+def load_pairing() -> Pairing | None:
+    data = _read_state_cached()
     if not data or "aes_key" not in data:
         return None
     return Pairing(
@@ -566,6 +647,7 @@ def _write_pairing_locked(p: Pairing, *, paired_code_digest: str | None) -> None
     else:
         data[_PAIRING_CODE_DIGEST_FIELD] = paired_code_digest
     _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+    _invalidate_state_cache()
     # Normal lifecycle cleanup. The state marker above remains the
     # authoritative revocation if unlink fails (permissions/race).
     # Resolved through the webauthn module (the canonical seam), not this
@@ -617,7 +699,7 @@ def _commit_pairing(code: str, p: Pairing) -> None:
 
 def load_channel_keys() -> dict[str, bytes]:
     """channelId → raw K_chan for every stored Slack channel key."""
-    data = _read_json(_state_path()) or {}
+    data = _read_state_cached() or {}
     out: dict[str, bytes] = {}
     for cid, kb in (data.get("channel_keys") or {}).items():
         try:
@@ -644,6 +726,7 @@ def save_channel_key(channel_id: str, raw_key: bytes) -> None:
         ck[channel_id] = b64u_encode(raw_key)
         data["channel_keys"] = ck
         _write_private(_state_path(), json.dumps(data).encode("utf-8"))
+        _invalidate_state_cache()
 
 
 def _is_replay_identity(value: Any) -> TypeGuard[str]:
@@ -770,6 +853,7 @@ def claim_e2e_replay_identities(
         kept.extend({"id": identity, "accepted_at": accepted_at} for identity in identities)
         data[_E2E_REPLAY_FIELD] = kept
         _write_private(_state_path(), json.dumps(data, separators=(",", ":")).encode("utf-8"))
+        _invalidate_state_cache()
         return True
 
 
@@ -784,6 +868,7 @@ def clear_pairing() -> None:
         for name in ("state.json", "webauthn.json"):
             with _suppress_oserror():
                 (_ext_dir() / name).unlink()
+        _invalidate_state_cache()
 
 
 class _suppress_oserror:
