@@ -563,3 +563,62 @@ def test_state_cache_reloads_after_a_write_outside_this_modules_helpers():
     reloaded = pairing.load_pairing()
     assert reloaded is not None
     assert reloaded.ext_token == "rewritten-externally-with-a-longer-token-value"
+
+
+def test_state_cache_does_not_republish_a_snapshot_a_write_invalidated(monkeypatch):
+    """A reader descheduled past a concurrent write must not install its
+    pre-write snapshot after that write's invalidation.
+
+    Readers deliberately skip ``_state_lock()`` — that is the point of the fast
+    path — so ``stat -> parse -> store`` is not atomic against a writer. The
+    (mtime, size) key normally catches the resulting stale store on the *next*
+    read, but that is exactly the filesystem-resolution dependency the explicit
+    ``_invalidate_state_cache()`` calls exist to remove. Pinning the stat key
+    here reproduces the pathological case (a write that leaves mtime_ns and
+    size unchanged) so the generation guard, not the clock, is what is tested.
+    """
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=b"\x01" * 32,
+            ext_token="before-the-racing-write",
+            ext_pubkey_b64="e",
+            hermes_pubkey_b64="h",
+            paired_at=1.0,
+        )
+    )
+    pinned_key = (pairing._state_path(), 1, 1)
+    monkeypatch.setattr(pairing, "_state_stat_key", lambda: pinned_key)
+    pairing._invalidate_state_cache()
+
+    real_read_json = pairing._read_json
+    raced = [False]
+
+    def read_json_then_let_a_write_land(path):
+        data = real_read_json(path)
+        if path == pairing._state_path() and not raced[0]:
+            # The writer commits between our parse and our cache store. It runs
+            # under _state_lock(), which this reader never took.
+            raced[0] = True
+            monkeypatch.setattr(pairing, "_read_json", real_read_json)
+            pairing._save_pairing(
+                pairing.Pairing(
+                    aes_key=b"\x02" * 32,
+                    ext_token="after-the-racing-write",
+                    ext_pubkey_b64="e",
+                    hermes_pubkey_b64="h",
+                    paired_at=2.0,
+                )
+            )
+        return data
+
+    monkeypatch.setattr(pairing, "_read_json", read_json_then_let_a_write_land)
+    stale = pairing.load_pairing()
+    assert stale is not None
+    assert raced[0] is True
+    # The racing reader may legitimately return its own pre-write snapshot.
+    # What it must not do is leave that snapshot in the cache for everyone else.
+    assert stale.ext_token == "before-the-racing-write"
+
+    fresh = pairing.load_pairing()
+    assert fresh is not None
+    assert fresh.ext_token == "after-the-racing-write"

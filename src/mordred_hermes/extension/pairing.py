@@ -554,6 +554,15 @@ def _pairing_code_digest(code: str) -> str:
 # commits, so a fresh read is never gated on the filesystem's mtime resolution
 # actually advancing between two writes issued back-to-back.
 #
+# That explicit invalidation only holds against a concurrent reader because of
+# the generation counter below. Readers deliberately do NOT take _state_lock()
+# (skipping it is the point of the fast path), so a reader can stat and parse a
+# pre-write state.json, get descheduled, and only reach its cache store after a
+# writer has already invalidated — re-publishing the snapshot the invalidation
+# was meant to retire. Storing only when the generation is unchanged since the
+# read began makes a raced read fall back to leaving the cache cold, so the
+# next reader re-parses instead of trusting mtime to have advanced.
+#
 # Only READ-ONLY consumers of the parsed dict may use _read_state_cached(): it
 # can hand back the very same dict object to multiple callers, so a read-modify
 # -write cycle (_write_pairing_locked / save_channel_key /
@@ -562,6 +571,7 @@ def _pairing_code_digest(code: str) -> str:
 # reader observe an uncommitted write before it reaches disk.
 _STATE_CACHE_LOCK = threading.Lock()
 _state_cache: tuple[Path, int, int, dict[str, Any]] | None = None
+_state_cache_generation = 0
 
 
 def _state_stat_key() -> tuple[Path, int, int] | None:
@@ -576,9 +586,10 @@ def _state_stat_key() -> tuple[Path, int, int] | None:
 
 
 def _invalidate_state_cache() -> None:
-    global _state_cache
+    global _state_cache, _state_cache_generation
     with _STATE_CACHE_LOCK:
         _state_cache = None
+        _state_cache_generation += 1
 
 
 def _read_state_cached() -> dict[str, Any]:
@@ -587,11 +598,18 @@ def _read_state_cached() -> dict[str, Any]:
     key = _state_stat_key()
     with _STATE_CACHE_LOCK:
         cached = _state_cache
+        generation = _state_cache_generation
     if key is not None and cached is not None and (cached[0], cached[1], cached[2]) == key:
         return cached[3]
     data = _read_json(_state_path())
     with _STATE_CACHE_LOCK:
-        _state_cache = (key[0], key[1], key[2], data) if key is not None else None
+        if _state_cache_generation != generation:
+            # A write committed while we were parsing: `data` may predate it,
+            # and `key` certainly does. Leave the cache cold rather than
+            # publish a snapshot the writer already invalidated.
+            _state_cache = None
+        else:
+            _state_cache = (key[0], key[1], key[2], data) if key is not None else None
     return data
 
 
