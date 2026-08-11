@@ -120,6 +120,12 @@ Slack / Discordでは暗号化されていない受信をagentへ渡しません
 best-effortで送り、dispatchをskipします。Teams等はplaintext自体を禁止しませんが、
 `ENC`を名乗ったwireは同じv3検証に合格しない限りfail-closedです。
 
+The needs-key notice is rate-limited per conversation (platform × profile ×
+channel, 60 s window): the notice fires before host authorization, so without a
+cooldown any channel member could amplify a message flood into an equal flood of
+bot posts. Suppression affects only the notice — every refused message still
+gets the `skip` verdict.
+
 **空 `text` も「未暗号化受信」として拒否します。** Slack adapterはbot mentionを
 strip（`text.replace(f"<@{bot_uid}>", "").strip()`）し、添付は `media_urls` に
 載せるため、`@Hermes` + 画像 / 音声クリップ / mentionのみは `text == ""` で

@@ -25,6 +25,7 @@ which is exactly what the E2E transport needs:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from . import e2e
@@ -41,6 +42,16 @@ _NEEDS_KEY_NOTICE = (
     "🔒 暗号化されていないメッセージには応答できません。"
     "拡張機能で暗号化キーを設定または取得のうえ、暗号化して再送してください。"
 )
+
+# One needs-key notice per conversation per window. The notice is sent BEFORE
+# the host authorizes the sender, so on a mandatory-E2E platform every member of
+# a channel can otherwise amplify each message of their own into a bot post.
+# Same shape as ``gateway.pairing.PairingStore._is_rate_limited``: last-send
+# timestamp compared against a fixed window. Kept in memory (unlike the pairing
+# store's file) because a notice dropped across a restart costs nothing — the
+# message itself is refused either way.
+_NEEDS_KEY_RATE_LIMIT_SECONDS = 60
+_NEEDS_KEY_NOTICE_TIMES: dict[tuple[str, str | None, str], float] = {}
 
 # Strong refs to fire-and-forget notice sends: without this the event loop only
 # holds a weak reference and may garbage-collect the task mid-flight (RUF006).
@@ -86,9 +97,29 @@ async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: dict[st
         logger.warning("mordred_e2e: needs-key notice send failed: %s", exc)
 
 
+def _notice_rate_limited(platform: str, profile: str | None, chat_id: str) -> bool:
+    """Has this conversation already been sent a needs-key notice recently?
+
+    Mirrors ``gateway.pairing.PairingStore._is_rate_limited``. Expired entries
+    are dropped on the way through: the key space is attacker-influenced (one
+    entry per channel they can post in), so it must not grow unbounded.
+    """
+    now = time.time()
+    for key, sent_at in list(_NEEDS_KEY_NOTICE_TIMES.items()):
+        if (now - sent_at) >= _NEEDS_KEY_RATE_LIMIT_SECONDS:
+            del _NEEDS_KEY_NOTICE_TIMES[key]
+    last_sent = _NEEDS_KEY_NOTICE_TIMES.get((platform, profile, chat_id), 0.0)
+    return (now - last_sent) < _NEEDS_KEY_RATE_LIMIT_SECONDS
+
+
 def _notify_needs_key(gateway: Any, event: Any, outbound: Any, profile: str | None) -> bool:
     """Reply to the originating channel/thread asking the sender to set up or
     obtain an encryption key. Best-effort; returns True if a send was scheduled.
+
+    Rate-limited per (platform, profile, channel): suppressing a notice only
+    costs the sender an explanation, while sending one per inbound message hands
+    any channel member a flood amplifier. The caller's ``skip`` verdict — the
+    encryption gate itself — is unaffected either way.
 
     The send is scheduled on the running loop (the hook itself is sync and is
     invoked from the gateway's async dispatch path) so returning ``skip`` stays
@@ -98,19 +129,20 @@ def _notify_needs_key(gateway: Any, event: Any, outbound: Any, profile: str | No
 
     src = getattr(event, "source", None)
     chat_id = getattr(src, "chat_id", None) or getattr(event, "chat_id", None)
+    platform = _platform_name(event)
+    if not chat_id or _notice_rate_limited(platform, profile, str(chat_id)):
+        return False
     adapter = (
-        outbound.live_adapter_for(gateway, _platform_name(event), profile)
-        if gateway is not None and outbound is not None
-        else None
+        outbound.live_adapter_for(gateway, platform, profile) if gateway is not None and outbound is not None else None
     )
-    if adapter is None or not chat_id:
+    if adapter is None:
         return False
 
     thread = getattr(src, "thread_id", None) or getattr(event, "thread_id", None)
     metadata: dict[str, Any] | None = None
     if thread:
         # Slack threads reply via thread_ts; Discord via thread_id.
-        metadata = {"thread_ts": thread} if _platform_name(event) == "slack" else {"thread_id": thread}
+        metadata = {"thread_ts": thread} if platform == "slack" else {"thread_id": thread}
 
     try:
         loop = asyncio.get_running_loop()
@@ -119,6 +151,9 @@ def _notify_needs_key(gateway: Any, event: Any, outbound: Any, profile: str | No
     task = loop.create_task(_safe_send(adapter, str(chat_id), _NEEDS_KEY_NOTICE, metadata))
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
+    # Only a scheduled send opens the cooldown; a notice we could not even
+    # attempt must not silence the next message.
+    _NEEDS_KEY_NOTICE_TIMES[(platform, profile, str(chat_id))] = time.time()
     return True
 
 
