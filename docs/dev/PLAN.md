@@ -71,9 +71,16 @@ permissions, writers, and readers.
 - Base install stays small. Platform and feature dependencies remain in the
   `keyvault`, `macos`, `extension`, `ethereum`, `messaging`, `tor-control`, and
   integration extras.
-- `hermes-mordred` remains available across the full Hermes support range;
-  `hermes mordred` is an additional host-CLI form on Hermes 0.19.0+ after the
-  plugins are enabled.
+- `hermes-mordred` is the canonical user-facing CLI across the full Hermes
+  support range. Hermes 0.19.0+ can expose the same handlers through an
+  additional host-CLI compatibility surface after the plugins are enabled.
+  Command examples use the canonical form; README mentions the host form only
+  as a compatibility note.
+- The public distribution rename is staged at the package boundary: reserve
+  `hermes-mordred` independently, publish the real `0.1.0a16` distribution,
+  then publish a metadata-only `mordred-hermes` shim. The import tree,
+  entry-point IDs, persistent state, and native helper identifiers do not
+  change. `MIGRATION.md` §6 owns the ordering and compatibility contract.
 
 ### 0.6 CI workflow
 

@@ -4,10 +4,9 @@ The supported user-facing CLI for Mordred setup, policy inspection, network
 selection, key management, at-rest encryption, migration, and extension
 pairing.
 
-Use `hermes-mordred` for installation and recovery because it works before any
-plugin is enabled and across every supported Hermes version. Hermes 0.19 also
-exposes the same tree as `hermes mordred` after `mordred_wizard` is enabled.
-Run `hermes-mordred --help` for the authoritative command list.
+Use `hermes-mordred` for every operation. It works before any plugin is enabled,
+across every supported Hermes version, and during recovery. Run
+`hermes-mordred --help` for the authoritative command list.
 
 See [SPEC.md](../../../docs/dev/SPEC.md),
 [PATHS.md](../../../docs/dev/PATHS.md), and

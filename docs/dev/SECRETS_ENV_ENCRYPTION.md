@@ -215,7 +215,7 @@ for "Gatekeeper trust when downloading a prebuilt binary," not for SE use
 itself.
 
 **Enable command (`keyvault enable-se`)**: building and installing the helper
-above is a single command — `hermes mordred keyvault enable-se
+above is a single command — `hermes-mordred keyvault enable-se
 [--install-dir PATH]`. It may install or refresh the helper with an existing
 keyvault. Internally it calls `native/sekey-helper/build.sh`, running
 `swift build -c release` → `codesign --sign -` (ad-hoc) → install to
@@ -276,7 +276,7 @@ off `PATH`, point at it with `MORDRED_SEKEY_HELPER`. Implementation:
      the shim).
    - **Agent memory: done** (`vault set-memory-key`). An on-ramp now stores the
      memory-encryption key (PR #61 — upstream `tools/memory_tool.py`, AES-256-GCM
-     keyed by `HERMES_MEMORY_KEY`) in the vault `.env`. `hermes mordred vault
+     keyed by `HERMES_MEMORY_KEY`) in the vault `.env`. `hermes-mordred vault
      set-memory-key [--rotate]` opens the vault on the hot path and generates /
      merges the key (preserving other `.env` entries, idempotent, never printing
      it; `--rotate` regenerates but warns that memories encrypted under the old
@@ -320,8 +320,7 @@ off `PATH`, point at it with `MORDRED_SEKEY_HELPER`. Implementation:
        decrypt error rather than booting on a default/stale config; an absent anchor
        with manifests still on disk is treated as anchor deletion and refused.
 
-     **Opt-in lifecycle** (`hermes-mordred …` always works after installation;
-     Hermes 0.19+ also exposes `hermes mordred …` after the plugin is enabled):
+     **Opt-in lifecycle** (using the canonical `hermes-mordred …` form):
      `hermes-mordred vault enable-config-decrypt` enrolls
      `<home>/config.yaml` + writes the marker (`<home>/mordred/config-vault.marker`)
      only after a clean enroll; `disable-config-decrypt` removes the marker and
@@ -392,10 +391,10 @@ set-memory-key`, …) are kept, but a single namespace now toggles every at-rest
 target the same way:
 
 ```
-hermes mordred encryption status                       # all targets, non-prompting (+ --json)
-hermes mordred encryption enable  {env|config|memory}  # turn on
-hermes mordred encryption disable {env|config|memory}  # turn off — reversible, keeps the vault copy
-hermes mordred encryption purge   {env|config|memory} --yes   # remove the encrypted copy — destructive
+hermes-mordred encryption status                       # all targets, non-prompting (+ --json)
+hermes-mordred encryption enable  {env|config|memory}  # turn on
+hermes-mordred encryption disable {env|config|memory}  # turn off — reversible, keeps the vault copy
+hermes-mordred encryption purge   {env|config|memory} --yes   # remove the encrypted copy — destructive
 ```
 
 `disable` and `purge` are **per-target state transitions, not symmetric

@@ -107,7 +107,7 @@ PR4 contribution (4 codes; **documented in step-0, `ReasonCode` Literal extensio
 | 21 | `keyvault.init_started` | 4 | **Lifecycle**. `api.confirm_generate` enters the durable phase (Enclave create + meta.json write). Decision `allow`. Fields: `event="keyvault.init"`, `key_id_hash` (16-char hex prefix of `SHA-256(key_id)` — never the cleartext id). Emitted exactly once per `confirm_generate` invocation, **before** any Keychain or filesystem state mutation. Sink-failure policy: if the audit sink raises during this emit, the entire init operation aborts and no Keychain item / `meta.json` row is created. Rationale: `init_started` is the durability barrier — failing-open here would diverge audit from observable state (no audit, but key exists), which violates the audit-as-evidence contract. Pattern differs from #22/#23/#24 below (success-path emits use `contextlib.suppress`). |
 | 22 | `keyvault.init_completed` | 4 | **Lifecycle**. `api.confirm_generate` finished successfully: Enclave key created, `meta.json` row persisted, `digests/<kid>.commit` written. Decision `allow`. Fields: `event="keyvault.init"`, `key_id_hash`, `verification_digest_hex_prefix` (16-char hex prefix of the verification digest — full digest reachable only via `verify_digest` API). Sink-failure policy: init has already succeeded by this point, so a sink exception is suppressed via `contextlib.suppress(Exception)` (mirrors PR3 `wrap.py:555` success-path pattern). A single line is written to stderr so the operator can investigate; the durable state is correct. |
 | 23 | `keyvault.init_denied` | 4 | **Action**. `api.confirm_generate` rejected the user-supplied `expected_digest` (recomputed digest does NOT match the prepared digest via `hmac.compare_digest`). Decision `block` (paired with `VerificationDigestMismatch` raise). Fields: `event="keyvault.init"`, `key_id_hash` (16-char hex prefix of the *intended* `key_id` — derived from the prepared digest, NOT from any user input). Emitted **before** the exception propagates and **before** any Keychain or filesystem state is touched (no rollback needed because no mutation occurred). Distinct from #17 (`keyvault.recovery_digest_mismatch`) which is import-backup-specific; the `event` field disambiguates audit consumers. If the audit sink itself raises, the sink exception is chained as `__context__` on the `VerificationDigestMismatch` (mirrors PR2 recovery `_emit_mismatch` failure-path pattern). |
-| 24 | `keyvault.backup_exported` | 4 | **Lifecycle**. `api.export_backup` finished — the MRKV blob is materialized in the caller's hand (file persistence is the caller's responsibility; wizard PR lands `hermes mordred keyvault export`). Decision `allow`. Fields: `event="keyvault.backup_export"`, `key_id_hash`, `blob_version=1`, `kdf_id=1` (Argon2id, m=46 MiB / t=1 / p=1), `envelope_count` (number of ciphertext envelopes packed into the manifest). Sink-failure policy: success-path emit, suppressed via `contextlib.suppress(Exception)`; blob is already returned to the caller. The bytes are not persisted by keyvault; the caller (wizard) writes them to a path the user specifies. |
+| 24 | `keyvault.backup_exported` | 4 | **Lifecycle**. `api.export_backup` finished — the MRKV blob is materialized in the caller's hand (file persistence is the caller's responsibility; wizard PR lands `hermes-mordred keyvault export`). Decision `allow`. Fields: `event="keyvault.backup_export"`, `key_id_hash`, `blob_version=1`, `kdf_id=1` (Argon2id, m=46 MiB / t=1 / p=1), `envelope_count` (number of ciphertext envelopes packed into the manifest). Sink-failure policy: success-path emit, suppressed via `contextlib.suppress(Exception)`; blob is already returned to the caller. The bytes are not persisted by keyvault; the caller (wizard) writes them to a path the user specifies. |
 
 `encrypt` / `decrypt` audit observability comes only from `keyvault.unwrap_authorized` / `keyvault.unwrap_denied` (#19/#20) which the PR3 wrap layer emits when `unwrap_dek` runs. There is no per-encrypt audit (no auth gate to record).
 
@@ -196,7 +196,7 @@ The agentskills.io v1 spec defines `metadata` as a flat `string -> string` map. 
 
 The agentskills spec explicitly endorses vendor-namespaced keys ("We recommend making your key names reasonably unique to avoid accidental conflicts"). It does not forbid nested structures, but `skills-ref validate` may reject Mordred-flavoured skills due to the type-strictness rule.
 
-**Acceptable for v1** because Mordred users go through `hermes mordred install` (the privacy-check wrapper). Pure-spec consumers reading `metadata` flatly will simply see Mordred's nested block as opaque.
+**Acceptable for v1** because Mordred users go through `hermes-mordred install` (the privacy-check wrapper). Pure-spec consumers reading `metadata` flatly will simply see Mordred's nested block as opaque.
 
 ---
 
@@ -217,7 +217,7 @@ The `mordred_wizard` plugin (Phase 1.3) writes this section via `ruamel.yaml` ro
 
 ## Decision matrix (Phase 1)
 
-### Install-time (`hermes mordred install <skill>`)
+### Install-time (`hermes-mordred install <skill>`)
 
 | `policy` | `network_requirements` | Decision | Reason |
 | --- | --- | --- | --- |

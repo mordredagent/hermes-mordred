@@ -10,7 +10,7 @@
 
 Mordred is built on the principle of fully leveraging Hermes's plugin SDK and existing capabilities (4 plugin source types, 16 lifecycle hooks, and the registration API via `PluginContext`) without modifying core (independent as a plugin development repository). The privacy layer is distributed as **6 plugins + 1 skill-metadata convention**.
 
-Users can install it with just `pip install mordred-hermes`, and configure/operate it via the `hermes mordred ...` subcommands.
+Users can install it with just `pip install mordred-hermes`, and configure/operate it via the `hermes-mordred ...` subcommands.
 
 Privacy concerns addressed:
 
@@ -37,7 +37,7 @@ explicit at the Vision level. Read them together with §Platform Support and
   - The plugins are developed under `src/mordred_hermes/` and exposed via `[project.entry-points."hermes_agent.plugins"]` in `pyproject.toml`; `mordred_e2e` uses the `extension/` package rather than a directory matching its entry-point suffix
   - What the old SPEC called a "core seam" is instead handled by **plugin-side wrapper + audit log** (the `mordred.degraded.*` family) for defense-in-depth (Tier A, v1 default)
   - Items that truly need hard enforcement fall under the **vendored fork extra** (Tier B, v2): a patched version of Hermes core modules is redistributed via e.g. `pip install mordred-hermes[hard-lock]`. Out of scope for v1
-- **Compatibility goal**: Existing Hermes users can add the privacy layer with just `pip install mordred-hermes && hermes mordred upgrade`. Users migrating from OpenClaw follow 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes mordred upgrade`
+- **Compatibility goal**: Existing Hermes users can add the privacy layer with just `pip install mordred-hermes && hermes-mordred upgrade`. Users migrating from OpenClaw follow 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes-mordred upgrade`
 
 ### Platform Support (v1)
 
@@ -102,7 +102,7 @@ Because Hermes has a broader hook palette than OpenClaw, many items that the old
 
 When the equivalents of the old SPEC's S2 (`originSkill` in tool_call) and S3 (`resolvedProvider` in model_resolve) are not present in Hermes's payloads, the plugin runs in degraded mode (recording `mordred.degraded.*` in the audit log, and falling back to a generic tool-name allowlist and unconditional override). Because of the zero-PR commitment (`MIGRATION.md` §5, 2026-05-07), **no PR is sent to Hermes upstream**. If it's judged that plugin-only cannot achieve this, we re-evaluate whether to escalate to the v2 vendored fork extra (Tier B, `[hard-lock]`) or make the fallback behavior permanent.
 
-**Out-of-band agent harnesses** (Codex, Claude CLI, Cursor, Copilot, ACP adapter): since Hermes has an ACP adapter, some of these can be handled. Under strict mode, if a harness that Mordred cannot enforce is configured as primary, `hermes mordred` startup is refused.
+**Out-of-band agent harnesses** (Codex, Claude CLI, Cursor, Copilot, ACP adapter): since Hermes has an ACP adapter, some of these can be handled. Under strict mode, if a harness that Mordred cannot enforce is configured as primary, `hermes-mordred` startup is refused.
 
 ## Plugin-Only Architecture (zero Hermes core modifications, zero-PR strategy)
 
@@ -116,7 +116,7 @@ The old SPEC's "Core Minimal-Change Policy" was redefined as **zero upstream PR*
 
 - ~~extension to include `provider_id` / `model_id` in the `pre_llm_call` payload~~ → **Phase 0.8 verify (2026-05-10) complete**: `pre_llm_call` carries only `model`, not `provider`, and its return value is **context-injection only** (provider rewrite is structurally impossible). `pre_api_request` carries provider/model/base_url and discards callback return values, but a `BaseException`-derived refusal still stops egress through Hermes's hook wrapper. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5. v1 therefore performs an audit-only disk pre-check in `on_session_start`, then authoritatively validates the actual runtime provider in `pre_api_request`
 - ~~extension to include `origin_skill` in the `pre_tool_call` payload~~ → the current consumed Hermes contract does not include `origin_skill` (see [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4). Since per-skill policy cannot be implemented via `pre_tool_call`, the install-time `hermes-mordred install` guard that inspects SKILL.md frontmatter is the sole per-skill enforcement path. The runtime hook provides only a generic tool-name guard
-- A pre-install hook at skill install time (`hermes_cli/skills_hub.py`) → create new if needed; until then, substitute with the `hermes mordred install` wrapper
+- A pre-install hook at skill install time (`hermes_cli/skills_hub.py`) → create new if needed; until then, substitute with the `hermes-mordred install` wrapper
 - agent process init / shutdown hook → network setup uses plugin `register()` plus an `atexit` finalizer so the process route exists before provider clients and outlives turn/session hooks; other plugins continue to use the existing session hooks where process ownership is not required
 
 The fields Mordred consumes are defined in `tools/hook_payload_contract.json`
@@ -149,13 +149,16 @@ All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK 
 
 1. **`mordred_network`** — process-scoped route selection across Tor / VPN / Clearnet. Activates and freezes the route before provider construction, then manages child-process lifecycle (`tor`/`arti`/Mullvad WireGuard CLI) via Python `subprocess` until process exit. Provides proxy environment-variable injection (`HTTPS_PROXY`, `ALL_PROXY`, etc.) and an internal Python API (`mordred_network.api.use`, `status`, `blackout_assert`); changing a frozen route requires restart.
 2. **`mordred_privacy_check`** — privacy policy enforcement at two checkpoints:
-   - **Skill install guard**: while there's no pure hook available, policy is decided by reading `metadata.mordred.network_requirements` from the frontmatter via the `hermes mordred install <skill>` wrapper CLI. Migrates to a hook-based approach once Hermes adds an install hook in the future
+   - **Skill install guard**: while there's no pure hook available, policy is decided by reading `metadata.mordred.network_requirements` from the frontmatter via the `hermes-mordred install <skill>` wrapper CLI. Migrates to a hook-based approach once Hermes adds an install hook in the future
    - `pre_tool_call` — generic per-tool policy (e.g. blocking `web_fetch` over Clearnet under strict mode). Per-skill policy too if `origin_skill` is present in the payload; otherwise just a tool-name allowlist
 3. **`mordred_llm_guard`** — registers `mordred_llm_guard/local_adapter.py` as a Hermes provider adapter + provider override under strict mode via the `pre_llm_call` hook. Turns a local OpenAI-compatible endpoint (LM Studio / Ollama / vLLM) into a synthetic provider as `mordred-local`
 4. **`mordred_keyvault`** — AES key wrapping backed by Secure Enclave or the
    login Keychain on macOS and TPM 2.0 on Linux. Operated from the
-   `hermes mordred keyvault ...` CLI subtree
-5. **`mordred_wizard`** — registers the `hermes mordred ...` subcommand tree via `register_cli_command`. Oversees all CLI for configure / upgrade / install / network / policy / audit / keyvault
+   `hermes-mordred keyvault ...` CLI subtree
+5. **`mordred_wizard`** — owns the canonical `hermes-mordred ...` command tree
+   and registers the same handlers with Hermes as an optional compatibility
+   surface. Oversees all CLI for configure / upgrade / install / network /
+   policy / audit / keyvault
 6. **`mordred_e2e`** — gateway messaging E2E enforcement from the `extension/` package: decrypts authenticated inbound envelopes, records reply context, and re-encrypts outbound Slack/Discord replies
 
 ### Conventions (not plugins)
@@ -185,9 +188,13 @@ All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK 
 ### Naming Convention
 
 - Project name: **Mordred**
-- CLI command name: **`hermes mordred ...`** (via Hermes's `register_cli_command`)
+- CLI command name: **`hermes-mordred ...`** (the standalone console script;
+  canonical in documentation and operator guidance)
 - Plugin Python module IDs: `mordred_network`, `mordred_privacy_check`, `mordred_keyvault`, `mordred_llm_guard`, `mordred_wizard`, `mordred_e2e` (snake_case, following Python module naming conventions)
-- pip distribution: **`mordred-hermes`** (single package, all Mordred plugins included)
+- pip distribution: **`hermes-mordred`** from `0.1.0a16` (single real package,
+  all Mordred plugins included). The previous **`mordred-hermes`** PyPI project
+  becomes a metadata-only compatibility shim after the new name is reserved;
+  see `MIGRATION.md` §6
 - Configuration topology: per-plugin config under `plugins.mordred_<plugin-id>` in `~/.hermes/config.yaml`. Mordred plugins coordinate shared state (effective policy, active network path) via an internally-imported shared module within Hermes, **not** via a single `mordred:` top-level key
 - Skill metadata: `metadata.mordred.*` (same as the old SPEC, maintaining compatibility)
 - Mordred-owned filesystem paths: `~/.hermes/mordred/` (audit log, policy snapshot, keyvault state)
@@ -213,13 +220,13 @@ Out of scope (v2+): journalists, enterprise IT teams, GUI-only users, Windows na
 
 ### Story 1: Adding the privacy layer for existing Hermes users
 
-As an existing Hermes user, I want to add the privacy layer with `pip install mordred-hermes && hermes mordred upgrade`, reusing my existing `~/.hermes/config.yaml` and skills unchanged.
+As an existing Hermes user, I want to add the privacy layer with `pip install mordred-hermes && hermes-mordred upgrade`, reusing my existing `~/.hermes/config.yaml` and skills unchanged.
 
 Behavior:
 
 - Idempotent: re-running is a no-op when state already matches
 - If the `plugins.mordred_*` section already exists, show a diff and prompt for overwrite
-- Existing skills without `metadata.mordred.*` are treated as `network_requirements: unknown`. Lenient mode (default for upgrade) gives a one-time warning; strict mode blocks, listed in `hermes mordred policy explain`
+- Existing skills without `metadata.mordred.*` are treated as `network_requirements: unknown`. Lenient mode (default for upgrade) gives a one-time warning; strict mode blocks, listed in `hermes-mordred policy explain`
 - Comments and key order in `~/.hermes/config.yaml` are preserved (round-trip writer via `ruamel.yaml`)
 - The existing `~/.hermes/mordred/` is preserved unless `--reset` is specified
 
@@ -229,13 +236,13 @@ Users who were using the old Mordred in an OpenClaw environment follow these 3 s
 
 1. `hermes claw migrate` — migrate to Hermes (workspace, config migration)
 2. `pip install mordred-hermes` — obtain the Mordred plugin suite
-3. `hermes mordred upgrade` — enable the privacy layer
+3. `hermes-mordred upgrade` — enable the privacy layer
 
-`hermes mordred upgrade` has an assist feature that, when it detects the OpenClaw-era `~/.openclaw/mordred/`, migrates policy / audit log / keyvault state to `~/.hermes/mordred/` (see PLAN.md §1.3 for details).
+`hermes-mordred upgrade` has an assist feature that, when it detects the OpenClaw-era `~/.openclaw/mordred/`, migrates policy / audit log / keyvault state to `~/.hermes/mordred/` (see PLAN.md §1.3 for details).
 
 ### Story 2: New user setup
 
-As a new user, I want `hermes mordred configure` to:
+As a new user, I want `hermes-mordred configure` to:
 
 1. Optionally spawn `hermes setup` as a child process when `--with-hermes-setup` is passed (run Hermes's standard setup first — opt-in, skipped by default since 2026-07-16)
 2. Ask Mordred-specific questions (network policy strict/lenient/off, local LLM endpoint, keyvault initialization opt-in)
@@ -244,7 +251,7 @@ This allows Hermes and Mordred to be configured with a single command by passing
 
 ### Story 3: Skill execution and automatic path selection
 
-At skill install time (via the `hermes mordred install <skill>` wrapper), `mordred_privacy_check` parses `metadata.mordred.network_requirements` from the SKILL.md frontmatter and checks it against user policy. Install is blocked on mismatch. At process registration, `mordred_network` activates one route and injects its proxy environment before provider clients are constructed; child processes spawned later inherit it where Hermes permits. The active path is process-wide and frozen: same-path reuse is idempotent, while a conflicting path requires a restart.
+At skill install time (via the `hermes-mordred install <skill>` wrapper), `mordred_privacy_check` parses `metadata.mordred.network_requirements` from the SKILL.md frontmatter and checks it against user policy. Install is blocked on mismatch. At process registration, `mordred_network` activates one route and injects its proxy environment before provider clients are constructed; child processes spawned later inherit it where Hermes permits. The active path is process-wide and frozen: same-path reuse is idempotent, while a conflicting path requires a restart.
 
 > **Note**: Once an install hook is added to Hermes core, the wrapper CLI will be retired in favor of going directly through the hook. Until then, the wrapper is the only policy-enforcement path.
 
@@ -324,11 +331,11 @@ depend on entry-point enumeration order. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOAD
 - **Path failure semantics (M9, v1)**:
   - **Bring-up failure** (Tor bootstrap timeout / VPN handshake fail): strict aborts the session with `MordredPathBringupFailed`; lenient shows a user-visible warning + clearnet fallback (emits audit `network.bringup_failed`); off falls back silently
   - **Liveness probe**: an internal worker thread runs `mordred_network.api.health()` at a 30s interval (Tor: SOCKS5 reachability + circuit-established check; VPN: WireGuard handshake recency + interface up). Judged path-dropped after 2 consecutive failures
-  - **Mid-session drop**: strict raises `MordredPathDropped` on the next `pre_tool_call` (blocking tool execution); lenient warns + continues while keeping the path-dropped state. There is **no automatic clearnet fallback**. To choose clearnet, persist it with `hermes mordred network use clearnet` and restart Hermes so provider clients are rebuilt on that route. Audit `network.path_dropped` is always emitted
+  - **Mid-session drop**: strict raises `MordredPathDropped` on the next `pre_tool_call` (blocking tool execution); lenient warns + continues while keeping the path-dropped state. There is **no automatic clearnet fallback**. To choose clearnet, persist it with `hermes-mordred network use clearnet` and restart Hermes so provider clients are rebuilt on that route. Audit `network.path_dropped` is always emitted
   - **`use(path)` failure**: raises `MordredNetworkError` (including `BringupFailed`, `AlreadySwitching`, `UnknownPath`, and `PathSwitchRequiresRestart`). Silent live switching after provider construction is prohibited
 - **Concurrency model (v1)**:
   - Active path is **process-wide single state**, activated before provider construction and frozen for the process lifetime. Same-path reuse is idempotent; a conflicting path requires a restart rather than applying last-write-wins
-  - **Path mismatch for parallel tool_calls**: runtime per-skill path-mismatch detection is **not done in v1** — since the Phase 0.8 verify confirmed that `origin_skill` is **absent** from the `pre_tool_call` payload ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4), per-skill blocking at runtime is structurally impossible. Per-skill enforcement exists only at install-time (`hermes mordred install <skill>`). Automatic path switching is likewise not done in v1 (to avoid the M3 transitive failure mode). Once the `origin_skill` payload extension lands upstream, runtime detection will be reconsidered in v2-H2
+  - **Path mismatch for parallel tool_calls**: runtime per-skill path-mismatch detection is **not done in v1** — since the Phase 0.8 verify confirmed that `origin_skill` is **absent** from the `pre_tool_call` payload ([`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4), per-skill blocking at runtime is structurally impossible. Per-skill enforcement exists only at install-time (`hermes-mordred install <skill>`). Automatic path switching is likewise not done in v1 (to avoid the M3 transitive failure mode). Once the `origin_skill` payload extension lands upstream, runtime detection will be reconsidered in v2-H2
   - **Parallel requests for the same path**: no restriction, executes in parallel as usual
   - **Parallel requests for different paths**: a process cannot safely provide different routes because provider clients share the frozen transport. A conflicting request is blocked with restart-required semantics. Independent per-session/per-skill routes and SOCKS5 stream isolation are under consideration for v2
 - Provider transport flagging: resolves the active Hermes provider at startup and again from every `pre_api_request` payload, evaluates it against the immutable baseline plus additive `policy.json provider_overrides`, and applies the strict-Tor fail-closed behavior above
@@ -336,13 +343,13 @@ depend on entry-point enumeration order. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOAD
 
 ### Plugin: `mordred_privacy_check`
 
-- **Skill install guard** (via the `hermes mordred install <skill>` wrapper):
+- **Skill install guard** (via the `hermes-mordred install <skill>` wrapper):
   - Reads SKILL.md from the install source path and extracts `metadata.mordred.network_requirements` from the frontmatter
   - Strict + `clearnet` → block
   - Strict + missing metadata → block with `policy.strict.unknown_metadata`
   - Lenient + missing metadata → allow + warning
 - `pre_tool_call` — generic per-tool allowlist (configurable). Default strict-mode blocklist: builtin `web_fetch`, `web_search` when active network path is Clearnet. Per-skill determination too if `origin_skill` is present in the payload; otherwise just a tool-name allowlist
-- Policy state: loaded from `plugins.mordred_privacy_check` in `~/.hermes/config.yaml` at `on_session_start`, cached in memory. Reload is explicit via `hermes mordred policy reload`
+- Policy state: loaded from `plugins.mordred_privacy_check` in `~/.hermes/config.yaml` at `on_session_start`, cached in memory. Reload is explicit via `hermes-mordred policy reload`
 - Audit logging: see §Operational Guarantees
 
 ### Plugin: `mordred_llm_guard`
@@ -492,7 +499,7 @@ The difficulty-8 vector is for hand-calculation verification (reached at `n = 51
 
 #### `keyvault init` flow (Phase 4 PR10)
 
-`hermes mordred keyvault init` runs the one-shot key-generation flow in the following order:
+`hermes-mordred keyvault init` runs the one-shot key-generation flow in the following order:
 
 1. **Generate**: `keyvault` generates a 24-word BIP39 mnemonic (256-bit entropy + SHA-256 checksum) and computes the PoW via `pow.compute_pow(normalized_seed)`. The Passphrase is entered interactively by the user (not echoed to the PC screen).
 2. **prepare**: `api.prepare_generate(seed, passphrase, pow_bytes)` → `(SeedDisplayHandle, expected_digest)` (in-memory only, no disk mutation).
@@ -535,7 +542,7 @@ The difficulty-8 vector is for hand-calculation verification (reached at `n = 51
 4. **Windows native / external HSM / master-password tiers**: deferred
 
 > **Linux TPM 2.0 (MVP complete 2026-06-09)**:
-> `hermes mordred keyvault enable-tpm` builds and installs the packaged
+> `hermes-mordred keyvault enable-tpm` builds and installs the packaged
 > `mordred-hermes-tpmkey` helper. A copied key blob is useless on another
 > host, but this is machine binding rather than Touch-ID-equivalent presence:
 > the MVP has no per-use PIN/PCR prompt. Per-use gating remains a follow-up.
@@ -1103,26 +1110,29 @@ See `POLICY.md` §"Phase 4 PR4 step-0 freeze" for the full table. Summary:
 
 ### Plugin: `mordred_wizard` (CLI Extension)
 
-Registers the `hermes mordred ...` subcommand tree via `PluginContext.register_cli_command("mordred", help, setup_fn, handler_fn)`. Builds the argparse subparser hierarchy inside `setup_fn(subparser)`.
+Provides the canonical `hermes-mordred ...` console-script tree. The wizard
+also passes the same parser setup to
+`PluginContext.register_cli_command("mordred", help, setup_fn, handler_fn)` as
+an optional host-CLI compatibility surface.
 
 Subcommands:
-- `hermes mordred configure` — asks Mordred-specific questions; with `--with-hermes-setup` it first spawns `hermes setup` as a child process (skipped by default)
-- `hermes mordred upgrade` — Story 1 / 1.5 single-command migration
-- `hermes mordred install <skill>` — skill installation via privacy-check (a substitute until a skill install hook is added to Hermes core)
-- `hermes mordred network init` — on-demand network-privacy setup (Tor / VPN / clearnet + Mullvad); separate from `configure`, re-runnable (blank Mullvad answer keeps the current secret). `--non-interactive` is flag-driven (`--path` / `--tor-binary` / `--tor-socks-port` / `--mullvad-relay` / `--mullvad-killswitch`); `--clear-mullvad` removes the stored secret. The Mullvad secret is never accepted as a CLI flag.
-- `hermes mordred network use <tor|vpn|clearnet>` — persist the next process route; same-route use is a live no-op, while a conflicting frozen route requires restart
-- `hermes mordred network status` — show current active path
-- `hermes mordred policy show` — print effective policy
-- `hermes mordred policy explain <skill-id>` — explain why a given skill is allowed/blocked
-- `hermes mordred policy dry-run <skill-path>` — predict install-time decision without installing
-- `hermes mordred policy reload` — invalidate in-memory policy cache
-- `hermes mordred audit tail [-n N]` — print last N entries from `~/.hermes/mordred/audit.log`
-- `hermes mordred audit grep <pattern>` — search audit log
-- `hermes mordred keyvault init` — Seed Phrase + Passphrase + PoW generation flow
-- `hermes mordred keyvault list` — list key IDs (no key material)
-- `hermes mordred keyvault verify-digest` — re-display digest
-- `hermes mordred keyvault recover --blob <path>` — recovery on different machine
-- `hermes mordred audit decrypt --date YYYY-MM-DD` — from Phase 4 onward, decrypts encrypted historical logs via the selected native backend
+- `hermes-mordred configure` — asks Mordred-specific questions; with `--with-hermes-setup` it first spawns `hermes setup` as a child process (skipped by default)
+- `hermes-mordred upgrade` — Story 1 / 1.5 single-command migration
+- `hermes-mordred install <skill>` — skill installation via privacy-check (a substitute until a skill install hook is added to Hermes core)
+- `hermes-mordred network init` — on-demand network-privacy setup (Tor / VPN / clearnet + Mullvad); separate from `configure`, re-runnable (blank Mullvad answer keeps the current secret). `--non-interactive` is flag-driven (`--path` / `--tor-binary` / `--tor-socks-port` / `--mullvad-relay` / `--mullvad-killswitch`); `--clear-mullvad` removes the stored secret. The Mullvad secret is never accepted as a CLI flag.
+- `hermes-mordred network use <tor|vpn|clearnet>` — persist the next process route; same-route use is a live no-op, while a conflicting frozen route requires restart
+- `hermes-mordred network status` — show current active path
+- `hermes-mordred policy show` — print effective policy
+- `hermes-mordred policy explain <skill-id>` — explain why a given skill is allowed/blocked
+- `hermes-mordred policy dry-run <skill-path>` — predict install-time decision without installing
+- `hermes-mordred policy reload` — invalidate in-memory policy cache
+- `hermes-mordred audit tail [-n N]` — print last N entries from `~/.hermes/mordred/audit.log`
+- `hermes-mordred audit grep <pattern>` — search audit log
+- `hermes-mordred keyvault init` — Seed Phrase + Passphrase + PoW generation flow
+- `hermes-mordred keyvault list` — list key IDs (no key material)
+- `hermes-mordred keyvault verify-digest` — re-display digest
+- `hermes-mordred keyvault recover --blob <path>` — recovery on different machine
+- `hermes-mordred audit decrypt --date YYYY-MM-DD` — from Phase 4 onward, decrypts encrypted historical logs via the selected native backend
 
 ## Operational Guarantees & Caveats
 
@@ -1239,7 +1249,7 @@ Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock
 
 - Loaded at `on_session_start` (when the Hermes session starts)
 - Cached in-memory for the session lifetime
-- Reload via `hermes mordred policy reload` (an internal function call; a fs watcher is not introduced in v1)
+- Reload via `hermes-mordred policy reload` (an internal function call; a fs watcher is not introduced in v1)
 - Intentional tradeoff: prevents hot-path file reads; policy edits require an explicit reload
 
 ### Plugin Versioning & Compatibility
@@ -1255,9 +1265,9 @@ Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock
 ### Observability
 
 - All hook decisions (allow / block / override) are logged via the audit log policy above
-- `hermes mordred policy explain <skill-id>` gives a per-skill decision trace
-- `hermes mordred policy dry-run <skill-path>` predicts install-time decision without filesystem mutation
-- `hermes mordred network status` reports active path + health
+- `hermes-mordred policy explain <skill-id>` gives a per-skill decision trace
+- `hermes-mordred policy dry-run <skill-path>` predicts install-time decision without filesystem mutation
+- `hermes-mordred network status` reports active path + health
 - LLM Guard prints the active provider override target in the startup banner
 - Operates in parallel with Hermes's observability plugins (langfuse, etc.) without conflict
 

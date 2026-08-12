@@ -93,7 +93,10 @@ extra rather than modifying or sending PRs to Hermes upstream.
 
 This is the binding decision:
 
-1. `mordred-hermes` remains a standalone repository and PyPI package.
+1. Mordred remains a standalone repository and PyPI package. The public
+   distribution moves from `mordred-hermes` to `hermes-mordred` through the
+   staged compatibility migration in §6; the Python package remains
+   `mordred_hermes`.
 2. Hermes is an external dependency, not a git parent or subtree.
 3. No PRs are submitted to Hermes upstream.
 4. Plugin-side degraded/refusal behavior remains explicit and audited.
@@ -102,13 +105,40 @@ This is the binding decision:
 
 ## 6. Naming Conventions
 
-- Distribution: `mordred-hermes`.
+- Distribution: `hermes-mordred` from `0.1.0a16`; the old
+  `mordred-hermes` project remains as a metadata-only compatibility shim.
 - Import package: `mordred_hermes`.
 - Entry points and config IDs: `mordred_*`.
-- Standalone CLI: `hermes-mordred`.
-- Host CLI when supported: `hermes mordred`.
+- Canonical operator CLI: `hermes-mordred`.
+- Optional host compatibility alias: the registered `mordred` subcommand on
+  supported Hermes versions; it is not used in operator guidance.
 - Persistent state: `<HERMES_HOME>/mordred/` and the established extension
   state under `<HERMES_HOME>/extension/`.
+
+### Distribution rename contract (decided 2026-08-12)
+
+`mordred-hermes` and `hermes-mordred` are distinct PyPI projects. The rename
+therefore uses a staged release rather than treating the metadata edit as an
+in-place rename:
+
+1. Publish `hermes-mordred==0.0.0.dev0` from
+   `packaging/hermes-mordred-reservation/` to TestPyPI and PyPI with
+   `release.yml` mode `reserve-rename`.
+2. Only after both reservations exist, change the real root distribution to
+   `hermes-mordred` and bump it to `0.1.0a16`.
+3. Publish a metadata-only `mordred-hermes==0.1.0a16` compatibility shim that
+   depends on the matching `hermes-mordred` release and forwards every extra.
+   The shim must not ship `mordred_hermes` files or console scripts, because
+   two distributions owning the same installed paths make uninstall unsafe.
+4. Publish and verify the new real distribution before publishing the old-name
+   shim, first on TestPyPI and then in the same order on PyPI.
+5. Change the GitHub repository name only after both PyPI projects work, then
+   update every PyPI/TestPyPI Trusted Publisher to the new repository claim.
+
+Until step 1 is recorded as complete, the root package metadata and public
+installer continue to use `mordred-hermes`. Native helper names, persistent
+key identifiers, state paths, plugin IDs, and `mordred_hermes` imports are
+compatibility identifiers and are not renamed.
 
 ## 7. Platform Support [DECIDED]
 

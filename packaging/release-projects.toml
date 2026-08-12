@@ -1,0 +1,18 @@
+# Machine-readable source of truth for release.yml project routing. Keep PyPI
+# names out of ad-hoc workflow conditionals: publishing the right artifact to
+# the wrong project is irreversible.
+
+[mode.reserve]
+directory = "packaging/name-reservation"
+name = "mordred-hermes"
+reservation = true
+
+[mode.reserve-rename]
+directory = "packaging/hermes-mordred-reservation"
+name = "hermes-mordred"
+reservation = true
+
+[mode.release]
+directory = "."
+name = "mordred-hermes"
+reservation = false
