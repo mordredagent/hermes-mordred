@@ -39,9 +39,23 @@ The package exposes six `hermes_agent.plugins` entry points:
 
 ## Install (users, from PyPI)
 
-Install Mordred into the same environment that runs Hermes, normally
-`~/.hermes/hermes-agent/venv`. Hermes-managed environments often have no
-`pip`, so use `uv pip install --python ...`:
+Start with an installed
+[Hermes Agent](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md),
+then run the Mordred installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+```
+
+The script follows Hermes's own install layout: it resolves the environment
+behind the `hermes` on your `PATH`, checks the Hermes version, selects the
+macOS or Linux dependencies, installs the PyPI package there, and writes a
+`hermes-mordred` launcher next to `hermes` that scrubs `PYTHONPATH` /
+`PYTHONHOME` exactly as Hermes's own launcher does. It does not configure
+Mordred or create keys.
+
+To inspect the script first, download it and run `less mordred-install.sh`
+before `bash mordred-install.sh`. The equivalent manual commands are:
 
 ```sh
 # macOS
@@ -53,9 +67,8 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   "mordred-hermes[keyvault]==0.1.0a13"
 ```
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first if
-needed. If the venv includes `pip`, its `bin/pip install ...` command is also
-valid.
+See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
+for the inspect-before-running sequence and first-time setup.
 
 Optional extras:
 
@@ -76,43 +89,41 @@ required.
 
 ### Use it
 
-Start with the standalone command installed in the Hermes venv:
+Start with the standalone command:
 
 ```sh
-M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
-
-$M configure                 # policy / LLM / harness setup
-$M network init              # optional: Tor / VPN / clearnet
+hermes-mordred configure                 # policy / LLM / harness setup
+hermes-mordred network init              # optional: Tor / VPN / clearnet
 ```
 
 Prepare the platform key helper, then create the keyvault:
 
 ```sh
 # macOS: unattended keys work in background gateways without Touch ID prompts
-$M keyvault enable-se
-MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+hermes-mordred keyvault enable-se
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred keyvault init
 
 # Linux: run these instead
-$M keyvault enable-tpm
-$M keyvault init
+hermes-mordred keyvault enable-tpm
+hermes-mordred keyvault init
 ```
 
 Turn on encryption and verify it:
 
 ```sh
-$M encryption enable env
-$M status                    # the env row should read [on] enrolled
+hermes-mordred encryption enable env
+hermes-mordred status                    # the env row should read [on] enrolled
 ```
 
 Everyday commands:
 
 ```sh
-$M status
-$M encryption status
-$M encryption enable <env|config|memory|workspace|all>
-$M network use <tor|vpn|clearnet>
-$M network status
-$M audit tail
+hermes-mordred status
+hermes-mordred encryption status
+hermes-mordred encryption enable <env|config|memory|workspace|all>
+hermes-mordred network use <tor|vpn|clearnet>
+hermes-mordred network status
+hermes-mordred audit tail
 ```
 
 Once Hermes 0.19.0+ is configured and the plugins are enabled,
@@ -127,7 +138,7 @@ for every command and interactive prompt.
 ### Verify discovery
 
 ```sh
-$M plugins list
+hermes-mordred plugins list
 # mordred_e2e / mordred_keyvault / mordred_llm_guard / mordred_network /
 # mordred_privacy_check / mordred_wizard
 ```
@@ -141,7 +152,9 @@ The optional extension server listens on `ws://127.0.0.1:7788/ext`, validates
 the local peer and browser origin, and supports pairing, encrypted chat,
 history, wallet accounts, and approval-bound signing.
 
-Install the required extras:
+The one-line installer deliberately installs only the platform keyvault extra,
+so `extension serve` exits with code 2 and prints how to add the `extension`
+extra until it is installed:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
@@ -159,9 +172,9 @@ are in the
 ### Run it (standalone)
 
 ```sh
-$M extension serve           # foreground; Ctrl+C to stop
+hermes-mordred extension serve           # foreground; Ctrl+C to stop
 # second terminal
-$M extension pair
+hermes-mordred extension pair
 ```
 
 Use `--port 7799` when another Hermes gateway already owns port 7788.
@@ -216,9 +229,9 @@ uv run mypy --strict src tools
 |---|---|
 | A background gateway starts without vault-managed secrets | The vault likely uses an attended Secure Enclave key. Follow the verified backup/recovery procedure in [USAGE §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) and create the replacement key with `MORDRED_SEKEY_UNATTENDED=1`. Re-running `enable-se` alone does not change an existing key policy. |
 | `extension serve` reports port 7788 in use | Run `lsof -nP -iTCP:7788 -sTCP:LISTEN`. If Hermes already owns it, the API is running; otherwise stop the stale process or use `--port 7799`. |
-| Tor/VPN communication stops | Run `$M network status`, then re-establish the selected route with `$M network use <tor|vpn|clearnet>`. Restart Hermes after changing routes. |
-| The audit log is plaintext and contains `mordred.degraded.audit_encryption_unavailable` | Restart the process from a context that can access the device key. Recovery is automatic; purge rotated plaintext logs with `$M audit purge --before YYYY-MM-DD --yes` if required. |
-| The recovery passphrase is lost | If the current device key still works, run `$M encryption change-passphrase`. If both the passphrase and device key are gone, the encrypted data cannot be recovered. |
+| Tor/VPN communication stops | Run `hermes-mordred network status`, then re-establish the selected route with `hermes-mordred network use <tor\|vpn\|clearnet>`. Restart Hermes after changing routes. |
+| The audit log is plaintext and contains `mordred.degraded.audit_encryption_unavailable` | Restart the process from a context that can access the device key. Recovery is automatic; purge rotated plaintext logs with `hermes-mordred audit purge --before YYYY-MM-DD --yes` if required. |
+| The recovery passphrase is lost | If the current device key still works, run `hermes-mordred encryption change-passphrase`. If both the passphrase and device key are gone, the encrypted data cannot be recovered. |
 
 ## Upgrading
 
@@ -226,7 +239,14 @@ Package upgrades and config migration are separate operations.
 
 ### Upgrade the installed package
 
-Install the desired version into the Hermes venv:
+Re-run the installer to upgrade Mordred without upgrading Hermes:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+```
+
+For a version-pinned upgrade, install the desired version manually into the
+Hermes environment:
 
 ```sh
 # macOS; use [keyvault] on Linux
@@ -234,11 +254,11 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   "mordred-hermes[macos]==<new-version>"
 ```
 
-For the newest release without pinning:
+The equivalent manual command for the newest release is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade "mordred-hermes[macos]"
+  --upgrade-package mordred-hermes "mordred-hermes[macos]"
 ```
 
 Restart the Hermes gateway or `extension serve` after upgrading.
@@ -256,12 +276,12 @@ loaded path:
 
 ### Migrate config with `hermes-mordred upgrade`
 
-`$M upgrade` migrates an existing Hermes or OpenClaw configuration. It is
+`hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration. It is
 idempotent and safe to repeat:
 
 ```sh
-$M upgrade
-$M upgrade --non-interactive --policy-conflict keep-existing
+hermes-mordred upgrade
+hermes-mordred upgrade --non-interactive --policy-conflict keep-existing
 ```
 
 Fresh installations should use `configure`, not `upgrade`.
@@ -271,21 +291,23 @@ Fresh installations should use `configure`, not `upgrade`.
 Decrypt data before removing the package or keys:
 
 ```sh
-$M encryption disable all
-$M vault disable-config-decrypt
-$M encryption status          # verify every target is off
+hermes-mordred encryption disable all
+hermes-mordred vault disable-config-decrypt
+hermes-mordred encryption status          # verify every target is off
 ```
 
 Optionally destroy profile-owned keys only after verifying the plaintext data:
 
 ```sh
-$M keyvault reset --yes        # irreversible
+hermes-mordred keyvault reset --yes        # irreversible
 ```
 
 Remove the six `mordred_*` entries from `plugins.enabled`, then uninstall:
 
 ```sh
 uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
+# the launcher lands next to `hermes`, wherever that is
+rm -f "$(dirname "$(command -v hermes)")/hermes-mordred"
 ```
 
 State under `~/.hermes/mordred/` and installed native helpers are intentionally
@@ -298,6 +320,7 @@ backup still depends on them.
 src/mordred_hermes/    plugins and shared internals
 native/                Secure Enclave and TPM helper sources
 skills/                read-only Mordred status skill
+scripts/install.sh      user installer for the Hermes-managed environment
 tools/                 release and compatibility tooling
 tests/                 unit and opt-in integration tests
 docs/user/             operator documentation

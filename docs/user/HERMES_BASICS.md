@@ -1,132 +1,93 @@
 # Running the base Hermes agent (host CLI)
 
-> **This is a different CLI from Mordred.** [`QUICKSTART.md`](./QUICKSTART.md)
-> and [`USAGE.md`](./USAGE.md) drive `hermes-mordred` — the privacy layer. This
-> page covers the **base Hermes agent**, the `hermes` command itself, run from
-> *this* dev checkout. You do not need any of it to set Mordred up; it is here
-> because both commands live in the **same** `.venv` (`hermes` arrives as the
-> `hermes-agent` dependency), and newcomers reasonably want to know how to drive
-> the agent underneath.
->
-> For anything beyond the basics below, the authority is
-> [hermes-agent's own documentation](https://pypi.org/project/hermes-agent/) —
-> this repo deliberately does not mirror it.
+> **This is different from Mordred.** `hermes` runs the agent;
+> `hermes-mordred` configures the privacy layer. The authoritative source for
+> Hermes itself is the
+> [official Hermes documentation](https://github.com/NousResearch/hermes-agent/tree/main/website/docs).
 
+## Install Hermes
+
+On macOS, the Hermes Desktop installer is the recommended graphical route. For
+a command-line installation on macOS or Linux, use the official installer:
+
+```sh
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+Open a new terminal after it finishes. The installer provisions Python, `uv`,
+dependencies, a managed environment under `~/.hermes/hermes-agent/`, and the
+`hermes` command on `PATH`. You do not need to create a project virtual
+environment for normal use.
+
+Verify the installation without configuring a provider:
+
+```sh
+hermes doctor
+hermes version
+```
 
 ## The `hermes` binary is already in `.venv`
 
-The base `hermes` agent ships inside the **same** `.venv` you built in
-[Build the venv](./QUICKSTART.md#build-the-venv) — it comes from the `hermes-agent`
-dependency, so there is **nothing extra to build**. If you skipped that step, a
-plain `uv sync` from the repo root creates `.venv` with both binaries:
-
-```sh
-cd <repo-root>            # /Users/.../Mordred-Hermes
-uv sync                   # reads ./uv.lock, creates ./.venv with `hermes` + `hermes-mordred`
-```
-
-Plain `uv sync` (no `--extra`) is enough to run the base agent; the
-`--extra macos` / `--extra keyvault` from
-[QUICKSTART](./QUICKSTART.md#build-the-venv) only adds Mordred's keyvault
-crypto stack. (Base-agent integrations such as the messaging gateway and local
-voice are `hermes-agent`'s own extras, not re-exposed by this repo — see the
-hermes-agent docs to enable them.) Confirm it landed:
-
-```sh
-.venv/bin/hermes --version   # prints  Project: <repo-root>
-```
-
-> **No uv?** `brew install uv` (macOS), or
-> `curl -LsSf https://astral.sh/uv/install.sh | sh`. Re-running `uv sync` is safe
-> and idempotent.
-
-## Launch this repo's copy (not the global one)
-
-A global `hermes` may already be on your `PATH` at `~/.local/bin/hermes` — that
-is a **separate install** (`~/.hermes/hermes-agent/`), not this checkout. Once
-you've [built `.venv`](./QUICKSTART.md#build-the-venv), activate it to run this repo's
-pinned copy:
-
-```sh
-cd <repo-root>                 # /Users/.../Mordred-Hermes
-source .venv/bin/activate      # fish: source .venv/bin/activate.fish
-which hermes                   # → <repo-root>/.venv/bin/hermes  (confirms the repo copy)
-hermes --version               # prints  Project: <repo-root>
-```
-
-- **Purpose**: make `hermes` resolve to this repo's `.venv` copy, overriding the global one.
-- **Result**: activation prepends `.venv/bin` to `PATH`, so `hermes` now runs the
-  `hermes-agent` version pinned in `uv.lock` (installed into `.venv`, not the
-  global `~/.local/bin/hermes`). `deactivate` reverts to the global `hermes`.
-
-> One-shot without activating: run the binary directly — `.venv/bin/hermes <args>`.
-
-## Good first commands to try
-
-No provider or auth needed — pure sanity checks:
-
-| Do (command) | Purpose |
-|---|---|
-| `hermes doctor` | Diagnose environment / config problems. |
-| `hermes status` | One-screen dashboard (model, keys, auth). |
-| `hermes tools` | List / toggle the 40+ tools. |
-| `hermes config list` | Dump current config. |
-| `hermes model` | Interactive provider + model picker. |
-
-Real end-to-end smoke test — needs a provider. The free path is Nous Portal OAuth:
-
-```sh
-hermes auth add nous --type oauth        # free login, opens a browser
-hermes -z "Say hi and list your tools"   # one-shot prompt — fastest "does it work"
-hermes                                    # full interactive TUI
-```
-
-> Have an API key instead? Put e.g. `OPENROUTER_API_KEY=…` in a `.env`, or run
-> `hermes config set`, then skip the Portal login.
+This applies to a development checkout: `uv sync --all-extras` creates the
+repository's `.venv` with both `hermes` and `hermes-mordred`. Normal users do
+not need that environment; the official installer puts Hermes in its managed
+environment under `~/.hermes/hermes-agent/venv` and exposes `hermes` on `PATH`.
 
 ## First-time setup
 
+The fastest provider setup uses Nous Portal OAuth:
+
 ```sh
-hermes setup                  # full interactive wizard
+hermes setup --portal
 ```
 
-Walks six sections in order: **model** (provider + model — the key one),
-**terminal** (where the agent runs), **gateway** (messaging platforms — skip if
-CLI-only), **tools**, **agent**, **tts** (optional). Variants:
+For the full interactive wizard instead:
 
-| Do (command) | Purpose |
+```sh
+hermes setup
+```
+
+It configures the model, terminal, messaging gateway, tools, agent behavior,
+and optional speech features. Re-run only missing items with
+`hermes setup --quick`, or choose a provider later with `hermes model`.
+
+## Good first commands to try
+
+| Command | Purpose |
 |---|---|
-| `hermes setup --quick` | Only prompt for what is missing / unset. |
-| `hermes setup model` | Re-run a single section. |
-| `hermes setup --reset` | Reset config back to defaults. |
-
-Verify with `hermes status` (keys show ✓), then `hermes -z "say hi"`.
+| `hermes` | Start the interactive agent. |
+| `hermes -z "Say hi"` | Run one prompt and exit. |
+| `hermes doctor` | Diagnose environment and configuration problems. |
+| `hermes status` | Show model, authentication, and runtime status. |
+| `hermes tools` | Configure available tools. |
+| `hermes model` | Select the provider and model. |
+| `hermes update` | Update an installer-managed Hermes checkout. |
 
 ## Run it in the background (messaging gateway)
 
-The agent CLI is not a daemon — the long-running background process is the
-**messaging gateway** (Telegram / Discord / Slack / …). Configure a platform
-first, then pick a run mode:
+Configure a messaging platform first:
 
 ```sh
-hermes gateway setup          # configure a platform (e.g. Telegram bot token)
+hermes gateway setup
 ```
 
-| Do (command) | Purpose | Result |
-|---|---|---|
-| `hermes gateway install` → `hermes gateway start` | Install + run as a macOS **launchd** service. | Background service surviving logout/restart; manage with `gateway status` / `stop` / `restart`. |
-| `hermes gateway run` | Foreground (good for testing, WSL, Docker, Termux). | Runs until Ctrl-C. |
-| `nohup hermes gateway run > ~/hermes-gateway.log 2>&1 &` | Quick detached background run. | Logs to the file; survives the shell. |
+Then choose a run mode:
 
-> **Dev-copy caveat.** `gateway install` writes a launchd unit pointing at
-> whichever `hermes` resolves *at install time*. To bind the service to **this
-> repo's** copy, run `install` with the venv activated; otherwise it picks up the
-> global `~/.local/bin/hermes`. For day-to-day repo testing, `gateway run` inside
-> tmux/screen is simpler and unambiguous.
+| Command | Purpose |
+|---|---|
+| `hermes gateway run` | Run in the foreground until Ctrl+C. |
+| `hermes gateway install` | Install a launchd/systemd service. |
+| `hermes gateway start` | Start the installed service. |
+| `hermes gateway status` | Check the service. |
+| `hermes gateway restart` | Restart after configuration or plugin updates. |
 
----
+## Launch this repo's copy (not the global one)
+
+Contributors who need the repository's editable Hermes dependency should use
+[`docs/dev/setup.md`](../dev/setup.md). That environment is deliberately
+separate from the normal installer-managed Hermes environment.
 
 ## Back to Mordred
 
-- [`QUICKSTART.md`](./QUICKSTART.md) — the Mordred setup path.
-- [`USAGE.md`](./USAGE.md) — full Mordred command reference.
+- [`QUICKSTART.md`](./QUICKSTART.md) — install and configure Mordred.
+- [`USAGE.md`](./USAGE.md) — complete Mordred command reference.

@@ -1,8 +1,8 @@
 # Mordred — Quickstart
 
 > **Audience**: Hermes users who want to protect local secrets quickly.
-> This guide starts with the normal PyPI install. Developers working from a
-> checkout can use the short alternative under [Build the venv](#build-the-venv).
+> This guide uses the normal Hermes and Mordred installers. Contributors
+> working from a checkout should use [`docs/dev/setup.md`](../dev/setup.md).
 > For every option and prompt, see [`USAGE.md`](./USAGE.md).
 
 ## What is Mordred?
@@ -16,26 +16,69 @@ local-LLM policy.
 
 You need:
 
-- An installed Hermes agent, normally under `~/.hermes/hermes-agent/`.
-- Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
-- macOS, or Linux with TPM 2.0 development/runtime support.
-- A real interactive terminal for `keyvault init`.
+- macOS, or Linux with TPM 2.0 development/runtime support;
+- a real interactive terminal for `keyvault init`; and
+- an installed [Hermes Agent](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md).
 
-Install Mordred into Hermes's own venv:
+If `hermes` is not installed yet, use its official installer, then reload your
+shell:
+
+```sh
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+Open a new terminal after it finishes so the new `hermes` command is on `PATH`.
+Hermes's installer provides its own Python environment and `uv`; you do not
+need to create a virtual environment or install Python separately for Mordred.
+
+## Install Mordred
+
+Run the Mordred installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+```
+
+It resolves the environment behind the `hermes` on your `PATH`, checks the
+Hermes version, selects the macOS or Linux dependencies, installs Mordred from
+PyPI, and puts a `hermes-mordred` launcher next to `hermes`. It does **not**
+change configuration, create keys, or encrypt data.
+
+Only the platform keyvault extra is installed. Features with their own extras —
+the browser extension, Ethereum keys, deep Tor liveness checks — need the extra
+added afterwards; see the manual command below.
+
+If you prefer to inspect a downloaded script before running it:
+
+```sh
+curl -fsSLo mordred-install.sh \
+  https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh
+less mordred-install.sh
+bash mordred-install.sh
+rm mordred-install.sh
+```
+
+<details>
+<summary>Manual install into the Hermes environment</summary>
+
+The installer automates these commands. Use them directly only when you need
+manual package control:
 
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade "mordred-hermes[macos]"
+  --upgrade-package mordred-hermes "mordred-hermes[macos]"
 
 # Linux: run this instead
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade "mordred-hermes[keyvault]"
+  --upgrade-package mordred-hermes "mordred-hermes[keyvault]"
 ```
+
+</details>
 
 ### Get the repository
 
-PyPI users can skip this section. Contributors can clone the source with:
+Normal users can skip this section. Contributors can clone the source with:
 
 ```sh
 git clone https://github.com/InternetMaximalism/mordred-hermes.git
@@ -44,77 +87,60 @@ cd mordred-hermes
 
 ### Build the venv
 
-PyPI users should keep using the Hermes-managed venv installed above. From a
-development checkout, create the separate editable environment instead:
-
-```sh
-uv sync --all-extras
-.venv/bin/python -c "import mordred_hermes; print(mordred_hermes.__file__)"
-# expected: <repo-root>/src/mordred_hermes/__init__.py
-```
-
-The development environment still reads real `~/.hermes` state unless you set
-`HERMES_HOME`. See [`setup.md`](../dev/setup.md) before testing destructive
-commands.
+Normal users should keep using the installer-managed Hermes environment. From
+a development checkout, create the separate editable environment with
+`uv sync --all-extras`; follow [`docs/dev/setup.md`](../dev/setup.md) so tests
+cannot modify production state under `~/.hermes`.
 
 ## Setup at a glance
 
-Choose the command path for your installation:
+Run the interactive configuration, then optionally choose a network route:
 
 ```sh
-# Normal PyPI install
-M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
-
-# Development checkout: use this assignment instead
-# M=.venv/bin/hermes-mordred
-```
-
-Then run the common setup:
-
-```sh
-$M configure                 # policy / LLM / harness
-$M network init              # optional: Tor / VPN / clearnet
+hermes-mordred configure       # policy / LLM / harness
+hermes-mordred network init    # optional: Tor / VPN / clearnet
 ```
 
 Prepare the platform helper and create the keyvault:
 
 ```sh
 # macOS — recommended for background gateways
-$M keyvault enable-se
-MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+hermes-mordred keyvault enable-se
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred keyvault init
 
 # Linux — run these instead
-$M keyvault enable-tpm
-$M keyvault init
+hermes-mordred keyvault enable-tpm
+hermes-mordred keyvault init
 ```
 
 Finally encrypt `.env` and verify:
 
 ```sh
-$M encryption enable env
-$M status
+hermes-mordred encryption enable env
+hermes-mordred status
 ```
 
 ## 1. Invoke it
 
-`hermes-mordred` always works after installation. Hermes 0.19.0+ also exposes
-the same tree as `hermes mordred ...` after `configure` enables the plugins.
-Use the standalone path for the first run and on older Hermes releases.
+The installer puts `hermes-mordred` in the same directory as `hermes`, so it
+works from any directory and in sh, bash, zsh, and fish. If that directory is
+not on `PATH`, the installer prints it at the end — add it and reload the
+shell.
 
-For fish, set the command with `set M
-~/.hermes/hermes-agent/venv/bin/hermes-mordred`; the `M=...` syntax above is for
-sh, bash, and zsh.
+Hermes 0.19.0+ also exposes the same command tree as `hermes mordred ...` after
+`configure` enables the plugins. Use `hermes-mordred` for first setup and on
+older supported Hermes releases.
 
 ## 2. First run, in order
 
 | # | Command | Result |
 |---|---|---|
-| 1 | `$M configure` | Writes Mordred policy and enables all six plugins. |
-| 2 | `$M network init` | Optionally selects Tor, VPN, or clearnet. |
-| 3 | `$M keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
-| 4 | `$M keyvault init` | Creates the device key and recovery material. |
-| 5 | `$M encryption enable env` | Enrolls `.env` in the encrypted vault. |
-| 6 | `$M status` | Shows policy, route, keyvault, and encryption state. |
+| 1 | `hermes-mordred configure` | Writes Mordred policy and enables all six plugins. |
+| 2 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
+| 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
+| 4 | `hermes-mordred keyvault init` | Creates the device key and recovery material. |
+| 5 | `hermes-mordred encryption enable env` | Enrolls `.env` in the encrypted vault. |
+| 6 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
 
 A successful final status includes an `env [on] enrolled` row. The `workspace`
 target has a separate `sealed` / `open` / `off` state: `sealed` is protected,
@@ -125,14 +151,14 @@ not disabled. Add `--json` for machine-readable status.
 If policy and network settings can wait, the minimum path is:
 
 ```sh
-# prepare one helper first: enable-se on macOS, enable-tpm on Linux
-$M keyvault enable-se
-MORDRED_SEKEY_UNATTENDED=1 $M encryption enable env  # creates the vault if needed
-$M status
+# macOS
+hermes-mordred keyvault enable-se
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
+hermes-mordred status
 ```
 
-On Linux replace the first line with `$M keyvault enable-tpm` and omit
-`MORDRED_SEKEY_UNATTENDED=1`.
+On Linux, replace the first line with `hermes-mordred keyvault enable-tpm` and
+omit `MORDRED_SEKEY_UNATTENDED=1`.
 
 Running `keyvault init` first is still recommended: its ceremony displays the
 24-word recovery seed and verifies the offline digest before data is enrolled.
@@ -143,10 +169,10 @@ ceremony is in
 ## 4. Encrypt more targets (optional)
 
 ```sh
-$M encryption enable config
-$M encryption enable memory
-$M encryption enable all
-$M encryption status
+hermes-mordred encryption enable config
+hermes-mordred encryption enable memory
+hermes-mordred encryption enable all
+hermes-mordred encryption status
 ```
 
 `disable` is reversible and retains the encrypted copy. `purge` deletes it and
@@ -156,9 +182,9 @@ encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recomme
 ## 5. Network settings 🌐
 
 ```sh
-$M network init
-$M network use <tor|vpn|clearnet>
-$M network status
+hermes-mordred network init
+hermes-mordred network use <tor|vpn|clearnet>
+hermes-mordred network status
 ```
 
 Changing the selected path is saved immediately, but a running Hermes process
@@ -168,13 +194,13 @@ supports any VPN provider; Mullvad has the most guided setup. See
 
 ## 6. Tune policy (optional)
 
-`$M configure` defaults to `lenient`: guards audit problems without blocking
-ordinary use. `strict` blocks non-allowlisted cloud LLMs and unsafe paths;
-`off` disables policy enforcement.
+`hermes-mordred configure` defaults to `lenient`: guards audit problems without
+blocking ordinary use. `strict` blocks non-allowlisted cloud LLMs and unsafe
+paths; `off` disables policy enforcement.
 
 ```sh
-$M policy show
-$M configure --non-interactive --policy strict --no-allow-cloud-llm
+hermes-mordred policy show
+hermes-mordred configure --non-interactive --policy strict --no-allow-cloud-llm
 ```
 
 The complete question-by-question explanation is in
@@ -183,8 +209,8 @@ The complete question-by-question explanation is in
 ## Reset or remove the keyvault
 
 ```sh
-$M keyvault reset            # asks you to type reset
-$M keyvault reset --yes      # non-interactive and immediate
+hermes-mordred keyvault reset         # asks you to type reset
+hermes-mordred keyvault reset --yes   # non-interactive and immediate
 ```
 
 This destroys profile-owned key material. Export and verify a backup first;
@@ -195,22 +221,23 @@ prints the exact key IDs before interactive confirmation.
 
 | Check | Command |
 |---|---|
-| Everything at a glance | `$M status` |
-| Encryption targets | `$M encryption status` |
-| Active route and liveness | `$M network status` |
-| Key IDs | `$M keyvault list` |
-| Recovery digest | `$M keyvault verify-digest` |
-| Recent audit entries | `$M audit tail` |
-| Discovered Mordred plugins | `$M plugins list` |
+| Everything at a glance | `hermes-mordred status` |
+| Encryption targets | `hermes-mordred encryption status` |
+| Active route and liveness | `hermes-mordred network status` |
+| Key IDs | `hermes-mordred keyvault list` |
+| Recovery digest | `hermes-mordred keyvault verify-digest` |
+| Recent audit entries | `hermes-mordred audit tail` |
+| Discovered Mordred plugins | `hermes-mordred plugins list` |
 
 ## Ethereum keys (HD wallet)
 
-Install the `ethereum` extra, then use:
+Install the `ethereum` optional extra using the manual installation pattern
+above, then use:
 
 ```sh
-$M keyvault eth new
-$M keyvault eth derive --index 0
-$M keyvault eth address --envelope-id <id>
+hermes-mordred keyvault eth new
+hermes-mordred keyvault eth derive --index 0
+hermes-mordred keyvault eth address --envelope-id <id>
 ```
 
 Private keys stay in the keyvault. Options and BIP-39 caveats are in
@@ -219,8 +246,8 @@ Private keys stay in the keyvault. Options and BIP-39 caveats are in
 ## Running the base Hermes agent (host CLI)
 
 Mordred's CLI configures the privacy layer; the base `hermes` command runs the
-agent itself. See [`HERMES_BASICS.md`](./HERMES_BASICS.md) for setup, provider
-authentication, interactive use, and the messaging gateway.
+agent itself. See [`HERMES_BASICS.md`](./HERMES_BASICS.md) for installation,
+provider authentication, interactive use, and the messaging gateway.
 
 ## Glossary
 
@@ -236,5 +263,5 @@ authentication, interactive use, and the messaging gateway.
 
 - [`USAGE.md`](./USAGE.md) — complete command reference and ceremonies.
 - [`EXTENSION.md`](./EXTENSION.md) — browser extension and E2E messaging.
-- [`setup.md`](../dev/setup.md) — development environment and safe isolation.
+- [`setup.md`](../dev/setup.md) — development checkout and safe test isolation.
 - [README troubleshooting](https://github.com/InternetMaximalism/mordred-hermes/blob/main/README.md#troubleshooting) — common failures and recovery.
