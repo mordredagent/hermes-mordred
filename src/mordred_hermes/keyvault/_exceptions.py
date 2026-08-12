@@ -89,7 +89,7 @@ class WrapNativeUnavailable(WrapError):
        ``None``. The message names the actual platform.
     2. macOS without ``pyobjc-framework-Security`` installed — the
        underlying :class:`ImportError` is chained via ``__cause__``.
-       The message mentions ``pip install mordred-hermes[macos]``.
+       The message mentions ``pip install hermes-mordred[macos]``.
     """
 
 

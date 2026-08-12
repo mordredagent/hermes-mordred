@@ -209,7 +209,7 @@ def config_status(*, home: Path, platform: str, hook_installed: bool | None = No
     hook = config_hook_installed() if hook_installed is None else hook_installed
     if hook:
         return TargetStatus("config", True, True, "vault-managed; decrypt hook installed (sealed on Hermes exit)")
-    detail = "vault-managed; decrypt hook NOT installed — plaintext stays on disk (reinstall the mordred-hermes wheel)"
+    detail = "vault-managed; decrypt hook NOT installed — plaintext stays on disk (reinstall the hermes-mordred wheel)"
     return TargetStatus("config", True, False, detail)
 
 

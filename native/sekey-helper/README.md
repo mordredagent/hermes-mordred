@@ -1,7 +1,7 @@
 # mordred-hermes-sekey
 
 A small, signed Swift CLI that performs Secure Enclave (SE) P-256 operations on
-behalf of the (unsigned) Python `mordred-hermes` keyvault.
+behalf of the (unsigned) Python `hermes-mordred` keyvault.
 
 ## Why this exists
 

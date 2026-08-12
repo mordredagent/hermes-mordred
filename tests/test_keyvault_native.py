@@ -147,7 +147,7 @@ def test_lazy_import_security_raises_with_install_hint_when_pyobjc_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On macOS without pyobjc, the user needs to run
-    ``pip install mordred-hermes[macos]``. The message must mention the
+    ``pip install hermes-mordred[macos]``. The message must mention the
     extra; the ImportError must be chained via ``__cause__`` so callers
     can introspect."""
     import sys

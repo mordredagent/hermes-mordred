@@ -414,7 +414,7 @@ def _display_seed_or_refuse(
     copy_hint = (
         f"  (copy it to that device from this machine: {script})\n"
         if script is not None
-        else "  (ships with mordred-hermes; copy it to that device first)\n"
+        else "  (ships with hermes-mordred; copy it to that device first)\n"
     )
     surface.banner(
         "\n"

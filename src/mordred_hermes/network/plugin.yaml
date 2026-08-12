@@ -2,7 +2,7 @@
 # is a Mordred-internal hint used by the shared integrity gate to detect a
 # disabled sibling (SPEC §Plugin-disable protection Tier A).
 name: mordred_network
-version: 0.1.0a15
+version: 0.1.0a16
 description: Process-scoped privacy routing and network policy enforcement
 author: InternetMaximalism
 privacy_lock: true

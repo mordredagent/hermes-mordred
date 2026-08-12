@@ -4,7 +4,7 @@ The vendored fork wired Slack/Discord/Teams E2E by editing each platform
 adapter (inbound decrypt) and ``gateway/run.py`` (start the extension server).
 This module replaces the *inbound* half with a single ``pre_gateway_dispatch``
 hook so the exact same behaviour runs on a stock ``hermes-agent`` install via
-``pip install mordred-hermes`` — no upstream edits, no fork.
+``pip install hermes-mordred`` — no upstream edits, no fork.
 
 ``pre_gateway_dispatch`` fires once per incoming ``MessageEvent`` after the
 internal-event guard but BEFORE auth/pairing and agent dispatch, and may return:

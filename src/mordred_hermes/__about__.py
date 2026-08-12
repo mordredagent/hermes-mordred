@@ -1,4 +1,4 @@
-# Single source of truth for the mordred-hermes package version.
+# Single source of truth for the hermes-mordred package version.
 #
 # Hatchling reads ``__version__`` from this file at build time
 # (``[tool.hatch.version] path`` in pyproject.toml), so the version is NOT
@@ -13,4 +13,4 @@
 # Bump with `python tools/bump_version.py <new-version>`, which rewrites this
 # file, the docs VERSION marker, and every plugin.yaml in lockstep. The
 # consistency is pinned by tests/test_packaging_versions.py.
-__version__ = "0.1.0a15"
+__version__ = "0.1.0a16"

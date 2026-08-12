@@ -44,6 +44,12 @@ Hermes version, selects the macOS or Linux dependencies, installs Mordred from
 PyPI, and puts a `hermes-mordred` launcher next to `hermes`. It does **not**
 change configuration, create keys, or encrypt data.
 
+For an existing `mordred-hermes==0.1.0a15` installation, the script verifies
+that `hermes-mordred>=0.1.0a16` is available before removing the old
+distribution and installing the new one. Configuration, keys, and state are
+preserved. Do not manually install the two real distributions on top of each
+other; use the installer or uninstall the legacy name first.
+
 Only the platform keyvault extra is installed. Features with their own extras —
 the browser extension, Ethereum keys, deep Tor liveness checks — need the extra
 added afterwards; see the manual command below.
@@ -67,11 +73,11 @@ manual package control:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package mordred-hermes "mordred-hermes[macos]"
+  --upgrade-package hermes-mordred "hermes-mordred[macos]"
 
 # Linux: run this instead
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package mordred-hermes "mordred-hermes[keyvault]"
+  --upgrade-package hermes-mordred "hermes-mordred[keyvault]"
 ```
 
 </details>

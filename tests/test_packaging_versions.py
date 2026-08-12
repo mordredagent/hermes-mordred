@@ -1,27 +1,28 @@
 """Tests guarding the PyPI release version invariants.
 
-Three invariants are pinned here:
+Four invariants are pinned here:
 
 1. **Name-reservation ordering (M7, TODO §0.5 L70).** M7 reserves the
    ``mordred-hermes`` distribution name on TestPyPI/PyPI by uploading an
    intentionally empty stub *before* the real implementation ships. The stub
-   lives at ``packaging/name-reservation/pyproject.toml``; the real package is
-   the top-level ``mordred-hermes/pyproject.toml``. PyPI never allows
-   re-uploading a deleted version, so the stub version is permanent. If the
-   stub version were >= the real version, the real release could never be
-   published under the same name.
+   lives at ``packaging/name-reservation/pyproject.toml``. After the rename,
+   that project is continued by the metadata-only compatibility shim.
 
-2. **Rename reservation (2026-08-12).** The future canonical
+2. **Rename reservation (2026-08-12).** The canonical
    ``hermes-mordred`` distribution has its own empty ``0.0.0.dev0`` stub. It
-   must remain a separate project until that name is reserved on both indexes.
+   shares its project name with the real root package after cutover.
 
-3. **Single-source version consistency (TODO §0.5 L64).** The real package no
+3. **Compatibility ownership.** The ``mordred-hermes`` shim matches the real
+   version, depends on that exact ``hermes-mordred`` release, forwards every
+   extra, and is configured to build a metadata-only wheel.
+
+4. **Single-source version consistency (TODO §0.5 L64).** The real package no
    longer hardcodes its version in pyproject. It is sourced dynamically from
    ``src/mordred_hermes/__about__.py`` (Hatch ``[tool.hatch.version] path``),
    which lives inside the importable package so sdist->wheel builds resolve it
    without the docs tree. The docs marker (``docs/dev/VERSION``), every
    ``plugin.yaml``, and the copy-paste install commands in ``README.md``
-   (the status line + every ``mordred-hermes[...]==`` install pin) and
+   (the status line + every ``hermes-mordred[...]==`` install pin) and
    ``docs/dev/setup.md`` (the ``--reinstall`` pin) must all match that single
    source — otherwise a release bump that touches only some of them ships an
    inconsistent version. ``tools/bump_version.py`` rewrites all of them in
@@ -45,10 +46,13 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 #: The empty stub uploaded first to claim the name (M7).
 _STUB_PYPROJECT = _PKG_ROOT / "packaging" / "name-reservation" / "pyproject.toml"
 
-#: The independent stub that reserves the target distribution name before the
-#: real package metadata changes. It intentionally does not yet match the root
-#: package name during the reservation gate.
+#: The historical stub that reserved the target distribution name before the
+#: root package adopted it. It now deliberately shares the canonical name while
+#: remaining permanently below every real release.
 _RENAME_STUB_PYPROJECT = _PKG_ROOT / "packaging" / "hermes-mordred-reservation" / "pyproject.toml"
+
+#: Metadata-only continuation of the old distribution name.
+_COMPAT_PYPROJECT = _PKG_ROOT / "packaging" / "mordred-hermes-compat" / "pyproject.toml"
 
 #: Release mode routing consumed directly by release.yml.
 _RELEASE_PROJECTS = _PKG_ROOT / "packaging" / "release-projects.toml"
@@ -72,11 +76,11 @@ _README = _PKG_ROOT / "README.md"
 #: ``_DOC_VERSION``.
 _SETUP_MD = _PKG_ROOT / "docs" / "dev" / "setup.md"
 
-#: Matches ``mordred-hermes[extra1,extra2]==<version>`` install pins and
+#: Matches ``hermes-mordred[extra1,extra2]==<version>`` install pins and
 #: captures the version. Requiring the version to start with a digit
 #: deliberately excludes the ``==<new-version>`` placeholder in README's
 #: Upgrading section — that's prose, not a real pin to check.
-_INSTALL_PIN_RE = re.compile(r"mordred-hermes\[[^\]]*\]==([0-9][^\s\"'#]*)")
+_INSTALL_PIN_RE = re.compile(r"hermes-mordred\[[^\]]*\]==([0-9][^\s\"'#]*)")
 
 
 def _read(pyproject: Path) -> dict[str, object]:
@@ -121,9 +125,10 @@ def _manifest_version(manifest: Path) -> str:
     return match.group(1)
 
 
-def test_stub_and_real_share_the_distribution_name() -> None:
-    """Both pyprojects must declare the same ``name`` — they are one project."""
-    assert _read(_STUB_PYPROJECT)["name"] == _read(_REAL_PYPROJECT)["name"] == "mordred-hermes"
+def test_distribution_names_follow_the_cutover_contract() -> None:
+    """Reservation sources stay attached to the project they originally claimed."""
+    assert _read(_STUB_PYPROJECT)["name"] == _read(_COMPAT_PYPROJECT)["name"] == "mordred-hermes"
+    assert _read(_RENAME_STUB_PYPROJECT)["name"] == _read(_REAL_PYPROJECT)["name"] == "hermes-mordred"
 
 
 def test_real_pyproject_sources_version_dynamically() -> None:
@@ -137,15 +142,15 @@ def test_real_pyproject_sources_version_dynamically() -> None:
     assert "version" in project.get("dynamic", []), "real pyproject must declare dynamic version"
 
 
-def test_stub_version_is_strictly_below_real_version() -> None:
-    """The stub must sort below the real release per PEP 440 ordering.
+def test_legacy_stub_version_is_strictly_below_compat_version() -> None:
+    """The stub must sort below the compatibility release per PEP 440 ordering.
 
     Otherwise the real ``release.yml`` publish would be rejected by PyPI as an
     older-or-equal version of an already-claimed name.
     """
     stub = Version(str(_read(_STUB_PYPROJECT)["version"]))
-    real = Version(_real_version())
-    assert stub < real, f"stub {stub} must be < real {real} so the real release can publish"
+    compat = Version(str(_read(_COMPAT_PYPROJECT)["version"]))
+    assert stub < compat, f"stub {stub} must be < compatibility release {compat}"
 
 
 def test_stub_version_is_a_dev_release() -> None:
@@ -153,18 +158,36 @@ def test_stub_version_is_a_dev_release() -> None:
     assert Version(str(_read(_STUB_PYPROJECT)["version"])).is_devrelease
 
 
-def test_rename_stub_reserves_the_target_distribution_name() -> None:
-    """The rename stub must claim only the future public distribution name."""
-    project = _read(_RENAME_STUB_PYPROJECT)
-    assert project["name"] == "hermes-mordred"
-    assert project["name"] != _read(_REAL_PYPROJECT)["name"]
-
-
 def test_rename_stub_version_is_a_dev_release_below_the_real_version() -> None:
     """The reservation must never sort as a real release."""
     stub = Version(str(_read(_RENAME_STUB_PYPROJECT)["version"]))
     assert stub.is_devrelease
     assert stub < Version(_real_version())
+
+
+def test_compatibility_shim_matches_and_forwards_the_real_release() -> None:
+    real = _read(_REAL_PYPROJECT)
+    compat = _read(_COMPAT_PYPROJECT)
+    version = _real_version()
+
+    assert compat["version"] == version
+    assert compat["dependencies"] == [f"hermes-mordred=={version}"]
+    real_extras = real["optional-dependencies"]
+    compat_extras = compat["optional-dependencies"]
+    assert isinstance(real_extras, dict)
+    assert isinstance(compat_extras, dict)
+    assert set(compat_extras) == set(real_extras)
+    assert compat_extras == {extra: [f"hermes-mordred[{extra}]=={version}"] for extra in real_extras}
+
+
+def test_compatibility_shim_declares_no_runtime_files_or_entry_points() -> None:
+    with _COMPAT_PYPROJECT.open("rb") as stream:
+        metadata = tomllib.load(stream)
+
+    project = metadata["project"]
+    assert "scripts" not in project
+    assert "entry-points" not in project
+    assert metadata["tool"]["hatch"]["build"]["targets"]["wheel"] == {"bypass-selection": True}
 
 
 def test_release_project_contract_matches_package_metadata() -> None:
@@ -185,6 +208,11 @@ def test_release_project_contract_matches_package_metadata() -> None:
         },
         "release": {
             "directory": ".",
+            "name": "hermes-mordred",
+            "reservation": False,
+        },
+        "compat": {
+            "directory": "packaging/mordred-hermes-compat",
             "name": "mordred-hermes",
             "reservation": False,
         },

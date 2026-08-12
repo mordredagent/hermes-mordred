@@ -5,7 +5,7 @@ condensed pointer — the documents under `docs/dev/` are the source of truth.
 
 ## What this repo is
 
-Standalone package repository for **mordred-hermes**, a plugin suite for
+Standalone package repository for **hermes-mordred**, a plugin suite for
 [hermes-agent](https://pypi.org/project/hermes-agent/). It ships 6 entry-point
 plugins from `src/mordred_hermes/` (`privacy_check`, `wizard`, `llm_guard`,
 `network`, `keyvault`, `extension`). It is **not** a fork of Hermes upstream — never send

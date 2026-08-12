@@ -25,7 +25,7 @@ This repository is a **standalone Mordred plugin package repository** — it is 
 
 ```
 mordred-hermes-plugin/
-├── pyproject.toml                    # mordred-hermes package config (6 entry points)
+├── pyproject.toml                    # hermes-mordred package config (6 entry points)
 ├── uv.lock                           # uv lockfile (for local dev use; CI resolves the latest from PyPI via pip)
 ├── src/mordred_hermes/               # plugin body (6 entry points + shared helpers)
 │   ├── privacy_check/
@@ -74,7 +74,7 @@ cd mordred-hermes
 
 # 2. Create the dev venv. This one command installs everything:
 #    - hermes-agent (from PyPI; required for the plugin loader to work)
-#    - mordred-hermes itself as an editable install (reads src/ directly)
+#    - hermes-mordred itself as an editable install (reads src/ directly)
 #    - all extras (dev / keyvault / macos / extension / tor-control / ethereum / …)
 uv sync --all-extras
 
@@ -158,7 +158,7 @@ lsof -nP -iTCP:7788 -sTCP:LISTEN
 Only for when you want to do an end-to-end check via the `hermes` on PATH, including the production configuration (LaunchAgent / existing keyvault / extension gateway). **This rewrites your production environment, so check with Method A first and use this only as a last resort.**
 
 ```sh
-# Swap the production venv's mordred-hermes for an editable install from your local checkout
+# Swap the production venv's hermes-mordred for an editable install from your local checkout
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   -e "/path/to/mordred-hermes[macos,extension,ethereum]"
 
@@ -170,7 +170,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "mordred-hermes[macos]==0.1.0a15"   # ← substitute the current PyPI version here
+  --reinstall "hermes-mordred[macos]==0.1.0a16"   # ← substitute the current PyPI version here
 ```
 
 ## (Optional) Hermes upstream remote

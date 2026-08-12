@@ -76,7 +76,7 @@ class TestRunFromManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Hermes' entry-point discovery returns an empty (or absent) version;
-        # the wizard must backfill the mordred-hermes package version, not "?".
+        # the wizard must backfill the hermes-mordred package version, not "?".
         from mordred_hermes.__about__ import __version__
 
         mgr = _FakeManager(

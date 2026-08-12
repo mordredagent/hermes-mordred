@@ -59,7 +59,7 @@ def _print_from_manager(mgr: _ManagerLike) -> int:
         enabled = "enabled" if p.get("enabled") else "disabled"
         # Hermes' entry-point discovery leaves `version` empty (it never reads
         # the plugin.yaml for pip/entry-point plugins), so backfill with the
-        # mordred-hermes package version — every Mordred plugin ships from it.
+        # hermes-mordred package version — every Mordred plugin ships from it.
         version = p.get("version") or _PACKAGE_VERSION
         print(f"{p['key']:30s}  {version:10s}  {enabled}")
     return 0

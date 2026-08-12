@@ -133,6 +133,9 @@ not stored API tokens.
   `hermes-mordred==0.0.0.dev0` reservation required before the distribution
   rename.
 - `mode=release`: the real package.
+- `mode=compat`: the metadata-only legacy-name shim. The workflow refuses this
+  mode unless the matching `hermes-mordred` version already exists on the
+  selected index.
 - `expected-version`: exact PEP 440 version required in source, wheel metadata,
   and sdist metadata.
 - Production publishing accepts only `main` and never permits a CI-gate bypass.
@@ -147,13 +150,13 @@ billing plan does not permit required reviewers on the `pypi` environment;
 manual dispatch plus the production branch/CI gates are the compensating
 controls until that setting becomes available.
 
-For the `hermes-mordred` rename, create pending publishers on both TestPyPI
-and PyPI with owner `InternetMaximalism`, repository `mordred-hermes`, workflow
-`release.yml`, and environment `testpypi` or `pypi` respectively. A pending
-publisher does not reserve the name: after this workflow version reaches
-`main` with green CI, dispatch `reserve-rename` to TestPyPI and verify the
-artifact before repeating it against PyPI. Do not dispatch the historical
-`reserve` mode and do not rename the GitHub repository during this gate.
+Completed 2026-08-12 for the `hermes-mordred` rename: pending publishers were
+created on both indexes with owner `InternetMaximalism`, repository
+`mordred-hermes`, workflow `release.yml`, and environments `testpypi` / `pypi`.
+`reserve-rename` published `0.0.0.dev0` from main SHA `504e1b7ab` after exact-SHA
+CI succeeded. Fresh installs from both indexes confirmed a dependency-free,
+entry-point-free reservation with no `mordred_hermes` runtime package. The
+historical `reserve` mode remains immutable and must not be dispatched again.
 
 ### Normal release (runbook)
 
@@ -164,10 +167,14 @@ artifact before repeating it against PyPI. Do not dispatch the historical
    Changes/Fixes entries, confirm CI, and merge.
 4. Dispatch TestPyPI from `main` with `mode=release` and the exact expected
    version.
-5. In a fresh venv, install from TestPyPI (using PyPI as the dependency index)
-   and verify six-entry-point discovery plus `hermes-mordred --version`.
-6. Dispatch production PyPI from `main` with the same expected version.
-7. Repeat the fresh-venv discovery/CLI verification against production PyPI.
+5. In a fresh venv, install `hermes-mordred` from TestPyPI (using PyPI as the
+   dependency index) and verify six-entry-point discovery plus
+   `hermes-mordred --version`.
+6. Dispatch TestPyPI with `mode=compat`; install `mordred-hermes` in another
+   fresh venv, verify that it resolves the matching canonical package, then
+   uninstall only the shim and confirm the runtime package and CLI remain.
+7. Repeat steps 4–6 against production PyPI, preserving the same canonical-first
+   order.
 8. Add annotated tag `v<version>` on the release merge and create the GitHub
    Release; mark pre-releases accordingly.
 

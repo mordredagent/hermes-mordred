@@ -11,7 +11,7 @@ The server needs the `extension` extra. Add `ethereum` for wallet signing and
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --upgrade \
-  "mordred-hermes[macos,extension,ethereum,messaging]"
+  "hermes-mordred[macos,extension,ethereum,messaging]"
 ```
 
 On Linux, replace `macos` with `keyvault`.

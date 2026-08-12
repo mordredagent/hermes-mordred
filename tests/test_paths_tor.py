@@ -837,7 +837,7 @@ class TestCircuitStatusHealth:
         """H5 (review 2026-05-14): the silent shallow fallback when stem
         is absent hides a real downgrade from the strict-mode operator.
         At least one WARNING must be emitted naming the optional extra so
-        the operator can install ``mordred-hermes[tor-control]`` to
+        the operator can install ``hermes-mordred[tor-control]`` to
         recover the deep probe. The warning must NOT be emitted every
         call (the 30s liveness worker would spam logs); once per process
         is enough.

@@ -1397,6 +1397,105 @@ wheels = [
 ]
 
 [[package]]
+name = "hermes-mordred"
+source = { editable = "." }
+dependencies = [
+    { name = "hermes-agent" },
+    { name = "ruamel-yaml" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+ethereum = [
+    { name = "argon2-cffi" },
+    { name = "blake3" },
+    { name = "cryptography" },
+    { name = "eth-account" },
+    { name = "eth-hash", extra = ["pycryptodome"] },
+    { name = "eth-keys" },
+    { name = "rlp" },
+]
+extension = [
+    { name = "aiohttp" },
+    { name = "cryptography" },
+    { name = "requests", extra = ["socks"] },
+    { name = "urllib3" },
+]
+integration = [
+    { name = "aiohttp-socks" },
+    { name = "anthropic" },
+    { name = "boto3" },
+    { name = "google-genai" },
+    { name = "httpx", extra = ["socks"] },
+    { name = "openai" },
+    { name = "requests", extra = ["socks"] },
+]
+keyvault = [
+    { name = "argon2-cffi" },
+    { name = "blake3" },
+    { name = "cryptography" },
+]
+macos = [
+    { name = "argon2-cffi" },
+    { name = "blake3" },
+    { name = "cryptography" },
+    { name = "pyobjc-framework-quartz" },
+    { name = "pyobjc-framework-security" },
+    { name = "pyobjc-framework-systemconfiguration" },
+]
+messaging = [
+    { name = "qrcode" },
+]
+tor-control = [
+    { name = "stem" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", marker = "extra == 'extension'", specifier = ">=3.9" },
+    { name = "aiohttp-socks", marker = "extra == 'integration'", specifier = ">=0.10" },
+    { name = "anthropic", marker = "extra == 'integration'", specifier = ">=0.40" },
+    { name = "argon2-cffi", marker = "extra == 'ethereum'", specifier = ">=23" },
+    { name = "argon2-cffi", marker = "extra == 'keyvault'", specifier = ">=23" },
+    { name = "argon2-cffi", marker = "extra == 'macos'", specifier = ">=23" },
+    { name = "blake3", marker = "extra == 'ethereum'", specifier = ">=0.4" },
+    { name = "blake3", marker = "extra == 'keyvault'", specifier = ">=0.4" },
+    { name = "blake3", marker = "extra == 'macos'", specifier = ">=0.4" },
+    { name = "boto3", marker = "extra == 'integration'", specifier = ">=1.34" },
+    { name = "cryptography", marker = "extra == 'ethereum'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'extension'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'keyvault'", specifier = ">=42" },
+    { name = "cryptography", marker = "extra == 'macos'", specifier = ">=42" },
+    { name = "eth-account", marker = "extra == 'ethereum'", specifier = ">=0.13" },
+    { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'ethereum'", specifier = ">=0.5" },
+    { name = "eth-keys", marker = "extra == 'ethereum'", specifier = ">=0.6" },
+    { name = "google-genai", marker = "extra == 'integration'", specifier = ">=1.20" },
+    { name = "hermes-agent", specifier = ">=0.13.0" },
+    { name = "httpx", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=0.27" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = "==2.1.0" },
+    { name = "openai", marker = "extra == 'integration'", specifier = ">=1.40" },
+    { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10.0" },
+    { name = "pyobjc-framework-security", marker = "extra == 'macos'", specifier = ">=10.0" },
+    { name = "pyobjc-framework-systemconfiguration", marker = "extra == 'macos'", specifier = ">=10.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-cov", marker = "extra == 'dev'" },
+    { name = "qrcode", marker = "extra == 'messaging'", specifier = ">=7.4" },
+    { name = "requests", extras = ["socks"], marker = "extra == 'extension'", specifier = ">=2.32" },
+    { name = "requests", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=2.32" },
+    { name = "rlp", marker = "extra == 'ethereum'", specifier = ">=4" },
+    { name = "ruamel-yaml", specifier = ">=0.18" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
+    { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
+    { name = "urllib3", marker = "extra == 'extension'", specifier = ">=2" },
+]
+provides-extras = ["dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "tor-control"]
+
+[[package]]
 name = "hexbytes"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1788,105 +1887,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mordred-hermes"
-source = { editable = "." }
-dependencies = [
-    { name = "hermes-agent" },
-    { name = "ruamel-yaml" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-ethereum = [
-    { name = "argon2-cffi" },
-    { name = "blake3" },
-    { name = "cryptography" },
-    { name = "eth-account" },
-    { name = "eth-hash", extra = ["pycryptodome"] },
-    { name = "eth-keys" },
-    { name = "rlp" },
-]
-extension = [
-    { name = "aiohttp" },
-    { name = "cryptography" },
-    { name = "requests", extra = ["socks"] },
-    { name = "urllib3" },
-]
-integration = [
-    { name = "aiohttp-socks" },
-    { name = "anthropic" },
-    { name = "boto3" },
-    { name = "google-genai" },
-    { name = "httpx", extra = ["socks"] },
-    { name = "openai" },
-    { name = "requests", extra = ["socks"] },
-]
-keyvault = [
-    { name = "argon2-cffi" },
-    { name = "blake3" },
-    { name = "cryptography" },
-]
-macos = [
-    { name = "argon2-cffi" },
-    { name = "blake3" },
-    { name = "cryptography" },
-    { name = "pyobjc-framework-quartz" },
-    { name = "pyobjc-framework-security" },
-    { name = "pyobjc-framework-systemconfiguration" },
-]
-messaging = [
-    { name = "qrcode" },
-]
-tor-control = [
-    { name = "stem" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", marker = "extra == 'extension'", specifier = ">=3.9" },
-    { name = "aiohttp-socks", marker = "extra == 'integration'", specifier = ">=0.10" },
-    { name = "anthropic", marker = "extra == 'integration'", specifier = ">=0.40" },
-    { name = "argon2-cffi", marker = "extra == 'ethereum'", specifier = ">=23" },
-    { name = "argon2-cffi", marker = "extra == 'keyvault'", specifier = ">=23" },
-    { name = "argon2-cffi", marker = "extra == 'macos'", specifier = ">=23" },
-    { name = "blake3", marker = "extra == 'ethereum'", specifier = ">=0.4" },
-    { name = "blake3", marker = "extra == 'keyvault'", specifier = ">=0.4" },
-    { name = "blake3", marker = "extra == 'macos'", specifier = ">=0.4" },
-    { name = "boto3", marker = "extra == 'integration'", specifier = ">=1.34" },
-    { name = "cryptography", marker = "extra == 'ethereum'", specifier = ">=42" },
-    { name = "cryptography", marker = "extra == 'extension'", specifier = ">=42" },
-    { name = "cryptography", marker = "extra == 'keyvault'", specifier = ">=42" },
-    { name = "cryptography", marker = "extra == 'macos'", specifier = ">=42" },
-    { name = "eth-account", marker = "extra == 'ethereum'", specifier = ">=0.13" },
-    { name = "eth-hash", extras = ["pycryptodome"], marker = "extra == 'ethereum'", specifier = ">=0.5" },
-    { name = "eth-keys", marker = "extra == 'ethereum'", specifier = ">=0.6" },
-    { name = "google-genai", marker = "extra == 'integration'", specifier = ">=1.20" },
-    { name = "hermes-agent", specifier = ">=0.13.0" },
-    { name = "httpx", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=0.27" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = "==2.1.0" },
-    { name = "openai", marker = "extra == 'integration'", specifier = ">=1.40" },
-    { name = "pyobjc-framework-quartz", marker = "extra == 'macos'", specifier = ">=10.0" },
-    { name = "pyobjc-framework-security", marker = "extra == 'macos'", specifier = ">=10.0" },
-    { name = "pyobjc-framework-systemconfiguration", marker = "extra == 'macos'", specifier = ">=10.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "qrcode", marker = "extra == 'messaging'", specifier = ">=7.4" },
-    { name = "requests", extras = ["socks"], marker = "extra == 'extension'", specifier = ">=2.32" },
-    { name = "requests", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=2.32" },
-    { name = "rlp", marker = "extra == 'ethereum'", specifier = ">=4" },
-    { name = "ruamel-yaml", specifier = ">=0.18" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
-    { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
-    { name = "urllib3", marker = "extra == 'extension'", specifier = ">=2" },
-]
-provides-extras = ["dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "tor-control"]
-
-[[package]]
 name = "multidict"
 version = "6.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2213,7 +2213,7 @@ name = "portalocker"
 version = "3.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "pywin32" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5e/77/65b857a69ed876e1951e88aaba60f5ce6120c33703f7cb61a3c894b8c1b6/portalocker-3.2.0.tar.gz", hash = "sha256:1f3002956a54a8c3730586c5c77bf18fae4149e07eaf1c29fc3faf4d5a3f89ac", size = 95644, upload-time = "2025-06-14T13:20:40.03Z" }
 wheels = [

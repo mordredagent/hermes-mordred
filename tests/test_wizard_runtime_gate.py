@@ -87,8 +87,8 @@ class TestRefusalMessage:
         err = capsys.readouterr().err
         assert "refusing to vault-seal thing.yaml — no shim.\n" in err
         assert _MECHANISM in err
-        assert "  (run from the repo root):\n" in err
-        assert f"    uv pip install --python {sys.executable} -e './mordred-hermes[macos]'\n" in err
+        assert "  Install the published package into that interpreter:\n" in err
+        assert (f"    uv pip install --python {sys.executable} 'hermes-mordred[macos]>=0.1.0a16'\n") in err
         assert _TAIL in err
 
     def test_runtime_python_falls_back_under_home(

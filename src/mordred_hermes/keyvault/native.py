@@ -90,7 +90,7 @@ def _lazy_import_security() -> Any:
     except ImportError as exc:
         raise WrapNativeUnavailable(
             "pyobjc-framework-Security is not installed; "
-            "run `pip install mordred-hermes[macos]` to enable keyvault on macOS."
+            "run `pip install hermes-mordred[macos]` to enable keyvault on macOS."
         ) from exc
 
     _security_module = module
@@ -149,7 +149,7 @@ def is_secure_enclave_available() -> bool:
     determined by trying the actual operation.
 
     On non-Darwin the function returns ``False`` without invoking
-    pyobjc at all, so Linux / Windows installs of ``mordred-hermes``
+    pyobjc at all, so Linux / Windows installs of ``hermes-mordred``
     (without the ``[macos]`` extra) never load the Security bridge.
     """
     if sys.platform != "darwin":
