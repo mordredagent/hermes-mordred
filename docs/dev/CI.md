@@ -30,7 +30,7 @@ repair is complete; historical restoration details remain in Git.
 
 The workflow has eight jobs:
 
-1. **`test`** — Python/OS matrix; Ruff, shellcheck (Linux cells only), strict
+1. **`test`** — Python/OS matrix; Ruff, shellcheck (one Linux cell), strict
    mypy, pytest, coverage, and the status-skill drift guard.
 2. **`feature-extras`** — installs `ethereum`, `messaging`, and `tor-control`
    and runs their focused tests so optional coverage cannot disappear behind
@@ -52,8 +52,8 @@ Key policy:
 - The test matrix covers Ubuntu and macOS with Python 3.11–3.13.
 - CI installs `.[dev,keyvault,extension]`; macOS adds `macos`. Do not assume
   `ethereum` or `tor-control` imports are available in the main typing job.
-- Run `mypy --strict src tools`; a narrower CLI target silently stops checking
-  `tools/`.
+- Run `mypy --strict src tools scripts/keyvault_offline_digest.py`; a narrower
+  CLI target silently stops checking `tools/` or the shipped digest script.
 - GitHub Actions use immutable commit SHAs. Cargo commands use `--locked`.
 - The default pytest configuration excludes `integration` tests.
 - Required branch checks are the Ubuntu and macOS Python 3.12 `test` cells;

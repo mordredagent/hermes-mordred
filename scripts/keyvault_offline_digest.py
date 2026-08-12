@@ -70,13 +70,7 @@ except ImportError as err:  # pragma: no cover - only reached when blake3 is abs
     # python ALSO lacks blake3. On a stripped-down air-gapped device the venv
     # path does not exist, so we skip the re-exec and fall through to the
     # install hint below (the script stays portable — see SPEC offline tool).
-    _venv_python = (
-        Path(__file__).resolve().parents[1]
-        / "mordred-hermes"
-        / ".venv"
-        / "bin"
-        / "python"
-    )
+    _venv_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
     _script = str(Path(__file__).resolve())
     if not os.environ.get("_KV_OFFLINE_REEXEC") and _venv_python.exists():
         os.environ["_KV_OFFLINE_REEXEC"] = "1"
@@ -91,10 +85,10 @@ except ImportError as err:  # pragma: no cover - only reached when blake3 is abs
         "error: the 'blake3' package is required but is not installed in the\n"
         "Python you ran this with.\n"
         "\n"
-        "Easiest fix on this checkout — use the bundled venv that already has\n"
-        "blake3 (this is what `keyvault init` expects):\n"
+        "Easiest fix on this checkout — from the repo root, use the bundled\n"
+        "venv that already has blake3 (this is what `keyvault init` expects):\n"
         "\n"
-        "    mordred-hermes/.venv/bin/python scripts/keyvault_offline_digest.py\n"
+        "    .venv/bin/python scripts/keyvault_offline_digest.py\n"
         "\n"
         "On a stripped-down OFFLINE device (the air-gapped second device),\n"
         "install blake3 first, then re-run:\n"
@@ -148,7 +142,11 @@ def compute_digest(seed_phrase: str, passphrase: str, top4: bytes) -> bytes:
         raise ValueError(f"top4 must be exactly 4 bytes, got {len(top4)}")
     seed_hash = blake3(seed_phrase.encode("utf-8")).digest()
     pass_hash = blake3(passphrase.encode("utf-8")).digest()
-    masked_pass = bytes(p ^ t for p, t in zip(pass_hash[:4], top4, strict=True)) + pass_hash[4:]
+    # No zip(strict=) or other 3.10+-only syntax here: this file must keep
+    # running on stock system pythons (3.8/3.9) on the air-gapped second
+    # device, and both operands are provably 4 bytes (digest slice + the
+    # length check above).
+    masked_pass = bytes(pass_hash[i] ^ top4[i] for i in range(4)) + pass_hash[4:]
     return blake3(seed_hash + masked_pass).digest()
 
 
@@ -161,9 +159,7 @@ def _read_top4(raw: str) -> bytes:
     except ValueError as exc:
         raise ValueError(f"top4(PoW) is not valid hex: {exc}") from None
     if len(top4) != 4:
-        raise ValueError(
-            f"top4(PoW) must be exactly 4 bytes = 8 hex chars; got {len(top4)} bytes"
-        )
+        raise ValueError(f"top4(PoW) must be exactly 4 bytes = 8 hex chars; got {len(top4)} bytes")
     return top4
 
 
@@ -197,13 +193,9 @@ def _interactive_compute() -> int:
     a TTY. That fallback is desirable on the second device too if the
     operator pipes inputs from a file for any reason.
     """
-    print(
-        "────────────────────────────────────────────────────────────", file=sys.stderr
-    )
+    print("────────────────────────────────────────────────────────────", file=sys.stderr)
     print("  Mordred keyvault — offline verification digest", file=sys.stderr)
-    print(
-        "────────────────────────────────────────────────────────────", file=sys.stderr
-    )
+    print("────────────────────────────────────────────────────────────", file=sys.stderr)
     print(
         "  Transcribe THREE values shown on the primary device (the one",
         file=sys.stderr,
@@ -222,9 +214,7 @@ def _interactive_compute() -> int:
     print(file=sys.stderr)
 
     print("  [2/3] Passphrase", file=sys.stderr)
-    print(
-        "        Format : the exact passphrase you typed during init.", file=sys.stderr
-    )
+    print("        Format : the exact passphrase you typed during init.", file=sys.stderr)
     print(
         "        Note   : input is HIDDEN (no echo). Case and whitespace matter.",
         file=sys.stderr,
@@ -269,8 +259,7 @@ def _interactive_compute() -> int:
     print(f"verification digest: {digest.hex()}")
     print()
     print(
-        "Re-enter this hex on the primary device at the "
-        "`Verification digest from your offline device (hex)` prompt.",
+        "Re-enter this hex on the primary device at the `Verification digest from your offline device (hex)` prompt.",
         file=sys.stderr,
     )
     return 0
@@ -280,8 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="keyvault_offline_digest.py",
         description=(
-            "Compute the Mordred keyvault verification digest on an "
-            "air-gapped second device during `keyvault init`."
+            "Compute the Mordred keyvault verification digest on an air-gapped second device during `keyvault init`."
         ),
     )
     parser.add_argument(

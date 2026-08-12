@@ -96,16 +96,21 @@ jobs:
         run: ruff check src tests scripts
 
       - name: ruff format --check
-        run: ruff format --check src tests
+        run: ruff format --check src tests scripts
 
       - name: shellcheck
-        # The user installer is fetched via `curl | bash`; keep it clean.
-        # Linux-only: the macOS runner image does not ship shellcheck.
-        if: runner.os == 'Linux'
-        run: shellcheck scripts/*.sh
+        # The user installer is fetched via `curl | bash`, and the native
+        # helper build.sh scripts ship inside the wheel; keep them clean.
+        # One Linux cell only: the input never varies across the matrix and
+        # the macOS runner image does not ship shellcheck.
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: shellcheck scripts/*.sh native/*/build.sh
 
       - name: mypy --strict
-        run: mypy --strict src tools
+        # keyvault_offline_digest.py ships in the wheel and guards the
+        # keyvault init ceremony; the other scripts/*.py are dev-era PoCs
+        # that deliberately stay outside the strict gate.
+        run: mypy --strict src tools scripts/keyvault_offline_digest.py
 
       - name: pytest
         env:

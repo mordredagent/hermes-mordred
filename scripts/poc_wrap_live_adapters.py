@@ -6,47 +6,62 @@ gateway. Wrapping a same-named class from another module silently wraps a class
 nobody instantiates and the reply ships in cleartext. Drive it from
 GatewayRunner.adapters instead.
 """
+
 from __future__ import annotations
 
 import asyncio
 import os
 import secrets
 import sys
-from enum import StrEnum
+from enum import Enum
 
 
-class Platform(StrEnum):
+class Platform(Enum):  # plain Enum like the live gateway's — not a str mixin
     SLACK = "slack"
 
 
-class RealSlackAdapter:            # stands in for hermes_plugins.slack_platform.adapter
+class RealSlackAdapter:  # stands in for hermes_plugins.slack_platform.adapter
     MAX_MESSAGE_LENGTH = 3000
+
     def __init__(self):
         self._app = object()
         self.posts = []
         self._bot_message_ts = set()
-    def _get_client(self, c): return self
-    def _resolve_thread_ts(self, r, m): return (m or {}).get("thread_ts")
-    async def stop_typing(self, c): return None
+
+    def _get_client(self, c):
+        return self
+
+    def _resolve_thread_ts(self, r, m):
+        return (m or {}).get("thread_ts")
+
+    async def stop_typing(self, c):
+        return None
+
     async def chat_postMessage(self, **kw):
         self.posts.append(kw)
         return {"ts": "1"}
+
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         self.posts.append({"text": content, "PLAINTEXT": True})
         from types import SimpleNamespace
+
         return SimpleNamespace(success=True)
 
 
 class FakeGateway:
-    def __init__(self, adapter): self.adapters = {Platform.SLACK: adapter}
+    def __init__(self, adapter):
+        self.adapters = {Platform.SLACK: adapter}
 
 
 async def main() -> int:
     assert os.environ.get("HERMES_HOME")
     from mordred_hermes.extension import crypto, e2e, outbound, pairing
 
-    pairing._save_pairing(pairing.Pairing(aes_key=secrets.token_bytes(32), ext_token="t",
-        ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=0.0))
+    pairing._save_pairing(
+        pairing.Pairing(
+            aes_key=secrets.token_bytes(32), ext_token="t", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=0.0
+        )
+    )
     ck = secrets.token_bytes(32)
     pairing.save_channel_key("slack:C0BG9QTCNKE", ck)
     e2e.mark_encrypted_thread("slack", "C0BG9QTCNKE", None, crypto.key_id(ck))

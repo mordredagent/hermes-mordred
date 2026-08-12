@@ -5,6 +5,7 @@ unreadable by everyone while still *looking* encrypted. reply_key() must
 fail closed (None) when the inbound keyId hint is missing/unknown, and the
 send path must surface a visible notice instead of emitting ciphertext.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +15,9 @@ import sys
 
 
 class FakeClient:
-    def __init__(self): self.posts = []
+    def __init__(self):
+        self.posts = []
+
     async def chat_postMessage(self, **kw):
         self.posts.append(kw)
         return {"ts": "1"}
@@ -22,16 +25,25 @@ class FakeClient:
 
 class FakeSlackAdapter:
     MAX_MESSAGE_LENGTH = 3000
+
     def __init__(self):
         self._app = object()
         self._client = FakeClient()
         self._bot_message_ts = set()
-    def _get_client(self, c): return self._client
-    def _resolve_thread_ts(self, r, m): return (m or {}).get("thread_ts")
-    async def stop_typing(self, c): return None
+
+    def _get_client(self, c):
+        return self._client
+
+    def _resolve_thread_ts(self, r, m):
+        return (m or {}).get("thread_ts")
+
+    async def stop_typing(self, c):
+        return None
+
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         self._client.posts.append({"text": content, "PLAINTEXT": True})
         from types import SimpleNamespace
+
         return SimpleNamespace(success=True)
 
 
@@ -40,8 +52,9 @@ async def main() -> int:
     from mordred_hermes.extension import crypto, e2e, outbound, pairing
 
     master = secrets.token_bytes(32)
-    pairing._save_pairing(pairing.Pairing(aes_key=master, ext_token="t",
-        ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=0.0))
+    pairing._save_pairing(
+        pairing.Pairing(aes_key=master, ext_token="t", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=0.0)
+    )
     chan = secrets.token_bytes(32)
     pairing.save_channel_key("slack:T:C", chan)
 
@@ -76,7 +89,7 @@ async def main() -> int:
 
     # 5. End-to-end: encrypted thread with NO usable kid must post a notice,
     #    never ciphertext and never plaintext.
-    e2e.mark_encrypted_thread("slack", "C", "t1", None)   # marked, but kid unknown
+    e2e.mark_encrypted_thread("slack", "C", "t1", None)  # marked, but kid unknown
     outbound._wrap_slack(FakeSlackAdapter)
     a = FakeSlackAdapter()
     await a.send("C", "sensitive answer", metadata={"thread_ts": "t1"})
