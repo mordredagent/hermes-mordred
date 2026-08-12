@@ -6,20 +6,24 @@
 
 ## Install
 
-Complete the [Quickstart](./QUICKSTART.md) first. The one-line installer adds
-only the platform keyvault extra, so add `extension` to guarantee the server
-dependencies. Add `ethereum` for wallet features and `messaging` for terminal
-QR rendering:
+Complete the [Quickstart](./QUICKSTART.md) first. The installer selects `macos`
+or `keyvault` for the current platform and adds both the extension server and
+Ethereum wallet dependencies with `--with-extension`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension
+```
+
+Add `--version VERSION` after replacing `VERSION` with the exact PyPI release
+you need. Terminal QR rendering is optional; without the `messaging` extra,
+`extension pair` prints the pairing code as text. To add QR rendering after the
+installer completes:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package hermes-mordred \
-  "hermes-mordred[macos,extension,ethereum,messaging]"
+  --upgrade-package hermes-mordred "hermes-mordred[messaging]"
 ```
-
-On Linux, replace `macos` with `keyvault`. Omit `ethereum` when wallet features
-are not needed and `messaging` when entering the printed pairing code manually.
-The `extension pair` command itself does not need the `extension` extra.
 
 The browser client is a separately distributed
 [Chromium Manifest V3 bundle](https://github.com/InternetMaximalism/Mordred-Extension-dist):

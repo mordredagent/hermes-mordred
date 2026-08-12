@@ -50,10 +50,18 @@ distribution and installing the new one. Configuration, keys, and state are
 preserved. Do not manually install the two real distributions on top of each
 other; use the installer or uninstall the legacy name first.
 
-Only the platform keyvault extra is installed. Features with their own extras —
-the browser extension server, Ethereum keys, terminal pairing QR, and deep Tor
-liveness checks — need the extra added afterwards; see the manual command below
-and the [Extension guide](./EXTENSION.md#install).
+By default, only the platform keyvault extra is installed. To include the
+browser-extension server and Ethereum wallet support from the start, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension
+```
+
+Add `--version VERSION` after replacing `VERSION` with a release number when
+you need an exact PyPI version. For example, the two options can be combined as
+`bash -s -- --with-extension --version VERSION`. Deep Tor liveness checks and
+terminal QR rendering remain separate optional extras.
 
 If you prefer to inspect a downloaded script before running it:
 
@@ -61,7 +69,8 @@ If you prefer to inspect a downloaded script before running it:
 curl -fsSLo mordred-install.sh \
   https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh
 less mordred-install.sh
-bash mordred-install.sh
+bash mordred-install.sh                 # default platform dependencies
+# Or: bash mordred-install.sh --with-extension --version VERSION
 rm mordred-install.sh
 ```
 

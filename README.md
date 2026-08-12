@@ -46,6 +46,22 @@ then run the Mordred installer:
 curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash
 ```
 
+To include the browser-extension server and Ethereum wallet support, pass the
+installer option through `bash`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension
+```
+
+Add `--version VERSION` (replacing `VERSION` with the release to install) to
+pin either form to an exact PyPI release. The options can be combined:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension --version VERSION
+```
+
 The script follows Hermes's own install layout: it resolves the environment
 behind the `hermes` on your `PATH`, checks the Hermes version, selects the
 macOS or Linux dependencies, installs the PyPI package there, and writes a
@@ -174,19 +190,24 @@ The optional extension server listens on `ws://127.0.0.1:7788/ext`, validates
 the local peer and browser origin, and supports pairing, encrypted chat,
 history, wallet accounts, and approval-bound signing.
 
-The one-line installer deliberately installs only the platform keyvault extra;
-it does not guarantee the extension server dependencies. Install the
-`extension` extra explicitly. If `aiohttp` is otherwise unavailable,
-`extension serve` exits with code 2 and prints an install hint:
+The installer keeps preview dependencies out of its default install. Re-run it
+with `--with-extension` to retain the platform keyvault dependencies and add
+both the `extension` and `ethereum` extras:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension
+```
+
+The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   "hermes-mordred[macos,extension,ethereum]==0.1.0a16"
 ```
 
-This macOS example includes `ethereum` for wallet features. Omit it for
-chat/history only, replace `macos` with `keyvault` on Linux, and add
-`messaging` only when you want a terminal pairing QR.
+Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
+a terminal pairing QR.
 
 The browser client is distributed separately as a
 [prebuilt Chromium extension](https://github.com/InternetMaximalism/Mordred-Extension-dist).
@@ -266,6 +287,17 @@ curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/m
 This upgrades Mordred only and handles the transition from the old
 `mordred-hermes` package name. Run it again if a Hermes update recreates its
 virtual environment.
+
+For a version-pinned upgrade, pass the desired PEP 440 release to the installer
+(replace `VERSION` before running the command):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --version VERSION
+```
+
+Add `--with-extension` before `--version` when that installation also runs the
+browser-extension gateway or uses its Ethereum wallet bridge.
 
 `hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration;
 it does not upgrade the package:
