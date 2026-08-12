@@ -13,6 +13,28 @@
 - **Blocked** — requires an interface or platform capability not currently
   available to the plugin package.
 
+## Security-critical release gates
+
+The first critical expansion is an enforceable execution boundary for
+untrusted skills (`v2-OS1`). Proxy environment variables, metadata checks, and
+Hermes hooks remain useful policy layers, but they are not a security boundary:
+skill code can otherwise open a direct socket, read same-user files, or spawn an
+unrestricted child process.
+
+The following are release gates, not interchangeable hardening ideas:
+
+1. Do not claim protection from malicious or compromised skills until every
+   skill-controlled process is contained by `v2-OS1` and the acceptance checks
+   below pass on the supported platform.
+2. Do not ship payment skills until both `v2-OS1` and the isolated signing and
+   per-use authorization boundary in `v3-P1` are complete.
+3. Audit-log integrity, skill signatures, additional encryption, and GUI
+   controls are defense in depth. None substitutes for the two runtime
+   boundaries above.
+
+The current v1 threat model remains unchanged until those gates ship. Moving a
+gate into implementation requires a separate SPEC/PLAN change before code.
+
 ## Remaining browser-extension gateway integration
 
 Pairing, localhost serving, encrypted chat, history, wallet/RPC, and the real
@@ -68,13 +90,66 @@ priority. Current behavior must remain correct without it.
 
 ### v2-OS1: Local malware / co-resident process mitigations
 
-Run skill child processes inside OS sandboxes and restrict direct network,
-filesystem, and process-spawn access.
+Build a mandatory skill runner plus a Mordred-owned network broker. Run every
+skill-controlled process inside an OS sandbox; do not rely on
+`HTTP(S)_PROXY`, skill metadata, or cooperative client libraries as the final
+egress control.
 
-- macOS candidates: sandbox profiles or Endpoint Security.
-- Linux candidates: Landlock/seccomp.
-- **Risk**: entitlement requirements and breaking legitimate skills.
-- **Priority**: H when the threat model expands beyond a trusted host.
+Minimum acceptance criteria:
+
+- Default-deny direct IPv4/IPv6 TCP, UDP, QUIC, raw-socket, and DNS egress from
+  the skill process. The only egress path is an authenticated, least-privilege
+  IPC channel to the broker, which applies destination policy and owns the
+  selected Tor/VPN/policy-controlled clearnet/localhost transport. Direct
+  egress remains denied in every policy mode: lenient/off may broaden brokered
+  clearnet grants, while strict retains the clearnet refusal in `POLICY.md`.
+- Deny direct reads of `~/.hermes`, Mordred keyvault state, credentials, agent
+  memory, and unrelated workspace files. Grant only an explicit per-skill
+  filesystem view.
+- Construct every skill environment from a clean baseline rather than
+  inheriting the Hermes process environment. Pass only allowlisted non-secret
+  runtime variables. Any secret requires an explicit, auditable,
+  least-privilege grant scoped to the skill and invocation; prefer
+  broker-mediated credential use whenever the raw value need not enter the
+  skill process.
+- Ensure every descendant inherits the restrictions; deny escape through
+  process spawning, shell execution, `ptrace`, signals, inherited file
+  descriptors, or alternate interpreters.
+- In strict mode, refuse the skill before execution when the required sandbox,
+  broker, or kernel capability is unavailable or degraded. Lenient mode must
+  show and audit the downgrade; it must never label the run as isolated.
+- Add adversarial integration tests that attempt direct network connections,
+  local DNS resolution, protected-file reads, reads of an ungranted sentinel
+  secret through environment APIs and OS process-environment views, inherited
+  descriptor access, child-process escape, and broker policy bypass. Test both
+  successful denials and explicitly allowed brokered traffic, including
+  clearnet grants under lenient/off and clearnet refusal under strict.
+
+Implementation sequence:
+
+- Start with a Linux runner using Landlock/seccomp plus an appropriate network
+  enforcement mechanism; probe the available kernel ABI at runtime and fail
+  closed under strict policy.
+- Add a signed macOS runner using supported sandbox facilities and a narrowly
+  scoped broker service. Endpoint Security is an escalation path if the runner
+  cannot provide complete mediation without it.
+- Require a mandatory Hermes execution/spawn boundary. If the public plugin API
+  cannot cover every path, implement it only through Mordred's separately
+  approved, version-pinned vendored layer; never send an upstream PR.
+
+This first stage contains malicious skill code. It does **not** constrain an
+arbitrary same-UID process that was already running outside the runner. Extending
+the threat model to hostile co-resident malware additionally requires a
+dedicated OS account or VM/container boundary and an authenticated key service
+that does not trust same-UID callers merely because they can reach it.
+
+- **Risk**: incomplete process mediation creates a false security claim;
+  platform entitlements and restrictive profiles can also break legitimate
+  skills.
+- **Priority**: Critical / H. Required before claiming untrusted-skill
+  containment and before any payment-skill release.
+- **Blocked by**: a mandatory dispatch/spawn boundary covering all
+  skill-originated execution paths.
 
 ### v2-OS2: Remaining keyvault platforms and authorization tiers
 
@@ -151,10 +226,53 @@ not become the default. Future work belongs in bug fixes, not this roadmap item.
 
 ### v3-P1: Payment skills
 
-Add policy-aware payment skills only after wallet signing and approval UX have
-real operator adoption.
+Add policy-aware payment skills only after wallet signing is moved behind a
+dedicated signer boundary. A hardware-backed non-exportable key is insufficient
+when untrusted code can freely request signatures.
 
-- **Priority**: H within a future payment milestone, not the current product.
+Release requirements:
+
+- Depend on a completed `v2-OS1`; sandboxed skills receive no raw private key,
+  seed, keyvault master, or unrestricted signing handle.
+- Canonicalize and decode the exact transaction or message before approval.
+  Build an approval envelope containing the complete canonical signing payload
+  plus its origin and request context, and bind approval to a cryptographic
+  digest of that entire envelope rather than a selected field list. For a
+  transaction, the envelope includes the transaction type and every applicable
+  signing-affecting field, including account, chain, destination, value,
+  calldata, nonce, gas limit, fee fields, access list, authorization fields,
+  and blob fields. For a message, it includes the signing method and the exact
+  message bytes or complete typed-data domain, types, primary type, and
+  message. Context includes the caller skill identity, session/tool-call
+  identity, RPC context, origin, approval expiry, and a single-use request
+  identifier. The isolated signer recomputes the entire envelope digest from
+  the exact payload and trusted request context immediately before signing and
+  rejects any mismatch.
+- Require explicit per-use operator authorization for value-moving or
+  permission-granting operations. A general tool approval, chat instruction,
+  or previous transaction approval never authorizes a later signature.
+- Enforce independent signer-side limits and destination/contract policy; do
+  not trust validation performed only inside the requesting skill.
+- For every applicable state-changing transaction, simulate the exact approved
+  payload and fail closed when simulation is unavailable, fails, is stale, or
+  was produced for a payload other than the one committed by the
+  approval-envelope digest. Reject transaction forms the product cannot
+  completely decode, simulate when applicable, and evaluate.
+  Transaction simulation does not apply to `personal_sign` or EIP-712 message
+  requests; those requests still require complete decoding and display, policy
+  evaluation, per-use authorization, user-presence verification, audit
+  recording, and signer isolation.
+- Fail closed when any check required for the request type is unavailable.
+- Test replay, approval substitution, omitted-field mutation (including gas,
+  fees, access-list, authorization, and blob fields), origin confusion, chain
+  switching, hidden calldata, simulation/payload mismatch, valid message
+  requests without transaction simulation, concurrent requests, and a
+  compromised skill attempting to sign outside the displayed authorization.
+
+- **Priority**: Critical / H within a future payment milestone, not the current
+  product.
+- **Blocked by**: `v2-OS1` and a separately specified isolated signer and
+  approval protocol.
 
 ### v3-P2: x402 / agent payment protocol integration
 
