@@ -127,7 +127,11 @@ Publishing is `workflow_dispatch` only and uses PyPI Trusted Publishing (OIDC),
 not stored API tokens.
 
 - `target`: `testpypi` or `pypi`.
-- `mode=reserve`: the permanent `0.0.0.dev0` name-reservation stub.
+- `mode=reserve`: the already-published permanent `mordred-hermes==0.0.0.dev0`
+  name-reservation stub.
+- `mode=reserve-rename`: the separate permanent
+  `hermes-mordred==0.0.0.dev0` reservation required before the distribution
+  rename.
 - `mode=release`: the real package.
 - `expected-version`: exact PEP 440 version required in source, wheel metadata,
   and sdist metadata.
@@ -142,6 +146,14 @@ and the `0.0.0.dev0` reservation are in place. The current private-repository
 billing plan does not permit required reviewers on the `pypi` environment;
 manual dispatch plus the production branch/CI gates are the compensating
 controls until that setting becomes available.
+
+For the `hermes-mordred` rename, create pending publishers on both TestPyPI
+and PyPI with owner `InternetMaximalism`, repository `mordred-hermes`, workflow
+`release.yml`, and environment `testpypi` or `pypi` respectively. A pending
+publisher does not reserve the name: after this workflow version reaches
+`main` with green CI, dispatch `reserve-rename` to TestPyPI and verify the
+artifact before repeating it against PyPI. Do not dispatch the historical
+`reserve` mode and do not rename the GitHub repository during this gate.
 
 ### Normal release (runbook)
 

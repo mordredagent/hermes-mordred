@@ -7,17 +7,20 @@
 # (2026-07-06). Paths adapted: the package now builds from the repo root
 # instead of the old `mordred-hermes/` subdirectory.
 #
-# Two modes:
+# Three modes:
 #   reserve  — builds the empty 0.0.0.dev0 stub
 #              (packaging/name-reservation/) to claim the
 #              `mordred-hermes` name before the public docs launch.
 #              Run once against testpypi, then once against pypi.
+#   reserve-rename — builds the separate empty 0.0.0.dev0 stub
+#              (packaging/hermes-mordred-reservation/) to claim the future
+#              `hermes-mordred` distribution name before the rename lands.
 #   release  — builds the real package (repo root, version 0.1.0a0+).
 #              Used for every real release after the name is reserved.
 #
 # Authentication is PyPI Trusted Publishing (OIDC) — NO API tokens are
-# stored. Before the first run, register a "pending publisher" on PyPI
-# and TestPyPI for project `mordred-hermes`, workflow `release.yml`,
+# stored. The existing `mordred-hermes` publishers and the pending
+# `hermes-mordred` publishers both trust workflow `release.yml`, with
 # environment `pypi` / `testpypi` respectively. Full operator runbook:
 # docs/dev/CI.md §"release.yml details" §"Initial setup".
 
@@ -35,11 +38,12 @@ on:
           - pypi
         default: testpypi
       mode:
-        description: "reserve = 0.0.0.dev0 stub | release = real package"
+        description: "reserve = legacy-name stub | reserve-rename = new-name stub | release = real package"
         required: true
         type: choice
         options:
           - reserve
+          - reserve-rename
           - release
         default: reserve
       expected-version:
@@ -104,8 +108,8 @@ jobs:
             echo "::error::skip-ci-gate is prohibited for production PyPI releases."
             exit 1
           fi
-          if [ "$MODE" = "reserve" ] && [ "$EXPECTED_VERSION" != "0.0.0.dev0" ]; then
-            echo "::error::reserve mode requires expected-version=0.0.0.dev0."
+          if { [ "$MODE" = "reserve" ] || [ "$MODE" = "reserve-rename" ]; } && [ "$EXPECTED_VERSION" != "0.0.0.dev0" ]; then
+            echo "::error::reservation modes require expected-version=0.0.0.dev0."
             exit 1
           fi
           if [ "$MODE" = "release" ] && { [ -z "$EXPECTED_VERSION" ] || [ "$EXPECTED_VERSION" = "0.0.0.dev0" ]; }; then
@@ -154,21 +158,36 @@ jobs:
       - name: Install build + twine
         run: python -m pip install --upgrade pip build twine
 
-      - name: Resolve project directory for ${{ inputs.mode }} mode
+      - name: Resolve project contract for ${{ inputs.mode }} mode
         id: resolve
         env:
           MODE: ${{ inputs.mode }}
         run: |
-          set -euo pipefail
-          if [ "$MODE" = "reserve" ]; then
-            echo "dir=packaging/name-reservation" >> "$GITHUB_OUTPUT"
-          else
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          fi
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import tomllib
+
+          mode = os.environ["MODE"]
+          contract = tomllib.loads(
+              Path("packaging/release-projects.toml").read_text(encoding="utf-8")
+          )["mode"]
+          try:
+              project = contract[mode]
+          except KeyError as exc:
+              raise SystemExit(f"::error::Unsupported release mode: {mode}") from exc
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"dir={project['directory']}\n")
+              stream.write(f"name={project['name']}\n")
+              stream.write(f"reservation={str(project['reservation']).lower()}\n")
+          PY
 
       - name: Validate requested version against source
         env:
           EXPECTED_VERSION: ${{ inputs.expected-version }}
+          IS_RESERVATION: ${{ steps.resolve.outputs.reservation }}
           MODE: ${{ inputs.mode }}
           PROJECT_DIR: ${{ steps.resolve.outputs.dir }}
         run: |
@@ -193,7 +212,7 @@ jobs:
 
           mode = os.environ["MODE"]
           project_dir = Path(os.environ["PROJECT_DIR"])
-          if mode == "reserve":
+          if os.environ["IS_RESERVATION"] == "true":
               source_version = tomllib.loads(
                   (project_dir / "pyproject.toml").read_text(encoding="utf-8")
               )["project"]["version"]
@@ -236,6 +255,7 @@ jobs:
 
       - name: Guard artifact count, name, and exact version
         env:
+          EXPECTED_NAME: ${{ steps.resolve.outputs.name }}
           EXPECTED_VERSION: ${{ inputs.expected-version }}
         run: |
           python - <<'PY'
@@ -245,6 +265,7 @@ jobs:
           import tarfile
           import zipfile
 
+          expected_name = os.environ["EXPECTED_NAME"]
           expected = os.environ["EXPECTED_VERSION"]
           dist = Path("dist")
           wheels = list(dist.glob("*.whl"))
@@ -291,16 +312,17 @@ jobs:
               (wheels[0].name, wheel_metadata),
               (sdists[0].name, sdist_metadata),
           ):
-              if metadata["Name"] != "mordred-hermes":
+              if metadata["Name"] != expected_name:
                   raise SystemExit(
-                      f"::error::{artifact} has unexpected Name={metadata['Name']!r}"
+                      f"::error::{artifact} has Name={metadata['Name']!r}; "
+                      f"expected {expected_name!r}"
                   )
               if metadata["Version"] != expected:
                   raise SystemExit(
                       f"::error::{artifact} has Version={metadata['Version']!r}; "
                       f"expected {expected!r}"
                   )
-              print(f"Validated {artifact}: mordred-hermes=={expected}")
+              print(f"Validated {artifact}: {expected_name}=={expected}")
           PY
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

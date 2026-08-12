@@ -76,6 +76,11 @@ permissions, writers, and readers.
   additional host-CLI compatibility surface after the plugins are enabled.
   Command examples use the canonical form; README mentions the host form only
   as a compatibility note.
+- The public distribution rename is staged at the package boundary: reserve
+  `hermes-mordred` independently, publish the real `0.1.0a16` distribution,
+  then publish a metadata-only `mordred-hermes` shim. The import tree,
+  entry-point IDs, persistent state, and native helper identifiers do not
+  change. `MIGRATION.md` §6 owns the ordering and compatibility contract.
 
 ### 0.6 CI workflow
 

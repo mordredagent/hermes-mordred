@@ -55,6 +55,15 @@ None for the current release.
 - [ ] At each release, run `python tools/bump_version.py <version>` and verify
   `tests/test_packaging_versions.py`; never edit individual version surfaces by
   hand.
+- [ ] Reserve `hermes-mordred==0.0.0.dev0` on TestPyPI and PyPI through
+  `release.yml` mode `reserve-rename`; do not rename the root distribution
+  before both reservations are verified.
+- [ ] After reservation, publish the real `hermes-mordred==0.1.0a16` package,
+  then the metadata-only `mordred-hermes==0.1.0a16` compatibility shim, using
+  the TestPyPI-first order in `MIGRATION.md` §6.
+- [ ] Switch the installer and user documentation to `hermes-mordred`, verify
+  the `0.1.0a15` upgrade path, and only then rename the GitHub repository and
+  refresh all Trusted Publisher repository claims.
 
 ### 0.6 CI workflow
 
