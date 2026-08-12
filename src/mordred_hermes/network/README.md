@@ -57,10 +57,14 @@ hermes-mordred network use tor
 hermes-mordred network status
 ```
 
-`network init` configures the default path, Tor binary and SOCKS port, plus VPN
-provider settings. Mullvad secrets are written to `~/.hermes/.env`; persisted
-JSON contains only environment-variable references. Re-running setup preserves
-an existing secret when the account prompt is left blank.
+`network init` configures the default path, then only the settings that path
+needs: Tor binary and SOCKS port for `tor`, or the VPN provider and its
+settings for `vpn`; `clearnet` asks nothing further (UX request 2026-08-12).
+Mullvad secrets are written to `~/.hermes/.env`; persisted JSON contains only
+environment-variable references. Re-running setup preserves an existing
+secret when the account prompt is left blank, and preserves every setting
+belonging to a route not selected this run (e.g. a saved Tor path survives a
+`vpn` re-run) instead of blanking it.
 
 ## Network audit reason codes
 

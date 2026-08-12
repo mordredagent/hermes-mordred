@@ -8,7 +8,7 @@ which calls :func:`collect_network_answers` / :func:`network_answers_from_args`
 and then persists the result.
 
 The per-prompt description strings (mirrors of the Tor / VPN tables in
-``docs/user/QUICKSTART.md``) live here next to the prompts that use
+``docs/user/USAGE.md``) live here next to the prompts that use
 them; ``network_cli`` re-exports the handful the tests assert on.
 """
 
@@ -40,7 +40,7 @@ from .configure import PromptIO
 #: hint of what it does (UX request 2026-06-15); these orient the operator the
 #: same way the keyvault-init intro and the ``configure`` policy-mode
 #: descriptions do. Copy condenses the "What each route is" section of
-#: ``docs/user/QUICKSTART.md`` so the wizard and the docs never drift.
+#: ``docs/user/USAGE.md`` so the wizard and the docs never drift.
 _NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
     "tor": "Anonymity via the Tor network — slowest; needs `tor` installed",
     "vpn": "IP privacy via any VPN — faster; Mullvad recommended (paid)",
@@ -49,12 +49,15 @@ _NETWORK_PATH_DESCRIPTIONS: Final[Mapping[str, str]] = {
 
 #: Help line printed above each plain-text / secret / yes-no ``network init``
 #: prompt (UX request 2026-06-15). Every setting only matters for a single
-#: route, so each line names its route up front — a clearnet user can press
-#: Enter straight through. The three Mullvad lines now surface only when the
+#: route, so each line names its route up front. Prompts are now gated on the
+#: selected privacy path (UX request 2026-08-12): a clearnet user is asked
+#: only the path question and never sees the Tor or VPN prompts at all, a Tor
+#: user is asked only the Tor prompts, and a VPN user is asked only the VPN
+#: prompts. The three Mullvad lines within the VPN block surface only when the
 #: Mullvad VPN provider is selected (the provider question is asked first), so
 #: a WireGuard / custom-VPN user is never prompted for a Mullvad account number
 #: (UX request 2026-06-16). Mirrors the per-prompt Tor / VPN tables in
-#: ``docs/user/QUICKSTART.md``.
+#: ``docs/user/USAGE.md``.
 _TOR_BINARY_DESCRIPTION: Final[str] = (
     "Tor route only — where the `tor` program is. Leave as `tor` if it's on your PATH."
 )
@@ -118,6 +121,32 @@ class _VpnSettings:
     custom_health: tuple[str, ...]
 
 
+def _vpn_settings_from_existing(existing: Mapping[str, Any]) -> _VpnSettings:
+    """Seed every VPN-route field from the on-disk section, asking nothing.
+
+    Used when the ``vpn`` route wasn't selected, so ``network init`` never
+    prompts for VPN settings on a ``tor`` or ``clearnet`` run (UX request
+    2026-08-12). Unlike the "switched provider" preserve block inside
+    :func:`_collect_vpn_settings`, this preserves EVERYTHING — including
+    ``wireguard_config_path`` and the ``custom_*`` commands — because no
+    provider was actively (re-)selected here; there is nothing to blank.
+    This matters because :meth:`NetworkAnswers.to_config_yaml_section` only
+    emits the wireguard/custom keys when non-empty, so blanking them on a
+    tor/clearnet re-run would silently drop a saved wireguard/custom config
+    from ``config.yaml``.
+    """
+    return _VpnSettings(
+        vpn_provider=str(existing.get("vpn_provider") or "mullvad"),
+        mullvad_account_secret="",
+        mullvad_relay_country=_coerce_mullvad_relay_country(str(existing.get("mullvad_relay_country") or "auto")),
+        mullvad_killswitch=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
+        wireguard_config_path=str(existing.get("wireguard_config_path") or ""),
+        custom_up=_seed_cmd(existing.get("custom_up_cmd")),
+        custom_down=_seed_cmd(existing.get("custom_down_cmd")),
+        custom_health=_seed_cmd(existing.get("custom_health_cmd")),
+    )
+
+
 def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], prompt_secret: bool) -> _VpnSettings:
     """Ask which VPN provider to use, then only that provider's settings.
 
@@ -130,18 +159,24 @@ def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], p
     Non-Mullvad providers leave the Mullvad relay/killswitch at their existing
     on-disk values so a re-run that switches providers preserves a saved Mullvad
     config; ``mullvad_account_secret`` stays ``""`` (blank = keep current).
+    ``wireguard_config_path`` / ``custom_*`` intentionally start blank here
+    (unlike :func:`_vpn_settings_from_existing`) and are only filled back in
+    when the operator actively (re-)selects that provider below — switching
+    away from a saved wireguard/custom config is an active choice this
+    function must still allow.
     """
+    seeded = _vpn_settings_from_existing(existing)
     vpn_provider = prompt_io.ask_choice(
         label="VPN provider",
         choices=("mullvad", "wireguard", "custom"),
-        default=str(existing.get("vpn_provider") or "mullvad"),
+        default=seeded.vpn_provider,
         descriptions=_VPN_PROVIDER_DESCRIPTIONS,
     )
 
     mullvad_account_secret = ""
     # Preserve any saved Mullvad config when the chosen provider isn't Mullvad.
-    mullvad_relay_country = _coerce_mullvad_relay_country(str(existing.get("mullvad_relay_country") or "auto"))
-    mullvad_killswitch = _coerce_seed_bool(existing.get("mullvad_killswitch", False))
+    mullvad_relay_country = seeded.mullvad_relay_country
+    mullvad_killswitch = seeded.mullvad_killswitch
     wireguard_config_path = ""
     custom_up: tuple[str, ...] = ()
     custom_down: tuple[str, ...] = ()
@@ -210,6 +245,29 @@ def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], p
     )
 
 
+def _collect_tor_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any]) -> tuple[str, int]:
+    """Ask the two Tor-route prompts: binary path, then SOCKS port.
+
+    Only called when the operator picked the ``tor`` route (UX request
+    2026-08-12); :func:`collect_network_answers` seeds these two fields
+    straight from ``existing`` instead of calling this on any other route, so
+    a ``vpn`` or ``clearnet`` run never sees the Tor prompts.
+    """
+    tor_binary_path = prompt_io.ask_text(
+        label="Tor binary path",
+        default=str(existing.get("tor_binary_path") or "tor"),
+        description=_TOR_BINARY_DESCRIPTION,
+    )
+    tor_socks_port = _coerce_tor_socks_port(
+        prompt_io.ask_text(
+            label="Tor SOCKS port",
+            default=str(existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT),
+            description=_TOR_SOCKS_PORT_DESCRIPTION,
+        )
+    )
+    return tor_binary_path, tor_socks_port
+
+
 def collect_network_answers(
     prompt_io: PromptIO,
     *,
@@ -218,18 +276,31 @@ def collect_network_answers(
 ) -> NetworkInitInputs:
     """Run the network-privacy prompts, seeding defaults from ``existing``.
 
-    Prompt order: privacy path → Tor binary → Tor SOCKS port → VPN provider →
-    the selected provider's settings. Asking the provider before the Mullvad
-    prompts lets them be gated on ``vpn_provider == "mullvad"``, so a WireGuard
-    or custom-VPN user is never asked for a Mullvad account number (UX request
-    2026-06-16).
+    Prompts are gated by the selected privacy path (UX request 2026-08-12):
+    the wizard always asks the path question first, then asks only the
+    prompts that route needs.
+
+    - ``clearnet`` → the path question is the only prompt; the wizard
+      finishes there.
+    - ``tor`` → followed by the Tor binary path and Tor SOCKS port prompts;
+      the VPN provider block is never shown.
+    - ``vpn`` → followed by the VPN provider question and (per
+      :func:`_collect_vpn_settings`) the selected provider's own settings;
+      the Tor prompts are never shown.
+
+    Every prompt that a given route does not ask is instead seeded straight
+    from ``existing`` (falling back to the static safe defaults), so a
+    re-run on a different route never silently wipes settings belonging to a
+    route that isn't currently selected — the same non-destructive contract
+    :func:`_collect_vpn_settings` already applies one level down when a
+    non-Mullvad provider is chosen (UX request 2026-06-16).
 
     ``existing`` is the current ``plugins.mordred_network`` body (see
-    :func:`_read_existing_network_section`). Seeding each prompt's default from
-    it makes a re-run of ``network init`` non-destructive: pressing Enter on
-    every prompt keeps the on-disk value. A blank Mullvad answer is preserved
-    as ``""`` so :func:`run_init` can leave any existing ``.env`` secret intact
-    instead of stripping it.
+    :func:`_read_existing_network_section`). Seeding each asked prompt's
+    default from it makes a re-run of ``network init`` non-destructive:
+    pressing Enter on every prompt keeps the on-disk value. A blank Mullvad
+    answer is preserved as ``""`` so :func:`run_init` can leave any existing
+    ``.env`` secret intact instead of stripping it.
     """
     existing = existing or {}
 
@@ -243,19 +314,17 @@ def collect_network_answers(
         default=seeded_path,
         descriptions=_NETWORK_PATH_DESCRIPTIONS,
     )
-    tor_binary_path = prompt_io.ask_text(
-        label="Tor binary path",
-        default=str(existing.get("tor_binary_path") or "tor"),
-        description=_TOR_BINARY_DESCRIPTION,
-    )
-    tor_socks_port = _coerce_tor_socks_port(
-        prompt_io.ask_text(
-            label="Tor SOCKS port",
-            default=str(existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT),
-            description=_TOR_SOCKS_PORT_DESCRIPTION,
-        )
-    )
-    vpn = _collect_vpn_settings(prompt_io, existing=existing, prompt_secret=prompt_secret)
+
+    if default_network_path == "tor":
+        tor_binary_path, tor_socks_port = _collect_tor_settings(prompt_io, existing=existing)
+    else:
+        tor_binary_path = str(existing.get("tor_binary_path") or "tor")
+        tor_socks_port = _coerce_tor_socks_port(str(existing.get("tor_socks_port") or DEFAULT_TOR_SOCKS_PORT))
+
+    if default_network_path == "vpn":
+        vpn = _collect_vpn_settings(prompt_io, existing=existing, prompt_secret=prompt_secret)
+    else:
+        vpn = _vpn_settings_from_existing(existing)
 
     network_answers = NetworkAnswers(
         default_network_path=default_network_path,

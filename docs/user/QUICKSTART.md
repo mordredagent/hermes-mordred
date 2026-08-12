@@ -185,7 +185,10 @@ hermes-mordred network status
 
 Changing the selected path is saved immediately, but a running Hermes process
 must be restarted so its provider clients use the new route. `network init`
-supports any VPN provider; Mullvad has the most guided setup. See
+asks only the questions the route you pick needs — `clearnet` is a single
+question, `tor` adds two more, `vpn` adds the provider question plus that
+provider's settings — and supports any VPN provider; Mullvad has the most
+guided setup. See
 [`USAGE.md` §4.4](./USAGE.md#44-network-init--the-dialog-and-prompts).
 
 ## 6. Tune policy (optional)
