@@ -1,103 +1,95 @@
 # mordred_keyvault
 
-Hardware-backed key management: Secure Enclave on supported macOS systems
-(`pip install mordred-hermes[macos]`) and the packaged TPM 2.0 helper on
-Linux. macOS can fall back to a software P-256 key in the login Keychain when
-Secure Enclave access is unavailable; Linux fails closed without its TPM
-helper. Capabilities are selected by runtime probes rather than chip-class
-checks, and probing another platform never imports macOS-only pyobjc.
+Hardware-backed key management, encrypted file storage, backup and recovery,
+audit-log encryption, and extension wallet signing.
+
+macOS uses Secure Enclave when available and can fall back to a software P-256
+key in the login Keychain. Linux uses the packaged TPM 2.0 helper and fails
+closed when the helper is unavailable. Platform modules are loaded lazily, so
+capability probes do not import macOS-only dependencies on other systems.
+
+Install native helpers with:
+
+```bash
+hermes-mordred keyvault enable-se   # macOS
+hermes-mordred keyvault enable-tpm  # Linux
+```
 
 ## Owned filesystem paths (see `docs/dev/PATHS.md`)
 
-- `~/.hermes/mordred/keyvault/` — wrapped DEKs, backup blobs, digest cache (Phase 4 owner; sole writer + reader)
+- `~/.hermes/mordred/keyvault/` — wrapped keys, envelopes, backup manifests,
+  verification digests, and encrypted vault state
+- `~/.hermes/mordred/.keyvault.lifecycle.lock` — serialized lifecycle changes
+- `~/.hermes/mordred/.keyvault.reset.json` and `.keyvault.generation` — reset
+  and generation coordination
+
+See [PATHS.md](../../../docs/dev/PATHS.md) for permissions and ownership.
 
 ## Status (per Phase 4 PR)
 
-| File | PR | Status | Notes |
-| --- | --- | --- | --- |
-| `crypto.py` | PR1 (#21) | **landed** | AES-GCM encrypt/decrypt, AES-128/192/256, `secrets.token_bytes(12)` nonce |
-| `digest.py` | PR2 (#23) | **landed** | BLAKE3 `H(seed_hash \|\| (pass_hash ⊕_top4 PoW))`; canonical SPEC vector in tests |
-| `backup.py` | PR2 (#23) | **landed** | Argon2id (m=46 MiB, t=1, p=1) → AES-GCM with `b"MRKV"` self-describing wire format + AAD-bound header; DOS-guarded KDF params |
-| `recovery.py` | PR2 (#23) | **landed** | Verify-before-decrypt: digest mismatch raises before any KDF / AES work |
-| `_exceptions.py` | PR3 (this) | **landed** | `WrapError` base + 5 sibling subclasses (Parse, Integrity, NativeUnavailable, AuthCancelled, KeyNotFound) — codex NIT-1 split of the originally-proposed single `WrapAuthFailed` |
-| `native.py` | PR3 (this) | **landed** | Lazy `Security.framework` boundary; `_lazy_import_security()` (cached, non-Darwin short-circuit), `is_secure_enclave_available()` (infallible capability probe) |
-| `wrap.py` | PR3 (this) | **landed** | DEK wrap/unwrap via raw P-256 ECDH + HKDF-SHA256 + AES-KW (RFC 3394); `NativeBackend` Protocol for Keychain/SecKey ops only (HKDF/AES-KW/wire parsing in pure Python, tested with real crypto) |
-| `api.py` | PR4 | **landed** | Public Python API (`prepare_generate` / `confirm_generate` / encrypt / decrypt / backup import/export / digest verification); BIP39 Unicode normalization and the two-phase durable-init gate live here |
-| `seed_display.py` | PR7 | **landed** | `display_seed()` orchestrator: blackout assert → M4 banner → screenshot pre-check → `SeedDisplayHandle.consume()` → 60s monotonic timer + capture polling → auto-clear; `_default_capture_probe` wraps macOS `CGScreenIsBeingCaptured` (best-effort, fails open); `SeedDisplaySurface` Protocol abstracts rendering |
-| `network_fallback.py` | PR5 | **landed** | OS-API blackout fallback: `resolve_blackout_assert()` delegates to `mordred_network` when importable, else probes macOS `SCNetworkReachability` (pyobjc, lazy import); `blackout_assert` fails closed when the probe cannot run |
-| `log_encryption.py` | PR6 | **landed** | `EncryptedWriter` (Phase 1 `Writer` Protocol) + `decrypt_log_file`; `MRAL` v1 line-oriented AES-GCM wire format, keyvault-wrapped DEK in the header, per-entry AAD bound to `SHA-256(header)` |
-| `extension_sign.py` | #204 | **landed** | `personal_sign` / `sign_typed_data_v4` / `sign_transaction`, called by the packaged `mordred_hermes.extension.wallet` and RPC bridge. Requires the `ethereum` extra. |
+The historical heading is retained for existing links. All listed surfaces are
+current:
 
-`register(ctx)` installs transparent environment decrypt, the host `.env`
-write guard, the shared integrity hook, and best-effort session-boundary
-resealing. Public crypto APIs are invoked explicitly by the wizard and
-extension layers rather than registered as Hermes hooks.
+| Surface | Purpose |
+| --- | --- |
+| `api.py` | Generate keys, encrypt/decrypt envelopes, verify digests, and export/import recoverable backups. |
+| `wrap.py` and native backends | Hardware-backed DEK wrapping and authorized unwrapping. |
+| `vault.py` and `file_container.py` | Versioned encrypted file store used by at-rest protection. |
+| `log_encryption.py` | Process-safe `MRAL` encrypted audit writer and decryptor. |
+| `seed_display.py` | Time-limited Seed Phrase display under a network blackout. |
+| `extension_sign.py` | Ethereum account and transaction signing for the extension; requires the `ethereum` extra. |
+
+At plugin registration, keyvault installs transparent environment decryption,
+the host `.env` write guard, sibling-integrity checks, and best-effort
+session-boundary resealing. Crypto APIs are called explicitly by the wizard and
+extension rather than exposed as Hermes hooks.
 
 ## Wire format (Phase 4 PR2 baseline, frozen 2026-05-14)
 
-`backup.export` produces a self-describing blob whose entire header is bound to the AES-GCM ciphertext via AAD, so any header tampering trips `InvalidTag` at decrypt time:
+`MRKV` v1 is the recoverable backup format. Its header carries the Argon2id
+profile, salt, verification digest, and AES payload length; the complete header
+is authenticated as AES-GCM AAD. Parsers reject duplicate, non-canonical, and
+out-of-range KDF parameters before allocating KDF memory.
 
-```
-magic(4) = "MRKV"  |  version(1) = 1  |  kdf_id(1) = 1 (Argon2id)
-m_cost(4 BE)       |  t_cost(4 BE)    |  p_cost(4 BE)
-salt(16)           |  verification_digest(32)
-aes_blob_len(4 BE) |  aes_blob = nonce(12) || ciphertext || tag(16)
-```
-
-AAD = `magic || version || kdf_id || m_cost || t_cost || p_cost || salt || verification_digest` (66 bytes).
-
-DOS guards in `parse_header` (Phase 4 PR2 integration finding, **not** in the original Codex review): tampered cost-param bytes can otherwise convince `decrypt_body` to request 16 GiB Argon2 allocations. We cap `m_cost ≤ 1 GiB`, `t_cost ≤ 64`, `p_cost ≤ 16` and reject any value ≤ 0; the header-level reject precedes the KDF call.
+The frozen v1 Argon2id profile is 46 MiB memory, one iteration, and one lane.
+Breaking layout changes require a new version.
 
 ## Wrap wire format & algorithm (Phase 4 PR3, frozen 2026-05-14)
 
-`wrap.wrap_dek(dek, key_id, *, backend)` produces a 127-byte self-describing blob:
+`MRKW` v1 is a 127-byte DEK-wrap blob:
 
+```text
+magic + version + algorithm + key_id_hash + ephemeral P-256 public key + wrapped DEK
 ```
-magic(4) = "MRKW"  |  version(1) = 1  |  alg_suite(1) = 1
-key_id_hash(16)    |  ephemeral_pub(65)  |  wrapped_dek(40)
-```
 
-- `alg_suite = 1` = `(P256_ECDH_RAW, HKDF_SHA256, AES256_KW_RFC3394)`.
-- `key_id_hash` = first 16 bytes of `SHA-256(key_id)` — never the cleartext id.
-- `ephemeral_pub` = SEC1 uncompressed P-256 (`0x04 ‖ X ‖ Y`), freshly generated per call (wrap is non-deterministic).
-- `wrapped_dek` = 40-byte RFC 3394 AES-KW output for a 32-byte DEK (the 8-byte AIV is internal, **no separate IV field**; codex review BLOCKER-2).
-
-HKDF-SHA256 derives the 32-byte AES-KEK with `salt = b""` and `info = magic ‖ version ‖ alg_suite ‖ key_id_hash ‖ ephemeral_pub` (87 bytes). The `info` parameter binds every non-secret blob field to the KEK, so a tampered byte produces a different KEK → AES-KW AIV check fails → `WrapIntegrityError`. This is the integrity story for AES-KW, which lacks AAD natively (codex review HIGH-2).
-
-**Wrap is offline.** It uses the Enclave **public** key + a software ephemeral private key. No `SecKeyCopyKeyExchangeResult` call, no biometric prompt, no audit emit. Two wraps of the same `(dek, key_id)` produce different blobs.
-
-**Unwrap is authorized.** It calls `backend.enclave_ecdh(key_id, ephemeral_pub)` which on macOS routes to `SecKeyCopyKeyExchangeResult` and may prompt for Touch ID / Optic ID / device passcode (codex review BLOCKER-1 / HIGH-3 corrected the original plan: only unwrap is authorized, not wrap). Each invocation emits exactly one audit entry:
-
-| Outcome | Audit reason | Decision |
-| --- | --- | --- |
-| ECDH succeeds → DEK recovered | `keyvault.unwrap_authorized` | `allow` |
-| Enclave returns `errSec*` | `keyvault.unwrap_denied` | `block` |
-
-`native_error_code` on denial is a translated string (`user_cancelled` / `auth_failed` / `biometry_lockout` / `passcode_not_set` / `key_not_found`) — never the raw `OSStatus` integer.
+Wrapping uses P-256 ECDH, HKDF-SHA256, and RFC 3394 AES-256-KW. It needs only
+the hardware key's public half and therefore does not prompt. Unwrapping invokes
+the native private-key operation, may require biometric or device
+authorization, and emits exactly one allow or deny audit event.
 
 ## Exception taxonomy (Codex review NIT-1)
 
-`mordred_hermes.keyvault._exceptions.WrapError` is the base. Five sibling subclasses (not a chain) let callers handle failures by category:
+Callers can distinguish:
 
-- `WrapParseError` — malformed blob (length, magic, version, alg_suite, key_id_hash mismatch, invalid EC point). Surface BEFORE any Enclave call — UX + privacy (no biometric prompt for malformed input).
-- `WrapIntegrityError` — AES-KW AIV check failed (tampered `ephemeral_pub` or `wrapped_dek`).
-- `WrapNativeUnavailable` — `Security.framework` not reachable; chains `ImportError` via `__cause__` on macOS without pyobjc, no chain on non-Darwin.
-- `WrapAuthCancelled` — user denied the access-control prompt; chains the `NativeBackendError` via `__cause__` and (if `audit_sink` itself raised during the denial emit) the sink exception via `__context__` (mirrors PR2 `recovery._emit_mismatch` HIGH-1 fix).
-- `WrapKeyNotFound` — Keychain has no item for `key_id` (never generated, deleted, wrong device, or biometry-change invalidation — the four cases are deliberately indistinguishable to avoid leaking biometric-state changes).
+- `WrapParseError` — malformed or mismatched wire data before native access
+- `WrapIntegrityError` — authenticated unwrap failed
+- `WrapNativeUnavailable` — the required native backend is unavailable
+- `WrapAuthCancelled` — the authorization prompt was denied or cancelled
+- `WrapKeyNotFound` — no matching native key exists
+
+All inherit from `WrapError`; sibling subclasses avoid accidentally treating an
+authorization refusal as corrupt input.
 
 ## Verify-before-decrypt (Codex review #4)
 
-`recovery.import_backup(blob, passphrase, *, recomputed_digest, audit_sink=None)`:
-
-1. Length-confusion guard on `recomputed_digest` (must be 32 bytes) — reject upfront.
-2. `backup.parse_header(blob)` — structural validation only; no KDF, no AES.
-3. Constant-time compare via `hmac.compare_digest` between `parsed.verification_digest` and `recomputed_digest`. On mismatch: optional audit emit → raise `RecoveryDigestMismatch`.
-4. Only on match: `backup.decrypt_body(parsed, passphrase)` runs Argon2id + AES-GCM. `InvalidTag` (wrong passphrase / AAD tamper) propagates.
-
-The secret is **never materialized** on digest mismatch — asserted by explosive-spy tests on both `backup.decrypt_body` and `argon2.low_level.hash_secret_raw`.
+Backup recovery parses structure and compares the recomputed 32-byte
+verification digest in constant time before running Argon2id or AES-GCM. A
+digest mismatch never materializes the protected secret. Only a matching digest
+advances to passphrase-based decryption.
 
 ## See also
 
-- `docs/dev/SPEC.md` §Plugin: `mordred_keyvault` — key hierarchy, digest algorithm canonical form, Seed display security caveats (M4 / M5); §Backup wire format versioning (PR2); §Wrap wire format & algorithm (PR3) for the full byte layout, algorithm steps, and `kSec*` access-control attributes
-- `docs/dev/POLICY.md` §Phase 4 step-0 freeze (PR2) — `keyvault.recovery_digest_mismatch` and `keyvault.seed_display_aborted_screenshot`; §Phase 4 PR3 step-0 freeze — `keyvault.unwrap_authorized` and `keyvault.unwrap_denied`
-- `docs/dev/TODO.md` §4.1 — implementation checklist
+- [SPEC.md](../../../docs/dev/SPEC.md) — key hierarchy and frozen wire contracts
+- [POLICY.md](../../../docs/dev/POLICY.md) — keyvault audit reasons
+- [PATHS.md](../../../docs/dev/PATHS.md) — storage ownership and permissions
+- [Quickstart](../../../docs/user/QUICKSTART.md) — operator setup

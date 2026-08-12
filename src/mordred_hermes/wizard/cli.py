@@ -165,11 +165,10 @@ def dispatch(args: argparse.Namespace) -> int:
     code 2 (the usage-error convention shared with ``encryption purge`` /
     ``audit``).
 
-    Scope note (review 2026-07-07): this guard protects the standalone
-    ``hermes-mordred`` entry (``main`` routes through here). The Hermes-native
-    ``hermes mordred …`` path calls ``args.func(args)`` itself, bypassing this
-    helper — when Hermes 0.12+ wires that path, it needs the same guard at the
-    registration boundary (or to route through ``dispatch``).
+    This guard protects the standalone ``hermes-mordred`` entry because
+    :func:`main` routes through here. A host that exposes the registered plugin
+    command tree and invokes ``args.func(args)`` directly must provide the same
+    guard at its registration boundary or route through :func:`dispatch`.
     """
     func = getattr(args, "func", None)
     if func is None:
@@ -205,14 +204,11 @@ def dispatch(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Standalone ``hermes-mordred`` console-script entry.
 
-    This is the v1 user-facing CLI. It exists because Hermes 0.11.0 does
-    not iterate ``PluginManager._cli_commands`` when building its top-level
-    argparse subparsers (see ``hermes_cli/main.py:9728-9740`` -- only
-    ``plugins.memory.discover_plugin_cli_commands`` is consulted), so the
-    wizard's ``ctx.register_cli_command("mordred", ...)`` call alone is
-    silently dropped from argparse. Users invoke ``hermes-mordred ...``
-    today; once Hermes 0.12+ ships entry-point CLI wiring,
-    ``hermes mordred ...`` will also work via the same handlers.
+    This is the dependable bootstrap and recovery CLI. Hermes 0.19 exposes the
+    registered ``hermes mordred`` tree only after ``mordred_wizard`` is
+    enabled; ``hermes-mordred`` invokes the same handlers directly before or
+    after plugin configuration and remains compatible with the supported
+    Hermes version floor.
 
     Wired in ``pyproject.toml`` ``[project.scripts]`` as
     ``hermes-mordred = "mordred_hermes.wizard.cli:main"``.
@@ -221,10 +217,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="hermes-mordred",
-        description=(
-            "Mordred privacy layer (standalone CLI). "
-            "Same subcommand tree as `hermes mordred ...` once Hermes 0.12+ wires it."
-        ),
+        description="Mordred privacy layer (standalone CLI).",
         epilog=(
             "Quickstart (first run, in order):\n"
             "  hermes-mordred configure              interactive setup (policy / LLM / harness)\n"

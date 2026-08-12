@@ -329,16 +329,16 @@ $M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:77
 > gateway; both share `~/.hermes/extension/pending.json`. Needs the
 > `extension` extra for the built-in pairing backend (full-gateway checkouts
 > can fall back to `gateway.extension_pairing` without it) and `messaging`
-> for the QR render. On
-> builds without the extension package (e.g. the `0.1.0a1` wheel) it fails
-> closed with a clear message.
+> for the QR render. When the extension package is unavailable it fails closed
+> with a clear install hint.
 >
 > `serve` runs the plugin's own ported server (`mordred_hermes.extension`,
 > requires the `extension` extra) standalone — pairing, crypto, history,
 > keyvault signing, and agent chat all work: the chat handler binds the
 > Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
 > real agent replies (a stub reply appears only if that runtime is missing);
-> see the README's "Browser-extension WebSocket gateway" section.
+> see [`EXTENSION.md`](./EXTENSION.md) for the security model and deployment
+> options.
 > Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
 > with a one-line error. Non-loopback `--host` values are refused. To open the
 > localhost web app, copy the complete private `Web page:` URL printed at

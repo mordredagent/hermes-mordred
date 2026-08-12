@@ -1,55 +1,65 @@
 # mordred_privacy_check
 
-Skill metadata enforcement and audit logging.
+Skill metadata enforcement, generic tool gating, sibling-integrity checks, and
+shared audit logging.
 
 ## Owned filesystem paths (see `docs/dev/PATHS.md`)
 
-- `~/.hermes/mordred/audit.log` — process-serialized NDJSON audit log (Phase 1 owner; Phase 4 adds AES-GCM encryption layer)
-- `~/.hermes/mordred/policy.json` — reader (writer = `mordred_wizard`)
+- `~/.hermes/mordred/audit.log` — owns the shared audit stream; the keyvault
+  can replace plaintext NDJSON with the encrypted `MRAL` writer.
+- `~/.hermes/mordred/policy.json` — read-only; `mordred_wizard` is the sole
+  writer.
+- `~/.hermes/config.yaml` — reads `plugins.mordred_privacy_check`.
 
 ## Phase 1.1 surface
 
+The heading is retained for existing links. The surface below is current.
+
 ### Hooks registered
 
-- **`on_session_start`** — loads policy snapshot from `~/.hermes/config.yaml plugins.mordred_privacy_check`, runs H3 Path B sibling-disable detection, emits one-shot `mordred.degraded.no_origin_skill` audit entry (per [HOOK_PAYLOADS.md §4](../../../docs/dev/HOOK_PAYLOADS.md)).
-  - Strict + sibling-disable → audit `mordred.degraded.disable_unprotected` (decision `block`) + poison process + raise `MordredIntegrityRefused(BaseException)` (bypasses Hermes's `except Exception` guard without masquerading as an ordinary CLI exit).
-  - Lenient/off + sibling-disable → audit warn entry, log warning, continue.
-- **`pre_tool_call`** — generic strict-mode tool-name allowlist. Default blocklist `{web_fetch, web_search}` blocks under strict mode on the clearnet path. Returns `{"action": "block", "message": str}` or `None`. Per-skill enforcement is not possible — `origin_skill` is absent from the payload (HOOK_PAYLOADS §4); per-skill checks live in `install_wrapper.py`.
+- **`on_session_start`** loads policy, checks that privacy-locked sibling
+  plugins are enabled, and records the degraded mode caused by Hermes's lack of
+  per-skill origin data.
+- **`pre_tool_call`** applies the strict generic tool-name policy. It returns a
+  Hermes block verdict or `None`.
+
+Strict sibling-integrity failures poison the process and raise a
+`BaseException`-derived refusal so Hermes cannot silently swallow the block.
+Per-skill policy is enforced at install time because the current
+`pre_tool_call` payload contains `tool_name`, not `origin_skill`; see
+[HOOK_PAYLOADS.md](../../../docs/dev/HOOK_PAYLOADS.md).
 
 ### Public Python API
 
 | Module | Purpose |
 | --- | --- |
-| `policy.evaluate_install(*, policy_mode, network_requirements, requires_keyvault=False, keyvault_initialized=True)` | Pure decision for `hermes mordred install <skill>`. Covers `network_requirements` and `requires_keyvault` opt-in enforcement (TODO §4.1). |
-| `policy.evaluate_pre_tool_call(*, policy_mode, tool_name, active_path)` | Pure decision for the `pre_tool_call` hook. |
-| `skill_frontmatter.parse(skill_md_path)` | Read SKILL.md, return `SkillMetadata`. Tolerates missing `metadata.mordred.*`. |
-| `_keyvault_probe.keyvault_initialized(home=None)` | Backend-free probe: True when the Mordred keyvault holds ≥1 key. Reads `meta.json` only; lazily imports `keyvault._storage`. |
-| `audit.NDJSONWriter(path=...)` | Process-serialized audit logger. Implements the frozen `Writer` Protocol (Phase 4 swaps to `EncryptedWriter`). |
-| `install_wrapper.run(*, skill_path, policy_mode, audit, runner=..., keyvault_probe=...)` | Policy-gated wrapper for `hermes skills install <skill>`. `keyvault_probe` is consulted only for skills declaring `requires_keyvault: true`. |
-| `_audit_reasons.ReasonCode` | Frozen `Literal` of the 31 audit reason codes (see `docs/dev/POLICY.md`). |
-| `_runtime.poison(reason)` / `is_poisoned()` | Defense-in-depth poison flag — every subsequent `pre_tool_call` blocks. |
+| `policy` | Pure install and pre-tool decisions. |
+| `skill_frontmatter` | Parse `metadata.mordred` from `SKILL.md`. |
+| `install_wrapper` | Run skill installation through the policy and audit boundary. |
+| `audit` | Shared `Writer` protocol and process-safe plaintext writer. |
+| `_keyvault_probe` | Check keyvault readiness from metadata without opening a native backend. |
+| `_runtime` | Cached policy state, active audit path, and the process poison flag. |
+| `_audit_reasons` | Closed `ReasonCode` type shared by all plugins. |
 
 ### Configuration (under `plugins.mordred_privacy_check` in `~/.hermes/config.yaml`)
 
-| Key | Type | Default | Notes |
+| Key | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `policy` | `"strict"` \| `"lenient"` \| `"off"` | `"lenient"` | Invalid values fall back to `"lenient"` (logged warning). |
-| `allow_cloud_llm` | bool | `false` | Phase 2 hookpoint — read but not yet wired. |
-| `cloud_provider_allowlist` | list\[str] | `[]` | Phase 2 hookpoint. |
-| `audit_log_path` | str | `~/.hermes/mordred/audit.log` | Tilde expansion supported. |
+| `policy` | `strict`, `lenient`, or `off` | `lenient` | Select enforcement mode. |
+| `allow_cloud_llm` | boolean | `false` | Shared strict-LLM policy input enforced by `mordred_llm_guard`. |
+| `cloud_provider_allowlist` | list of strings | `[]` | Canonicalized cloud-provider allowlist. |
+| `audit_log_path` | string | `~/.hermes/mordred/audit.log` | Override the audit path within the Hermes home. |
+
+Invalid security-sensitive values fall back conservatively and emit a warning.
 
 ### Multi-process serialization
 
-Both writer implementations use a process-local lock plus a stable hidden
-sidecar `.<audit-name>.lock` guarded by `fcntl.flock`. The lock spans format
-checks, rotation, append completion, and partial-write rollback, so cooperating
-Hermes/wizard processes cannot interleave entries or let one rollback truncate
-another process's data. `EncryptedWriter` additionally verifies the active
-inode and MRAL header before reusing its in-memory DEK; after another process
-takes ownership, it wipes the stale DEK, rotates the successor file intact,
-and starts a fresh independently decryptable file. Final-path symlinks, FIFOs,
-devices, directories, and unsafe lock sidecars are refused without following
-or blocking on them. Native Windows (already outside the supported v1
-platforms) retains only the in-process fallback because `fcntl` is unavailable.
+Audit writers combine a process-local lock with `fcntl.flock` on a stable
+sidecar. The lock covers format checks, rotation, append, and rollback.
+Encrypted writers additionally verify the active inode and header before
+reusing an in-memory data-encryption key. Unsafe final paths and lock sidecars
+are refused.
 
-See `docs/dev/SPEC.md §Plugin: mordred_privacy_check`, `TODO.md §1.1`, and `POLICY.md` for the full enum freeze.
+See [SPEC.md](../../../docs/dev/SPEC.md),
+[POLICY.md](../../../docs/dev/POLICY.md), and
+[PATHS.md](../../../docs/dev/PATHS.md) for the full contracts.

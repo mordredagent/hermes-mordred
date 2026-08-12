@@ -320,9 +320,9 @@ off `PATH`, point at it with `MORDRED_SEKEY_HELPER`. Implementation:
        decrypt error rather than booting on a default/stale config; an absent anchor
        with manifests still on disk is treated as anchor deletion and refused.
 
-     **Opt-in lifecycle** (the console script is `hermes-mordred …` today; the
-     `hermes mordred …` form starts working once Hermes 0.12+ wires entry-point CLI
-     commands): `hermes-mordred vault enable-config-decrypt` enrolls
+     **Opt-in lifecycle** (`hermes-mordred …` always works after installation;
+     Hermes 0.19+ also exposes `hermes mordred …` after the plugin is enabled):
+     `hermes-mordred vault enable-config-decrypt` enrolls
      `<home>/config.yaml` + writes the marker (`<home>/mordred/config-vault.marker`)
      only after a clean enroll; `disable-config-decrypt` removes the marker and
      guarantees a readable plaintext (recovering the vault copy if sealed). Recovery
