@@ -7,7 +7,7 @@ The finalized strategy decisions are in `MIGRATION.md` §5 (`Option C + Vendored
 ## Repository position
 
 `Mordred-Hermes/` is a **Hermes plugin development repository** (a pure plugin bundle), not a fork of the Hermes upstream.
-The distribution form is a single package via `pip install mordred-hermes` (entry-point `hermes_agent.plugins`).
+The distribution form is a single package via `pip install hermes-mordred` (entry-point `hermes_agent.plugins`).
 
 Therefore:
 
@@ -84,8 +84,8 @@ In the revised strategy, we do not submit a PR upstream to Hermes, and instead r
 Only when hard-enforce truly becomes necessary (e.g., when it's judged that Tier A's defense-in-depth is insufficient):
 
 - Copy the relevant Hermes version's `plugins_cmd.py` into `vendor/hermes/<version>/hermes_cli/plugins_cmd.py`, and apply a patch that checks `privacy_lock` inside the `disable` internal function
-- Add an extra such as `hard-lock = ["mordred-hermes-core==<pinned>"]` to `[project.optional-dependencies]` in `pyproject.toml` (the concrete distribution form will be finalized during v2 design)
-- Users obtain the hard-enforce version via `pip install mordred-hermes[hard-lock]`
+- Add an extra such as `hard-lock = ["hermes-mordred-core==<pinned>"]` to `[project.optional-dependencies]` in `pyproject.toml` (the concrete distribution form will be finalized during v2 design)
+- Users obtain the hard-enforce version via `pip install hermes-mordred[hard-lock]`
 - Pinned to a specific Hermes version (e.g., `hermes-agent==0.5.0`); the patch is reapplied with each upstream release
 - Not included in the v1 release
 
@@ -113,6 +113,7 @@ At that point, update `MIGRATION.md` §5.
 
 - Hermes upstream URL: `https://github.com/NousResearch/hermes-agent`
 - Mordred plugin repository: `Mordred-Hermes/` (this repository)
-- Mordred distribution package: `mordred-hermes` (planned for PyPI; v1 is plugin-only)
-- v2 candidate extra: `mordred-hermes[hard-lock]` (vendored fork, Tier B)
+- Mordred distribution package: `hermes-mordred` (PyPI; v1 is plugin-only)
+- Legacy distribution alias: `mordred-hermes` (metadata-only compatibility shim)
+- v2 candidate extra: `hermes-mordred[hard-lock]` (vendored fork, Tier B)
 - Hermes upstream PR status: **Not submitted (zero-PR commitment, §Zero-PR commitment)**

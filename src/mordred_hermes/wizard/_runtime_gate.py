@@ -68,8 +68,8 @@ def runtime_gate(
     _term.emit_error(
         f"refusing to vault-seal {target} — {detail}.\n"
         f"{mechanism}"
-        "  (run from the repo root):\n"
-        f"    uv pip install --python {runtime_python} -e './mordred-hermes[macos]'\n"
+        "  Install the published package into that interpreter:\n"
+        f"    uv pip install --python {runtime_python} 'hermes-mordred[macos]>=0.1.0a16'\n"
         f"{rerun_tail}"
     )
     return 1

@@ -100,7 +100,7 @@ def _import_pairing() -> Any:
                 "extension pairing is installed but failed to import (missing "
                 f"module {exc.name!r}: {exc}). This is a broken installation, "
                 "not an old build — reinstall with "
-                '`pip install "mordred-hermes[extension]"`.'
+                '`pip install "hermes-mordred[extension]"`.'
             ) from exc
         ported_exc = exc
     except (ImportError, SyntaxError) as exc:
@@ -109,7 +109,7 @@ def _import_pairing() -> Any:
         raise ExtensionGatewayUnavailable(
             f"extension pairing is installed but failed to import: {exc}. "
             "This is a broken installation, not an old build — reinstall "
-            'with `pip install "mordred-hermes[extension]"`.'
+            'with `pip install "hermes-mordred[extension]"`.'
         ) from exc
 
     try:
@@ -132,7 +132,7 @@ def _import_pairing() -> Any:
                 "extension pairing is not available in this build: importing "
                 f"`mordred_hermes.extension.pairing` failed ({ported_exc}); the "
                 f"`gateway.extension_pairing` fallback also failed ({gw_exc}). "
-                "Install a complete mordred-hermes build newer than 0.1.0a1."
+                "Install a complete hermes-mordred build newer than 0.1.0a1."
             ) from ported_exc
     return pairing
 

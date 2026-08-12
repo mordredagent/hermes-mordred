@@ -27,7 +27,7 @@ from tests._keyvault_fakes import FakeBackend
 # eth-keys lives in the optional `ethereum` extra, which CI does not install
 # (only dev / keyvault / macos). Skip the whole module when it is absent so the
 # suite stays green without forcing every environment to pull eth-keys; the
-# tests still run wherever `pip install "mordred-hermes[ethereum]"` is present.
+# tests still run wherever `pip install "hermes-mordred[ethereum]"` is present.
 pytest.importorskip("eth_keys")
 
 # ---------------------------------------------------------------------------

@@ -194,7 +194,7 @@ def dispatch(args: argparse.Namespace) -> int:
             raise
         _term.emit_error(
             f"this command needs the keyvault crypto stack (missing: {(exc.name or '').partition('.')[0]}) — "
-            "install with: pip install 'mordred-hermes[keyvault]' "
+            "install with: pip install 'hermes-mordred[keyvault]' "
             "(on macOS use '[macos]' to also enable Secure Enclave support)"
         )
         return 1

@@ -46,7 +46,7 @@ jobs:
 
       # hermes-agent is a normal PyPI dependency, so a single editable
       # install resolves everything — no monorepo root install step.
-      - name: Install mordred-hermes (dev extra)
+      - name: Install hermes-mordred (dev extra)
         run: |
           pip install --upgrade pip
           pip install -e ".[dev]"

@@ -84,7 +84,7 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
             raise
         print(
             "error: the extension server needs the `extension` extra (aiohttp). "
-            'Install it with `pip install "mordred-hermes[extension]"` or, inside '
+            'Install it with `pip install "hermes-mordred[extension]"` or, inside '
             "this repo, `uv sync --extra extension`.",
             file=sys.stderr,
         )

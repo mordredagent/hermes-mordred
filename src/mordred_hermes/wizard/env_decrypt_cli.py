@@ -74,8 +74,8 @@ def _runtime_gate(
         target=".env",
         mechanism=(
             "  A sealed .env is injected at startup only by the mordred plugin in the\n"
-            "  interpreter that runs `hermes`. mordred-hermes is not published to an\n"
-            "  index — install it into that runtime from your local checkout instead\n"
+            "  interpreter that runs `hermes`. hermes-mordred is not installed in that\n"
+            "  runtime — install the wheel there before sealing the file\n"
         ),
         rerun_tail=(
             "  then re-run `encryption enable env`. To seal anyway (secrets stay\n"

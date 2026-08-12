@@ -1,6 +1,6 @@
-# mordred-hermes
+# hermes-mordred
 
-[![PyPI](https://img.shields.io/pypi/v/mordred-hermes)](https://pypi.org/project/mordred-hermes/)
+[![PyPI](https://img.shields.io/pypi/v/hermes-mordred)](https://pypi.org/project/hermes-mordred/)
 [![CI](https://github.com/InternetMaximalism/mordred-hermes/actions/workflows/ci.yml/badge.svg)](https://github.com/InternetMaximalism/mordred-hermes/actions/workflows/ci.yml)
 
 Privacy-preserving plugins for the
@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 encryption, hardware-backed keys, Tor/VPN routing, local-LLM policy enforcement,
 and end-to-end encryption for Slack and Discord gateway messages.
 
-**Status: active alpha** — current release `0.1.0a15`.
+**Status: active alpha** — current release `0.1.0a16`.
 
 New here? Follow the
 **[Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**
@@ -53,17 +53,23 @@ macOS or Linux dependencies, installs the PyPI package there, and writes a
 `PYTHONHOME` exactly as Hermes's own launcher does. It does not configure
 Mordred or create keys.
 
+When upgrading from `mordred-hermes==0.1.0a15` or older, the installer first
+confirms that a real `hermes-mordred>=0.1.0a16` release is available. Only then
+does it uninstall the legacy distribution and install the canonical one. This
+avoids two distributions owning the same `mordred_hermes` files; configuration,
+keys, audit data, and other state under `~/.hermes/` are not changed.
+
 To inspect the script first, download it and run `less mordred-install.sh`
 before `bash mordred-install.sh`. The equivalent manual commands are:
 
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[macos]==0.1.0a15"
+  "hermes-mordred[macos]==0.1.0a16"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[keyvault]==0.1.0a15"
+  "hermes-mordred[keyvault]==0.1.0a16"
 ```
 
 See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
@@ -157,7 +163,7 @@ extra until it is installed:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[macos,extension,ethereum]==0.1.0a15"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a16"
 ```
 
 ### How it works
@@ -245,20 +251,30 @@ Re-run the installer to upgrade Mordred without upgrading Hermes:
 curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
 ```
 
+The installer performs the old-name ownership transfer automatically. For a
+manual upgrade from `0.1.0a15`, uninstall the legacy real distribution before
+installing the new one:
+
+```sh
+uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
+  "hermes-mordred[macos]==0.1.0a16"  # use [keyvault] on Linux
+```
+
 For a version-pinned upgrade, install the desired version manually into the
 Hermes environment:
 
 ```sh
 # macOS; use [keyvault] on Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[macos]==<new-version>"
+  "hermes-mordred[macos]==<new-version>"
 ```
 
 The equivalent manual command for the newest release is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package mordred-hermes "mordred-hermes[macos]"
+  --upgrade-package hermes-mordred "hermes-mordred[macos]"
 ```
 
 Restart the Hermes gateway or `extension serve` after upgrading.
@@ -305,7 +321,8 @@ hermes-mordred keyvault reset --yes        # irreversible
 Remove the six `mordred_*` entries from `plugins.enabled`, then uninstall:
 
 ```sh
-uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
+uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 \
+  mordred-hermes hermes-mordred
 # the launcher lands next to `hermes`, wherever that is
 rm -f "$(dirname "$(command -v hermes)")/hermes-mordred"
 ```

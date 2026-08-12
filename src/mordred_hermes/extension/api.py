@@ -934,11 +934,21 @@ class _Connection:
 
 def _hermes_version() -> str:
     try:
-        from importlib.metadata import version
-
-        return version("mordred-hermes")
+        from importlib.metadata import PackageNotFoundError, version
     except Exception:
         return "0.0.0"
+
+    # The wire field predates the distribution rename and is retained for
+    # protocol compatibility. Prefer the canonical project, while still
+    # reporting the installed version on a pre-0.1.0a16 legacy environment.
+    for distribution_name in ("hermes-mordred", "mordred-hermes"):
+        try:
+            return version(distribution_name)
+        except PackageNotFoundError:
+            continue
+        except Exception:
+            return "0.0.0"
+    return "0.0.0"
 
 
 def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:

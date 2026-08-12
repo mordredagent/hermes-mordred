@@ -20,7 +20,7 @@ current frame).
 
 Requires the ``ethereum`` optional-dependency extra::
 
-    pip install "mordred-hermes[ethereum]"
+    pip install "hermes-mordred[ethereum]"
 
 which pulls in ``eth-keys`` (secp256k1 / EIP-55 / signing) and
 ``eth-hash[pycryptodome]`` (keccak-256 backend).
@@ -91,7 +91,7 @@ class EthereumSignature:
 # (a stubbed ``_eth_keys``), so a drifted duplicate would surface stale
 # instructions precisely where nobody notices.
 _ETH_KEYS_REQUIRED = (
-    'eth-keys is required for Ethereum key operations. Install it with: pip install "mordred-hermes[ethereum]"'
+    'eth-keys is required for Ethereum key operations. Install it with: pip install "hermes-mordred[ethereum]"'
 )
 
 

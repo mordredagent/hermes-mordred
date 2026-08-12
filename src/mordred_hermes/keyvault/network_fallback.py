@@ -161,7 +161,7 @@ def _query_reachability_flags(host: bytes = _PROBE_HOST_V4) -> int:
     except ImportError as exc:
         raise NetworkFallbackUnavailable(
             "pyobjc-framework-SystemConfiguration is not installed; run "
-            "`pip install mordred-hermes[macos]` to enable the keyvault "
+            "`pip install hermes-mordred[macos]` to enable the keyvault "
             "network-blackout fallback."
         ) from exc
 

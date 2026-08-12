@@ -74,8 +74,8 @@ def _runtime_gate(
         target="config.yaml",
         mechanism=(
             "  A sealed config.yaml is materialized at startup only by the mordred .pth\n"
-            "  hook in the interpreter that runs `hermes`. mordred-hermes is not published\n"
-            "  to an index — install it into that runtime from your local checkout instead\n"
+            "  hook in the interpreter that runs `hermes`. hermes-mordred is not installed\n"
+            "  in that runtime — install the wheel there before sealing the file\n"
         ),
         rerun_tail=(
             "  then re-run `encryption enable config`. To seal anyway (config stays\n"
@@ -158,7 +158,7 @@ def enable(
     else:
         print(
             "  ⚠ The decrypt hook is NOT installed in this environment, so the plaintext\n"
-            "  config.yaml stays on disk. Install it by (re)installing the mordred-hermes\n"
+            "  config.yaml stays on disk. Install it by (re)installing the hermes-mordred\n"
             "  wheel (it ships the startup .pth hook); until then nothing reseals it."
         )
     return 0

@@ -1,9 +1,9 @@
 ---
 name: release
-description: Run the mordred-hermes release runbook — version bump, dev PR, dev→main release PR, TestPyPI dry run, verification, PyPI publish, tag. Use when the user asks to release, publish, or bump the package version.
+description: Run the hermes-mordred release runbook — version bump, dev PR, dev→main release PR, canonical-first TestPyPI/PyPI verification, compatibility shim, tag. Use when the user asks to release, publish, or bump the package version.
 ---
 
-# mordred-hermes release runbook
+# hermes-mordred release runbook
 
 **Source of truth: `docs/dev/CI.md` §"Normal release (runbook)".** This skill is
 a thin operational wrapper. If anything below disagrees with CI.md, CI.md wins —
@@ -15,7 +15,8 @@ re-read it before proceeding, and update this skill in the same PR.
   even after deletion. Always bump; never re-release an existing version.
 - **The `pypi` Environment has no required reviewers** (billing-plan
   constraint) — dispatching the production workflow publishes immediately.
-  **Never run step 6 without the user's explicit go-ahead in this session.**
+  **Never run steps 7 or 9 without the user's explicit go-ahead in this
+  session, covering both production projects.**
 - Parallel Claude sessions may share this checkout: re-check
   `git status` / `git log` / open PRs immediately before any branch, commit,
   or PR mutation.
@@ -38,7 +39,7 @@ re-read it before proceeding, and update this skill in the same PR.
    PR included since the last release (this becomes the release notes).
    Confirm CI green, merge.
 
-4. **TestPyPI dry run** (from the `main` ref):
+4. **TestPyPI canonical publish** (from the `main` ref):
 
    ```sh
    gh workflow run release.yml --ref main -f target=testpypi -f mode=release \
@@ -50,7 +51,7 @@ re-read it before proceeding, and update this skill in the same PR.
 
    ```sh
    pip install --index-url https://test.pypi.org/simple/ \
-     --extra-index-url https://pypi.org/simple/ "mordred-hermes==<version>"
+     --extra-index-url https://pypi.org/simple/ "hermes-mordred==<version>"
    ```
 
    Then confirm entry-point discovery is 6/6 (`PluginManager.discover_and_load`
@@ -61,18 +62,36 @@ re-read it before proceeding, and update this skill in the same PR.
    discovery probe against the real home triggers the plaintext audit-writer
    takeover and rotates the production encrypted audit log aside.
 
-6. **Production publish — STOP and confirm with the user first** (immediate,
-   irreversible):
+6. **TestPyPI compatibility publish** — publish only after step 5 succeeds:
+
+   ```sh
+   gh workflow run release.yml --ref main -f target=testpypi -f mode=compat \
+     -f expected-version=<version>
+   ```
+
+   In another fresh venv, install `mordred-hermes==<version>`. Confirm it
+   resolves the matching `hermes-mordred` release, then uninstall only
+   `mordred-hermes` and confirm the import package and CLI still work.
+
+7. **Production canonical publish — STOP and confirm with the user first**
+   that both the canonical publish here and the compatibility publish in step
+   9 are authorized (both are immediate and irreversible):
 
    ```sh
    gh workflow run release.yml --ref main -f target=pypi -f mode=release \
      -f expected-version=<version>
    ```
 
-7. **Verify the production install** — fresh venv, pinned install from PyPI,
+8. **Verify the production install** — fresh venv, pinned `hermes-mordred`
+   install from PyPI,
    re-confirm discovery 6/6 + CLI.
 
-8. **Tag + GitHub Release** — annotated tag `v<version>` on main's release
+9. **Production compatibility publish** — publish `mode=compat` only after
+   step 8 succeeds, then repeat the shim install/uninstall ownership checks
+   from step 6. Proceed only when the step-7 confirmation explicitly covered
+   both production projects.
+
+10. **Tag + GitHub Release** — annotated tag `v<version>` on main's release
    merge commit; create a GitHub Release (use `--prerelease` for pre-release
    versions) with the notes aggregated in step 3.
 

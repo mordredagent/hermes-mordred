@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bump the mordred-hermes version everywhere it is hardcoded, in lockstep.
+"""Bump the hermes-mordred version everywhere it is hardcoded, in lockstep.
 
 The build's single source of truth is ``src/mordred_hermes/__about__.py`` —
 Hatch reads ``__version__`` from it (``[tool.hatch.version] path``). But a
@@ -10,11 +10,12 @@ release version also appears in surfaces that are not auto-derived from it:
   - src/mordred_hermes/*/plugin.yaml    (each plugin manifest's ``version:``)
   - README.md                        (status line + every install pin)
   - docs/dev/setup.md                (the ``--reinstall`` install pin)
+  - packaging/mordred-hermes-compat/pyproject.toml
+                                      (shim version + exact forwarded deps)
 
-This rewrites all of them at once — with the five plugin manifests and the
-three README install pins, that's twelve hardcoded spots across nine files
-collapsed into one command. ``tests/test_packaging_versions.py`` pins that
-they agree, so CI catches any surface a hand-edit forgets. The
+This rewrites every mirrored surface in one command, including the shim's
+version and exact forwarded dependencies. ``tests/test_packaging_versions.py``
+pins that they agree, so CI catches any surface a hand-edit forgets. The
 name-reservation stub (``packaging/name-reservation/pyproject.toml``) is
 intentionally NOT touched — it stays permanently at ``0.0.0.dev0`` (M7).
 
@@ -39,16 +40,19 @@ _ABOUT = _PKG_ROOT / "src" / "mordred_hermes" / "__about__.py"
 _DOC_VERSION = _PKG_ROOT / "docs" / "dev" / "VERSION"
 _README = _PKG_ROOT / "README.md"
 _SETUP_MD = _PKG_ROOT / "docs" / "dev" / "setup.md"
+_COMPAT_PYPROJECT = _PKG_ROOT / "packaging" / "mordred-hermes-compat" / "pyproject.toml"
 
 _ABOUT_VALUE_RE = re.compile(r"""(?m)^__version__\s*=\s*["']([^"']+)["']\s*$""")
 _ABOUT_LINE_RE = re.compile(r"""(?m)^__version__\s*=\s*["'][^"']+["'][^\n]*$""")
 _MANIFEST_LINE_RE = re.compile(r"(?m)^version:[^\n]*$")
-#: `mordred-hermes[extra1,extra2]==<version>` copy-paste install pins. The
+#: `hermes-mordred[extra1,extra2]==<version>` copy-paste install pins. The
 #: version must start with a digit, which deliberately excludes README's
 #: `==<new-version>` Upgrading-section placeholders — those are prose, not a
 #: pin to rewrite.
-_INSTALL_PIN_RE = re.compile(r"(mordred-hermes\[[^\]]*\]==)[0-9][^\s\"']*")
+_INSTALL_PIN_RE = re.compile(r"(hermes-mordred\[[^\]]*\]==)[0-9][^\s\"']*")
 _README_STATUS_RE = re.compile(r"(current release `)[^`]+(`)")
+_COMPAT_VERSION_RE = re.compile(r"""(?m)^version\s*=\s*["'][^"']+["']\s*$""")
+_COMPAT_REQUIREMENT_RE = re.compile(r"(hermes-mordred(?:\[[^\]]+\])?==)[0-9][^\s\"']*")
 
 
 def _plugin_manifests() -> list[Path]:
@@ -93,7 +97,7 @@ def _rewrite(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Bump mordred-hermes version in lockstep.")
+    parser = argparse.ArgumentParser(description="Bump hermes-mordred version in lockstep.")
     parser.add_argument("version", help="new PEP 440 version, e.g. 0.1.0a1 / 0.1.0b0 / 0.1.0")
     parser.add_argument("--dry-run", action="store_true", help="show changes without writing")
     parser.add_argument(
@@ -132,6 +136,15 @@ def main(argv: list[str] | None = None) -> int:
         targets.append((_SETUP_MD, _INSTALL_PIN_RE, lambda m: f"{m.group(1)}{new_str}", 0))
     else:
         print(f"warning: dev-setup doc {_SETUP_MD} absent — skipping", file=sys.stderr)
+    targets.append((_COMPAT_PYPROJECT, _COMPAT_VERSION_RE, f'version = "{new_str}"', 1))
+    targets.append(
+        (
+            _COMPAT_PYPROJECT,
+            _COMPAT_REQUIREMENT_RE,
+            lambda m: f"{m.group(1)}{new_str}",
+            0,
+        )
+    )
 
     label = "would update" if args.dry_run else "updated"
     changed = 0
@@ -146,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         print(
             "\nNext: add a changelog entry, then verify with\n"
-            "  .venv/bin/python -m pytest tests/test_packaging_versions.py\n"
+            "  uv run pytest tests/test_packaging_versions.py\n"
             "  uv build   # confirm sdist + wheel still build"
         )
     return 0

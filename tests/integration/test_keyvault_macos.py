@@ -48,7 +48,7 @@ def _require_live_enclave() -> None:
         pytest.fail(
             f"{_LIVE_GATE_ENV}=1 but is_secure_enclave_available() is False — "
             "Secure Enclave unreachable (no SEP, locked, or pyobjc missing). "
-            "Install with `pip install mordred-hermes[macos]` on Enclave-capable hardware."
+            "Install with `pip install hermes-mordred[macos]` on Enclave-capable hardware."
         )
 
 

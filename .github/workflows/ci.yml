@@ -5,7 +5,7 @@ name: CI
 # implements, and the "Standalone-repo adaptations" note at the top of
 # that doc for what changed vs. the pre-split design (chiefly: hermes-agent
 # now ships on PyPI, so the old "install hermes-agent from the monorepo
-# root, then install mordred-hermes" step is gone).
+# root, then install hermes-mordred" step is gone).
 
 on:
   pull_request:
@@ -75,7 +75,7 @@ jobs:
       # hermes-agent is a normal PyPI dependency (pyproject.toml pins
       # `hermes-agent>=0.13.0`) so `pip install -e .` resolves it directly —
       # no monorepo root install step needed.
-      - name: Install mordred-hermes (dev + keyvault + extension extras)
+      - name: Install hermes-mordred (dev + keyvault + extension extras)
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,keyvault,extension]"
@@ -212,10 +212,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Build sdist and wheel from that sdist
+      - name: Build canonical and compatibility artifacts
         run: |
           python -m pip install --upgrade pip build
           python -m build --outdir dist
+          python -m build --outdir compat-dist packaging/mordred-hermes-compat
 
       - name: Fresh-install and smoke entry points plus shipped assets
         env:
@@ -255,7 +256,7 @@ jobs:
           assert socks.socksocket
           assert urllib3.HTTPSConnectionPool
 
-          dist = importlib.metadata.distribution("mordred-hermes")
+          dist = importlib.metadata.distribution("hermes-mordred")
           plugin_eps = {
               ep.name: ep
               for ep in dist.entry_points
@@ -305,12 +306,38 @@ jobs:
 
           HERMES_HOME="$SMOKE_HOME" "$SMOKE_VENV/bin/hermes-mordred" --version
 
+          compat_wheel="$(find "$GITHUB_WORKSPACE/compat-dist" -maxdepth 1 -name '*.whl' -type f)"
+          compat_wheel_count="$(find "$GITHUB_WORKSPACE/compat-dist" -maxdepth 1 -name '*.whl' -type f | wc -l | tr -d ' ')"
+          if [ "$compat_wheel_count" -ne 1 ]; then
+            echo "::error::Expected exactly one compatibility wheel, found $compat_wheel_count"
+            exit 1
+          fi
+          "$SMOKE_VENV/bin/python" -m pip install --no-index "$compat_wheel"
+          "$SMOKE_VENV/bin/python" - <<'PY'
+          import importlib.metadata
+
+          canonical = importlib.metadata.distribution("hermes-mordred")
+          compat = importlib.metadata.distribution("mordred-hermes")
+          assert canonical.version == compat.version
+          assert not compat.entry_points
+          assert compat.files is not None
+          assert all(".dist-info/" in str(path) for path in compat.files), compat.files
+          PY
+          "$SMOKE_VENV/bin/python" -m pip uninstall --yes mordred-hermes
+          HERMES_HOME="$SMOKE_HOME" "$SMOKE_VENV/bin/python" - <<'PY'
+          import importlib.metadata
+          import mordred_hermes
+
+          assert importlib.metadata.version("hermes-mordred") == mordred_hermes.__version__
+          PY
+          HERMES_HOME="$SMOKE_HOME" "$SMOKE_VENV/bin/hermes-mordred" --version
+
   # H1 floor guarantee: pyproject.toml declares `hermes-agent>=0.13.0`, but
   # every other job in this workflow resolves the latest PyPI hermes-agent,
   # so the declared floor itself is never actually exercised — a Mordred
   # API usage that only works on a newer hermes-agent could silently
   # violate the floor. Pin hermes-agent to exactly 0.13.0 first, install
-  # mordred-hermes on top of it, verify the resolver left the pin alone
+  # hermes-mordred on top of it, verify the resolver left the pin alone
   # (pip could otherwise "helpfully" upgrade it while still satisfying the
   # >=0.13.0 constraint), and run the unit suite against that exact
   # combination. Standalone job (no `needs:`) so it runs in parallel with
@@ -336,7 +363,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "hermes-agent==0.13.0"
 
-      - name: Install mordred-hermes (dev + keyvault + extension extras)
+      - name: Install hermes-mordred (dev + keyvault + extension extras)
         run: pip install -e ".[dev,keyvault,extension]"
 
       - name: Guard — resolver must not have upgraded hermes-agent off the floor
@@ -391,7 +418,7 @@ jobs:
       # `integration` extra carries the SOCKS client libraries and
       # provider SDKs the §0.8 verification suites need. hermes-agent
       # resolves from PyPI — no monorepo root install step.
-      - name: Install mordred-hermes (dev + integration extras)
+      - name: Install hermes-mordred (dev + integration extras)
         run: |
           pip install --upgrade pip
           pip install -e ".[dev,integration]"

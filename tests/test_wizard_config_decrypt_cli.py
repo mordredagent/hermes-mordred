@@ -82,7 +82,7 @@ class TestEnable:
         assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
         out = capsys.readouterr().out
         assert "NOT installed" in out
-        assert "(re)installing the mordred-hermes" in out
+        assert "(re)installing the hermes-mordred" in out
 
     def test_missing_config_is_error_and_no_marker(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"

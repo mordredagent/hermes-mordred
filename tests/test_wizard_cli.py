@@ -253,7 +253,7 @@ class TestDispatchMissingCryptoStack:
         assert rc == 1
         err = capsys.readouterr().err
         assert err.startswith("error:")
-        assert "mordred-hermes[keyvault]" in err
+        assert "hermes-mordred[keyvault]" in err
         assert missing.partition(".")[0] in err
 
     def test_unrelated_module_not_found_propagates(self) -> None:

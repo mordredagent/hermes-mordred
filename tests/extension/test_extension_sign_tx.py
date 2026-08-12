@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-# Web3 signing is an optional feature (mordred-hermes[ethereum] + eth-account).
+# Web3 signing is an optional feature (hermes-mordred[ethereum] + eth-account).
 # Skip the whole module when those deps aren't installed (e.g. base CI env).
 eth_keys = pytest.importorskip("eth_keys")
 pytest.importorskip("eth_account")
