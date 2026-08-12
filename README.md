@@ -214,13 +214,14 @@ end-to-end production-profile test specifically requires it. The full workflow,
 including how to restore the PyPI wheel, is in
 [development setup](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md).
 
-Run the standard checks through uv:
+Run the standard checks:
 
 ```sh
 uv run pytest -q
-uv run ruff check src tests
-uv run ruff format --check src tests
-uv run mypy --strict src tools
+uv run ruff check src tests scripts
+uv run ruff format --check src tests scripts
+uv run mypy --strict src tools scripts/keyvault_offline_digest.py
+shellcheck scripts/*.sh native/*/build.sh   # brew/apt install shellcheck
 ```
 
 ## Troubleshooting

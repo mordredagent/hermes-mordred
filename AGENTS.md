@@ -16,9 +16,10 @@ PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).
 ```sh
 uv sync --all-extras                      # one-time: .venv with hermes-agent + editable install
 uv run pytest -q                          # unit suite (integration marker excluded by default)
-uv run ruff check src tests
-uv run ruff format --check src tests
-uv run mypy --strict src tools            # CI checks tools/ too, not just src/
+uv run ruff check src tests scripts
+uv run ruff format --check src tests scripts
+uv run mypy --strict src tools scripts/keyvault_offline_digest.py
+shellcheck scripts/*.sh native/*/build.sh # blocking in CI; brew/apt install shellcheck
 uv run pytest --cov=src/mordred_hermes    # coverage; CI floor is 80%
 ```
 

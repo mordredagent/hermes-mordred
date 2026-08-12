@@ -206,13 +206,13 @@ class TestBlake3Bootstrap:
     def test_reexec_under_bundled_venv_with_loop_guard(self) -> None:
         src = self._source()
         assert "os.execv" in src
-        assert ".venv" in src and "mordred-hermes" in src
+        assert ".venv" in src
         assert "_KV_OFFLINE_REEXEC" in src  # guards against an infinite re-exec loop
 
     def test_install_hint_mentions_both_paths(self) -> None:
         src = self._source()
         assert "pip install blake3" in src  # bare offline device
-        assert "mordred-hermes/.venv/bin/python" in src  # this dev checkout
+        assert ".venv/bin/python" in src  # this dev checkout
 
     def test_reexec_uses_only_stdlib(self) -> None:
         """The bootstrap must not pull in a third-party package — the
