@@ -79,14 +79,14 @@ pytestmark = [
 def tor_container() -> Iterator[None]:
     """Module-scoped Tor container — start once, tear down even on failure.
 
-    Bootstrap can take 30-90s on cold CI; the helper waits for
-    ``Bootstrapped 100%`` with a 120s deadline before yielding.
+    Bootstrap timing depends on the live Tor network; the helper waits
+    for ``Bootstrapped 100%`` with a per-attempt deadline and recreates
+    the container once on timeout (see :mod:`._docker`) before yielding.
     """
     with _docker.compose_up(
         project_dir=_COMPOSE_DIR,
         service="tor",
         bootstrap_token="Bootstrapped 100%",
-        timeout=120.0,
     ):
         yield
 

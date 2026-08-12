@@ -17,6 +17,10 @@ services:
       test: ["CMD-SHELL", "grep -q 'Bootstrapped 100%' /var/log/tor/notices.log"]
       interval: 5s
       timeout: 3s
-      retries: 30
+      # 30s start + 45x5s covers the harness's 240s per-attempt
+      # bootstrap deadline (tests/integration/_docker.py), so the
+      # container is not flagged unhealthy while a slow-but-live
+      # bootstrap is still inside its budget.
+      retries: 45
       start_period: 30s
     restart: "no"

@@ -20,9 +20,13 @@ Bootstrap detection
 
 Tor signals readiness on stdout with ``Bootstrapped 100%``; we tail the
 combined logs of the named service and return as soon as the token
-appears, with a deadline (default 120s — cold CI runners need 60-90s).
-Stdout tail is the same mechanism :mod:`paths.tor` uses for the native
-spawn case, so a regression in either path surfaces the same way.
+appears, with a per-attempt deadline (default 240s — cold CI runners
+have been observed past 120s). A missed deadline usually means the
+bootstrap wedged on a bad guard/directory draw rather than being merely
+slow, so :func:`compose_up` recreates the container once (fresh draw)
+before raising :class:`BootstrapTimeout`. Stdout tail is the same
+mechanism :mod:`paths.tor` uses for the native spawn case, so a
+regression in either path surfaces the same way.
 """
 
 from __future__ import annotations
@@ -37,7 +41,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
-DEFAULT_BOOTSTRAP_TIMEOUT: Final[float] = 120.0
+DEFAULT_BOOTSTRAP_TIMEOUT: Final[float] = 240.0
+DEFAULT_BOOTSTRAP_ATTEMPTS: Final[int] = 2
 DEFAULT_DOWN_TIMEOUT: Final[float] = 30.0
 DEFAULT_POLL_INTERVAL: Final[float] = 1.0
 
@@ -210,6 +215,27 @@ def _wait_for_bootstrap_token(
     raise BootstrapTimeout(f"service {service!r} did not emit {token!r} within {timeout}s; last log tail:\n{detail}")
 
 
+def _teardown(project_dir: Path) -> None:
+    """``compose down --volumes --remove-orphans``, escalating to
+    ``compose kill`` if the graceful path stalls."""
+    try:
+        _run_compose(
+            project_dir,
+            ["down", "--volumes", "--remove-orphans"],
+            check=False,
+            capture=True,
+            timeout=DEFAULT_DOWN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        _run_compose(
+            project_dir,
+            ["kill"],
+            check=False,
+            capture=True,
+            timeout=DEFAULT_DOWN_TIMEOUT,
+        )
+
+
 @contextmanager
 def compose_up(
     *,
@@ -217,44 +243,45 @@ def compose_up(
     service: str,
     bootstrap_token: str | None = None,
     timeout: float = DEFAULT_BOOTSTRAP_TIMEOUT,
+    attempts: int = DEFAULT_BOOTSTRAP_ATTEMPTS,
 ) -> Iterator[None]:
     """Bring up the compose project; tear down on exit even on failure.
 
     ``bootstrap_token`` controls readiness detection:
 
     - non-empty string → tail logs for the substring (Tor uses
-      ``Bootstrapped 100%``).
+      ``Bootstrapped 100%``), waiting up to ``timeout`` seconds per
+      attempt. If the token never appears the container is recreated
+      from scratch and the wait restarts, up to ``attempts`` total
+      tries — a wedged Tor bootstrap (bad guard/directory draw) rarely
+      recovers by waiting longer, but a fresh container re-rolls the
+      draw. The last attempt raises :class:`BootstrapTimeout`.
     - ``None`` → return immediately after ``compose up -d`` succeeds.
 
     Teardown calls ``compose down --volumes --remove-orphans`` so each
     test module starts from a clean slate; the bind-mount data dir is
     untouched (it lives in the test tree, not a docker volume).
     """
+    if attempts < 1:
+        raise ValueError(f"attempts must be >= 1, got {attempts}")
     if skip_reason_if_unavailable() is not None:
         raise DockerUnavailable(skip_reason_if_unavailable() or "")
 
     _run_compose(project_dir, ["up", "-d", service], timeout=180.0)
     try:
         if bootstrap_token:
-            _wait_for_bootstrap_token(project_dir, service, bootstrap_token, timeout)
+            for attempt in range(1, attempts + 1):
+                try:
+                    _wait_for_bootstrap_token(project_dir, service, bootstrap_token, timeout)
+                    break
+                except BootstrapTimeout:
+                    if attempt == attempts:
+                        raise
+                    _teardown(project_dir)
+                    _run_compose(project_dir, ["up", "-d", service], timeout=180.0)
         yield
     finally:
-        try:
-            _run_compose(
-                project_dir,
-                ["down", "--volumes", "--remove-orphans"],
-                check=False,
-                capture=True,
-                timeout=DEFAULT_DOWN_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            _run_compose(
-                project_dir,
-                ["kill"],
-                check=False,
-                capture=True,
-                timeout=DEFAULT_DOWN_TIMEOUT,
-            )
+        _teardown(project_dir)
 
 
 def container_alive(project_dir: Path, service: str) -> bool:
