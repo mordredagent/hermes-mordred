@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+from mordred_hermes.extension import __main__ as extension_main
 from mordred_hermes.extension.__main__ import main, serve
 from mordred_hermes.wizard.cli import _setup_subparser
 
@@ -171,6 +172,54 @@ def test_serve_does_not_misclassify_api_internal_import_bug() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_serve_loads_vault_managed_environment_before_accepting_rpcs(tmp_path, monkeypatch) -> None:
+    from mordred_hermes.extension import api as extension_api
+    from mordred_hermes.keyvault import _runtime_env
+
+    vault_root = tmp_path / "mordred" / "vault"
+    vault_root.mkdir(parents=True)
+    (vault_root / "manifest.1.mvmf").write_bytes(b"vault-present")
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    calls: list[str] = []
+
+    def inject() -> int:
+        calls.append("inject")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "from-vault")
+        return 1
+
+    class FakeServer:
+        page_url = "http://127.0.0.1/private"
+
+        def __init__(self, **_kwargs: object) -> None:
+            calls.append(f"server:{os.environ.get('DISCORD_BOT_TOKEN', '')}")
+
+    monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", inject)
+    monkeypatch.setattr(extension_api, "ExtensionAPIServer", FakeServer)
+    monkeypatch.setattr(extension_main, "_resolve_chat_handler", lambda: None)
+    monkeypatch.setattr(extension_main, "_run_forever", lambda *_args: 0)
+
+    assert serve(port=_free_port()) == 0
+    assert calls == ["inject", "server:from-vault"]
+
+
+def test_serve_fails_closed_when_vault_environment_cannot_be_loaded(tmp_path, monkeypatch, capsys) -> None:
+    from mordred_hermes.keyvault import _runtime_env
+
+    vault_root = tmp_path / "mordred" / "vault"
+    vault_root.mkdir(parents=True)
+    (vault_root / "manifest.1.mvmf").write_bytes(b"vault-present")
+
+    def fail() -> int:
+        raise RuntimeError("sensitive backend detail")
+
+    monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", fail)
+    assert serve(port=_free_port()) == 1
+    err = capsys.readouterr().err
+    assert "refusing to start" in err
+    assert "encryption status" in err
+    assert "sensitive backend detail" not in err
 
 
 def test_serve_rejects_non_loopback_host(capsys: pytest.CaptureFixture[str]) -> None:
