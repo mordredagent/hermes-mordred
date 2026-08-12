@@ -16,18 +16,12 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --upgrade \
 
 On Linux, replace `macos` with `keyvault`.
 
-Set the command path once:
-
-```sh
-M=~/.hermes/hermes-agent/venv/bin/hermes-mordred
-```
-
 ## Start and pair
 
 Start the server in the foreground:
 
 ```sh
-$M extension serve
+hermes-mordred extension serve
 # WebSocket: ws://127.0.0.1:7788/ext
 ```
 
@@ -37,15 +31,15 @@ different local port:
 
 ```sh
 lsof -nP -iTCP:7788 -sTCP:LISTEN
-$M extension serve --port 7799
+hermes-mordred extension serve --port 7799
 ```
 
 In a second terminal, generate a pairing code and wait for the browser
 extension to consume it:
 
 ```sh
-$M extension pair
-$M extension pair --timeout 300
+hermes-mordred extension pair
+hermes-mordred extension pair --timeout 300
 ```
 
 `pair` prints a `MORT-...` code and, with the `messaging` extra, a terminal QR.
