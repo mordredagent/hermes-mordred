@@ -157,6 +157,7 @@ async def _run_flow(port: int) -> dict:
                 await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
                 auth = json.loads((await ws.receive()).data)
                 results["auth_type"] = auth["type"]
+                results["auth_capabilities"] = auth.get("capabilities")
 
                 # --- encrypt then decrypt round-trip via the server ---
                 await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "秘密"}))
@@ -226,6 +227,7 @@ def test_full_server_flow():
     assert r["webauthn_required"] is False
     assert r["pair_type"] == "pair_complete"
     assert r["auth_type"] == "auth_ok"
+    assert r["auth_capabilities"] == ["discord_channel_resolve_v1"]
     assert r["enc_type"] == "encrypt_result"
     assert r["client_decrypt"] == "秘密"
     assert r["dec_plaintext"] == "秘密"
@@ -335,12 +337,13 @@ def test_page_token_auth_and_history():
                 hist = json.loads((await ws.receive()).data)
                 await ws.send_str(json.dumps({"id": "hc", "type": "history_clear"}))
                 cleared = json.loads((await ws.receive()).data)
-                return auth["type"], hist["type"], cleared["type"]
+                return auth, hist["type"], cleared["type"]
         finally:
             await server.stop()
 
-    auth_type, hist_type, cleared_type = asyncio.run(_flow(_free_port()))
-    assert auth_type == "auth_ok"
+    auth, hist_type, cleared_type = asyncio.run(_flow(_free_port()))
+    assert auth["type"] == "auth_ok"
+    assert "capabilities" not in auth
     assert hist_type == "history_result"
     assert cleared_type == "history_cleared"
 
@@ -638,6 +641,17 @@ def test_page_session_cannot_touch_credentials(tmp_path):
                     )
                 )
                 out["channel"] = await _recv(ws)
+                await ws.send_str(
+                    json.dumps(
+                        {
+                            "id": "dc1",
+                            "type": "discord_channel_resolve",
+                            "guild_id": "123",
+                            "channel_id": "456",
+                        }
+                    )
+                )
+                out["discord"] = await _recv(ws)
                 return out
         finally:
             await server.stop()
@@ -650,6 +664,7 @@ def test_page_session_cannot_touch_credentials(tmp_path):
     }
     assert out["slack"] == {"id": "s1", "type": "error", "reason": "page_session_forbidden"}
     assert out["channel"] == {"id": "k1", "type": "error", "reason": "page_session_forbidden"}
+    assert out["discord"] == {"id": "dc1", "type": "error", "reason": "page_session_forbidden"}
     assert pairing.has_webauthn_credential() is True  # second factor survived
     assert not (tmp_path / ".env").exists()  # no Slack tokens written
     assert pairing.load_channel_keys() == {}
@@ -1017,6 +1032,49 @@ def _authed_conn() -> extension_api._Connection:
     conn._authentication_generation = pairing.authentication_generation_fingerprint(token)
     assert conn._authentication_generation is not None
     return conn
+
+
+def test_authed_extension_resolves_discord_channel_metadata():
+    from mordred_hermes.extension.discord_context import DiscordChannelContext
+
+    async def resolver(guild_id: str, channel_id: str) -> DiscordChannelContext:
+        assert (guild_id, channel_id) == ("123", "999")
+        return DiscordChannelContext(
+            guild_id="123",
+            channel_id="999",
+            channel_type=11,
+            channel_name="release thread",
+            parent_channel_id="456",
+            parent_channel_name="secure-ops",
+        )
+
+    conn = _authed_conn()
+    conn.discord_resolver = resolver
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "dc1",
+                    "type": "discord_channel_resolve",
+                    "guild_id": "123",
+                    "channel_id": "999",
+                }
+            )
+        )
+    )
+    assert conn.ws.sent == [
+        {
+            "id": "dc1",
+            "type": "discord_channel_resolve_result",
+            "ok": True,
+            "guild_id": "123",
+            "channel_id": "999",
+            "channel_type": 11,
+            "channel_name": "release thread",
+            "parent_channel_id": "456",
+            "parent_channel_name": "secure-ops",
+        }
+    ]
 
 
 def test_webauthn_registration_binds_chromium_origin_as_rp_id(tmp_path):

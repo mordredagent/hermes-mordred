@@ -37,6 +37,24 @@ _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 7788
 
 
+def _load_vault_managed_environment() -> int:
+    """Install the same sealed ``.env`` shim used by plugin discovery.
+
+    The standalone launcher does not run ``mordred_keyvault.register()``.  A
+    manifest pre-check keeps an extension-only install free of macOS Keychain
+    dependencies when no vault exists, while any on-disk vault state takes the
+    normal fail-closed runtime path.
+    """
+
+    from ..keyvault._identity import default_vault_root
+
+    if not any(default_vault_root().glob("manifest.*.mvmf")):
+        return 0
+    from ..keyvault._runtime_env import install_vault_env_decrypt
+
+    return install_vault_env_decrypt()
+
+
 def _resolve_chat_handler() -> Any:
     """Return the real gateway-agent chat handler when the Hermes runtime is
     importable, else ``None`` (server falls back to its built-in stub).
@@ -106,6 +124,20 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
             file=sys.stderr,
         )
         return 2
+
+    try:
+        _load_vault_managed_environment()
+    except Exception:
+        # Secret-provisioning errors can contain vault paths or native backend
+        # details.  Stop before accepting RPCs and keep the CLI diagnostic
+        # content-free; ``encryption status`` supplies the actionable state.
+        print(
+            "error: could not load the vault-managed environment; refusing to "
+            "start. Run `hermes-mordred encryption status` and repair the env "
+            "vault before retrying.",
+            file=sys.stderr,
+        )
+        return 1
 
     # INFO so ExtensionAPIServer.start()'s "Mordred extension API on ws://..."
     # line reaches the console; this is a foreground/CLI launcher, not a

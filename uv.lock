@@ -1422,6 +1422,7 @@ ethereum = [
 ]
 extension = [
     { name = "aiohttp" },
+    { name = "aiohttp-socks" },
     { name = "cryptography" },
     { name = "requests", extra = ["socks"] },
     { name = "urllib3" },
@@ -1458,6 +1459,7 @@ tor-control = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'extension'", specifier = ">=3.9" },
+    { name = "aiohttp-socks", marker = "extra == 'extension'", specifier = ">=0.10" },
     { name = "aiohttp-socks", marker = "extra == 'integration'", specifier = ">=0.10" },
     { name = "anthropic", marker = "extra == 'integration'", specifier = ">=0.40" },
     { name = "argon2-cffi", marker = "extra == 'ethereum'", specifier = ">=23" },
