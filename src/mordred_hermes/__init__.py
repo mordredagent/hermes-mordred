@@ -1,4 +1,4 @@
-"""mordred-hermes — Hermes plugin bundle namespace package."""
+"""hermes-mordred — Hermes plugin bundle namespace package."""
 
 from mordred_hermes.__about__ import __version__
 

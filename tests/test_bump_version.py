@@ -1,9 +1,9 @@
 """Tests for the release version bump helper (``tools/bump_version.py``).
 
 The tool rewrites the version across every surface (the canonical
-``__about__.py``, the docs ``VERSION`` marker, every ``plugin.yaml``, and the
-README.md / docs/dev/setup.md install pins). A bad bump that desyncs them
-would only be caught later by
+``__about__.py``, the docs ``VERSION`` marker, every ``plugin.yaml``, the
+README.md / docs/dev/setup.md install pins, and the exact compatibility-shim
+requirements). A bad bump that desyncs them would only be caught later by
 ``test_packaging_versions.py``; these tests exercise the tool directly against
 a throwaway tree (``tmp_path`` + monkeypatched module paths) so its own logic —
 lockstep rewrite, dry-run, the monotonic/validity guards, and PEP 440
@@ -34,7 +34,7 @@ def bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, P
     """Load the tool and point its module-level paths at a throwaway tree."""
     mod = _load_tool()
 
-    pkg = tmp_path / "mordred-hermes"
+    pkg = tmp_path / "hermes-mordred"
     about = pkg / "src" / "mordred_hermes" / "__about__.py"
     about.parent.mkdir(parents=True)
     about.write_text('__version__ = "0.1.0a0"\n', encoding="utf-8")
@@ -52,14 +52,24 @@ def bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, P
     readme = pkg / "README.md"
     readme.write_text(
         "**Status: active alpha** — current release `0.1.0a0`\n\n"
-        'uv pip install --python p "mordred-hermes[macos]==0.1.0a0"\n'
-        'uv pip install --python p "mordred-hermes[keyvault]==0.1.0a0"\n',
+        'uv pip install --python p "hermes-mordred[macos]==0.1.0a0"\n'
+        'uv pip install --python p "hermes-mordred[keyvault]==0.1.0a0"\n',
         encoding="utf-8",
     )
 
     setup_md = pkg / "docs" / "dev" / "setup.md"
     setup_md.write_text(
-        'uv pip install --python p --reinstall "mordred-hermes[macos]==0.1.0a0"\n',
+        'uv pip install --python p --reinstall "hermes-mordred[macos]==0.1.0a0"\n',
+        encoding="utf-8",
+    )
+
+    compat_pyproject = pkg / "packaging" / "mordred-hermes-compat" / "pyproject.toml"
+    compat_pyproject.parent.mkdir(parents=True)
+    compat_pyproject.write_text(
+        '[project]\nversion = "0.1.0a0"\n'
+        'dependencies = ["hermes-mordred==0.1.0a0"]\n'
+        "[project.optional-dependencies]\n"
+        'macos = ["hermes-mordred[macos]==0.1.0a0"]\n',
         encoding="utf-8",
     )
 
@@ -75,6 +85,7 @@ def bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, P
     monkeypatch.setattr(mod, "_DOC_VERSION", doc)
     monkeypatch.setattr(mod, "_README", readme)
     monkeypatch.setattr(mod, "_SETUP_MD", setup_md)
+    monkeypatch.setattr(mod, "_COMPAT_PYPROJECT", compat_pyproject)
     return mod, about, doc, manifests
 
 
@@ -87,9 +98,13 @@ def test_bump_updates_every_surface_in_lockstep(bump: tuple[ModuleType, Path, Pa
         assert "version: 0.1.0b0" in manifest.read_text(encoding="utf-8")
     readme_text = mod._README.read_text(encoding="utf-8")
     assert "current release `0.1.0b0`" in readme_text
-    assert 'mordred-hermes[macos]==0.1.0b0"' in readme_text
-    assert 'mordred-hermes[keyvault]==0.1.0b0"' in readme_text
-    assert 'mordred-hermes[macos]==0.1.0b0"' in mod._SETUP_MD.read_text(encoding="utf-8")
+    assert 'hermes-mordred[macos]==0.1.0b0"' in readme_text
+    assert 'hermes-mordred[keyvault]==0.1.0b0"' in readme_text
+    assert 'hermes-mordred[macos]==0.1.0b0"' in mod._SETUP_MD.read_text(encoding="utf-8")
+    compat_text = mod._COMPAT_PYPROJECT.read_text(encoding="utf-8")
+    assert 'version = "0.1.0b0"' in compat_text
+    assert 'hermes-mordred==0.1.0b0"' in compat_text
+    assert 'hermes-mordred[macos]==0.1.0b0"' in compat_text
 
 
 def test_dry_run_writes_nothing(bump: tuple[ModuleType, Path, Path, list[Path]]) -> None:
@@ -101,8 +116,9 @@ def test_dry_run_writes_nothing(bump: tuple[ModuleType, Path, Path, list[Path]])
         assert "version: 0.1.0a0" in manifest.read_text(encoding="utf-8")
     readme_text = mod._README.read_text(encoding="utf-8")
     assert "current release `0.1.0a0`" in readme_text
-    assert 'mordred-hermes[macos]==0.1.0a0"' in readme_text
-    assert 'mordred-hermes[macos]==0.1.0a0"' in mod._SETUP_MD.read_text(encoding="utf-8")
+    assert 'hermes-mordred[macos]==0.1.0a0"' in readme_text
+    assert 'hermes-mordred[macos]==0.1.0a0"' in mod._SETUP_MD.read_text(encoding="utf-8")
+    assert 'version = "0.1.0a0"' in mod._COMPAT_PYPROJECT.read_text(encoding="utf-8")
 
 
 def test_non_increasing_version_is_rejected(bump: tuple[ModuleType, Path, Path, list[Path]]) -> None:

@@ -338,7 +338,7 @@ Phase 4 keyvault will replace the plaintext `.env` storage with AES-GCM-encrypte
 
 ## Tor ControlPort optional extra (Task #5)
 
-`pip install mordred-hermes[tor-control]` adds `stem>=1.8.0,<2` so
+`pip install hermes-mordred[tor-control]` adds `stem>=1.8.0,<2` so
 `paths/tor.py::circuit_status_health(handle, *, controller_factory=None)` can
 perform the runtime's default deep liveness check. After successful cookie
 authentication, an empty `GETINFO circuit-status` reply or one containing at

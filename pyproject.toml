@@ -3,7 +3,7 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mordred-hermes"
+name = "hermes-mordred"
 # Version is sourced dynamically from src/mordred_hermes/__about__.py (see
 # [tool.hatch.version] below) rather than hardcoded here. The single source
 # of truth lives inside the importable package so sdist->wheel builds — which
@@ -60,7 +60,7 @@ extension = [
 macos = [
   # Everything keyvault needs on a Mac = the cross-platform crypto stack
   # (recursive extra) plus the pyobjc Security-framework bridges.
-  "mordred-hermes[keyvault]",
+  "hermes-mordred[keyvault]",
   "pyobjc-framework-Security>=10.0",
   # Phase 4 PR5: SCNetworkReachability probe for keyvault.network_fallback
   # (OS-API network-blackout fallback when mordred_network is absent).
@@ -74,10 +74,10 @@ macos = [
 # don't want to make every Mordred user inherit that supply-chain risk, and
 # (b) the shallow `process.poll()` fallback covers lenient/off operators who
 # don't need the deeper M9 liveness signal. Strict-mode operators install
-# with `pip install mordred-hermes[tor-control]`.
+# with `pip install hermes-mordred[tor-control]`.
 ethereum = [
   # keyvault crypto stack is a prerequisite (AES-GCM encrypt/decrypt).
-  "mordred-hermes[keyvault]",
+  "hermes-mordred[keyvault]",
   # secp256k1 key operations + EIP-55 address derivation + signing.
   "eth-keys>=0.6",
   # keccak256 backend required by eth-keys via eth-hash.

@@ -1,8 +1,8 @@
-# Distribution-rename reservation for the future canonical PyPI name.
+# Historical distribution-rename reservation for the canonical PyPI name.
 #
 # This stub is deliberately separate from packaging/name-reservation/: that
 # directory records the already-published mordred-hermes reservation, while
-# this one must be published before the real distribution changes name.
+# this one was published before the real distribution changed name.
 [build-system]
 requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"

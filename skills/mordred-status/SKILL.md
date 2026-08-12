@@ -40,7 +40,7 @@ environment-specific — never hardcode one developer's machine path):
 2. Otherwise try the Hermes-managed venv, the documented install target per
    this repo's `README.md` ("Install (users, from PyPI)" section):
    `~/.hermes/hermes-agent/venv/bin/hermes-mordred`.
-3. Otherwise **ask the operator** for the path to their `mordred-hermes` venv
+3. Otherwise **ask the operator** for the path to their `hermes-mordred` venv
    (e.g. "I can't find `hermes-mordred` on PATH or at the default Hermes venv
    location — what path did you install it to?"). Only conclude "not
    installed" (see below) once the operator confirms there is no such install.

@@ -434,7 +434,7 @@ def circuit_status_health(
     - Missing ``control_auth_cookie`` (Tor still bootstrapping or data
       dir wiped) → shallow fallback.
     - ImportError from the default factory (the user did not install
-      ``mordred-hermes[tor-control]``) → shallow fallback.
+      ``hermes-mordred[tor-control]``) → shallow fallback.
     - Authentication failure (cookie mismatch, daemon rejected) →
       ``False`` (runtime treats as drop). This is different from the
       ImportError case because a present-but-rejected cookie is a real
@@ -470,7 +470,7 @@ def circuit_status_health(
             _LOG.warning(
                 "stem not installed; circuit_status_health degraded to shallow process.poll() "
                 "fallback. Install the optional dependency to recover deep liveness: "
-                "pip install 'mordred-hermes[tor-control]'."
+                "pip install 'hermes-mordred[tor-control]'."
             )
             _STEM_FALLBACK_WARNED = True
         return health(handle)

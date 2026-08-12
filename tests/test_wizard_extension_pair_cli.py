@@ -130,7 +130,7 @@ def test_extension_pair_fails_closed_without_any_backend(
     assert rc == 2
     err = capsys.readouterr().err
     assert "not available in this build" in err
-    assert "complete mordred-hermes build" in err
+    assert "complete hermes-mordred build" in err
 
 
 # --------------------------------------------------------------------------- #

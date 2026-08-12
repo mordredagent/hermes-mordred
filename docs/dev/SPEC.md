@@ -10,7 +10,7 @@
 
 Mordred is built on the principle of fully leveraging Hermes's plugin SDK and existing capabilities (4 plugin source types, 16 lifecycle hooks, and the registration API via `PluginContext`) without modifying core (independent as a plugin development repository). The privacy layer is distributed as **6 plugins + 1 skill-metadata convention**.
 
-Users can install it with just `pip install mordred-hermes`, and configure/operate it via the `hermes-mordred ...` subcommands.
+Users can install it with just `pip install hermes-mordred`, and configure/operate it via the `hermes-mordred ...` subcommands.
 
 Privacy concerns addressed:
 
@@ -32,12 +32,12 @@ explicit at the Vision level. Read them together with §Platform Support and
 
 - **Upstream**: github.com/NousResearch/hermes-agent (MIT License)
 - **Current repo**: `Mordred-Hermes/` (the Mordred plugin development repository; not a fork/clone of Hermes upstream)
-- **Strategy**: **Option C + Vendored-fork escape hatch** (zero-PR commitment, finalized in MIGRATION.md §10 row 1 / §5 on 2026-05-07) — Hermes core is left unmodified, and 6 plugins are distributed via `pip install mordred-hermes`. **No PRs are submitted to Hermes upstream**
+- **Strategy**: **Option C + Vendored-fork escape hatch** (zero-PR commitment, finalized in MIGRATION.md §10 row 1 / §5 on 2026-05-07) — Hermes core is left unmodified, and 6 plugins are distributed via `pip install hermes-mordred`. **No PRs are submitted to Hermes upstream**
   - `Mordred-Hermes/` requires no upstream rebase (a pure plugin development repository + vendored modules when needed)
   - The plugins are developed under `src/mordred_hermes/` and exposed via `[project.entry-points."hermes_agent.plugins"]` in `pyproject.toml`; `mordred_e2e` uses the `extension/` package rather than a directory matching its entry-point suffix
   - What the old SPEC called a "core seam" is instead handled by **plugin-side wrapper + audit log** (the `mordred.degraded.*` family) for defense-in-depth (Tier A, v1 default)
-  - Items that truly need hard enforcement fall under the **vendored fork extra** (Tier B, v2): a patched version of Hermes core modules is redistributed via e.g. `pip install mordred-hermes[hard-lock]`. Out of scope for v1
-- **Compatibility goal**: Existing Hermes users can add the privacy layer with just `pip install mordred-hermes && hermes-mordred upgrade`. Users migrating from OpenClaw follow 3 steps: `hermes claw migrate` → `pip install mordred-hermes` → `hermes-mordred upgrade`
+  - Items that truly need hard enforcement fall under the **vendored fork extra** (Tier B, v2): a patched version of Hermes core modules is redistributed via e.g. `pip install hermes-mordred[hard-lock]`. Out of scope for v1
+- **Compatibility goal**: Existing Hermes users can add the privacy layer with just `pip install hermes-mordred && hermes-mordred upgrade`. Users migrating from OpenClaw follow 3 steps: `hermes claw migrate` → `pip install hermes-mordred` → `hermes-mordred upgrade`
 
 ### Platform Support (v1)
 
@@ -110,7 +110,7 @@ The old SPEC's "Core Minimal-Change Policy" was redefined as **zero upstream PR*
 
 | Old modification proposal | v1 strategy | v2 escape hatch |
 |----------|---------|-------------------|
-| ~~HSeam-1: add `privacy_lock: boolean` to `plugin.yaml` in Hermes upstream~~ | **plugin-side only**: `privacy_lock: true` is kept as a declarative marker, while a fixed six-plugin canonical list drives the shared integrity callback. Strict refusal raises `MordredIntegrityRefused(BaseException)` (§Plugin-disable protection) | Redistribute a vendored fork (a patched version of `hermes_cli/plugins_cmd.py`) via `pip install mordred-hermes[hard-lock]`. Introduced in v2 if hard enforcement becomes necessary |
+| ~~HSeam-1: add `privacy_lock: boolean` to `plugin.yaml` in Hermes upstream~~ | **plugin-side only**: `privacy_lock: true` is kept as a declarative marker, while a fixed six-plugin canonical list drives the shared integrity callback. Strict refusal raises `MordredIntegrityRefused(BaseException)` (§Plugin-disable protection) | Redistribute a vendored fork (a patched version of `hermes_cli/plugins_cmd.py`) via `pip install hermes-mordred[hard-lock]`. Introduced in v2 if hard enforcement becomes necessary |
 
 **Items that would seem to need core modification run on a plugin-side fallback in v1** (no PRs will be sent in the future either; escape to the v2 vendored fork if necessary):
 
@@ -126,7 +126,7 @@ payload fields against the installed Hermes release and upstream `main`.
 
 ### What Mordred Adds (6 plugins)
 
-All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK (`PluginContext`). Distribution is as a single pip package `mordred-hermes`, supporting loading via the `hermes_agent.plugins` entry point.
+All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK (`PluginContext`). Distribution is as a single pip package `hermes-mordred`, supporting loading via the `hermes_agent.plugins` entry point.
 
 > **Naming convention — read before copying any code path from this document.**
 > Throughout this SPEC, `mordred_network`, `mordred_keyvault`, … are **entry-point
@@ -220,7 +220,7 @@ Out of scope (v2+): journalists, enterprise IT teams, GUI-only users, Windows na
 
 ### Story 1: Adding the privacy layer for existing Hermes users
 
-As an existing Hermes user, I want to add the privacy layer with `pip install mordred-hermes && hermes-mordred upgrade`, reusing my existing `~/.hermes/config.yaml` and skills unchanged.
+As an existing Hermes user, I want to add the privacy layer with `pip install hermes-mordred && hermes-mordred upgrade`, reusing my existing `~/.hermes/config.yaml` and skills unchanged.
 
 Behavior:
 
@@ -235,7 +235,7 @@ Behavior:
 Users who were using the old Mordred in an OpenClaw environment follow these 3 steps:
 
 1. `hermes claw migrate` — migrate to Hermes (workspace, config migration)
-2. `pip install mordred-hermes` — obtain the Mordred plugin suite
+2. `pip install hermes-mordred` — obtain the Mordred plugin suite
 3. `hermes-mordred upgrade` — enable the privacy layer
 
 `hermes-mordred upgrade` has an assist feature that, when it detects the OpenClaw-era `~/.openclaw/mordred/`, migrates policy / audit log / keyvault state to `~/.hermes/mordred/` (see PLAN.md §1.3 for details).
@@ -549,7 +549,7 @@ The difficulty-8 vector is for hand-calculation verification (reached at `n = 51
 
 #### Implementation interface
 
-- Add `pyobjc-framework-Security` to `mordred-hermes`'s macOS extra (`pip install mordred-hermes[macos]`)
+- Add `pyobjc-framework-Security` to `hermes-mordred`'s macOS extra (`pip install hermes-mordred[macos]`)
 - The `Security.framework` wrapper is implemented in `mordred_keyvault/native.py`, with lazy import (using the `_lazy_import` pattern so it doesn't raise `ImportError` at import time on Linux/WSL2)
 - Internal Python API (shared across Mordred plugins) — see §"PR4 API contract & MREN envelope wire format" for the canonical form frozen at PR4 step-0 (2026-05-15):
   - `mordred_keyvault.api.prepare_generate(seed, passphrase, pow_bytes) -> (SeedDisplayHandle, expected_digest)` — in-memory only, no persistence
@@ -1241,7 +1241,7 @@ Because **zero upstream PR** was finalized in MIGRATION.md §10 row 4 (2026-05-0
 
 **Tier B (v2 deferred, vendored fork extra)**:
 
-Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock]` extra is provided. It carries a patched version of `hermes_cli/plugins_cmd.py` under `vendor/hermes/<version>/`, and while `mordred-hermes[hard-lock]` pins to a specific Hermes version via `dependencies` in `pyproject.toml` at install time, it refuses the disable operation itself on the core side. No PR is submitted to Hermes upstream; it is distributed as a vendored fork. Out of scope for v1.
+Once hard enforcement is truly needed, the `pip install hermes-mordred[hard-lock]` extra is provided. It carries a patched version of `hermes_cli/plugins_cmd.py` under `vendor/hermes/<version>/`, and while `hermes-mordred[hard-lock]` pins to a specific Hermes version via `dependencies` in `pyproject.toml` at install time, it refuses the disable operation itself on the core side. No PR is submitted to Hermes upstream; it is distributed as a vendored fork. Out of scope for v1.
 
 **Important caveat (see §Threat Model "does NOT defend against")**: Tier A is designed to block **at the next session start**. "Immediate stop if disabled while running" is out of scope for v1 (on the premise that Hermes does not reflect a plugin's dynamic disablement while a session is running, verified in Phase 0.8). The defense flow is: disable edited between sessions → next session's strict startup → block. This remains plugin-only enforcement: if every runtime Mordred plugin is disabled, no plugin callback can execute; preventing that operation itself requires Tier B/core control.
 
@@ -1254,7 +1254,7 @@ Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock
 
 ### Plugin Versioning & Compatibility
 
-- All Mordred plugins are bundled in the single pip package `mordred-hermes`, sharing a common version
+- All Mordred plugins are bundled in the single pip package `hermes-mordred`, sharing a common version
 - Declares `min-hermes-version` in `[tool.mordred]` of `pyproject.toml`; the
   install dependency and the `hermes-floor` CI job enforce the same floor
 - Detects changes to consumed Hermes hook names and payload fields in local and
@@ -1313,7 +1313,7 @@ Required before starting development:
    - `README.md` — Mordred-owned paths, config keys, internal API surface
 
    `mordred_e2e` (added later, package dir `extension/`) is the one exception to this scaffold — it has no `plugin.yaml` manifest.
-4. Declare the `hermes_agent.plugins` entry point in `pyproject.toml` (the `mordred-hermes` package):
+4. Declare the `hermes_agent.plugins` entry point in `pyproject.toml` (the `hermes-mordred` package):
    ```toml
    [project.entry-points."hermes_agent.plugins"]
    mordred_network = "mordred_hermes.network"

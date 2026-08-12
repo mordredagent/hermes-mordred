@@ -8,7 +8,7 @@ are lazy and resolve only when running inside a live Hermes gateway.
 Submodule access is **lazy** (PEP 562): importing this package does NOT pull in
 ``api`` (which needs the ``[extension]`` extra's ``aiohttp``). That lets
 lightweight consumers — e.g. the ``mordred_e2e`` gateway hook, which only needs
-``crypto``/``pairing`` — load on a base ``mordred-hermes[keyvault]`` install
+``crypto``/``pairing`` — load on a base ``hermes-mordred[keyvault]`` install
 without the WebSocket-server dependencies. ``api``/aiohttp are imported only when
 that submodule is actually touched (``extension serve``).
 """

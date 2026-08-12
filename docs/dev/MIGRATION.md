@@ -22,7 +22,7 @@ dependency.
 |---|---|---|
 | Runtime | TypeScript / Node.js | Python 3.11+ |
 | Extension model | Core seams plus extensions | `hermes_agent.plugins` entry points |
-| Distribution | Fork-oriented tree | `pip install mordred-hermes` |
+| Distribution | Fork-oriented tree | `pip install hermes-mordred` |
 | State root | `~/.openclaw/mordred/` | `<HERMES_HOME>/mordred/` |
 | Configuration | OpenClaw config | `config.yaml` plus Mordred policy mirror |
 | Compatibility | Core patches | Plugin hooks plus tested adapters |
@@ -135,10 +135,12 @@ in-place rename:
 5. Change the GitHub repository name only after both PyPI projects work, then
    update every PyPI/TestPyPI Trusted Publisher to the new repository claim.
 
-Until step 1 is recorded as complete, the root package metadata and public
-installer continue to use `mordred-hermes`. Native helper names, persistent
-key identifiers, state paths, plugin IDs, and `mordred_hermes` imports are
-compatibility identifiers and are not renamed.
+Step 1 completed on 2026-08-12: both indexes serve
+`hermes-mordred==0.0.0.dev0`, and fresh-install checks confirmed that the
+reservation contains no runtime package or console scripts. The root metadata
+and public installer therefore use `hermes-mordred` from `0.1.0a16`. Native
+helper names, persistent key identifiers, state paths, plugin IDs, and
+`mordred_hermes` imports remain compatibility identifiers and are not renamed.
 
 ## 7. Platform Support [DECIDED]
 

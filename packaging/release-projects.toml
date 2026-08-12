@@ -14,5 +14,10 @@ reservation = true
 
 [mode.release]
 directory = "."
+name = "hermes-mordred"
+reservation = false
+
+[mode.compat]
+directory = "packaging/mordred-hermes-compat"
 name = "mordred-hermes"
 reservation = false

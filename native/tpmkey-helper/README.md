@@ -1,7 +1,7 @@
 # mordred-hermes-tpmkey
 
 A small Rust CLI that performs TPM 2.0 P-256 operations on behalf of the Python
-`mordred-hermes` keyvault on **Linux** — the cross-platform counterpart to the
+`hermes-mordred` keyvault on **Linux** — the cross-platform counterpart to the
 macOS Secure-Enclave helper (`mordred-hermes-sekey`).
 
 ## Why this exists

@@ -249,6 +249,6 @@ def evaluate_library_compatibility(
         warnings.append(
             f"{lib}: unknown SOCKS5h compatibility (not in v1 allowlist); "
             "verify the library honours socks5h:// URL scheme or add an entry "
-            "to mordred-hermes proxy_env.SOCKS5H_LIBRARY_REQUIREMENTS"
+            "to mordred_hermes.network.proxy_env.SOCKS5H_LIBRARY_REQUIREMENTS"
         )
     return warnings

@@ -5,6 +5,7 @@ Origin guard. Uses asyncio.run to avoid a pytest-asyncio dependency."""
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import os
 import socket
@@ -20,6 +21,34 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from mordred_hermes.extension import extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
+
+
+def test_reported_package_version_prefers_canonical_distribution(monkeypatch):
+    calls: list[str] = []
+
+    def fake_version(name: str) -> str:
+        calls.append(name)
+        return {"hermes-mordred": "0.1.0a16", "mordred-hermes": "0.1.0a15"}[name]
+
+    monkeypatch.setattr(importlib.metadata, "version", fake_version)
+
+    assert extension_api._hermes_version() == "0.1.0a16"
+    assert calls == ["hermes-mordred"]
+
+
+def test_reported_package_version_falls_back_to_legacy_distribution(monkeypatch):
+    calls: list[str] = []
+
+    def fake_version(name: str) -> str:
+        calls.append(name)
+        if name == "hermes-mordred":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return "0.1.0a15"
+
+    monkeypatch.setattr(importlib.metadata, "version", fake_version)
+
+    assert extension_api._hermes_version() == "0.1.0a15"
+    assert calls == ["hermes-mordred", "mordred-hermes"]
 
 
 @pytest.fixture(autouse=True)

@@ -6,11 +6,9 @@
 # launch, preventing name-squat / supply-chain attacks.
 #
 # Build + upload happen via `.github/workflows/release.yml` in
-# `mode=reserve` (or a manual `twine upload`). The real package — the
-# sibling `mordred-hermes/pyproject.toml`, version `0.1.0a0` — is
-# published later in `mode=release`. PEP 440 guarantees
-# `0.0.0.dev0 < 0.1.0a0`, so this stub never blocks the real release;
-# `tests/test_packaging_versions.py` pins that invariant.
+# `mode=reserve`. The old-name project is now continued by
+# `packaging/mordred-hermes-compat/` in `mode=compat`; this immutable source is
+# retained only to reproduce and audit the already-published reservation.
 [build-system]
 requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
@@ -18,15 +16,15 @@ build-backend = "hatchling.build"
 [project]
 name = "mordred-hermes"
 version = "0.0.0.dev0"
-description = "Name-reservation placeholder for the Mordred privacy plugin bundle (real release pending)"
+description = "Historical name-reservation placeholder for the Mordred privacy plugin bundle"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "InternetMaximalism" }]
 license = { text = "MIT" }
 
 [project.urls]
-Homepage = "https://github.com/InternetMaximalism/Mordred-Hermes"
-Source = "https://github.com/InternetMaximalism/Mordred-Hermes"
+Homepage = "https://github.com/InternetMaximalism/mordred-hermes"
+Source = "https://github.com/InternetMaximalism/mordred-hermes"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mordred_hermes"]

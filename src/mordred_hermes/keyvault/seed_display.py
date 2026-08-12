@@ -194,7 +194,7 @@ def _default_capture_probe() -> str | None:
             _LOG.warning(
                 "pyobjc-framework-Quartz is not installed; screen-capture "
                 "detection is disabled (best-effort only, M5). Install "
-                "mordred-hermes[macos] to enable it."
+                "hermes-mordred[macos] to enable it."
             )
             _QUARTZ_IMPORT_WARNED = True
         return None
