@@ -75,7 +75,9 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 See the [Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for the inspect-before-running sequence and first-time setup.
 
-Optional extras:
+Optional extras are dependency groups selected at installation time, not Hermes
+plugins. The installer automatically selects `macos` on macOS or `keyvault` on
+Linux; add the other extras only when you need the corresponding features:
 
 | Extra | Use it for |
 |---|---|
