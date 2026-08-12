@@ -51,7 +51,7 @@ class DiscordContextError(RuntimeError):
 
 @dataclass(frozen=True)
 class _ClientRoute:
-    connector: aiohttp.BaseConnector | None
+    socks_proxy_url: str | None
     request_proxy: str | None
 
 
@@ -148,7 +148,8 @@ def _tor_route_required() -> bool:
 
     The registered runtime is authoritative in a full Hermes process.  The
     standalone extension launcher has no plugin discovery, so it falls back to
-    the persisted selection and still refuses direct egress when Tor is chosen.
+    the persisted selection.  Tor still requires an explicit proxy, while VPN
+    is refused because its live OS route cannot be verified without a runtime.
     """
 
     from mordred_hermes.network import api as network_api
@@ -160,9 +161,12 @@ def _tor_route_required() -> bool:
         try:
             from mordred_hermes.network.settings import read_default_path_strict
 
-            return read_default_path_strict(hermes_home() / "config.yaml") == "tor"
+            selected_path = read_default_path_strict(hermes_home() / "config.yaml")
         except Exception as exc:
             raise DiscordContextError("routing_unavailable") from exc
+        if selected_path == "vpn":
+            raise DiscordContextError("routing_unavailable") from None
+        return selected_path == "tor"
     except Exception as exc:
         raise DiscordContextError("routing_unavailable") from exc
 
@@ -201,7 +205,8 @@ def _resolve_gateway_route() -> _ClientRoute:
     ``aiohttp`` does not consume proxy environment variables unless
     ``trust_env=True``.  Resolve the same gateway route used elsewhere, then
     pass it explicitly.  ``aiohttp-socks`` cannot parse ``socks5h://``;
-    translating it to ``socks5://`` with ``rdns=True`` preserves remote DNS.
+    translating it to ``socks5://`` preserves remote DNS when the connector is
+    later constructed with ``rdns=True`` on the request's event-loop thread.
     """
 
     tor_required = _tor_route_required()
@@ -225,18 +230,27 @@ def _resolve_gateway_route() -> _ClientRoute:
     if scheme in {"socks5", "socks5h"}:
         if tor_required and not _loopback_proxy_host(proxy_url):
             raise DiscordContextError("routing_unavailable")
-        socks_url = f"socks5://{proxy_url.split('://', 1)[1]}"
-        try:
-            from aiohttp_socks import ProxyConnector
-
-            connector = ProxyConnector.from_url(socks_url, rdns=True)
-        except (ImportError, ValueError) as exc:
-            raise DiscordContextError("routing_unavailable") from exc
-        return _ClientRoute(connector, None)
+        _scheme, separator, remainder = proxy_url.partition("://")
+        if not separator or not remainder:
+            raise DiscordContextError("routing_unavailable")
+        return _ClientRoute(f"socks5://{remainder}", None)
 
     if tor_required or scheme not in {"http", "https"}:
         raise DiscordContextError("routing_unavailable")
     return _ClientRoute(None, proxy_url)
+
+
+def _build_socks_connector(proxy_url: str | None) -> aiohttp.BaseConnector | None:
+    """Build the loop-bound SOCKS connector on the request event loop."""
+
+    if proxy_url is None:
+        return None
+    try:
+        from aiohttp_socks import ProxyConnector
+
+        return ProxyConnector.from_url(proxy_url, rdns=True)
+    except (ImportError, RuntimeError, ValueError) as exc:
+        raise DiscordContextError("routing_unavailable") from exc
 
 
 async def resolve_discord_channel(
@@ -262,9 +276,10 @@ async def resolve_discord_channel(
             if session is None:
                 client_route = await asyncio.to_thread(_resolve_gateway_route)
                 request_proxy = client_route.request_proxy
+                connector = _build_socks_connector(client_route.socks_proxy_url)
                 timeout = aiohttp.ClientTimeout(total=_RESOLUTION_TIMEOUT_SECONDS)
                 session = aiohttp.ClientSession(
-                    connector=client_route.connector,
+                    connector=connector,
                     timeout=timeout,
                     trust_env=False,
                 )
@@ -320,17 +335,20 @@ async def resolve_discord_channel(
 
 
 def _configured_bot_token() -> str:
-    """Read the process environment, then the standard Hermes dotenv file."""
+    """Read Hermes's authoritative dotenv, then the process environment."""
 
     configured = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
-    if configured:
-        return configured
+    path = hermes_home() / ".env"
     try:
         from dotenv import dotenv_values
 
-        path = hermes_home() / ".env"
         text = path.read_text("utf-8")
-        value = dotenv_values(stream=io.StringIO(text), interpolate=False).get("DISCORD_BOT_TOKEN")
-        return value.strip() if isinstance(value, str) else ""
+        values = dotenv_values(stream=io.StringIO(text), interpolate=False)
+    except FileNotFoundError:
+        return configured
     except (OSError, UnicodeError, ValueError):
         return ""
+    if "DISCORD_BOT_TOKEN" not in values:
+        return configured
+    value = values["DISCORD_BOT_TOKEN"]
+    return value.strip() if isinstance(value, str) else configured
