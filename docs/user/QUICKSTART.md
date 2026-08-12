@@ -127,10 +127,6 @@ works from any directory and in sh, bash, zsh, and fish. If that directory is
 not on `PATH`, the installer prints it at the end — add it and reload the
 shell.
 
-Hermes 0.19.0+ also exposes the same command tree as `hermes mordred ...` after
-`configure` enables the plugins. Use `hermes-mordred` for first setup and on
-older supported Hermes releases.
-
 ## 2. First run, in order
 
 | # | Command | Result |

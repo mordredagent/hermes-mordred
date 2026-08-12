@@ -1,21 +1,19 @@
-"""Source-level guard: user-facing guidance must name the working CLI form.
+"""Guards for the canonical user-facing CLI spelling.
 
-Hermes 0.11 does not wire entry-point CLI commands into its argparse tree
-(see ``wizard/cli.py:main``), so ``hermes mordred ...`` does nothing today —
-the working spelling is the ``hermes-mordred`` console script. Telling a
-user to run the space form sends them to a dead end (UX review 2026-06-11
-found 13 such messages).
+``hermes-mordred`` works across the full supported Hermes range, before plugin
+configuration, and on recovery paths. The registered host subcommand is a
+compatibility alias, not an operator-facing spelling. Mixing the two forms in
+guidance makes first-run and recovery instructions version-dependent.
 
 This test walks every non-docstring string constant in the package and
-rejects the space form. Strings that mention ``0.12`` are exempt: they
-*document* the future ``hermes mordred`` wiring rather than instruct the
-user to run it now. Mirrors the narrower guard in
-``test_keyvault_config_bootstrap.py`` (``_RECOVERY_HINT``).
+rejects the space form. It also checks repository Markdown so README, user
+guides, and developer sources of truth cannot drift back to mixed spelling.
+The explicit future-migration item in ``ROADMAP.md`` is the sole exception.
+This mirrors the narrower recovery-hint guard in
+``test_keyvault_config_bootstrap.py``.
 
-Known limits (accepted): docstrings are exempt by design (developer-facing
-RST docs legitimately reference the ``hermes mordred`` form), so guidance
-text smuggled into a docstring position would slip through; the scan covers
-the installed package only, not ``tests/``.
+Known limit (accepted): Python docstrings are developer-facing implementation
+notes and remain outside the source-string scan.
 """
 
 from __future__ import annotations
@@ -26,8 +24,10 @@ from pathlib import Path
 import mordred_hermes
 
 _PACKAGE_ROOT = Path(mordred_hermes.__file__).parent
+_REPO_ROOT = _PACKAGE_ROOT.parents[1]
 _SPACE_FORM = "hermes mordred"
-_FUTURE_FORM_MARKER = "0.12"
+_ROADMAP = _REPO_ROOT / "docs" / "dev" / "ROADMAP.md"
+_ROADMAP_FUTURE_HEADING = "### v2-X4: Canonical Hermes subcommand"
 
 
 def _docstring_node_ids(tree: ast.Module) -> set[int]:
@@ -56,7 +56,7 @@ def _offending_strings(source_file: Path) -> list[str]:
             continue
         if id(node) in docstrings:
             continue
-        if _SPACE_FORM in node.value and _FUTURE_FORM_MARKER not in node.value:
+        if _SPACE_FORM in node.value:
             offenders.append(f"{source_file.name}:{node.lineno}: {node.value!r}")
     return offenders
 
@@ -65,7 +65,25 @@ def test_no_user_facing_space_form_guidance() -> None:
     offenders: list[str] = []
     for source_file in sorted(_PACKAGE_ROOT.rglob("*.py")):
         offenders.extend(_offending_strings(source_file))
-    assert not offenders, (
-        "user-facing strings must reference the working `hermes-mordred ...` "
-        "spelling (Hermes 0.11 does not wire `hermes mordred ...`):\n" + "\n".join(offenders)
+    assert not offenders, "user-facing strings must use the canonical `hermes-mordred ...` spelling:\n" + "\n".join(
+        offenders
     )
+
+
+def test_markdown_uses_canonical_cli_spelling() -> None:
+    markdown_files = [
+        _REPO_ROOT / "README.md",
+        _PACKAGE_ROOT / "wizard" / "README.md",
+        *sorted((_REPO_ROOT / "docs").rglob("*.md")),
+        *sorted((_REPO_ROOT / "tests" / "fixtures").rglob("*.md")),
+    ]
+    offenders: list[str] = []
+    for path in markdown_files:
+        text = path.read_text(encoding="utf-8")
+        if path == _ROADMAP and _ROADMAP_FUTURE_HEADING in text:
+            before, future = text.split(_ROADMAP_FUTURE_HEADING, 1)
+            _, separator, after = future.partition("\n## ")
+            text = before + (f"\n## {after}" if separator else "")
+        if _SPACE_FORM in text:
+            offenders.append(str(path.relative_to(_REPO_ROOT)))
+    assert not offenders, "Markdown must use the canonical `hermes-mordred ...` spelling:\n" + "\n".join(offenders)

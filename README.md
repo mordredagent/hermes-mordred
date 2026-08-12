@@ -30,9 +30,8 @@ The package exposes six `hermes_agent.plugins` entry points:
 ## Requirements
 
 - Python 3.11 or newer; CI currently tests 3.11–3.13.
-- `hermes-agent>=0.13.0`. The host form `hermes mordred ...` additionally
-  requires Hermes 0.19.0 or newer; the standalone `hermes-mordred` command
-  works across the supported range.
+- `hermes-agent>=0.13.0`. Use the canonical `hermes-mordred` command across the
+  supported Hermes range.
 - macOS or Linux. macOS can fall back from Secure Enclave to a software P-256
   key in the login Keychain. Linux requires TPM 2.0 and fails closed when its
   helper is unavailable.
@@ -125,10 +124,6 @@ hermes-mordred network use <tor|vpn|clearnet>
 hermes-mordred network status
 hermes-mordred audit tail
 ```
-
-Once Hermes 0.19.0+ is configured and the plugins are enabled,
-`hermes mordred <command>` exposes the same command tree. On older Hermes
-versions, or before the first `configure`, keep using `hermes-mordred`.
 
 See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
 for expected output and the

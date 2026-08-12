@@ -71,9 +71,10 @@ permissions, writers, and readers.
 - Base install stays small. Platform and feature dependencies remain in the
   `keyvault`, `macos`, `extension`, `ethereum`, `messaging`, `tor-control`, and
   integration extras.
-- `hermes-mordred` remains available across the full Hermes support range;
-  `hermes mordred` is an additional host-CLI form on Hermes 0.19.0+ after the
-  plugins are enabled.
+- `hermes-mordred` is the canonical user-facing CLI across the full Hermes
+  support range. Hermes 0.19.0+ can expose the same handlers through an
+  additional host-CLI compatibility surface after the plugins are enabled, but
+  documentation and operator guidance do not use that form.
 
 ### 0.6 CI workflow
 

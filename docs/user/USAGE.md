@@ -8,13 +8,9 @@
 
 ## 1. How to invoke
 
-Mordred ships **two** entry points onto the *same* subcommand tree. They take
-identical arguments — use whichever is available to you:
-
-| Form | When it works | Notes |
-|------|---------------|-------|
-| `hermes mordred <cmd>` | hermes-agent **0.19.0+**, with the plugins enabled in `~/.hermes/config.yaml` | **Preferred.** `hermes` is on your `PATH`, so this runs from any directory with nothing to type but the command. |
-| `hermes-mordred <cmd>` | Always, once the package is installed | Standalone console script — the bootstrap and the fallback. |
+Use `hermes-mordred <cmd>` for every Mordred operation. This is the canonical
+CLI form across the full supported Hermes version range and remains available
+before the plugins are configured or when their configuration needs recovery.
 
 > **Where `hermes-mordred` actually lives.** The console script itself is
 > installed alongside the interpreter, at
@@ -23,26 +19,11 @@ identical arguments — use whichever is available to you:
 > `hermes`, so the bare command works from any directory. From a development
 > checkout, use `.venv/bin/hermes-mordred` or activate the venv.
 
-**Which should I use?** `hermes mordred …` when it works — no `cd`, no venv
-path. One command tells you:
+Check the installation with:
 
 ```sh
-hermes mordred status     # Mordred status → use this form everywhere below
+hermes-mordred status
 ```
-
-If that prints the top-level `hermes` usage instead, the host-CLI form isn't
-wired on your install — fall back to the console script at its full venv path
-(`~/.hermes/hermes-agent/venv/bin/hermes-mordred`, or `.venv/bin/hermes-mordred`
-in this checkout). Two things gate the `hermes mordred` form:
-
-- **hermes-agent version.** 0.19.0+ discovers entry-point plugin CLI commands
-  and grafts them onto its argparse tree. Older builds — down to Mordred's
-  supported floor of 0.13.0 — do not, so `hermes mordred` falls through to the
-  top-level usage.
-- **Plugins enabled.** The subcommand is registered by the `mordred_wizard`
-  plugin, so it appears only once the plugins are enabled in
-  `~/.hermes/config.yaml`. `hermes-mordred configure` writes that for you —
-  which is why a **fresh install always begins with `hermes-mordred`**.
 
 In this development checkout the fully-wired venv is `.venv`:
 
@@ -51,9 +32,8 @@ cd <repo-root>            # /Users/.../Mordred-Hermes
 .venv/bin/hermes-mordred status
 ```
 
-Every example below is written as `hermes-mordred <cmd>`. Substitute
-`hermes mordred <cmd>` if you prefer the host-CLI form, or the full
-`.venv/bin/hermes-mordred` path from an unactivated checkout.
+Every example below uses `hermes-mordred <cmd>`. From an unactivated development
+checkout, use the full `.venv/bin/hermes-mordred` path instead.
 
 ### Enabling all Mordred plugins
 
