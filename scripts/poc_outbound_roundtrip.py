@@ -56,11 +56,17 @@ class FakeSlackAdapter:
 async def main() -> int:
     assert os.environ.get("HERMES_HOME"), "set HERMES_HOME to a temp dir"
 
-    from mordred_hermes.extension import crypto, pairing, e2e, outbound
+    from mordred_hermes.extension import crypto, e2e, outbound, pairing
 
     # Seed a channel key and mark a Slack thread encrypted (as the inbound hook would).
     pairing._save_pairing(
-        pairing.Pairing(aes_key=secrets.token_bytes(32), ext_token="t", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=0.0)
+        pairing.Pairing(
+            aes_key=secrets.token_bytes(32),
+            ext_token="t",
+            ext_pubkey_b64="",
+            hermes_pubkey_b64="",
+            paired_at=0.0,
+        )
     )
     chan_key = secrets.token_bytes(32)
     pairing.save_channel_key("slack:T:C", chan_key)

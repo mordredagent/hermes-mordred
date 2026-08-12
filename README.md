@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 encryption, hardware-backed keys, Tor/VPN routing, local-LLM policy enforcement,
 and end-to-end encryption for Slack and Discord gateway messages.
 
-**Status: active alpha** — current release `0.1.0a14`.
+**Status: active alpha** — current release `0.1.0a15`.
 
 New here? Follow the
 **[Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**
@@ -60,11 +60,11 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[macos]==0.1.0a14"
+  "mordred-hermes[macos]==0.1.0a15"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[keyvault]==0.1.0a14"
+  "mordred-hermes[keyvault]==0.1.0a15"
 ```
 
 See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
@@ -158,7 +158,7 @@ extra until it is installed:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "mordred-hermes[macos,extension,ethereum]==0.1.0a14"
+  "mordred-hermes[macos,extension,ethereum]==0.1.0a15"
 ```
 
 ### How it works
@@ -214,13 +214,14 @@ end-to-end production-profile test specifically requires it. The full workflow,
 including how to restore the PyPI wheel, is in
 [development setup](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md).
 
-Run the standard checks through uv:
+Run the standard checks:
 
 ```sh
 uv run pytest -q
-uv run ruff check src tests
-uv run ruff format --check src tests
-uv run mypy --strict src tools
+uv run ruff check src tests scripts
+uv run ruff format --check src tests scripts
+uv run mypy --strict src tools scripts/keyvault_offline_digest.py
+shellcheck scripts/*.sh native/*/build.sh   # brew/apt install shellcheck
 ```
 
 ## Troubleshooting

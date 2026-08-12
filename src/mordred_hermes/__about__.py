@@ -13,4 +13,4 @@
 # Bump with `python tools/bump_version.py <new-version>`, which rewrites this
 # file, the docs VERSION marker, and every plugin.yaml in lockstep. The
 # consistency is pinned by tests/test_packaging_versions.py.
-__version__ = "0.1.0a14"
+__version__ = "0.1.0a15"
