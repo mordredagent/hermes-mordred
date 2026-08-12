@@ -45,6 +45,9 @@ keyvault = [
 # `mypy --strict src` and pytest can resolve the extension modules.
 extension = [
   "aiohttp>=3.9",
+  # Discord context lookups must follow Tor with remote DNS. aiohttp has no
+  # native SOCKS transport; aiohttp-socks provides the explicit connector.
+  "aiohttp-socks>=0.10",
   # pairing/crypto hard-import cryptography at module scope; until now it only
   # rode along transitively via hermes-agent's own pin, which this extra must
   # not silently depend on.

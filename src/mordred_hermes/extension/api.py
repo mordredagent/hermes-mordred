@@ -11,6 +11,7 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``auth``             → validate ext_token, reply ``auth_ok`` (se_available)
 - ``chat``             → injected ``chat_handler`` streamed as ``chat_chunk*`` + ``chat_end``
 - ``encrypt``/``decrypt`` → :mod:`mordred_hermes.extension.crypto` with the shared key
+- ``discord_channel_resolve`` → Discord channel/thread metadata via the configured bot token
 - ``accounts_request`` → keyvault address (``accounts_result``)
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
 
@@ -27,7 +28,7 @@ import json
 import logging
 import re
 import secrets
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -43,6 +44,11 @@ from .crypto import (
     hkdf_subkey,
     is_encrypted,
     key_id,
+)
+from .discord_context import (
+    DiscordChannelContext,
+    DiscordContextError,
+    resolve_discord_channel,
 )
 from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
 from .webauthn import InvalidWebAuthnPublicKey
@@ -65,6 +71,7 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # and removed from browser history by the page bootstrap. Any handler added to
 # the `authed` table is refused for page sessions unless it is added here too.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
+_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1"]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
 # socket dies), so an authed client that never approves would grow it without
@@ -89,6 +96,7 @@ DEFAULT_KEEPALIVE_INTERVAL = 20.0
 
 # A chat handler streams response chunks for a user message.
 ChatHandler = Callable[[str, dict[str, Any]], AsyncIterator[str]]
+DiscordResolver = Callable[[str, str], Awaitable[DiscordChannelContext]]
 
 
 def _serialize_frame(payload: dict[str, Any]) -> str:
@@ -208,6 +216,7 @@ class ExtensionAPIServer:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         chat_handler: ChatHandler | None = None,
+        discord_resolver: DiscordResolver | None = None,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
     ) -> None:
         if not _is_loopback_host(host):
@@ -215,6 +224,7 @@ class ExtensionAPIServer:
         self.host = host
         self.port = port
         self.chat_handler: ChatHandler = chat_handler or _default_chat_handler
+        self.discord_resolver: DiscordResolver = discord_resolver or resolve_discord_channel
         self.keepalive_interval = keepalive_interval
         self._runner: web.AppRunner | None = None
         # Per-process page principal. It is printed only as a URL fragment by
@@ -303,7 +313,13 @@ class ExtensionAPIServer:
         # The page authenticates with the page token (only valid from a local
         # origin); the extension authenticates with its paired ext_token.
         page_token = self._page_token if (origin in self._local_origins) else None
-        conn = _Connection(ws, self.chat_handler, page_token=page_token, client_origin=origin)
+        conn = _Connection(
+            ws,
+            self.chat_handler,
+            discord_resolver=self.discord_resolver,
+            page_token=page_token,
+            client_origin=origin,
+        )
         await conn.send_challenge()
         keepalive = asyncio.create_task(conn.keepalive(self.keepalive_interval))
         try:
@@ -325,11 +341,13 @@ class _Connection:
         ws: web.WebSocketResponse,
         chat_handler: ChatHandler,
         *,
+        discord_resolver: DiscordResolver = resolve_discord_channel,
         page_token: str | None = None,
         client_origin: str | None = None,
     ) -> None:
         self.ws = ws
         self.chat_handler = chat_handler
+        self.discord_resolver = discord_resolver
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
         self.authed = False
@@ -402,6 +420,7 @@ class _Connection:
             "decrypt": self._on_decrypt,
             "channel_key_set": self._on_channel_key_set,
             "slack_setup": self._on_slack_setup,
+            "discord_channel_resolve": self._on_discord_channel_resolve,
             "accounts_request": self._on_accounts,
             "sign_request": self._on_sign_request,
             "sign_approve": self._on_sign_approve,
@@ -556,6 +575,7 @@ class _Connection:
                 "type": "auth_ok",
                 "hermes_version": _hermes_version(),
                 "se_available": pairing.se_available(),
+                "capabilities": _EXTENSION_CAPABILITIES,
             }
         )
 
@@ -748,6 +768,50 @@ class _Connection:
             await _reply(True, note="tokens written to ~/.hermes/.env — restart Hermes to apply")
         except Exception as exc:
             await _reply(False, error=str(exc))
+
+    async def _on_discord_channel_resolve(self, msg: dict[str, Any]) -> None:
+        """Resolve a Discord route without exposing the configured bot token."""
+
+        mid = msg.get("id")
+        guild_id = msg.get("guild_id")
+        channel_id = msg.get("channel_id")
+        if not isinstance(mid, str) or not mid or not isinstance(guild_id, str) or not isinstance(channel_id, str):
+            await self._send(
+                {
+                    "id": mid,
+                    "type": "discord_channel_resolve_result",
+                    "ok": False,
+                    "error": "invalid_request",
+                }
+            )
+            return
+        try:
+            context = await self.discord_resolver(guild_id, channel_id)
+        except DiscordContextError as exc:
+            response: dict[str, Any] = {
+                "id": mid,
+                "type": "discord_channel_resolve_result",
+                "ok": False,
+                "error": exc.code,
+            }
+            if exc.retry_after_ms is not None:
+                response["retry_after_ms"] = exc.retry_after_ms
+            await self._send(response)
+            return
+
+        await self._send(
+            {
+                "id": mid,
+                "type": "discord_channel_resolve_result",
+                "ok": True,
+                "guild_id": context.guild_id,
+                "channel_id": context.channel_id,
+                "channel_type": context.channel_type,
+                "channel_name": context.channel_name,
+                "parent_channel_id": context.parent_channel_id,
+                "parent_channel_name": context.parent_channel_name,
+            }
+        )
 
     # -- Slack crypto (fallback path) --------------------------------------
 
