@@ -1,0 +1,554 @@
+"""Hermetic tests for the public ``scripts/install.sh`` entry point."""
+
+from __future__ import annotations
+
+import os
+import platform
+import re
+import shutil
+import stat
+import subprocess
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+INSTALLER = ROOT / "scripts" / "install.sh"
+
+#: Stand-in for uv. Records every invocation, reports a fixed hermes-agent
+#: version, and materialises the console script `pip install` would create.
+#: ``pip check`` answers differently before and after the install so a test can
+#: drive the "Mordred broke Hermes's dependency graph" path.
+_FAKE_UV = """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$UV_LOG"
+if [ "$1" = pip ] && [ "$2" = show ]; then
+  printf 'Name: hermes-agent\\nVersion: %s\\n' "$HERMES_VERSION"
+  exit 0
+fi
+if [ "$1" = pip ] && [ "$2" = check ]; then
+  if [ -f "$UV_STATE/installed" ]; then
+    exit "${UV_CHECK_AFTER:-0}"
+  fi
+  exit "${UV_CHECK_BEFORE:-0}"
+fi
+if [ "$1" = pip ] && [ "$2" = install ]; then
+  shift 2
+  python_path=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --python ]; then
+      python_path="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  cli="$(dirname "$python_path")/hermes-mordred"
+  printf '#!/bin/sh\\nexit 0\\n' > "$cli"
+  chmod 755 "$cli"
+  : > "$UV_STATE/installed"
+  exit 0
+fi
+exit 64
+"""
+
+#: Verbatim shape of the launcher Hermes's official installer writes to
+#: ~/.local/bin/hermes: a bash wrapper whose shebang names bash, not Python.
+_HERMES_WRAPPER = """#!/usr/bin/env bash
+unset PYTHONPATH
+unset PYTHONHOME
+exec "{python}" "{agent}" "$@"
+"""
+
+
+# eq=False: `env` is a dict, so the auto-generated __hash__ from frozen+eq
+# would raise TypeError, and the field stays mutable regardless of `frozen`.
+@dataclass(frozen=True, eq=False)
+class InstallFixture:
+    home: Path
+    bin_dir: Path
+    hermes_python: Path
+    uv_log: Path
+    env: dict[str, str]
+
+    @property
+    def installed_cli(self) -> Path:
+        return self.hermes_python.parent / "hermes-mordred"
+
+    @property
+    def launcher(self) -> Path:
+        return self.bin_dir / "hermes-mordred"
+
+    def uv_calls(self) -> str:
+        return self.uv_log.read_text(encoding="utf-8") if self.uv_log.exists() else ""
+
+
+def _write_executable(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _make_env(root: Path, *, is_venv: bool = True) -> Path:
+    """Create a virtualenv-shaped tree and return its ``bin/python3``."""
+    python = root / "bin" / "python3"
+    _write_executable(python, "#!/bin/sh\nexit 0\n")
+    if is_venv:
+        (root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    return python
+
+
+def _fixture(
+    tmp_path: Path,
+    *,
+    platform_name: str = "Darwin",
+    hermes_version: str = "0.19.0",
+    launcher_style: str = "wrapper",
+    is_venv: bool = True,
+    shadow_env: Path | None = None,
+) -> InstallFixture:
+    """Build an isolated install target.
+
+    ``launcher_style`` picks how ``hermes`` is exposed on PATH: ``wrapper`` is
+    the official installer's bash launcher, ``console`` a pip-generated console
+    script, ``none`` leaves PATH without ``hermes`` at all. ``shadow_env``
+    points the PATH launcher at a *different* environment than the canonical
+    ``~/.hermes`` one, which is how a second Hermes install is simulated.
+    """
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    canonical_python = _make_env(home / ".hermes" / "hermes-agent" / "venv", is_venv=is_venv)
+    launcher_python = _make_env(shadow_env, is_venv=is_venv) if shadow_env is not None else canonical_python
+
+    if launcher_style == "wrapper":
+        _write_executable(
+            bin_dir / "hermes",
+            _HERMES_WRAPPER.format(python=launcher_python, agent=launcher_python.parent.parent.parent / "hermes"),
+        )
+    elif launcher_style == "console":
+        _write_executable(launcher_python.parent / "hermes", f"#!{launcher_python}\n")
+        (bin_dir / "hermes").symlink_to(launcher_python.parent / "hermes")
+    elif launcher_style != "none":  # pragma: no cover - guards test authoring
+        raise ValueError(f"unknown launcher_style {launcher_style!r}")
+
+    expected_python = canonical_python if launcher_style == "none" else launcher_python
+
+    state = tmp_path / "state"
+    state.mkdir()
+    fake_uv = tmp_path / "fake-bin" / "uv"
+    _write_executable(fake_uv, _FAKE_UV)
+    _write_executable(fake_uv.parent / "uname", f"#!/bin/sh\nprintf '%s\\n' '{platform_name}'\n")
+
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "HERMES_HOME": str(home / ".hermes"),
+        "HERMES_VERSION": hermes_version,
+        "UV_LOG": str(tmp_path / "uv.log"),
+        "UV_STATE": str(state),
+        "PATH": os.pathsep.join((str(fake_uv.parent), str(bin_dir), "/usr/bin", "/bin")),
+    }
+    env.pop("PYTHONPATH", None)
+    return InstallFixture(
+        home=home,
+        bin_dir=bin_dir,
+        hermes_python=expected_python,
+        uv_log=tmp_path / "uv.log",
+        env=env,
+    )
+
+
+def _run(fixture: InstallFixture, **overrides: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", str(INSTALLER)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**fixture.env, **overrides},
+    )
+
+
+def test_installer_has_valid_bash_syntax() -> None:
+    assert INSTALLER.stat().st_mode & stat.S_IXUSR
+    result = subprocess.run(["/bin/bash", "-n", str(INSTALLER)], check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_minimum_hermes_version_matches_pyproject() -> None:
+    """The gate in the installer and ``[tool.mordred]`` must not drift apart."""
+    declared = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["mordred"][
+        "min-hermes-version"
+    ]
+    match = re.search(r'^readonly MIN_HERMES_VERSION="([^"]+)"$', INSTALLER.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match is not None, "scripts/install.sh must declare MIN_HERMES_VERSION"
+    assert match.group(1) == declared
+
+
+def test_user_docs_lead_with_the_installer_and_path_command() -> None:
+    quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    install_command = (
+        "curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash"
+    )
+
+    for document in (quickstart, readme):
+        assert install_command in document
+        assert "hermes-mordred configure" in document
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["README.md", "docs/user/QUICKSTART.md", "docs/user/USAGE.md", "docs/user/EXTENSION.md"],
+)
+def test_user_docs_do_not_reintroduce_the_cli_path_variable(relative_path: str) -> None:
+    """The `$M` idiom outlived its first removal in the docs README/QUICKSTART link to."""
+    document = (ROOT / relative_path).read_text(encoding="utf-8")
+
+    assert not re.search(r"^M=", document, re.MULTILINE), f"{relative_path} reintroduces the `M=...` assignment"
+    assert not re.search(r"\$M\b", document), f"{relative_path} reintroduces `$M`"
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "expected_extra"),
+    [("Darwin", "mordred-hermes[macos]"), ("Linux", "mordred-hermes[keyvault]")],
+)
+def test_installs_platform_extra_and_exposes_cli(
+    tmp_path: Path,
+    platform_name: str,
+    expected_extra: str,
+) -> None:
+    fixture = _fixture(tmp_path, platform_name=platform_name)
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    calls = fixture.uv_calls()
+    assert f"pip show --python {fixture.hermes_python}" in calls
+    assert "--upgrade-package mordred-hermes" in calls
+    assert expected_extra in calls
+    assert fixture.launcher.is_file()
+    assert "Configuration and keys were not changed" in result.stdout
+    assert f"{fixture.launcher} configure" in result.stdout
+
+
+def test_detects_the_official_bash_wrapper_not_only_the_canonical_path(tmp_path: Path) -> None:
+    """The real launcher's shebang names bash; the interpreter is on its exec line."""
+    fixture = _fixture(tmp_path, launcher_style="wrapper", shadow_env=tmp_path / "actual" / "venv")
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert str(fixture.hermes_python) in fixture.uv_calls()
+
+
+def test_detects_root_style_environment_from_hermes_shebang(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, launcher_style="console", shadow_env=tmp_path / "root-layout" / "venv")
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert str(fixture.hermes_python) in fixture.uv_calls()
+
+
+@pytest.mark.parametrize("launcher_style", ["wrapper", "console"])
+def test_path_hermes_wins_over_a_second_canonical_install(tmp_path: Path, launcher_style: str) -> None:
+    """`hermes` and `hermes-mordred` must never end up in different environments."""
+    shadow = tmp_path / "actual" / "venv"
+    fixture = _fixture(tmp_path, launcher_style=launcher_style, shadow_env=shadow)
+    canonical = fixture.home / ".hermes" / "hermes-agent" / "venv" / "bin" / "python3"
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert fixture.hermes_python == shadow / "bin" / "python3"
+    assert str(fixture.hermes_python) in fixture.uv_calls()
+    assert str(canonical) not in fixture.uv_calls()
+    assert not (canonical.parent / "hermes-mordred").exists()
+
+
+def test_falls_back_to_the_canonical_environment_without_a_launcher(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, launcher_style="none")
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert str(fixture.hermes_python) in fixture.uv_calls()
+    assert fixture.launcher.is_file()
+    # ~/.local/bin is already on PATH here, so there is nothing to advise.
+    assert "to PATH" not in result.stdout
+
+
+def test_launcher_directory_off_path_is_reported(tmp_path: Path) -> None:
+    """Reloading the shell cannot help when ~/.local/bin is simply not on PATH."""
+    fixture = _fixture(tmp_path, launcher_style="none")
+    without_bin_dir = [entry for entry in fixture.env["PATH"].split(os.pathsep) if entry != str(fixture.bin_dir)]
+
+    result = _run(fixture, PATH=os.pathsep.join(without_bin_dir))
+
+    assert result.returncode == 0, result.stderr
+    assert f"Add {fixture.bin_dir} to PATH" in result.stdout
+
+
+def test_launcher_isolates_python_path_like_hermes_own_wrapper(tmp_path: Path) -> None:
+    """A bare symlink would let an ambient PYTHONPATH redirect the import."""
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    launcher = fixture.launcher.read_text(encoding="utf-8")
+    assert "unset PYTHONPATH" in launcher
+    assert "unset PYTHONHOME" in launcher
+    assert f'exec "{fixture.installed_cli}" "$@"' in launcher
+
+    # The wrapper must really scrub the variables, not merely mention them.
+    probe = subprocess.run(
+        ["/bin/bash", "-c", f'exec "{fixture.launcher}"'],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**fixture.env, "PYTHONPATH": "/somewhere/else"},
+    )
+    assert probe.returncode == 0, probe.stderr
+    fixture.installed_cli.write_text('#!/bin/sh\nprintf "PYTHONPATH=[%s]\\n" "${PYTHONPATH-unset}"\n', encoding="utf-8")
+    fixture.installed_cli.chmod(0o755)
+    probe = subprocess.run(
+        [str(fixture.launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**fixture.env, "PYTHONPATH": "/somewhere/else"},
+    )
+    assert probe.stdout.strip() == "PYTHONPATH=[unset]"
+
+
+def test_rerun_refreshes_a_launcher_this_installer_wrote(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    assert _run(fixture).returncode == 0
+    first = fixture.launcher.read_text(encoding="utf-8")
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert fixture.launcher.read_text(encoding="utf-8") == first
+    assert f"{fixture.launcher} configure" in result.stdout
+
+
+def test_foreign_symlink_is_not_replaced(tmp_path: Path) -> None:
+    """A link into some other venv may belong to a different profile or checkout."""
+    fixture = _fixture(tmp_path)
+    stranger = tmp_path / "other" / "venv" / "bin" / "hermes-mordred"
+    fixture.launcher.symlink_to(stranger)
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert fixture.launcher.is_symlink()
+    assert os.readlink(fixture.launcher) == str(stranger)
+    assert "this installer did not create it" in result.stderr
+    assert f"{fixture.installed_cli} configure" in result.stdout
+
+
+def test_unrelated_existing_launcher_is_not_overwritten(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _write_executable(fixture.launcher, "#!/bin/sh\necho unrelated\n")
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert fixture.launcher.read_text(encoding="utf-8") == "#!/bin/sh\necho unrelated\n"
+    assert "this installer did not create it" in result.stderr
+    assert f"{fixture.installed_cli} configure" in result.stdout
+
+
+def test_console_script_in_the_launcher_directory_is_not_wrapped(tmp_path: Path) -> None:
+    """In a checkout, `hermes` lives in the same bin/ that receives the script."""
+    fixture = _fixture(tmp_path, launcher_style="console")
+    venv_bin = fixture.hermes_python.parent
+    # Drop ~/.local/bin so `hermes` resolves from the venv itself, as it does
+    # inside an activated development checkout.
+    entries = [entry for entry in fixture.env["PATH"].split(os.pathsep) if entry != str(fixture.bin_dir)]
+    entries.insert(1, str(venv_bin))
+
+    result = _run(fixture, PATH=os.pathsep.join(entries))
+
+    assert result.returncode == 0, result.stderr
+    assert fixture.installed_cli.read_text(encoding="utf-8") == "#!/bin/sh\nexit 0\n"
+    assert f"{fixture.installed_cli} configure" in result.stdout
+
+
+def test_non_virtualenv_interpreter_stops_before_install(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, is_venv=False)
+
+    result = _run(fixture)
+
+    assert result.returncode == 1
+    assert "not in a virtual environment" in result.stderr
+    # The check precedes every uv call, so nothing should have been invoked at
+    # all — a substring assertion alone would also pass if uv had run.
+    assert not fixture.uv_log.exists()
+
+
+def test_unwritable_launcher_directory_keeps_the_successful_install(tmp_path: Path) -> None:
+    """`set -e` is suppressed inside the command substitution that writes the launcher.
+
+    Without explicit checks, a failed `mktemp` ran on into `chmod`/`mv` with an
+    empty path and exited 1 — reporting failure after the package had already
+    installed cleanly.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the directory write bit")
+    fixture = _fixture(tmp_path)
+    fixture.bin_dir.chmod(0o555)
+    try:
+        result = _run(fixture)
+    finally:
+        fixture.bin_dir.chmod(0o755)
+
+    assert result.returncode == 0, result.stderr
+    assert "could not write" in result.stderr
+    assert "No such file or directory" not in result.stderr
+    # The usable console script must be named, not buried.
+    assert f"{fixture.installed_cli} configure" in result.stdout
+    assert fixture.installed_cli.is_file()
+
+
+def test_launcher_is_not_generated_for_a_path_with_shell_metacharacters(tmp_path: Path) -> None:
+    """The path is interpolated into a double-quoted `exec` in the generated wrapper."""
+    hostile = tmp_path / 'ho"stile' / "venv"
+    fixture = _fixture(tmp_path, launcher_style="console", shadow_env=hostile)
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert "shell metacharacters" in result.stderr
+    assert not fixture.launcher.exists()
+
+
+def test_dependency_conflict_introduced_by_mordred_is_reported(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, UV_CHECK_BEFORE="0", UV_CHECK_AFTER="1")
+
+    assert result.returncode == 0, result.stderr
+    assert "conflicting dependencies" in result.stderr
+    assert "uv pip check --python" in result.stderr
+
+
+def test_preexisting_dependency_conflict_is_not_blamed_on_mordred(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, UV_CHECK_BEFORE="1", UV_CHECK_AFTER="1")
+
+    assert result.returncode == 0, result.stderr
+    assert "conflicting dependencies" not in result.stderr
+
+
+@pytest.mark.parametrize("hermes_version", ["0.11.0", "0.9.0", "0.08.0"])
+def test_old_hermes_stops_before_install(tmp_path: Path, hermes_version: str) -> None:
+    fixture = _fixture(tmp_path, hermes_version=hermes_version)
+
+    result = _run(fixture)
+
+    assert result.returncode == 1
+    assert "hermes update" in result.stderr
+    assert "older than the required 0.13.0" in result.stderr
+    assert "value too great for base" not in result.stderr
+    assert "pip install" not in fixture.uv_calls()
+
+
+@pytest.mark.parametrize("hermes_version", ["0.13.0", "0.19.0", "0.13.0rc1", "1.0.0"])
+def test_supported_hermes_versions_proceed(tmp_path: Path, hermes_version: str) -> None:
+    fixture = _fixture(tmp_path, hermes_version=hermes_version)
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert "pip install" in fixture.uv_calls()
+
+
+def test_missing_hermes_prints_official_install_command(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, launcher_style="none")
+    fixture.hermes_python.unlink()
+
+    result = _run(fixture)
+
+    assert result.returncode == 1
+    assert "https://hermes-agent.nousresearch.com/install.sh" in result.stderr
+    assert not fixture.uv_log.exists()
+
+
+def test_missing_uv_stops_without_changing_the_environment(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    (tmp_path / "fake-bin" / "uv").unlink()
+
+    result = _run(fixture)
+
+    assert result.returncode == 1
+    assert "uv is not on PATH" in result.stderr
+    assert not fixture.uv_log.exists()
+    assert not fixture.installed_cli.exists()
+
+
+def test_unsupported_platform_stops_before_install(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, platform_name="FreeBSD")
+
+    result = _run(fixture)
+
+    assert result.returncode == 1
+    assert "unsupported platform FreeBSD" in result.stderr
+    assert "pip install" not in fixture.uv_calls()
+
+
+@pytest.mark.integration
+def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
+    """The hermetic tests drive a fake uv; this one proves the flags are real.
+
+    Resolution only (``--dry-run``), so no environment is modified. It needs
+    network access and is therefore excluded from default runs.
+    """
+    uv_bin = shutil.which("uv")
+    if uv_bin is None:
+        pytest.skip("uv is not installed")
+
+    venv = tmp_path / "venv"
+    subprocess.run([uv_bin, "venv", str(venv)], check=True, capture_output=True)
+    python = venv / "bin" / "python3"
+    env = {**os.environ, "UV_NO_CONFIG": "1"}
+
+    check = subprocess.run(
+        [uv_bin, "pip", "check", "--python", str(python)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert check.returncode == 0, check.stderr
+
+    spec = "mordred-hermes[macos]" if platform.system() == "Darwin" else "mordred-hermes[keyvault]"
+    install = subprocess.run(
+        [
+            uv_bin,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--no-python-downloads",
+            "--upgrade-package",
+            "mordred-hermes",
+            "--dry-run",
+            spec,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert install.returncode == 0, install.stderr
+    # Every published release is still a pre-release; the bare spec must keep
+    # resolving to one rather than failing to find a candidate.
+    assert "mordred-hermes==" in install.stdout + install.stderr

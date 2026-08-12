@@ -14,13 +14,14 @@ identical arguments — use whichever is available to you:
 | Form | When it works | Notes |
 |------|---------------|-------|
 | `hermes mordred <cmd>` | hermes-agent **0.19.0+**, with the plugins enabled in `~/.hermes/config.yaml` | **Preferred.** `hermes` is on your `PATH`, so this runs from any directory with nothing to type but the command. |
-| `<venv>/bin/hermes-mordred <cmd>` | Always, once the package is installed in a venv | Standalone console script — the bootstrap and the fallback. **Not placed on `PATH`**, so give its full path (or activate the venv first). |
+| `hermes-mordred <cmd>` | Always, once the package is installed | Standalone console script — the bootstrap and the fallback. |
 
-> **Where `hermes-mordred` actually lives.** Installing into the Hermes runtime
-> as the README describes puts the script at
-> `~/.hermes/hermes-agent/venv/bin/hermes-mordred` — there is no `~/.local/bin`
-> shim for it, unlike `hermes` itself. That is precisely why `hermes mordred …`
-> is worth using once it works.
+> **Where `hermes-mordred` actually lives.** The console script itself is
+> installed alongside the interpreter, at
+> `~/.hermes/hermes-agent/venv/bin/hermes-mordred` for a Hermes-managed
+> install. `scripts/install.sh` additionally writes a launcher next to
+> `hermes`, so the bare command works from any directory. From a development
+> checkout, use `.venv/bin/hermes-mordred` or activate the venv.
 
 **Which should I use?** `hermes mordred …` when it works — no `cd`, no venv
 path. One command tells you:
@@ -50,24 +51,9 @@ cd <repo-root>            # /Users/.../Mordred-Hermes
 .venv/bin/hermes-mordred status
 ```
 
-Tip — alias it for the session so every example below pastes as-is. **Pick one
-line, not both:**
-
-```sh
-# sh / bash / zsh
-M="hermes mordred"            # host-CLI form, if it works for you
-M=.venv/bin/hermes-mordred    # otherwise (fresh install, or this dev checkout)
-$M status
-```
-
-```fish
-# fish — note the LIST form: `set M "hermes mordred"` (quoted) does NOT work,
-# because fish does not word-split, and would look for a command literally
-# named "hermes mordred".
-set M hermes mordred          # host-CLI form
-set M .venv/bin/hermes-mordred  # otherwise
-$M status
-```
+Every example below is written as `hermes-mordred <cmd>`. Substitute
+`hermes mordred <cmd>` if you prefer the host-CLI form, or the full
+`.venv/bin/hermes-mordred` path from an unactivated checkout.
 
 ### Enabling all Mordred plugins
 
@@ -98,13 +84,11 @@ interactive ones. In brief, run these in order (every step is idempotent and saf
 to re-run):
 
 ```sh
-M=.venv/bin/hermes-mordred
-
-$M configure              # interactive setup → writes config.yaml + policy.json
-$M network init           # OPTIONAL — Tor / VPN / clearnet privacy path
-$M keyvault init          # create the hardware-backed keyvault
-$M encryption enable env  # turn on at-rest encryption (first run creates the vault, prompts once for a passphrase)
-$M status                 # verify the result at a glance
+hermes-mordred configure              # interactive setup → writes config.yaml + policy.json
+hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privacy path
+hermes-mordred keyvault init          # create the hardware-backed keyvault
+hermes-mordred encryption enable env  # turn on at-rest encryption (first run creates the vault, prompts once for a passphrase)
+hermes-mordred status                 # verify the result at a glance
 ```
 
 `status` prints a single-screen summary (`policy` / `network` / `keyvault` /
@@ -119,8 +103,8 @@ machine-readable output.
 
 ### `status` — state at a glance
 ```sh
-$M status            # human-readable
-$M status --json     # machine-readable
+hermes-mordred status            # human-readable
+hermes-mordred status --json     # machine-readable
 ```
 
 ### `configure` — interactive setup
@@ -134,10 +118,10 @@ configured yet (Hermes pre-fills each prompt so pressing Enter keeps existing
 values). The old `--skip-hermes-setup` flag is now the default behavior and
 is accepted as a deprecated no-op.
 ```sh
-$M configure                                           # Mordred prompts only (default)
-$M configure --with-hermes-setup                       # run `hermes setup` first, then Mordred prompts
-$M configure --non-interactive --policy strict --no-allow-cloud-llm
-$M configure --non-interactive --policy lenient
+hermes-mordred configure                                           # Mordred prompts only (default)
+hermes-mordred configure --with-hermes-setup                       # run `hermes setup` first, then Mordred prompts
+hermes-mordred configure --non-interactive --policy strict --no-allow-cloud-llm
+hermes-mordred configure --non-interactive --policy lenient
 ```
 Key flags: `--with-hermes-setup`, `--policy {strict,lenient,off}`,
 `--allow-cloud-llm/--no-allow-cloud-llm`,
@@ -149,38 +133,38 @@ Key flags: `--with-hermes-setup`, `--policy {strict,lenient,off}`,
 Idempotent migration of an existing Hermes / OpenClaw setup to Mordred
 (auto-detects `~/.openclaw`). Safe to re-run.
 ```sh
-$M upgrade
-$M upgrade --non-interactive --policy-conflict keep-existing
+hermes-mordred upgrade
+hermes-mordred upgrade --non-interactive --policy-conflict keep-existing
 ```
 Key flags: `--reset`, `--non-interactive`, `--audit-merge {skip,append-all,abort}`,
 `--policy-conflict {keep-existing,overwrite,abort}`.
 
 ### `policy` — inspect the active policy
 ```sh
-$M policy show                  # print resolved policy.json
-$M policy explain <skill-id>    # explain an install decision (exit 2 = block)
-$M policy dry-run <SKILL.md>    # evaluate a SKILL.md without installing
-$M policy reload                # re-read policy from config.yaml
+hermes-mordred policy show                  # print resolved policy.json
+hermes-mordred policy explain <skill-id>    # explain an install decision (exit 2 = block)
+hermes-mordred policy dry-run <SKILL.md>    # evaluate a SKILL.md without installing
+hermes-mordred policy reload                # re-read policy from config.yaml
 ```
 
 ### `network` — privacy path control
 ```sh
-$M network init                 # set up Tor / VPN / clearnet (Mullvad account)
-$M network use {tor,vpn,clearnet}
-$M network status               # active path + liveness
+hermes-mordred network init                 # set up Tor / VPN / clearnet (Mullvad account)
+hermes-mordred network use {tor,vpn,clearnet}
+hermes-mordred network status               # active path + liveness
 ```
 
 ### `install` — policy-gated skill install
 ```sh
-$M install <skill-name>         # or a path to a dir containing SKILL.md
+hermes-mordred install <skill-name>         # or a path to a dir containing SKILL.md
 ```
 
 ### `audit` — the audit log
 ```sh
-$M audit tail                        # most recent entries
-$M audit grep <regex>                # line-wise regex search
-$M audit decrypt --date YYYY-MM-DD   # decrypt that day's encrypted entries
-$M audit purge --before YYYY-MM-DD --yes  # delete dated rotated logs before a date
+hermes-mordred audit tail                        # most recent entries
+hermes-mordred audit grep <regex>                # line-wise regex search
+hermes-mordred audit decrypt --date YYYY-MM-DD   # decrypt that day's encrypted entries
+hermes-mordred audit purge --before YYYY-MM-DD --yes  # delete dated rotated logs before a date
 ```
 
 ### `encryption` — the recommended on/off switch
@@ -188,11 +172,11 @@ At-rest encryption per target: `env`, `config`, `memory`, `workspace` — or `al
 to apply the verb to every target at once (best-effort; `workspace` is skipped on
 non-macOS or when its tooling isn't installed, and never fails the batch).
 ```sh
-$M encryption status                        # all targets (non-prompting)
-$M encryption enable  {env,config,memory,workspace,all}
-$M encryption disable {env,config,memory,workspace,all}   # reversible; keeps vault copy
-$M encryption purge   {env,config,memory,workspace,all} --yes   # destructive
-$M encryption change-passphrase             # rotate the recovery passphrase (alias of `vault change-passphrase`)
+hermes-mordred encryption status                        # all targets (non-prompting)
+hermes-mordred encryption enable  {env,config,memory,workspace,all}
+hermes-mordred encryption disable {env,config,memory,workspace,all}   # reversible; keeps vault copy
+hermes-mordred encryption purge   {env,config,memory,workspace,all} --yes   # destructive
+hermes-mordred encryption change-passphrase             # rotate the recovery passphrase (alias of `vault change-passphrase`)
 ```
 
 > **Changing the recovery passphrase.** `change-passphrase` rewraps the vault
@@ -205,15 +189,15 @@ $M encryption change-passphrase             # rotate the recovery passphrase (al
 
 ### `keyvault` — hardware-backed key management
 ```sh
-$M keyvault init                # initialise the keyvault
-$M keyvault list                # list key IDs
-$M keyvault verify-digest       # integrity check
-$M keyvault recover --blob <path>   # restore from a backup blob
-$M keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
-$M keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
+hermes-mordred keyvault init                # initialise the keyvault
+hermes-mordred keyvault list                # list key IDs
+hermes-mordred keyvault verify-digest       # integrity check
+hermes-mordred keyvault recover --blob <path>   # restore from a backup blob
+hermes-mordred keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
+hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
                                 # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
-$M keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
-$M keyvault eth <sub>           # Ethereum keys — see below
+hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
+hermes-mordred keyvault eth <sub>           # Ethereum keys — see below
 ```
 
 #### `keyvault eth` — Ethereum keys (HD wallet)
@@ -224,9 +208,9 @@ it. **The raw private key never leaves the keyvault** — these commands return
 only the EIP-55 address and an opaque `envelope_id` handle.
 
 ```sh
-$M keyvault eth new                          # generate a new random key
-$M keyvault eth derive --index 0             # derive BIP-44 account #0 from the seed
-$M keyvault eth address --envelope-id <id>   # show the address for a stored key
+hermes-mordred keyvault eth new                          # generate a new random key
+hermes-mordred keyvault eth derive --index 0             # derive BIP-44 account #0 from the seed
+hermes-mordred keyvault eth address --envelope-id <id>   # show the address for a stored key
 ```
 
 | Command | Key flags |
@@ -276,16 +260,16 @@ merely because its native blob is visible.
 ### `vault` — the underlying encrypted store (advanced)
 Normally driven by `encryption`; rarely used directly.
 ```sh
-$M vault init                   # new vault sealed under a recovery passphrase
-$M vault add <name> <file>      # encrypt a file under a logical name
-$M vault status                 # generation + enrolled file names (non-prompting)
-$M vault cat <name>             # decrypt one entry to stdout
-$M vault migrate                # import plaintext .env + config.yaml
-$M vault recover                # re-key a vault copied to this machine onto its device
-$M vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
-$M vault set-memory-key         # store/rotate HERMES_MEMORY_KEY
-$M vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
-$M vault disable-config-decrypt # stop managing config.yaml; restore plaintext
+hermes-mordred vault init                   # new vault sealed under a recovery passphrase
+hermes-mordred vault add <name> <file>      # encrypt a file under a logical name
+hermes-mordred vault status                 # generation + enrolled file names (non-prompting)
+hermes-mordred vault cat <name>             # decrypt one entry to stdout
+hermes-mordred vault migrate                # import plaintext .env + config.yaml
+hermes-mordred vault recover                # re-key a vault copied to this machine onto its device
+hermes-mordred vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
+hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY
+hermes-mordred vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
+hermes-mordred vault disable-config-decrypt # stop managing config.yaml; restore plaintext
 ```
 
 #### Migrate to a new machine
@@ -299,7 +283,7 @@ vault directory across and then re-key it onto the new device:
 cp -a ~/.hermes/mordred/vault /path/to/transfer/   # then move it to the new machine
 
 # on the new machine, after restoring the directory to the same location
-$M vault recover                # prompts for the recovery passphrase, re-keys onto this device's Secure Enclave
+hermes-mordred vault recover                # prompts for the recovery passphrase, re-keys onto this device's Secure Enclave
 ```
 
 `vault recover` cold-opens the copied vault with the recovery passphrase and
@@ -314,31 +298,31 @@ at all, since it only reads the on-disk manifest — but enrolling does not).
 
 ### `plugins`
 ```sh
-$M plugins list                 # discovered Mordred plugins
+hermes-mordred plugins list                 # discovered Mordred plugins
 ```
 
 ### `extension` — browser-extension pairing and server (preview)
 ```sh
-$M extension pair               # print a MORT-… pairing code + terminal QR, then wait
-$M extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
-$M extension serve              # run the extension WebSocket server in the foreground
-$M extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
+hermes-mordred extension pair               # print a MORT-… pairing code + terminal QR, then wait
+hermes-mordred extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
+hermes-mordred extension serve              # run the extension WebSocket server in the foreground
+hermes-mordred extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
 ```
 > `pair` prints a code and waits for a running extension WebSocket server to
 > consume it — either this plugin's `extension serve` or a full Hermes
 > gateway; both share `~/.hermes/extension/pending.json`. Needs the
 > `extension` extra for the built-in pairing backend (full-gateway checkouts
 > can fall back to `gateway.extension_pairing` without it) and `messaging`
-> for the QR render. On
-> builds without the extension package (e.g. the `0.1.0a1` wheel) it fails
-> closed with a clear message.
+> for the QR render. When the extension package is unavailable it fails closed
+> with a clear install hint.
 >
 > `serve` runs the plugin's own ported server (`mordred_hermes.extension`,
 > requires the `extension` extra) standalone — pairing, crypto, history,
 > keyvault signing, and agent chat all work: the chat handler binds the
 > Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
 > real agent replies (a stub reply appears only if that runtime is missing);
-> see the README's "Browser-extension WebSocket gateway" section.
+> see [`EXTENSION.md`](./EXTENSION.md) for the security model and deployment
+> options.
 > Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
 > with a one-line error. Non-loopback `--host` values are refused. To open the
 > localhost web app, copy the complete private `Web page:` URL printed at
@@ -433,7 +417,7 @@ same one even in principle.
 On macOS the device key (①) lives in the **Secure Enclave**, and by default it is
 created in **attended** mode: macOS asks for **Touch ID every time the vault is
 unwrapped**. Each component that opens the vault prompts independently, so a
-*single* `$M …` run can unlock the vault more than once:
+*single* `hermes-mordred …` run can unlock the vault more than once:
 
 - the `config` decrypt hook at interpreter startup (after `encryption enable config`),
 - the `.env` injection when the plugin loads (after `encryption enable env`),
@@ -454,8 +438,8 @@ while the Mac is unlocked), install the helper and select **unattended** policy
 on a later fresh device-key creation command:
 
 ```sh
-$M keyvault enable-se                # build + install/probe the SE helper
-MORDRED_SEKEY_UNATTENDED=1 $M keyvault init
+hermes-mordred keyvault enable-se                # build + install/probe the SE helper
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred keyvault init
                                      # create the device key unattended
 ```
 
@@ -563,7 +547,7 @@ The **Mullvad prompts** appear *only if you keep the `mullvad` provider* — pic
 > provider, then answer its prompts (3 for Mullvad).
 >
 > Prefer no dialog? Set everything from flags in one shot:
-> `$M network init --non-interactive --path tor` (see `network init --help`).
+> `hermes-mordred network init --non-interactive --path tor` (see `network init --help`).
 
 #### Using a different VPN (not just Mullvad)
 
@@ -585,7 +569,7 @@ are skipped entirely when you don't pick Mullvad. So **Proton VPN** →
 
 ### 4.5 `configure` — policy mode and the agent harness in detail
 
-`$M configure` walks through a short list of questions — it runs the underlying
+`hermes-mordred configure` walks through a short list of questions — it runs the underlying
 Hermes setup first, then Mordred's own prompts. **If in doubt, press Enter
 through all of them**: the defaults are the safe, private choice.
 
@@ -675,9 +659,9 @@ If none of this rings a bell, `none` is correct.
 
 | Do (command) | Purpose | Result |
 |---|---|---|
-| `$M policy show` | Print the resolved policy currently in force. | Outputs `policy.json`. |
-| `$M configure --non-interactive --policy strict` | Switch to strict mode without prompts. | Policy mode set to `strict`. |
-| `$M policy explain <skill-id>` | Explain whether a skill would be allowed to install. | Prints the decision (exit 2 = block). |
+| `hermes-mordred policy show` | Print the resolved policy currently in force. | Outputs `policy.json`. |
+| `hermes-mordred configure --non-interactive --policy strict` | Switch to strict mode without prompts. | Policy mode set to `strict`. |
+| `hermes-mordred policy explain <skill-id>` | Explain whether a skill would be allowed to install. | Prints the decision (exit 2 = block). |
 
 ---
 

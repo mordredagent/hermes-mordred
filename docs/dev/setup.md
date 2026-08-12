@@ -4,7 +4,9 @@
 
 This guide is intended for **developers starting work on the Mordred plugin**. If you want to install Mordred as an end user, refer to the future package README (to be added after Phase 0.5 is complete).
 
-The canonical source for the official order and task breakdown is `PLAN.md` Phase 0, and for the checklist it's `TODO.md` §0.1–0.6. This file is a reference that reorganizes those from a day-to-day operational perspective — it is not the source of the spec.
+This is the operational source for building and verifying the editable
+development environment. [`PLAN.md`](./PLAN.md) describes the implementation
+shape, and [`TODO.md`](./TODO.md) lists only open work.
 
 ---
 
@@ -168,7 +170,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "mordred-hermes[macos]==0.1.0a13"   # ← substitute the current PyPI version here
+  --reinstall "mordred-hermes[macos]==0.1.0a14"   # ← substitute the current PyPI version here
 ```
 
 ## (Optional) Hermes upstream remote
@@ -200,7 +202,9 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 | Check overall status | `.venv/bin/hermes-mordred status` | Shows policy / network / keyvault / encryption on one screen (`--json` available). Read-only, no prompts or Secure Enclave access |
 | Start extension gateway | `.venv/bin/hermes-mordred extension serve --port 7799` | ⚠️ The default 7788 conflicts with the production LaunchAgent |
 
-See `CI.md` for CI workflow details. `upstream-check.yml`'s hook signature drift detection is informational only (see `UPSTREAM.md` §Hook signature drift detection).
+See `CI.md` for workflow details. The scheduled upstream check files an
+informational issue; the equivalent installed-Hermes contract test runs in the
+normal CI suite and can block an incompatible change.
 
 ## Mordred-owned filesystem paths
 
@@ -274,18 +278,24 @@ See `SPEC.md §Key generation and verification digest` for the detailed algorith
 
 - One-plugin-one-PR principle: don't touch `mordred_privacy_check` and `mordred_wizard` in the same change. If a cross-plugin change is needed, PR the SPEC/PLAN side first
 - Don't send PRs to Hermes upstream (zero-PR commitment, `MIGRATION.md` §5). If hard-enforcement looks necessary, that's a candidate for the v2 vendored fork extra — in v1 it's absorbed on the plugin side
-- When adding a new doc, place it directly under `docs/` with an `HERMES_*.md` / `DEV_*.md` prefix until GA (post-GA it gets `git mv`'d into the `hermes/` / `dev/` subdirectory, `ROADMAP.md` v2-X3)
+- Put operator documentation under `docs/user/`, current developer contracts and
+  procedures under `docs/dev/`, and upstream snapshots under
+  `docs/dev/hermes/`. Add new documents to the matching index.
 
 ## Next steps
 
-- Work through `PLAN.md` Phase 0's steps in order → check off `TODO.md` §0.x
-- When starting on an individual plugin's implementation, refer to the relevant phase in `SPEC.md` plus the plugin module layout in `PLAN.md`
-- If you're using an AI agent (Claude Code, etc.) alongside this, refer to `AGENTS.md` at the repo root (it's a Hermes upstream guide, but still useful for Mordred development)
+- Pick an unchecked item from [`TODO.md`](./TODO.md), then read its behavior in
+  [`SPEC.md`](./SPEC.md) and implementation boundary in [`PLAN.md`](./PLAN.md).
+- For an individual plugin, read its package README and focused tests before
+  changing code.
+- AI coding agents and contributors should follow [`AGENTS.md`](../../AGENTS.md)
+  at the repository root (`CLAUDE.md` is a thin include shim pointing at it).
 
 ---
 
 ## Related documents
 
+- `README.md` — index and status of the developer document set
 - `SPEC.md` — what to build (functional spec)
 - `PLAN.md` — how to build it (implementation plan)
 - `TODO.md` — task ordering and checklist

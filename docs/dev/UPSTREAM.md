@@ -12,7 +12,8 @@ The distribution form is a single package via `pip install mordred-hermes` (entr
 Therefore:
 
 - **Mordred's own code** lands in `src/mordred_hermes/<plugin>/`
-- **Hermes upstream** is only used as a clone directly under `Mordred-Hermes/` for testing during development; it's optional as a git remote for Mordred
+- **Hermes upstream** is inspected read-only through PyPI source, CI's temporary
+  clone, or an optional remote
 - In normal Mordred development, there is **no need to rebase** Hermes upstream (because only plugins are managed)
 - Only if the **vendored fork extra** (Tier B, described below) is introduced in v2, some modules of the relevant Hermes version are copied and kept under `vendor/hermes/<version>/`. This does not affect the plugin distribution layout
 
@@ -30,7 +31,8 @@ Tracking items like `PR status: pending submission / submitted / accepted` are u
 
 ## Optional remote
 
-Only if you want to track the latest Hermes upstream during Mordred development:
+Only if you want to inspect the latest Hermes upstream during Mordred
+development:
 
 ```sh
 git remote add hermes-upstream https://github.com/NousResearch/hermes-agent.git
@@ -38,24 +40,23 @@ git fetch hermes-upstream
 git log --oneline hermes-upstream/main -5
 ```
 
-If you want to fast-forward the clone:
-
-```sh
-git fetch hermes-upstream
-git checkout main
-git merge --ff-only hermes-upstream/main   # assumes there are no local changes
-```
-
-If you have local Mordred plugin development files, `git stash` them, then `merge --ff-only`, then `git stash pop`.
+Never merge, rebase, or check out `hermes-upstream/main` onto a Mordred branch;
+the repositories have different histories and ownership. Use `git show
+hermes-upstream/main:<path>` or a separate temporary clone for source review.
 
 ## Hook signature drift detection (informational only)
 
-To keep up with Hermes upstream's rapid evolution, CI detects signature drift in the hook payloads (e.g., `pre_tool_call`, `pre_llm_call`) that plugins depend on.
+To keep up with Hermes upstream's rapid evolution, CI detects drift in the hook
+names and payload fields Mordred consumes.
 
-See the `upstream-check.yml` workflow in [`CI.md`](./CI.md) for details. This workflow fetches the latest `hermes_cli/plugins.py:VALID_HOOKS` enumeration from Hermes weekly, and cross-checks it against the hook names registered by Mordred plugins. When a discrepancy occurs, a GitHub issue is automatically filed.
+See the `upstream-check.yml` workflow in [`CI.md`](./CI.md) for details. It
+checks both the latest PyPI package and upstream `main` against
+`tools/hook_payload_contract.json`. A discrepancy opens or updates a GitHub
+issue.
 
-- This signal detection is **informational**: it's not for submitting a PR upstream, but is used as material for judging whether the vendored fork extra (Tier B) is needed, and as a trigger for updating the `mordred-min-hermes-version` / `mordred-max-hermes-version` range on the Mordred plugin side
-- Detected drift never blocks a release
+- The scheduled issue is informational and never submits an upstream PR.
+- The equivalent local compatibility test is part of normal CI, so a released
+  Hermes incompatibility must be resolved or explicitly bounded before release.
 
 ## Privacy-lock guard (replacement for the old HSeam-1)
 
