@@ -1,0 +1,27 @@
+# Distribution-rename reservation for the future canonical PyPI name.
+#
+# This stub is deliberately separate from packaging/name-reservation/: that
+# directory records the already-published mordred-hermes reservation, while
+# this one must be published before the real distribution changes name.
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-mordred"
+version = "0.0.0.dev0"
+description = "Name-reservation placeholder for the Hermes Mordred privacy plugin bundle"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "InternetMaximalism" }]
+license = { text = "MIT" }
+
+[project.urls]
+Homepage = "https://github.com/InternetMaximalism/mordred-hermes"
+Source = "https://github.com/InternetMaximalism/mordred-hermes"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_mordred_reservation"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/pyproject.toml"]

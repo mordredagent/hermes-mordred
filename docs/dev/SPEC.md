@@ -191,7 +191,10 @@ All plugins live under `src/mordred_hermes/` and use only the Hermes plugin SDK 
 - CLI command name: **`hermes-mordred ...`** (the standalone console script;
   canonical in documentation and operator guidance)
 - Plugin Python module IDs: `mordred_network`, `mordred_privacy_check`, `mordred_keyvault`, `mordred_llm_guard`, `mordred_wizard`, `mordred_e2e` (snake_case, following Python module naming conventions)
-- pip distribution: **`mordred-hermes`** (single package, all Mordred plugins included)
+- pip distribution: **`hermes-mordred`** from `0.1.0a16` (single real package,
+  all Mordred plugins included). The previous **`mordred-hermes`** PyPI project
+  becomes a metadata-only compatibility shim after the new name is reserved;
+  see `MIGRATION.md` §6
 - Configuration topology: per-plugin config under `plugins.mordred_<plugin-id>` in `~/.hermes/config.yaml`. Mordred plugins coordinate shared state (effective policy, active network path) via an internally-imported shared module within Hermes, **not** via a single `mordred:` top-level key
 - Skill metadata: `metadata.mordred.*` (same as the old SPEC, maintaining compatibility)
 - Mordred-owned filesystem paths: `~/.hermes/mordred/` (audit log, policy snapshot, keyvault state)

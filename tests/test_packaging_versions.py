@@ -1,6 +1,6 @@
 """Tests guarding the PyPI release version invariants.
 
-Two invariants are pinned here:
+Three invariants are pinned here:
 
 1. **Name-reservation ordering (M7, TODO §0.5 L70).** M7 reserves the
    ``mordred-hermes`` distribution name on TestPyPI/PyPI by uploading an
@@ -11,7 +11,11 @@ Two invariants are pinned here:
    stub version were >= the real version, the real release could never be
    published under the same name.
 
-2. **Single-source version consistency (TODO §0.5 L64).** The real package no
+2. **Rename reservation (2026-08-12).** The future canonical
+   ``hermes-mordred`` distribution has its own empty ``0.0.0.dev0`` stub. It
+   must remain a separate project until that name is reserved on both indexes.
+
+3. **Single-source version consistency (TODO §0.5 L64).** The real package no
    longer hardcodes its version in pyproject. It is sourced dynamically from
    ``src/mordred_hermes/__about__.py`` (Hatch ``[tool.hatch.version] path``),
    which lives inside the importable package so sdist->wheel builds resolve it
@@ -40,6 +44,14 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 
 #: The empty stub uploaded first to claim the name (M7).
 _STUB_PYPROJECT = _PKG_ROOT / "packaging" / "name-reservation" / "pyproject.toml"
+
+#: The independent stub that reserves the target distribution name before the
+#: real package metadata changes. It intentionally does not yet match the root
+#: package name during the reservation gate.
+_RENAME_STUB_PYPROJECT = _PKG_ROOT / "packaging" / "hermes-mordred-reservation" / "pyproject.toml"
+
+#: Release mode routing consumed directly by release.yml.
+_RELEASE_PROJECTS = _PKG_ROOT / "packaging" / "release-projects.toml"
 
 #: The real Mordred plugin bundle.
 _REAL_PYPROJECT = _PKG_ROOT / "pyproject.toml"
@@ -139,6 +151,47 @@ def test_stub_version_is_strictly_below_real_version() -> None:
 def test_stub_version_is_a_dev_release() -> None:
     """The reservation stub is a ``.devN`` release — never a real version."""
     assert Version(str(_read(_STUB_PYPROJECT)["version"])).is_devrelease
+
+
+def test_rename_stub_reserves_the_target_distribution_name() -> None:
+    """The rename stub must claim only the future public distribution name."""
+    project = _read(_RENAME_STUB_PYPROJECT)
+    assert project["name"] == "hermes-mordred"
+    assert project["name"] != _read(_REAL_PYPROJECT)["name"]
+
+
+def test_rename_stub_version_is_a_dev_release_below_the_real_version() -> None:
+    """The reservation must never sort as a real release."""
+    stub = Version(str(_read(_RENAME_STUB_PYPROJECT)["version"]))
+    assert stub.is_devrelease
+    assert stub < Version(_real_version())
+
+
+def test_release_project_contract_matches_package_metadata() -> None:
+    """Every publish mode must resolve to the intended on-disk project."""
+    with _RELEASE_PROJECTS.open("rb") as stream:
+        modes = tomllib.load(stream)["mode"]
+
+    assert modes == {
+        "reserve": {
+            "directory": "packaging/name-reservation",
+            "name": "mordred-hermes",
+            "reservation": True,
+        },
+        "reserve-rename": {
+            "directory": "packaging/hermes-mordred-reservation",
+            "name": "hermes-mordred",
+            "reservation": True,
+        },
+        "release": {
+            "directory": ".",
+            "name": "mordred-hermes",
+            "reservation": False,
+        },
+    }
+    for project in modes.values():
+        pyproject = _PKG_ROOT / project["directory"] / "pyproject.toml"
+        assert _read(pyproject)["name"] == project["name"]
 
 
 def test_doc_version_marker_matches_package_version() -> None:
