@@ -6,7 +6,7 @@ The finalized strategy decisions are in `MIGRATION.md` §5 (`Option C + Vendored
 
 ## Repository position
 
-`Mordred-Hermes/` is a **Hermes plugin development repository** (a pure plugin bundle), not a fork of the Hermes upstream.
+`hermes-mordred/` is a **Hermes plugin development repository** (a pure plugin bundle), not a fork of the Hermes upstream.
 The distribution form is a single package via `pip install hermes-mordred` (entry-point `hermes_agent.plugins`).
 
 Therefore:
@@ -112,7 +112,7 @@ At that point, update `MIGRATION.md` §5.
 ## Quick reference
 
 - Hermes upstream URL: `https://github.com/NousResearch/hermes-agent`
-- Mordred plugin repository: `Mordred-Hermes/` (this repository)
+- Mordred plugin repository: `hermes-mordred/` (this repository)
 - Mordred distribution package: `hermes-mordred` (PyPI; v1 is plugin-only)
 - Legacy distribution alias: `mordred-hermes` (metadata-only compatibility shim)
 - v2 candidate extra: `hermes-mordred[hard-lock]` (vendored fork, Tier B)

@@ -28,7 +28,7 @@ hermes-mordred status
 In this development checkout the fully-wired venv is `.venv`:
 
 ```sh
-cd <repo-root>            # /Users/.../Mordred-Hermes
+cd <repo-root>            # /Users/.../hermes-mordred
 .venv/bin/hermes-mordred status
 ```
 

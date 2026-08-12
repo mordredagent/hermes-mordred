@@ -158,6 +158,12 @@ CI succeeded. Fresh installs from both indexes confirmed a dependency-free,
 entry-point-free reservation with no `mordred_hermes` runtime package. The
 historical `reserve` mode remains immutable and must not be dispatched again.
 
+On 2026-08-12, after both `0.1.0a16` projects passed TestPyPI and production
+verification, the repository was renamed to `InternetMaximalism/hermes-mordred`.
+All four publisher claims (two projects on both indexes) were replaced
+add-first with the new repository claim while preserving `release.yml` and the
+`testpypi` / `pypi` environments.
+
 ### Normal release (runbook)
 
 1. Run `python tools/bump_version.py <version>`; never reuse a published PyPI
@@ -208,7 +214,7 @@ the operational control.
 List active workflows with:
 
 ```sh
-gh api -X GET /repos/InternetMaximalism/mordred-hermes/actions/workflows \
+gh api -X GET /repos/InternetMaximalism/hermes-mordred/actions/workflows \
   --paginate --jq '.workflows[] | select(.state=="active") | .path' | sort
 ```
 

@@ -31,9 +31,9 @@ explicit at the Vision level. Read them together with §Platform Support and
 ### Relationship to Hermes
 
 - **Upstream**: github.com/NousResearch/hermes-agent (MIT License)
-- **Current repo**: `Mordred-Hermes/` (the Mordred plugin development repository; not a fork/clone of Hermes upstream)
+- **Current repo**: `hermes-mordred/` (the Mordred plugin development repository; not a fork/clone of Hermes upstream)
 - **Strategy**: **Option C + Vendored-fork escape hatch** (zero-PR commitment, finalized in MIGRATION.md §10 row 1 / §5 on 2026-05-07) — Hermes core is left unmodified, and 6 plugins are distributed via `pip install hermes-mordred`. **No PRs are submitted to Hermes upstream**
-  - `Mordred-Hermes/` requires no upstream rebase (a pure plugin development repository + vendored modules when needed)
+  - `hermes-mordred/` requires no upstream rebase (a pure plugin development repository + vendored modules when needed)
   - The plugins are developed under `src/mordred_hermes/` and exposed via `[project.entry-points."hermes_agent.plugins"]` in `pyproject.toml`; `mordred_e2e` uses the `extension/` package rather than a directory matching its entry-point suffix
   - What the old SPEC called a "core seam" is instead handled by **plugin-side wrapper + audit log** (the `mordred.degraded.*` family) for defense-in-depth (Tier A, v1 default)
   - Items that truly need hard enforcement fall under the **vendored fork extra** (Tier B, v2): a patched version of Hermes core modules is redistributed via e.g. `pip install hermes-mordred[hard-lock]`. Out of scope for v1
@@ -1303,7 +1303,7 @@ User-visible MVP = Phase 1 + Phase 2. This is the minimal "Hermes with Privacy" 
 
 Required before starting development:
 
-1. Confirm the `Mordred-Hermes/` repository (the Mordred plugin development repo; the environment must already have Hermes itself via `pip install hermes-agent`)
+1. Confirm the `hermes-mordred/` repository (the Mordred plugin development repo; the environment must already have Hermes itself via `pip install hermes-agent`)
 2. Create the `~/.hermes/` profile (automatic when running `hermes setup`)
 3. Scaffold the plugins: create the following in each `src/mordred_hermes/<name>/` directory
    - `plugin.yaml` — manifest (`name`, `version`, `description`, `author`, `privacy_lock`, `config_schema`)
