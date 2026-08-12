@@ -125,6 +125,10 @@ hermes-mordred network status
 hermes-mordred audit tail
 ```
 
+Once Hermes 0.19.0+ is configured and the plugins are enabled,
+`hermes mordred <command>` exposes the same command tree. On older Hermes
+versions, or before the first `configure`, keep using `hermes-mordred`.
+
 See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
 for expected output and the
 [usage guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md)

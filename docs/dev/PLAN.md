@@ -73,8 +73,9 @@ permissions, writers, and readers.
   integration extras.
 - `hermes-mordred` is the canonical user-facing CLI across the full Hermes
   support range. Hermes 0.19.0+ can expose the same handlers through an
-  additional host-CLI compatibility surface after the plugins are enabled, but
-  documentation and operator guidance do not use that form.
+  additional host-CLI compatibility surface after the plugins are enabled.
+  Command examples use the canonical form; README mentions the host form only
+  as a compatibility note.
 
 ### 0.6 CI workflow
 

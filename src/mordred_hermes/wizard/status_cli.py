@@ -58,6 +58,12 @@ __all__ = [
 
 _LOG = logging.getLogger("mordred.wizard.status_cli")
 
+_POLICY_MODE_DETAILS = {
+    "strict": "blocks on policy violations",
+    "lenient": "warns and audits; continues",
+    "off": "guards disabled",
+}
+
 #: Resolve the platform hardware-helper binary, or None. Injected in tests.
 HelperFinder = Callable[[str], str | None]
 
@@ -295,6 +301,8 @@ def collect(
 
 
 def render_text(report: StatusReport, *, color: bool = False) -> str:
+    policy_detail = _POLICY_MODE_DETAILS.get(report.policy_mode)
+    policy = f"{report.policy_mode} ({policy_detail})" if policy_detail else report.policy_mode
     if report.network_live:
         ready = "ready" if report.network_ready else "not ready"
         network = f"{report.network_active_path} (live, {ready})"
@@ -307,7 +315,7 @@ def render_text(report: StatusReport, *, color: bool = False) -> str:
         keyvault = f"{report.keyvault_detail} ({helper})"
     lines = [
         _term.heading("Mordred status:", enabled=color),
-        f"  policy mode : {report.policy_mode}",
+        f"  policy mode : {policy}",
         f"  network     : {network}",
         f"  keyvault    : {keyvault}",
         "  encryption  :",

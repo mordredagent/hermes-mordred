@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -394,6 +395,18 @@ class TestRendering:
 
     def test_render_text_default_has_no_ansi(self) -> None:
         assert "\033" not in status_cli.render_text(self._sample_report())
+
+    @pytest.mark.parametrize(
+        ("mode", "detail"),
+        [
+            ("strict", "blocks on policy violations"),
+            ("lenient", "warns and audits; continues"),
+            ("off", "guards disabled"),
+        ],
+    )
+    def test_policy_mode_has_short_explanation(self, mode: str, detail: str) -> None:
+        report = replace(self._sample_report(), policy_mode=mode)
+        assert f"policy mode : {mode} ({detail})" in status_cli.render_text(report)
 
     def test_render_text_color_emits_ansi(self) -> None:
         text = status_cli.render_text(self._sample_report(), color=True)
