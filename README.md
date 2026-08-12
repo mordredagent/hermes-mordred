@@ -96,7 +96,22 @@ required.
 
 ### Use it
 
-Start with the standalone command:
+The fastest path is the guided orchestrator:
+
+```sh
+hermes-mordred setup
+```
+
+`setup` probes each step in order and only runs what is still incomplete, so
+it is safe to re-run after an interruption. It never deletes or recreates an
+existing keyvault: a blocked or corrupt keyvault stops setup with repair
+guidance instead of auto-repairing it. Add `--non-interactive` to run the
+automatable subset and list the interactive commands still needed (exit code
+0 only once everything is set up).
+
+Prefer to drive each step yourself, or need to fix just one? `setup` runs the
+manual sequence below, in the same order (after first checking upstream
+Hermes) — start with the standalone command:
 
 ```sh
 hermes-mordred configure                 # policy / LLM / harness setup
