@@ -30,9 +30,8 @@ The package exposes six `hermes_agent.plugins` entry points:
 ## Requirements
 
 - Python 3.11 or newer; CI currently tests 3.11–3.13.
-- `hermes-agent>=0.13.0`. The host form `hermes mordred ...` additionally
-  requires Hermes 0.19.0 or newer; the standalone `hermes-mordred` command
-  works across the supported range.
+- `hermes-agent>=0.13.0`. Use the canonical `hermes-mordred` command across the
+  supported Hermes range.
 - macOS or Linux. macOS can fall back from Secure Enclave to a software P-256
   key in the login Keychain. Linux requires TPM 2.0 and fails closed when its
   helper is unavailable.

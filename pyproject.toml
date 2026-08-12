@@ -90,7 +90,7 @@ ethereum = [
   "rlp>=4",
 ]
 messaging = [
-  # Terminal QR-code rendering for `hermes mordred extension pair`. Optional
+  # Terminal QR-code rendering for `hermes-mordred extension pair`. Optional
   # (the command already falls back to printing the code as plain text when
   # this isn't installed) — was referenced in a comment as living in this
   # extra before the extra itself existed.
@@ -150,15 +150,17 @@ mordred_e2e = "mordred_hermes.extension.gateway_plugin"
 #
 # Upstream has since wired it: hermes-agent 0.19.0 calls discover_plugins()
 # and then iterates get_plugin_manager()._cli_commands.values()
-# (hermes_cli/main.py:13766-13778), so `hermes mordred ...` now works too --
-# exactly the "without code changes" outcome this comment predicted. Both
-# entry points coexist; verified 2026-08-03 on 0.19.0.
+# (hermes_cli/main.py:13766-13778), so the registered host subcommand now works
+# too. It remains a compatibility alias; `hermes-mordred` is the canonical
+# user-facing spelling. Both entry points coexist; verified 2026-08-03 on
+# 0.19.0.
 #
 # Keep this console_script regardless: the dependency floor is
-# hermes-agent>=0.13.0, and on 0.13.0-0.18.x `hermes mordred` still falls
-# through to top-level usage. It is also the only form available before
-# `configure` enables the plugins in ~/.hermes/config.yaml, since the
-# subcommand is registered by the mordred_wizard plugin.
+# hermes-agent>=0.13.0, and on 0.13.0-0.18.x the registered host subcommand
+# still falls through to top-level usage. The console script is also the only
+# form available before `configure` enables the plugins in
+# ~/.hermes/config.yaml, since the subcommand is registered by the
+# mordred_wizard plugin.
 [project.scripts]
 hermes-mordred = "mordred_hermes.wizard.cli:main"
 
@@ -181,7 +183,7 @@ path = "src/mordred_hermes/__about__.py"
 packages = ["src/mordred_hermes"]
 
 # Ship the Secure Enclave helper's Swift *sources* inside the package (NOT the
-# Swift `.build/` artifacts) so `hermes mordred keyvault enable-se` can build
+# Swift `.build/` artifacts) so `hermes-mordred keyvault enable-se` can build
 # them after a plain `pip install`. `_seckey_helper._locate_helper_source()`
 # finds them via importlib.resources at `mordred_hermes/_native/sekey-helper/`.
 [tool.hatch.build.targets.wheel.force-include]
@@ -190,7 +192,7 @@ packages = ["src/mordred_hermes"]
 "native/sekey-helper/Sources" = "mordred_hermes/_native/sekey-helper/Sources"
 "native/sekey-helper/README.md" = "mordred_hermes/_native/sekey-helper/README.md"
 # The Linux TPM 2.0 helper's Rust *sources* (NOT the cargo `target/` artifacts)
-# so `hermes mordred keyvault enable-tpm` can build them after a plain
+# so `hermes-mordred keyvault enable-tpm` can build them after a plain
 # `pip install`. `_seckey_helper._locate_tpmkey_source()` finds them via
 # importlib.resources at `mordred_hermes/_native/tpmkey-helper/` (v2-OS2 2c).
 "native/tpmkey-helper/build.sh" = "mordred_hermes/_native/tpmkey-helper/build.sh"

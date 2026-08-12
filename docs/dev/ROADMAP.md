@@ -185,6 +185,24 @@ Complete. User, developer, and upstream-snapshot documents are separated by
 directory and indexed. Keep the structure rather than scheduling another
 migration.
 
+### v2-X4: Canonical Hermes subcommand
+
+Make `hermes mordred ...` the canonical user-facing CLI spelling. Keep
+`hermes-mordred` as a bootstrap and recovery entry point until the host
+subcommand is available immediately after installation and remains usable when
+plugin configuration is missing or damaged.
+
+Transition only after:
+
+- the minimum supported Hermes version is 0.19.0 or newer;
+- first-time configuration works through `hermes mordred configure`;
+- a reliable recovery path exists for disabled or invalid plugin configuration.
+
+Until those conditions are met, user documentation continues to use
+`hermes-mordred ...` as the dependable command form.
+
+- **Priority**: H after the Hermes version floor can move to 0.19.0.
+
 ## Forever out of scope
 
 - Submitting Mordred changes to Hermes upstream.

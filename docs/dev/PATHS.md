@@ -59,7 +59,7 @@ Hermes config integration:
     unwrapped via the selected native key backend.
   - Existing logs written before Phase 4 stay plaintext until the user manually
     purges them (see TODO.md §4 DECIDE block and
-    `hermes mordred audit purge --before YYYY-MM-DD --yes`).
+    `hermes-mordred audit purge --before YYYY-MM-DD --yes`).
 
 ### Entry contract
 
@@ -95,10 +95,10 @@ Audit entries carry the following fields:
 
 ### Consumer CLI
 
-- `hermes mordred audit tail [-n N]` — show last N entries
-- `hermes mordred audit grep <pattern>` — pattern match
-- `hermes mordred audit decrypt --date YYYY-MM-DD` — Phase 4+, decrypts encrypted logs (native wrapping-key access required)
-- `hermes mordred audit purge --before YYYY-MM-DD --yes` — delete dated rotated logs before the cutoff
+- `hermes-mordred audit tail [-n N]` — show last N entries
+- `hermes-mordred audit grep <pattern>` — pattern match
+- `hermes-mordred audit decrypt --date YYYY-MM-DD` — Phase 4+, decrypts encrypted logs (native wrapping-key access required)
+- `hermes-mordred audit purge --before YYYY-MM-DD --yes` — delete dated rotated logs before the cutoff
 
 ### Tamper detection roadmap (v2)
 
@@ -106,7 +106,7 @@ v1 is not tamper-evident (see the H4 caveat above). Planned additions for v2:
 
 - **Per-entry HMAC chain**: Add an `hmac` field to each NDJSON entry. `hmac_n = HMAC-SHA256(chain_key, hmac_{n-1} || entry_n_canonical_json)`. Rewriting an entry after the fact makes every subsequent HMAC unverifiable
 - **Chain key protection**: The `chain_key` is wrapped with the Phase 4 keyvault's DEK and stored at `~/.hermes/mordred/audit.chain.wrap`. It is unwrapped through the selected native backend at Hermes process startup and kept resident in memory
-- **Verification CLI**: `hermes mordred audit verify [--from YYYY-MM-DD] [--to YYYY-MM-DD]` re-walks the chain and reports anomalies
+- **Verification CLI**: `hermes-mordred audit verify [--from YYYY-MM-DD] [--to YYYY-MM-DD]` re-walks the chain and reports anomalies
 - **Phase 4 dependency**: Presupposes secure storage of the chain key. macOS
   can use Secure Enclave/login Keychain and Linux can use the shipped TPM 2.0
   helper. Windows-native custody remains deferred
@@ -115,7 +115,7 @@ Implementation begins in v2. In v1, `0600` access control plus Phase 4 audit log
 
 ### Multi-process write serialization (M1 resolved)
 
-`hermes mordred install <skill>` is designed so that the wizard CLI writes
+`hermes-mordred install <skill>` is designed so that the wizard CLI writes
 audit entries from **a process separate from the session process**. The audit
 contract therefore treats cross-process serialization as an operational
 requirement, not a theoretical edge case.
@@ -145,7 +145,7 @@ requirement, not a theoretical edge case.
 ## `~/.hermes/mordred/policy.json`
 
 **Owning plugin**: `mordred_privacy_check` (Phase 1)
-**Writer**: `mordred_wizard` (`hermes mordred configure` / `upgrade`)
+**Writer**: `mordred_wizard` (`hermes-mordred configure` / `upgrade`)
 **Readers**: `mordred_privacy_check` (cached in memory at `on_session_start`),
 `mordred_llm_guard` (Phase 2), `mordred_network` (Phase 3)
 
@@ -168,7 +168,7 @@ Effective merged policy snapshot. The canonical source is the
   closed rather than accepting a mixed old/new pair. A later successful
   configure/upgrade write reconciles a stale marker left by an interrupted
   transaction.
-- **Reload**: `hermes mordred policy reload` (an internal function call; a fs watcher is not introduced in v1)
+- **Reload**: `hermes-mordred policy reload` (an internal function call; a fs watcher is not introduced in v1)
 - **Canonical configuration**: The wizard edits the `plugins.mordred_*` section of `~/.hermes/config.yaml` via a `ruamel.yaml` round-trip (preserving comments and key order). `policy.json` is a scrubbed snapshot of that.
 
 ### Schema sketch (Phase 1)
@@ -211,11 +211,11 @@ The full schema reference treats [`POLICY.md §\`plugins.mordred_privacy_check\`
 
 ### Consumer CLI
 
-- `hermes mordred configure` / `upgrade` — writes
-- `hermes mordred policy show` — display current values
-- `hermes mordred policy explain <skill-id>` — explain decision for a skill
-- `hermes mordred policy dry-run <skill-path>` — pre-install decision simulation
-- `hermes mordred policy reload` — triggers in-process reload
+- `hermes-mordred configure` / `upgrade` — writes
+- `hermes-mordred policy show` — display current values
+- `hermes-mordred policy explain <skill-id>` — explain decision for a skill
+- `hermes-mordred policy dry-run <skill-path>` — pre-install decision simulation
+- `hermes-mordred policy reload` — triggers in-process reload
 
 ### Cross-references
 
@@ -227,7 +227,7 @@ The full schema reference treats [`POLICY.md §\`plugins.mordred_privacy_check\`
 ## `~/.hermes/mordred/credentials/`
 
 **Owning plugin**: `mordred_network` (Phase 3)
-**Writer**: `mordred_wizard` (during `hermes mordred configure` Phase 3 questions)
+**Writer**: `mordred_wizard` (during `hermes-mordred configure` Phase 3 questions)
 **Readers**: none currently — this file is **write-only**. `mordred_wizard` writes it, but no module under `network/` reads `credentials/network.json` (`mordred_network` reads Mullvad settings from `policy.json` instead — `network/__init__.py:270-276`). A runtime reader is not yet implemented and will be wired up in a future phase.
 
 ### Purpose
@@ -317,7 +317,7 @@ Local persistence of keyvault state:
 - **Subordinate file mode**: `0600`
 - **Created**: on the first call to `mordred_keyvault.api.generate`
 - **Deleted**: only when the user explicitly runs
-  `hermes mordred keyvault reset`; native-key deletion must succeed before the
+  `hermes-mordred keyvault reset`; native-key deletion must succeed before the
   on-disk directory is removed
 - **Encryption**: the wrapped DEK inside the directory is protected by the
   selected key backend (Secure Enclave or the documented login-Keychain
@@ -400,7 +400,7 @@ Authoritative definitions live in SPEC.md §"PR4 API contract & MREN envelope wi
 
 ### Consumer CLI
 
-- `hermes mordred keyvault init` / `list` / `verify-digest` / `recover --blob <path>`
+- `hermes-mordred keyvault init` / `list` / `verify-digest` / `recover --blob <path>`
 
 ### Pre-Phase-4 behavior
 
@@ -417,7 +417,7 @@ Authoritative definitions live in SPEC.md §"PR4 API contract & MREN envelope wi
 
 ## Migration from legacy OpenClaw paths
 
-When `hermes mordred upgrade` detects `~/.openclaw/mordred/` from the OpenClaw era, it migrates as follows (Story 1.5). Each entry specifies its conflict-resolution policy (H5):
+When `hermes-mordred upgrade` detects `~/.openclaw/mordred/` from the OpenClaw era, it migrates as follows (Story 1.5). Each entry specifies its conflict-resolution policy (H5):
 
 | Old path (OpenClaw) | New path (Hermes) | Processing | Behavior on conflict (H5) |
 |-------------------|-------------------|------|-------------------|
@@ -441,7 +441,7 @@ rename, and the destination parent is flushed afterward. A byte-identical
 existing destination is an idempotent no-op whose modes are repaired; differing
 contents still abort without overwrite.
 
-**Idempotency contract (H5)**: When `hermes mordred upgrade` is run a second time, if the marker file `~/.hermes/mordred/.audit-migrated-from-openclaw` (written on the first run) exists, audit migration is skipped (a no-op). This prevents duplicate appending of the same entries. If the user intentionally wants to re-run it, they should delete the marker or specify `--reset --audit-merge=append-all`.
+**Idempotency contract (H5)**: When `hermes-mordred upgrade` is run a second time, if the marker file `~/.hermes/mordred/.audit-migrated-from-openclaw` (written on the first run) exists, audit migration is skipped (a no-op). This prevents duplicate appending of the same entries. If the user intentionally wants to re-run it, they should delete the marker or specify `--reset --audit-merge=append-all`.
 
 The `--reset` flag forces every conflict-policy to `overwrite` (destructive — old data is deleted). In CI / automation environments, request a non-interactive mode that suppresses interactive prompts via `--non-interactive`; if a conflict-policy flag is not specified, fail fast.
 

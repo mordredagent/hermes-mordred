@@ -72,7 +72,7 @@ In the revised strategy, we do not submit a PR upstream to Hermes, and instead r
   declarative marker. Hermes ignores the field, and no runtime code discovers
   siblings from it; enforcement uses the fixed six-entry
   `privacy_check._runtime.SIBLING_PLUGINS` canonical list.
-- `mordred_wizard` provides the `hermes mordred plugins disable <plugin>` wrapper CLI, and plugins under `mordred_*` refuse when an attempt is made to disable them without the `--unlock` flag (defense-in-depth at the UX layer)
+- `mordred_wizard` provides the `hermes-mordred plugins disable <plugin>` wrapper CLI, and plugins under `mordred_*` refuse when an attempt is made to disable them without the `--unlock` flag (defense-in-depth at the UX layer)
 - **At the start of each runtime Mordred plugin's `on_session_start`, scan the canonical list (`mordred_privacy_check` / `mordred_network` / `mordred_llm_guard` / `mordred_keyvault` / `mordred_e2e` / `mordred_wizard`)**:
   - **If `policy=strict` and even one sibling is disabled**: raise `MordredIntegrityRefused(BaseException)` with the disabled sibling list and abort the session. At the same time, record an audit log entry `mordred.degraded.disable_unprotected` (decision=`block`). Direct `BaseException` inheritance lets the refusal escape Hermes's `except Exception:` wrapper without being mistaken for an ordinary `SystemExit`.
   - **If `policy=lenient` / `off`**: warning only (the audit `mordred.degraded.disable_unprotected` (decision=`warn`) is likewise recorded, to ensure compatibility)

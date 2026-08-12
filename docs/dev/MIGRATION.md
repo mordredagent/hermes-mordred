@@ -105,8 +105,9 @@ This is the binding decision:
 - Distribution: `mordred-hermes`.
 - Import package: `mordred_hermes`.
 - Entry points and config IDs: `mordred_*`.
-- Standalone CLI: `hermes-mordred`.
-- Host CLI when supported: `hermes mordred`.
+- Canonical operator CLI: `hermes-mordred`.
+- Optional host compatibility alias: the registered `mordred` subcommand on
+  supported Hermes versions; it is not used in operator guidance.
 - Persistent state: `<HERMES_HOME>/mordred/` and the established extension
   state under `<HERMES_HOME>/extension/`.
 
