@@ -1,0 +1,17 @@
+# Keeps the SHA-pinned GitHub Actions in .github/workflows/ current.
+# Deliberately actions-only: Python dependencies are governed by
+# pyproject.toml floors + uv.lock (and the hermes-floor CI job), so pip/uv
+# update PRs would add review noise without a matching safety gain.
+# See docs/dev/CI.md §"dependabot.yml details".
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - ci
+    groups:
+      actions:
+        patterns:
+          - "*"

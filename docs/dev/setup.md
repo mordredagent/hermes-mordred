@@ -288,8 +288,8 @@ See `SPEC.md §Key generation and verification digest` for the detailed algorith
   [`SPEC.md`](./SPEC.md) and implementation boundary in [`PLAN.md`](./PLAN.md).
 - For an individual plugin, read its package README and focused tests before
   changing code.
-- AI coding agents and contributors should follow [`CLAUDE.md`](../../CLAUDE.md)
-  at the repository root.
+- AI coding agents and contributors should follow [`AGENTS.md`](../../AGENTS.md)
+  at the repository root (`CLAUDE.md` is a thin include shim pointing at it).
 
 ---
 

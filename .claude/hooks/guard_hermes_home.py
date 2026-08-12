@@ -16,7 +16,8 @@ import re
 import sys
 
 DESTRUCTIVE = re.compile(
-    r"hermes-mordred\s+(?:configure\b|keyvault\s+init\b|network\s+init\b)"
+    r"hermes-mordred\s+(?:-\S+\s+)*"
+    r"(?:configure\b|keyvault\s+(?:-\S+\s+)*init\b|network\s+(?:-\S+\s+)*init\b)"
 )
 
 BLOCK_MESSAGE = (

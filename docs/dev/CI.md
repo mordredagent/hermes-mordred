@@ -107,6 +107,15 @@ Required labels:
 - `plugins/mordred-wizard`
 - `actionable`, `upstream-drift`, `docs`, and `ci`
 
+## `dependabot.yml` details
+
+`.github/dependabot.yml` keeps the SHA-pinned GitHub Actions current: monthly,
+with all action bumps grouped into one `ci`-labelled PR against `dev`. Scope is
+deliberately actions-only — Python dependencies are governed by
+`pyproject.toml` floors plus `uv.lock` and the `hermes-floor` job, so pip/uv
+update PRs would add review noise without a matching safety gain. It is not a
+workflow, so the expected-path list in [Auditing](#auditing) is unchanged.
+
 ## `release.yml` details
 
 Publishing is `workflow_dispatch` only and uses PyPI Trusted Publishing (OIDC),
