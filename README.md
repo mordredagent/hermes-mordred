@@ -243,66 +243,25 @@ shellcheck scripts/*.sh native/*/build.sh   # brew/apt install shellcheck
 
 ## Upgrading
 
-Package upgrades and config migration are separate operations.
-
-### Upgrade the installed package
-
-Re-run the installer to upgrade Mordred without upgrading Hermes:
+Re-run the installer, then restart the Hermes gateway or a standalone
+`extension serve` process:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash
 ```
 
-The installer performs the old-name ownership transfer automatically. For a
-manual upgrade from `0.1.0a15`, uninstall the legacy real distribution before
-installing the new one:
+This upgrades Mordred only and handles the transition from the old
+`mordred-hermes` package name. Run it again if a Hermes update recreates its
+virtual environment.
 
-```sh
-uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a16"  # use [keyvault] on Linux
-```
-
-For a version-pinned upgrade, install the desired version manually into the
-Hermes environment:
-
-```sh
-# macOS; use [keyvault] on Linux
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==<new-version>"
-```
-
-The equivalent manual command for the newest release is:
-
-```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package hermes-mordred "hermes-mordred[macos]"
-```
-
-Restart the Hermes gateway or `extension serve` after upgrading.
-
-### When Hermes itself is updated
-
-An in-place Hermes update normally preserves the Mordred wheel, but does not
-upgrade it. If Hermes recreates its venv, reinstall Mordred and verify the
-loaded path:
-
-```sh
-~/.hermes/hermes-agent/venv/bin/python3 -c \
-  "import mordred_hermes; print(mordred_hermes.__file__)"
-```
-
-### Migrate config with `hermes-mordred upgrade`
-
-`hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration. It is
-idempotent and safe to repeat:
+`hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration;
+it does not upgrade the package:
 
 ```sh
 hermes-mordred upgrade
-hermes-mordred upgrade --non-interactive --policy-conflict keep-existing
 ```
 
-Fresh installations should use `configure`, not `upgrade`.
+It is safe to repeat. Fresh installations should use `configure` instead.
 
 ## Uninstall
 
