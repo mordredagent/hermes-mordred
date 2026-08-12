@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -152,6 +153,34 @@ def test_configured_token_falls_back_to_the_standard_hermes_dotenv(tmp_path, mon
     assert _configured_bot_token() == "from-dotenv"
 
 
+def test_configured_token_prefers_hermes_dotenv_over_stale_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "stale-export")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("DISCORD_BOT_TOKEN=rotated-dotenv\n", encoding="utf-8")
+    assert _configured_bot_token() == "rotated-dotenv"
+
+
+def test_empty_dotenv_token_overrides_stale_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "stale-export")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("DISCORD_BOT_TOKEN=\n", encoding="utf-8")
+    assert _configured_bot_token() == ""
+
+
+def test_configured_token_uses_export_when_dotenv_key_is_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "current-export")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("OTHER=value\n", encoding="utf-8")
+    assert _configured_bot_token() == "current-export"
+
+
+def test_bare_dotenv_token_does_not_override_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "current-export")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("DISCORD_BOT_TOKEN\n", encoding="utf-8")
+    assert _configured_bot_token() == "current-export"
+
+
 def test_tor_route_without_a_proxy_fails_closed(monkeypatch):
     monkeypatch.setattr(discord_context, "_tor_route_required", lambda: True)
     monkeypatch.setattr("gateway.platforms.base.resolve_proxy_url", lambda **_kwargs: None)
@@ -161,28 +190,96 @@ def test_tor_route_without_a_proxy_fails_closed(monkeypatch):
     assert raised.value.code == "routing_unavailable"
 
 
-def test_tor_socks5h_route_uses_remote_dns_connector(monkeypatch):
-    seen: dict[str, Any] = {}
-    connector = object()
+def test_standalone_configured_vpn_fails_closed(tmp_path, monkeypatch):
+    from mordred_hermes.network import api as network_api
+    from mordred_hermes.network._exceptions import MordredNetworkError
 
-    def from_url(url: str, **kwargs: Any) -> object:
-        seen.update(url=url, **kwargs)
-        return connector
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  mordred_network:\n    default_path: vpn\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discord_context, "hermes_home", lambda: tmp_path)
 
+    def no_runtime():
+        raise MordredNetworkError("runtime unavailable")
+
+    proxy_called = False
+
+    def resolve_proxy_url(**_kwargs):
+        nonlocal proxy_called
+        proxy_called = True
+        return None
+
+    monkeypatch.setattr(network_api, "status", no_runtime)
+    monkeypatch.setattr("gateway.platforms.base.resolve_proxy_url", resolve_proxy_url)
+
+    with pytest.raises(DiscordContextError) as raised:
+        discord_context._resolve_gateway_route()
+    assert raised.value.code == "routing_unavailable"
+    assert proxy_called is False
+
+
+def test_tor_socks5h_route_preserves_remote_dns_without_building_connector(monkeypatch):
     monkeypatch.setattr(discord_context, "_tor_route_required", lambda: True)
     monkeypatch.setattr(
         "gateway.platforms.base.resolve_proxy_url",
         lambda **_kwargs: "socks5h://route:route@127.0.0.1:9050",
     )
-    monkeypatch.setattr("aiohttp_socks.ProxyConnector.from_url", from_url)
 
     route = discord_context._resolve_gateway_route()
-    assert route.connector is connector
+    assert route.socks_proxy_url == "socks5://route:route@127.0.0.1:9050"
     assert route.request_proxy is None
-    assert seen == {
-        "url": "socks5://route:route@127.0.0.1:9050",
-        "rdns": True,
-    }
+
+
+def test_real_socks_connector_builds_on_running_event_loop():
+    async def run():
+        connector = discord_context._build_socks_connector("socks5://127.0.0.1:9050")
+        assert connector is not None
+        await connector.close()
+
+    asyncio.run(run())
+
+
+def test_owned_session_builds_socks_connector_on_event_loop_thread(monkeypatch):
+    session = _Session(
+        {
+            "456": _Response(
+                200,
+                {"id": "456", "guild_id": "123", "type": 0, "name": "secure-ops"},
+            )
+        }
+    )
+    seen: dict[str, Any] = {}
+    connector = object()
+
+    def resolve_route() -> discord_context._ClientRoute:
+        seen["resolution_thread"] = threading.get_ident()
+        return discord_context._ClientRoute("socks5://127.0.0.1:9050", None)
+
+    def from_url(url: str, **kwargs: Any) -> object:
+        seen.update(connector_thread=threading.get_ident(), connector_url=url, **kwargs)
+        return connector
+
+    def session_factory(**kwargs: Any) -> _Session:
+        seen["session_connector"] = kwargs["connector"]
+        return session
+
+    monkeypatch.setattr(discord_context, "_resolve_gateway_route", resolve_route)
+    monkeypatch.setattr("aiohttp_socks.ProxyConnector.from_url", from_url)
+    monkeypatch.setattr(discord_context.aiohttp, "ClientSession", session_factory)
+
+    async def run():
+        seen["loop_thread"] = threading.get_ident()
+        return await resolve_discord_channel("123", "456", token="token")
+
+    result = asyncio.run(run())
+    assert result.parent_channel_id == "456"
+    assert seen["resolution_thread"] != seen["loop_thread"]
+    assert seen["connector_thread"] == seen["loop_thread"]
+    assert seen["connector_url"] == "socks5://127.0.0.1:9050"
+    assert seen["rdns"] is True
+    assert seen["session_connector"] is connector
+    assert session.closed is True
 
 
 def test_owned_session_disables_ambient_env_and_uses_explicit_http_proxy(monkeypatch):
