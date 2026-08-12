@@ -196,50 +196,34 @@ for deployment, protocol, wallet, and troubleshooting details.
 
 ## Install (development)
 
-Use the repository's editable `.venv`; do not replace the production Hermes
-environment for normal development:
+Use the repository's editable `.venv`, separate from the production Hermes
+environment:
 
 ```sh
 git clone https://github.com/InternetMaximalism/hermes-mordred.git
 cd hermes-mordred
 uv sync --all-extras
-
-.venv/bin/python -c "import mordred_hermes; print(mordred_hermes.__file__)"
 .venv/bin/hermes-mordred status
 ```
 
-The printed module path should be under this checkout's `src/`. Local commands
-still use real `~/.hermes` state unless isolated:
-
-```sh
-env HERMES_HOME=/tmp/mordred-test-home \
-  .venv/bin/hermes-mordred configure
-```
-
-Only replace `~/.hermes/hermes-agent/venv` with an editable install when an
-end-to-end production-profile test specifically requires it. The full workflow,
-including how to restore the PyPI wheel, is in
-[development setup](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/dev/setup.md).
-
-Run the standard checks:
-
-```sh
-uv run pytest -q
-uv run ruff check src tests scripts
-uv run ruff format --check src tests scripts
-uv run mypy --strict src tools scripts/keyvault_offline_digest.py
-shellcheck scripts/*.sh native/*/build.sh   # brew/apt install shellcheck
-```
+Local commands read real `~/.hermes` state unless `HERMES_HOME` is set. See
+[development setup](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/dev/setup.md)
+for safe isolation, loaded-code verification, and the full check suite.
 
 ## Troubleshooting
 
-| Symptom | What to do |
-|---|---|
-| A background gateway starts without vault-managed secrets | The vault likely uses an attended Secure Enclave key. Follow the verified backup/recovery procedure in [USAGE §4.3](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) and create the replacement key with `MORDRED_SEKEY_UNATTENDED=1`. Re-running `enable-se` alone does not change an existing key policy. |
-| `extension serve` reports port 7788 in use | Run `lsof -nP -iTCP:7788 -sTCP:LISTEN`. If Hermes already owns it, the API is running; otherwise stop the stale process or use `--port 7799`. |
-| Tor/VPN communication stops | Run `hermes-mordred network status`, then re-establish the selected route with `hermes-mordred network use <tor\|vpn\|clearnet>`. Restart Hermes after changing routes. |
-| The audit log is plaintext and contains `mordred.degraded.audit_encryption_unavailable` | Restart the process from a context that can access the device key. Recovery is automatic; purge rotated plaintext logs with `hermes-mordred audit purge --before YYYY-MM-DD --yes` if required. |
-| The recovery passphrase is lost | If the current device key still works, run `hermes-mordred encryption change-passphrase`. If both the passphrase and device key are gone, the encrypted data cannot be recovered. |
+- For keyvault, Touch ID, and recovery issues, see
+  [USAGE §4](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/USAGE.md#4-interactive-command-walkthroughs).
+  Encrypted data cannot be recovered if both the device key and recovery
+  passphrase are lost.
+- For extension, gateway, and port 7788 issues, see the
+  [extension troubleshooting guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/EXTENSION.md#troubleshooting).
+- For Tor/VPN issues, run `hermes-mordred network status`, then
+  `hermes-mordred network use <tor|vpn|clearnet>`; restart Hermes if the route
+  changed.
+- If the audit log falls back to plaintext with
+  `mordred.degraded.audit_encryption_unavailable`, restart from a context that
+  can access the device key. Recovery is automatic.
 
 ## Upgrading
 
