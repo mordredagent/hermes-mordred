@@ -28,3 +28,9 @@ dev_init_keyvault.py
 !.claude/settings.json
 !.claude/hooks/
 !.claude/skills/
+
+# editors
+.idea
+.vscode
+gha-creds-*.json
+notes.md
