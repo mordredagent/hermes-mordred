@@ -159,14 +159,23 @@ The optional extension server listens on `ws://127.0.0.1:7788/ext`, validates
 the local peer and browser origin, and supports pairing, encrypted chat,
 history, wallet accounts, and approval-bound signing.
 
-The one-line installer deliberately installs only the platform keyvault extra,
-so `extension serve` exits with code 2 and prints how to add the `extension`
-extra until it is installed:
+The one-line installer deliberately installs only the platform keyvault extra;
+it does not guarantee the extension server dependencies. Install the
+`extension` extra explicitly. If `aiohttp` is otherwise unavailable,
+`extension serve` exits with code 2 and prints an install hint:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   "hermes-mordred[macos,extension,ethereum]==0.1.0a16"
 ```
+
+This macOS example includes `ethereum` for wallet features. Omit it for
+chat/history only, replace `macos` with `keyvault` on Linux, and add
+`messaging` only when you want a terminal pairing QR.
+
+The browser client is distributed separately as a
+[prebuilt Chromium extension](https://github.com/InternetMaximalism/Mordred-Extension-dist).
+Load its `dist/` directory as an unpacked extension.
 
 ### How it works
 
@@ -184,13 +193,18 @@ hermes-mordred extension serve           # foreground; Ctrl+C to stop
 hermes-mordred extension pair
 ```
 
-Use `--port 7799` when another Hermes gateway already owns port 7788.
+The published Chromium bundle is authorized for port 7788 only. Use
+`--port 7799` only with the bundled localhost page, tests, or a custom extension
+build whose manifest permits that port. If 7788 is occupied, inspect the owner
+before starting another server.
 
 ### Standalone behavior notes
 
 `extension serve` runs the real Hermes agent when its runtime is installed.
-It does not start automatically because Hermes currently exposes no plugin
-boot hook for long-running services. See the
+Stock `hermes-agent` does not host this API, and the Mordred plugin does not
+start it automatically because Hermes currently exposes no plugin boot hook
+for long-running services. Compatible legacy/custom gateways may host the API;
+verify the process rather than inferring that from an occupied port. See the
 [Extension guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/EXTENSION.md)
 for deployment, protocol, wallet, and troubleshooting details.
 

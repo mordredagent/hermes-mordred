@@ -51,8 +51,9 @@ preserved. Do not manually install the two real distributions on top of each
 other; use the installer or uninstall the legacy name first.
 
 Only the platform keyvault extra is installed. Features with their own extras —
-the browser extension, Ethereum keys, deep Tor liveness checks — need the extra
-added afterwards; see the manual command below.
+the browser extension server, Ethereum keys, terminal pairing QR, and deep Tor
+liveness checks — need the extra added afterwards; see the manual command below
+and the [Extension guide](./EXTENSION.md#install).
 
 If you prefer to inspect a downloaded script before running it:
 

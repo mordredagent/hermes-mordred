@@ -143,13 +143,19 @@ env HERMES_HOME=/tmp/mordred-test-home .venv/bin/hermes-mordred status
 
 An isolated home starts out in a `not initialised` state, so you can safely redo the first-run ceremony as many times as you like. If it gets broken, discard it with `rm -rf /tmp/mordred-test-home`.
 
-**⚠️ `extension serve` conflicts on port 7788.** The production gateway (LaunchAgent) already holds port 7788, so if you want to run the local build alongside it, use a different port:
+**⚠️ `extension serve` may conflict on port 7788.** Inspect the owner before
+starting a development server. For localhost-page or API testing alongside an
+existing Extension service, use a different port:
 
 ```sh
 .venv/bin/hermes-mordred extension serve --port 7799
 # Check who is holding 7788:
 lsof -nP -iTCP:7788 -sTCP:LISTEN
 ```
+
+The published Chromium bundle is authorized for port 7788 only. Testing that
+bundle against 7799 requires a custom build whose manifest and client
+configuration permit 7799.
 
 **About the Secure Enclave helper**: `_native/`, which is only bundled in the wheel, doesn't exist in a local editable install, but `_locate_helper_source()` has a fallback that walks up parent directories to find `native/sekey-helper`, so `keyvault enable-se` builds fine even under editable install.
 
@@ -201,7 +207,7 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 | Network privacy configuration | `.venv/bin/hermes-mordred network init` | Sets up Tor / VPN / clearnet + Mullvad on demand. Re-runnable (seeds existing values as prompt defaults; an empty Mullvad input keeps the existing secret). CI/scripts drive it via `--non-interactive --path tor --mullvad-relay jp ...` (secrets are not passed via CLI flags). Delete a saved secret with `--clear-mullvad`. **Destructive — `HERMES_HOME` isolation recommended** |
 | Select / check network route | `.venv/bin/hermes-mordred network use <tor\|vpn\|clearnet>` / `network status` | Saves the next process route; restart Hermes to activate a changed route. `network status --json` shows the current process state |
 | Check overall status | `.venv/bin/hermes-mordred status` | Shows policy / network / keyvault / encryption on one screen (`--json` available). Read-only, no prompts or Secure Enclave access |
-| Start extension gateway | `.venv/bin/hermes-mordred extension serve --port 7799` | ⚠️ The default 7788 conflicts with the production LaunchAgent |
+| Start extension gateway | `.venv/bin/hermes-mordred extension serve --port 7799` | Use 7799 for the localhost page/API tests; the published Chromium bundle permits only 7788 |
 
 See `CI.md` for workflow details. The scheduled upstream check files an
 informational issue; the equivalent installed-Hermes contract test runs in the
