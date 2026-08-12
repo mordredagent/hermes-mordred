@@ -38,7 +38,8 @@ bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
   pass locally but fail CI. If you touch that code, reproduce in a venv with
   only those extras before pushing. See `docs/dev/CI.md`.
 - **Destructive CLI ceremonies read/write production state.** `configure`,
-  `keyvault init`, `network init` touch the real `~/.hermes/` unless isolated:
+  `keyvault init`, `network init`, and `setup` (which drives all three) touch
+  the real `~/.hermes/` unless isolated:
   `env HERMES_HOME=/tmp/mordred-test-home .venv/bin/hermes-mordred configure`
   (fish needs the `env` prefix). Read-only commands (`status`, `audit tail`)
   are safe.

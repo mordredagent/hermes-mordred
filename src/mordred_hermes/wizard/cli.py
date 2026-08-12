@@ -12,6 +12,8 @@ and reference ``cli._handle_*`` directly).
 
 Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 
+- ``setup``                                      — one-command orchestrator: runs every step below in
+  order, resuming where it left off (never destroys state; never auto-resets the keyvault)
 - ``configure``                                  — interactive Mordred setup (policy / LLM / harness)
 - ``upgrade [--reset|--non-interactive|...]``    — idempotent migration (detects ~/.openclaw)
 - ``install <skill>``                            — install a skill through the policy gate
@@ -45,6 +47,7 @@ from ._cli_parsers import (
     _add_network,
     _add_plugins,
     _add_policy,
+    _add_setup,
     _add_status,
     _add_upgrade,
     _add_vault,
@@ -75,6 +78,7 @@ from ._cli_parsers import (
     _handle_policy_explain,
     _handle_policy_reload,
     _handle_policy_show,
+    _handle_setup,
     _handle_status,
     _handle_upgrade,
     _handle_vault_add,
@@ -102,6 +106,7 @@ __all__ = [
     "_add_network",
     "_add_plugins",
     "_add_policy",
+    "_add_setup",
     "_add_status",
     "_add_upgrade",
     "_add_vault",
@@ -132,6 +137,7 @@ __all__ = [
     "_handle_policy_explain",
     "_handle_policy_reload",
     "_handle_policy_show",
+    "_handle_setup",
     "_handle_status",
     "_handle_upgrade",
     "_handle_vault_add",
@@ -219,9 +225,16 @@ def main(argv: list[str] | None = None) -> int:
         prog="hermes-mordred",
         description="Mordred privacy layer (standalone CLI).",
         epilog=(
-            "Quickstart (first run, in order):\n"
+            "Quickstart (first run):\n"
+            "  hermes-mordred setup    runs every step below in order, and is safe to re-run --\n"
+            "                          it resumes from wherever it left off and never destroys\n"
+            "                          existing state (never auto-resets the keyvault)\n"
+            "\n"
+            "The individual steps `setup` drives, useful on their own for troubleshooting or\n"
+            "redoing a single one:\n"
             "  hermes-mordred configure              interactive setup (policy / LLM / harness)\n"
             "  hermes-mordred network init           optional: Tor / VPN / clearnet privacy path\n"
+            "  hermes-mordred keyvault enable-se      (macOS) / enable-tpm (Linux): hardware helper\n"
             "  hermes-mordred keyvault init          create the hardware-backed keyvault\n"
             "  hermes-mordred encryption enable env  turn on at-rest encryption (first run creates the vault)\n"
             "  hermes-mordred status                 check the result at a glance\n"

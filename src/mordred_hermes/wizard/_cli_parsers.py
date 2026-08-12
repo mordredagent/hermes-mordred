@@ -40,6 +40,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     sub = parser.add_subparsers(dest="mordred_command", required=required, metavar="COMMAND")
 
     _add_status(sub)
+    _add_setup(sub)
     _add_configure(sub)
     _add_upgrade(sub)
     _add_install(sub)
@@ -84,6 +85,61 @@ def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     )
     p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p.set_defaults(func=_handle_status)
+
+
+def _add_setup(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser(
+        "setup",
+        help="Run every setup step in order (hermes / configure / network / hardware helper / "
+        "keyvault / encryption); safe to re-run, resumes where it left off",
+    )
+    p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Never prompt; any step that still needs a decision is reported as needing a manual follow-up",
+    )
+    hermes_group = p.add_mutually_exclusive_group()
+    hermes_group.add_argument(
+        "--with-hermes-setup",
+        action="store_true",
+        help="Force-run the upstream `hermes setup` wizard even if it already looks complete",
+    )
+    hermes_group.add_argument(
+        "--skip-hermes-setup",
+        action="store_true",
+        help="Skip the upstream `hermes setup` step even if it looks incomplete",
+    )
+    keys_group = p.add_mutually_exclusive_group()
+    keys_group.add_argument(
+        "--unattended-keys",
+        dest="unattended_keys",
+        action="store_true",
+        default=None,
+        help="New keyvault keys skip the per-use Touch ID / passcode prompt (for background callers "
+        "like the extension Gateway)",
+    )
+    keys_group.add_argument(
+        "--attended-keys",
+        dest="unattended_keys",
+        action="store_false",
+        default=None,
+        help="New keyvault keys require a per-use Touch ID / passcode prompt (default)",
+    )
+    p.set_defaults(store_seed_for_hd=True)
+    seed_storage = p.add_mutually_exclusive_group()
+    seed_storage.add_argument(
+        "--store-seed-for-hd",
+        dest="store_seed_for_hd",
+        action="store_true",
+        help="SE-encrypt the generated keyvault seed so HD Ethereum accounts can be derived later (default).",
+    )
+    seed_storage.add_argument(
+        "--paper-only",
+        dest="store_seed_for_hd",
+        action="store_false",
+        help="Do not store the generated keyvault seed at rest; require the paper seed for later recovery/import.",
+    )
+    p.set_defaults(func=_handle_setup)
 
 
 def _add_configure(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -511,6 +567,12 @@ def _handle_status(args: argparse.Namespace) -> int:
     from . import status_cli
 
     return status_cli.cli_status(args)
+
+
+def _handle_setup(args: argparse.Namespace) -> int:
+    from . import setup_cli
+
+    return setup_cli.cli_setup(args)
 
 
 def _handle_configure(args: argparse.Namespace) -> int:

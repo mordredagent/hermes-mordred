@@ -58,14 +58,16 @@ entry-point plugins; use `hermes-mordred plugins list`.)
 
 ## 2. First-run quickstart
 
-New here? The guided short path lives in **[`QUICKSTART.md`](./QUICKSTART.md)** —
-it walks each step as Purpose / Do / Result and tells you what to expect from the
-interactive ones. In brief, run these in order (every step is idempotent and safe
-to re-run):
+New here? Run `hermes-mordred setup` — the guided, re-runnable orchestrator
+that probes each step below and only runs what is still incomplete. The full
+walkthrough (Purpose / Do / Result, plus what to expect from the interactive
+prompts) lives in **[`QUICKSTART.md`](./QUICKSTART.md)**. In brief, `setup`
+runs these in order (every step is idempotent and safe to re-run):
 
 ```sh
 hermes-mordred configure              # interactive setup → writes config.yaml + policy.json
 hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privacy path
+hermes-mordred keyvault enable-se     # build the platform key helper (Linux: enable-tpm)
 hermes-mordred keyvault init          # create the hardware-backed keyvault
 hermes-mordred encryption enable env  # turn on at-rest encryption (first run creates the vault, prompts once for a passphrase)
 hermes-mordred status                 # verify the result at a glance

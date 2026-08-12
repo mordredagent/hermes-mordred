@@ -1084,6 +1084,64 @@ class TestInit:
         meta = _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))
         assert meta["keys"]
 
+    def test_unattended_kwarg_reaches_confirm_generate(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ``hermes-mordred setup`` orchestrator threads its resolved
+        unattended-key policy through ``init_keyvault`` -> ``_confirm_or_refuse``
+        -> ``api.confirm_generate`` (which already accepts it). Spy on the real
+        ``api.confirm_generate`` -- rather than replacing it outright -- so the
+        ceremony still runs for real and this stays a behavioural, not just a
+        wiring, test."""
+        captured: dict[str, Any] = {}
+        original_confirm_generate = api.confirm_generate
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured["unattended"] = kwargs.get("unattended")
+            return original_confirm_generate(*args, **kwargs)
+
+        monkeypatch.setattr(api, "confirm_generate", spy)
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+            unattended=True,
+        )
+
+        assert rc == 0
+        assert captured["unattended"] is True
+
+    def test_unattended_defaults_to_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Omitting ``unattended`` must preserve today's exact behaviour: ``None``
+        reaches ``api.confirm_generate`` unchanged, which falls back to the
+        ``MORDRED_SEKEY_UNATTENDED`` env var deep in ``_seckey_backend``."""
+        captured: dict[str, Any] = {}
+        original_confirm_generate = api.confirm_generate
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            captured["unattended"] = kwargs.get("unattended")
+            return original_confirm_generate(*args, **kwargs)
+
+        monkeypatch.setattr(api, "confirm_generate", spy)
+
+        rc = keyvault_cli.init_keyvault(
+            home=tmp_path,
+            backend=FakeBackend(),
+            prompt_io=ScriptedPromptIO(
+                texts=[self._expected_digest().hex()],
+                passwords=[self.PASSPHRASE, self.PASSPHRASE],
+            ),
+            surface=FakeSurface(),
+            display_fn=self._noop_display,
+        )
+
+        assert rc == 0
+        assert captured["unattended"] is None
+
     def test_cli_init_adapter_delegates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}
 
