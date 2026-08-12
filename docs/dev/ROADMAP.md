@@ -42,7 +42,8 @@ Hermes chat bridge ship in `mordred_hermes.extension`. The remaining question is
 service lifecycle: keep explicit `extension serve`, document launchd/systemd,
 or integrate only if Hermes exposes a safe plugin service-boot hook.
 
-- Preserve coexistence with a full gateway already listening on port 7788.
+- Preserve coexistence with a legacy/custom gateway or standalone Extension
+  service already listening on port 7788.
 - Keep explicit startup as the default until ownership and shutdown semantics
   are unambiguous.
 - **Priority**: M.

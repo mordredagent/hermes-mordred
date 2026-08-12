@@ -15,7 +15,8 @@ server repairs are complete. One lifecycle choice remains:
 - [ ] Decide automatic lifecycle integration for the packaged extension server:
   document launchd/systemd, keep explicit `extension serve`, or revisit only if
   Hermes adds a plugin-owned service boot hook. Preserve compatibility with a
-  full gateway already using port 7788.
+  legacy/custom gateway or standalone Extension service already using port
+  7788.
 
 ## Phase 0 — Operational Setup (blocks all later phases)
 

@@ -6,33 +6,55 @@
 
 ## Install
 
-The server needs the `extension` extra. Add `ethereum` for wallet signing and
-`messaging` for terminal QR rendering:
+Complete the [Quickstart](./QUICKSTART.md) first. The one-line installer adds
+only the platform keyvault extra, so add `extension` to guarantee the server
+dependencies. Add `ethereum` for wallet features and `messaging` for terminal
+QR rendering:
 
 ```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 --upgrade \
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
+  --upgrade-package hermes-mordred \
   "hermes-mordred[macos,extension,ethereum,messaging]"
 ```
 
-On Linux, replace `macos` with `keyvault`.
+On Linux, replace `macos` with `keyvault`. Omit `ethereum` when wallet features
+are not needed and `messaging` when entering the printed pairing code manually.
+The `extension pair` command itself does not need the `extension` extra.
+
+The browser client is a separately distributed
+[Chromium Manifest V3 bundle](https://github.com/InternetMaximalism/Mordred-Extension-dist):
+
+```sh
+git clone https://github.com/InternetMaximalism/Mordred-Extension-dist.git
+```
+
+Open `chrome://extensions` (or the equivalent page in Brave, Arc, or Edge),
+enable Developer mode, choose **Load unpacked**, and select the cloned `dist/`
+directory. There is currently no published Firefox bundle.
 
 ## Start and pair
 
-Start the server in the foreground:
+Stock `hermes-agent` does not host or automatically start the Extension API.
+Start the packaged server in the foreground:
 
 ```sh
 hermes-mordred extension serve
 # WebSocket: ws://127.0.0.1:7788/ext
 ```
 
-The server refuses non-loopback hosts. If port 7788 is already owned by a full
-Hermes gateway, the extension API may already be running. Otherwise choose a
-different local port:
+The server refuses non-loopback hosts. If port 7788 is occupied, inspect its
+owner first. Reuse it only when it is a known Mordred Extension API; otherwise
+stop the conflicting process. The published Chromium bundle is authorized for
+port 7788 only:
 
 ```sh
 lsof -nP -iTCP:7788 -sTCP:LISTEN
+# For the bundled localhost page, tests, or a custom extension build only:
 hermes-mordred extension serve --port 7799
 ```
+
+An alternate port requires a custom extension build whose manifest permits and
+client configuration selects that port.
 
 In a second terminal, generate a pairing code and wait for the browser
 extension to consume it:
@@ -43,7 +65,7 @@ hermes-mordred extension pair --timeout 300
 ```
 
 `pair` prints a `MORT-...` code and, with the `messaging` extra, a terminal QR.
-The standalone server and a full Hermes gateway share
+The standalone server and compatible legacy/custom gateway implementations use
 `~/.hermes/extension/pending.json`, so either can consume the code.
 
 The `Web page:` line printed at startup contains a private URL fragment. Copy
@@ -59,9 +81,11 @@ admitted. A connection begins with `auth_challenge` and is bound to the pairing
 token generation that authenticated it. Re-pairing or clearing pairing state
 revokes existing privileged sessions.
 
-Chromium extensions can additionally register a WebAuthn credential. Firefox
-transport remains available, but Firefox WebAuthn registration is refused until
-the protocol can carry its stable browser-specific ceremony origin and RP ID.
+The currently published browser bundle targets Chromium and can additionally
+register a WebAuthn credential. The server accepts `moz-extension://` transport
+origins for compatible custom clients, but Firefox WebAuthn registration is
+refused until the protocol can carry its stable browser-specific ceremony
+origin and RP ID.
 
 For wallet requests, the browser cannot select an arbitrary chain or RPC URL.
 Both must match the operator-selected values in
@@ -77,9 +101,14 @@ in the approval prompt.
 
 | Message | Behavior |
 |---|---|
+| `auth_challenge` / `ping` | Server-initiated authentication challenge and application keepalive. |
 | `pair_init` | Consumes a one-time pairing code and establishes the shared key. |
+| `auth` | Validates the rotated local token and, when registered, a WebAuthn assertion. |
+| `webauthn_register` | Registers or clears the Chromium WebAuthn credential. |
 | `chat` | Streams a Hermes agent turn as `chat_chunk*` plus `chat_end`. |
 | `encrypt` / `decrypt` | Encrypts or decrypts extension message payloads. |
+| `channel_key_set` | Stores an encrypted per-channel gateway key from the paired extension. |
+| `slack_setup` | Validates and stores Slack bot/app tokens for the next Hermes restart. |
 | `accounts_request` | Returns the selected wallet address and chain ID. |
 | `sign_request` | Produces a frozen approval prompt before any keyvault signing. |
 | `sign_approve` | Signs only the request captured by the matching prompt. |
@@ -112,7 +141,8 @@ The server does not start automatically. Hermes currently has no plugin boot
 hook for long-running services, so use one of these deployment models:
 
 - Run `extension serve` explicitly in a terminal or process supervisor.
-- Use a full Hermes gateway that already hosts the extension API.
+- Use a compatible legacy/custom gateway only when it explicitly includes the
+  Extension API.
 - Install a launchd/systemd unit whose command is the full
   `hermes-mordred extension serve` path.
 
@@ -122,7 +152,8 @@ Ctrl+C and SIGTERM shut the standalone server down cleanly.
 
 | Symptom | Resolution |
 |---|---|
-| `address already in use` | Inspect port 7788; reuse the full gateway or select another port. |
+| `address already in use` | Inspect port 7788. Reuse a known Mordred Extension API or stop the conflicting process; stock Hermes does not provide this API. |
+| Published extension cannot connect on port 7799 | Use port 7788, or build a custom extension whose manifest and client configuration permit 7799. |
 | `web app not built` | Reinstall the PyPI wheel; released wheels include the bundled page. |
 | Reconnects with close code `1002` / `invalid_server_frame` | Update and reload the browser extension and Mordred together, then restart the server. |
 | QR code is absent | Install the `messaging` extra or enter the printed `MORT-...` code manually. |

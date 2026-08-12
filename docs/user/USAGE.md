@@ -283,28 +283,32 @@ hermes-mordred plugins list                 # discovered Mordred plugins
 
 ### `extension` — browser-extension pairing and server (preview)
 ```sh
-hermes-mordred extension pair               # print a MORT-… pairing code + terminal QR, then wait
+hermes-mordred extension pair               # print a MORT-… code (+ QR with messaging), then wait
 hermes-mordred extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
 hermes-mordred extension serve              # run the extension WebSocket server in the foreground
 hermes-mordred extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
 ```
 > `pair` prints a code and waits for a running extension WebSocket server to
-> consume it — either this plugin's `extension serve` or a full Hermes
-> gateway; both share `~/.hermes/extension/pending.json`. Needs the
-> `extension` extra for the built-in pairing backend (full-gateway checkouts
-> can fall back to `gateway.extension_pairing` without it) and `messaging`
-> for the QR render. When the extension package is unavailable it fails closed
-> with a clear install hint.
+> consume it — either this plugin's `extension serve` or a compatible
+> legacy/custom gateway. After the normal platform install, the pairing path
+> does not need the server's `extension` extra; `messaging` adds only the QR
+> render. A `gateway.extension_pairing` fallback remains for compatible older
+> custom checkouts. When no pairing backend is available, the command fails
+> closed with a clear install hint.
 >
-> `serve` runs the plugin's own ported server (`mordred_hermes.extension`,
-> requires the `extension` extra) standalone — pairing, crypto, history,
-> keyvault signing, and agent chat all work: the chat handler binds the
+> `serve` runs the plugin's own ported server (`mordred_hermes.extension`)
+> standalone. Install the `extension` extra to guarantee its dependencies.
+> Pairing, crypto, history, keyvault signing, and agent chat all work: the chat
+> handler binds the
 > Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
 > real agent replies (a stub reply appears only if that runtime is missing);
 > see [`EXTENSION.md`](./EXTENSION.md) for the security model and deployment
 > options.
-> Ctrl+C stops it; a bound port (e.g. a full gateway already on 7788) exits
-> with a one-line error. Non-loopback `--host` values are refused. To open the
+> Ctrl+C stops it; a bound port exits with a one-line error. Stock Hermes does
+> not start this API, so inspect the owner rather than assuming an occupied
+> port is reusable. The published Chromium bundle supports port 7788; port
+> 7799 is for the localhost page, tests, or a suitably configured custom
+> extension build. Non-loopback `--host` values are refused. To open the
 > localhost web app, copy the complete private `Web page:` URL printed at
 > startup, including its `#token=…` fragment.
 
