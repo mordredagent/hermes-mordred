@@ -41,7 +41,11 @@ The workflow has eight jobs:
 4. **`hermes-floor`** — pins `hermes-agent==0.13.0`, verifies the resolver kept
    the pin, and runs the compatible default suite.
 5. **`integration-tor`** — Docker-based Tor, SOCKS5h, and provider-transport
-   integration tests.
+   integration tests. Tor bootstrap runs against the live Tor network; the
+   harness waits up to 240s per attempt and recreates the container once
+   before failing (`tests/integration/_docker.py`). A `BootstrapTimeout`
+   that survives both attempts is a network flake — re-run the job rather
+   than bypassing the CI gate.
 6. **`sekey-helper`** — compiles the Secure Enclave Swift helper on macOS.
 7. **`tpmkey-helper`** — checks the Rust crate, locked dependencies, MSRV, and
    `tss-esapi` build.
