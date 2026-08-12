@@ -141,6 +141,11 @@ reservation contains no runtime package or console scripts. The root metadata
 and public installer therefore use `hermes-mordred` from `0.1.0a16`. Native
 helper names, persistent key identifiers, state paths, plugin IDs, and
 `mordred_hermes` imports remain compatibility identifiers and are not renamed.
+Steps 2–5 completed on 2026-08-12: `0.1.0a16` was verified canonical-first on
+TestPyPI and production PyPI, the repository moved to
+`InternetMaximalism/hermes-mordred`, and all four Trusted Publisher claims now
+use the new repository name with their existing workflow and environment
+constraints.
 
 ## 7. Platform Support [DECIDED]
 

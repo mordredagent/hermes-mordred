@@ -36,7 +36,7 @@ need to create a virtual environment or install Python separately for Mordred.
 Run the Mordred installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash
 ```
 
 It resolves the environment behind the `hermes` on your `PATH`, checks the
@@ -58,7 +58,7 @@ If you prefer to inspect a downloaded script before running it:
 
 ```sh
 curl -fsSLo mordred-install.sh \
-  https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh
+  https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh
 less mordred-install.sh
 bash mordred-install.sh
 rm mordred-install.sh
@@ -87,8 +87,8 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 Normal users can skip this section. Contributors can clone the source with:
 
 ```sh
-git clone https://github.com/InternetMaximalism/mordred-hermes.git
-cd mordred-hermes
+git clone https://github.com/InternetMaximalism/hermes-mordred.git
+cd hermes-mordred
 ```
 
 ### Build the venv
@@ -269,4 +269,4 @@ provider authentication, interactive use, and the messaging gateway.
 - [`USAGE.md`](./USAGE.md) — complete command reference and ceremonies.
 - [`EXTENSION.md`](./EXTENSION.md) — browser extension and E2E messaging.
 - [`setup.md`](../dev/setup.md) — development checkout and safe test isolation.
-- [README troubleshooting](https://github.com/InternetMaximalism/mordred-hermes/blob/main/README.md#troubleshooting) — common failures and recovery.
+- [README troubleshooting](https://github.com/InternetMaximalism/hermes-mordred/blob/main/README.md#troubleshooting) — common failures and recovery.

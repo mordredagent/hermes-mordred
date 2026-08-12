@@ -1,7 +1,7 @@
 # hermes-mordred
 
 [![PyPI](https://img.shields.io/pypi/v/hermes-mordred)](https://pypi.org/project/hermes-mordred/)
-[![CI](https://github.com/InternetMaximalism/mordred-hermes/actions/workflows/ci.yml/badge.svg)](https://github.com/InternetMaximalism/mordred-hermes/actions/workflows/ci.yml)
+[![CI](https://github.com/InternetMaximalism/hermes-mordred/actions/workflows/ci.yml/badge.svg)](https://github.com/InternetMaximalism/hermes-mordred/actions/workflows/ci.yml)
 
 Privacy-preserving plugins for the
 [Hermes agent](https://github.com/NousResearch/hermes-agent): at-rest secret
@@ -11,7 +11,7 @@ and end-to-end encryption for Slack and Discord gateway messages.
 **Status: active alpha** — current release `0.1.0a16`.
 
 New here? Follow the
-**[Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**
+**[Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
 for the shortest path from an existing Hermes install to encrypted secrets.
 
 ## The plugins
@@ -43,7 +43,7 @@ Start with an installed
 then run the Mordred installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash
 ```
 
 The script follows Hermes's own install layout: it resolves the environment
@@ -72,7 +72,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   "hermes-mordred[keyvault]==0.1.0a16"
 ```
 
-See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
+See the [Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for the inspect-before-running sequence and first-time setup.
 
 Optional extras:
@@ -135,9 +135,9 @@ Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
 versions, or before the first `configure`, keep using `hermes-mordred`.
 
-See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
+See the [Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for expected output and the
-[usage guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md)
+[usage guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/USAGE.md)
 for every command and interactive prompt.
 
 ### Verify discovery
@@ -172,7 +172,7 @@ The extension authenticates with a one-time pairing flow and a rotated local
 token. Gateway messaging uses the context-bound `ENC:v3` wire and rejects
 plaintext Slack/Discord agent commands. Security model and protocol details
 are in the
-[Extension guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/EXTENSION.md).
+[Extension guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/EXTENSION.md).
 
 ### Run it (standalone)
 
@@ -189,7 +189,7 @@ Use `--port 7799` when another Hermes gateway already owns port 7788.
 `extension serve` runs the real Hermes agent when its runtime is installed.
 It does not start automatically because Hermes currently exposes no plugin
 boot hook for long-running services. See the
-[Extension guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/EXTENSION.md)
+[Extension guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/EXTENSION.md)
 for deployment, protocol, wallet, and troubleshooting details.
 
 ## Install (development)
@@ -198,8 +198,8 @@ Use the repository's editable `.venv`; do not replace the production Hermes
 environment for normal development:
 
 ```sh
-git clone https://github.com/InternetMaximalism/mordred-hermes.git
-cd mordred-hermes
+git clone https://github.com/InternetMaximalism/hermes-mordred.git
+cd hermes-mordred
 uv sync --all-extras
 
 .venv/bin/python -c "import mordred_hermes; print(mordred_hermes.__file__)"
@@ -217,7 +217,7 @@ env HERMES_HOME=/tmp/mordred-test-home \
 Only replace `~/.hermes/hermes-agent/venv` with an editable install when an
 end-to-end production-profile test specifically requires it. The full workflow,
 including how to restore the PyPI wheel, is in
-[development setup](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md).
+[development setup](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/dev/setup.md).
 
 Run the standard checks:
 
@@ -233,7 +233,7 @@ shellcheck scripts/*.sh native/*/build.sh   # brew/apt install shellcheck
 
 | Symptom | What to do |
 |---|---|
-| A background gateway starts without vault-managed secrets | The vault likely uses an attended Secure Enclave key. Follow the verified backup/recovery procedure in [USAGE §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) and create the replacement key with `MORDRED_SEKEY_UNATTENDED=1`. Re-running `enable-se` alone does not change an existing key policy. |
+| A background gateway starts without vault-managed secrets | The vault likely uses an attended Secure Enclave key. Follow the verified backup/recovery procedure in [USAGE §4.3](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) and create the replacement key with `MORDRED_SEKEY_UNATTENDED=1`. Re-running `enable-se` alone does not change an existing key policy. |
 | `extension serve` reports port 7788 in use | Run `lsof -nP -iTCP:7788 -sTCP:LISTEN`. If Hermes already owns it, the API is running; otherwise stop the stale process or use `--port 7799`. |
 | Tor/VPN communication stops | Run `hermes-mordred network status`, then re-establish the selected route with `hermes-mordred network use <tor\|vpn\|clearnet>`. Restart Hermes after changing routes. |
 | The audit log is plaintext and contains `mordred.degraded.audit_encryption_unavailable` | Restart the process from a context that can access the device key. Recovery is automatic; purge rotated plaintext logs with `hermes-mordred audit purge --before YYYY-MM-DD --yes` if required. |
@@ -248,7 +248,7 @@ Package upgrades and config migration are separate operations.
 Re-run the installer to upgrade Mordred without upgrading Hermes:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash
 ```
 
 The installer performs the old-name ownership transfer automatically. For a
@@ -348,12 +348,12 @@ docs/dev/              specification and developer documentation
 
 | Audience | Document | Purpose |
 |---|---|---|
-| Users | [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md) | PyPI install to protected secrets |
-| Users | [Usage guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md) | Complete command reference and ceremonies |
-| Users | [Extension guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/EXTENSION.md) | Browser extension, E2E messaging, and wallet bridge |
-| Users | [Hermes basics](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/HERMES_BASICS.md) | Running the base Hermes agent |
-| Developers | [Development index](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/README.md) | Current sources of truth and historical records |
-| Developers | [Development setup](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md) | Editable environment and validation workflow |
+| Users | [Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md) | PyPI install to protected secrets |
+| Users | [Usage guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/USAGE.md) | Complete command reference and ceremonies |
+| Users | [Extension guide](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Browser extension, E2E messaging, and wallet bridge |
+| Users | [Hermes basics](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/HERMES_BASICS.md) | Running the base Hermes agent |
+| Developers | [Development index](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/dev/README.md) | Current sources of truth and historical records |
+| Developers | [Development setup](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/dev/setup.md) | Editable environment and validation workflow |
 
 ## License
 

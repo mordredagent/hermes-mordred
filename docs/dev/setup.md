@@ -69,8 +69,8 @@ before judging the running code.
 
 ```sh
 # 1. Get the repository
-git clone https://github.com/InternetMaximalism/mordred-hermes.git
-cd mordred-hermes
+git clone https://github.com/InternetMaximalism/hermes-mordred.git
+cd hermes-mordred
 
 # 2. Create the dev venv. This one command installs everything:
 #    - hermes-agent (from PyPI; required for the plugin loader to work)
@@ -125,7 +125,7 @@ If you've already run `uv sync`, there's nothing else to install. The CLI under 
 ```sh
 # Precondition check: if it points at src/... it's the local build; if site-packages/... it's the PyPI release
 .venv/bin/python -c "import mordred_hermes; print(mordred_hermes.__file__)"
-# → /path/to/mordred-hermes/src/mordred_hermes/__init__.py
+# → /path/to/hermes-mordred/src/mordred_hermes/__init__.py
 
 .venv/bin/hermes-mordred status
 .venv/bin/hermes-mordred audit tail
@@ -160,7 +160,7 @@ Only for when you want to do an end-to-end check via the `hermes` on PATH, inclu
 ```sh
 # Swap the production venv's hermes-mordred for an editable install from your local checkout
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  -e "/path/to/mordred-hermes[macos,extension,ethereum]"
+  -e "/path/to/hermes-mordred[macos,extension,ethereum]"
 
 # Confirm the swap took effect (should point at src/...)
 ~/.hermes/hermes-agent/venv/bin/python3 -c "import mordred_hermes; print(mordred_hermes.__file__)"

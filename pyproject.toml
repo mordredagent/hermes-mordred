@@ -165,8 +165,8 @@ mordred_e2e = "mordred_hermes.extension.gateway_plugin"
 hermes-mordred = "mordred_hermes.wizard.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/InternetMaximalism/mordred-hermes/tree/main/docs"
-Source = "https://github.com/InternetMaximalism/mordred-hermes"
+Documentation = "https://github.com/InternetMaximalism/hermes-mordred/tree/main/docs"
+Source = "https://github.com/InternetMaximalism/hermes-mordred"
 
 [tool.mordred]
 min-hermes-version = "0.13.0"

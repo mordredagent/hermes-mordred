@@ -107,7 +107,7 @@ The full set of requirements for SE persistence:
 - Apple can **remotely revoke** this certificate and invalidate all distributed copies at once (a censorship/coercion vector, and a weakness for a privacy tool). Notarization involves an initial online check (OCSP).
 
 ### 4.3 Mordred Is a CLI Tool — a Poor Fit for SE
-- Mordred-Hermes is **the `hermes` command (a Python CLI distributed via pip/uv/Homebrew)**, not a GUI `.app`.
+- `hermes-mordred` is **the `hermes` command (a Python CLI distributed via pip/uv/Homebrew)**, not a GUI `.app`.
 - Using SE requires building a separate small compiled helper (Swift/C/Rust) that does nothing but SE operations, signing and bundling it, and invoking it from Python over IPC (the signed-helper pattern, as seen in e.g. Secretive).
 - Bundling a Developer-ID-signed, notarized Mach-O helper inside a pip wheel is **highly unusual and awkward to manage**. The fact that this is a CLI makes the SE route even less suitable.
 
