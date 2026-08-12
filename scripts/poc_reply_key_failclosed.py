@@ -16,13 +16,16 @@ import sys
 class FakeClient:
     def __init__(self): self.posts = []
     async def chat_postMessage(self, **kw):
-        self.posts.append(kw); return {"ts": "1"}
+        self.posts.append(kw)
+        return {"ts": "1"}
 
 
 class FakeSlackAdapter:
     MAX_MESSAGE_LENGTH = 3000
     def __init__(self):
-        self._app = object(); self._client = FakeClient(); self._bot_message_ts = set()
+        self._app = object()
+        self._client = FakeClient()
+        self._bot_message_ts = set()
     def _get_client(self, c): return self._client
     def _resolve_thread_ts(self, r, m): return (m or {}).get("thread_ts")
     async def stop_typing(self, c): return None
@@ -34,7 +37,7 @@ class FakeSlackAdapter:
 
 async def main() -> int:
     assert os.environ.get("HERMES_HOME"), "set HERMES_HOME"
-    from mordred_hermes.extension import crypto, pairing, e2e, outbound
+    from mordred_hermes.extension import crypto, e2e, outbound, pairing
 
     master = secrets.token_bytes(32)
     pairing._save_pairing(pairing.Pairing(aes_key=master, ext_token="t",
@@ -48,13 +51,15 @@ async def main() -> int:
     k = e2e.reply_key(None)
     print("reply_key(None)          ->", "None" if k is None else "SOME KEY")
     if k is not None:
-        ok = False; print("   FAIL: fell back to a key (master) nobody can read")
+        ok = False
+        print("   FAIL: fell back to a key (master) nobody can read")
 
     # 2. Unknown hint -> must NOT return the master key.
     k = e2e.reply_key("ZZZZunknown")
     print("reply_key('ZZZZunknown') ->", "None" if k is None else "SOME KEY")
     if k is not None:
-        ok = False; print("   FAIL: fell back to a key (master)")
+        ok = False
+        print("   FAIL: fell back to a key (master)")
 
     # 3. Known channel keyId -> resolves.
     k = e2e.reply_key(crypto.key_id(chan))
@@ -66,7 +71,8 @@ async def main() -> int:
     k = e2e.reply_key(crypto.key_id(master))
     print("reply_key(<master kid>)  ->", "master (v1 legacy ok)" if k == master else "WRONG")
     if k != master:
-        ok = False; print("   FAIL: broke v1/legacy conversations")
+        ok = False
+        print("   FAIL: broke v1/legacy conversations")
 
     # 5. End-to-end: encrypted thread with NO usable kid must post a notice,
     #    never ciphertext and never plaintext.
@@ -79,9 +85,15 @@ async def main() -> int:
     unreadable = any("ENC:v3:" in p.get("text", "") for p in posts)
     noticed = any("暗号化できない" in p.get("text", "") for p in posts)
     print("send with unknown kid   ->", posts)
-    if leaked_plain: ok = False; print("   FAIL: plaintext leak")
-    if unreadable:   ok = False; print("   FAIL: emitted ciphertext nobody can read")
-    if not noticed:  ok = False; print("   FAIL: no visible notice")
+    if leaked_plain:
+        ok = False
+        print("   FAIL: plaintext leak")
+    if unreadable:
+        ok = False
+        print("   FAIL: emitted ciphertext nobody can read")
+    if not noticed:
+        ok = False
+        print("   FAIL: no visible notice")
 
     print("\n" + ("PASS — reply key is fail-closed" if ok else "FAIL"))
     return 0 if ok else 1

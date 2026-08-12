@@ -19,7 +19,7 @@
 # stored. Before the first run, register a "pending publisher" on PyPI
 # and TestPyPI for project `mordred-hermes`, workflow `release.yml`,
 # environment `pypi` / `testpypi` respectively. Full operator runbook:
-# docs/dev/CI.md § `release.yml` 詳細 § 初回 setup.
+# docs/dev/CI.md §"release.yml details" §"Initial setup".
 
 name: Release (PyPI publish)
 

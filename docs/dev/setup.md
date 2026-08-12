@@ -193,8 +193,9 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 |---|---|---|
 | Run tests | `uv run pytest -q` | Excludes the integration marker by default (`addopts` in `pyproject.toml`). For coverage use `uv run pytest --cov=src/mordred_hermes` (same as CI, floor 80%) |
 | Integration tests | `uv run pytest -m integration` | Requires Docker / a real Mullvad account / a real network. `integration` extra required |
-| Lint | `uv run ruff check src tests` | `PLAN.md` §0.6 |
+| Lint | `uv run ruff check src tests scripts` | `PLAN.md` §0.6 |
 | Format check | `uv run ruff format --check src tests` | Blocking in CI |
+| Shell lint | `shellcheck scripts/*.sh` | Blocking in CI (Linux cells) |
 | Type-check | `uv run mypy --strict src tools` | The main strict lane omits feature extras; the separate feature lane exercises them at runtime |
 | Mordred initial configuration | `.venv/bin/hermes-mordred configure` | Configures policy / LLM / harness. Does not include network privacy. CI/scripts drive it via flags with `--non-interactive --policy strict --harness codex ...` (unspecified flags keep the existing setting). **Destructive — `HERMES_HOME` isolation recommended** |
 | Network privacy configuration | `.venv/bin/hermes-mordred network init` | Sets up Tor / VPN / clearnet + Mullvad on demand. Re-runnable (seeds existing values as prompt defaults; an empty Mullvad input keeps the existing secret). CI/scripts drive it via `--non-interactive --path tor --mullvad-relay jp ...` (secrets are not passed via CLI flags). Delete a saved secret with `--clear-mullvad`. **Destructive — `HERMES_HOME` isolation recommended** |

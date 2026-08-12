@@ -232,6 +232,9 @@ include = ["/src", "/tests", "/README.md", "/LICENSE", "/pyproject.toml", "/nati
 exclude = [
   "native/tpmkey-helper/target",
   "native/sekey-helper/.build",
+  # Dev-era PoC harnesses for the extension plugin; their behavior is
+  # mirrored by tests/extension/, so downstream builds don't need them.
+  "scripts/poc_*.py",
 ]
 
 [tool.pytest.ini_options]

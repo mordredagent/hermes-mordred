@@ -30,8 +30,8 @@ repair is complete; historical restoration details remain in Git.
 
 The workflow has eight jobs:
 
-1. **`test`** — Python/OS matrix; Ruff, strict mypy, pytest, coverage, and the
-   status-skill drift guard.
+1. **`test`** — Python/OS matrix; Ruff, shellcheck (Linux cells only), strict
+   mypy, pytest, coverage, and the status-skill drift guard.
 2. **`feature-extras`** — installs `ethereum`, `messaging`, and `tor-control`
    and runs their focused tests so optional coverage cannot disappear behind
    import skips.
@@ -105,11 +105,12 @@ Required labels:
 - `plugins/mordred-llm-guard`
 - `plugins/mordred-keyvault`
 - `plugins/mordred-wizard`
+- `plugins/mordred-extension`
 - `actionable`, `upstream-drift`, `docs`, and `ci`
 
 ## `dependabot.yml` details
 
-`.github/dependabot.yml` keeps the SHA-pinned GitHub Actions current: monthly,
+`.github/dependabot.yml` keeps the SHA-pinned GitHub Actions current: weekly,
 with all action bumps grouped into one `ci`-labelled PR against `dev`. Scope is
 deliberately actions-only — Python dependencies are governed by
 `pyproject.toml` floors plus `uv.lock` and the `hermes-floor` job, so pip/uv

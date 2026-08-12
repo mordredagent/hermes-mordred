@@ -93,10 +93,16 @@ jobs:
         run: hermes-mordred policy dry-run skills/mordred-status
 
       - name: ruff check
-        run: ruff check src tests
+        run: ruff check src tests scripts
 
       - name: ruff format --check
         run: ruff format --check src tests
+
+      - name: shellcheck
+        # The user installer is fetched via `curl | bash`; keep it clean.
+        # Linux-only: the macOS runner image does not ship shellcheck.
+        if: runner.os == 'Linux'
+        run: shellcheck scripts/*.sh
 
       - name: mypy --strict
         run: mypy --strict src tools

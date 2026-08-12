@@ -50,6 +50,7 @@ Validates the SPEC fixed vector (``"test seed"`` / ``"test pass"`` /
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import os
 import sys
@@ -58,7 +59,7 @@ from pathlib import Path
 
 try:
     from blake3 import blake3
-except ImportError:  # pragma: no cover - only reached when blake3 is absent
+except ImportError as err:  # pragma: no cover - only reached when blake3 is absent
     # blake3 is missing in THIS interpreter. `keyvault init` tells the
     # operator to run `python3 scripts/keyvault_offline_digest.py`; on a dev
     # checkout the system python3 usually lacks blake3, so make that command
@@ -82,10 +83,9 @@ except ImportError:  # pragma: no cover - only reached when blake3 is absent
         sys.stderr.write(
             f"note: blake3 not found in this Python; re-running under the bundled venv ({_venv_python}).\n"
         )
-        try:
+        with contextlib.suppress(OSError):
             os.execv(str(_venv_python), [str(_venv_python), _script, *sys.argv[1:]])
-        except OSError:
-            pass  # fall through to the install hint below
+        # if execv raised OSError, fall through to the install hint below
     sys.stderr.write(
         "\n"
         "error: the 'blake3' package is required but is not installed in the\n"
@@ -103,7 +103,7 @@ except ImportError:  # pragma: no cover - only reached when blake3 is absent
         "    python3 keyvault_offline_digest.py\n"
         "\n"
     )
-    raise SystemExit(1)
+    raise SystemExit(1) from err
 
 # SPEC fixed vector. Must match
 # mordred-hermes/tests/test_keyvault_digest.py:SPEC_*. If the canonical
@@ -148,7 +148,7 @@ def compute_digest(seed_phrase: str, passphrase: str, top4: bytes) -> bytes:
         raise ValueError(f"top4 must be exactly 4 bytes, got {len(top4)}")
     seed_hash = blake3(seed_phrase.encode("utf-8")).digest()
     pass_hash = blake3(passphrase.encode("utf-8")).digest()
-    masked_pass = bytes(p ^ t for p, t in zip(pass_hash[:4], top4)) + pass_hash[4:]
+    masked_pass = bytes(p ^ t for p, t in zip(pass_hash[:4], top4, strict=True)) + pass_hash[4:]
     return blake3(seed_hash + masked_pass).digest()
 
 
