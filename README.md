@@ -107,9 +107,9 @@ guidance instead of auto-repairing it. Add `--non-interactive` to run the
 automatable subset and list the interactive commands still needed (exit code
 0 only once everything is set up).
 
-Prefer to drive each step yourself, or need to fix just one? `setup` runs
-exactly the manual sequence below, in the same order — start with the
-standalone command:
+Prefer to drive each step yourself, or need to fix just one? `setup` runs the
+manual sequence below, in the same order (after first checking upstream
+Hermes) — start with the standalone command:
 
 ```sh
 hermes-mordred configure                 # policy / LLM / harness setup

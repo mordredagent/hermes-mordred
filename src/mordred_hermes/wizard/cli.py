@@ -226,9 +226,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Mordred privacy layer (standalone CLI).",
         epilog=(
             "Quickstart (first run):\n"
-            "  hermes-mordred setup    runs every step below in order, and is safe to re-run --\n"
-            "                          it resumes from wherever it left off and never destroys\n"
-            "                          existing state (never auto-resets the keyvault)\n"
+            "  hermes-mordred setup    first checks that upstream Hermes itself is set up (offering\n"
+            "                          `hermes setup` if not), then runs every step below in order --\n"
+            "                          it is safe to re-run: it resumes from wherever it left off and\n"
+            "                          never destroys existing state (never auto-resets the keyvault)\n"
             "\n"
             "The individual steps `setup` drives, useful on their own for troubleshooting or\n"
             "redoing a single one:\n"

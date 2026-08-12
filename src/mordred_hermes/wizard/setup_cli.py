@@ -32,9 +32,15 @@ A step's ``action`` is one of:
 - ``"skipped"``      -- the operator explicitly opted out via a flag (only the
   ``hermes`` step's ``--skip-hermes-setup`` / a declined prompt use this).
 - ``"manual"``       -- it needs interaction that ``--non-interactive`` cannot
-  supply, or the operator was told to run a specific command themselves. The
-  keyvault ceremony (passphrase + 24-word seed transcription) and the vault's
-  one-time recovery-passphrase prompt are the two cases that hit this.
+  supply, the operator was told to run a specific command themselves, or a
+  build/prerequisite step failed in a way that still leaves the rest of the
+  run usable. Hits this for: a non-zero ``hermes setup`` exit; a
+  hardware-helper build/install failure (``enable-se`` / ``enable-tpm``); the
+  keyvault ceremony itself (passphrase + 24-word seed transcription) and its
+  preflight gate (most commonly: the host must be offline); the vault's
+  one-time recovery-passphrase prompt, or an OS-level device-key unlock, when
+  ``--non-interactive`` would reach either; and any prompt that fails closed
+  because stdin is not a TTY, even without ``--non-interactive``.
 - ``"blocked"``      -- on-disk state needs manual repair before this step can
   run at all (a corrupt or interrupted keyvault). The repair command is named
   in the detail; this module never runs it.
@@ -70,7 +76,28 @@ orchestrator decides on the operator's behalf. The same caution applies to
 ``configure``/``network init``/``encryption enable env``: each step probe is
 the *only* gate for whether the delegated command runs, so a step already
 marked complete on disk is never re-run (and, for ``configure`` in
-particular, never overwritten) just because ``setup`` was invoked again.
+particular, never overwritten) just because ``setup`` was invoked again. The
+env-encryption probe extends this to an explicit operator opt-out: once
+``encryption disable env`` has written its opt-out marker, re-running
+``setup`` reports that step ``"done"`` (paused, by choice) rather than
+silently reversing the decision -- a stray plaintext ``.env`` at rest while
+still vault-managed (drift) is the opposite case and is deliberately treated
+as *incomplete*, so ``enable()``'s reseal path runs instead of a secret being
+reported "already done" while it sits exposed on disk.
+
+Keyvault preflight gate
+------------------------
+Before asking the unattended-keys question, the keyvault step also runs the
+ceremony's own fail-closed preflight (``_keyvault_init._preflight_or_refuse``)
+once ahead of time, via the module-level ``_keyvault_preflight`` seam. A
+refusal there -- most commonly, the host must be fully offline for the
+seed-display air-gap check -- resolves straight to ``"manual"`` *before* the
+operator is asked anything, rather than asking the unattended-keys question
+first and only then discovering the ceremony can't proceed.
+``_keyvault_init.init_keyvault`` still re-runs the exact same preflight
+internally once the ceremony actually starts; that duplication is
+intentional defense in depth (a TOCTOU race between the two checks still
+fails closed at the second one), not redundant plumbing to remove.
 
 Probe contract
 ---------------
@@ -98,6 +125,7 @@ from typing import Literal
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
+from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import resolve_prompt_io
 from ._prompt_io import NonInteractiveAbort, PromptIO, _RefusingPromptIO
@@ -206,18 +234,44 @@ def _stops_run(result: StepResult) -> bool:
 
 
 def _probe_hermes(*, home: Path) -> tuple[bool, str]:
-    """Read-only: is upstream Hermes already set up?"""
+    """Read-only: is upstream Hermes already set up?
+
+    Deliberate heuristic: plain ``config.yaml`` existence is NOT sufficient
+    signal by itself, because Mordred's own ``configure`` step also creates
+    ``config.yaml`` (see :class:`.policy_writer.PolicyWriter`) -- so a fresh
+    machine that only ever ran Mordred's ``setup`` (never upstream
+    ``hermes setup``) would already have a config.yaml, and reading that alone
+    as "upstream ran" would let this probe report ``done`` when it is not.
+    ``PolicyWriter`` (and every other Mordred-side writer that touches
+    ``config.yaml`` -- ``network_cli``, ``openclaw_migration``, ``upgrade``)
+    only ever mutates the top-level ``plugins`` mapping, so any OTHER
+    top-level key is real evidence that something outside Mordred wrote to
+    this file -- i.e. ``hermes setup`` itself (provider credentials, model
+    config, ...). Upstream Hermes therefore counts as set up only when
+    ``hermes`` is on PATH AND config.yaml exists AND it has at least one
+    top-level key other than ``plugins``.
+    """
     import shutil
 
+    from .._yaml_io import load_yaml_mapping
+
     has_hermes = shutil.which("hermes") is not None
-    has_config = (home / "config.yaml").exists()
-    if has_hermes and has_config:
-        return True, "`hermes` is on PATH and config.yaml exists"
+    config_path = home / "config.yaml"
+    has_config = config_path.exists()
+    has_upstream_evidence = False
+    if has_config:
+        mapping = load_yaml_mapping(config_path, catch=(Exception,))
+        has_upstream_evidence = any(key != "plugins" for key in mapping)
+
+    if has_hermes and has_config and has_upstream_evidence:
+        return True, "`hermes` is on PATH and config.yaml has upstream-authored content"
     missing = []
     if not has_hermes:
         missing.append("`hermes` not found on PATH")
     if not has_config:
         missing.append("config.yaml does not exist yet")
+    elif not has_upstream_evidence:
+        missing.append("config.yaml has no content beyond Mordred's own `plugins` section")
     return False, "; ".join(missing)
 
 
@@ -242,24 +296,43 @@ def _resolve_step_hermes(
         # --with-hermes-setup is itself the operator's explicit go-ahead, so
         # asking again would just be a redundant second confirmation.
         if not options.with_hermes_setup:
-            run_now = prompt_io.ask_bool(
-                "Run the upstream `hermes setup` wizard now?",
-                default=True,
-                description=(
-                    "`hermes setup` is Hermes's own first-run wizard -- it creates "
-                    "~/.hermes/config.yaml and your provider credentials. Mordred setup "
-                    "needs that to exist before it can continue."
-                ),
-            )
+            try:
+                run_now = prompt_io.ask_bool(
+                    "Run the upstream `hermes setup` wizard now?",
+                    default=True,
+                    description=(
+                        "`hermes setup` is Hermes's own first-run wizard -- it creates "
+                        "~/.hermes/config.yaml and your provider credentials. Mordred setup "
+                        "needs that to exist before it can continue."
+                    ),
+                )
+            except NonInteractiveAbort:
+                # PromptToolkitIO fails closed on a non-TTY stdin even without
+                # --non-interactive (see configure._require_tty) -- an
+                # unhandled abort here would skip render_report entirely, so
+                # this is caught the same way every other prompt site in this
+                # module already handles it.
+                return StepResult(
+                    _STEP_HERMES,
+                    "manual",
+                    "stdin is not a TTY; re-run interactively, or use --non-interactive",
+                )
             if not run_now:
                 return StepResult(_STEP_HERMES, "skipped", "declined at the prompt")
         rc = setup_runner.run(non_interactive=False)
 
     if rc != 0:
         # Mirrors configure.py's existing tolerance for a non-zero `hermes
-        # setup` exit: warn and keep going rather than treating it as fatal.
+        # setup` exit: warn and keep going -- reported as "manual" (not a
+        # success) so the overall exit code reflects that upstream Hermes may
+        # not actually be configured, but this never stops the rest of
+        # Mordred setup from running.
         _term.emit_warn(f"`hermes setup` exited with code {rc}; continuing with Mordred setup anyway")
-        return StepResult(_STEP_HERMES, "ran", f"hermes setup exited with code {rc}; continuing anyway")
+        return StepResult(
+            _STEP_HERMES,
+            "manual",
+            f"`hermes setup` exited with code {rc}; re-run `hermes setup` yourself, then re-run setup",
+        )
     return StepResult(_STEP_HERMES, "ran", "hermes setup completed")
 
 
@@ -340,6 +413,8 @@ def _resolve_step_configure(
     setup_runner: SetupRunner,
     options: SetupOptions,
 ) -> StepResult:
+    from ruamel.yaml.error import YAMLError
+
     complete, detail = _probe_configure(policy_writer=policy_writer)
     if complete:
         return StepResult(_STEP_CONFIGURE, "done", detail)
@@ -362,7 +437,11 @@ def _resolve_step_configure(
             "configure cannot complete without prompts; run `hermes-mordred configure --non-interactive` "
             "(with flags) or `hermes-mordred configure` interactively",
         )
-    except OSError as exc:
+    except (OSError, YAMLError) as exc:
+        # PolicyWriter.write() round-trip-loads the existing config.yaml
+        # (ruamel.yaml) before editing it; a syntactically corrupt file raises
+        # YAMLError there, alongside the existing OSError paths (disk full,
+        # permission denied).
         return StepResult(_STEP_CONFIGURE, "failed", f"configure failed: {exc}")
     return StepResult(_STEP_CONFIGURE, "ran", "policy.json and config.yaml written")
 
@@ -390,8 +469,17 @@ def _probe_network(*, config_path: Path) -> tuple[bool, str]:
     return False, "plugins.mordred_network.default_path is missing or invalid"
 
 
-def _run_network(*, prompt_io: PromptIO, policy_writer: PolicyWriter) -> int:
-    """Run the network-privacy prompt sequence. Thin seam over ``network_cli.run_init``."""
+def _run_network(*, home: Path, prompt_io: PromptIO, policy_writer: PolicyWriter) -> int:
+    """Run the network-privacy prompt sequence. Thin seam over ``network_cli.run_init``.
+
+    Passes ``env_path`` / ``credentials_path`` derived from the injected
+    ``home`` -- the same relative layout ``network_cli._persist_network``
+    falls back to (``<home>/.env`` and
+    ``<home>/mordred/credentials/network.json``), just with ``home``
+    substituted for that module's import-time ``HERMES_BASE``. Without this,
+    ``run_init`` would default both to the real production paths regardless
+    of which ``home`` this orchestrator was invoked with.
+    """
     from . import network_cli
     from .credentials_writer import JSONCredentialsWriter
     from .env_file_writer import DotEnvFileWriter
@@ -401,10 +489,12 @@ def _run_network(*, prompt_io: PromptIO, policy_writer: PolicyWriter) -> int:
         policy_writer=policy_writer,
         env_writer=DotEnvFileWriter(),
         credentials_writer=JSONCredentialsWriter(),
+        env_path=home / ".env",
+        credentials_path=home / "mordred" / "credentials" / "network.json",
     )
 
 
-def _resolve_step_network(*, prompt_io: PromptIO, policy_writer: PolicyWriter) -> StepResult:
+def _resolve_step_network(*, home: Path, prompt_io: PromptIO, policy_writer: PolicyWriter) -> StepResult:
     complete, detail = _probe_network(config_path=policy_writer.config_path)
     if complete:
         return StepResult(_STEP_NETWORK, "done", detail)
@@ -415,7 +505,7 @@ def _resolve_step_network(*, prompt_io: PromptIO, policy_writer: PolicyWriter) -
         # -- so a non-interactive prompt_io aborts immediately, before any
         # write. The network path is optional (clearnet is a safe default),
         # so unlike keyvault this must NOT stop the rest of the run.
-        rc = _run_network(prompt_io=prompt_io, policy_writer=policy_writer)
+        rc = _run_network(home=home, prompt_io=prompt_io, policy_writer=policy_writer)
     except NonInteractiveAbort:
         return StepResult(
             _STEP_NETWORK,
@@ -436,14 +526,25 @@ def _probe_se_helper() -> bool:
     """Read-only: is the macOS Secure Enclave helper installed on PATH?"""
     from ..keyvault import _seckey_helper
 
-    return _seckey_helper._find_helper() is not None
+    # Mirrors status_cli.collect's guard (review 2026-06-12): the PATH/home
+    # walk can blow up in odd environments (e.g. Path.home() raising
+    # RuntimeError in a container with no passwd entry) -- degrade to "not
+    # installed" instead of letting a read-only probe raise.
+    try:
+        return _seckey_helper._find_helper() is not None
+    except Exception:
+        return False
 
 
 def _probe_tpm_helper() -> bool:
     """Read-only: is the Linux TPM 2.0 helper installed on PATH?"""
     from ..keyvault import _seckey_helper
 
-    return _seckey_helper.find_tpmkey_helper() is not None
+    # See _probe_se_helper's comment -- same rationale, same guard.
+    try:
+        return _seckey_helper.find_tpmkey_helper() is not None
+    except Exception:
+        return False
 
 
 def _run_se_helper(*, home: Path) -> int:
@@ -461,12 +562,32 @@ def _run_tpm_helper(*, home: Path) -> int:
 
 
 def _resolve_step_hardware_helper(*, home: Path, platform: str) -> StepResult:
+    """Build/install the platform hardware helper. A build failure here (e.g. no
+    ``native/`` sources on a wheel install, missing Xcode CLT / Rust toolchain)
+    does not by itself make the keyvault unusable, so it resolves to
+    ``"manual"`` (never a stopping ``"failed"``) and the run continues to the
+    keyvault step:
+
+    - macOS: ``_seckey_backend`` falls back to a software P-256 key when no SE
+      helper is installed, so the keyvault remains usable without it.
+    - Linux: there is no such fallback -- the TPM backend fails closed without
+      a working helper (see ``_seckey_backend``'s platform selection) -- but
+      that failure is still better surfaced at the keyvault step itself (where
+      it would occur) than guessed at here; stopping the whole run one step
+      early, before the keyvault step even gets to try, would hide that detail
+      behind a generic "enable-tpm failed" instead.
+    """
     if platform == "darwin":
         if _probe_se_helper():
             return StepResult(_STEP_HARDWARE_HELPER, "done", "Secure Enclave helper installed")
         rc = _run_se_helper(home=home)
         if rc != 0:
-            return StepResult(_STEP_HARDWARE_HELPER, "failed", "enable-se failed (see errors above)")
+            return StepResult(
+                _STEP_HARDWARE_HELPER,
+                "manual",
+                "enable-se failed to build/install (see errors above); the keyvault will use the software "
+                "fallback for now -- retry later with `hermes-mordred keyvault enable-se`",
+            )
         return StepResult(_STEP_HARDWARE_HELPER, "ran", "Secure Enclave helper installed")
 
     if platform.startswith("linux"):
@@ -474,7 +595,13 @@ def _resolve_step_hardware_helper(*, home: Path, platform: str) -> StepResult:
             return StepResult(_STEP_HARDWARE_HELPER, "done", "TPM 2.0 helper installed")
         rc = _run_tpm_helper(home=home)
         if rc != 0:
-            return StepResult(_STEP_HARDWARE_HELPER, "failed", "enable-tpm failed (see errors above)")
+            return StepResult(
+                _STEP_HARDWARE_HELPER,
+                "manual",
+                "enable-tpm failed to build/install (see errors above); Linux keyvault operations fail closed "
+                "without a working TPM helper (there is no software fallback off macOS) -- retry later with "
+                "`hermes-mordred keyvault enable-tpm`",
+            )
         return StepResult(_STEP_HARDWARE_HELPER, "ran", "TPM 2.0 helper installed")
 
     return StepResult(
@@ -597,6 +724,29 @@ def _run_keyvault_init(
     return init_keyvault(home=home, prompt_io=prompt_io, store_seed_for_hd=store_seed_for_hd, unattended=unattended)
 
 
+def _keyvault_preflight(*, home: Path) -> int | None:
+    """Thin seam over ``_keyvault_init._preflight_or_refuse``'s fail-closed guards.
+
+    Runs the exact same pre-ceremony checks ``init_keyvault`` itself runs first
+    (re-init race, air-gap online check, stdout-not-a-tty) -- ``blackout_assert``
+    and ``surface`` are passed as ``None`` so this uses the same production
+    defaults ``init_keyvault`` would. Returns the refusal exit code (guidance
+    already printed) if any guard would refuse, else ``None``.
+
+    Called from :func:`_resolve_step_keyvault` *before* the unattended-keys
+    question, purely so an online host (the common failure: the air-gap check
+    refuses while a network link is still up) is reported ``"manual"``
+    immediately rather than after asking the operator a question whose answer
+    would then go nowhere. ``init_keyvault`` still re-runs this exact preflight
+    internally when the ceremony actually starts -- that duplication is
+    intentional defense in depth (see the module docstring's "Keyvault
+    preflight gate" section), not redundant plumbing to remove.
+    """
+    from ._keyvault_init import _preflight_or_refuse
+
+    return _preflight_or_refuse(home=home, blackout_assert=None, surface=None)
+
+
 def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOptions) -> StepResult:
     state, detail = _probe_keyvault(home=home)
     if state == "initialised":
@@ -619,7 +769,31 @@ def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOpt
             "that --non-interactive cannot complete; run `hermes-mordred keyvault init`",
         )
 
-    resolved_unattended = _resolve_unattended_keys(options=options, prompt_io=prompt_io)
+    # Gate the ceremony's own preflight BEFORE asking the unattended-keys
+    # question: a refusal here (most commonly the fail-closed air-gap check
+    # while the host is still online) means the ceremony cannot proceed no
+    # matter how that question is answered, so there is no point asking it
+    # first only to discover this afterward.
+    if _keyvault_preflight(home=home) is not None:
+        return StepResult(
+            _STEP_KEYVAULT,
+            "manual",
+            "keyvault init preflight refused (see guidance above); commonly the host must be offline for "
+            "the ceremony -- disconnect, re-run `hermes-mordred setup`, or run `hermes-mordred keyvault init` "
+            "yourself",
+        )
+
+    try:
+        resolved_unattended = _resolve_unattended_keys(options=options, prompt_io=prompt_io)
+    except NonInteractiveAbort:
+        # See _resolve_step_hermes's matching catch: PromptToolkitIO fails
+        # closed on a non-TTY stdin even here, where --non-interactive was
+        # already ruled out above.
+        return StepResult(
+            _STEP_KEYVAULT,
+            "manual",
+            "stdin is not a TTY; re-run interactively, or use --non-interactive",
+        )
     rc = _run_keyvault_init(
         home=home,
         prompt_io=prompt_io,
@@ -637,14 +811,37 @@ def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOpt
 
 
 def _probe_env_encryption(*, home: Path, root: Path, platform: str) -> tuple[bool, str]:
-    """Read-only: is ``.env`` encryption already fully effective?
+    """Read-only: is ``.env`` encryption already fully effective -- or
+    deliberately paused by the operator?
 
     On Linux ``TargetStatus.active`` is gated to macOS (the runtime decrypt
     shim is macOS-only), so an enrolled-and-injecting-nowhere-else target
     still counts as complete there; on macOS it must actually be active.
+
+    Two completeness rules on top of :func:`encryption_cli.env_status` that
+    ``env_status`` itself has no reason to make (it is a status *display*, not
+    a step-completion gate):
+
+    - **Operator opt-out**: ``encryption disable env`` is a deliberate,
+      reversible pause -- it writes an opt-out marker and restores the
+      plaintext ``.env`` (see :mod:`env_decrypt_cli`). An enrolled-and-opted-out
+      target resolves ``complete=True`` here (action ``"done"``) so setup
+      never reverses that explicit operator decision; without this, the
+      run would fall through to :func:`_run_env_encryption`, which calls
+      ``enable()`` and silently re-enables the very thing that was just
+      turned off.
+    - **Drift**: a stray plaintext ``.env`` on disk at rest while
+      ``env_status`` still reports ``active`` means a host write slipped past
+      the seal -- a secret is exposed at rest right now. That must read as
+      *incomplete* so ``enable()``'s reseal branch runs, not as "already done"
+      while a secret sits exposed.
     """
     st = env_status(root=root, home=home, platform=platform)
-    complete = st.configured and (platform != "darwin" or st.active)
+    if st.configured and _env_optout_marker_path(home).exists():
+        return True, (
+            "paused by operator (`encryption disable env`); re-enable with `hermes-mordred encryption enable env`"
+        )
+    complete = st.configured and not st.drift and (platform != "darwin" or st.active)
     return complete, st.detail
 
 
@@ -667,36 +864,65 @@ def _resolve_step_env_encryption(
     root: Path,
     platform: str,
     prompt_io: PromptIO,
+    options: SetupOptions,
 ) -> StepResult:
     complete, detail = _probe_env_encryption(home=home, root=root, platform=platform)
     if complete:
         return StepResult(_STEP_ENV_ENCRYPTION, "done", detail)
 
     if not (home / ".env").is_file():
-        # env_decrypt_cli.enable() would just report "no .env ... nothing to
-        # protect" (rc=1) here -- the probe above already ruled out the
-        # already-enrolled-and-sealed case that would make rc=1 mean success.
-        # A fresh system genuinely has nothing to encrypt yet; that is a
-        # benign outcome, not a failure.
+        # Only the genuinely-nothing-to-do case takes this shortcut: not
+        # enrolled AND not opted-out. The probe above already ruled out
+        # enrolled-and-sealed (already "done") and enrolled-and-opted-out
+        # (also "done", paused); what's left here besides "never enrolled" is
+        # an opted-out marker with no plaintext to show for it (e.g. a failed
+        # restore) -- that is real, incomplete state env_decrypt_cli.enable()
+        # must be given a chance to handle, not "nothing to encrypt".
+        st = env_status(root=root, home=home, platform=platform)
+        if not st.configured and not _env_optout_marker_path(home).exists():
+            # env_decrypt_cli.enable() would just report "no .env ... nothing
+            # to protect" (rc=1) here. A fresh system genuinely has nothing to
+            # encrypt yet; that is a benign outcome, not a failure.
+            return StepResult(
+                _STEP_ENV_ENCRYPTION,
+                "ran",
+                "no .env file yet; nothing to encrypt (create one, then re-run `hermes-mordred encryption enable env`)",
+            )
+
+    if options.non_interactive:
+        # Mirrors the keyvault step's hardcoded non-interactive gate (see
+        # _resolve_step_keyvault): the NonInteractiveAbort catch below already
+        # covers the vault's one-time recovery-passphrase prompt, but enable()
+        # can also reach an OS-level device-key unlock (Touch ID / passcode)
+        # to add_and_verify() the enrollment -- that dialog sits outside the
+        # PromptIO seam entirely, so --non-interactive can never supply it.
+        # Checked unconditionally, before attempting the run, rather than
+        # discovering it partway through.
         return StepResult(
             _STEP_ENV_ENCRYPTION,
-            "ran",
-            "no .env file yet; nothing to encrypt (create one, then re-run `hermes-mordred encryption enable env`)",
+            "manual",
+            "`.env` encryption may need interactive confirmation (a vault recovery passphrase and/or an "
+            "OS device-key unlock) that --non-interactive cannot supply; run `hermes-mordred encryption enable env`",
         )
 
     try:
         # enable() only prompts (for a one-time vault recovery passphrase) if
-        # no vault exists yet; if one already exists this can complete with
-        # zero prompts even non-interactively, so this attempts the run
-        # rather than assuming --non-interactive always needs "manual".
+        # no vault exists yet. Interactive from here on (the gate above
+        # already returned for --non-interactive); this catch is for
+        # PromptToolkitIO's fail-closed non-TTY guard.
         rc = _run_env_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io)
     except NonInteractiveAbort:
         return StepResult(
             _STEP_ENV_ENCRYPTION,
             "manual",
-            "creating the at-rest vault needs a one-time recovery-passphrase prompt that "
-            "--non-interactive cannot provide; run `hermes-mordred encryption enable env`",
+            "creating the at-rest vault needs a one-time recovery-passphrase prompt, and stdin "
+            "is not a TTY; run `hermes-mordred encryption enable env` interactively",
         )
+    except OSError as exc:
+        # Mirrors the configure step's OSError handling: a disk-write failure
+        # (full disk, permission error, read-only ~/.hermes) reports a clean
+        # "failed" result instead of an unhandled traceback.
+        return StepResult(_STEP_ENV_ENCRYPTION, "failed", f"encryption enable env failed: {exc}")
     if rc != 0:
         return StepResult(_STEP_ENV_ENCRYPTION, "failed", "encryption enable env failed (see errors above)")
     return StepResult(_STEP_ENV_ENCRYPTION, "ran", "`.env` is now vault-managed")
@@ -732,10 +958,12 @@ def run_setup(
         lambda: _resolve_step_configure(
             prompt_io=prompt_io, policy_writer=policy_writer, setup_runner=setup_runner, options=options
         ),
-        lambda: _resolve_step_network(prompt_io=prompt_io, policy_writer=policy_writer),
+        lambda: _resolve_step_network(home=home, prompt_io=prompt_io, policy_writer=policy_writer),
         lambda: _resolve_step_hardware_helper(home=home, platform=platform),
         lambda: _resolve_step_keyvault(home=home, prompt_io=prompt_io, options=options),
-        lambda: _resolve_step_env_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io),
+        lambda: _resolve_step_env_encryption(
+            home=home, root=root, platform=platform, prompt_io=prompt_io, options=options
+        ),
     )
 
     stopped = False

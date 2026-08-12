@@ -21,8 +21,8 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _native_key_id, _storage
-from mordred_hermes.wizard import cli, configure, setup_cli
+from mordred_hermes.keyvault import _identity, _native_key_id, _storage
+from mordred_hermes.wizard import cli, configure, encryption_cli, network_cli, setup_cli
 from mordred_hermes.wizard._prompt_io import NonInteractiveAbort, _RefusingPromptIO
 from mordred_hermes.wizard.encryption_cli import WorkspacePaths
 from mordred_hermes.wizard.policy_writer import PolicyWriter
@@ -148,6 +148,22 @@ def _policy_writer(tmp_path: Path) -> PolicyWriter:
     )
 
 
+def _vault_root(home: Path) -> Path:
+    """Home-relative encryption *vault* root -- mirrors what
+    ``_identity.resolve_root(None)`` (production ``root=``) resolves to when
+    ``_hermes_home()`` == ``home`` (see ``test_wizard_vault_cli_inspection.py``'s
+    ``TestResolveRoot.test_default_root_under_hermes_home``).
+
+    Deliberately distinct from ``_storage.resolve_keyvault_dir(home)``
+    (``<home>/mordred/keyvault``): that is the separate SE/TPM hardware-keyvault
+    directory the keyvault step's own probe (``_probe_keyvault``) reads. Using
+    the keyvault dir here too would point the env-encryption vault and the
+    hardware keyvault at the very same on-disk directory in tests that exercise
+    both in the same run.
+    """
+    return home.joinpath(*_identity._VAULT_SUBDIR)
+
+
 def _run_setup(
     tmp_path: Path,
     *,
@@ -159,7 +175,7 @@ def _run_setup(
 ) -> int:
     return setup_cli.run_setup(
         home=tmp_path,
-        root=_storage.resolve_keyvault_dir(tmp_path),
+        root=_vault_root(tmp_path),
         platform=platform,
         workspace=_workspace(tmp_path),
         prompt_io=prompt_io,
@@ -316,6 +332,11 @@ class TestRunSetupOrchestration:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _force_steps_done(monkeypatch, _STEP_HERMES, _STEP_CONFIGURE, _STEP_NETWORK, _STEP_HARDWARE_HELPER)
+        # F5: the real preflight would fail closed here anyway under pytest
+        # (capsys leaves stdout non-a-tty), which is not what this test is
+        # about -- monkeypatched to "pass" so _run_keyvault_init is actually
+        # reached.
+        monkeypatch.setattr(setup_cli, "_keyvault_preflight", lambda **kw: None)
         monkeypatch.setattr(setup_cli, "_run_keyvault_init", lambda **kw: 1)  # fails
         env_calls: list[bool] = []
 
@@ -402,6 +423,59 @@ class TestRunSetupOrchestration:
         assert hw_calls == [True]  # the run continued past the network "manual" step
         assert rc == 1  # a "manual" step still makes the overall run non-clean
 
+    def test_hardware_helper_failure_is_manual_and_run_continues_to_keyvault(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F4: a hardware-helper build failure must not hard-stop the run --
+        it resolves to "manual" (not the stopping "failed"), so the keyvault
+        step still runs afterward."""
+        _force_steps_done(monkeypatch, _STEP_HERMES, _STEP_CONFIGURE, _STEP_NETWORK)
+        monkeypatch.setattr(setup_cli, "_probe_se_helper", lambda: False)
+        monkeypatch.setattr(setup_cli, "_run_se_helper", lambda **kw: 1)
+        keyvault_calls: list[bool] = []
+
+        def _kv_step(**kwargs: object) -> setup_cli.StepResult:
+            keyvault_calls.append(True)
+            return setup_cli.StepResult(_STEP_KEYVAULT, "done", "mock")
+
+        monkeypatch.setattr(setup_cli, "_resolve_step_keyvault", _kv_step)
+        monkeypatch.setattr(setup_cli, "_probe_env_encryption", lambda **kw: (True, "env ready"))
+
+        rc = _run_setup(tmp_path, platform="darwin", prompt_io=_RefusingPromptIO(), options=setup_cli.SetupOptions())
+
+        assert keyvault_calls == [True]  # the run continued past the hardware-helper "manual" step
+        assert rc == 1  # a "manual" step still makes the overall run non-clean
+
+    def test_non_tty_prompt_abort_still_prints_report(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """F8: run_setup's docstring contract ("always prints render_report")
+        must hold even when a prompt fails closed on a non-TTY stdin, in
+        interactive mode -- an unhandled NonInteractiveAbort escaping a
+        _resolve_step_* would otherwise crash the whole run before the report
+        prints."""
+        monkeypatch.setattr(setup_cli, "_probe_hermes", lambda **kw: (False, "not set up"))
+        _force_steps_done(
+            monkeypatch, _STEP_CONFIGURE, _STEP_NETWORK, _STEP_HARDWARE_HELPER, _STEP_KEYVAULT, _STEP_ENV_ENCRYPTION
+        )
+
+        class _AbortingPromptIO(_DefaultEchoPromptIO):
+            def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+                raise NonInteractiveAbort("stdin is not a terminal")
+
+        rc = _run_setup(
+            tmp_path,
+            prompt_io=_AbortingPromptIO(),
+            options=setup_cli.SetupOptions(),
+            setup_runner=_RaisingSetupRunner(),
+        )
+
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "Setup summary:" in out
+        assert _STEP_HERMES in out
+        assert "TTY" in out
+
 
 # --------------------------------------------------------------------------- #
 # Step 1 -- hermes                                                            #
@@ -417,13 +491,28 @@ class TestHermesStep:
         assert complete is False
         assert "PATH" in detail
 
-    def test_probe_complete_when_hermes_on_path_and_config_present(
+    def test_probe_complete_when_hermes_on_path_and_config_has_upstream_content(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes" if name == "hermes" else None)
-        (tmp_path / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
-        complete, _ = setup_cli._probe_hermes(home=tmp_path)
+        # A non-`plugins` top-level key is the upstream-authored evidence (F3):
+        # `model` here stands in for whatever `hermes setup` itself writes.
+        (tmp_path / "config.yaml").write_text("model:\n  provider: openai\nplugins: {}\n", encoding="utf-8")
+        complete, detail = setup_cli._probe_hermes(home=tmp_path)
         assert complete is True
+        assert "upstream" in detail.lower()
+
+    def test_probe_incomplete_with_plugins_only_config_yaml(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F3 regression: config.yaml containing ONLY Mordred's own `plugins`
+        section is not evidence that upstream `hermes setup` ever ran -- Mordred's
+        own `configure` step creates exactly this file."""
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes" if name == "hermes" else None)
+        (tmp_path / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+        complete, detail = setup_cli._probe_hermes(home=tmp_path)
+        assert complete is False
+        assert "plugins" in detail.lower()
 
     def test_skip_flag_skips_without_running(self, tmp_path: Path) -> None:
         result = setup_cli._resolve_step_hermes(
@@ -448,7 +537,10 @@ class TestHermesStep:
         assert result.action == "ran"
         assert runner.calls == [True]
 
-    def test_non_zero_exit_warns_and_continues_as_ran(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_non_zero_exit_warns_and_continues_as_manual(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """F2: a non-zero `hermes setup` exit must not silently count as
+        success -- it resolves to "manual" (not a _SUCCESS_ACTIONS member) so
+        the overall run exits 1, even though the run itself keeps going."""
         monkeypatch.setattr("shutil.which", lambda name: None)
         runner = _FakeSetupRunner(rc=7)
         result = setup_cli._resolve_step_hermes(
@@ -457,8 +549,9 @@ class TestHermesStep:
             setup_runner=runner,
             options=setup_cli.SetupOptions(non_interactive=True),
         )
-        assert result.action == "ran"
+        assert result.action == "manual"
         assert "7" in result.detail
+        assert result.action not in setup_cli._SUCCESS_ACTIONS
 
     def test_interactive_declines_prompt_is_skipped(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr("shutil.which", lambda name: None)
@@ -494,6 +587,26 @@ class TestHermesStep:
         )
         assert result.action == "ran"
         assert runner.calls == [False]
+
+    def test_non_tty_ask_bool_abort_is_manual(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """F8: PromptToolkitIO fails closed with NonInteractiveAbort on a
+        non-TTY stdin even in interactive mode (no --non-interactive) -- an
+        unhandled abort here would skip render_report entirely, so this must
+        be caught and reported as "manual" instead of propagating."""
+        monkeypatch.setattr("shutil.which", lambda name: None)
+
+        class _AbortingPromptIO(_DefaultEchoPromptIO):
+            def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+                raise NonInteractiveAbort("stdin is not a terminal")
+
+        result = setup_cli._resolve_step_hermes(
+            home=tmp_path,
+            prompt_io=_AbortingPromptIO(),
+            setup_runner=_RaisingSetupRunner(),
+            options=setup_cli.SetupOptions(),
+        )
+        assert result.action == "manual"
+        assert "TTY" in result.detail
 
 
 # --------------------------------------------------------------------------- #
@@ -561,6 +674,26 @@ class TestConfigureStep:
         assert result.action == "failed"
         assert "disk full" in result.detail
 
+    def test_yaml_error_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """F6: PolicyWriter.write() round-trip-loads config.yaml (ruamel.yaml)
+        before editing it -- a syntactically corrupt file raises YAMLError
+        there, which must be caught the same way as the existing OSError
+        paths rather than propagating as an unhandled traceback."""
+        from ruamel.yaml.error import YAMLError
+
+        def _boom(**kwargs: object) -> None:
+            raise YAMLError("bad yaml")
+
+        monkeypatch.setattr(setup_cli, "_run_configure", _boom)
+        result = setup_cli._resolve_step_configure(
+            prompt_io=_DefaultEchoPromptIO(),
+            policy_writer=_policy_writer(tmp_path),
+            setup_runner=_RaisingSetupRunner(),
+            options=setup_cli.SetupOptions(),
+        )
+        assert result.action == "failed"
+        assert "bad yaml" in result.detail
+
     def test_partial_state_missing_llm_guard_section_is_incomplete(self, tmp_path: Path) -> None:
         pw = _policy_writer(tmp_path)
         pw.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -600,15 +733,36 @@ class TestNetworkStep:
 
     def test_non_interactive_incomplete_is_manual_and_continues(self, tmp_path: Path) -> None:
         pw = _policy_writer(tmp_path)
-        result = setup_cli._resolve_step_network(prompt_io=_RefusingPromptIO(), policy_writer=pw)
+        result = setup_cli._resolve_step_network(home=tmp_path, prompt_io=_RefusingPromptIO(), policy_writer=pw)
         assert result.action == "manual"
         assert "network init" in result.detail
 
     def test_run_failure_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr(setup_cli, "_run_network", lambda **kw: 1)
         pw = _policy_writer(tmp_path)
-        result = setup_cli._resolve_step_network(prompt_io=_DefaultEchoPromptIO(), policy_writer=pw)
+        result = setup_cli._resolve_step_network(home=tmp_path, prompt_io=_DefaultEchoPromptIO(), policy_writer=pw)
         assert result.action == "failed"
+
+    def test_run_network_passes_home_derived_env_and_credentials_paths(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F7: _run_network must pass env_path/credentials_path derived from
+        the injected `home`, not let network_cli.run_init default them to the
+        real production HERMES_BASE paths."""
+        captured: dict[str, object] = {}
+
+        def _spy(**kwargs: object) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(network_cli, "run_init", _spy)
+        pw = _policy_writer(tmp_path)
+
+        rc = setup_cli._run_network(home=tmp_path, prompt_io=_DefaultEchoPromptIO(), policy_writer=pw)
+
+        assert rc == 0
+        assert captured["env_path"] == tmp_path / ".env"
+        assert captured["credentials_path"] == tmp_path / "mordred" / "credentials" / "network.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -633,11 +787,30 @@ class TestHardwareHelperStep:
         assert result.action == "ran"
         assert calls == [{"home": tmp_path}]
 
-    def test_darwin_enable_se_failure_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_darwin_enable_se_failure_is_manual_and_continues(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F4: a build/install failure does not make the keyvault unusable (the
+        software P-256 fallback still works on macOS), so it resolves to
+        "manual" rather than the stopping "failed" action."""
         monkeypatch.setattr(setup_cli, "_probe_se_helper", lambda: False)
         monkeypatch.setattr(setup_cli, "_run_se_helper", lambda **kw: 1)
         result = setup_cli._resolve_step_hardware_helper(home=tmp_path, platform="darwin")
-        assert result.action == "failed"
+        assert result.action == "manual"
+        assert "software fallback" in result.detail.lower()
+        assert "enable-se" in result.detail
+
+    def test_linux_enable_tpm_failure_is_manual(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """F4 on Linux: still "manual" (never a stopping "failed") so the run
+        reaches the keyvault step, where a genuinely TPM-less host fails there
+        instead -- but the detail must NOT claim a software fallback exists on
+        Linux (there isn't one; the TPM backend fails closed)."""
+        monkeypatch.setattr(setup_cli, "_probe_tpm_helper", lambda: False)
+        monkeypatch.setattr(setup_cli, "_run_tpm_helper", lambda **kw: 1)
+        result = setup_cli._resolve_step_hardware_helper(home=tmp_path, platform="linux")
+        assert result.action == "manual"
+        assert "enable-tpm" in result.detail
+        assert "no software fallback" in result.detail.lower()
 
     def test_linux_dispatches_to_tpm_probe_and_runner(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setattr(setup_cli, "_probe_tpm_helper", lambda: False)
@@ -650,6 +823,31 @@ class TestHardwareHelperStep:
     def test_win32_is_unsupported(self, tmp_path: Path) -> None:
         result = setup_cli._resolve_step_hardware_helper(home=tmp_path, platform="win32")
         assert result.action == "unsupported"
+
+
+class TestHelperProbeGuards:
+    """F12: Path.home() (walked internally by the PATH/home helper lookups)
+    can raise RuntimeError in a container with no passwd entry -- same
+    rationale as the guard in status_cli.collect. A probe must degrade to
+    "not installed" rather than let that propagate."""
+
+    def test_se_helper_probe_raising_is_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault import _seckey_helper
+
+        def _boom() -> str | None:
+            raise RuntimeError("no passwd entry")
+
+        monkeypatch.setattr(_seckey_helper, "_find_helper", _boom)
+        assert setup_cli._probe_se_helper() is False
+
+    def test_tpm_helper_probe_raising_is_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault import _seckey_helper
+
+        def _boom() -> str | None:
+            raise RuntimeError("no passwd entry")
+
+        monkeypatch.setattr(_seckey_helper, "find_tpmkey_helper", _boom)
+        assert setup_cli._probe_tpm_helper() is False
 
 
 # --------------------------------------------------------------------------- #
@@ -772,6 +970,10 @@ class TestKeyvaultStep:
         assert result.action == "done"
 
     def test_absent_runs_init_with_resolved_unattended(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        # F5: real _keyvault_preflight touches network / stdout-tty state (the
+        # air-gap check, the stdout-not-a-tty guard) -- monkeypatched to "pass"
+        # so this test stays a pure unit test of the unattended-keys wiring.
+        monkeypatch.setattr(setup_cli, "_keyvault_preflight", lambda **kw: None)
         calls: list[dict[str, object]] = []
         monkeypatch.setattr(setup_cli, "_run_keyvault_init", lambda **kw: (calls.append(kw), 0)[-1])
         result = setup_cli._resolve_step_keyvault(
@@ -785,6 +987,7 @@ class TestKeyvaultStep:
         ]
 
     def test_absent_run_failure_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(setup_cli, "_keyvault_preflight", lambda **kw: None)
         monkeypatch.setattr(setup_cli, "_run_keyvault_init", lambda **kw: 1)
         result = setup_cli._resolve_step_keyvault(
             home=tmp_path,
@@ -792,6 +995,48 @@ class TestKeyvaultStep:
             options=setup_cli.SetupOptions(unattended_keys=False),
         )
         assert result.action == "failed"
+
+    def test_preflight_refusal_is_manual_and_never_asks_unattended(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F5: a preflight refusal (most commonly the fail-closed air-gap check
+        while the host is online) must be reported "manual" BEFORE the
+        unattended-keys question is asked -- order matters, since asking first
+        and refusing after would waste the operator's answer."""
+        monkeypatch.setattr(setup_cli, "_keyvault_preflight", lambda **kw: 1)
+        monkeypatch.setattr(setup_cli, "_run_keyvault_init", _raiser("must not run init_keyvault"))
+
+        class _AskBoolRaisesPromptIO(_DefaultEchoPromptIO):
+            def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+                raise AssertionError("must not ask the unattended-keys question when preflight refuses first")
+
+        result = setup_cli._resolve_step_keyvault(
+            home=tmp_path,
+            prompt_io=_AskBoolRaisesPromptIO(),
+            options=setup_cli.SetupOptions(),
+        )
+
+        assert result.action == "manual"
+        assert "preflight" in result.detail.lower()
+
+    def test_unattended_prompt_non_tty_abort_is_manual(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """F8: the unattended-keys ask_bool can also fail closed on a non-TTY
+        stdin; must be caught and reported "manual", not propagate."""
+        monkeypatch.setattr(setup_cli, "_keyvault_preflight", lambda **kw: None)
+        monkeypatch.setattr(setup_cli, "_run_keyvault_init", _raiser("must not run init_keyvault"))
+
+        class _AbortingPromptIO(_DefaultEchoPromptIO):
+            def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+                raise NonInteractiveAbort("stdin is not a terminal")
+
+        result = setup_cli._resolve_step_keyvault(
+            home=tmp_path,
+            prompt_io=_AbortingPromptIO(),
+            options=setup_cli.SetupOptions(),
+        )
+
+        assert result.action == "manual"
+        assert "TTY" in result.detail
 
 
 # --------------------------------------------------------------------------- #
@@ -801,42 +1046,158 @@ class TestKeyvaultStep:
 
 class TestEnvEncryptionStep:
     def test_fresh_system_with_no_plaintext_env_is_benign_not_failed(self, tmp_path: Path) -> None:
-        root = _storage.resolve_keyvault_dir(tmp_path)
+        root = _vault_root(tmp_path)
         result = setup_cli._resolve_step_env_encryption(
-            home=tmp_path, root=root, platform="darwin", prompt_io=_RefusingPromptIO()
+            home=tmp_path, root=root, platform="darwin", prompt_io=_RefusingPromptIO(), options=setup_cli.SetupOptions()
         )
         assert result.action == "ran"
         assert "nothing to encrypt" in result.detail.lower() or ".env" in result.detail
         assert not (tmp_path / ".env").exists()
 
-    def test_non_interactive_with_plaintext_and_no_vault_is_manual(
+    def test_interactive_prompt_abort_creating_vault_is_manual(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # _run_env_encryption is mocked to raise NonInteractiveAbort directly --
-        # exactly what a real, non-interactive `enable()` does when it must
-        # create the vault (a one-time recovery-passphrase prompt). This
-        # isolates _resolve_step_env_encryption's own exception-handling
-        # decision from env_decrypt_cli's real device-key-store chain, which
-        # needs a real Keychain / pyobjc on macOS to even attempt.
+        # exactly what a real `enable()` does when it must create the vault (a
+        # one-time recovery-passphrase prompt) and the prompt_io fails closed
+        # (e.g. stdin is not a TTY, or --non-interactive; both raise the same
+        # exception). This isolates _resolve_step_env_encryption's own
+        # exception-handling decision from env_decrypt_cli's real
+        # device-key-store chain, which needs a real Keychain / pyobjc on
+        # macOS to even attempt. options.non_interactive stays False here so
+        # the F9 hardcoded gate does not short-circuit before the try/except
+        # under test is even reached -- see TestNonInteractiveEnvGate for that
+        # separate code path.
         (tmp_path / ".env").write_text("FOO=bar\n", encoding="utf-8")
-        root = _storage.resolve_keyvault_dir(tmp_path)
+        root = _vault_root(tmp_path)
         monkeypatch.setattr(setup_cli, "_probe_env_encryption", lambda **kw: (False, "not enrolled"))
         monkeypatch.setattr(setup_cli, "_run_env_encryption", _raise_non_interactive_abort)
         result = setup_cli._resolve_step_env_encryption(
-            home=tmp_path, root=root, platform="darwin", prompt_io=_RefusingPromptIO()
+            home=tmp_path, root=root, platform="darwin", prompt_io=_RefusingPromptIO(), options=setup_cli.SetupOptions()
         )
         assert result.action == "manual"
         assert "encryption enable env" in result.detail
 
     def test_run_failure_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         (tmp_path / ".env").write_text("FOO=bar\n", encoding="utf-8")
-        root = _storage.resolve_keyvault_dir(tmp_path)
+        root = _vault_root(tmp_path)
         monkeypatch.setattr(setup_cli, "_probe_env_encryption", lambda **kw: (False, "not enrolled"))
         monkeypatch.setattr(setup_cli, "_run_env_encryption", lambda **kw: 1)
         result = setup_cli._resolve_step_env_encryption(
-            home=tmp_path, root=root, platform="darwin", prompt_io=_DefaultEchoPromptIO()
+            home=tmp_path,
+            root=root,
+            platform="darwin",
+            prompt_io=_DefaultEchoPromptIO(),
+            options=setup_cli.SetupOptions(),
         )
         assert result.action == "failed"
+
+    def test_os_error_in_run_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        (tmp_path / ".env").write_text("FOO=bar\n", encoding="utf-8")
+        root = _vault_root(tmp_path)
+        monkeypatch.setattr(setup_cli, "_probe_env_encryption", lambda **kw: (False, "not enrolled"))
+
+        def _boom(**kwargs: object) -> int:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(setup_cli, "_run_env_encryption", _boom)
+        result = setup_cli._resolve_step_env_encryption(
+            home=tmp_path,
+            root=root,
+            platform="darwin",
+            prompt_io=_DefaultEchoPromptIO(),
+            options=setup_cli.SetupOptions(),
+        )
+        assert result.action == "failed"
+        assert "disk full" in result.detail
+
+    def test_opted_out_probe_is_done_and_enable_never_called(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """F0/F11: an explicit `encryption disable env` opt-out must read as
+        already satisfied ("done", paused) -- setup must never reverse it by
+        calling enable() again."""
+        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
+        home = tmp_path / "home"
+        home.mkdir()
+        marker = encryption_cli._env_optout_marker_path(home)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("opt-out\n", encoding="utf-8")
+        (home / ".env").write_text("FOO=bar\n", encoding="utf-8")  # disable() restores the plaintext
+        root = _vault_root(home)
+        monkeypatch.setattr(
+            setup_cli, "_run_env_encryption", _raiser("enable() must not be called for an opted-out target")
+        )
+
+        result = setup_cli._resolve_step_env_encryption(
+            home=home, root=root, platform="darwin", prompt_io=_RefusingPromptIO(), options=setup_cli.SetupOptions()
+        )
+
+        assert result.action == "done"
+        assert "paused" in result.detail.lower()
+        assert marker.exists()  # the opt-out marker survives untouched
+        assert (home / ".env").read_text(encoding="utf-8") == "FOO=bar\n"  # plaintext untouched too
+
+    def test_drift_is_incomplete_and_runs_enable(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """F1: a stray plaintext .env at rest while nominally "active" (drift)
+        must NOT read as already done -- setup must run enable() so the reseal
+        branch merges the plaintext back into the vault."""
+        monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".env").write_text("FOO=bar\n", encoding="utf-8")  # plaintext at rest while "active"
+        root = _vault_root(home)
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(setup_cli, "_run_env_encryption", lambda **kw: (calls.append(kw), 0)[-1])
+
+        result = setup_cli._resolve_step_env_encryption(
+            home=home, root=root, platform="darwin", prompt_io=_DefaultEchoPromptIO(), options=setup_cli.SetupOptions()
+        )
+
+        assert len(calls) == 1  # enable()/reseal was actually attempted
+        assert result.action == "ran"
+
+
+class TestNonInteractiveEnvGate:
+    """F9: --non-interactive must never reach enable()'s OS-level device-key
+    unlock (Touch ID / passcode) when there is real work to do -- the gate is
+    checked unconditionally, before the run is even attempted (mirrors the
+    keyvault step's hardcoded non-interactive gate)."""
+
+    def test_non_interactive_with_work_to_do_is_manual_without_attempting_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / ".env").write_text("FOO=bar\n", encoding="utf-8")
+        root = _vault_root(tmp_path)
+        monkeypatch.setattr(setup_cli, "_probe_env_encryption", lambda **kw: (False, "not enrolled"))
+        monkeypatch.setattr(
+            setup_cli, "_run_env_encryption", _raiser("enable() must not be attempted under --non-interactive")
+        )
+
+        result = setup_cli._resolve_step_env_encryption(
+            home=tmp_path,
+            root=root,
+            platform="darwin",
+            prompt_io=_RefusingPromptIO(),
+            options=setup_cli.SetupOptions(non_interactive=True),
+        )
+
+        assert result.action == "manual"
+        assert "encryption enable env" in result.detail
+
+    def test_non_interactive_with_nothing_to_do_is_still_benign(self, tmp_path: Path) -> None:
+        """The non-interactive gate only applies when there IS work to do --
+        the ".env"-missing / not-enrolled shortcut still takes priority."""
+        root = _vault_root(tmp_path)
+        result = setup_cli._resolve_step_env_encryption(
+            home=tmp_path,
+            root=root,
+            platform="darwin",
+            prompt_io=_RefusingPromptIO(),
+            options=setup_cli.SetupOptions(non_interactive=True),
+        )
+        assert result.action == "ran"
+        assert "nothing to encrypt" in result.detail.lower() or ".env" in result.detail
 
 
 # --------------------------------------------------------------------------- #

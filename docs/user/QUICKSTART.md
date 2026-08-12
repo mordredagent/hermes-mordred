@@ -107,9 +107,10 @@ left off:
 hermes-mordred setup
 ```
 
-Prefer to run each step yourself? `setup` runs exactly this sequence,
-skipping whatever is already done. Run the interactive configuration, then
-optionally choose a network route:
+Prefer to run each step yourself? `setup` first checks that upstream Hermes
+itself is set up, then runs the sequence below, skipping whatever is already
+done. Run the interactive configuration, then optionally choose a network
+route:
 
 ```sh
 hermes-mordred configure       # policy / LLM / harness
@@ -144,12 +145,13 @@ shell.
 
 ## 2. First run, in order
 
-`hermes-mordred setup` runs exactly these six steps, in this order, probing
-each one first and skipping whatever is already complete — so re-running it
-after an interruption picks up where it left off. Two moments still need you
-at the keyboard: the keyvault Passphrase and 24-word Seed Phrase backup at
-step 4 (have pen and paper ready), and the vault recovery passphrase the
-first time step 5 enables encryption.
+`hermes-mordred setup` first checks that upstream Hermes itself is set up
+(offering to run `hermes setup` if not), then runs the six steps below in
+order, probing each one first and skipping whatever is already complete — so
+re-running it after an interruption picks up where it left off. Two moments
+still need you at the keyboard: the keyvault Passphrase and 24-word Seed
+Phrase backup at step 4 (have pen and paper ready), and the vault recovery
+passphrase the first time step 5 enables encryption.
 
 | # | Command | Result |
 |---|---|---|
