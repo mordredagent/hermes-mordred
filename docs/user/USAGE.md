@@ -491,19 +491,22 @@ activates the focused button.
   *Needs:* nothing. Fastest and simplest, but your source IP is fully visible.
   Pick this if you don't need anonymity or just want things working.
 
-After the path, `network init` asks the **Tor prompts**, then a **VPN provider**
-question, then the prompts for whichever provider you picked. **Each prompt only
-matters for one route** — if you picked `clearnet`, none of them apply, so just
-press **Enter** through them.
+After the path, `network init` asks **only the prompts the route you picked
+needs** (UX request 2026-08-12): pick `clearnet` and the wizard is done right
+there — no further prompts. Pick `tor` and it asks the **Tor prompts** below.
+Pick `vpn` and it asks a **VPN provider** question, then the prompts for
+whichever provider you picked. A route you didn't pick is never asked about
+and its previously saved settings are left exactly as they were on disk —
+switching routes on a re-run never wipes another route's configuration.
 
-**Tor route only** (relevant if you picked **tor**) — defaults are usually fine:
+**Tor route only** (asked only if you picked **tor**) — defaults are usually fine:
 
 | Prompt | Default | What it means |
 |---|---|---|
 | Tor binary path | `tor` | Where the `tor` program is. Leave as `tor` if it's on your PATH. |
 | Tor SOCKS port | `9050` | Local port Tor's SOCKS proxy listens on. Standard is 9050; rarely changed. |
 
-**VPN route only** (relevant if you picked **vpn**) — `network init` asks **which
+**VPN route only** (asked only if you picked **vpn**) — `network init` asks **which
 VPN provider** to use *first*, and only then that provider's prompts:
 
 | Provider | Use it for | What `network init` then asks |
@@ -521,10 +524,11 @@ The **Mullvad prompts** appear *only if you keep the `mullvad` provider* — pic
 | Mullvad relay country | `auto` | `auto`, or a 2-letter code (e.g. `se`) to pin the VPN exit country. |
 | Mullvad killswitch | `no` | Lockdown mode — block all traffic if the VPN drops, so your real IP can't leak. |
 
-> **In short:** the route is the only choice that affects most people.
-> Want **clearnet** (the default)? Just Enter through everything. Pick **tor** →
-> answer the 2 Tor prompts (defaults usually fine). Pick **vpn** → choose a
-> provider, then answer its prompts (3 for Mullvad).
+> **In short:** the route you pick decides everything else you're asked.
+> Want **clearnet** (the default)? Answer the one path question and you're
+> done. Pick **tor** → also answer the 2 Tor prompts (defaults usually fine).
+> Pick **vpn** → also choose a provider, then answer its prompts (3 for
+> Mullvad).
 >
 > Prefer no dialog? Set everything from flags in one shot:
 > `hermes-mordred network init --non-interactive --path tor` (see `network init --help`).
