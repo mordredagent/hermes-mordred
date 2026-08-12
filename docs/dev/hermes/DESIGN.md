@@ -4,16 +4,13 @@
 > Provides diagrams, layered subsystem overview, and deep links into the
 > canonical references — does not replace them.
 >
-> **Path note**: The `../../../…` link targets below (e.g.
-> [`AGENTS.md`](../../../AGENTS.md), `../../../website/docs/…`,
-> `../../../gateway/…`) are relative to the **upstream `hermes-agent` checkout**
-> at the snapshot commit below — **not this repository** — so they do not resolve
-> from here.
+> **Link note**: Upstream links are pinned to the snapshot commit below. They
+> resolve against `NousResearch/hermes-agent`, not this repository.
 >
 > **Position vs other docs**:
-> - [`AGENTS.md`](../../../AGENTS.md) (~44k) — contributor "how to write code" guide.
-> - [`website/docs/developer-guide/architecture.md`](../../../website/docs/developer-guide/architecture.md) — public top-level architecture page.
-> - [`website/docs/developer-guide/*`](../../../website/docs/developer-guide/) — subsystem deep dives (`agent-loop.md`, `prompt-assembly.md`, `gateway-internals.md`, `tools-runtime.md`, etc.).
+> - [`AGENTS.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md) (~44k) — contributor "how to write code" guide.
+> - [`website/docs/developer-guide/architecture.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/architecture.md) — public top-level architecture page.
+> - [`website/docs/developer-guide/*`](https://github.com/NousResearch/hermes-agent/tree/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide) — subsystem deep dives (`agent-loop.md`, `prompt-assembly.md`, `gateway-internals.md`, `tools-runtime.md`, etc.).
 > - **This document** — visual overview, layered model, extension-point cheatsheet, snapshot-pinned for verifiability.
 
 ## Snapshot
@@ -165,7 +162,7 @@ sequenceDiagram
   end
 ```
 
-The loop is **synchronous** with terminating conditions: (a) response has no tool calls, (b) `max_iterations` exhausted, (c) `iteration_budget` depleted, (d) user-initiated interrupt. See [`AGENTS.md` § Agent Loop](../../../AGENTS.md) and [`website/docs/developer-guide/agent-loop.md`](../../../website/docs/developer-guide/agent-loop.md).
+The loop is **synchronous** with terminating conditions: (a) response has no tool calls, (b) `max_iterations` exhausted, (c) `iteration_budget` depleted, (d) user-initiated interrupt. See [`AGENTS.md` § Agent Loop](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md) and [`website/docs/developer-guide/agent-loop.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/agent-loop.md).
 
 ---
 
@@ -180,7 +177,7 @@ Single class `AIAgent` (~13.7k LOC at this snapshot, ~60 `__init__` parameters) 
 - `chat(message) -> str` — simple interface, returns final response string.
 - `run_conversation(user_message, system_message=None, conversation_history=None, task_id=None) -> dict` — full interface, returns `{final_response, messages}`.
 
-The loop is synchronous with interrupt checks, iteration budget, one-turn grace call. Messages follow OpenAI chat format; reasoning content stored in `assistant_msg["reasoning"]`. Deep dive: [`AGENTS.md` § AIAgent Class](../../../AGENTS.md), [`website/docs/developer-guide/agent-loop.md`](../../../website/docs/developer-guide/agent-loop.md).
+The loop is synchronous with interrupt checks, iteration budget, one-turn grace call. Messages follow OpenAI chat format; reasoning content stored in `assistant_msg["reasoning"]`. Deep dive: [`AGENTS.md` § AIAgent Class](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/agent-loop.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/agent-loop.md).
 
 ### 3.2 CLI surface (`cli.py` + `hermes_cli/`)
 
@@ -191,7 +188,7 @@ The loop is synchronous with interrupt checks, iteration budget, one-turn grace 
 - **Setup wizard** (`hermes_cli/setup.py`, ~3.5k LOC): interactive first-run.
 - **Plugins can extend** the CLI via `ctx.register_cli_command(...)` — argparse tree wired in at startup.
 
-Deep dive: [`AGENTS.md` § CLI Architecture](../../../AGENTS.md), [`website/docs/developer-guide/extending-the-cli.md`](../../../website/docs/developer-guide/extending-the-cli.md).
+Deep dive: [`AGENTS.md` § CLI Architecture](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/extending-the-cli.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/extending-the-cli.md).
 
 ### 3.3 Tool system (`tools/` + `model_tools.py` + `toolsets.py`)
 
@@ -201,7 +198,7 @@ Three layers:
 2. **Dispatch** (`model_tools.py`): `discover_builtin_tools()` collects schemas; `handle_function_call(tool_name, args, task_id)` dispatches at run-time.
 3. **Toolsets** (`toolsets.py`): `TOOLSETS` dict groups tools into ~30 keys (`browser`, `clarify`, `code_execution`, `cronjob`, `delegation`, `discord`, `feishu_doc`, `file`, `homeassistant`, `image_gen`, `kanban`, `memory`, `messaging`, `safe`, `search`, `skills`, `terminal`, `todo`, `tts`, `video`, `vision`, `web`, etc.). `_HERMES_CORE_TOOLS` is the default bundle most platforms inherit from. Each platform adapter selects a base toolset.
 
-Built-in tool count varies; the architecture page reports 61 tools and 52 toolsets at one snapshot. Deep dive: [`AGENTS.md` § Adding New Tools](../../../AGENTS.md), [`website/docs/developer-guide/tools-runtime.md`](../../../website/docs/developer-guide/tools-runtime.md), [`website/docs/developer-guide/adding-tools.md`](../../../website/docs/developer-guide/adding-tools.md).
+Built-in tool count varies; the architecture page reports 61 tools and 52 toolsets at one snapshot. Deep dive: [`AGENTS.md` § Adding New Tools](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/tools-runtime.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/tools-runtime.md), [`website/docs/developer-guide/adding-tools.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/adding-tools.md).
 
 ### 3.4 Plugin architecture (`hermes_cli/plugins.py` + `plugins/`)
 
@@ -229,7 +226,7 @@ Each plugin exposes `register(ctx)` that may call:
 
 **Memory plugins** are a separate discovery system (`plugins/memory/<name>/`): each implements the `MemoryProvider` ABC (`agent/memory_provider.py`). Built-in providers at this snapshot: honcho, mem0, supermemory, byterover, hindsight, holographic, openviking, retaindb. CLI for memory plugins is gated to the **active** provider only.
 
-Deep dive: [`AGENTS.md` § Plugins](../../../AGENTS.md), [`website/docs/developer-guide/memory-provider-plugin.md`](../../../website/docs/developer-guide/memory-provider-plugin.md), [`website/docs/developer-guide/context-engine-plugin.md`](../../../website/docs/developer-guide/context-engine-plugin.md).
+Deep dive: [`AGENTS.md` § Plugins](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/memory-provider-plugin.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/memory-provider-plugin.md), [`website/docs/developer-guide/context-engine-plugin.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/context-engine-plugin.md).
 
 ### 3.5 Hook dispatch model
 
@@ -297,7 +294,7 @@ flowchart LR
   loader --> ctx["AIAgent context<br/>(injected as user message)"]
 ```
 
-Deep dive: [`AGENTS.md` § Skills](../../../AGENTS.md), [`website/docs/developer-guide/creating-skills.md`](../../../website/docs/developer-guide/creating-skills.md).
+Deep dive: [`AGENTS.md` § Skills](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/creating-skills.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/creating-skills.md).
 
 ### 3.7 Provider & transport layer
 
@@ -309,13 +306,13 @@ Two distinct concerns:
 
 Plugins can register additional providers via `ctx.register_provider(...)`.
 
-Deep dive: [`website/docs/developer-guide/provider-runtime.md`](../../../website/docs/developer-guide/provider-runtime.md), [`website/docs/developer-guide/adding-providers.md`](../../../website/docs/developer-guide/adding-providers.md).
+Deep dive: [`website/docs/developer-guide/provider-runtime.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/provider-runtime.md), [`website/docs/developer-guide/adding-providers.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/adding-providers.md).
 
 ### 3.8 Gateway / Platforms (`gateway/`)
 
 Multi-platform messaging gateway. Core: `gateway/run.py` (entrypoint), `gateway/session.py` (per-platform session state), `gateway/hooks.py` (gateway-side hook dispatch), `gateway/platform_registry.py` (adapter discovery).
 
-**27+ platform adapters** at this snapshot (`gateway/platforms/`): Slack, Discord, Telegram, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Bluebubbles (iMessage), DingTalk, WeCom, Weixin, Feishu, QQbot, HomeAssistant, Webhook, API server, plus Yuanbao integration (`yuanbao*`). Add a new adapter via [`gateway/platforms/ADDING_A_PLATFORM.md`](../../../gateway/platforms/ADDING_A_PLATFORM.md).
+**27+ platform adapters** at this snapshot (`gateway/platforms/`): Slack, Discord, Telegram, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Bluebubbles (iMessage), DingTalk, WeCom, Weixin, Feishu, QQbot, HomeAssistant, Webhook, API server, plus Yuanbao integration (`yuanbao*`). Add a new adapter via [`gateway/platforms/ADDING_A_PLATFORM.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/gateway/platforms/ADDING_A_PLATFORM.md).
 
 ```mermaid
 sequenceDiagram
@@ -341,7 +338,7 @@ sequenceDiagram
   SLK-->>U: render
 ```
 
-Deep dive: [`AGENTS.md` § CLI Architecture (slash registry)](../../../AGENTS.md), [`website/docs/developer-guide/gateway-internals.md`](../../../website/docs/developer-guide/gateway-internals.md), [`website/docs/developer-guide/adding-platform-adapters.md`](../../../website/docs/developer-guide/adding-platform-adapters.md).
+Deep dive: [`AGENTS.md` § CLI Architecture (slash registry)](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/gateway-internals.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/gateway-internals.md), [`website/docs/developer-guide/adding-platform-adapters.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/adding-platform-adapters.md).
 
 ### 3.9 Memory & Context engine
 
@@ -352,15 +349,15 @@ Two pluggable systems:
 
 **Prompt caching** (`agent/prompt_caching.py`): Anthropic-specific cache control to maximize cache hits across turns. Skill commands inject as **user message** (not system) to preserve cache boundaries.
 
-Deep dive: [`website/docs/developer-guide/context-compression-and-caching.md`](../../../website/docs/developer-guide/context-compression-and-caching.md), [`website/docs/developer-guide/prompt-assembly.md`](../../../website/docs/developer-guide/prompt-assembly.md).
+Deep dive: [`website/docs/developer-guide/context-compression-and-caching.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/context-compression-and-caching.md), [`website/docs/developer-guide/prompt-assembly.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/prompt-assembly.md).
 
 ### 3.10 Cron / scheduler (`cron/`)
 
-`cron/jobs.py` defines job types; `cron/scheduler.py` runs them. Used for scheduled routines (e.g. daily summaries, scheduled gateway broadcasts). Tool surface: `tools/cronjob_tools.py`. Deep dive: [`AGENTS.md` § Cron](../../../AGENTS.md), [`website/docs/developer-guide/cron-internals.md`](../../../website/docs/developer-guide/cron-internals.md).
+`cron/jobs.py` defines job types; `cron/scheduler.py` runs them. Used for scheduled routines (e.g. daily summaries, scheduled gateway broadcasts). Tool surface: `tools/cronjob_tools.py`. Deep dive: [`AGENTS.md` § Cron](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/cron-internals.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/cron-internals.md).
 
 ### 3.11 ACP adapter (`acp_adapter/`)
 
-Implements the Agent Client Protocol so editors (VS Code, Zed, JetBrains) can drive Hermes as their local agent. Files: `server.py`, `session.py`, `auth.py`, `events.py`, `permissions.py`, `tools.py`, `entry.py` (`__main__.py` for `python -m acp_adapter`). Deep dive: [`website/docs/developer-guide/acp-internals.md`](../../../website/docs/developer-guide/acp-internals.md).
+Implements the Agent Client Protocol so editors (VS Code, Zed, JetBrains) can drive Hermes as their local agent. Files: `server.py`, `session.py`, `auth.py`, `events.py`, `permissions.py`, `tools.py`, `entry.py` (`__main__.py` for `python -m acp_adapter`). Deep dive: [`website/docs/developer-guide/acp-internals.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/acp-internals.md).
 
 ### 3.12 TUI / Web surfaces
 
@@ -380,7 +377,7 @@ Implements the Agent Client Protocol so editors (VS Code, Zed, JetBrains) can dr
 - **TUI** (`ui-tui/` + `tui_gateway/`): TypeScript owns the screen; Python owns sessions/tools/model calls/slash commands. Newline-delimited JSON-RPC over stdio. Method/event catalog in `tui_gateway/server.py`.
 - **Web** (`web/` + `hermes_cli/web_server.py`): browser embeds the actual `hermes --tui` via xterm.js + WebGL renderer + WebSocket-PTY. **Not a re-implementation** — the dashboard wraps the TUI rather than replacing it.
 
-Deep dive: [`AGENTS.md` § TUI Architecture](../../../AGENTS.md).
+Deep dive: [`AGENTS.md` § TUI Architecture](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md).
 
 ### 3.13 Configuration & state
 
@@ -388,9 +385,9 @@ Deep dive: [`AGENTS.md` § TUI Architecture](../../../AGENTS.md).
 - **`~/.hermes/.env`** — secrets only (API keys, tokens, passwords). Never store config-shaped values here.
 - **Session DB** (`hermes_state.py` → SQLite + FTS5): full session history, full-text search across past turns. Per-profile via `get_hermes_home()`.
 - **Logs** (`~/.hermes/logs/`): `agent.log` (INFO+), `errors.log` (WARNING+), `gateway.log` (when running gateway). Browse via `hermes logs [--follow] [--level ...] [--session ...]`.
-- **Three config loaders** (don't mix them): see [`AGENTS.md` § Adding Configuration](../../../AGENTS.md).
+- **Three config loaders** (don't mix them): see [`AGENTS.md` § Adding Configuration](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md).
 
-Deep dive: [`website/docs/developer-guide/session-storage.md`](../../../website/docs/developer-guide/session-storage.md).
+Deep dive: [`website/docs/developer-guide/session-storage.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/session-storage.md).
 
 ### 3.14 Subprocess & terminal backends
 
@@ -406,7 +403,7 @@ Subprocess spawn inherits the parent process environment; tools that need restri
 - **`Dockerfile`** + `docker/` + `docker-compose.yml` — container-based deployment.
 - **`packaging/homebrew/`** — Homebrew tap.
 
-Deep dive: [`AGENTS.md` § Development Environment](../../../AGENTS.md), [`website/docs/developer-guide/contributing.md`](../../../website/docs/developer-guide/contributing.md).
+Deep dive: [`AGENTS.md` § Development Environment](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md), [`website/docs/developer-guide/contributing.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/contributing.md).
 
 ---
 
@@ -465,43 +462,43 @@ Brief rationales for non-obvious choices, drawn from canonical references. Each 
 
 ### Primary canonical sources (read these first)
 
-- [`AGENTS.md`](../../../AGENTS.md) — full contributor guide.
-- [`website/docs/developer-guide/architecture.md`](../../../website/docs/developer-guide/architecture.md) — public top-level architecture page.
+- [`AGENTS.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md) — full contributor guide.
+- [`website/docs/developer-guide/architecture.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/architecture.md) — public top-level architecture page.
 
 ### Subsystem deep dives
 
-- [`agent-loop.md`](../../../website/docs/developer-guide/agent-loop.md)
-- [`prompt-assembly.md`](../../../website/docs/developer-guide/prompt-assembly.md)
-- [`provider-runtime.md`](../../../website/docs/developer-guide/provider-runtime.md)
-- [`tools-runtime.md`](../../../website/docs/developer-guide/tools-runtime.md)
-- [`gateway-internals.md`](../../../website/docs/developer-guide/gateway-internals.md)
-- [`acp-internals.md`](../../../website/docs/developer-guide/acp-internals.md)
-- [`session-storage.md`](../../../website/docs/developer-guide/session-storage.md)
-- [`context-compression-and-caching.md`](../../../website/docs/developer-guide/context-compression-and-caching.md)
-- [`context-engine-plugin.md`](../../../website/docs/developer-guide/context-engine-plugin.md)
-- [`memory-provider-plugin.md`](../../../website/docs/developer-guide/memory-provider-plugin.md)
-- [`creating-skills.md`](../../../website/docs/developer-guide/creating-skills.md)
-- [`adding-tools.md`](../../../website/docs/developer-guide/adding-tools.md)
-- [`adding-providers.md`](../../../website/docs/developer-guide/adding-providers.md)
-- [`adding-platform-adapters.md`](../../../website/docs/developer-guide/adding-platform-adapters.md)
-- [`extending-the-cli.md`](../../../website/docs/developer-guide/extending-the-cli.md)
-- [`browser-supervisor.md`](../../../website/docs/developer-guide/browser-supervisor.md)
-- [`cron-internals.md`](../../../website/docs/developer-guide/cron-internals.md)
-- [`environments.md`](../../../website/docs/developer-guide/environments.md)
-- [`trajectory-format.md`](../../../website/docs/developer-guide/trajectory-format.md)
+- [`agent-loop.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/agent-loop.md)
+- [`prompt-assembly.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/prompt-assembly.md)
+- [`provider-runtime.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/provider-runtime.md)
+- [`tools-runtime.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/tools-runtime.md)
+- [`gateway-internals.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/gateway-internals.md)
+- [`acp-internals.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/acp-internals.md)
+- [`session-storage.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/session-storage.md)
+- [`context-compression-and-caching.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/context-compression-and-caching.md)
+- [`context-engine-plugin.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/context-engine-plugin.md)
+- [`memory-provider-plugin.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/memory-provider-plugin.md)
+- [`creating-skills.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/creating-skills.md)
+- [`adding-tools.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/adding-tools.md)
+- [`adding-providers.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/adding-providers.md)
+- [`adding-platform-adapters.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/adding-platform-adapters.md)
+- [`extending-the-cli.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/extending-the-cli.md)
+- [`browser-supervisor.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/browser-supervisor.md)
+- [`cron-internals.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/cron-internals.md)
+- [`environments.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/environments.md)
+- [`trajectory-format.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide/trajectory-format.md)
 
 ### Reference
 
-- [`website/docs/reference/cli-commands.md`](../../../website/docs/reference/cli-commands.md)
-- [`website/docs/reference/slash-commands.md`](../../../website/docs/reference/slash-commands.md)
-- [`website/docs/reference/tools-reference.md`](../../../website/docs/reference/tools-reference.md)
-- [`website/docs/reference/toolsets-reference.md`](../../../website/docs/reference/toolsets-reference.md)
-- [`website/docs/reference/skills-catalog.md`](../../../website/docs/reference/skills-catalog.md)
-- [`website/docs/reference/optional-skills-catalog.md`](../../../website/docs/reference/optional-skills-catalog.md)
-- [`website/docs/reference/model-catalog.md`](../../../website/docs/reference/model-catalog.md)
-- [`website/docs/reference/environment-variables.md`](../../../website/docs/reference/environment-variables.md)
-- [`website/docs/reference/profile-commands.md`](../../../website/docs/reference/profile-commands.md)
-- [`website/docs/reference/mcp-config-reference.md`](../../../website/docs/reference/mcp-config-reference.md)
+- [`website/docs/reference/cli-commands.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/cli-commands.md)
+- [`website/docs/reference/slash-commands.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/slash-commands.md)
+- [`website/docs/reference/tools-reference.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/tools-reference.md)
+- [`website/docs/reference/toolsets-reference.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/toolsets-reference.md)
+- [`website/docs/reference/skills-catalog.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/skills-catalog.md)
+- [`website/docs/reference/optional-skills-catalog.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/optional-skills-catalog.md)
+- [`website/docs/reference/model-catalog.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/model-catalog.md)
+- [`website/docs/reference/environment-variables.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/environment-variables.md)
+- [`website/docs/reference/profile-commands.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/profile-commands.md)
+- [`website/docs/reference/mcp-config-reference.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference/mcp-config-reference.md)
 
 ### Companion in this directory
 

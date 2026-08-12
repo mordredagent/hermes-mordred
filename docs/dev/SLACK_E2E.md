@@ -1,147 +1,177 @@
-# Hermes ⇄ gateway E2E 暗号化
+<a id="hermes--gateway-e2e-&#x6697;&#x53f7;&#x5316;"></a>
 
-Mordred ブラウザ拡張と Hermes の間で Slack / Discord を暗号文の伝送路として
-使うための、Hermes 側の受信・返信仕様です。ゲートウェイ経由の agent command は
-`ENC:v3` のみを受理します。WebSocket API、履歴、`K_extchat` の v1/v2 ヘルパーは
-別プロトコルであり、互換性のためそのまま残します。
+# Hermes ⇄ gateway E2E encryption
 
-> **移行上の注意:** v3 は意図的な breaking wire change です。外部の Mordred
-> Extension が v3 の AAD と方向を実装する前にこの版のゲートウェイを配備すると、
-> 旧 v1/v2 クライアントは gateway command と reply の両方を利用できません。
-> Hermes と Extension を同時に更新してください。旧 command を暗黙に許可する
-> downgrade はありません。
+This document defines how Hermes receives and replies to agent commands when
+the Mordred browser extension uses Slack or Discord only as a ciphertext
+transport. Gateway agent commands accept `ENC:v3` only. The WebSocket API,
+history, and the v1/v2 `K_extchat` helpers are separate protocols and remain
+available for compatibility.
+
+> **Migration note:** v3 is an intentional breaking wire change. Deploying this
+> gateway before the external Mordred extension implements the v3 AAD and
+> direction fields disables both gateway commands and replies for v1/v2
+> clients. Update Hermes and the extension together. There is no implicit
+> downgrade path for older commands.
 
 ## 1. v3 wire
 
-1件のプラットフォーム投稿は、許可された先頭メンション、1個のv3 token、末尾空白
-だけで構成します。
+A platform post contains only an allowed leading mention, one v3 token, and
+trailing whitespace:
 
 ```text
 [mention-prefix] 🔒ENC:v3:{kid}:{message_id}:{seq}:{total}:{nonce}:{ciphertext}
 ```
 
-- `kid`: `base64url(SHA-256(K_chan)[0:6])`（8文字）
-- `message_id`: 送信前に生成する128-bitランダム値（base64url、22文字）。Slack /
-  Discord が投稿後に付与する message ID とは別物
-- 現行プロファイルは常に `seq=0,total=1`
-- `nonce`: 96-bit AES-GCM nonce
-- `ciphertext`: UTF-8本文のAES-256-GCM ciphertext + 16-byte tag
-- base64urlはpaddingなしのcanonical表現
+- `kid`: `base64url(SHA-256(K_chan)[0:6])` (8 characters)
+- `message_id`: a random 128-bit value generated before posting (22-character
+  base64url), not the platform message ID assigned later by Slack or Discord
+- The current profile always uses `seq=0,total=1`.
+- `nonce`: a 96-bit AES-GCM nonce
+- `ciphertext`: AES-256-GCM ciphertext for the UTF-8 body plus its 16-byte tag
+- All base64url values use canonical, unpadded encoding.
 
-Slack が Unicode の鍵絵文字を `:lock:` に正規化する場合に限り、
-`:lock:ENC:v3:…` も同一のcanonical aliasとして受理します。鍵絵文字なしも既存の
-renderer互換として受理します。未知version、複数token、平文prefix/suffix、
-非canonical encoding、改ざんは投稿全体を拒否します。
+When Slack normalizes the Unicode lock emoji to `:lock:`,
+`:lock:ENC:v3:…` is accepted as the same canonical alias. A token without the
+lock is also accepted for compatibility with existing renderers. An unknown
+version, multiple tokens, a plaintext prefix or suffix, non-canonical
+encoding, or tampering rejects the entire post.
 
-## 2. AADと宛先束縛
+<a id="2-aad&#x3068;&#x5b9b;&#x5148;&#x675f;&#x7e1b;"></a>
 
-AES-GCM AAD は次の順序のfieldを結合します。各文字列fieldはUTF-8化し、
-`uint32_be(length) || bytes` として曖昧性なく符号化し、最後に
-`uint16_be(seq) || uint16_be(total)` を付けます。
+## 2. AAD and destination binding
+
+AES-GCM AAD joins the following fields in order. Each string is encoded as
+UTF-8 and framed as `uint32_be(length) || bytes`; the final fields are encoded
+as `uint16_be(seq) || uint16_be(total)`.
 
 ```text
 "mordred-e2e-v3"
-direction          # "command" または "reply"
+direction          # "command" or "reply"
 platform.lower()   # "slack" / "discord"
 chat_id
-thread_root        # None は空文字
+thread_root        # None is the empty string
 message_id
 seq
 total
 ```
 
-Hermes受信は `direction="command"`、返信は `direction="reply"` 固定です。このため
-返信暗号文をagent命令へ反射できません。`platform/chat_id/thread_root` が変わる
-cross-channel / cross-thread replayも認証に失敗します。
+Hermes fixes inbound messages to `direction="command"` and replies to
+`direction="reply"`, so a reply ciphertext cannot be reflected into an agent
+command. Cross-channel and cross-thread replays also fail authentication when
+`platform`, `chat_id`, or `thread_root` changes.
 
-Discordのauto-threadでは、Extensionがcommandを暗号化する時点では新しいthread IDが
-まだ存在しません。そのcommand AADは投稿元の `(parent_chat_id, thread_root=None)` を
-canonical値とします。Hermes 0.19の `auto_thread_created` と、0.13/0.19で保持される
-`raw_message.channel.id` を照合してからこの変換を行います。返信registryとreply AADは
-作成後の `(thread_id, thread_id)` を使います。marker・親・raw channelが矛盾する場合や、
-旧版イベントでauto-threadか既存threadか判定できない場合は推測せず拒否します。
+For a Discord auto-thread, the new thread ID does not exist when the extension
+encrypts the command. Its command AAD therefore uses the canonical
+`(parent_chat_id, thread_root=None)` destination. Hermes performs this
+conversion only after correlating the Hermes 0.19 `auto_thread_created` marker
+with the `raw_message.channel.id` retained by Hermes 0.13 and 0.19. The reply
+registry and reply AAD use `(thread_id, thread_id)` after creation. Hermes
+rejects the message instead of guessing if the marker, parent, and raw channel
+conflict, or if an older event cannot distinguish an auto-thread from an
+existing thread.
 
-Slackのchannel top levelにも鏡写しの問題があります。Slack adapterのデフォルト
-(`reply_in_thread`)はsession keyingのため、top-level messageの `thread_id` に
-そのmessage自身の `ts` を合成thread rootとして与えます(`thread_ts == ts`)。
-この `ts` は送信後にSlackが採番する値でExtensionは暗号化時点で知り得ないため、
-routed thread rootがcommand自身の `message_id` と一致する場合に限り、command AADは
-`thread_root=None` をcanonical値とします。本物のthread replyは `thread_ts != ts`
-で届くので実rootのまま認証され、top-level tokenを既存threadへ貼り直すreplayは
-今まで通り拒否されます。返信routingは合成threadを使い続けます。
+Slack top-level channel messages have a mirrored issue. For session keying,
+the default Slack adapter (`reply_in_thread`) synthesizes the message's own
+`ts` as `thread_id` (`thread_ts == ts`). The extension cannot know this
+server-assigned value while encrypting, so command AAD uses
+`thread_root=None` only when the routed thread root equals the command's own
+message ID. A real thread reply arrives with `thread_ts != ts` and is
+authenticated against the real root, so replaying a top-level token into an
+existing thread still fails. Reply routing continues to use the synthesized
+thread.
 
-`kid` を全channel共通indexから引くことはしません。イベントの `chat_id`、または
-Discord threadの認証済み `parent_chat_id` に登録された `K_chan` だけを候補にし、
-そのfingerprintが `kid` と一致する場合に限って復号します。
+Keys are never selected from a global `kid` index. Hermes considers only the
+`K_chan` registered for the event's `chat_id`, or for an authenticated Discord
+thread's `parent_chat_id`, and decrypts only when that key's fingerprint
+matches `kid`.
 
-## 3. Replay防止とplaintext release
+<a id="3-replay&#x9632;&#x6b62;&#x3068;plaintext-release"></a>
 
-認証成功時に、domain-separated SHA-256で次の2つのidentityを作ります。
+## 3. Replay protection and plaintext release
+
+After authentication, domain-separated SHA-256 produces two identities:
 
 - `(kid, message_id)`
 - `(kid, nonce)`
 
-生のIDやnonceは保存しません。identityはprivateな
-`~/.hermes/extension/state.json` に、30日TTL・固定上限付きでatomicに保存します。
-したがってgateway再起動後も同じcommandはfreshになりません。message IDの使い回し
-とAES-GCM nonceの使い回しをそれぞれ拒否します。
+Raw IDs and nonces are not stored. The identities are saved atomically in the
+private `~/.hermes/extension/state.json` file with a 30-day TTL and a fixed
+capacity. Restarting the gateway therefore does not make a command fresh.
+Hermes rejects both message-ID reuse and AES-GCM nonce reuse.
 
-commit順序は次の通りです。
+The commit order is:
 
-1. wire grammarとAES-GCMを認証
-2. 対象profileのlive outbound adapterがfail-closed wrapper済みか確認
-3. `(platform, chat_id, thread_root, kid)` をreply-in-kind registryへ記録
-4. replay identityをatomicにcheck-and-store
-5. 初めてplaintextをagentへrelease
+1. Authenticate the wire grammar and AES-GCM payload.
+2. Confirm that the target profile's live outbound adapter has a fail-closed
+   wrapper.
+3. Record `(platform, chat_id, thread_root, kid)` in the reply-in-kind
+   registry.
+4. Atomically check and store the replay identities.
+5. Release plaintext to the agent for the first time.
 
-adapter不調などで手順2/3に失敗した正当な投稿はreplay cacheへ消費しません。
-replay storeの読書き失敗はfail-closedです。
+A valid post that fails step 2 or 3, such as during an adapter outage, does not
+consume its replay entry. Replay-store read or write failures are fail-closed.
 
-## 4. 返信
+<a id="4-&#x8fd4;&#x4fe1;"></a>
 
-暗号化commandを受けたconversationは24時間のin-memory registryへ記録し、返信本文を
-同じchannel keyで `direction="reply"` のv3 tokenへ暗号化します。長文は投稿単位に
-分割し、各投稿を独立した `seq=0,total=1` messageとして新しいmessage ID / nonceで
-暗号化します。
+## 4. Replies
 
-Slack / Discordのrouting mentionは先頭に平文で残せますが、Slack channel/subteamの
-表示labelとTeamsの表示名はagent promptへ入れず、自由文を除去します。暗号化対象か
-どうかの判定、thread解決、key lookup、暗号化のいずれかが失敗した場合、元のplaintext
-sendへは委譲しません。Slackは最小限のlocked noticeを出せますが、本文は送りません。
+A conversation that supplies an encrypted command is recorded in an in-memory
+registry for 24 hours. Reply bodies are encrypted with the same channel key as
+v3 tokens using `direction="reply"`. Long replies are split by platform post;
+each post is an independent `seq=0,total=1` message with a fresh message ID and
+nonce.
 
-Hermes multiplex gatewayでは `event.source.profile` に対応する
-`gateway._profile_adapters[profile]` をwrap・検証・notice送信に使います。default
-profileの同platform adapterがwrap済みでも、secondary profileの未保護adapterを
-代用しません。古いHermesの `gateway.adapters` 経路も維持します。
+Slack and Discord routing mentions may remain as a plaintext prefix, but Slack
+channel or subteam display labels and Teams display names are not added to the
+agent prompt, and free-form text is removed. If encryption classification,
+thread resolution, key lookup, or encryption fails, the wrapper never delegates
+to the original plaintext sender. Slack may emit a minimal locked notice, but
+never the reply body.
+
+In a multiplexed Hermes gateway, the wrapper, verification, and notice path use
+`gateway._profile_adapters[profile]` selected by `event.source.profile`. A
+wrapped default-profile adapter is never substituted for an unprotected
+secondary-profile adapter on the same platform. The legacy
+`gateway.adapters` path remains supported for older Hermes versions.
 
 ## 5. Mandatory E2E
 
-Slack / Discordでは暗号化されていない受信をagentへ渡しません。設定案内を
-best-effortで送り、dispatchをskipします。Teams等はplaintext自体を禁止しませんが、
-`ENC`を名乗ったwireは同じv3検証に合格しない限りfail-closedです。
+Hermes never sends an unencrypted Slack or Discord message to the agent. It
+attempts to send setup guidance and skips dispatch. Other platforms such as
+Teams may still accept plaintext, but any payload claiming the `ENC` wire
+format fails closed unless it passes the same v3 validation.
 
 The needs-key notice is rate-limited per conversation (platform × profile ×
-channel, 60 s window): the notice fires before host authorization, so without a
-cooldown any channel member could amplify a message flood into an equal flood of
-bot posts. Suppression affects only the notice — every refused message still
-gets the `skip` verdict.
+channel, 60-second window). The notice is emitted before host authorization;
+without a cooldown, any channel member could amplify a message flood into an
+equal flood of bot posts. Suppression affects only the notice: every refused
+message still receives the `skip` verdict.
 
-**空 `text` も「未暗号化受信」として拒否します。** Slack adapterはbot mentionを
-strip（`text.replace(f"<@{bot_uid}>", "").strip()`）し、添付は `media_urls` に
-載せるため、`@Hermes` + 画像 / 音声クリップ / mentionのみは `text == ""` で
-hookに到達します。v3 tokenが空textに同伴することは有り得ないので、mandatory
-platformでは他の平文と同様にskip + 設定案内とします（2026-08-02のsecurity
-reviewで、この経路がgateを迂回しagentの応答が平文で流出し得ることが判明）。
+**An empty `text` value is also rejected as unencrypted input.** The Slack
+adapter strips bot mentions (`text.replace(f"<@{bot_uid}>", "").strip()`) and
+stores attachments in `media_urls`, so `@Hermes` plus an image, audio clip, or
+mention alone reaches the hook with `text == ""`. An empty value cannot contain
+a v3 token. Mandatory platforms therefore skip it and send setup guidance just
+like any other plaintext input. Other platforms continue normal dispatch. A
+2026-08-02 security review found that this path could otherwise bypass the gate
+and leak an agent reply in plaintext.
 
-## 6. テスト要件
+<a id="6-&#x30c6;&#x30b9;&#x30c8;&#x8981;&#x4ef6;"></a>
 
-- Unicode鍵、鍵なし、Slack `:lock:` aliasのcanonical v3
-- platform / chat / thread / directionを1項目ずつ変えたAAD失敗
-- 異なるchannelにだけ登録されたkeyの拒否
-- v1/v2 gateway command、複数token、平文混在、改ざんの拒否
-- replay、message ID再利用、nonce再利用を再起動相当の永続stateでも拒否
-- replay commitがoutbound保護確認より後であること
-- default / secondary profile adapterを取り違えないこと
-- 暗号化判定例外時にplaintext `orig_send` を呼ばないこと
-- 空 / 欠落 `text`（画像・音声添付、mentionのみ）をmandatory platformで拒否し、
-  他platformでは従来どおり通常dispatchすること
+## 6. Test requirements
+
+- Canonical v3 with the Unicode lock, no lock, and Slack's `:lock:` alias
+- AAD failure after independently changing platform, chat, thread, or direction
+- Rejection when a matching key exists only in a different channel
+- Rejection of v1/v2 gateway commands, multiple tokens, mixed plaintext, and
+  tampering
+- Rejection of replayed messages, reused message IDs, and reused nonces across
+  simulated restarts with persistent state
+- Replay commit occurring only after outbound protection is confirmed
+- No confusion between default- and secondary-profile adapters
+- No plaintext `orig_send` call when encryption classification raises
+- Rejection of empty or missing `text` on mandatory platforms for image/audio
+  attachments and mention-only posts, while other platforms still dispatch
+  normally

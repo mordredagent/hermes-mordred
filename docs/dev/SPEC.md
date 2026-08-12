@@ -115,11 +115,14 @@ The old SPEC's "Core Minimal-Change Policy" was redefined as **zero upstream PR*
 **Items that would seem to need core modification run on a plugin-side fallback in v1** (no PRs will be sent in the future either; escape to the v2 vendored fork if necessary):
 
 - ~~extension to include `provider_id` / `model_id` in the `pre_llm_call` payload~~ → **Phase 0.8 verify (2026-05-10) complete**: `pre_llm_call` carries only `model`, not `provider`, and its return value is **context-injection only** (provider rewrite is structurally impossible). `pre_api_request` carries provider/model/base_url and discards callback return values, but a `BaseException`-derived refusal still stops egress through Hermes's hook wrapper. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §5. v1 therefore performs an audit-only disk pre-check in `on_session_start`, then authoritatively validates the actual runtime provider in `pre_api_request`
-- ~~extension to include `origin_skill` in the `pre_tool_call` payload~~ → **Phase 0.8 verify complete**: in v0.11.0 the payload does not include `origin_skill` (only `tool_name`/`args`/`task_id`/`session_id`/`tool_call_id`; see [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4 for details). Since per-skill policy cannot be implemented via `pre_tool_call`, the install-time guard (the `hermes mordred install` wrapper CLI) that inspects SKILL.md frontmatter is confirmed as the **sole per-skill enforcement path**. The runtime `pre_tool_call` provides only a generic tool-name allowlist
+- ~~extension to include `origin_skill` in the `pre_tool_call` payload~~ → the current consumed Hermes contract does not include `origin_skill` (see [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §4). Since per-skill policy cannot be implemented via `pre_tool_call`, the install-time `hermes-mordred install` guard that inspects SKILL.md frontmatter is the sole per-skill enforcement path. The runtime hook provides only a generic tool-name guard
 - A pre-install hook at skill install time (`hermes_cli/skills_hub.py`) → create new if needed; until then, substitute with the `hermes mordred install` wrapper
 - agent process init / shutdown hook → network setup uses plugin `register()` plus an `atexit` finalizer so the process route exists before provider clients and outlives turn/session hooks; other plugins continue to use the existing session hooks where process ownership is not required
 
-Each plugin probes the shape of the hook payload in `on_session_start`, and if it's missing, records `mordred.degraded.<seam>` in the audit log and runs in degraded mode. The payload shapes confirmed by the Phase 0.8 verify are consolidated in [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) (canonical) — drift watch is `.github/workflows/upstream-check.yml` (weekly, **hook name** drift only; re-verification of payload field shape is a manual bump of this doc triggered by a name-drift signal).
+The fields Mordred consumes are defined in `tools/hook_payload_contract.json`
+and explained in [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md). The local compatibility
+test and `.github/workflows/upstream-check.yml` verify both hook names and those
+payload fields against the installed Hermes release and upstream `main`.
 
 ### What Mordred Adds (6 plugins)
 
@@ -277,7 +280,12 @@ For skills that declare `metadata.mordred.requires_keyvault: true`, `mordred_key
 
 ### Story 6: Coexistence with Hermes's existing features
 
-Mordred plugins can coexist with Hermes's memory plugin (honcho/mem0), context engine, and observability (langfuse). Each plugin is independent, and Mordred's hooks are called in parallel with other plugins' hooks. **Phase 0.8 verify (2026-05-10) complete**: Hermes v0.11.0's plugin loader guarantees hook ordering by **registration order** (`PluginManager.invoke_hook` at `hermes_cli/plugins.py` L968-1002, no priority system). The plugin load order is bundled → user → project → entry-point, and Mordred (entry-point) is **registered last for every hook**. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) §1 for details.
+Mordred plugins can coexist with Hermes's memory plugin, context engine, and
+observability integrations. Hook callbacks run in registration order and Hermes
+exposes no priority API that Mordred relies on. Each Mordred plugin orders its
+own callbacks explicitly; cross-plugin safety uses readiness checks and must not
+depend on entry-point enumeration order. See [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md)
+§1.
 
 ## Scope (In) — what we build in v1
 
@@ -1237,9 +1245,12 @@ Once hard enforcement is truly needed, the `pip install mordred-hermes[hard-lock
 ### Plugin Versioning & Compatibility
 
 - All Mordred plugins are bundled in the single pip package `mordred-hermes`, sharing a common version
-- Declares `mordred-min-hermes-version` in `[project.metadata]` of `pyproject.toml`; each plugin verifies the Hermes version in `on_session_start`
-- Detects changes to Hermes upstream's hook payload types via CI (GitHub Actions), automatically filing an issue when compatibility breaks
-- `mordred-hermes`'s own version is managed in `docs/VERSION` (same as the old SPEC)
+- Declares `min-hermes-version` in `[tool.mordred]` of `pyproject.toml`; the
+  install dependency and the `hermes-floor` CI job enforce the same floor
+- Detects changes to consumed Hermes hook names and payload fields in local and
+  scheduled CI
+- Sources the package version from `src/mordred_hermes/__about__.py`; use
+  `tools/bump_version.py` to update its human and manifest mirrors
 
 ### Observability
 
@@ -1302,5 +1313,5 @@ Required before starting development:
    mordred_wizard = "mordred_hermes.wizard"
    mordred_e2e = "mordred_hermes.extension.gateway_plugin"
    ```
-5. CI workflow: `.github/workflows/ci.yml` (pytest + ruff + mypy), `.github/workflows/upstream-check.yml` (detects Hermes hook **name** drift; diffing payload field shape is v2)
+5. CI workflow: `.github/workflows/ci.yml` (pytest + ruff + mypy), `.github/workflows/upstream-check.yml` (detects consumed Hermes hook-name and payload-field drift)
 6. ~~Submitting the HSeam-1 PR~~ → **Removed**: because of the zero-PR commitment (MIGRATION.md §10 row 4, finalized 2026-05-07), no PR is submitted to Hermes upstream. Disable protection is fully handled by the plugin-side strict-mode startup refusal (§Plugin-disable protection Tier A). If hard enforcement becomes necessary in v2, the `[hard-lock]` extra (vendored fork) is added

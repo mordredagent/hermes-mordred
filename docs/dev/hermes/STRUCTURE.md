@@ -191,10 +191,10 @@ Forks or repositories that vendor Hermes as a base may add fork-specific top-lev
 
 ## Cross-references
 
-- [`AGENTS.md`](../../../AGENTS.md) — Contributor development guide (canonical).
-- [`../../website/docs/developer-guide/`](../../../website/docs/developer-guide/) — Public developer docs.
-- [`../../website/docs/reference/`](../../../website/docs/reference/) — Public API reference.
-- [`../../gateway/platforms/ADDING_A_PLATFORM.md`](../../../gateway/platforms/ADDING_A_PLATFORM.md) — How to add a new platform adapter.
+- [`AGENTS.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/AGENTS.md) — Contributor development guide (canonical).
+- [`../../website/docs/developer-guide/`](https://github.com/NousResearch/hermes-agent/tree/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/developer-guide) — Public developer docs.
+- [`../../website/docs/reference/`](https://github.com/NousResearch/hermes-agent/tree/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/website/docs/reference) — Public API reference.
+- [`../../gateway/platforms/ADDING_A_PLATFORM.md`](https://github.com/NousResearch/hermes-agent/blob/d4493e2c6e1eeb1b7f779ab572014ff138a1c050/gateway/platforms/ADDING_A_PLATFORM.md) — How to add a new platform adapter.
 - [`DESIGN.md`](./DESIGN.md) — Hermes architecture / design overview (this directory).
 
 ---
