@@ -1,6 +1,9 @@
 # Mordred — usage guide
 
-> **Audience**: operators running Mordred locally. For the design rationale see [`SPEC.md`](../dev/SPEC.md), [`POLICY.md`](../dev/POLICY.md), [`SECRETS_ENV_ENCRYPTION.md`](../dev/SECRETS_ENV_ENCRYPTION.md), [`KEYVAULT_BACKENDS.md`](../dev/KEYVAULT_BACKENDS.md). For developer environment setup see [`setup.md`](../dev/setup.md).
+> **Audience**: operators running Mordred locally. For the current design and
+> boundaries see [`SPEC.md`](../dev/SPEC.md), [`POLICY.md`](../dev/POLICY.md),
+> and [`PATHS.md`](../dev/PATHS.md). For developer environment setup see
+> [`setup.md`](../dev/setup.md).
 >
 > **Scope**: the `mordred_wizard` CLI surface exposed today through the standalone `hermes-mordred …` command.
 
@@ -28,7 +31,7 @@ hermes-mordred status
 In this development checkout the fully-wired venv is `.venv`:
 
 ```sh
-cd <repo-root>            # /Users/.../hermes-mordred
+cd <repo-root>            # the hermes-mordred checkout
 .venv/bin/hermes-mordred status
 ```
 
@@ -69,9 +72,14 @@ hermes-mordred configure              # interactive setup → writes config.yaml
 hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privacy path
 hermes-mordred keyvault enable-se     # build the platform key helper (Linux: enable-tpm)
 hermes-mordred keyvault init          # create the hardware-backed keyvault
-hermes-mordred encryption enable env  # turn on at-rest encryption (first run creates the vault, prompts once for a passphrase)
+hermes-mordred encryption enable env  # macOS only: turn on transparent at-rest encryption
 hermes-mordred status                 # verify the result at a glance
 ```
+
+On Linux, the supported operator path stops after keyvault setup and status.
+The TPM-backed keyvault is supported, but transparent env/config runtime
+loading is inactive, `vault recover` lacks a Linux device-anchor store, and
+plaintext remains the runtime source.
 
 `status` prints a single-screen summary (`policy` / `network` / `keyvault` /
 per-target `encryption`); see
@@ -88,6 +96,25 @@ machine-readable output.
 hermes-mordred status            # human-readable
 hermes-mordred status --json     # machine-readable
 ```
+
+### `setup` — resumable first-run orchestrator
+
+Runs the upstream-Hermes check, Mordred configuration, network selection,
+platform helper, keyvault ceremony, macOS env encryption, and final status in
+order. Completed steps are skipped on a rerun. A blocked or corrupt keyvault
+stops with repair guidance; setup never resets it automatically.
+
+```sh
+hermes-mordred setup
+hermes-mordred setup --non-interactive
+hermes-mordred setup --with-hermes-setup --unattended-keys
+hermes-mordred setup --skip-hermes-setup --paper-only
+```
+
+`--non-interactive` runs only steps that need no decisions and reports the
+remaining manual commands. Key policy flags affect newly created keys only;
+`--store-seed-for-hd` is the default and `--paper-only` opts out of storing the
+seed for later HD-wallet derivation.
 
 ### `configure` — interactive setup
 Writes `config.yaml` + `policy.json`. Interactive by default; scriptable with
@@ -151,8 +178,10 @@ hermes-mordred audit purge --before YYYY-MM-DD --yes  # delete dated rotated log
 
 ### `encryption` — the recommended on/off switch
 At-rest encryption per target: `env`, `config`, `memory`, `workspace` — or `all`
-to apply the verb to every target at once (best-effort; `workspace` is skipped on
-non-macOS or when its tooling isn't installed, and never fails the batch).
+to apply the verb to every target at once. The transparent runtime lifecycle is
+currently macOS-only. Off macOS, enrollment can exist but `status` reports the
+target inactive and plaintext remains authoritative; `workspace` is skipped
+when its macOS tooling is unavailable and never fails an `all` batch.
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  {env,config,memory,workspace,all}
@@ -181,6 +210,12 @@ hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclav
 hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
 hermes-mordred keyvault eth <sub>           # Ethereum keys — see below
 ```
+
+`recover --blob` is import-only. The Python API has an internal
+`export_backup()` operation, but the current operator CLI has no
+`keyvault export` command and does not create a backup file for you. Never run
+`reset` on a profile that still protects data unless you already hold and have
+independently verified a usable backup blob or have removed every dependency.
 
 #### `keyvault eth` — Ethereum keys (HD wallet)
 
@@ -215,22 +250,13 @@ key IDs, or moving one between `HERMES_HOME` profiles.*
 
 Keys created by current releases are isolated per `HERMES_HOME`. A legacy
 keyvault remains readable, but `keyvault reset` intentionally retains its
-machine-global legacy Keychain tag because another profile may share it. To
-migrate safely: verify and export a backup, reset the old profile, then recover
-the backup into the fresh profile. The logical key ID in the backup does not
-change.
-
-Legacy helper keys created with an explicit API `home=` may physically remain in
-the helper store selected by the process's old ambient `HERMES_HOME`. Mordred
-tries the current profile store first and that historical ambient store second,
-for legacy reads only. If the old home is no longer the ambient one, set one of
-these while exporting the legacy backup — they are authoritative, so remove them
-before recovering into the fresh profile:
-
-```sh
-MORDRED_SEKEY_STORE=/old/home/mordred/keyvault/sekey   # macOS
-MORDRED_TPMKEY_STORE=/old/home/mordred/keyvault/tpm    # Linux
-```
+machine-global legacy Keychain tag because another profile may share it.
+There is no supported public-CLI migration path unless you already possess an
+`MRKV` backup blob: the CLI can import with `recover --blob`, but it cannot
+export the old keyvault. Do not improvise a reset/export sequence from internal
+environment variables or Python APIs on production data. Keep the original
+profile and native helper store intact until the supported export workflow is
+available.
 
 Current profiles also record the profile-scoped audit wrapping key separately
 from the main key. If audit-key generation or its durability check is
@@ -247,7 +273,7 @@ hermes-mordred vault add <name> <file>      # encrypt a file under a logical nam
 hermes-mordred vault status                 # generation + enrolled file names (non-prompting)
 hermes-mordred vault cat <name>             # decrypt one entry to stdout
 hermes-mordred vault migrate                # import plaintext .env + config.yaml
-hermes-mordred vault recover                # re-key a vault copied to this machine onto its device
+hermes-mordred vault recover                # macOS only: re-key a copied vault onto this Mac
 hermes-mordred vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
 hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY
 hermes-mordred vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
@@ -257,26 +283,32 @@ hermes-mordred vault disable-config-decrypt # stop managing config.yaml; restore
 #### Migrate to a new machine
 
 The vault is sealed two ways: this device's key (the everyday hot path) and a
-recovery passphrase (the cold path). When you move to a new machine, copy the
-vault directory across and then re-key it onto the new device:
+recovery passphrase (the cold path). The supported recovery workflow currently
+requires macOS on the destination. When you move to a new Mac, copy the vault
+directory across and then re-key it onto the new device:
 
 ```sh
 # on the old machine — the vault lives under <hermes home>/mordred/vault
 cp -a ~/.hermes/mordred/vault /path/to/transfer/   # then move it to the new machine
 
 # on the new machine, after restoring the directory to the same location
-hermes-mordred vault recover                # prompts for the recovery passphrase, re-keys onto this device's Secure Enclave
+hermes-mordred vault recover                # prompts for the recovery passphrase and re-keys onto this device
 ```
 
 `vault recover` cold-opens the copied vault with the recovery passphrase and
-re-wraps the **same** master key under a fresh wrapping key on this machine's
-Secure Enclave (TPM on Linux), so the everyday automatic (writable) hot path
-works locally again — the master key and every enrolled file are unchanged, and
-your recovery passphrase stays the same for the next machine. It is the
-encryption-vault counterpart to `keyvault recover` (which restores keyvault key
-material from a backup blob). Until you run it, a copied vault opens read-only
-(`vault cat` works via the passphrase; `vault status` works with no passphrase
-at all, since it only reads the on-disk manifest — but enrolling does not).
+re-wraps the **same** master key under a fresh wrapping key in this Mac's Secure
+Enclave, so the everyday automatic (writable) hot path works locally again —
+the master key and every enrolled file are unchanged, and your recovery
+passphrase stays the same for the next Mac. It is the encryption-vault
+counterpart to `keyvault recover` (which restores keyvault key material from a
+backup blob). Until you run it, a copied vault opens read-only (`vault cat`
+works via the passphrase; `vault status` works with no passphrase at all, since
+it only reads the on-disk manifest — but enrolling does not).
+
+Do not run `vault recover` on Linux. The TPM helper supplies the wrapping
+backend, but the current production path still resolves the device anchor
+through the macOS Keychain store. Linux recovery requires a native anchor-store
+implementation first and can otherwise fail after staging recovery files.
 
 ### `plugins`
 ```sh
@@ -331,9 +363,9 @@ aborts cleanly with a non-interactive error (and a redirected stdout is refused
 separately) instead of raising a raw error — always run it in your own terminal.
 Three steps, in order:
 
-1. **Choose a Passphrase** (hidden input). It is never stored anywhere; combined
-   with the Seed Phrase it protects the keyvault. Lose it and the keyvault cannot
-   be recovered.
+1. **Choose a Passphrase** (hidden input). It is never stored. Together with
+   the Seed Phrase and an exported backup blob, it is required for
+   cross-device keyvault recovery.
 2. **A 24-word Seed Phrase is shown** (auto-clears after 60s) — write it down.
 3. **Offline verification digest.** In a second tab/device, run the command below,
    then re-enter the 64-char digest it prints at the `Verification digest …`
@@ -360,27 +392,28 @@ Three steps, in order:
 > device key is ever lost). Later enables reuse it silently. You *can* pre-create
 > the vault with `vault init`, but you don't need to — `encryption` drives it.
 
-> **On ordering**: the recommended order is `keyvault init` → `encryption enable
-> env`. But you *can* run `encryption enable env` **directly** — on first run it
-> auto-creates the underlying vault and device key and asks once for a recovery
-> passphrase. The difference is not "does it work" (both do); it's that running
-> `keyvault init` first takes you through the **formal 24-word seed backup
-> ceremony** before anything is encrypted. If you just want encryption on, running
-> `enable` directly is fine.
+> **On ordering**: `keyvault init` and `encryption enable env` create different
+> stores and different native keys. Run `keyvault init` when you need keyvault
+> envelopes or HD-wallet derivation. Run `encryption enable env` to create the
+> at-rest file vault. The 24-word keyvault seed does not replace the file
+> vault's recovery passphrase and does not reconstruct its encrypted files.
+> The current CLI also cannot create the backup blob required to restore the
+> keyvault envelopes on another device.
 
 ### 4.2 The device key and the recovery passphrase are different things
 
-The **device key** that `keyvault init` creates and the **recovery passphrase**
-that `encryption enable` asks for are **not the same**. They are **two keyholes**
-into the *same single master key* — split on purpose.
+For the at-rest file vault, the **device key** and the **recovery passphrase**
+are two different ways to open the same random master key. Both are created by
+the first `encryption enable` (or an explicit `vault init`). They are separate
+from the main `default` key and seed ceremony created by `keyvault init`.
 
 | | ① Device key | ② Recovery passphrase |
 |---|---|---|
-| Created by | `keyvault init` (also auto-made by a direct `encryption enable`) | `encryption enable` (asked once, on first run) |
+| Created by | First `encryption enable` or `vault init` | First `encryption enable` or `vault init` |
 | What it is | a Secure Enclave / TPM hardware key | a string you remember |
-| Where it lives | inside this device's chip (can't be extracted) | in your head / a password manager |
-| When it's used | **automatically** on this device (no typing — for unattended runs) | to **recover** when the device is lost (typed by hand) |
-| Weakness | useless if the device breaks or is lost | must be typed each time / you must store it |
+| Where it lives | native device/helper storage; it is non-exportable | with the operator, ideally in a password manager |
+| When it's used | Normal device-backed vault opens | Cold recovery or migration to another device |
+| Weakness | Lost with an unavailable device/helper store | Must be stored and entered securely |
 
 Both seal the same master key:
 
@@ -390,13 +423,13 @@ Both seal the same master key:
 ```
 
 **Why not collapse them into one?**
-- **Only ①** → lose the device and the vault is **unrecoverable forever**.
-- **Only ②** → you must type it on every startup (**no unattended operation**) and you lose hardware protection.
 
-① can't be carried (it never leaves the chip); ② can. They cover each other's
-weakness — the classic "**something you have (the device) + something you know
-(the passphrase)**" pairing. Since ① literally cannot be typed, they can't be the
-same one even in principle.
+- **Only ①** → lose the device and the vault is **unrecoverable forever**.
+- **Only ②** → every normal open needs operator input and loses the
+  device-backed hot path.
+
+① cannot be exported; ② can be carried. They are alternative wrappers around
+one master key, not two factors that must both be presented for each open.
 
 ### 4.3 Touch ID prompts — why several per command, and how to silence them
 
@@ -426,18 +459,21 @@ on a later fresh device-key creation command:
 ```sh
 hermes-mordred keyvault enable-se                # build + install/probe the SE helper
 MORDRED_SEKEY_UNATTENDED=1 hermes-mordred keyvault init
-                                     # create the device key unattended
+                                     # optional main keyvault key, unattended
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
+                                     # file-vault device key, unattended
 ```
 
-After this the vault decrypts with **zero Touch ID prompts** while your session is
-unlocked.
+The environment variable applies only to the command it prefixes. After the
+file-vault key is created unattended, its normal opens do not require Touch ID
+while your login session is unlocked.
 
 `keyvault enable-se` may install or refresh the helper with an existing
 keyvault, but never creates, promotes, or migrates a wrapping key. Existing
 helper-store, legacy PyObjC-Keychain, and software keys remain in their original
 namespace and continue through ordered backend fallback. The same
-`MORDRED_SEKEY_UNATTENDED=1` policy can be placed on a recovery command when
-restoring into a genuinely fresh vault.
+`MORDRED_SEKEY_UNATTENDED=1` policy can prefix a recovery command when that
+command creates a genuinely fresh device key.
 
 > **Trade-off**: an unattended SE key (access control `.privateKeyUsage` only) can
 > be unwrapped by any process running as you while the Mac is unlocked — you trade
@@ -446,9 +482,13 @@ restoring into a genuinely fresh vault.
 
 > **Already created an attended key?** The attended/unattended choice is fixed
 > when the key is created. Re-running `enable-se` safely refreshes the helper
-> but cannot convert that key; use the
-> documented verified-backup/recovery workflow to restore into a fresh vault
-> whose recovery command carries `MORDRED_SEKEY_UNATTENDED=1`.
+> but cannot convert that key. For the file vault, keep the complete vault
+> directory and recovery passphrase; `vault recover` can re-key a copied vault
+> on a genuinely fresh device/profile, but it is not an in-place policy toggle.
+> For the main keyvault, the CLI can import a backup blob but cannot export one,
+> so there is no general supported conversion ceremony unless you already have
+> that blob. Keep using attended keys in a foreground session, and never reset
+> either store while secrets or wallets still depend on it.
 
 ### 4.4 `network init` — the dialog and prompts
 
@@ -559,9 +599,9 @@ are skipped entirely when you don't pick Mullvad. So **Proton VPN** →
 
 ### 4.5 `configure` — policy mode and the agent harness in detail
 
-`hermes-mordred configure` walks through a short list of questions — it runs the underlying
-Hermes setup first, then Mordred's own prompts. **If in doubt, press Enter
-through all of them**: the defaults are the safe, private choice.
+`hermes-mordred configure` walks through a short list of Mordred questions. It
+does not run upstream `hermes setup` unless you pass `--with-hermes-setup`.
+**If in doubt, press Enter through the Mordred prompts** to keep their defaults.
 
 | # | Question | Default | What it means | Do |
 |---|---|---|---|---|
@@ -598,7 +638,7 @@ through all of them**: the defaults are the safe, private choice.
 
 | Mode | What it means | Who it's for |
 |---|---|---|
-| `strict` | The strictest. Blocks cloud LLMs, disables IPv6, and refuses to run when a known AI harness is detected. | Advanced users who want maximum privacy. |
+| `strict` | The strictest. Refuses unapproved cloud LLMs, disables IPv6 use by Mordred's Tor client, and refuses a declared/known AI harness. | Advanced users who want fail-closed behavior. |
 | `lenient` (**default / recommended**) | Standard. Guards are active but stay out of your way — the built-in default. | Most people, and anyone who just wants it working. |
 | `off` | Disables all guards entirely. | Anyone who wants no restrictions at all. |
 
@@ -612,19 +652,20 @@ raises or lowers security — think of it as an honesty field that tells Mordred
 what it can and cannot police.
 
 **Premise — how Mordred guards you:**
-Mordred hooks into `pre_llm_call`, the moment right before Hermes calls a cloud LLM, and
-decides "allow or deny this traffic." This rests on one assumption: **every LLM call must
-pass through that hook.**
+For the primary Hermes request, Mordred checks the resolved provider and actual
+endpoint at `pre_api_request`, immediately before egress. Hermes auxiliary LLM
+clients do not all emit that hook, so Mordred also guards their resolver and
+client-construction seams.
 
 ```
-[your code] → [pre_llm_call hook inspects] → [cloud LLM]
-                       ↑ Mordred decides allow / deny here
+[Hermes provider] → [pre_api_request check] → [LLM endpoint]
+                              ↑ allow or refuse here
 ```
 
 **Problem — external tools (harnesses) take a side road:**
-Codex / Claude CLI / Cursor / ACP clients carry their own line to the AI. They call the LLM
-*without going through Hermes*, so the hook never sees it — the traffic is invisible to
-Mordred.
+Codex / Claude CLI / Cursor / ACP clients carry their own line to the AI. They
+call the LLM *without going through Hermes*, so neither the primary hook nor
+the auxiliary guards see it — the traffic is invisible to Mordred.
 
 ```
 [Codex / Claude CLI / …] ──direct──→ [cloud LLM]   ← bypasses the hook = invisible to Mordred
@@ -657,35 +698,37 @@ If none of this rings a bell, `none` is correct.
 
 ## 5. The three storage layers
 
-Mordred's at-rest encryption is a stack — pick the highest layer that does the job:
+The three command families are related, but they are not one nested store:
 
+```text
+native device backend (Secure Enclave or TPM)
+├── keyvault   purpose-bound MREN envelopes and wallet/seed material
+└── vault      encrypted file container with its own device key + passphrase
+    └── encryption   macOS-oriented env/config/memory/workspace facade
 ```
-encryption   ← recommended on/off switch (env / config / memory / workspace)
-   │
-keyvault     ← hardware-backed key material (Secure Enclave on macOS, TPM on Linux)
-   │
-vault        ← the underlying encrypted file store (advanced; rarely touched directly)
-```
 
-- **`encryption`** is what you want 95% of the time.
-- **`keyvault`** holds the hardware-bound key that seals the vault. On macOS
-  Apple Silicon the live path is the Secure Enclave helper (`enable-se`); on
-  Linux it is the TPM 2.0 helper (`enable-tpm`).
-- **`vault`** is the file container the other two drive. Use it directly only for
-  recovery or low-level inspection.
+- **`keyvault`** manages the main logical key, purpose-bound secret envelopes,
+  recovery-digest ceremony, and wallet material.
+- **`vault`** is a separate encrypted file container under
+  `<home>/mordred/vault/`. Use its commands for migration, cold recovery, or
+  low-level inspection.
+- **`encryption`** drives the vault for common targets. Its transparent runtime
+  lifecycle is macOS-only; Linux keyvault/TPM support does not make these
+  targets active.
 
-See [`SECRETS_ENV_ENCRYPTION.md`](../dev/SECRETS_ENV_ENCRYPTION.md) and
-[`KEYVAULT_BACKENDS.md`](../dev/KEYVAULT_BACKENDS.md) for the full design.
+See [`SPEC.md`](../dev/SPEC.md) for the security contract and
+[`PATHS.md`](../dev/PATHS.md) for the complete storage inventory.
 
 ---
 
 ## 6. Conversational read-only access (`mordred-status` skill)
 
-Mordred deliberately registers **no agent tools or skills** — an agent must not
-be able to loosen its own constraints, and secrets must never flow through a
-recorded transcript ([`HARNESS_PRIVACY.md`](../dev/HARNESS_PRIVACY.md), domain
-separation). The one sanctioned exception is **observation**: a read-only skill
-lets you ask the Hermes agent "what's my mordred status?" in chat.
+Mordred's runtime plugins register no mutation-capable agent tools. An agent
+must not be able to loosen its own constraints, and secrets must not flow
+through a recorded transcript. The repository does include one optional,
+read-only observation skill so you can ask the Hermes agent "what's my mordred
+status?" in chat. The trust boundary is documented in
+[`SPEC.md`](../dev/SPEC.md) §Threat Model & Accepted Limitations.
 
 The skill ships in this repo at `skills/mordred-status/SKILL.md`.
 Install = copy it into the Hermes skills directory:
@@ -719,7 +762,10 @@ including under strict mode).
   via `keyvault enable-se`. The `workspace` encryption target is "sealed when
   idle" only (not while mounted under the same user).
 - **Linux**: TPM 2.0 is the key backend (`keyvault enable-tpm`). MVP binding is
-  machine-only (Tier 2 — no per-use PIN/PCR prompt).
+  machine-only (Tier 2 — no per-use PIN/PCR prompt). Transparent `.env` and
+  `config.yaml` loading/resealing, memory-key provisioning through that
+  lifecycle, and workspace encryption are inactive; plaintext stays the
+  runtime source and status reports the limitation.
 - **Fallback behavior**: macOS can use a software P-256 key in the login
   Keychain when Secure Enclave access is unavailable. Linux deliberately has no
   software fallback and fails closed without the TPM helper.

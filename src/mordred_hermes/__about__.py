@@ -7,7 +7,7 @@
 # /src, /tests, /README.md, /pyproject.toml, /native, /packaging/pth
 # (see [tool.hatch.build.targets.sdist] in pyproject.toml); docs/ is excluded,
 # so a wheel built from that sdist can't see the docs-tree VERSION marker
-# (TODO 0.5 L64). Keeping the canonical value here is the
+# Keeping the canonical value here is the
 # build-isolation-safe resolution of that follow-up.
 #
 # Bump with `python tools/bump_version.py <new-version>`, which rewrites this

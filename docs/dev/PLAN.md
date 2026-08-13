@@ -46,10 +46,12 @@ Phase 0 is complete. Its rules remain the baseline for every change.
 
 ### 0.3 Mordred-owned paths (kept in sync with PATHS.md)
 
-All persistent Mordred state is resolved from `HERMES_HOME` and stored beneath
-`<hermes-home>/mordred/`, except the extension's established
-`<hermes-home>/extension/` state. [`PATHS.md`](./PATHS.md) owns exact paths,
-permissions, writers, and readers.
+Persistent state is resolved from the active Hermes profile. Most private
+state is beneath `<hermes-home>/mordred/`; extension state lives under
+`<hermes-home>/extension/`, and the encryption facade deliberately manages
+selected Hermes-owned `.env`, config, memory, and workspace targets.
+[`PATHS.md`](./PATHS.md) owns the complete paths, permissions, writers, and
+readers.
 
 ### 0.4 Plugin scaffolding pattern
 
@@ -80,7 +82,8 @@ permissions, writers, and readers.
   `hermes-mordred` independently, publish the real `0.1.0a16` distribution,
   then publish a metadata-only `mordred-hermes` shim. The import tree,
   entry-point IDs, persistent state, and native helper identifiers do not
-  change. `MIGRATION.md` §6 owns the ordering and compatibility contract.
+  change. [`CI.md`](./CI.md) §Normal release owns the ordering and compatibility
+  contract.
 
 ### 0.6 CI workflow
 
@@ -184,9 +187,10 @@ an explicitly gated live-device test.
   2.0 helper on Linux; Linux has no software fallback.
 - Store encrypted envelopes and metadata under the profile-owned keyvault root
   with atomic writes, process locks, permission checks, and purpose-bound AAD.
-- Provide recovery seed/digest, portable backup export/import, passphrase
-  recovery, audit encryption, config/env/memory integration, Ethereum keys, and
-  extension signing.
+- Provide recovery seed/digest, portable backup export/import in the Python
+  API, passphrase recovery, audit encryption, Ethereum keys, extension signing,
+  and macOS-only config/env/memory runtime integration. The operator CLI is
+  import-only until the export task in [`TODO.md`](./TODO.md) §4.2 lands.
 - Keep native imports lazy so unsupported platforms can still import the
   package and report capabilities.
 
@@ -194,7 +198,7 @@ an explicitly gated live-device test.
 
 The CLI owns `keyvault init/list/verify-digest/recover/reset`, native helper
 installation, Ethereum subcommands, the lower-level vault interface, and the
-recommended `encryption` facade.
+`encryption` facade. It does not currently expose the API's backup export.
 
 ### 4.3 Tests
 
@@ -206,9 +210,10 @@ software TPM. Real Secure Enclave validation remains manually gated.
 
 ### Documentation
 
-Use [`README.md`](./README.md) as the developer index. Keep current contracts in
+Use [`README.md`](./README.md) as the only developer index. Keep current contracts in
 SPEC/POLICY/PATHS/HOOK_PAYLOADS, operational policy in CI/setup, and future work
-in TODO/ROADMAP. PR descriptions hold change history.
+in TODO/ROADMAP. Git and PR descriptions hold change history; package-local
+plugin READMEs are not separate documentation authorities.
 
 ### Testing posture
 
@@ -218,7 +223,8 @@ temporary `HERMES_HOME`.
 
 ### Type/build/lint posture
 
-Run pytest, Ruff lint/format check, and `mypy --strict src tools` through uv.
+Run pytest, Ruff lint/format check, and
+`mypy --strict src tools scripts/keyvault_offline_digest.py` through uv.
 Optional imports stay behind lazy or `TYPE_CHECKING` boundaries so CI's reduced
 extras remain valid.
 
@@ -253,15 +259,17 @@ historical context, not the source of truth.
   per-skill routes.
 - Co-resident malware and OS-level traffic bypass remain outside the plugin
   threat boundary.
-- Secure Enclave, live LLM, and live VPN paths require periodic on-device
-  validation because CI cannot exercise them.
+- Secure Enclave and live LLM paths require periodic on-device validation.
+  Live VPN validation is manual-only, including its explicitly dispatched
+  GitHub Actions workflow.
 
 ## Recommended execution order
 
 1. Pick an unchecked item from [`TODO.md`](./TODO.md) and confirm it belongs to
    the current release rather than the roadmap.
 2. Update SPEC/PLAN first when behavior or cross-plugin contracts change.
-3. Implement one plugin per PR and update its README in the same PR.
+3. Implement one plugin per PR and update its canonical SPEC/PLAN/PATHS/POLICY
+   sections in the same PR.
 4. Run the reduced-extras compatibility checks when touching optional
    dependency code.
 5. Record one-line Changes/Fixes entries in the PR description; do not create a

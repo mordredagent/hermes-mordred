@@ -361,8 +361,8 @@ def make_audit_writer(
 ) -> Writer:
     """Return the audit-log :class:`Writer` for the current keyvault state.
 
-    Phase 4 L465: once the Mordred keyvault is initialized the audit log
-    must be AES-GCM-encrypted at rest. This factory returns a keyvault
+    Once the Mordred keyvault is initialized, the audit log should be
+    AES-GCM-encrypted at rest. This factory returns a keyvault
     :class:`~mordred_hermes.keyvault.log_encryption.EncryptedWriter` when
     the keyvault is initialized *and* its audit-log wrapping key is
     usable, and an :class:`NDJSONWriter` otherwise.
