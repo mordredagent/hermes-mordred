@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 encryption, hardware-backed keys, Tor/VPN routing, local-LLM policy enforcement,
 and end-to-end encryption for Slack and Discord gateway messages.
 
-**Status: active alpha** — current release `0.1.0a16`.
+**Status: active alpha** — current release `0.1.0a17`.
 
 New here? Follow the
 **[Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
@@ -81,11 +81,11 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a16"
+  "hermes-mordred[macos]==0.1.0a17"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a16"
+  "hermes-mordred[keyvault]==0.1.0a17"
 ```
 
 See the [Quickstart](https://github.com/InternetMaximalism/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
@@ -203,7 +203,7 @@ The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a16"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a17"
 ```
 
 Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
