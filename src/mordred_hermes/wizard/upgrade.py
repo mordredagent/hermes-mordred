@@ -14,8 +14,8 @@ Story 1.5 (OpenClaw migration) is dispatched to
 directory exists. Phase E lands the dispatch + report wiring; the actual
 migrator implementation lives in that sibling module.
 
-The :class:`UpgradeOptions` flag rules per PATHS.md §OpenClaw migration
-L286 H5 table:
+The :class:`UpgradeOptions` flag rules follow PATHS.md §Migration from legacy
+OpenClaw paths:
 
 - ``--reset`` overrides every other policy and forces overwrite.
 - ``--non-interactive`` requires ``--policy-conflict`` to be pre-specified

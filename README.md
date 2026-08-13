@@ -4,11 +4,11 @@
 [![CI](https://github.com/mordredagent/hermes-mordred/actions/workflows/ci.yml/badge.svg)](https://github.com/mordredagent/hermes-mordred/actions/workflows/ci.yml)
 
 Privacy-preserving plugins for the
-[Hermes agent](https://github.com/NousResearch/hermes-agent): at-rest secret
-encryption, hardware-backed keys, Tor/VPN routing, local-LLM policy enforcement,
-and end-to-end encryption for Slack and Discord gateway messages.
+[Hermes agent](https://github.com/NousResearch/hermes-agent): hardware-backed
+keys, Tor/VPN routing, local-LLM policy enforcement, end-to-end gateway
+messages, and macOS-integrated at-rest secret encryption.
 
-**Status: active alpha** — current release `0.1.0a16`.
+**Status: active alpha** — current release `0.1.0a17`.
 
 New here? Follow the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
@@ -35,6 +35,9 @@ The package exposes six `hermes_agent.plugins` entry points:
 - macOS or Linux. macOS can fall back from Secure Enclave to a software P-256
   key in the login Keychain. Linux requires TPM 2.0 and fails closed when its
   helper is unavailable.
+- The transparent `.env`, configuration, memory-key, and workspace encryption
+  lifecycle is currently macOS-only. Linux supports the TPM-backed keyvault,
+  but these runtime targets report inactive and continue to use plaintext.
 
 ## Install (users, from PyPI)
 
@@ -81,11 +84,11 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a16"
+  "hermes-mordred[macos]==0.1.0a17"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a16"
+  "hermes-mordred[keyvault]==0.1.0a17"
 ```
 
 See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
@@ -146,12 +149,23 @@ hermes-mordred keyvault enable-tpm
 hermes-mordred keyvault init
 ```
 
-Turn on encryption and verify it:
+On macOS, turn on transparent `.env` encryption and verify it:
 
 ```sh
-hermes-mordred encryption enable env
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
 hermes-mordred status                    # the env row should read [on] enrolled
 ```
+
+The environment variable applies to each command separately. `keyvault init`
+creates the main keyvault key; the first `encryption enable` creates a distinct
+device key for the at-rest file vault, so both creation commands need the flag
+when both keys must be unattended.
+
+On Linux, the supported operator path stops after keyvault initialization and
+status. The transparent env/config startup shims are not active there, and
+`vault recover` does not yet have a Linux device-anchor store;
+`encryption status` reports enrolled targets as inactive and plaintext remains
+the runtime source.
 
 Everyday commands:
 
@@ -203,7 +217,7 @@ The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a16"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a17"
 ```
 
 Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
@@ -264,8 +278,9 @@ for safe isolation, loaded-code verification, and the full check suite.
 
 - For keyvault, Touch ID, and recovery issues, see
   [USAGE §4](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#4-interactive-command-walkthroughs).
-  Encrypted data cannot be recovered if both the device key and recovery
-  passphrase are lost.
+  The file-vault recovery command is currently macOS-only; encrypted data
+  cannot be recovered if both its device key and recovery passphrase are lost.
+  The main keyvault CLI can import but does not yet export a backup blob.
 - For extension, gateway, and port 7788 issues, see the
   [extension troubleshooting guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md#troubleshooting).
 - For Tor/VPN issues, run `hermes-mordred network status`, then
@@ -357,8 +372,7 @@ docs/dev/              specification and developer documentation
 | Users | [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md) | PyPI install to protected secrets |
 | Users | [Usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md) | Complete command reference and ceremonies |
 | Users | [Extension guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Browser extension, E2E messaging, and wallet bridge |
-| Users | [Hermes basics](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/HERMES_BASICS.md) | Running the base Hermes agent |
-| Developers | [Development index](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/README.md) | Current sources of truth and historical records |
+| Developers | [Development index](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/README.md) | Maintained sources of truth |
 | Developers | [Development setup](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/setup.md) | Editable environment and validation workflow |
 
 ## License

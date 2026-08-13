@@ -1,7 +1,7 @@
 """mordred_keyvault.log_encryption — AES-GCM encryption layer for the audit log.
 
-Phase 4 PR6. SPEC.md §Audit log policy / §Audit-log encryption coupling +
-PLAN.md L549-555.
+The current format contract is documented in SPEC.md §Audit log policy and
+§Encrypted audit-log wire format.
 
 :class:`EncryptedWriter` is an AES-GCM-encrypting implementation of the
 Phase 1 ``Writer`` Protocol frozen in
@@ -37,15 +37,14 @@ stale DEK is wiped and the foreign file is rotated intact before a fresh
 header/DEK is created. A write-all loop completes the whole line even when
 ``os.write`` returns short.
 
-The DEK is unwrapped through the Secure Enclave authorization boundary
+The DEK is unwrapped through the selected native-key authorization boundary
 (:func:`mordred_keyvault.wrap.unwrap_dek`) only on the *read* side
-(:func:`decrypt_log_file`), which the ``hermes mordred audit decrypt`` CLI
-(PR8) drives. Writing never authorizes: :func:`~mordred_keyvault.wrap.wrap_dek`
-is an offline operation against the Enclave's public key.
+(:func:`decrypt_log_file`), which `hermes-mordred audit decrypt` drives.
+Writing never authorizes: :func:`~mordred_keyvault.wrap.wrap_dek` is an offline
+operation against the native key's public half.
 
-This module imports :mod:`cryptography` (via ``.crypto`` / ``.wrap``) and
-so, like its keyvault crypto siblings, is only importable where the
-``[macos]`` extra is installed.
+This module imports :mod:`cryptography` from the cross-platform ``keyvault``
+extra. Platform-specific custody stays behind ``NativeBackend``.
 """
 
 from __future__ import annotations

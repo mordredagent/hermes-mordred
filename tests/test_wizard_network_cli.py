@@ -218,7 +218,7 @@ class TestNetworkUseAtomicity:
 
     Detection strategy: PolicyWriter's ``_ensure_plugins_enabled`` adds
     the full Mordred-plugin list to ``plugins.enabled`` on every write
-    (HOOK_PAYLOADS.md §1 / TODO.md §0.5 L128). A plain ``Path.write_text``
+    (HOOK_PAYLOADS.md §1). A plain ``Path.write_text``
     would not produce that side effect. Asserting the side effect proves
     the write went through PolicyWriter and therefore got atomic-rename
     semantics — without us having to interrupt a write to test atomicity

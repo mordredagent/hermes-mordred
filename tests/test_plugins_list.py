@@ -1,8 +1,7 @@
-"""Tests for ``hermes mordred plugins list``.
+"""Tests for ``hermes-mordred plugins list``.
 
-Closes the UX gap from §0.5 L128: Hermes 0.11 silently drops plugin
-entry-point CLI commands, so users have no built-in way to see which
-Mordred plugins are loaded. The wizard surfaces this directly.
+The wizard exposes package entry-point discovery directly because the ordinary
+Hermes plugin listing does not surface it.
 
 Primary path: query :class:`hermes_cli.plugins.PluginManager` via
 :func:`get_plugin_manager`. Fallback: read ``~/.hermes/config.yaml``
