@@ -124,7 +124,7 @@ Do not resurrect historical option tables as current guidance.
 ## Quick reference
 
 - Hermes upstream URL: `https://github.com/NousResearch/hermes-agent`
-- Mordred repository: `InternetMaximalism/hermes-mordred`
+- Mordred repository: `mordredagent/hermes-mordred`
 - Distribution: `hermes-mordred` (PyPI; v1 is plugin-only)
 - Legacy distribution alias: `mordred-hermes` (metadata-only compatibility shim)
 - v2 candidate extra: `hermes-mordred[hard-lock]` (vendored fork, Tier B)

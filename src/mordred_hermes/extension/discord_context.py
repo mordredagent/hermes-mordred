@@ -21,7 +21,7 @@ from mordred_hermes import __version__
 from mordred_hermes._home import hermes_home
 
 _API_ROOT = "https://discord.com/api/v10"
-_SOURCE_URL = "https://github.com/InternetMaximalism/hermes-mordred"
+_SOURCE_URL = "https://github.com/mordredagent/hermes-mordred"
 _THREAD_TYPES = frozenset({10, 11, 12})
 _SNOWFLAKE_RE = re.compile(r"[0-9]{1,20}")
 # The browser extension gives the entire RPC eight seconds.  Keep route
