@@ -11,7 +11,7 @@ or `keyvault` for the current platform and adds both the extension server and
 Ethereum wallet dependencies with `--with-extension`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
   bash -s -- --with-extension
 ```
 

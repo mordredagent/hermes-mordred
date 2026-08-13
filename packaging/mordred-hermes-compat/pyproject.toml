@@ -23,8 +23,8 @@ integration = ["hermes-mordred[integration]==0.1.0a16"]
 dev = ["hermes-mordred[dev]==0.1.0a16"]
 
 [project.urls]
-Documentation = "https://github.com/InternetMaximalism/hermes-mordred/tree/main/docs"
-Source = "https://github.com/InternetMaximalism/hermes-mordred"
+Documentation = "https://github.com/mordredagent/hermes-mordred/tree/main/docs"
+Source = "https://github.com/mordredagent/hermes-mordred"
 
 # The compatibility distribution owns metadata only. Runtime modules and the
 # hermes-mordred console script belong exclusively to the new distribution so

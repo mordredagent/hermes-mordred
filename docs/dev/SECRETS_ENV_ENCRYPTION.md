@@ -13,7 +13,7 @@
 > MENV (`KEY=value`-only codec) proposal was generalized into a general-purpose
 > **vault** that encrypts arbitrary files (the 2026-05-28 redesign).
 > **Related**: `POLICY.md:224`, `keyvault/{vault,manifest,anchor,file_container,vault_master,kek}.py`.
-> **PR**: #64 (InternetMaximalism/hermes-mordred).
+> **PR**: #64 (mordredagent/hermes-mordred).
 
 ---
 

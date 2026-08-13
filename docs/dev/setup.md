@@ -69,7 +69,7 @@ before judging the running code.
 
 ```sh
 # 1. Get the repository
-git clone https://github.com/InternetMaximalism/hermes-mordred.git
+git clone https://github.com/mordredagent/hermes-mordred.git
 cd hermes-mordred
 
 # 2. Create the dev venv. This one command installs everything:

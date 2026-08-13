@@ -143,7 +143,7 @@ helper names, persistent key identifiers, state paths, plugin IDs, and
 `mordred_hermes` imports remain compatibility identifiers and are not renamed.
 Steps 2–5 completed on 2026-08-12: `0.1.0a16` was verified canonical-first on
 TestPyPI and production PyPI, the repository moved to
-`InternetMaximalism/hermes-mordred`, and all four Trusted Publisher claims now
+`mordredagent/hermes-mordred`, and all four Trusted Publisher claims now
 use the new repository name with their existing workflow and environment
 constraints.
 
