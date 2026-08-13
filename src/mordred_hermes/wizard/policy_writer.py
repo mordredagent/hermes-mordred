@@ -1,6 +1,6 @@
 """Round-trip writer for ``~/.hermes/config.yaml`` and ``~/.hermes/mordred/policy.json``.
 
-Sole writer for the wizard-owned files (PATHS.md L17-19 writer column).
+Sole writer for the wizard-owned policy files (PATHS.md §Overview).
 Preserves user comments, key order, and anchors in ``config.yaml`` via
 ``ruamel.yaml`` round-trip mode. Writes ``policy.json`` as the
 debugger-friendly mirror that other Mordred plugins read directly.
@@ -340,7 +340,7 @@ def _finish_policy_transaction(marker: Path) -> None:
 def _ensure_plugins_enabled(root: Any) -> None:
     """Ensure all Mordred plugin names appear in ``plugins.enabled``.
 
-    Per HOOK_PAYLOADS.md §1 / TODO.md §0.5 acceptance gate L128, Hermes's
+    Per HOOK_PAYLOADS.md §1, Hermes's
     entry-point plugins are NOT auto-loaded; their names must be listed
     in ``plugins.enabled`` for ``register()`` to be invoked.
 

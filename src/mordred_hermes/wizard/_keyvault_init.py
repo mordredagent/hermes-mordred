@@ -478,17 +478,25 @@ def _confirm_or_refuse(
     backend: NativeBackend,
     audit_sink: AuditSink,
     home: Path | None,
+    unattended: bool | None = None,
 ) -> GenerateResult | None:
     """Finalize the keyvault iff the offline digest matches. Returns the
     GenerateResult, or None (after printing) on a digest mismatch, an Enclave wrap
     error, or the re-init race guard.
+
+    ``unattended`` is forwarded verbatim to :func:`api.confirm_generate`, which
+    already accepts it (``keyvault/api.py``); ``None`` preserves the existing
+    behaviour exactly (the env-var fallback resolved deep in
+    ``keyvault._seckey_backend``).
     """
     from ..keyvault import api
     from ..keyvault._exceptions import WrapError
     from ..keyvault.digest import VerificationDigestMismatch
 
     try:
-        return api.confirm_generate(handle, user_digest, backend=backend, audit_sink=audit_sink, home=home)
+        return api.confirm_generate(
+            handle, user_digest, backend=backend, audit_sink=audit_sink, home=home, unattended=unattended
+        )
     except VerificationDigestMismatch:
         _term.emit_error(
             "Verification digest mismatch — the Seed or Passphrase was mis-transcribed. "
@@ -760,6 +768,7 @@ def init_keyvault(
     display_fn: Callable[[SeedDisplayHandle, SeedDisplaySurface], None] | None = None,
     blackout_assert: Callable[..., None] | None = None,
     store_seed_for_hd: bool = True,
+    unattended: bool | None = None,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
 
@@ -791,6 +800,14 @@ def init_keyvault(
     inject fakes. Returns 0 on a finalized keyvault, 1 on any refusal
     (already initialised, online host at the pre-check, passphrase mismatch,
     blackout failure, capture abort, expiry, digest mismatch, Enclave error).
+
+    ``unattended`` selects the authorization policy for the newly generated
+    wrapping key: ``True`` makes it usable by background callers (e.g. the
+    extension Gateway) without a per-use Touch ID / passcode prompt; ``False``
+    keeps the interactive per-use prompt; ``None`` (the default) preserves the
+    prior behaviour exactly, falling back to the ``MORDRED_SEKEY_UNATTENDED``
+    env var deep in ``keyvault._seckey_backend``. Forwarded verbatim to
+    :func:`..keyvault.api.confirm_generate`.
     """
     refusal = _preflight_or_refuse(home=home, blackout_assert=blackout_assert, surface=surface)
     if refusal is not None:
@@ -818,7 +835,7 @@ def init_keyvault(
     backend = resolve_backend(backend)
     sink = audit_sink if audit_sink is not None else _stderr_audit_sink
 
-    result = _confirm_or_refuse(handle, user_digest, backend=backend, audit_sink=sink, home=home)
+    result = _confirm_or_refuse(handle, user_digest, backend=backend, audit_sink=sink, home=home, unattended=unattended)
     if result is None:
         return 1
 

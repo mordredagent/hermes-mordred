@@ -33,6 +33,19 @@ fail() {
   exit 1
 }
 
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--with-extension] [--version VERSION]
+
+Install hermes-mordred into the Python environment owned by Hermes Agent.
+
+Options:
+  --with-extension  Add the browser-extension server and Ethereum wallet extras.
+  --version VERSION Install an exact PyPI release at or above the supported floor.
+  -h, --help        Show this help and exit.
+EOF
+}
+
 # Match the isolation used by Hermes's installer. A caller's Python or uv
 # project settings must not redirect package discovery into another checkout,
 # an ambient override must not redirect the download away from PyPI, and none
@@ -272,9 +285,58 @@ install_launcher() {
 
 main() {
   local hermes_launcher hermes_python env_root uv_bin metadata hermes_version
-  local platform package_spec legacy_spec installed_cli exposed_cli exposed_dir
+  local platform platform_extra package_extras package_spec legacy_spec
+  local installed_cli exposed_cli exposed_dir requested_version
   local legacy_metadata legacy_version
   local deps_were_consistent=0
+  local with_extension=0
+
+  requested_version=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --with-extension)
+        with_extension=1
+        shift
+        ;;
+      --version)
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          fail "--version requires a version"
+        fi
+        requested_version="$2"
+        shift 2
+        ;;
+      --version=*)
+        requested_version="${1#--version=}"
+        if [[ -z "$requested_version" ]]; then
+          fail "--version requires a version"
+        fi
+        shift
+        ;;
+      -h | --help)
+        usage
+        return 0
+        ;;
+      --)
+        shift
+        if [[ $# -gt 0 ]]; then
+          fail "unexpected argument: $1"
+        fi
+        ;;
+      -*)
+        fail "unknown option: $1"
+        ;;
+      *)
+        fail "unexpected argument: $1"
+        ;;
+    esac
+  done
+
+  # Keep requirement operators, URLs, whitespace, and shell metacharacters out
+  # of the package spec. uv remains the authority on whether the resulting
+  # value is a valid/canonical PEP 440 version.
+  if [[ -n "$requested_version" && ! "$requested_version" =~ ^[0-9][0-9A-Za-z._!+-]*$ ]]; then
+    fail "invalid version: ${requested_version}"
+  fi
 
   hermes_launcher="$(find_hermes_command)"
   hermes_python="$(find_hermes_python "$hermes_launcher")"
@@ -309,17 +371,27 @@ main() {
   platform="$(uname -s)"
   case "$platform" in
     Darwin)
-      package_spec="hermes-mordred[macos]>=${MIN_MORDRED_VERSION}"
-      legacy_spec='mordred-hermes[macos]'
+      platform_extra='macos'
       ;;
     Linux)
-      package_spec="hermes-mordred[keyvault]>=${MIN_MORDRED_VERSION}"
-      legacy_spec='mordred-hermes[keyvault]'
+      platform_extra='keyvault'
       ;;
     *)
       fail "unsupported platform ${platform}; Mordred currently supports macOS and Linux"
       ;;
   esac
+  package_extras="$platform_extra"
+  if ((with_extension)); then
+    package_extras="${package_extras},extension,ethereum"
+  fi
+  legacy_spec="${LEGACY_DISTRIBUTION_NAME}[${package_extras}]"
+  if [[ -n "$requested_version" ]]; then
+    # Retain the canonical-name floor even for exact pins so the permanent
+    # 0.0.0.dev0 reservation stub can never replace a working installation.
+    package_spec="${DISTRIBUTION_NAME}[${package_extras}]==${requested_version},>=${MIN_MORDRED_VERSION}"
+  else
+    package_spec="${DISTRIBUTION_NAME}[${package_extras}]>=${MIN_MORDRED_VERSION}"
+  fi
 
   # Mordred shares an environment with the running agent, so it can move a
   # dependency Hermes also pins. Record the state beforehand to report only a

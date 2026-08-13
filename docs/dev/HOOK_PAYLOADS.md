@@ -54,6 +54,10 @@ point.
 
 ## 3. Dynamic plugin disable in running session (TODO §0.8 L105)
 
+The heading is retained as a stable anchor; the old TODO line reference is
+historical. Current ownership is [`SPEC.md`](./SPEC.md)
+§Plugin-disable protection.
+
 Hermes does not re-register hooks when configuration is edited during an active
 process. A disable/enable change therefore takes effect at the next process
 start. Mordred documents and audits this startup boundary; it does not claim to
@@ -115,6 +119,10 @@ extension security guarantee from unused Hermes approval hooks.
 
 ## 8. Subprocess spawn API and proxy env passing (TODO §0.8 L101-103)
 
+The heading is retained as a stable anchor. [`PLAN.md`](./PLAN.md) §Boundary
+discipline and [`ROADMAP.md`](./ROADMAP.md) §v2-OS1 own the current and future
+execution boundaries.
+
 Mordred controls subprocess networking only where the selected Hermes/plugin
 boundary accepts an explicit environment. It never assumes that setting a
 process-global proxy retroactively changes already-constructed provider clients.
@@ -129,6 +137,9 @@ that choice for the process. Child-process code uses the approved proxy
 environment instead of copying arbitrary caller variables.
 
 ### 🔴 Phase 3 design implication (MAJOR — flagged by Codex review on PR #9)
+
+The historical heading remains for inbound anchors; the rule below is the
+current contract, independent of the review that first identified it.
 
 Switching the saved route while Hermes is running does not rebuild existing
 clients. Operators must restart Hermes. A conflicting live activation is
@@ -168,5 +179,6 @@ gated tests and last validation dates are tracked in [`CI.md`](./CI.md).
 2. Run `tests/test_hook_payload_drift.py` and the scanner against installed
    Hermes.
 3. Let the weekly workflow compare both PyPI and upstream `main`.
-4. Update SPEC/PLAN and the affected plugin README in the same behavior change.
+4. Update SPEC/PLAN and the affected canonical policy/path document in the same
+   behavior change.
 5. Never describe an old Hermes snapshot as the current source of truth.

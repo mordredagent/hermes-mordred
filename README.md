@@ -1,17 +1,17 @@
 # hermes-mordred
 
 [![PyPI](https://img.shields.io/pypi/v/hermes-mordred)](https://pypi.org/project/hermes-mordred/)
-[![CI](https://github.com/InternetMaximalism/mordred-hermes/actions/workflows/ci.yml/badge.svg)](https://github.com/InternetMaximalism/mordred-hermes/actions/workflows/ci.yml)
+[![CI](https://github.com/mordredagent/hermes-mordred/actions/workflows/ci.yml/badge.svg)](https://github.com/mordredagent/hermes-mordred/actions/workflows/ci.yml)
 
 Privacy-preserving plugins for the
-[Hermes agent](https://github.com/NousResearch/hermes-agent): at-rest secret
-encryption, hardware-backed keys, Tor/VPN routing, local-LLM policy enforcement,
-and end-to-end encryption for Slack and Discord gateway messages.
+[Hermes agent](https://github.com/NousResearch/hermes-agent): hardware-backed
+keys, Tor/VPN routing, local-LLM policy enforcement, end-to-end gateway
+messages, and macOS-integrated at-rest secret encryption.
 
-**Status: active alpha** — current release `0.1.0a16`.
+**Status: active alpha** — current release `0.1.0a17`.
 
 New here? Follow the
-**[Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)**
+**[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
 for the shortest path from an existing Hermes install to encrypted secrets.
 
 ## The plugins
@@ -35,6 +35,9 @@ The package exposes six `hermes_agent.plugins` entry points:
 - macOS or Linux. macOS can fall back from Secure Enclave to a software P-256
   key in the login Keychain. Linux requires TPM 2.0 and fails closed when its
   helper is unavailable.
+- The transparent `.env`, configuration, memory-key, and workspace encryption
+  lifecycle is currently macOS-only. Linux supports the TPM-backed keyvault,
+  but these runtime targets report inactive and continue to use plaintext.
 
 ## Install (users, from PyPI)
 
@@ -43,7 +46,23 @@ Start with an installed
 then run the Mordred installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
+```
+
+To include the browser-extension server and Ethereum wallet support, pass the
+installer option through `bash`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension
+```
+
+Add `--version VERSION` (replacing `VERSION` with the release to install) to
+pin either form to an exact PyPI release. The options can be combined:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension --version VERSION
 ```
 
 The script follows Hermes's own install layout: it resolves the environment
@@ -65,17 +84,19 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a16"
+  "hermes-mordred[macos]==0.1.0a17"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a16"
+  "hermes-mordred[keyvault]==0.1.0a17"
 ```
 
-See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
+See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for the inspect-before-running sequence and first-time setup.
 
-Optional extras:
+Optional extras are dependency groups selected at installation time, not Hermes
+plugins. The installer automatically selects `macos` on macOS or `keyvault` on
+Linux; add the other extras only when you need the corresponding features:
 
 | Extra | Use it for |
 |---|---|
@@ -94,7 +115,22 @@ required.
 
 ### Use it
 
-Start with the standalone command:
+The fastest path is the guided orchestrator:
+
+```sh
+hermes-mordred setup
+```
+
+`setup` probes each step in order and only runs what is still incomplete, so
+it is safe to re-run after an interruption. It never deletes or recreates an
+existing keyvault: a blocked or corrupt keyvault stops setup with repair
+guidance instead of auto-repairing it. Add `--non-interactive` to run the
+automatable subset and list the interactive commands still needed (exit code
+0 only once everything is set up).
+
+Prefer to drive each step yourself, or need to fix just one? `setup` runs the
+manual sequence below, in the same order (after first checking upstream
+Hermes) — start with the standalone command:
 
 ```sh
 hermes-mordred configure                 # policy / LLM / harness setup
@@ -113,12 +149,23 @@ hermes-mordred keyvault enable-tpm
 hermes-mordred keyvault init
 ```
 
-Turn on encryption and verify it:
+On macOS, turn on transparent `.env` encryption and verify it:
 
 ```sh
-hermes-mordred encryption enable env
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
 hermes-mordred status                    # the env row should read [on] enrolled
 ```
+
+The environment variable applies to each command separately. `keyvault init`
+creates the main keyvault key; the first `encryption enable` creates a distinct
+device key for the at-rest file vault, so both creation commands need the flag
+when both keys must be unattended.
+
+On Linux, the supported operator path stops after keyvault initialization and
+status. The transparent env/config startup shims are not active there, and
+`vault recover` does not yet have a Linux device-anchor store;
+`encryption status` reports enrolled targets as inactive and plaintext remains
+the runtime source.
 
 Everyday commands:
 
@@ -135,9 +182,9 @@ Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
 versions, or before the first `configure`, keep using `hermes-mordred`.
 
-See the [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md)
+See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for expected output and the
-[usage guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md)
+[usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md)
 for every command and interactive prompt.
 
 ### Verify discovery
@@ -157,14 +204,28 @@ The optional extension server listens on `ws://127.0.0.1:7788/ext`, validates
 the local peer and browser origin, and supports pairing, encrypted chat,
 history, wallet accounts, and approval-bound signing.
 
-The one-line installer deliberately installs only the platform keyvault extra,
-so `extension serve` exits with code 2 and prints how to add the `extension`
-extra until it is installed:
+The installer keeps preview dependencies out of its default install. Re-run it
+with `--with-extension` to retain the platform keyvault dependencies and add
+both the `extension` and `ethereum` extras:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --with-extension
+```
+
+The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a16"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a17"
 ```
+
+Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
+a terminal pairing QR.
+
+The browser client is distributed separately as a
+[prebuilt Chromium extension](https://github.com/InternetMaximalism/Mordred-Extension-dist).
+Load its `dist/` directory as an unpacked extension.
 
 ### How it works
 
@@ -172,7 +233,7 @@ The extension authenticates with a one-time pairing flow and a rotated local
 token. Gateway messaging uses the context-bound `ENC:v3` wire and rejects
 plaintext Slack/Discord agent commands. Security model and protocol details
 are in the
-[Extension guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/EXTENSION.md).
+[Extension guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md).
 
 ### Run it (standalone)
 
@@ -182,125 +243,85 @@ hermes-mordred extension serve           # foreground; Ctrl+C to stop
 hermes-mordred extension pair
 ```
 
-Use `--port 7799` when another Hermes gateway already owns port 7788.
+The published Chromium bundle is authorized for port 7788 only. Use
+`--port 7799` only with the bundled localhost page, tests, or a custom extension
+build whose manifest permits that port. If 7788 is occupied, inspect the owner
+before starting another server.
 
 ### Standalone behavior notes
 
 `extension serve` runs the real Hermes agent when its runtime is installed.
-It does not start automatically because Hermes currently exposes no plugin
-boot hook for long-running services. See the
-[Extension guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/EXTENSION.md)
+Stock `hermes-agent` does not host this API, and the Mordred plugin does not
+start it automatically because Hermes currently exposes no plugin boot hook
+for long-running services. Compatible legacy/custom gateways may host the API;
+verify the process rather than inferring that from an occupied port. See the
+[Extension guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md)
 for deployment, protocol, wallet, and troubleshooting details.
 
 ## Install (development)
 
-Use the repository's editable `.venv`; do not replace the production Hermes
-environment for normal development:
+Use the repository's editable `.venv`, separate from the production Hermes
+environment:
 
 ```sh
-git clone https://github.com/InternetMaximalism/mordred-hermes.git
-cd mordred-hermes
+git clone https://github.com/mordredagent/hermes-mordred.git
+cd hermes-mordred
 uv sync --all-extras
-
-.venv/bin/python -c "import mordred_hermes; print(mordred_hermes.__file__)"
 .venv/bin/hermes-mordred status
 ```
 
-The printed module path should be under this checkout's `src/`. Local commands
-still use real `~/.hermes` state unless isolated:
-
-```sh
-env HERMES_HOME=/tmp/mordred-test-home \
-  .venv/bin/hermes-mordred configure
-```
-
-Only replace `~/.hermes/hermes-agent/venv` with an editable install when an
-end-to-end production-profile test specifically requires it. The full workflow,
-including how to restore the PyPI wheel, is in
-[development setup](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md).
-
-Run the standard checks:
-
-```sh
-uv run pytest -q
-uv run ruff check src tests scripts
-uv run ruff format --check src tests scripts
-uv run mypy --strict src tools scripts/keyvault_offline_digest.py
-shellcheck scripts/*.sh native/*/build.sh   # brew/apt install shellcheck
-```
+Local commands read real `~/.hermes` state unless `HERMES_HOME` is set. See
+[development setup](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/setup.md)
+for safe isolation, loaded-code verification, and the full check suite.
 
 ## Troubleshooting
 
-| Symptom | What to do |
-|---|---|
-| A background gateway starts without vault-managed secrets | The vault likely uses an attended Secure Enclave key. Follow the verified backup/recovery procedure in [USAGE §4.3](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them) and create the replacement key with `MORDRED_SEKEY_UNATTENDED=1`. Re-running `enable-se` alone does not change an existing key policy. |
-| `extension serve` reports port 7788 in use | Run `lsof -nP -iTCP:7788 -sTCP:LISTEN`. If Hermes already owns it, the API is running; otherwise stop the stale process or use `--port 7799`. |
-| Tor/VPN communication stops | Run `hermes-mordred network status`, then re-establish the selected route with `hermes-mordred network use <tor\|vpn\|clearnet>`. Restart Hermes after changing routes. |
-| The audit log is plaintext and contains `mordred.degraded.audit_encryption_unavailable` | Restart the process from a context that can access the device key. Recovery is automatic; purge rotated plaintext logs with `hermes-mordred audit purge --before YYYY-MM-DD --yes` if required. |
-| The recovery passphrase is lost | If the current device key still works, run `hermes-mordred encryption change-passphrase`. If both the passphrase and device key are gone, the encrypted data cannot be recovered. |
+- For keyvault, Touch ID, and recovery issues, see
+  [USAGE §4](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#4-interactive-command-walkthroughs).
+  The file-vault recovery command is currently macOS-only; encrypted data
+  cannot be recovered if both its device key and recovery passphrase are lost.
+  The main keyvault CLI can import but does not yet export a backup blob.
+- For extension, gateway, and port 7788 issues, see the
+  [extension troubleshooting guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md#troubleshooting).
+- For Tor/VPN issues, run `hermes-mordred network status`, then
+  `hermes-mordred network use <tor|vpn|clearnet>`; restart Hermes if the route
+  changed.
+- If the audit log falls back to plaintext with
+  `mordred.degraded.audit_encryption_unavailable`, restart from a context that
+  can access the device key. Recovery is automatic.
 
 ## Upgrading
 
-Package upgrades and config migration are separate operations.
-
-### Upgrade the installed package
-
-Re-run the installer to upgrade Mordred without upgrading Hermes:
+Re-run the installer, then restart the Hermes gateway or a standalone
+`extension serve` process:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
 ```
 
-The installer performs the old-name ownership transfer automatically. For a
-manual upgrade from `0.1.0a15`, uninstall the legacy real distribution before
-installing the new one:
+This upgrades Mordred only and handles the transition from the old
+`mordred-hermes` package name. Run it again if a Hermes update recreates its
+virtual environment.
+
+For a version-pinned upgrade, pass the desired PEP 440 release to the installer
+(replace `VERSION` before running the command):
 
 ```sh
-uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 mordred-hermes
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a16"  # use [keyvault] on Linux
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --version VERSION
 ```
 
-For a version-pinned upgrade, install the desired version manually into the
-Hermes environment:
+Add `--with-extension` before `--version` when that installation also runs the
+browser-extension gateway or uses its Ethereum wallet bridge.
 
-```sh
-# macOS; use [keyvault] on Linux
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==<new-version>"
-```
-
-The equivalent manual command for the newest release is:
-
-```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package hermes-mordred "hermes-mordred[macos]"
-```
-
-Restart the Hermes gateway or `extension serve` after upgrading.
-
-### When Hermes itself is updated
-
-An in-place Hermes update normally preserves the Mordred wheel, but does not
-upgrade it. If Hermes recreates its venv, reinstall Mordred and verify the
-loaded path:
-
-```sh
-~/.hermes/hermes-agent/venv/bin/python3 -c \
-  "import mordred_hermes; print(mordred_hermes.__file__)"
-```
-
-### Migrate config with `hermes-mordred upgrade`
-
-`hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration. It is
-idempotent and safe to repeat:
+`hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration;
+it does not upgrade the package:
 
 ```sh
 hermes-mordred upgrade
-hermes-mordred upgrade --non-interactive --policy-conflict keep-existing
 ```
 
-Fresh installations should use `configure`, not `upgrade`.
+It is safe to repeat. Fresh installations should use `configure` instead.
 
 ## Uninstall
 
@@ -348,12 +369,11 @@ docs/dev/              specification and developer documentation
 
 | Audience | Document | Purpose |
 |---|---|---|
-| Users | [Quickstart](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/QUICKSTART.md) | PyPI install to protected secrets |
-| Users | [Usage guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/USAGE.md) | Complete command reference and ceremonies |
-| Users | [Extension guide](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/EXTENSION.md) | Browser extension, E2E messaging, and wallet bridge |
-| Users | [Hermes basics](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/user/HERMES_BASICS.md) | Running the base Hermes agent |
-| Developers | [Development index](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/README.md) | Current sources of truth and historical records |
-| Developers | [Development setup](https://github.com/InternetMaximalism/mordred-hermes/blob/main/docs/dev/setup.md) | Editable environment and validation workflow |
+| Users | [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md) | PyPI install to protected secrets |
+| Users | [Usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md) | Complete command reference and ceremonies |
+| Users | [Extension guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Browser extension, E2E messaging, and wallet bridge |
+| Developers | [Development index](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/README.md) | Maintained sources of truth |
+| Developers | [Development setup](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/setup.md) | Editable environment and validation workflow |
 
 ## License
 

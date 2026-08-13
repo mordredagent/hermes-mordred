@@ -399,6 +399,25 @@ def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: b
 
     Echoes the resolved settings so the user can verify what was saved, and
     whether the Mullvad secret was stored, cleared, or left unchanged.
+
+    Only the selected route's settings are echoed (UX request 2026-08-12,
+    matching the route-gated prompts in :func:`collect_network_answers`): the
+    Tor binary/port lines appear only for ``tor``, and
+    :func:`_provider_summary_lines` (the VPN provider's settings, including
+    the relay/killswitch) only for ``vpn``. A setting that wasn't prompted for
+    this run is still preserved on disk (see :func:`_vpn_settings_from_existing`
+    in ``_network_init``) -- it's just not echoed here because it doesn't
+    apply to the route that was actually (re-)initialised.
+
+    The one exception is the Mullvad account line when the secret was
+    actively *cleared*: ``--clear-mullvad`` is a route- and
+    provider-independent action (it can be combined with any ``--path`` and
+    clears the secret regardless of the saved provider), so that confirmation
+    is always shown even when no Mullvad line would otherwise print -- a
+    non-``vpn`` route, or a ``vpn`` route whose provider is
+    wireguard/custom. Otherwise a ``network init --clear-mullvad`` run on
+    those combinations would silently clear the secret without ever telling
+    the operator it happened.
     """
     killswitch = "enabled" if na.mullvad_killswitch else "disabled"
     if secret_cleared:
@@ -411,10 +430,18 @@ def _init_summary(na: NetworkAnswers, *, secret_written: bool, secret_cleared: b
         "",
         "Network privacy initialised:",
         f"  default path       : {na.default_network_path}",
-        f"  tor binary         : {na.tor_binary_path}",
-        f"  tor socks port     : {na.tor_socks_port}",
-        *_provider_summary_lines(na, killswitch=killswitch, account=account),
     ]
+    if na.default_network_path == "tor":
+        lines.append(f"  tor binary         : {na.tor_binary_path}")
+        lines.append(f"  tor socks port     : {na.tor_socks_port}")
+    if na.default_network_path == "vpn":
+        lines.extend(_provider_summary_lines(na, killswitch=killswitch, account=account))
+        # A wireguard/custom provider summary carries no Mullvad account line
+        # of its own, so the cleared confirmation must be appended explicitly.
+        if secret_cleared and na.vpn_provider != "mullvad":
+            lines.append(f"  mullvad account    : {account}")
+    elif secret_cleared:
+        lines.append(f"  mullvad account    : {account}")
     if na.default_network_path == "clearnet":
         lines.append("  note: clearnet = no anonymising layer; re-run and pick tor/vpn to enable privacy.")
     warning = dependency_warning(

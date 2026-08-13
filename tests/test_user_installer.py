@@ -197,9 +197,9 @@ def _fixture(
     )
 
 
-def _run(fixture: InstallFixture, **overrides: str) -> subprocess.CompletedProcess[str]:
+def _run(fixture: InstallFixture, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["/bin/bash", str(INSTALLER)],
+        ["/bin/bash", str(INSTALLER), *args],
         check=False,
         capture_output=True,
         text=True,
@@ -241,12 +241,25 @@ def test_user_docs_lead_with_the_installer_and_path_command() -> None:
     quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install_command = (
-        "curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/mordred-hermes/main/scripts/install.sh | bash"
+        "curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash"
     )
 
     for document in (quickstart, readme):
         assert install_command in document
         assert "hermes-mordred configure" in document
+
+
+def test_user_docs_describe_extension_and_version_installer_options() -> None:
+    paths = (
+        ROOT / "README.md",
+        ROOT / "docs" / "user" / "QUICKSTART.md",
+        ROOT / "docs" / "user" / "EXTENSION.md",
+    )
+
+    for path in paths:
+        document = path.read_text(encoding="utf-8")
+        assert "bash -s -- --with-extension" in document, f"{path.relative_to(ROOT)} omits --with-extension"
+        assert "--version VERSION" in document, f"{path.relative_to(ROOT)} omits --version"
 
 
 @pytest.mark.parametrize(
@@ -287,6 +300,67 @@ def test_installs_platform_extra_and_exposes_cli(
     assert fixture.launcher.is_file()
     assert "Configuration and keys were not changed" in result.stdout
     assert f"{fixture.launcher} configure" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "expected_spec"),
+    [
+        ("Darwin", "hermes-mordred[macos,extension,ethereum]==0.1.0a16,>=0.1.0a16"),
+        ("Linux", "hermes-mordred[keyvault,extension,ethereum]==0.1.0a16,>=0.1.0a16"),
+    ],
+)
+def test_with_extension_and_version_install_requested_package(
+    tmp_path: Path,
+    platform_name: str,
+    expected_spec: str,
+) -> None:
+    fixture = _fixture(tmp_path, platform_name=platform_name)
+
+    result = _run(fixture, "--with-extension", "--version", "0.1.0a16")
+
+    assert result.returncode == 0, result.stderr
+    assert expected_spec in fixture.uv_calls()
+
+
+def test_version_equals_form_is_supported(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, "--version=0.1.0a16")
+
+    assert result.returncode == 0, result.stderr
+    assert "hermes-mordred[macos]==0.1.0a16,>=0.1.0a16" in fixture.uv_calls()
+
+
+def test_help_does_not_probe_or_modify_the_environment(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "--with-extension" in result.stdout
+    assert "--version VERSION" in result.stdout
+    assert not fixture.uv_log.exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--version",),
+        ("--version=",),
+        ("--version", "latest"),
+        ("--version", "0.1.0a16;echo"),
+        ("--unknown",),
+        ("unexpected",),
+    ],
+)
+def test_invalid_installer_arguments_stop_before_environment_changes(tmp_path: Path, args: tuple[str, ...]) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, *args)
+
+    assert result.returncode == 1
+    assert "mordred: error:" in result.stderr
+    assert not fixture.uv_log.exists()
 
 
 def test_detects_the_official_bash_wrapper_not_only_the_canonical_path(tmp_path: Path) -> None:
@@ -450,6 +524,20 @@ def test_failed_canonical_install_attempts_exact_legacy_restore(tmp_path: Path) 
     assert "pip uninstall" in calls
     assert "mordred-hermes[macos]==0.1.0a15" in calls
     assert "attempting to restore mordred-hermes 0.1.0a15" in result.stderr
+
+
+def test_failed_extension_install_restores_the_same_legacy_extras(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(
+        fixture,
+        "--with-extension",
+        UV_LEGACY_VERSION="0.1.0a15",
+        UV_CANONICAL_INSTALL_FAIL="1",
+    )
+
+    assert result.returncode == 1
+    assert "mordred-hermes[macos,extension,ethereum]==0.1.0a15" in fixture.uv_calls()
 
 
 def test_foreign_symlink_is_not_replaced(tmp_path: Path) -> None:
@@ -643,26 +731,31 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
     )
     assert check.returncode == 0, check.stderr
 
-    spec = "hermes-mordred[macos]>=0.1.0a16" if platform.system() == "Darwin" else "hermes-mordred[keyvault]>=0.1.0a16"
-    install = subprocess.run(
-        [
-            uv_bin,
-            "pip",
-            "install",
-            "--python",
-            str(python),
-            "--no-python-downloads",
-            "--upgrade-package",
-            "hermes-mordred",
-            "--dry-run",
-            spec,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
+    platform_extra = "macos" if platform.system() == "Darwin" else "keyvault"
+    specs = (
+        f"hermes-mordred[{platform_extra}]>=0.1.0a16",
+        f"hermes-mordred[{platform_extra},extension,ethereum]==0.1.0a16,>=0.1.0a16",
     )
-    assert install.returncode == 0, install.stderr
-    # Every published release is still a pre-release; the bare spec must keep
-    # resolving to one rather than failing to find a candidate.
-    assert "hermes-mordred==" in install.stdout + install.stderr
+    for spec in specs:
+        install = subprocess.run(
+            [
+                uv_bin,
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "--no-python-downloads",
+                "--upgrade-package",
+                "hermes-mordred",
+                "--dry-run",
+                spec,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert install.returncode == 0, install.stderr
+        # Every published release is still a pre-release; both the floor and
+        # exact-pin forms must resolve rather than selecting the claim stub.
+        assert "hermes-mordred==" in install.stdout + install.stderr
