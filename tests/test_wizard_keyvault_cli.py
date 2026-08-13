@@ -1,6 +1,6 @@
-"""RED tests for Phase 4 PR8: ``hermes mordred keyvault {list,verify-digest}``.
+"""Tests for ``hermes-mordred keyvault {list,verify-digest}``.
 
-SPEC.md §4.2 / TODO.md §4.2 L429-430. These are the **backend-free**
+These are the **backend-free**
 keyvault CLI commands — they only read the on-disk keyvault layout
 (``meta.json`` + ``digests/<hash>.commit``) and need no Secure Enclave
 ``NativeBackend``:

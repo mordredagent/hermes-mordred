@@ -46,11 +46,11 @@ bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
 - **Port 7788 belongs to the production extension gateway.** For local runs use
   `.venv/bin/hermes-mordred extension serve --port 7799`; check holders with
   `lsof -nP -iTCP:7788 -sTCP:LISTEN`.
-- **Live-gated tests never run in CI.** Suites gated by
-  `MORDRED_KEYVAULT_LIVE=1` / `MORDRED_LIVE_LLM_TEST=1` /
-  `MORDRED_LIVE_VPN_TEST=1` have no CI automation — run them manually
-  on-device after changing the code paths they cover (`docs/dev/CI.md`
-  §Manual live-device validation log).
+- **Live-gated tests require explicit execution.** Secure Enclave and live-LLM
+  suites have no CI automation. The Mullvad suite has a manual-only GitHub
+  Actions workflow (`integration-vpn.yml`); it never runs on pushes or PRs.
+  Run the relevant gated path after changing it and record the result in
+  `docs/dev/CI.md` §Manual live-device validation log.
 
 ## Git and PR conventions
 
@@ -60,7 +60,7 @@ bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
   cross-plugin change is needed, PR the SPEC/PLAN side first.
 - **Parallel agent sessions need separate git worktrees.** Branch refs and the
   index are repo-global, so concurrent sessions sharing one checkout stomp each
-  other — create one with `git worktree add ../mordred-hermes-<topic> -b <branch>`.
+  other — create one with `git worktree add ../hermes-mordred-<topic> -b <branch>`.
 - **No CHANGELOG.md.** Record changes as one-line entries under `### Changes` /
   `### Fixes` headings in each PR description (`docs/dev/CI.md` §Changelog
   convention).

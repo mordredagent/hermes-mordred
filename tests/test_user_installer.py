@@ -241,7 +241,7 @@ def test_user_docs_lead_with_the_installer_and_path_command() -> None:
     quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     install_command = (
-        "curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash"
+        "curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash"
     )
 
     for document in (quickstart, readme):

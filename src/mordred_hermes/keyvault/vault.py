@@ -48,9 +48,9 @@ NOT protect against a same-uid attacker on a running, unlocked machine —
 an unattended wrapping key lets any same-uid process unwrap the master.
 That tradeoff is accepted for hands-free operation.
 
-Like its keyvault siblings it imports :mod:`cryptography` (through the
-crypto modules) and is only importable where the ``[macos]`` extra is
-installed.
+It imports :mod:`cryptography` through the cross-platform ``keyvault`` extra.
+Device custody remains abstracted behind the injected native backend and
+anchor store.
 """
 
 from __future__ import annotations

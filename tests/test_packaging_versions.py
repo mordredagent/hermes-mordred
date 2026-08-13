@@ -2,7 +2,7 @@
 
 Four invariants are pinned here:
 
-1. **Name-reservation ordering (M7, TODO §0.5 L70).** M7 reserves the
+1. **Name-reservation ordering.** The original reservation package claimed the
    ``mordred-hermes`` distribution name on TestPyPI/PyPI by uploading an
    intentionally empty stub *before* the real implementation ships. The stub
    lives at ``packaging/name-reservation/pyproject.toml``. After the rename,
@@ -16,7 +16,7 @@ Four invariants are pinned here:
    version, depends on that exact ``hermes-mordred`` release, forwards every
    extra, and is configured to build a metadata-only wheel.
 
-4. **Single-source version consistency (TODO §0.5 L64).** The real package no
+4. **Single-source version consistency.** The real package no
    longer hardcodes its version in pyproject. It is sourced dynamically from
    ``src/mordred_hermes/__about__.py`` (Hatch ``[tool.hatch.version] path``),
    which lives inside the importable package so sdist->wheel builds resolve it

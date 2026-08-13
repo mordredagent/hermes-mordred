@@ -8,9 +8,9 @@
 ## What is Mordred?
 
 Mordred adds privacy controls to Hermes without modifying Hermes itself. It can
-encrypt `.env`, configuration, and agent memory at rest; keep the unlocking key
-behind Secure Enclave or TPM 2.0; route traffic through Tor or a VPN; and enforce
-local-LLM policy.
+keep keys behind Secure Enclave or TPM 2.0, route traffic through Tor or a VPN,
+enforce local-LLM policy, and on macOS transparently encrypt `.env`,
+configuration, and agent memory keys at rest.
 
 ## Before you start
 
@@ -19,6 +19,10 @@ You need:
 - macOS, or Linux with TPM 2.0 development/runtime support;
 - a real interactive terminal for `keyvault init`; and
 - an installed [Hermes Agent](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md).
+
+Linux supports the hardware-backed keyvault, but the transparent env/config
+startup lifecycle is not active there yet. On Linux those encryption targets
+report inactive and plaintext remains the runtime source.
 
 If `hermes` is not installed yet, use its official installer, then reload your
 shell:
@@ -36,7 +40,7 @@ need to create a virtual environment or install Python separately for Mordred.
 Run the Mordred installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
 ```
 
 It resolves the environment behind the `hermes` on your `PATH`, checks the
@@ -54,7 +58,7 @@ By default, only the platform keyvault extra is installed. To include the
 browser-extension server and Ethereum wallet support from the start, run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
   bash -s -- --with-extension
 ```
 
@@ -67,7 +71,7 @@ If you prefer to inspect a downloaded script before running it:
 
 ```sh
 curl -fsSLo mordred-install.sh \
-  https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh
+  https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh
 less mordred-install.sh
 bash mordred-install.sh                 # default platform dependencies
 # Or: bash mordred-install.sh --with-extension --version VERSION
@@ -97,7 +101,7 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 Normal users can skip this section. Contributors can clone the source with:
 
 ```sh
-git clone https://github.com/InternetMaximalism/hermes-mordred.git
+git clone https://github.com/mordredagent/hermes-mordred.git
 cd hermes-mordred
 ```
 
@@ -139,12 +143,19 @@ hermes-mordred keyvault enable-tpm
 hermes-mordred keyvault init
 ```
 
-Finally encrypt `.env` and verify:
+On macOS, finally encrypt `.env` and verify:
 
 ```sh
-hermes-mordred encryption enable env
+MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
 hermes-mordred status
 ```
+
+`keyvault init` and the file vault use distinct native keys. The environment
+variable applies to one process, so put it on both key-creation commands when
+both keys must work unattended.
+
+On Linux, finish by checking `hermes-mordred keyvault list` and
+`hermes-mordred status`; do not expect an `env [on]` row.
 
 ## 1. Invoke it
 
@@ -168,13 +179,15 @@ passphrase the first time step 5 enables encryption.
 | 1 | `hermes-mordred configure` | Writes Mordred policy and enables all six plugins. |
 | 2 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
 | 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
-| 4 | `hermes-mordred keyvault init` | Creates the device key and recovery material. |
-| 5 | `hermes-mordred encryption enable env` | Enrolls `.env` in the encrypted vault. |
+| 4 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
+| 5 | `hermes-mordred encryption enable env` (macOS only) | Enrolls `.env` and activates the transparent runtime lifecycle. |
 | 6 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
 
-A successful final status includes an `env [on] enrolled` row. The `workspace`
-target has a separate `sealed` / `open` / `off` state: `sealed` is protected,
-not disabled. Add `--json` for machine-readable status.
+On macOS, a successful final status includes an `env [on] enrolled` row. On
+Linux the row is inactive even if enrolled; that is an explicit platform
+limit, not protected runtime state. The macOS-only `workspace` target has a
+separate `sealed` / `open` / `off` state: `sealed` is protected, not disabled.
+Add `--json` for machine-readable status.
 
 ## 3. Fastest path: secrets encrypted at rest
 
@@ -187,13 +200,15 @@ MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
 hermes-mordred status
 ```
 
-On Linux, replace the first line with `hermes-mordred keyvault enable-tpm` and
-omit `MORDRED_SEKEY_UNATTENDED=1`.
+This fastest at-rest path is macOS-only. On Linux, use
+`hermes-mordred keyvault enable-tpm` followed by `keyvault init` for the
+hardware-backed keyvault; transparent `.env` loading still uses plaintext.
 
-Running `keyvault init` first is still recommended: its ceremony displays the
-24-word recovery seed and verifies the offline digest before data is enrolled.
-The device key and recovery passphrase are different recovery paths; the full
-ceremony is in
+Running `keyvault init` first is still recommended when you also use keyvault
+envelopes or HD wallet derivation: its ceremony displays the 24-word seed and
+verifies the offline digest. It does not back up the separate at-rest file
+vault. That vault has its own device key and recovery passphrase; the full
+ceremonies are in
 [`USAGE.md` §4.1–4.3](./USAGE.md#41-keyvault-init--the-interactive-ceremony).
 
 ## 4. Encrypt more targets (optional)
@@ -246,9 +261,13 @@ hermes-mordred keyvault reset         # asks you to type reset
 hermes-mordred keyvault reset --yes   # non-interactive and immediate
 ```
 
-This destroys profile-owned key material. Export and verify a backup first;
-otherwise encrypted secrets and wallets may be unrecoverable. The command
-prints the exact key IDs before interactive confirmation.
+This destroys profile-owned key material. The current CLI can recover an
+existing backup blob but cannot create one: there is no supported
+`keyvault export` command yet. Do not reset a profile whose encrypted secrets
+or wallets still depend on it. Use reset only for an expendable profile, or
+after decrypting/removing every dependency and independently verifying any
+backup blob you already possess. The command prints the exact key IDs before
+interactive confirmation.
 
 ## Common checks
 
@@ -279,8 +298,10 @@ Private keys stay in the keyvault. Options and BIP-39 caveats are in
 ## Running the base Hermes agent (host CLI)
 
 Mordred's CLI configures the privacy layer; the base `hermes` command runs the
-agent itself. See [`HERMES_BASICS.md`](./HERMES_BASICS.md) for installation,
-provider authentication, interactive use, and the messaging gateway.
+agent itself. Use the upstream
+[Hermes installation guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md)
+and [Hermes documentation](https://github.com/NousResearch/hermes-agent/tree/main/website/docs)
+for provider authentication, interactive use, and gateway operation.
 
 ## Glossary
 
@@ -297,4 +318,4 @@ provider authentication, interactive use, and the messaging gateway.
 - [`USAGE.md`](./USAGE.md) — complete command reference and ceremonies.
 - [`EXTENSION.md`](./EXTENSION.md) — browser extension and E2E messaging.
 - [`setup.md`](../dev/setup.md) — development checkout and safe test isolation.
-- [README troubleshooting](https://github.com/InternetMaximalism/hermes-mordred/blob/main/README.md#troubleshooting) — common failures and recovery.
+- [README troubleshooting](https://github.com/mordredagent/hermes-mordred/blob/main/README.md#troubleshooting) — common failures and recovery.

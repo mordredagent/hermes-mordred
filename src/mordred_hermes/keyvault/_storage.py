@@ -251,7 +251,7 @@ def _check_file_mode(path: Path) -> None:
 def ensure_layout(root: Path) -> None:
     """Idempotently create the keyvault directory tree.
 
-    Layout (PATHS.md L255-262):
+    Layout (PATHS.md §Expected substructure):
 
     - ``root/`` (mode ``0o700``)
     - ``root/.lock`` (mode ``0o600``, empty; fcntl.flock target)

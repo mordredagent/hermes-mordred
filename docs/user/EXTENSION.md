@@ -11,18 +11,19 @@ or `keyvault` for the current platform and adds both the extension server and
 Ethereum wallet dependencies with `--with-extension`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/InternetMaximalism/hermes-mordred/main/scripts/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
   bash -s -- --with-extension
 ```
 
 Add `--version VERSION` after replacing `VERSION` with the exact PyPI release
 you need. Terminal QR rendering is optional; without the `messaging` extra,
-`extension pair` prints the pairing code as text. To add QR rendering after the
-installer completes:
+`extension pair` prints the pairing code as text. If you selected an exact
+release, add QR rendering without changing that release by replacing `VERSION`
+below with the same version:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package hermes-mordred "hermes-mordred[messaging]"
+  --upgrade-package hermes-mordred "hermes-mordred[messaging]==VERSION"
 ```
 
 The browser client is a separately distributed
@@ -162,7 +163,7 @@ Ctrl+C and SIGTERM shut the standalone server down cleanly.
 | Reconnects with close code `1002` / `invalid_server_frame` | Update and reload the browser extension and Mordred together, then restart the server. |
 | QR code is absent | Install the `messaging` extra or enter the printed `MORT-...` code manually. |
 | Wallet command says the extra is missing | Install `ethereum` in the same Hermes venv and restart the server. |
-| Background chat cannot open sealed secrets on macOS | Recover onto a fresh unattended key as described in [`USAGE.md` §4.3](./USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them). |
+| Background chat cannot open sealed secrets on macOS | The file-vault key may be attended. `enable-se` cannot change its policy. Keep the server foreground, or preserve the complete vault plus recovery passphrase and re-key a copied vault on a genuinely fresh device/profile with `vault recover`; never delete the working store first. See [`USAGE.md` §4.3](./USAGE.md#43-touch-id-prompts--why-several-per-command-and-how-to-silence-them). |
 
 ## Related references
 
