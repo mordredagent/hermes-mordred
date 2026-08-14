@@ -26,6 +26,14 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
   --upgrade-package hermes-mordred "hermes-mordred[messaging]==VERSION"
 ```
 
+Alternatively, install the extension features and terminal QR rendering in one
+step with the generic extras option:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --extras extension,ethereum,messaging
+```
+
 The browser client is a separately distributed
 [Chromium Manifest V3 bundle](https://github.com/InternetMaximalism/Mordred-Extension-dist):
 

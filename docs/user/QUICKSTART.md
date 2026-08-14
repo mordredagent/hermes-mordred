@@ -67,6 +67,14 @@ you need an exact PyPI version. For example, the two options can be combined as
 `bash -s -- --with-extension --version VERSION`. Deep Tor liveness checks and
 terminal QR rendering remain separate optional extras.
 
+Use `--extras` when you want a custom feature set, or `--all-extras` to include
+all user-facing extras, including deep Tor liveness checks:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --extras extension,ethereum,messaging
+```
+
 If you prefer to inspect a downloaded script before running it:
 
 ```sh
