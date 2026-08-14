@@ -207,6 +207,17 @@ def _run(fixture: InstallFixture, *args: str, **overrides: str) -> subprocess.Co
     )
 
 
+def _run_from_stdin(fixture: InstallFixture, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", "-s", "--", *args],
+        input=INSTALLER.read_text(encoding="utf-8"),
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**fixture.env, **overrides},
+    )
+
+
 def test_installer_has_valid_bash_syntax() -> None:
     assert INSTALLER.stat().st_mode & stat.S_IXUSR
     result = subprocess.run(["/bin/bash", "-n", str(INSTALLER)], check=False, capture_output=True, text=True)
@@ -249,7 +260,7 @@ def test_user_docs_lead_with_the_installer_and_path_command() -> None:
         assert "hermes-mordred configure" in document
 
 
-def test_user_docs_describe_extension_and_version_installer_options() -> None:
+def test_user_docs_describe_installer_options() -> None:
     paths = (
         ROOT / "README.md",
         ROOT / "docs" / "user" / "QUICKSTART.md",
@@ -259,6 +270,7 @@ def test_user_docs_describe_extension_and_version_installer_options() -> None:
     for path in paths:
         document = path.read_text(encoding="utf-8")
         assert "bash -s -- --with-extension" in document, f"{path.relative_to(ROOT)} omits --with-extension"
+        assert "--extras extension,ethereum,messaging" in document, f"{path.relative_to(ROOT)} omits --extras"
         assert "--version VERSION" in document, f"{path.relative_to(ROOT)} omits --version"
 
 
@@ -360,6 +372,87 @@ def test_invalid_installer_arguments_stop_before_environment_changes(tmp_path: P
 
     assert result.returncode == 1
     assert "mordred: error:" in result.stderr
+    assert not fixture.uv_log.exists()
+
+
+def test_installs_requested_optional_extras(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, platform_name="Darwin")
+
+    result = _run(fixture, "--extras", "extension, ethereum,messaging")
+
+    assert result.returncode == 0, result.stderr
+    expected = "hermes-mordred[macos,extension,ethereum,messaging]>=0.1.0a16"
+    assert fixture.uv_calls().count(expected) == 2  # preflight + install
+    assert f"installing {expected} from PyPI" in result.stdout
+
+
+def test_installs_optional_extras_from_pipe_friendly_environment_variable(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, platform_name="Linux")
+
+    result = _run_from_stdin(fixture, MORDRED_INSTALL_EXTRAS="extension,tor-control")
+
+    assert result.returncode == 0, result.stderr
+    expected = "hermes-mordred[keyvault,extension,tor-control]>=0.1.0a16"
+    assert fixture.uv_calls().count(expected) == 2
+
+
+def test_piped_installer_accepts_optional_extra_arguments(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, platform_name="Linux")
+
+    result = _run_from_stdin(fixture, "--extras", "extension,messaging")
+
+    assert result.returncode == 0, result.stderr
+    expected = "hermes-mordred[keyvault,extension,messaging]>=0.1.0a16"
+    assert fixture.uv_calls().count(expected) == 2
+
+
+def test_all_extras_are_deduplicated_in_stable_order(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, platform_name="Darwin")
+
+    result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "messaging,extension")
+
+    assert result.returncode == 0, result.stderr
+    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control]>=0.1.0a16"
+    calls = fixture.uv_calls()
+    assert calls.count(expected) == 2
+    assert "extension,extension" not in calls
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["unknown", "dev", "integration", "macos", "keyvault", "extension,,messaging"],
+)
+def test_invalid_optional_extra_stops_before_uv(tmp_path: Path, extra: str) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, "--extras", extra)
+
+    assert result.returncode == 1
+    assert "mordred: error:" in result.stderr
+    assert not fixture.uv_log.exists()
+
+
+@pytest.mark.parametrize("args", [("--extras",), ("--extras", "--all-extras")])
+def test_missing_optional_extra_value_stops_before_uv(tmp_path: Path, args: tuple[str, ...]) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, *args)
+
+    assert result.returncode == 1
+    assert "--extras requires" in result.stderr
+    assert not fixture.uv_log.exists()
+
+
+def test_installer_help_does_not_require_hermes_or_uv(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    fixture.hermes_python.unlink()
+    (tmp_path / "fake-bin" / "uv").unlink()
+
+    result = _run(fixture, "--help", MORDRED_INSTALL_EXTRAS="invalid-but-ignored-for-help")
+
+    assert result.returncode == 0, result.stderr
+    assert "--extras LIST" in result.stdout
+    assert "extension, ethereum, messaging, tor-control" in result.stdout
     assert not fixture.uv_log.exists()
 
 
@@ -735,6 +828,7 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
     specs = (
         f"hermes-mordred[{platform_extra}]>=0.1.0a16",
         f"hermes-mordred[{platform_extra},extension,ethereum]==0.1.0a16,>=0.1.0a16",
+        f"hermes-mordred[{platform_extra},extension,ethereum,messaging,tor-control]>=0.1.0a16",
     )
     for spec in specs:
         install = subprocess.run(

@@ -241,7 +241,7 @@ hermes-mordred keyvault eth address --envelope-id <id>   # show the address for 
 - `--seed-envelope-id` is needed only when several seeds are stored.
 - `derive` and `address` decrypt key material, so they trigger a Touch ID /
   passcode prompt unless the wrapping key is unattended (§4.3).
-- Requires the optional extra: `pip install "hermes-mordred[ethereum]"`.
+- Requires the `ethereum` extra; rerun the installer with `--extras ethereum`.
 
 #### Legacy vaults and cross-profile migration
 
