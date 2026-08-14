@@ -94,18 +94,23 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for the inspect-before-running sequence and first-time setup.
 
-Optional extras are dependency groups selected at installation time, not Hermes
-plugins. The installer automatically selects `macos` on macOS or `keyvault` on
-Linux; add the other extras only when you need the corresponding features:
+Optional extras are dependency groups, not Hermes plugins. Install any
+combination in one step, or add them later by rerunning the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --extras extension,ethereum,messaging
+```
+
+The installer selects `macos` or `keyvault` automatically. Use `--all-extras`
+for all four feature extras, or set `MORDRED_INSTALL_EXTRAS` to the same
+comma-separated list in automation.
 
 | Extra | Use it for |
 |---|---|
-| `keyvault` | Cross-platform cryptography used by `encryption` and `keyvault` |
-| `macos` | `keyvault` plus Secure Enclave and macOS system bridges |
-| `ethereum` | HD-wallet derivation and signing |
-| `tor-control` | Deep Tor liveness checks |
-| `messaging` | Terminal QR codes for extension pairing |
 | `extension` | Browser-extension WebSocket server and wallet RPC transport |
+| `ethereum` | HD-wallet derivation and signing |
+| `messaging` | Terminal QR codes for extension pairing |
+| `tor-control` | Deep Tor liveness checks |
 
 ### Enable the plugins
 
@@ -211,6 +216,14 @@ both the `extension` and `ethereum` extras:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
   bash -s -- --with-extension
+```
+
+For a custom feature set, use `--extras`; `--all-extras` adds every
+user-facing feature extra:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --extras extension,ethereum,messaging
 ```
 
 The equivalent version-pinned manual command on macOS is:
