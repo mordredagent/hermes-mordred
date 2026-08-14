@@ -149,6 +149,17 @@ hermes-mordred keyvault enable-tpm
 hermes-mordred keyvault init
 ```
 
+After initialization, create the first portable Keyvault snapshot in an
+existing private directory:
+
+```sh
+hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv
+```
+
+The destination must not already exist. Store the snapshot separately from the
+Keyvault init passphrase and 24-word Seed Phrase, and export a new snapshot
+after every Keyvault content change, including `keyvault eth new`.
+
 On macOS, turn on transparent `.env` encryption and verify it:
 
 ```sh
@@ -280,7 +291,8 @@ for safe isolation, loaded-code verification, and the full check suite.
   [USAGE §4](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#4-interactive-command-walkthroughs).
   The file-vault recovery command is currently macOS-only; encrypted data
   cannot be recovered if both its device key and recovery passphrase are lost.
-  The main keyvault CLI can import but does not yet export a backup blob.
+  Keyvault snapshots are created with `keyvault export` and restored with
+  `keyvault recover`; keep the blob, init passphrase, and Seed Phrase separate.
 - For extension, gateway, and port 7788 issues, see the
   [extension troubleshooting guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md#troubleshooting).
 - For Tor/VPN issues, run `hermes-mordred network status`, then

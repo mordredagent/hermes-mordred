@@ -850,8 +850,13 @@ def init_keyvault(
 
     print(f"Keyvault initialised. Key: {result.key_id}")
     print(
-        "Next: `hermes-mordred encryption enable env` to encrypt secrets at rest "
-        "(the first enable creates the vault and asks once for a recovery passphrase), "
-        "or `hermes-mordred status` for an overview."
+        "Next: create the portable Keyvault snapshot with "
+        "`hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv`. "
+        "Store it separately from the init passphrase and 24-word Seed Phrase."
+    )
+    print(
+        "The backup is a snapshot: export it again after `keyvault eth new`, direct Keyvault API writes, "
+        "or any other Keyvault content change. Then use `hermes-mordred encryption enable env` for "
+        "ordinary Hermes secrets, or `hermes-mordred status` for an overview."
     )
     return 0

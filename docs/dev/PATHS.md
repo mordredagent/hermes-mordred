@@ -263,14 +263,17 @@ The stable internal surface includes `prepare_generate`, `confirm_generate`,
 `generate`, `encrypt`, `decrypt`, `verify_digest`, `export_backup`, and
 `import_backup` in `mordred_hermes.keyvault.api`.
 
-`export_backup()` is an API, not a current operator command. Do not document a
-`keyvault export` CLI until the task in [`TODO.md`](./TODO.md) §4.2 lands.
+`export_backup()` returns bytes without choosing a path. The wizard's
+`keyvault export --output <path>` command owns safe publication of those bytes.
 
 ### Consumer CLI
 
 The current keyvault subtree provides `init`, `list`, `verify-digest`,
-`recover --blob`, `reset`, `enable-se`, `enable-tpm`, and `eth`. `recover`
-imports an existing MRKV blob; the CLI does not currently create that blob.
+`export --output`, `recover --blob`, `reset`, `enable-se`, `enable-tpm`, and
+`eth`. Export output is caller-owned and may be outside the managed layout.
+Its immediate parent must be a real directory and the final path must not
+exist. The wizard publishes a complete mode-`0600` file atomically without
+replacement and leaves no partial final file on failure.
 
 ### Pre-Phase-4 behavior
 
@@ -351,9 +354,9 @@ legacy audit log, policy snapshot/config, keyvault tree, and credentials tree.
 - Sensitive trees reject links/special files, stage privately, compare a final
   source rescan, and never overwrite differing destination data implicitly.
 - Copying a native-key-backed keyvault is only useful where the corresponding
-  native key remains available. The current CLI can import an existing backup
-  blob but cannot create one; do not promise cross-machine keyvault migration
-  through a nonexistent export command.
+  native key remains available. For cross-machine migration, create a portable
+  MRKV snapshot with `keyvault export` and restore it into a fresh profile with
+  `keyvault recover` instead of copying the managed keyvault directory.
 - `--reset` selects destructive overwrite behavior for migration conflicts; it
   is unrelated to `keyvault reset`.
 

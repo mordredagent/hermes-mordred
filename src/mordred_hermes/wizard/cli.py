@@ -20,7 +20,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
-- ``keyvault {init,list,verify-digest,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
+- ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — list discovered Mordred plugins
 """
@@ -65,6 +65,7 @@ from ._cli_parsers import (
     _handle_install,
     _handle_keyvault_enable_se,
     _handle_keyvault_enable_tpm,
+    _handle_keyvault_export,
     _handle_keyvault_init,
     _handle_keyvault_list,
     _handle_keyvault_recover,
@@ -124,6 +125,7 @@ __all__ = [
     "_handle_install",
     "_handle_keyvault_enable_se",
     "_handle_keyvault_enable_tpm",
+    "_handle_keyvault_export",
     "_handle_keyvault_init",
     "_handle_keyvault_list",
     "_handle_keyvault_recover",
@@ -240,12 +242,14 @@ def main(argv: list[str] | None = None) -> int:
             "  hermes-mordred encryption enable env  turn on at-rest encryption (first run creates the vault)\n"
             "  hermes-mordred status                 check the result at a glance\n"
             "\n"
-            "Storage commands, from high- to low-level:\n"
-            "  encryption  the recommended on/off switch for at-rest encryption\n"
-            "              (env / config / memory / workspace)\n"
-            "  keyvault    hardware-backed key management (Secure Enclave / TPM)\n"
-            "  vault       the underlying encrypted file store (advanced; driven\n"
-            "              by `encryption` — rarely used directly)"
+            "Wallet / advanced Keyvault recovery material:\n"
+            "  hermes-mordred keyvault init\n"
+            "  hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv\n"
+            "\n"
+            "Storage command families:\n"
+            "  encryption  recommended facade over the Vault for env / config / memory / workspace\n"
+            "  vault       underlying encrypted file store (advanced; separate recovery passphrase)\n"
+            "  keyvault    separate wallet / API envelope store (portable backup recovery)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

@@ -44,7 +44,7 @@ emit site. A reserved value is not evidence that the feature exists.
 | 25 | `keyvault.init_started` | live | Durable key initialization began before mutation. |
 | 26 | `keyvault.init_completed` | live | Key initialization and digest commitment completed. |
 | 27 | `keyvault.init_denied` | live | Initialization digest confirmation failed before mutation. |
-| 28 | `keyvault.backup_exported` | live API event | `keyvault.api.export_backup()` returned a blob. There is no current export CLI. |
+| 28 | `keyvault.backup_exported` | live API/CLI event | `keyvault.api.export_backup()` returned a blob, including when invoked by `keyvault export`. |
 | 29 | `policy.strict.keyvault_uninitialized` | live | Strict install rejected a skill requiring an initialized keyvault. |
 | 30 | `policy.lenient.keyvault_uninitialized_warning` | live | Same condition warned under lenient policy. |
 | 31 | `mordred.degraded.audit_encryption_unavailable` | live | Encrypted audit was expected but writer creation fell back to plaintext. |
@@ -88,8 +88,9 @@ boundary; native private-key unwrap emits the authorized/denied pair.
 
 Historical anchor. Initialization emits started/completed/denied, and the
 internal backup API emits `keyvault.backup_exported` after materializing the
-blob in memory. File persistence is the caller's responsibility; no operator
-export command currently exists.
+blob in memory. At that phase file persistence was the caller's responsibility.
+The current wizard publishes the returned bytes through `keyvault export`; it
+does not add a second audit reason or expose recovery material in audit fields.
 
 ### Phase 4 §4.1 freeze (added 2026-05-16)
 
