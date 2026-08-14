@@ -203,6 +203,7 @@ hermes-mordred encryption change-passphrase             # rotate the recovery pa
 hermes-mordred keyvault init                # initialise the keyvault
 hermes-mordred keyvault list                # list key IDs
 hermes-mordred keyvault verify-digest       # integrity check
+hermes-mordred keyvault export --output <path>  # create a new mode-0600 MRKV snapshot
 hermes-mordred keyvault recover --blob <path>   # restore from a backup blob
 hermes-mordred keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
 hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
@@ -211,11 +212,12 @@ hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helpe
 hermes-mordred keyvault eth <sub>           # Ethereum keys — see below
 ```
 
-`recover --blob` is import-only. The Python API has an internal
-`export_backup()` operation, but the current operator CLI has no
-`keyvault export` command and does not create a backup file for you. Never run
-`reset` on a profile that still protects data unless you already hold and have
-independently verified a usable backup blob or have removed every dependency.
+`keyvault export` refuses an existing output path and requires its immediate
+parent to be a real directory. It prompts for the Keyvault init passphrase and,
+for a paper-only Keyvault, the 24-word Seed Phrase; neither belongs in argv.
+The snapshot is point-in-time, so export again after every Keyvault content
+change. Never run `reset` unless an isolated recovery test has verified the
+latest blob or every dependency on the source has been removed.
 
 #### `keyvault eth` — Ethereum keys (HD wallet)
 
@@ -251,12 +253,10 @@ key IDs, or moving one between `HERMES_HOME` profiles.*
 Keys created by current releases are isolated per `HERMES_HOME`. A legacy
 keyvault remains readable, but `keyvault reset` intentionally retains its
 machine-global legacy Keychain tag because another profile may share it.
-There is no supported public-CLI migration path unless you already possess an
-`MRKV` backup blob: the CLI can import with `recover --blob`, but it cannot
-export the old keyvault. Do not improvise a reset/export sequence from internal
-environment variables or Python APIs on production data. Keep the original
-profile and native helper store intact until the supported export workflow is
-available.
+Create an `MRKV` snapshot with `keyvault export --output <path>`, then import it
+into a fresh profile with `recover --blob <path>`. Keep the original profile
+and native helper store intact until the destination has been verified; export
+does not make reset or source removal safe by itself.
 
 Current profiles also record the profile-scoped audit wrapping key separately
 from the main key. If audit-key generation or its durability check is
@@ -397,8 +397,8 @@ Three steps, in order:
 > envelopes or HD-wallet derivation. Run `encryption enable env` to create the
 > at-rest file vault. The 24-word keyvault seed does not replace the file
 > vault's recovery passphrase and does not reconstruct its encrypted files.
-> The current CLI also cannot create the backup blob required to restore the
-> keyvault envelopes on another device.
+> After Keyvault initialization, create and separately store a portable
+> snapshot with `keyvault export`; it does not back up the at-rest file vault.
 
 ### 4.2 The device key and the recovery passphrase are different things
 
@@ -485,10 +485,9 @@ command creates a genuinely fresh device key.
 > but cannot convert that key. For the file vault, keep the complete vault
 > directory and recovery passphrase; `vault recover` can re-key a copied vault
 > on a genuinely fresh device/profile, but it is not an in-place policy toggle.
-> For the main keyvault, the CLI can import a backup blob but cannot export one,
-> so there is no general supported conversion ceremony unless you already have
-> that blob. Keep using attended keys in a foreground session, and never reset
-> either store while secrets or wallets still depend on it.
+> For the main keyvault, export a fresh portable blob and verify recovery into
+> a fresh profile before considering an attended-to-unattended replacement.
+> Never reset either store while secrets or wallets still depend on it.
 
 ### 4.4 `network init` — the dialog and prompts
 

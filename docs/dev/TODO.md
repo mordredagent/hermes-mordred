@@ -172,15 +172,15 @@ Strict mode must never retry a selected protected route over clearnet.
 
 ## Phase 4 — Key Management (`mordred_keyvault`)
 
-The crypto/storage API includes portable backup export and import, but the
-operator CLI exposes only import. The docs must not claim a complete backup
-workflow until the missing export surface lands.
+Portable backup export and import are available through both the crypto/storage
+API and the operator CLI.
 
 ### Open decisions
 
-- [ ] Define the supported operator UX for selecting the key, supplying the
-  recovery inputs, choosing an output path, and verifying the resulting blob.
-  Secrets must not be accepted in argv or written to logs.
+- [x] Select the single initialized logical key automatically, collect recovery
+  inputs through masked prompts, require a new `--output` path, and cover an
+  isolated export/recover round trip. Secrets are never accepted in argv or
+  written to logs.
 
 ### 4.1 `mordred_keyvault` plugin
 
@@ -190,28 +190,27 @@ operator surface.
 
 ### 4.2 Wizard additions (Phase 4)
 
-- [ ] Add `hermes-mordred keyvault export --output <path>` (or the separately
-  specified equivalent) backed by `keyvault.api.export_backup()`.
-- [ ] Write the output atomically as a mode-`0600` regular file, refuse unsafe
+- [x] Add `hermes-mordred keyvault export --output <path>` backed by
+  `keyvault.api.export_backup()`.
+- [x] Write the output atomically as a mode-`0600` regular file, refuse unsafe
   destinations, avoid printing secret inputs or blob contents, and leave no
   partial output on failure.
-- [ ] Add an explicit verification step that imports the blob against an
-  isolated fresh profile/fake backend without mutating the source profile.
-- [ ] Only after those checks pass, update Quickstart/Usage/README to recommend
+- [x] Verify the blob in tests against an isolated fresh profile/fake backend
+  without mutating the source profile.
+- [x] Update Quickstart/Usage/README to recommend
   export-before-reset, cross-profile key migration, or attended-to-unattended
   key replacement.
 
 ### 4.3 Tests (Phase 4)
 
-- [ ] Cover parser/help, interactive and non-interactive secret handling,
+- [x] Cover parser/help, interactive and non-interactive secret handling,
   permissions, existing-output refusal, atomic failure cleanup, successful
   round trip, wrong-passphrase failure, and source-profile preservation.
 
 ### Acceptance gate (Phase 4)
 
-The current import-only CLI remains documented as such. A complete operator
-backup claim requires a CLI-produced blob to recover successfully into an
-isolated fresh profile while the source remains usable.
+A CLI-produced blob recovers successfully into an isolated fresh profile while
+the source remains usable, and failure paths leave no partial destination.
 
 ## Cross-cutting (ongoing through the operational phase)
 

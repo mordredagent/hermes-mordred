@@ -187,18 +187,18 @@ an explicitly gated live-device test.
   2.0 helper on Linux; Linux has no software fallback.
 - Store encrypted envelopes and metadata under the profile-owned keyvault root
   with atomic writes, process locks, permission checks, and purpose-bound AAD.
-- Provide recovery seed/digest, portable backup export/import in the Python
-  API, passphrase recovery, audit encryption, Ethereum keys, extension signing,
-  and macOS-only config/env/memory runtime integration. The operator CLI is
-  import-only until the export task in [`TODO.md`](./TODO.md) §4.2 lands.
+- Provide recovery seed/digest, portable backup export/import in both the
+  Python API and operator CLI, passphrase recovery, audit encryption, Ethereum
+  keys, extension signing, and macOS-only config/env/memory runtime integration.
 - Keep native imports lazy so unsupported platforms can still import the
   package and report capabilities.
 
 ### 4.2 Wizard additions
 
-The CLI owns `keyvault init/list/verify-digest/recover/reset`, native helper
-installation, Ethereum subcommands, the lower-level vault interface, and the
-`encryption` facade. It does not currently expose the API's backup export.
+The CLI owns `keyvault init/list/verify-digest/export/recover/reset`, native
+helper installation, Ethereum subcommands, the lower-level vault interface,
+and the `encryption` facade. Export collects recovery material through masked
+prompts and publishes a new mode-`0600` MRKV snapshot without replacement.
 
 ### 4.3 Tests
 

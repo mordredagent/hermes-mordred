@@ -262,9 +262,9 @@ requires the TPM helper. Seed display is short-lived and capture-aware where
 the OS exposes the signal.
 
 The Python API can export and import a recoverable encrypted manifest. The
-operator CLI currently exposes `recover --blob` but no `keyvault export`
-command. Until that workflow is added, documentation must not tell an operator
-that the CLI can create a backup before reset or migration.
+operator CLI exposes `keyvault export --output` and `recover --blob` for the
+corresponding portable snapshot workflow. Exported snapshots are point-in-time
+artifacts and must be recreated after Keyvault contents change.
 
 ### Story 6: Coexistence with Hermes's existing features
 
@@ -531,9 +531,13 @@ keyvault, and reconstructs purpose-bound `MREN` envelopes for that device.
 Import refuses overwrite/merge conflicts and rolls back provisional state on
 failure.
 
-The current CLI exposes only import through `keyvault recover --blob`. A safe,
-atomic mode-`0600` `keyvault export` operator workflow is an open task in
-[`TODO.md`](./TODO.md); the Python API is not evidence that the CLI exists.
+The CLI exposes export through `keyvault export --output <path>`. It selects
+the single initialized logical key, collects the init passphrase and any
+required paper Seed Phrase through masked prompts, and delegates MRKV creation
+to `keyvault.api.export_backup()`. The wizard publishes a complete mode-`0600`
+file atomically without replacement. The parent must already be a real
+directory, the final path must not exist, and failures leave no partial final
+file. Import remains `keyvault recover --blob <path>` into an empty profile.
 
 ##### File-safety semantics (step-B foundation, codex HIGH #4)
 

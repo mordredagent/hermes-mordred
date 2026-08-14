@@ -269,13 +269,17 @@ hermes-mordred keyvault reset         # asks you to type reset
 hermes-mordred keyvault reset --yes   # non-interactive and immediate
 ```
 
-This destroys profile-owned key material. The current CLI can recover an
-existing backup blob but cannot create one: there is no supported
-`keyvault export` command yet. Do not reset a profile whose encrypted secrets
-or wallets still depend on it. Use reset only for an expendable profile, or
-after decrypting/removing every dependency and independently verifying any
-backup blob you already possess. The command prints the exact key IDs before
-interactive confirmation.
+This destroys profile-owned key material. Before reset, create a fresh snapshot
+in an existing private directory:
+
+```sh
+hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv
+```
+
+Keep the blob separate from the Keyvault init passphrase and 24-word Seed
+Phrase. Verify recovery against an isolated fresh profile before relying on it.
+Do not reset while encrypted secrets or wallets still depend on the source.
+The reset command prints the exact key IDs before interactive confirmation.
 
 ## Common checks
 
