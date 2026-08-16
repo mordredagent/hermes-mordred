@@ -248,7 +248,7 @@ Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
 a terminal pairing QR.
 
 The browser client is distributed separately as a
-[prebuilt Chromium extension](https://github.com/InternetMaximalism/Mordred-Extension-dist).
+[prebuilt Chromium extension](https://github.com/mordredagent/mordred-extension-dist).
 Load its `dist/` directory as an unpacked extension.
 
 ### How it works

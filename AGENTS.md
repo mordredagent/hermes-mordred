@@ -8,7 +8,8 @@ condensed pointer — the documents under `docs/dev/` are the source of truth.
 Standalone package repository for **hermes-mordred**, a plugin suite for
 [hermes-agent](https://pypi.org/project/hermes-agent/). It ships 6 entry-point
 plugins from `src/mordred_hermes/` (`privacy_check`, `wizard`, `llm_guard`,
-`network`, `keyvault`, `extension`). It is **not** a fork of Hermes upstream — never send
+`network`, `keyvault`, `extension` — the last registers as the manifest-less
+`mordred_e2e` entry point). It is **not** a fork of Hermes upstream — never send
 PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).
 
 ## Setup and everyday commands
