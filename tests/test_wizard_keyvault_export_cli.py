@@ -879,8 +879,51 @@ class TestPublicationFailureModes:
         assert _staging_leftovers(output)
         err = capsys.readouterr().err
         assert str(output) in err
-        assert "durably synced" in err
+        assert "durability or cleanup step after publication failed" in err
         assert "mordred-materialize" in err
+        assert "written safely" not in err
+
+    def test_staging_cleanup_failure_after_successful_sync_is_still_reported_as_published(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The other post-link sub-case: the directory sync succeeded, only the staging cleanup's sync failed."""
+
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "cleanup-fail.mrkv"
+        real_sync = keyvault_export_cli._plaintext_capture._sync_directory
+        calls = {"n": 0}
+
+        def second_sync_fails(directory: Path) -> None:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError(errno.EIO, "simulated staging-cleanup sync failure")
+            real_sync(directory)
+
+        monkeypatch.setattr(keyvault_export_cli._plaintext_capture, "_sync_directory", second_sync_fails)
+
+        assert (
+            _export(
+                home=isolated_home,
+                backend=backend,
+                output=output,
+                prompts=RecordingPromptIO([PASSPHRASE]),
+            )
+            == 1
+        )
+
+        assert calls["n"] == 2
+        blob = output.read_bytes()
+        assert blob.startswith(b"MRKV")
+        assert os.stat(output, follow_symlinks=False).st_mode & 0o777 == 0o600
+        # The staging name was unlinked before its directory sync raised.
+        assert _staging_leftovers(output) == []
+        err = capsys.readouterr().err
+        assert "durability or cleanup step after publication failed" in err
         assert "written safely" not in err
 
     def test_hard_link_unsupported_destination_names_the_filesystem_limit(
@@ -896,7 +939,9 @@ class TestPublicationFailureModes:
         real_link = os.link
 
         def refuse_link(src: Any, dst: Any, **kwargs: Any) -> None:
-            del kwargs
+            if Path(dst) != output:
+                real_link(src, dst, **kwargs)
+                return
             # Mirror CPython: two-path syscalls populate both filename attributes.
             raise OSError(errno.EPERM, "hard links are not supported on this filesystem", str(src), None, str(dst))
 
@@ -1384,5 +1429,13 @@ class TestPublishedOutputProbe:
             del fd, size
             raise OSError(errno.EIO, "simulated read failure")
 
-        monkeypatch.setattr(os, "read", unreadable)
-        assert not keyvault_export_cli._is_complete_published_output(private, b"x")
+        with monkeypatch.context() as scoped:
+            scoped.setattr(os, "read", unreadable)
+            assert not keyvault_export_cli._is_complete_published_output(private, b"x")
+
+        # A byte-identical private file owned by someone else is not ours either;
+        # the euid seam is what makes the ownership check testable without root.
+        with monkeypatch.context() as scoped:
+            scoped.setattr(keyvault_export_cli, "_geteuid", lambda: os.geteuid() + 1)
+            assert not keyvault_export_cli._is_complete_published_output(private, b"x")
+        assert keyvault_export_cli._is_complete_published_output(private, b"x")

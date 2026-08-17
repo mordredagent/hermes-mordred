@@ -21,6 +21,8 @@ import hashlib
 import hmac
 import os
 import stat
+from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,13 +39,15 @@ if TYPE_CHECKING:
 
 __all__ = ["cli_export", "export_keyvault_backup"]
 
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-#: ``O_NONBLOCK`` mirrors ``_plaintext_capture._open_regular_no_follow``: without
-#: it, opening a FIFO another writer raced into the output pathname would block
-#: the CLI forever instead of being rejected as a non-regular file.
-_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
-_PRIVATE_MODE = 0o600
+#: Shared with the publication primitive so the probe cannot drift from what
+#: ``publish_plaintext_no_replace`` actually wrote. ``O_NONBLOCK`` mirrors
+#: ``_plaintext_capture._open_regular_no_follow``: without it, opening a FIFO
+#: another writer raced into the output pathname would block the CLI forever
+#: instead of being rejected as a non-regular file.
+_O_NOFOLLOW = _plaintext_capture._O_NOFOLLOW
+_O_CLOEXEC = _plaintext_capture._O_CLOEXEC
+_O_NONBLOCK = _plaintext_capture._O_NONBLOCK
+_PRIVATE_MODE = _plaintext_capture._PRIVATE_MODE
 _geteuid = getattr(os, "geteuid", None)
 
 #: ``os.link`` errnos that mean "this destination filesystem has no hard links"
@@ -116,7 +120,7 @@ def _preflight_output(path: Path) -> bool:
     return True
 
 
-def _validate_single_key_row(keys: Any) -> tuple[str, dict[str, Any]] | None:
+def _select_single_key_row(keys: Mapping[str, object]) -> tuple[str, dict[str, Any]] | None:
     """Return the one ``meta['keys']`` row, reporting count/shape-specific guidance.
 
     An empty mapping is an *uninitialized* layout, not a damaged one: a
@@ -176,7 +180,7 @@ def _single_key_id(home: Path) -> str | None:
         )
         return None
 
-    entry = _validate_single_key_row(meta["keys"])
+    entry = _select_single_key_row(meta["keys"])
     if entry is None:
         return None
     key_id_hash, row = entry
@@ -325,7 +329,10 @@ def _is_complete_published_output(path: Path, blob: bytes) -> bool:
     except OSError:
         return False
     finally:
-        os.close(fd)
+        # A deferred write-back error surfacing at close must not escape the
+        # failure handler and turn into the generic "failed safely" report.
+        with suppress(OSError):
+            os.close(fd)
     return total == len(blob) and hmac.compare_digest(b"".join(chunks), blob)
 
 
@@ -333,14 +340,15 @@ def _report_publish_failure(path: Path, blob: bytes, exc: OSError) -> None:
     """Emit the guidance that matches what publication actually left on disk."""
 
     if _is_complete_published_output(path, blob):
-        # Post-link directory-sync failure: the file is real and complete, only
-        # its durability is unconfirmed. Reporting "not written" here would send
-        # the operator to a retry that `_preflight_output` then refuses.
+        # Post-link failure (directory sync or staging cleanup): the file is real
+        # and complete, only its durability is unconfirmed. Reporting "not
+        # written" here would send the operator to a retry that
+        # `_preflight_output` then refuses.
         _term.emit_error(
-            f"Backup was published at {_terminal_safe(path)} (complete, mode 0600) but its directory entry "
-            "could not be durably synced; a private staging copy named "
-            f"`.{_terminal_safe(path.name)}.mordred-materialize-*` may remain in the same directory. "
-            "Verify the file and remove the staging copy before relying on it."
+            f"Backup was published at {_terminal_safe(path)} (complete, mode 0600) but a durability or cleanup "
+            "step after publication failed, so its directory entry may not be durably synced; a private staging "
+            f"copy named `.{_terminal_safe(path.name)}.mordred-materialize-*` may remain in the same directory. "
+            "Verify the file and remove any staging copy before relying on it."
         )
         return
     if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
@@ -357,7 +365,8 @@ def _report_publish_failure(path: Path, blob: bytes, exc: OSError) -> None:
         )
         return
     _term.emit_error(
-        "Backup output could not be written safely; check directory permissions and free space, then retry."
+        "Backup output could not be written safely; check directory permissions and free space, then retry "
+        "with a new output path."
     )
 
 

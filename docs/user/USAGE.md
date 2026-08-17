@@ -217,10 +217,10 @@ parent to be a real directory. It prompts for the Keyvault init passphrase and,
 for a paper-only Keyvault, the 24-word Seed Phrase; neither belongs in argv.
 The snapshot is point-in-time, so export again after every Keyvault content
 change. If the command exits non-zero but reports that the backup *was*
-published and only its directory sync failed, the file at `--output` is
-complete (mode `0600`); verify it and remove the private
-`.<name>.mordred-materialize-*` staging copy left beside it before relying on
-it. Never run `reset` unless an isolated recovery test has verified the
+published and only a post-publication durability or cleanup step failed, the
+file at `--output` is complete (mode `0600`); verify it and remove the private
+`.<name>.mordred-materialize-*` staging copy if one was left beside it before
+relying on it. Never run `reset` unless an isolated recovery test has verified the
 latest blob or every dependency on the source has been removed.
 
 #### `keyvault eth` — Ethereum keys (HD wallet)
