@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 # an inbound message the plugin cannot decrypt (plaintext, or ciphertext whose
 # key we do not hold) is never handed to the agent in cleartext. Instead the
 # sender is told to set up / obtain an encryption key (see _notify_needs_key).
-_ENFORCE_ENCRYPTION_PLATFORMS = frozenset({"slack", "discord"})
+# Shared with the send path (e2e.outbound_must_encrypt): the two directions must
+# agree on which platforms are ciphertext-only, so the set has one definition.
+_ENFORCE_ENCRYPTION_PLATFORMS = e2e.MANDATORY_ENCRYPTION_PLATFORMS
 
 _NEEDS_KEY_NOTICE = (
     "🔒 暗号化されていないメッセージには応答できません。"
@@ -91,8 +93,17 @@ def _profile_name(event: Any) -> str | None:
 
 
 async def _safe_send(adapter: Any, chat_id: str, content: str, metadata: dict[str, Any] | None) -> None:
+    """Deliver a Mordred control notice through the (wrapped) live adapter.
+
+    Marked as a control notice so the send path's channel-binding rule does not
+    encrypt it: the notice exists to tell a sender who could not encrypt how to
+    obtain a key, so ciphertext would make it unreadable by its only audience.
+    It carries no agent or user content. Reply-in-kind is unaffected — a
+    conversation already marked encrypted still gets an encrypted notice.
+    """
     try:
-        await adapter.send(chat_id, content, reply_to=None, metadata=metadata)
+        with e2e.control_notice_send():
+            await adapter.send(chat_id, content, reply_to=None, metadata=metadata)
     except Exception as exc:
         logger.warning("mordred_e2e: needs-key notice send failed: %s", exc)
 
@@ -155,6 +166,32 @@ def _notify_needs_key(gateway: Any, event: Any, outbound: Any, profile: str | No
     # attempt must not silence the next message.
     _NEEDS_KEY_NOTICE_TIMES[(platform, profile, str(chat_id))] = time.time()
     return True
+
+
+def _scope_id(event: Any) -> str | None:
+    """The workspace/guild this event arrived from, when the host stamps one.
+
+    ``SessionSource.scope_id`` is Hermes' platform-neutral scope discriminator
+    (Slack team id / Discord guild id); ``guild_id`` is its deprecated alias,
+    read as a fallback for older events. The extension's composite channel-key
+    id embeds the same value, so a known scope tightens key binding
+    (:func:`e2e._channel_key_matches`).
+
+    Returns ``None`` — meaning "unknown, stay lenient" — whenever the field is
+    absent, blank, or not a string. Today the shipped Slack adapter stamps it
+    from the event's ``team_id`` while the Discord adapter never sets it, so
+    Discord binding is unchanged. Anything hostile-shaped is treated as unknown
+    rather than as a mismatch: a wrong value here would refuse a legitimate
+    command, and the lenient path is exactly the #83-verified behaviour.
+    """
+    try:
+        src = getattr(event, "source", None)
+        raw = getattr(src, "scope_id", None) or getattr(src, "guild_id", None)
+        if not isinstance(raw, str):
+            return None
+        return raw.strip() or None
+    except BaseException:
+        return None
 
 
 def _thread_ctx(event: Any) -> tuple[str, str, str | None, str | None]:
@@ -388,6 +425,7 @@ def pre_gateway_dispatch(
             chat_id=chat_id,
             thread_root=thread_root,
             parent_chat_id=parent_chat_id,
+            scope_id=_scope_id(event),
         )
     except e2e.InvalidEncryptedEnvelope as exc:
         # The reason is a fixed identifier (never message text, keys or

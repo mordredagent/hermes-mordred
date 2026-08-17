@@ -78,6 +78,25 @@ uses a paid account and mutates runner network state.
 - **2026-05-25 — passed on real devices**:
   - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v`
   - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v`
+- **PENDING — Slack E2E outbound channel-key binding** (`docs/dev/SLACK_E2E.md`
+  §5 "Outbound: channel-key binding"). Required before the next release: the
+  rule changes what leaves a live workspace, and no CI job can exercise it. In a
+  Slack channel with a bound `K_chan`, verify all four:
+  1. encrypted command in, encrypted reply out (the existing round-trip);
+  2. an agent-initiated send with no thread context (for example a cron
+     delivery) arrives as `ENC:v3` and decrypts in the extension;
+  3. a plaintext post still receives a **readable** needs-key notice;
+  4. a channel with no bound key is unchanged.
+  Plus the top-risk case for the `{team}` scope tightening: an `ENC:v3` command
+  from an external member in a **Slack Connect / externally shared** channel,
+  and a `/hermes` **slash command** in that same channel. The adapter derives
+  the team id from the inner event (`team_id` or `team` — the posting user's
+  workspace in a shared channel) for messages but from the command payload (the
+  installing workspace) for slash commands, so a composite id built around the
+  installing team can now fail closed as `key_not_bound_to_channel` (#83
+  shape). Check the extension-side composite builder uses the same team id the
+  adapter stamps on `SessionSource.scope_id` before shipping.
+  Record the date and result here; do not delete this entry until it passes.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

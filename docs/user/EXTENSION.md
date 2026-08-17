@@ -110,6 +110,22 @@ Before returning a message signature or broadcasting a transaction, Hermes
 recovers the actual signer and verifies that it still matches the address shown
 in the approval prompt.
 
+`personal_sign` prompts distinguish a readable message from an opaque payload.
+A bare 32-byte digest — a Safe transaction hash, a meta-transaction — is
+labelled as unverifiable and warns that the signature alone may authorize
+contract actions or asset movement off-chain. Only a payload that decodes to
+readable text is described as moving no assets.
+
+The localhost page response carries `Content-Security-Policy` (script and style
+pinned by hash, `frame-ancestors 'none'`, `connect-src` limited to the page's
+own loopback WebSocket), `X-Frame-Options: DENY`, `Referrer-Policy:
+no-referrer`, `X-Content-Type-Options: nosniff`, and `Cache-Control: no-store`,
+so the page holding the launch-fragment token cannot be framed and its token
+cannot leak through a referrer.
+
+Client-visible errors are stable codes. Exception detail (file paths, backend
+and provider messages) is written to the Hermes log instead of the reply.
+
 ## Supported messages
 
 | Message | Behavior |
@@ -122,13 +138,18 @@ in the approval prompt.
 | `encrypt` / `decrypt` | Encrypts or decrypts extension message payloads. |
 | `channel_key_set` | Stores an encrypted per-channel gateway key from the paired extension. |
 | `slack_setup` | Validates and stores Slack bot/app tokens for the next Hermes restart. |
-| `accounts_request` | Returns the selected wallet address and chain ID. |
+| `accounts_request` | Returns the selected wallet address and chain ID, resolved at most once per minute (repeat requests are served from that snapshot, so a burst cannot drive repeated Touch ID prompts). |
 | `sign_request` | Produces a frozen approval prompt before any keyvault signing. |
 | `sign_approve` | Signs only the request captured by the matching prompt. |
 | `history_get` / `history_clear` | Reads or clears encrypted-at-rest conversation history. |
 
 Large history reads return the newest complete suffix with `truncated: true`;
-stored history is not modified.
+stored history is not modified. `history_result` also carries `status`
+(`ok`, `empty`, `unavailable`, `undecryptable`) so a client can tell an empty
+conversation from history that a re-pairing left unreadable; `turns` stays a
+list in every case. Unreadable history is not preserved: the next chat turn
+saves over it, because the key that sealed it is gone and no surface can ever
+decrypt it again.
 
 ## Gateway message encryption
 
