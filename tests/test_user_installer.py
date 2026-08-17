@@ -281,12 +281,20 @@ def test_user_optional_extras_do_not_drift_from_pyproject_or_docs(tmp_path: Path
     fixture = _fixture(tmp_path)
     result = _run(fixture, "--help")
     assert result.returncode == 0, result.stderr
-    for extra in user_extras:
-        assert extra in result.stdout, f"--help output omits the {extra!r} extra"
+    # Anchor on the interpolated line itself: bare names would also match
+    # `--with-extension` / `browser-extension` elsewhere in the usage text.
+    feature_line = next((line for line in result.stdout.splitlines() if line.startswith("Feature extras:")), None)
+    assert feature_line is not None, "--help output lost its 'Feature extras:' line"
+    assert feature_line == "Feature extras: " + ", ".join(extras_in_order)
 
+    # Scope the README check to the extras table block; the same names appear
+    # in prose elsewhere (including the Upgrading section), which must not
+    # satisfy a stale-table assertion.
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "| Extra | Use it for |" in readme, "README.md extras table header changed"
+    table = readme.split("| Extra | Use it for |", 1)[1].split("\n\n", 1)[0]
     for extra in user_extras:
-        assert f"`{extra}`" in readme, f"README.md extras table omits {extra!r}"
+        assert f"| `{extra}` |" in table, f"README.md extras table omits {extra!r}"
 
 
 def test_user_docs_lead_with_the_installer_and_path_command() -> None:
@@ -528,6 +536,16 @@ def test_with_extension_combined_with_extras_dedupes_and_preserves_order(tmp_pat
 
     result = _run(fixture, "--with-extension", "--extras", "ethereum,tor-control")
 
+    assert result.returncode == 0, result.stderr
+    expected = "hermes-mordred[macos,extension,ethereum,tor-control]>=0.1.0a16"
+    assert fixture.uv_calls().count(expected) == 2
+
+
+def test_env_extras_are_appended_after_argv_extras(tmp_path: Path) -> None:
+    """Left-to-right contract: argv extras first, MORDRED_INSTALL_EXTRAS last, deduplicated."""
+
+    fixture = _fixture(tmp_path)
+    result = _run(fixture, "--with-extension", MORDRED_INSTALL_EXTRAS="tor-control,extension")
     assert result.returncode == 0, result.stderr
     expected = "hermes-mordred[macos,extension,ethereum,tor-control]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2

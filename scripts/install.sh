@@ -132,8 +132,8 @@ parse_installer_args() {
   # usage and exits 0 as soon as it is reached, so an invalid argument earlier
   # in argv still fails with rc=1 (it is reached first) while --help earlier
   # than an invalid argument still succeeds (the invalid one is never
-  # reached). MORDRED_INSTALL_EXTRAS is resolved after this loop, so --help
-  # anywhere in argv short-circuits before the environment variable is ever
+  # reached). MORDRED_INSTALL_EXTRAS is resolved after this loop, so a --help
+  # the loop reaches short-circuits before the environment variable is ever
   # parsed, and cannot itself fail before a command-line --help is honored.
   while (($#)); do
     case "$1" in
@@ -197,6 +197,7 @@ parse_installer_args() {
   if [[ -n "$(trim_spaces "${MORDRED_INSTALL_EXTRAS:-}")" ]]; then
     EXTRA_ERROR_PREFIX="from MORDRED_INSTALL_EXTRAS: "
     parse_extra_list "$MORDRED_INSTALL_EXTRAS"
+    # fail() exits, so this reset only matters for a future post-loop caller.
     EXTRA_ERROR_PREFIX=""
   fi
   unset MORDRED_INSTALL_EXTRAS

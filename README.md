@@ -331,8 +331,9 @@ This upgrades Mordred only and handles the transition from the old
 the base package and silently drops any `extension`, `ethereum`, `messaging`,
 or `tor-control` extras from before, because a recreated venv only gets what
 the re-run itself asks for. Repeat the same extras flags to keep them. A
-re-run against an intact venv keeps previously installed extras, so the bare
-form above is enough there.
+re-run against an intact venv leaves already-installed extra dependencies in
+place, but only a re-run with the same flags re-resolves those extras against
+the new release, so pass them every time.
 
 For a version-pinned upgrade, pass the desired PEP 440 release to the installer
 (replace `VERSION` before running the command):
