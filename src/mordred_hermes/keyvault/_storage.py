@@ -272,14 +272,13 @@ def ensure_layout(root: Path) -> None:
         _ensure_layout_locked(root)
 
 
-def _ensure_layout_locked(root: Path) -> None:
-    """Implement :func:`ensure_layout` while its lifecycle lock is held."""
-    # Check the stable parent journal before creating ``root``. A crash may
-    # leave the journal after rmtree already removed the old generation; an
-    # initializer must not publish an empty successor tree over that pending
-    # reset transaction.
-    assert_keyvault_active(root)
-    root_existed = root.exists()
+def _ensure_layout_root(root: Path) -> None:
+    """Materialize/validate the keyvault root directory itself.
+
+    Split out of :func:`_ensure_layout_locked` for cyclomatic headroom only.
+    The caller samples ``root.exists()`` for the generation-epoch decision
+    *before* calling this, so the pre-existing double stat is unchanged.
+    """
     if root.exists():
         if not root.is_dir():
             raise KeyvaultPermissionError(errno.ENOTDIR, "keyvault root exists but is not a directory", str(root))
@@ -294,10 +293,13 @@ def _ensure_layout_locked(root: Path) -> None:
         else:
             os.chmod(root, _DIR_MODE)
 
-    # A root created at this pathname is a new generation even if the
-    # filesystem immediately reuses the predecessor's dev/inode pair.
-    ensure_generation_epoch(root, force_new=not root_existed)
 
+def _ensure_layout_subdirs(root: Path) -> None:
+    """Materialize/validate ``digests/`` and ``ciphertexts/`` at ``0o700``.
+
+    Split out of :func:`_ensure_layout_locked` for cyclomatic headroom only;
+    the per-subdirectory exists/mkdir/race-validate sequence is unchanged.
+    """
     for sub in ("digests", "ciphertexts"):
         d = root / sub
         if d.exists():
@@ -309,6 +311,23 @@ def _ensure_layout_locked(root: Path) -> None:
                 _check_dir_mode(d)
             else:
                 os.chmod(d, _DIR_MODE)
+
+
+def _ensure_layout_locked(root: Path) -> None:
+    """Implement :func:`ensure_layout` while its lifecycle lock is held."""
+    # Check the stable parent journal before creating ``root``. A crash may
+    # leave the journal after rmtree already removed the old generation; an
+    # initializer must not publish an empty successor tree over that pending
+    # reset transaction.
+    assert_keyvault_active(root)
+    root_existed = root.exists()
+    _ensure_layout_root(root)
+
+    # A root created at this pathname is a new generation even if the
+    # filesystem immediately reuses the predecessor's dev/inode pair.
+    ensure_generation_epoch(root, force_new=not root_existed)
+
+    _ensure_layout_subdirs(root)
 
     lock = root / ".lock"
     ensure_lock_file(lock)
