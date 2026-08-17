@@ -19,6 +19,12 @@ artifacts —
 - the ``memory.encryption.enabled`` flag in ``config.yaml``,
 - the workspace sparsebundle / wrapped-passphrase / mountpoint.
 
+The one deliberate exception is :func:`gateway_runtime_lines`, appended to the
+text output on macOS: it inspects the process table for a running
+``hermes gateway`` and probes that interpreter's decrypt shims in a subprocess.
+It still opens no vault and prompts for nothing, and it is skipped entirely for
+``--json``.
+
 ``active`` is the *effective* state on **this** OS. The runtime decrypt shims are
 macOS-only (:mod:`mordred_hermes.keyvault._runtime_env`,
 :mod:`mordred_hermes.keyvault._config_bootstrap`), so an enrolled-but-off-darwin
@@ -56,6 +62,7 @@ __all__ = [
     "collect_status",
     "config_status",
     "env_status",
+    "gateway_runtime_lines",
     "memory_status",
     "render_json",
     "render_text",
@@ -411,6 +418,50 @@ def _default_workspace_paths() -> WorkspacePaths:
     return resolve_workspace_env()
 
 
+def _shim_mark(ok: bool) -> str:
+    return "ok" if ok else "MISSING"
+
+
+def gateway_runtime_lines(*, home: Path, platform: str) -> list[str]:
+    """One line per interpreter currently running a ``hermes gateway``.
+
+    ``gateway runtime: <python> (pid N) — env shim: ok | config hook: MISSING``
+
+    The env/config seals are only as good as the interpreter that actually serves
+    the gateway: on 2026-06-25 a gateway running from a repo ``.venv`` without
+    mordred could not unseal files the seal had removed, while the *expected*
+    runtime looked healthy. This makes that interpreter visible before anything
+    is sealed.
+
+    Unlike the rest of ``status`` this spends two short subprocess probes per
+    discovered gateway (macOS only, and only when one is actually running).
+    Neither probe opens the vault or prompts for Touch ID — the config probe runs
+    with the ``.pth`` hook neutralized. Any failure yields no lines: ``status``
+    must never raise or block.
+    """
+    if platform != _DARWIN:
+        return []
+    try:
+        from ..keyvault._runtime_probe import (
+            discover_running_gateway_runtimes,
+            runtime_config_decrypt_available,
+            runtime_env_injection_available,
+        )
+
+        lines = []
+        for gateway in discover_running_gateway_runtimes(home=home):
+            env_ok, _ = runtime_env_injection_available(home=home, runtime_python=gateway.python)
+            config_ok, _ = runtime_config_decrypt_available(home=home, runtime_python=gateway.python)
+            where = f"{gateway.python}" + (f" (pid {gateway.pid})" if gateway.pid is not None else "")
+            lines.append(
+                f"  gateway runtime: {where} — env shim: {_shim_mark(env_ok)} | config hook: {_shim_mark(config_ok)}"
+            )
+        return lines
+    except Exception:
+        # Broad on purpose: a diagnostic line must never make `status` fail.
+        return []
+
+
 def status(
     *,
     home: Path,
@@ -420,12 +471,20 @@ def status(
     as_json: bool = False,
     on_path: Callable[[str], bool] | None = None,
 ) -> int:
-    """Print the state of all four targets. Always returns 0 (read-only)."""
+    """Print the state of all four targets. Always returns 0 (read-only).
+
+    Text output is followed by one :func:`gateway_runtime_lines` line per running
+    gateway interpreter (macOS only). ``--json`` stays a pure list of target
+    objects — and skips the probes entirely, so machine consumers keep the old
+    shape and the old cost.
+    """
     statuses = collect_status(home=home, root=root, platform=platform, workspace=workspace, on_path=on_path)
     if as_json:
         print(render_json(statuses))
-    else:
-        print(render_text(statuses, color=_term.should_color(sys.stdout)))
+        return 0
+    print(render_text(statuses, color=_term.should_color(sys.stdout)))
+    for line in gateway_runtime_lines(home=home, platform=platform):
+        print(line)
     return 0
 
 

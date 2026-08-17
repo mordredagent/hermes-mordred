@@ -30,7 +30,8 @@ import pytest
 
 from mordred_hermes.keyvault import _identity, _runtime_env, vault
 from mordred_hermes.keyvault._runtime_env import _env_optout_marker_path
-from mordred_hermes.wizard import env_decrypt_cli
+from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
+from mordred_hermes.wizard import _runtime_gate, env_decrypt_cli
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
@@ -59,9 +60,12 @@ def _runtime_injection_available(monkeypatch: pytest.MonkeyPatch) -> None:
     tests, which exercise the enroll/delete logic rather than the runtime gate.
 
     The gate itself is covered by :class:`TestRuntimeGate`, which injects its own
-    ``runtime_probe=`` and so is unaffected by this default.
+    ``runtime_probe=`` and so is unaffected by this default. Running-gateway
+    discovery is defaulted to "none found" for the same reason — and so no test
+    ever reads this host's real process table.
     """
-    monkeypatch.setattr(env_decrypt_cli, "_default_runtime_probe", lambda *, home: (True, "ok"))
+    monkeypatch.setattr(env_decrypt_cli, "_default_runtime_probe", lambda *, home, runtime_python=None: (True, "ok"))
+    monkeypatch.setattr(_runtime_gate, "_default_gateway_discovery", lambda *, home: [])
 
 
 # -----------------------------------------------------------------------------
@@ -523,7 +527,7 @@ class TestEnableReconcilesDrift:
 # -----------------------------------------------------------------------------
 # runtime gate — refuse to seal .env when the `hermes` runtime cannot decrypt it
 # -----------------------------------------------------------------------------
-def _boom_probe(*, home: Path) -> tuple[bool, str]:
+def _boom_probe(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
     raise AssertionError("runtime probe must not be consulted on this path")
 
 
@@ -551,7 +555,7 @@ class TestRuntimeGate:
             platform="darwin",
             backend=backend,
             store=store,
-            runtime_probe=lambda *, home: (False, "mordred_keyvault plugin not registered"),
+            runtime_probe=lambda *, home, runtime_python=None: (False, "mordred_keyvault plugin not registered"),
         )
         assert rc == 1
         assert (home / ".env").read_bytes() == _ENV_A  # plaintext untouched
@@ -601,7 +605,7 @@ class TestRuntimeGate:
                 platform="darwin",
                 backend=backend,
                 store=store,
-                runtime_probe=lambda *, home: (True, "ok"),
+                runtime_probe=lambda *, home, runtime_python=None: (True, "ok"),
             )
             == 0
         )
@@ -614,9 +618,100 @@ class TestRuntimeGate:
             platform="darwin",
             backend=backend,
             store=store,
-            runtime_probe=lambda *, home: (False, "mordred dropped from the runtime"),
+            runtime_probe=lambda *, home, runtime_python=None: (False, "mordred dropped from the runtime"),
         )
         assert rc == 1
         assert (home / ".env").read_bytes() == _ENV_B  # drift plaintext kept, not deleted by reseal
         out = capsys.readouterr()
         assert "refusing to vault-seal .env" in (out.err + out.out)
+
+
+class TestRunningGatewayGate:
+    """The gate's second check at the CLI boundary: a gateway running from a
+    *different* interpreter that cannot inject must block the seal, leaving the
+    plaintext and the vault exactly as they were (the 2026-06-25 incident shape).
+    """
+
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+        return root, home, backend, store
+
+    def _gateway_python(self, tmp_path: Path) -> Path:
+        bindir = tmp_path / "repo" / ".venv" / "bin"
+        bindir.mkdir(parents=True)
+        python = bindir / "python"
+        python.write_text("")
+        return python
+
+    def test_refuses_when_the_running_gateway_cannot_inject(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        gateway = self._gateway_python(tmp_path)
+        monkeypatch.setattr(
+            _runtime_gate, "_default_gateway_discovery", lambda *, home: [GatewayRuntime(pid=4242, python=gateway)]
+        )
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            # The expected runtime is fine; the interpreter actually serving the
+            # gateway is not — exactly what stranded the operator in the incident.
+            runtime_probe=lambda *, home, runtime_python=None: (
+                (True, "ok") if runtime_python is None else (False, "mordred_keyvault plugin not registered")
+            ),
+        )
+        assert rc == 1
+        assert (home / ".env").read_bytes() == _ENV_A  # plaintext untouched
+        assert _vault_env(root, backend, store) is None  # nothing enrolled
+        assert not _env_optout_marker_path(home).exists()  # marker untouched
+        err = capsys.readouterr().err
+        assert "refusing to vault-seal .env" in err
+        assert f"{gateway} (pid 4242)" in err
+
+    def test_proceeds_when_the_running_gateway_can_inject(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+        gateway = self._gateway_python(tmp_path)
+        monkeypatch.setattr(
+            _runtime_gate, "_default_gateway_discovery", lambda *, home: [GatewayRuntime(pid=9, python=gateway)]
+        )
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=lambda *, home, runtime_python=None: (True, "ok"),
+        )
+        assert rc == 0
+        assert _vault_env(root, backend, store) == _ENV_A
+        assert not (home / ".env").exists()
+
+    def test_force_bypasses_the_running_gateway_check_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root, home, backend, store = self._setup(tmp_path)
+
+        def _never(*, home: Path) -> list[GatewayRuntime]:
+            raise AssertionError("--force-runtime-unverified must skip discovery entirely")
+
+        monkeypatch.setattr(_runtime_gate, "_default_gateway_discovery", _never)
+        rc = env_decrypt_cli.enable(
+            home=home,
+            root=root,
+            platform="darwin",
+            backend=backend,
+            store=store,
+            runtime_probe=_boom_probe,
+            force_runtime_unverified=True,
+        )
+        assert rc == 0
+        assert not (home / ".env").exists()  # sealed anyway, as documented

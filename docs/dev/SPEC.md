@@ -52,6 +52,16 @@ compatibility policy.
   provisioning through that startup lifecycle, and the encrypted workspace
   integration are active only on macOS. Off macOS they may be enrolled, but
   status reports them inactive and plaintext remains the runtime source.
+- Arming those macOS seals is fail-closed on the runtime: before removing a
+  plaintext, the CLI probes the interpreter that should run `hermes` and also
+  the interpreter of each `hermes gateway run` process it can identify in the
+  process table, refusing when either cannot run the startup shim. Identifiable
+  means: this user's process whose argv is `<python> -m hermes_cli… gateway
+  run`, `<python> <launcher> gateway run`, `<launcher> gateway run`, or
+  `<shell> <launcher> gateway run`, with an absolute launcher path. Gateways
+  running under another account, or argv shapes outside that set, are not
+  probed. A scan that finds nothing is not a refusal, and
+  `--force-runtime-unverified` seals without either check.
 - File-vault `vault recover` is supported only on macOS. The Linux TPM helper
   implements native wrapping, but the file vault has no Linux device-anchor
   store and must not claim a working recovery hot path there.

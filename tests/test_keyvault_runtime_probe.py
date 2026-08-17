@@ -193,11 +193,17 @@ class TestRuntimeInjectionAvailable:
         assert ok is False
         assert "timed out" in detail
 
-    def test_strips_pythonpath_and_pythonhome(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_strips_pythonpath_and_neutralizes_the_config_hook(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # A stray PYTHONPATH must not let the runtime import a mordred it would not
-        # see under the real `hermes` wrapper (which unsets both).
+        # see under the real `hermes` wrapper (which unsets both). MORDRED_CONFIG_DECRYPT=0
+        # matters just as much: with it exported as "1" the config-decrypt .pth hook
+        # force-engages inside the probe process and would open the vault / prompt
+        # Touch ID — including from the read-only `encryption status` path.
         monkeypatch.setenv("PYTHONPATH", "/leak/src")
         monkeypatch.setenv("PYTHONHOME", "/leak/home")
+        monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "1")
         captured: dict[str, dict[str, str]] = {}
 
         def _fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -208,6 +214,7 @@ class TestRuntimeInjectionAvailable:
         runtime_env_injection_available(home=tmp_path, runtime_python=Path("/any/python"))
         assert "PYTHONPATH" not in captured["env"]
         assert "PYTHONHOME" not in captured["env"]
+        assert captured["env"].get("MORDRED_CONFIG_DECRYPT") == "0"
 
 
 # -----------------------------------------------------------------------------
