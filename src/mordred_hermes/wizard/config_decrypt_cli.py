@@ -41,12 +41,17 @@ __all__ = ["cli_disable", "cli_enable", "disable", "enable"]
 _CONFIG_NAME = "config.yaml"
 
 
-def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
+def _default_runtime_probe(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
     """Production runtime probe: can the interpreter that runs ``hermes`` decrypt
-    a sealed ``config.yaml``? Imported lazily so this module stays import-light."""
+    a sealed ``config.yaml``? Imported lazily so this module stays import-light.
+
+    ``runtime_python`` pins a specific interpreter — the gate passes it when
+    probing an interpreter that is running a gateway *right now*; omitted, the
+    probe resolves the expected runtime itself.
+    """
     from ..keyvault._runtime_probe import runtime_config_decrypt_available
 
-    return runtime_config_decrypt_available(home=home)
+    return runtime_config_decrypt_available(home=home, runtime_python=runtime_python)
 
 
 def _runtime_gate(
@@ -59,11 +64,13 @@ def _runtime_gate(
     """Fail-closed macOS gate for arming the config.yaml seal.
 
     Returns 1 (after printing actionable guidance) when the interpreter that runs
-    ``hermes`` cannot materialize a sealed ``config.yaml`` at startup, else 0. A
-    no-op (0) off macOS — the plaintext is kept there anyway — and when
-    ``force_runtime_unverified`` is set. The gate core is shared with
-    ``env_decrypt_cli`` via :func:`._runtime_gate.runtime_gate`; only the
-    config.yaml-specific guidance text lives here.
+    ``hermes`` — or one that is running a gateway right now — cannot materialize
+    a sealed ``config.yaml`` at startup, else 0. A no-op (0) off macOS — the
+    plaintext is kept there anyway — and when ``force_runtime_unverified`` is
+    set. The gate core is shared with ``env_decrypt_cli`` via
+    :func:`._runtime_gate.runtime_gate`; only the config.yaml-specific guidance
+    text lives here (it is reused for both the expected-runtime and the
+    running-gateway refusal).
     """
     return runtime_gate(
         home=home,
@@ -114,9 +121,12 @@ def enable(
     it probes the interpreter that actually runs ``hermes`` (see
     :mod:`...keyvault._runtime_probe`) and refuses (rc 1) when that runtime lacks
     the config-decrypt ``.pth`` hook — otherwise the marker would arm reseal-on-exit
-    and strand Hermes with a config it cannot materialize at startup.
-    ``runtime_probe`` is injectable for tests; ``force_runtime_unverified``
-    bypasses the check (advanced; arms the seal anyway).
+    and strand Hermes with a config it cannot materialize at startup. The same
+    probe is then run against every *running* ``hermes gateway`` interpreter from
+    a different environment, because that is the process which must materialize
+    the config in practice. ``runtime_probe`` is injectable for tests;
+    ``force_runtime_unverified`` bypasses both checks (advanced; arms the seal
+    anyway).
     """
     from . import vault_cli
 

@@ -190,6 +190,43 @@ hermes-mordred encryption purge   {env,config,memory,workspace,all} --yes   # de
 hermes-mordred encryption change-passphrase             # rotate the recovery passphrase (alias of `vault change-passphrase`)
 ```
 
+> **Runtime guard before a seal (macOS).** `enable env` and `enable config`
+> remove the plaintext, so both first prove the file can be unsealed again at
+> startup. Two interpreters are probed. The first is the one that *should* run
+> `hermes`: `MORDRED_HERMES_RUNTIME_PYTHON` if set, else
+> `~/.hermes/hermes-agent/venv`, else the `hermes` launcher on `$PATH`. The
+> second is the interpreter of each `hermes … gateway run` process running
+> **right now** under your account — read from the process table, because a
+> gateway started from some other virtualenv is what actually has to unseal the
+> file, and its recorded `gateway_state.json` argv can name a different
+> interpreter than the one the kernel exec'd. Four argv shapes are recognised:
+> `<python> -m hermes_cli… gateway run`, `<python> <launcher> gateway run` (how a
+> console script appears once the kernel rewrites the `#!` exec),
+> `<launcher> gateway run`, and `<shell> <launcher> gateway run` — the launcher
+> path must be absolute. A gateway running under another account (or a shape
+> outside that set) is not seen, and therefore not probed. If a running gateway
+> cannot load the shim, the command refuses and touches nothing (excerpt):
+>
+> ```text
+> error: refusing to vault-seal .env — a hermes gateway is RUNNING from a different
+>   interpreter that cannot handle the seal: /path/to/repo/.venv/bin/python (pid 4242).
+>   probe: the hermes runtime (/path/to/repo/.venv/bin/python) cannot decrypt a sealed
+>   .env: ModuleNotFoundError("No module named 'mordred_hermes'")
+>   …
+> ```
+>
+> Fix it by installing the package into that interpreter
+> (`uv pip install --python <that-python> 'hermes-mordred[macos]'`) or by stopping
+> that gateway and restarting it from the expected runtime, then re-run the
+> command. `--force-runtime-unverified` skips both checks and seals anyway
+> (advanced — the file stays unreadable until that runtime has Mordred). When no
+> gateway is running, or the process table cannot be read, the extra check is
+> skipped silently: it never blocks a seal on an inconclusive scan.
+>
+> `encryption status` reports the same discovery on macOS, one line per running
+> gateway: `gateway runtime: <python> (pid N) — env shim: ok | config hook:
+> MISSING`. `--json` output is unchanged (and skips the probes).
+
 > **Changing the recovery passphrase.** `change-passphrase` rewraps the vault
 > under a new passphrase and leaves the master key, the device key, and every
 > enrolled file untouched — nothing is re-encrypted, and day-to-day automatic

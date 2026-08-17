@@ -41,12 +41,17 @@ __all__ = ["disable", "enable", "purge", "reseal"]
 _ENV_NAME = ".env"
 
 
-def _default_runtime_probe(*, home: Path) -> tuple[bool, str]:
+def _default_runtime_probe(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
     """Production runtime probe: can the interpreter that runs ``hermes`` decrypt
-    a sealed ``.env``? Imported lazily so this module stays import-light."""
+    a sealed ``.env``? Imported lazily so this module stays import-light.
+
+    ``runtime_python`` pins a specific interpreter — the gate passes it when
+    probing an interpreter that is running a gateway *right now*; omitted, the
+    probe resolves the expected runtime itself.
+    """
     from ..keyvault._runtime_probe import runtime_env_injection_available
 
-    return runtime_env_injection_available(home=home)
+    return runtime_env_injection_available(home=home, runtime_python=runtime_python)
 
 
 def _runtime_gate(
@@ -59,11 +64,13 @@ def _runtime_gate(
     """Fail-closed macOS gate for the destructive seal.
 
     Returns 1 (after printing actionable guidance) when the interpreter that runs
-    ``hermes`` cannot inject a sealed ``.env`` at startup, else 0. A no-op (0) off
-    macOS — the plaintext is kept there anyway — and when
-    ``force_runtime_unverified`` is set. The gate core is shared with
-    ``config_decrypt_cli`` via :func:`._runtime_gate.runtime_gate`; only the
-    .env-specific guidance text lives here.
+    ``hermes`` — or one that is running a gateway right now — cannot inject a
+    sealed ``.env`` at startup, else 0. A no-op (0) off macOS — the plaintext is
+    kept there anyway — and when ``force_runtime_unverified`` is set. The gate
+    core is shared with ``config_decrypt_cli`` via
+    :func:`._runtime_gate.runtime_gate`; only the .env-specific guidance text
+    lives here (it is reused for both the expected-runtime and the
+    running-gateway refusal).
     """
     return runtime_gate(
         home=home,
@@ -228,8 +235,11 @@ def enable(
     step it probes the interpreter that actually runs ``hermes`` (see
     :mod:`...keyvault._runtime_probe`) and refuses (rc 1) when that runtime lacks
     the mordred injection shim — otherwise the deleted plaintext would be
-    undecryptable at startup. ``runtime_probe`` is injectable for tests;
-    ``force_runtime_unverified`` bypasses the check (advanced; seals anyway).
+    undecryptable at startup. The same probe is then run against every *running*
+    ``hermes gateway`` interpreter from a different environment, because that is
+    the process which must unseal the file in practice. ``runtime_probe`` is
+    injectable for tests; ``force_runtime_unverified`` bypasses both checks
+    (advanced; seals anyway).
     """
     from . import vault_cli
 

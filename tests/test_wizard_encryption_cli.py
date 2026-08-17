@@ -738,3 +738,92 @@ def test_all_core_targets_derived_from_targets() -> None:
     assert encryption_cli.TARGETS[-1] == "workspace"
     assert encryption_cli._ALL_CORE_TARGETS == ("env", "config", "memory")
     assert encryption_cli.TARGETS[:-1] == encryption_cli._ALL_CORE_TARGETS
+
+
+class TestGatewayRuntimeLines:
+    """``encryption status`` surfaces the interpreter serving a running gateway.
+
+    That interpreter — not the one the seal *expects* — is what has to unseal
+    ``.env`` / ``config.yaml`` at startup, and on 2026-06-25 it was a repo
+    ``.venv`` without mordred. The line makes the mismatch visible before an
+    operator seals anything.
+    """
+
+    def _patch_probe(
+        self, monkeypatch: pytest.MonkeyPatch, *, gateways: object, env_ok: bool = True, config_ok: bool = True
+    ) -> None:
+        from mordred_hermes.keyvault import _runtime_probe
+
+        monkeypatch.setattr(_runtime_probe, "discover_running_gateway_runtimes", gateways)
+        monkeypatch.setattr(_runtime_probe, "runtime_env_injection_available", lambda **_kw: (env_ok, "detail"))
+        monkeypatch.setattr(_runtime_probe, "runtime_config_decrypt_available", lambda **_kw: (config_ok, "detail"))
+
+    def test_reports_each_gateway_with_both_shim_results(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
+
+        python = tmp_path / "repo" / ".venv" / "bin" / "python"
+        self._patch_probe(
+            monkeypatch,
+            gateways=lambda **_kw: [GatewayRuntime(pid=4242, python=python)],
+            env_ok=False,
+            config_ok=True,
+        )
+        lines = encryption_cli.gateway_runtime_lines(home=tmp_path, platform="darwin")
+        assert lines == [f"  gateway runtime: {python} (pid 4242) — env shim: MISSING | config hook: ok"]
+
+    def test_omits_the_pid_when_unknown(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
+
+        python = tmp_path / "bin" / "python3"
+        self._patch_probe(monkeypatch, gateways=lambda **_kw: [GatewayRuntime(pid=None, python=python)])
+        assert encryption_cli.gateway_runtime_lines(home=tmp_path, platform="darwin") == [
+            f"  gateway runtime: {python} — env shim: ok | config hook: ok"
+        ]
+
+    def test_no_lines_off_macos_and_no_discovery(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _never(**_kw: object) -> list[object]:
+            raise AssertionError("the shims are macOS-only; do not scan elsewhere")
+
+        self._patch_probe(monkeypatch, gateways=_never)
+        assert encryption_cli.gateway_runtime_lines(home=tmp_path, platform="linux") == []
+
+    def test_no_gateway_running_yields_no_lines(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_probe(monkeypatch, gateways=lambda **_kw: [])
+        assert encryption_cli.gateway_runtime_lines(home=tmp_path, platform="darwin") == []
+
+    def test_discovery_failure_is_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(**_kw: object) -> list[object]:
+            raise RuntimeError("ps exploded")
+
+        self._patch_probe(monkeypatch, gateways=_boom)
+        assert encryption_cli.gateway_runtime_lines(home=tmp_path, platform="darwin") == []
+
+    def test_status_prints_the_line_and_json_stays_a_pure_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(encryption_cli, "gateway_runtime_lines", lambda **_kw: ["  gateway runtime: X"])
+        ws = encryption_cli.WorkspacePaths(
+            image=tmp_path / "img.sparsebundle", blob=tmp_path / "pp.wrapped", mount=tmp_path / "mnt"
+        )
+        assert (
+            encryption_cli.status(
+                home=tmp_path, root=tmp_path / "v", platform="darwin", workspace=ws, on_path=lambda _n: False
+            )
+            == 0
+        )
+        assert "  gateway runtime: X" in capsys.readouterr().out
+
+        assert (
+            encryption_cli.status(
+                home=tmp_path,
+                root=tmp_path / "v",
+                platform="darwin",
+                workspace=ws,
+                as_json=True,
+                on_path=lambda _n: False,
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert "gateway runtime" not in out  # --json keeps the old shape and cost
+        assert isinstance(json.loads(out), list)
