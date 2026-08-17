@@ -35,10 +35,10 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 ```
 
 The browser client is a separately distributed
-[Chromium Manifest V3 bundle](https://github.com/InternetMaximalism/Mordred-Extension-dist):
+[Chromium Manifest V3 bundle](https://github.com/mordredagent/mordred-extension-dist):
 
 ```sh
-git clone https://github.com/InternetMaximalism/Mordred-Extension-dist.git
+git clone https://github.com/mordredagent/mordred-extension-dist.git
 ```
 
 Open `chrome://extensions` (or the equivalent page in Brave, Arc, or Edge),
