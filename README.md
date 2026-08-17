@@ -317,16 +317,23 @@ for safe isolation, loaded-code verification, and the full check suite.
 
 ## Upgrading
 
-Re-run the installer, then restart the Hermes gateway or a standalone
-`extension serve` process:
+Re-run the installer with the same `--extras`, `--all-extras`, or
+`--with-extension` flags you used originally, then restart the Hermes gateway
+or a standalone `extension serve` process:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
 ```
 
 This upgrades Mordred only and handles the transition from the old
-`mordred-hermes` package name. Run it again if a Hermes update recreates its
-virtual environment.
+`mordred-hermes` package name. A Hermes self-update can recreate
+`~/.hermes/hermes-agent/venv`; when that happens, a bare re-run installs only
+the base package and silently drops any `extension`, `ethereum`, `messaging`,
+or `tor-control` extras from before, because a recreated venv only gets what
+the re-run itself asks for. Repeat the same extras flags to keep them. A
+re-run against an intact venv leaves already-installed extra dependencies in
+place, but only a re-run with the same flags re-resolves those extras against
+the new release, so pass them every time.
 
 For a version-pinned upgrade, pass the desired PEP 440 release to the installer
 (replace `VERSION` before running the command):
@@ -336,8 +343,9 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --version VERSION
 ```
 
-Add `--with-extension` before `--version` when that installation also runs the
-browser-extension gateway or uses its Ethereum wallet bridge.
+Add `--with-extension` (or `--extras ...` / `--all-extras`) before `--version`
+when that installation also runs the browser-extension gateway or uses its
+Ethereum wallet bridge.
 
 `hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration;
 it does not upgrade the package:
