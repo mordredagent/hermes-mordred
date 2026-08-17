@@ -7,16 +7,19 @@ the real home, macOS Keychain, Secure Enclave, and TPM helper are never opened.
 from __future__ import annotations
 
 import argparse
+import errno
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.keyvault import _bip39, _storage, api, backup, ethereum
+from mordred_hermes.keyvault import _bip39, _native_key_id, _storage, api, backup, ethereum
 from mordred_hermes.keyvault import pow as keyvault_pow
-from mordred_hermes.wizard import keyvault_cli, keyvault_export_cli
-from mordred_hermes.wizard.cli import _setup_subparser, main
+from mordred_hermes.wizard import configure, keyvault_cli, keyvault_export_cli
+from mordred_hermes.wizard._prompt_io import NonInteractiveAbort, _RefusingPromptIO
+from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 from tests._keyvault_fakes import FakeBackend
 
 SEED = _bip39.entropy_to_mnemonic(bytes(range(32)))
@@ -152,6 +155,30 @@ def _file_snapshot(root: Path) -> dict[Path, bytes]:
     return {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+class _MissingPromptToolkitIO(RecordingPromptIO):
+    """Reproduce ``PromptToolkitIO.ask_password`` without ``prompt_toolkit`` installed."""
+
+    def ask_password(self, label: str, default: str = "") -> str:
+        del label, default
+        raise RuntimeError(configure._PROMPT_TOOLKIT_REQUIRED)
+
+
+def _patch_meta(monkeypatch: pytest.MonkeyPatch, meta: dict[str, Any]) -> None:
+    """Make the export command observe a crafted ``meta.json`` layout."""
+
+    def load_meta(root: Path) -> dict[str, Any]:
+        del root
+        return dict(meta)
+
+    monkeypatch.setattr(keyvault_export_cli._storage, "load_meta", load_meta)
+
+
+def _staging_leftovers(output: Path) -> list[Path]:
+    """Return the private staging hard links publication may have left behind."""
+
+    return sorted(output.parent.glob(f".{output.name}.mordred-materialize-*"))
+
+
 class TestPortableExport:
     def test_initialized_keyvault_exports_parseable_mode_0600_blob(
         self,
@@ -263,6 +290,25 @@ class TestPortableExport:
         assert output.is_dir()
         assert "directory" in capsys.readouterr().err.lower()
 
+    def test_existing_special_file_is_never_replaced(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "fifo.mrkv"
+        os.mkfifo(output)
+        prompts = RecordingPromptIO([])
+
+        assert _export(home=isolated_home, backend=backend, output=output, prompts=prompts) == 1
+
+        assert prompts.calls == []
+        err = capsys.readouterr().err
+        assert "filesystem object" in err
+        assert "refusing to overwrite" in err
+
     def test_missing_output_parent_fails_before_prompt(
         self,
         isolated_home: Path,
@@ -298,7 +344,11 @@ class TestPortableExport:
         assert _export(home=isolated_home, backend=backend, output=output, prompts=prompts) == 1
 
         assert prompts.calls == []
-        assert "real directory" in capsys.readouterr().err.lower()
+        err = capsys.readouterr().err
+        assert "real directory" in err.lower()
+        # The refusal is only actionable with the remedy attached.
+        assert "resolved directory path" in err
+        assert "/private/tmp" in err
         assert not (real_parent / "backup.mrkv").exists()
 
     def test_symlink_is_rejected_without_touching_its_target(
@@ -788,3 +838,551 @@ class TestExportParserAndSecrecy:
         assert blob_marker not in rendered
         assert "failed safely" in rendered.lower()
         assert not (output.exists() or output.is_symlink())
+
+
+class TestPublicationFailureModes:
+    """Publication errnos must be reported for what they actually did to disk."""
+
+    def test_directory_sync_failure_reports_the_complete_published_file(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "sync-fail.mrkv"
+
+        def unsyncable(directory: Path) -> None:
+            del directory
+            raise OSError(errno.EIO, "simulated directory-sync failure")
+
+        # publish_plaintext_no_replace syncs the parent AFTER os.link commits,
+        # so this raises with a complete final file already on disk.
+        monkeypatch.setattr(keyvault_export_cli._plaintext_capture, "_sync_directory", unsyncable)
+
+        assert (
+            _export(
+                home=isolated_home,
+                backend=backend,
+                output=output,
+                prompts=RecordingPromptIO([PASSPHRASE]),
+            )
+            == 1
+        )
+
+        blob = output.read_bytes()
+        assert blob.startswith(b"MRKV")
+        assert backup.parse_header(blob).version == backup.VERSION
+        assert os.stat(output, follow_symlinks=False).st_mode & 0o777 == 0o600
+        assert _staging_leftovers(output)
+        err = capsys.readouterr().err
+        assert str(output) in err
+        assert "durably synced" in err
+        assert "mordred-materialize" in err
+        assert "written safely" not in err
+
+    def test_hard_link_unsupported_destination_names_the_filesystem_limit(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "no-hardlinks.mrkv"
+        real_link = os.link
+
+        def refuse_link(src: Any, dst: Any, **kwargs: Any) -> None:
+            del kwargs
+            # Mirror CPython: two-path syscalls populate both filename attributes.
+            raise OSError(errno.EPERM, "hard links are not supported on this filesystem", str(src), None, str(dst))
+
+        monkeypatch.setattr(os, "link", refuse_link)
+        assert os.link is not real_link
+
+        assert (
+            _export(
+                home=isolated_home,
+                backend=backend,
+                output=output,
+                prompts=RecordingPromptIO([PASSPHRASE]),
+            )
+            == 1
+        )
+
+        assert not (output.exists() or output.is_symlink())
+        assert _staging_leftovers(output) == []
+        err = capsys.readouterr().err
+        assert "does not support" in err
+        assert "hard links" in err
+        assert "written safely" not in err
+
+    def test_eperm_from_staging_creation_keeps_the_generic_guidance(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """EPERM raised before ``os.link`` (immutable/TCC-protected dir) is not a hard-link limit."""
+
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "locked-dir.mrkv"
+
+        def refuse_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+            del args, kwargs
+            raise OSError(errno.EPERM, "Operation not permitted", str(output.parent))
+
+        monkeypatch.setattr(keyvault_export_cli._plaintext_capture.tempfile, "mkstemp", refuse_mkstemp)
+
+        assert (
+            _export(
+                home=isolated_home,
+                backend=backend,
+                output=output,
+                prompts=RecordingPromptIO([PASSPHRASE]),
+            )
+            == 1
+        )
+
+        assert not (output.exists() or output.is_symlink())
+        assert _staging_leftovers(output) == []
+        err = capsys.readouterr().err
+        assert "check directory permissions and free space" in err
+        assert "hard links" not in err
+
+    def test_vanished_output_directory_keeps_its_own_guidance(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "vanished.mrkv"
+
+        def vanished(path: Path, data: bytes) -> bool:
+            del path, data
+            raise OSError(errno.ENOENT, "no such file or directory")
+
+        monkeypatch.setattr(keyvault_export_cli._plaintext_capture, "publish_plaintext_no_replace", vanished)
+
+        assert (
+            _export(
+                home=isolated_home,
+                backend=backend,
+                output=output,
+                prompts=RecordingPromptIO([PASSPHRASE]),
+            )
+            == 1
+        )
+
+        assert not output.exists()
+        assert "directory disappeared" in capsys.readouterr().err
+
+
+class TestPromptDependencyAndNonInteractive:
+    def test_missing_prompt_toolkit_keeps_its_install_hint(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "no-prompt-toolkit.mrkv"
+
+        rc = _export(
+            home=isolated_home,
+            backend=backend,
+            output=output,
+            prompts=_MissingPromptToolkitIO([]),
+        )
+
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "pip install prompt_toolkit" in err
+        assert configure._PROMPT_TOOLKIT_REQUIRED in err
+        assert "failed safely" not in err
+        assert not output.exists()
+
+    def test_non_interactive_abort_is_not_redacted_and_dispatches_as_usage_error(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backend = FakeBackend()
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "non-interactive.mrkv"
+
+        with pytest.raises(NonInteractiveAbort):
+            keyvault_export_cli.export_keyvault_backup(
+                output_path=output,
+                home=isolated_home,
+                backend=backend,
+                prompt_io=_RefusingPromptIO(),
+                audit_sink=_sink([]),
+            )
+        assert not output.exists()
+
+        def refuse(*, output_path: Path) -> int:
+            del output_path
+            raise NonInteractiveAbort("--non-interactive set but prompt required: 'Keyvault init passphrase'")
+
+        monkeypatch.setattr(keyvault_export_cli, "export_keyvault_backup", refuse)
+        namespace = argparse.Namespace(func=keyvault_export_cli.cli_export, output=str(output))
+        assert dispatch(namespace) == 2
+
+
+class TestKeyvaultStateGuards:
+    """Every `_single_key_id` refusal must be actionable and output-free."""
+
+    def _refuse(
+        self,
+        home: Path,
+        tmp_path: Path,
+        name: str,
+    ) -> tuple[int, Path, RecordingPromptIO]:
+        output = tmp_path / f"{name}.mrkv"
+        prompts = RecordingPromptIO([])
+        rc = _export(home=home, backend=FakeBackend(), output=output, prompts=prompts)
+        return rc, output, prompts
+
+    def test_reset_in_progress_points_at_finishing_reset(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+
+        def in_reset(root: Path) -> None:
+            del root
+            raise _storage.KeyvaultResetInProgressError("reset journal present")
+
+        monkeypatch.setattr(keyvault_export_cli._storage, "assert_keyvault_active", in_reset)
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "reset-in-progress")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        assert "reset is incomplete" in capsys.readouterr().err
+
+    def test_corrupt_meta_points_at_a_verified_backup(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+
+        def corrupt(root: Path) -> dict[str, Any]:
+            del root
+            raise _storage.KeyvaultCorruptError("meta.json is not valid JSON")
+
+        monkeypatch.setattr(keyvault_export_cli._storage, "load_meta", corrupt)
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "corrupt-meta")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        assert "metadata is corrupt" in capsys.readouterr().err
+
+    def test_unreadable_metadata_points_at_permissions(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+
+        def unreadable(root: Path) -> dict[str, Any]:
+            del root
+            raise PermissionError(errno.EACCES, "permission denied")
+
+        monkeypatch.setattr(keyvault_export_cli._storage, "load_meta", unreadable)
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "unreadable-meta")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        assert "owner-only permissions" in capsys.readouterr().err
+
+    def test_pending_native_key_points_at_reset(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        key_id, _envelope, _entries = _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+        _patch_meta(
+            monkeypatch,
+            {
+                "version": 1,
+                "keys": {},
+                _native_key_id.PENDING_NATIVE_KEY_FIELD: {"key_id": key_id, "native_key_id": "x"},
+            },
+        )
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "pending-native-key")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        assert "provisioning is incomplete" in capsys.readouterr().err
+
+    def test_zero_keys_gives_the_uninitialized_guidance(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+        _patch_meta(monkeypatch, {"version": 1, "keys": {}})
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "zero-keys")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        err = capsys.readouterr().err
+        assert "keyvault init" in err
+        assert "reset" not in err.lower()
+
+    def test_multiple_keys_names_the_api_instead_of_recommending_reset(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+        _patch_meta(
+            monkeypatch,
+            {"version": 1, "keys": {"aa" * 8: {"key_id": "one"}, "bb" * 8: {"key_id": "two"}}},
+        )
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "multi-key")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        err = capsys.readouterr().err
+        assert "exactly one initialized Keyvault key" in err
+        assert "this Keyvault has 2" in err
+        assert "export_backup(" in err
+        assert "reset" not in err.lower()
+
+    def test_invalid_key_row_shapes_are_rejected(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+
+        for index, keys in enumerate(({"aa" * 8: "not-a-mapping"}, {7: {"key_id": "one"}})):
+            _patch_meta(monkeypatch, {"version": 1, "keys": keys})
+
+            rc, output, prompts = self._refuse(isolated_home, tmp_path, f"invalid-row-{index}")
+
+            assert (rc, prompts.calls, output.exists()) == (1, [], False)
+            assert "invalid key row" in capsys.readouterr().err
+
+    def test_invalid_key_id_is_rejected(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+        _patch_meta(monkeypatch, {"version": 1, "keys": {"aa" * 8: {"key_id": ""}}})
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "invalid-key-id")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        assert "invalid key id" in capsys.readouterr().err
+
+    def test_key_hash_mismatch_is_rejected(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        key_id, _envelope, _entries = _initialize_source(isolated_home, FakeBackend(), store_seed=True)
+        _patch_meta(monkeypatch, {"version": 1, "keys": {"00" * 16: {"key_id": key_id}}})
+
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "hash-mismatch")
+
+        assert (rc, prompts.calls, output.exists()) == (1, [], False)
+        assert "does not match its key id" in capsys.readouterr().err
+
+
+class TestBackupBlobErrorMap:
+    """Known `api.export_backup` failures keep their specific, redacted guidance."""
+
+    def _export_raising(
+        self,
+        home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+        name: str,
+    ) -> tuple[int, Path]:
+        backend = FakeBackend()
+        _initialize_source(home, backend, store_seed=True)
+        output = tmp_path / f"{name}.mrkv"
+
+        def explode(*args: object, **kwargs: object) -> bytes:
+            del args, kwargs
+            raise exc
+
+        monkeypatch.setattr(api, "export_backup", explode)
+        rc = _export(home=home, backend=backend, output=output, prompts=RecordingPromptIO([PASSPHRASE]))
+        return rc, output
+
+    def test_invalid_tag_reports_failed_authentication(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from cryptography.exceptions import InvalidTag
+
+        rc, output = self._export_raising(isolated_home, tmp_path, monkeypatch, InvalidTag(), "invalid-tag")
+
+        assert (rc, output.exists()) == (1, False)
+        assert "failed authentication" in capsys.readouterr().err
+
+    def test_backup_corrupt_points_at_verify_digest(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc, output = self._export_raising(
+            isolated_home,
+            tmp_path,
+            monkeypatch,
+            backup.BackupCorrupt("truncated envelope"),
+            "backup-corrupt",
+        )
+
+        assert (rc, output.exists()) == (1, False)
+        err = capsys.readouterr().err
+        assert "verify-digest" in err
+        assert "truncated envelope" not in err
+
+    def test_wrap_error_points_at_the_device_key(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.keyvault._exceptions import WrapError
+
+        rc, output = self._export_raising(
+            isolated_home,
+            tmp_path,
+            monkeypatch,
+            WrapError("enclave declined"),
+            "wrap-error",
+        )
+
+        assert (rc, output.exists()) == (1, False)
+        err = capsys.readouterr().err
+        assert "authorize the device key" in err
+        assert "enclave declined" not in err
+
+    def test_value_error_points_at_the_recovery_material(
+        self,
+        isolated_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        rc, output = self._export_raising(
+            isolated_home,
+            tmp_path,
+            monkeypatch,
+            ValueError(PASSPHRASE),
+            "value-error",
+        )
+
+        assert (rc, output.exists()) == (1, False)
+        err = capsys.readouterr().err
+        assert "could not verify the Keyvault recovery material" in err
+        assert PASSPHRASE not in err
+
+
+class TestPublishedOutputProbe:
+    """The post-failure probe must recognise only this export's own complete file."""
+
+    def test_exact_private_file_matches_and_different_bytes_do_not(self, tmp_path: Path) -> None:
+        path = tmp_path / "probe.mrkv"
+        path.write_bytes(b"MRKV-body")
+        path.chmod(0o600)
+
+        assert keyvault_export_cli._is_complete_published_output(path, b"MRKV-body")
+        assert not keyvault_export_cli._is_complete_published_output(path, b"MRKV-bodX")
+        assert not keyvault_export_cli._is_complete_published_output(path, b"MRKV-body-longer")
+        assert not keyvault_export_cli._is_complete_published_output(path, b"MRKV-bod")
+
+    def test_absent_loose_moded_and_unreadable_objects_are_not_ours(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert not keyvault_export_cli._is_complete_published_output(tmp_path / "absent.mrkv", b"x")
+
+        loose = tmp_path / "loose.mrkv"
+        loose.write_bytes(b"x")
+        loose.chmod(0o644)
+        assert not keyvault_export_cli._is_complete_published_output(loose, b"x")
+
+        # A symlink to a byte-identical private file is still not our output:
+        # the probe opens O_NOFOLLOW so the link itself is what gets rejected.
+        target = tmp_path / "target.mrkv"
+        target.write_bytes(b"x")
+        target.chmod(0o600)
+        link = tmp_path / "link.mrkv"
+        link.symlink_to(target)
+        assert keyvault_export_cli._is_complete_published_output(target, b"x")
+        assert not keyvault_export_cli._is_complete_published_output(link, b"x")
+
+        # A FIFO raced into the output pathname must be rejected, not waited on:
+        # the probe opens O_NONBLOCK so this returns instead of hanging forever.
+        # The alarm turns a regression of that flag into a failure, not a hang.
+        fifo = tmp_path / "fifo.mrkv"
+        os.mkfifo(fifo, 0o600)
+
+        def _wedged(signum: int, frame: object) -> None:
+            del signum, frame
+            raise TimeoutError("probe blocked on a FIFO: O_NONBLOCK regressed")
+
+        previous = signal.signal(signal.SIGALRM, _wedged)
+        signal.setitimer(signal.ITIMER_REAL, 5.0)
+        try:
+            assert not keyvault_export_cli._is_complete_published_output(fifo, b"x")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, previous)
+
+        private = tmp_path / "private.mrkv"
+        private.write_bytes(b"x")
+        private.chmod(0o600)
+
+        def unreadable(fd: int, size: int) -> bytes:
+            del fd, size
+            raise OSError(errno.EIO, "simulated read failure")
+
+        monkeypatch.setattr(os, "read", unreadable)
+        assert not keyvault_export_cli._is_complete_published_output(private, b"x")

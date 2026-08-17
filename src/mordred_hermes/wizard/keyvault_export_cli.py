@@ -18,22 +18,41 @@ from __future__ import annotations
 import argparse
 import errno
 import hashlib
+import hmac
+import os
 import stat
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault import _native_key_id, _plaintext_capture, _storage
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io
 from ._keyvault_init import _stderr_audit_sink
-from ._prompt_io import NonInteractiveAbort
+from ._prompt_io import _PROMPT_TOOLKIT_REQUIRED, NonInteractiveAbort
 
 if TYPE_CHECKING:
     from ..keyvault.wrap import AuditSink, NativeBackend
     from .configure import PromptIO
 
 __all__ = ["cli_export", "export_keyvault_backup"]
+
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+#: ``O_NONBLOCK`` mirrors ``_plaintext_capture._open_regular_no_follow``: without
+#: it, opening a FIFO another writer raced into the output pathname would block
+#: the CLI forever instead of being rejected as a non-regular file.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_PRIVATE_MODE = 0o600
+_geteuid = getattr(os, "geteuid", None)
+
+#: ``os.link`` errnos that mean "this destination filesystem has no hard links"
+#: rather than "the write failed": Linux returns ``EPERM`` for a filesystem
+#: without link support (also macOS FAT/exFAT), and some FUSE/SMB mounts return
+#: ``ENOTSUP``/``EOPNOTSUPP``. Publication is atomic-no-replace via ``os.link``,
+#: so those destinations can never be served — the operator needs a different
+#: instruction from "check permissions and free space, then retry".
+_HARD_LINK_UNSUPPORTED_ERRNOS = frozenset({errno.EPERM, errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)})
 
 
 def _terminal_safe(value: object) -> str:
@@ -90,10 +109,40 @@ def _preflight_output(path: Path) -> bool:
     if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
         _term.emit_error(
             f"backup output parent must be a real directory, not a symlink or special file: "
-            f"{_terminal_safe(path.parent)}."
+            f"{_terminal_safe(path.parent)}. Pass the resolved directory path instead "
+            "(on macOS `/tmp` is a symlink to `/private/tmp`)."
         )
         return False
     return True
+
+
+def _validate_single_key_row(keys: Any) -> tuple[str, dict[str, Any]] | None:
+    """Return the one ``meta['keys']`` row, reporting count/shape-specific guidance.
+
+    An empty mapping is an *uninitialized* layout, not a damaged one: a
+    ``keyvault init`` that failed after its ``init_started`` journal (or a
+    manually deleted ``meta.json`` — :func:`_storage.load_meta` rebuilds it as
+    ``{"version": 1, "keys": {}}``) leaves exactly this state, and the operator
+    fix is to run init, not to repair or reset. More than one key is a layout
+    this CLI never creates, so it is reported as unsupported-here rather than
+    answered with a destructive ``reset`` suggestion.
+    """
+
+    if len(keys) == 0:
+        _term.emit_error("Keyvault is not initialized; run `hermes-mordred keyvault init` first.")
+        return None
+    if len(keys) > 1:
+        _term.emit_error(
+            f"Backup export supports exactly one initialized Keyvault key; this Keyvault has {len(keys)}. "
+            "Multi-key profiles are not an operator-supported layout for `keyvault export`; use the Keyvault "
+            "API `mordred_hermes.keyvault.api.export_backup(key_id, passphrase, ...)` to export one specific key."
+        )
+        return None
+    [(key_id_hash, row)] = keys.items()
+    if not isinstance(key_id_hash, str) or not isinstance(row, dict):
+        _term.emit_error("Keyvault metadata contains an invalid key row; restore a verified backup or reset it.")
+        return None
+    return key_id_hash, row
 
 
 def _single_key_id(home: Path) -> str | None:
@@ -127,16 +176,10 @@ def _single_key_id(home: Path) -> str | None:
         )
         return None
 
-    keys = meta["keys"]
-    if len(keys) != 1:
-        _term.emit_error(
-            "Backup export requires exactly one initialized Keyvault key; repair or reset this Keyvault first."
-        )
+    entry = _validate_single_key_row(meta["keys"])
+    if entry is None:
         return None
-    [(key_id_hash, row)] = keys.items()
-    if not isinstance(key_id_hash, str) or not isinstance(row, dict):
-        _term.emit_error("Keyvault metadata contains an invalid key row; restore a verified backup or reset it.")
-        return None
+    key_id_hash, row = entry
     try:
         key_id = _native_key_id.validate_main_key_id(row.get("key_id"))
         expected_hash = hashlib.sha256(key_id.encode("utf-8")).digest()[:16].hex()
@@ -246,18 +289,91 @@ def _build_backup_blob(
         ) from None
 
 
+def _is_complete_published_output(path: Path, blob: bytes) -> bool:
+    """Whether ``path`` is exactly the private regular file this export published.
+
+    ``publish_plaintext_no_replace`` syncs the destination directory *after*
+    ``os.link`` has already committed the final name, so an ``OSError`` from it
+    can arrive with a complete mode-0600 output on disk. Reading the published
+    bytes back is the only way to tell that apart from a genuine write failure.
+    The comparison is not secret-sensitive (``blob`` is the ciphertext this
+    process just built and is about to hand the operator), but
+    :func:`hmac.compare_digest` keeps the habit and costs nothing here.
+    """
+
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | _O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != _PRIVATE_MODE:
+            return False
+        if _geteuid is not None and opened.st_uid != _geteuid():
+            return False
+        # Bounded read: anything longer than the blob is not our output, and a
+        # foreign large regular file at this pathname must not stall the CLI.
+        limit = len(blob) + 1
+        chunks: list[bytes] = []
+        total = 0
+        while total < limit:
+            chunk = os.read(fd, min(65536, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return total == len(blob) and hmac.compare_digest(b"".join(chunks), blob)
+
+
+def _report_publish_failure(path: Path, blob: bytes, exc: OSError) -> None:
+    """Emit the guidance that matches what publication actually left on disk."""
+
+    if _is_complete_published_output(path, blob):
+        # Post-link directory-sync failure: the file is real and complete, only
+        # its durability is unconfirmed. Reporting "not written" here would send
+        # the operator to a retry that `_preflight_output` then refuses.
+        _term.emit_error(
+            f"Backup was published at {_terminal_safe(path)} (complete, mode 0600) but its directory entry "
+            "could not be durably synced; a private staging copy named "
+            f"`.{_terminal_safe(path.name)}.mordred-materialize-*` may remain in the same directory. "
+            "Verify the file and remove the staging copy before relying on it."
+        )
+        return
+    if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+        _term.emit_error("Backup output directory disappeared; recreate it and retry with a new path.")
+        return
+    # ``filename2`` is set only by two-path syscalls, and ``os.link`` is the only
+    # one publication performs, so its presence is what ties EPERM to "no hard
+    # links" rather than to ``mkstemp``/``write``/``fsync`` on an immutable or
+    # TCC-protected directory (which keeps the generic guidance below).
+    if exc.errno in _HARD_LINK_UNSUPPORTED_ERRNOS and exc.filename2 is not None:
+        _term.emit_error(
+            "The destination filesystem does not support the atomic no-replace publication (hard links); "
+            "export to a local disk and copy the file afterwards."
+        )
+        return
+    _term.emit_error(
+        "Backup output could not be written safely; check directory permissions and free space, then retry."
+    )
+
+
 def _publish_backup(path: Path, blob: bytes) -> bool:
-    """Publish ``blob`` atomically without replacement, reporting safe errors."""
+    """Publish ``blob`` atomically without replacement, reporting safe errors.
+
+    Returns ``False`` on every failure, including the post-link directory-sync
+    failure that leaves a complete output behind: the command must still exit
+    non-zero there because durability is unconfirmed, so the message — not the
+    exit code — is what tells the operator the file exists.
+    """
 
     try:
         published = _plaintext_capture.publish_plaintext_no_replace(path, blob)
     except OSError as exc:
-        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
-            _term.emit_error("Backup output directory disappeared; recreate it and retry with a new path.")
-        else:
-            _term.emit_error(
-                "Backup output could not be written safely; check directory permissions and free space, then retry."
-            )
+        _report_publish_failure(path, blob, exc)
         return False
     if not published:
         _term.emit_error(
@@ -330,7 +446,14 @@ def export_keyvault_backup(
             return 1
     except (EOFError, ModuleNotFoundError, NonInteractiveAbort):
         raise
-    except Exception:
+    except Exception as exc:
+        if type(exc) is RuntimeError and exc.args == (_PROMPT_TOOLKIT_REQUIRED,):
+            # The prompt layer's missing-dependency signal is a fixed library
+            # literal with no operator or secret data in it, so the install hint
+            # is surfaced verbatim (from the constant, never from `exc`) instead
+            # of being redacted into the unactionable generic text below.
+            _term.emit_error(_PROMPT_TOOLKIT_REQUIRED)
+            return 1
         # Never interpolate an unexpected exception: a lower layer or injected
         # backend could have included a passphrase, seed, plaintext, or blob in
         # its message. The actionable recovery surface is intentionally fixed.
