@@ -27,10 +27,12 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/vault/` | vault/encryption CLI | at-rest file vault |
 | `<home>/mordred/env-vault.optout` | encryption CLI | disables runtime `.env` injection |
 | `<home>/mordred/config-vault.marker` | encryption CLI | enables config materialize/reseal lifecycle |
+| `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
-| `<home>/memories/*.md` | Hermes memory tool | plaintext today; Mordred stores a key + flag for a future memory-encryption runtime |
+| `<home>/memories/*.md` | Hermes memory tool | sealed by Mordred's memory hook when armed, otherwise plaintext |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
 
 Unless a section says otherwise, private Mordred directories are mode `0700`
@@ -299,11 +301,14 @@ are inactive and plaintext runtime files remain; `encryption status` reports
 the enrolled target as paused/inactive rather than claiming protection.
 
 The markers `<home>/mordred/env-vault.optout` and
-`<home>/mordred/config-vault.marker` control those macOS lifecycles. On macOS,
-a copied vault can be re-keyed on a new device with `vault recover` and its
-recovery passphrase; this is different from `keyvault recover --blob`. Linux
-has a TPM wrapping backend but no production device-anchor store for this file
-vault, so `vault recover` is unsupported there.
+`<home>/mordred/config-vault.marker` control those macOS lifecycles;
+`<home>/mordred/memory-vault.marker` and `<home>/mordred/memory-vault.optout`
+control the agent-memory at-rest encryption runtime the same way — marker
+present arms the hook, optout present pauses it regardless of the marker. On
+macOS, a copied vault can be re-keyed on a new device with `vault recover` and
+its recovery passphrase; this is different from `keyvault recover --blob`.
+Linux has a TPM wrapping backend but no production device-anchor store for
+this file vault, so `vault recover` is unsupported there.
 
 ## `<home>/extension/`
 
@@ -328,11 +333,15 @@ do not publish them as diagnostics.
 - `<home>/config.yaml`: Hermes's canonical config. The wizard round-trips only
   Mordred sections and plugin enablement; the optional macOS vault lifecycle
   materializes plaintext while Hermes runs and reseals it at exit.
-- `<home>/memories/*.md`: written by Hermes's memory tool. No Hermes release
-  reads `memory.encryption.enabled` or `HERMES_MEMORY_KEY` today, so these
-  files are always plaintext. Mordred stores or removes that key and edits
-  the flag for a future Mordred-owned memory-encryption runtime; it does not
-  own the file format.
+- `<home>/memories/*.md`: written by Hermes's memory tool. Files are
+  plaintext unless Mordred's memory hook is armed; when armed, every write is
+  sealed in the `HERMES-MEMORY-ENC-v1` format, and drift backups
+  (`*.md.bak.<ts>`) are sealed too. Mordred stores `HERMES_MEMORY_KEY` in the
+  vault `.env` and owns the sealed container format; Hermes owns the entry
+  format inside the plaintext and the memory tool itself. The legacy
+  `memory.encryption.enabled` config flag is inert; `encryption status`
+  reports a legacy flag without a marker as "legacy flag set — run
+  `encryption enable memory`".
 - `~/.local/bin/mordred-hermes-sekey` and
   `~/.local/bin/mordred-hermes-tpmkey`: helper executables installed by the
   native-helper commands. Explicit helper environment variables and a final

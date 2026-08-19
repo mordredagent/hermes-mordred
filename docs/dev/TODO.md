@@ -207,6 +207,18 @@ operator surface.
   permissions, existing-output refusal, atomic failure cleanup, successful
   round trip, wrong-passphrase failure, and source-profile preservation.
 
+### 4.4 Agent-memory at-rest encryption (cross-plugin: keyvault + wizard)
+
+- [x] Docs: specify the sealed memory file format, arming rule, seam
+  coverage, and lifecycle in SPEC/PLAN/PATHS/ROADMAP (this PR).
+- [ ] Keyvault runtime: the memory-hook wrapper around the memory tool seam,
+  the capability probe, and the CI canary against the installed upstream.
+- [ ] Wizard lifecycle: `encryption enable/disable/purge memory`, `status`
+  drift, and the `setup` `memory-encryption` step.
+- [ ] Live verification on Apple Silicon with a running gateway.
+- [ ] Record the live-verification result in [`CI.md`](./CI.md) §Manual
+  live-device validation log.
+
 ### Acceptance gate (Phase 4)
 
 A CLI-produced blob recovers successfully into an isolated fresh profile while
@@ -222,4 +234,3 @@ the source remains usable, and failure paths leave no partial destination.
   record the result in [`CI.md`](./CI.md).
 - Keep each implementation PR scoped to one plugin; land cross-plugin contract
   documentation first.
-- Memory-encryption runtime (Mordred-owned): make the `memory` target real — keyvault runtime hook around the memory tool seam, then wizard lifecycle (migrate/decrypt-back) and a `setup` step.
