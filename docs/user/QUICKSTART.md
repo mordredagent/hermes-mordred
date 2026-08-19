@@ -9,9 +9,8 @@
 
 Mordred adds privacy controls to Hermes without modifying Hermes itself. It can
 keep keys behind Secure Enclave or TPM 2.0, route traffic through Tor or a VPN,
-enforce local-LLM policy, and on macOS transparently encrypt `.env` and
-configuration at rest (and pre-provision an agent-memory key — agent memories
-themselves are not encrypted by any Hermes release yet).
+enforce local-LLM policy, and on macOS transparently encrypt `.env`,
+configuration, and agent memories at rest.
 
 ## Before you start
 
@@ -176,7 +175,7 @@ shell.
 ## 2. First run, in order
 
 `hermes-mordred setup` first checks that upstream Hermes itself is set up
-(offering to run `hermes setup` if not), then runs the six steps below in
+(offering to run `hermes setup` if not), then runs the seven steps below in
 order, probing each one first and skipping whatever is already complete — so
 re-running it after an interruption picks up where it left off. Two moments
 still need you at the keyboard: the keyvault Passphrase and 24-word Seed
@@ -190,7 +189,8 @@ passphrase the first time step 5 enables encryption.
 | 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
 | 4 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
 | 5 | `hermes-mordred encryption enable env` (macOS only) | Enrolls `.env` and activates the transparent runtime lifecycle. |
-| 6 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
+| 6 | `hermes-mordred encryption enable memory` (macOS only) | Arms the memory hook and seals `~/.hermes/memories/*.md`. |
+| 7 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
 
 On macOS, a successful final status includes an `env [on] enrolled` row. On
 Linux the row is inactive even if enrolled; that is an explicit platform
@@ -224,6 +224,7 @@ ceremonies are in
 
 ```sh
 hermes-mordred encryption enable config
+hermes-mordred encryption enable memory
 hermes-mordred encryption enable all
 hermes-mordred encryption status
 ```
@@ -232,10 +233,10 @@ hermes-mordred encryption status
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).
 
-`encryption enable memory` is deliberately left out of this happy path: no
-Hermes release encrypts agent memory yet, so it refuses until Mordred ships
-its own runtime for it, and `encryption status` reports `memory` as plaintext
-until then. Separately, the audit log itself is encrypted only after
+`encryption enable memory` needs the `env` target first (it carries the memory
+key) and seals `~/.hermes/memories/*.md` as it goes. If a `hermes gateway` is
+running, restart it afterwards — until then it keeps writing plaintext
+memories. Separately, the audit log itself is encrypted only after
 `keyvault init` — before that, entries are written in plaintext.
 
 ## 5. Network settings 🌐

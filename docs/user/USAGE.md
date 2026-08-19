@@ -191,12 +191,47 @@ hermes-mordred encryption change-passphrase             # rotate the recovery pa
 ```
 
 > **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
-> implements agent-memory encryption, so `memory` is provisioning-only: it
-> stores `HERMES_MEMORY_KEY` in the vault `.env` and sets the
-> `memory.encryption.enabled` config flag, but `~/.hermes/memories/*.md`
-> stays plaintext. `encryption enable memory` refuses (exit 1) rather than
-> report memory as encrypted; use `vault set-memory-key` to pre-provision the
-> key anyway. `disable` / `purge` still work — they only clear state.
+> encrypts `~/.hermes/memories/*.md`, so Mordred owns this one end to end: a
+> runtime hook seals every memory write and opens every sealed read, keyed by
+> `HERMES_MEMORY_KEY` from the vault `.env`.
+>
+> **Preconditions** (`enable memory` refuses, exit 1, writing nothing, unless
+> all hold): the `env` target is enabled and injecting — that shim is how the
+> key reaches the runtime; macOS; and the interpreter that runs `hermes` (plus
+> any gateway running right now) proves it can open a sealed file. The last
+> check is the same runtime guard the `.env` seal uses, and
+> `--force-runtime-unverified` bypasses it at your own risk.
+>
+> **What the verbs do.** `enable` stores the key (one Touch ID), writes the
+> opt-in marker, and migrates every plaintext `*.md` (and `*.md.bak.*`
+> snapshot) already on disk to sealed. `disable` decrypts them all back to
+> plaintext, keeps the key, and writes an opt-out marker (`paused`); it
+> *refuses* rather than proceed if a sealed file cannot be decrypted, so you
+> never end up with unreadable blobs. `purge` runs that same `disable` first
+> and only then strips the key.
+>
+> **Status marks.** `on` = armed and everything on disk is sealed; `paused` =
+> opt-out marker (or off macOS); `off` = never enabled; `exposed` = armed but a
+> plaintext memory file is on disk — re-run `encryption enable memory` to seal
+> it.
+>
+> **Restart a running gateway** after enabling or disabling: it installs the
+> hook when its plugins load, so until you restart it, an old process keeps
+> writing plaintext. `enable` warns and names the pid when it sees one.
+>
+> **Recovery.** `HERMES_SAFE_MODE=1` disarms the hook for one run (memories are
+> then read as-is, sealed ones unreadable) — the escape hatch if a memory
+> problem blocks start-up. The key itself lives in the vault `.env`; without
+> it, sealed memories cannot be recovered.
+>
+> **Known limitations.** Readers that bypass the memory tool see the sealed
+> text rather than plaintext (`hermes doctor`'s size report, the Desktop
+> learning graph, the Honcho migration upload) — degraded display, never a
+> leak. A writer in a process without the hook (a migration script) leaves
+> plaintext, which `status` shows as `exposed` and the next in-process write
+> seals. `memory.write_approval` stages pending writes as plaintext JSON under
+> `~/.hermes/pending/memory/` until they are applied (`enable` warns when the
+> flag is on). Run `hermes agent-import` from an interpreter that has the hook.
 
 > **Runtime guard before a seal (macOS).** `enable env` and `enable config`
 > remove the plaintext, so both first prove the file can be unsealed again at
@@ -324,7 +359,7 @@ hermes-mordred vault cat <name>             # decrypt one entry to stdout
 hermes-mordred vault migrate                # import plaintext .env + config.yaml
 hermes-mordred vault recover                # macOS only: re-key a copied vault onto this Mac
 hermes-mordred vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
-hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY (pre-provisioning only; no Hermes release encrypts memory yet)
+hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY (the agent-memory key; `encryption enable memory` turns sealing on)
 hermes-mordred vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
 hermes-mordred vault disable-config-decrypt # stop managing config.yaml; restore plaintext
 ```
@@ -489,8 +524,8 @@ unwrapped**. Each component that opens the vault prompts independently, so a
 
 - the `config` decrypt hook at interpreter startup (after `encryption enable config`),
 - the `.env` injection when the plugin loads (after `encryption enable env`),
-- plus whatever the command itself touches (e.g. `vault set-memory-key`
-  re-enrolls `.env`).
+- plus whatever the command itself touches (e.g. `encryption enable memory`
+  re-enrolls `.env` once to store the memory key).
 
 So with `env` + `config` on you will typically see **2–3 Touch ID prompts per
 command** — expected, not a bug.
@@ -811,9 +846,9 @@ including under strict mode).
   idle" only (not while mounted under the same user).
 - **Linux**: TPM 2.0 is the key backend (`keyvault enable-tpm`). MVP binding is
   machine-only (Tier 2 — no per-use PIN/PCR prompt). Transparent `.env` and
-  `config.yaml` loading/resealing, memory-key provisioning through that
-  lifecycle, and workspace encryption are inactive; plaintext stays the
-  runtime source and status reports the limitation.
+  `config.yaml` loading/resealing, agent-memory sealing, and workspace
+  encryption are inactive; plaintext stays the runtime source and status
+  reports the limitation.
 - **Fallback behavior**: macOS can use a software P-256 key in the login
   Keychain when Secure Enclave access is unavailable. Linux deliberately has no
   software fallback and fails closed without the TPM helper.

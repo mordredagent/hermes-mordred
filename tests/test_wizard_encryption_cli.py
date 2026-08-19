@@ -5,8 +5,9 @@ the state of all four targets (``env`` / ``config`` / ``memory`` / ``workspace``
 without ever opening the vault cold path (no passphrase prompt) or probing the
 device key store. Enrollment is read from the plaintext manifest body
 (:func:`mordred_hermes.keyvault.manifest.parse_unverified`); the config opt-in is
-the marker file; memory is the ``config.yaml`` flag; the workspace is on-disk
-artifact + mountpoint detection.
+the marker file; memory is its own opt-in / opt-out marker pair plus the sealed
+state of ``<home>/memories/*.md``; the workspace is on-disk artifact +
+mountpoint detection.
 
 ``active`` is the *effective* state on this OS: the runtime decrypt shims are
 macOS-only (see :mod:`mordred_hermes.keyvault._runtime_env`), so an enrolled
@@ -23,11 +24,15 @@ import pytest
 
 from mordred_hermes.keyvault import _identity, vault
 from mordred_hermes.keyvault._config_bootstrap import _marker_path
+from mordred_hermes.keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
+from mordred_hermes.keyvault.memory_crypto import seal
 from mordred_hermes.wizard import encryption_cli
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
 _PASSPHRASE = "correct horse battery staple"
+#: Any 32 bytes: these tests only care whether a file *looks* sealed.
+_MEMORY_KEY = b"\x07" * 32
 
 
 # --- shared vault helpers (mirror test_wizard_config_decrypt_cli) -------------
@@ -222,42 +227,133 @@ class TestConfigStatus:
 
 
 class TestMemoryStatus:
-    def test_flag_false_or_absent(self, tmp_path: Path) -> None:
-        (tmp_path / "config.yaml").write_text("model: x\n", encoding="utf-8")
+    """The memory target is keyed on the Mordred markers, not the legacy flag.
+
+    ``<home>/mordred/memory-vault.marker`` is what arms the hook; the
+    ``memory.encryption.enabled`` config key is a legacy flag no runtime reads
+    (an old profile carrying it is reported, never treated as protection).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _runtime_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default to a wrappable seam; the unavailable case overrides this."""
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, "seam A"))
+
+    def _arm(self, home: Path) -> Path:
+        marker = memory_marker_path(home)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("armed\n", encoding="utf-8")
+        return marker
+
+    def _opt_out(self, home: Path) -> Path:
+        marker = memory_optout_marker_path(home)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("opt-out\n", encoding="utf-8")
+        return marker
+
+    def _memory_file(self, home: Path, name: str, data: bytes) -> Path:
+        path = home / "memories" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_no_marker_is_not_configured(self, tmp_path: Path) -> None:
         st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
         assert st.target == "memory"
         assert st.configured is False
+        assert st.active is False
+        assert st.detail == "not enabled"
 
-    def test_flag_true_but_no_runtime_stays_inactive_on_macos(self, tmp_path: Path) -> None:
-        # No Hermes release encrypts agent memory yet, so a set flag is
-        # configured but never active — the memory files stay plaintext.
+    def test_legacy_flag_without_marker_says_so(self, tmp_path: Path) -> None:
         (tmp_path / "config.yaml").write_text("memory:\n  encryption:\n    enabled: true\n", encoding="utf-8")
         st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
-        assert st.configured is True
-        assert st.active is False
-        assert "plaintext" in st.detail.lower()
+        assert st.configured is False  # the flag never sealed anything
+        assert "legacy" in st.detail
+        assert "encryption enable memory" in st.detail
 
-    def test_flag_true_inactive_off_macos(self, tmp_path: Path) -> None:
-        (tmp_path / "config.yaml").write_text("memory:\n  encryption:\n    enabled: true\n", encoding="utf-8")
+    def test_marker_active_on_macos(self, tmp_path: Path) -> None:
+        self._arm(tmp_path)
+        st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert st.configured is True
+        assert st.active is True
+        assert encryption_cli.status_mark(st) == "on"
+        assert "hook armed" in st.detail
+
+    def test_marker_inactive_off_macos(self, tmp_path: Path) -> None:
+        self._arm(tmp_path)
         st = encryption_cli.memory_status(home=tmp_path, platform="linux")
         assert st.configured is True
         assert st.active is False
+        assert "linux" in st.detail
 
-    def test_missing_config_is_not_configured(self, tmp_path: Path) -> None:
+    def test_optout_is_paused(self, tmp_path: Path) -> None:
+        self._opt_out(tmp_path)
         st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
-        assert st.configured is False
+        assert st.configured is True
+        assert st.active is False
+        assert encryption_cli.status_mark(st) == "paused"
+        assert "re-enable" in st.detail
 
-    def test_active_when_runtime_available_honours_the_seam(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Proves memory_status is routed through the seam: flip it available
-        # and the target behaves like env/config again (darwin-gated).
-        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
-        (tmp_path / "config.yaml").write_text("memory:\n  encryption:\n    enabled: true\n", encoding="utf-8")
-        darwin = encryption_cli.memory_status(home=tmp_path, platform="darwin")
-        assert darwin.active is True
-        linux = encryption_cli.memory_status(home=tmp_path, platform="linux")
-        assert linux.active is False
+    def test_marker_without_runtime_is_inactive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (False, "no wrappable seam"))
+        self._arm(tmp_path)
+        st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert st.active is False
+        assert "no wrappable seam" in st.detail
+        assert "plaintext" in st.detail
+
+    def test_plaintext_file_while_armed_is_drift(self, tmp_path: Path) -> None:
+        self._arm(tmp_path)
+        self._memory_file(tmp_path, "MEMORY.md", b"# plaintext notes\n")
+        st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert st.drift is True
+        assert encryption_cli.status_mark(st) == "exposed"
+        assert st.to_dict()["drift"] is True
+        assert "reseal" in st.detail
+
+    def test_plaintext_backup_snapshot_is_drift_too(self, tmp_path: Path) -> None:
+        """Upstream writes `<file>.bak.<ts>` next to the live file on drift."""
+        self._arm(tmp_path)
+        self._memory_file(tmp_path, "MEMORY.md", seal(b"sealed\n", key=_MEMORY_KEY, name="MEMORY.md"))
+        self._memory_file(tmp_path, "MEMORY.md.bak.20260819", b"# plaintext snapshot\n")
+        st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert st.drift is True
+
+    def test_sealed_files_only_is_clean(self, tmp_path: Path) -> None:
+        self._arm(tmp_path)
+        self._memory_file(tmp_path, "MEMORY.md", seal(b"sealed\n", key=_MEMORY_KEY, name="MEMORY.md"))
+        st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert st.drift is False
+        assert encryption_cli.status_mark(st) == "on"
+
+    def test_plaintext_while_paused_is_not_drift(self, tmp_path: Path) -> None:
+        """After `disable memory` the plaintext is the intended state."""
+        self._opt_out(tmp_path)
+        self._memory_file(tmp_path, "MEMORY.md", b"# plaintext notes\n")
+        st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert st.drift is False
+        assert encryption_cli.status_mark(st) == "paused"
+
+
+class TestMemoryRuntimeAvailable:
+    """The single seam every memory decision routes through (status + enable)."""
+
+    def test_reports_the_live_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault import _memory_hook
+
+        monkeypatch.setattr(_memory_hook, "seam_check", lambda *_a, **_k: (True, "seam A"))
+        assert encryption_cli.memory_runtime_available() == (True, "seam A")
+
+    def test_failure_is_reported_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.keyvault import _memory_hook
+
+        def _boom(*_a: object, **_k: object) -> tuple[bool, str]:
+            raise RuntimeError("importing tools blew up")
+
+        monkeypatch.setattr(_memory_hook, "seam_check", _boom)
+        ok, reason = encryption_cli.memory_runtime_available()
+        assert ok is False
+        assert "importing tools blew up" in reason
 
 
 class TestWorkspaceStatus:
@@ -389,6 +485,21 @@ class TestRender:
         assert "[on ]" in text
         assert "[off]" in text
         assert "legend:" not in text
+
+    def test_exposed_legend_is_target_neutral(self) -> None:
+        """`exposed` is now reachable for env *and* memory, so the alert line
+        must not name a single target's reseal command."""
+        body = encryption_cli.EXPOSED_LEGEND_BODY
+        assert "encryption enable <target>" in body
+        assert "encryption enable env" not in body
+
+    def test_render_text_shows_the_exposed_alert_for_any_target(self) -> None:
+        statuses = [
+            encryption_cli.TargetStatus("memory", configured=True, active=True, detail="plaintext file", drift=True),
+        ]
+        text = encryption_cli.render_text(statuses)
+        assert "[exposed]" in text
+        assert encryption_cli.EXPOSED_LEGEND_BODY in text
 
     def test_workspace_mark_is_sealed_when_set_up_and_unmounted(self) -> None:
         # The workspace is encrypted at rest whenever it is set up and sealed,
@@ -653,8 +764,9 @@ class TestCliDispatchAll:
     def test_enable_all_skips_memory_without_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # No monkeypatch of memory_runtime_available — exercises the real
-        # (False, reason) seam, matching production until a runtime ships.
+        # A Hermes whose memory tool this build cannot wrap: the engine would
+        # only refuse, so the fan-out records a skip instead of a failure.
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (False, "no wrappable seam"))
         self._patch_home(monkeypatch, tmp_path / "home")
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
@@ -784,15 +896,22 @@ class TestGatewayRuntimeLines:
     """
 
     def _patch_probe(
-        self, monkeypatch: pytest.MonkeyPatch, *, gateways: object, env_ok: bool = True, config_ok: bool = True
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        gateways: object,
+        env_ok: bool = True,
+        config_ok: bool = True,
+        memory_ok: bool = True,
     ) -> None:
         from mordred_hermes.keyvault import _runtime_probe
 
         monkeypatch.setattr(_runtime_probe, "discover_running_gateway_runtimes", gateways)
         monkeypatch.setattr(_runtime_probe, "runtime_env_injection_available", lambda **_kw: (env_ok, "detail"))
         monkeypatch.setattr(_runtime_probe, "runtime_config_decrypt_available", lambda **_kw: (config_ok, "detail"))
+        monkeypatch.setattr(_runtime_probe, "runtime_memory_encryption_available", lambda **_kw: (memory_ok, "detail"))
 
-    def test_reports_each_gateway_with_both_shim_results(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_reports_each_gateway_with_every_shim_result(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 
         python = tmp_path / "repo" / ".venv" / "bin" / "python"
@@ -801,9 +920,12 @@ class TestGatewayRuntimeLines:
             gateways=lambda **_kw: [GatewayRuntime(pid=4242, python=python)],
             env_ok=False,
             config_ok=True,
+            memory_ok=False,
         )
         lines = encryption_cli.gateway_runtime_lines(home=tmp_path, platform="darwin")
-        assert lines == [f"  gateway runtime: {python} (pid 4242) — env shim: MISSING | config hook: ok"]
+        assert lines == [
+            f"  gateway runtime: {python} (pid 4242) — env shim: MISSING | config hook: ok | memory hook: MISSING"
+        ]
 
     def test_omits_the_pid_when_unknown(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
@@ -811,7 +933,7 @@ class TestGatewayRuntimeLines:
         python = tmp_path / "bin" / "python3"
         self._patch_probe(monkeypatch, gateways=lambda **_kw: [GatewayRuntime(pid=None, python=python)])
         assert encryption_cli.gateway_runtime_lines(home=tmp_path, platform="darwin") == [
-            f"  gateway runtime: {python} — env shim: ok | config hook: ok"
+            f"  gateway runtime: {python} — env shim: ok | config hook: ok | memory hook: ok"
         ]
 
     def test_no_lines_off_macos_and_no_discovery(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

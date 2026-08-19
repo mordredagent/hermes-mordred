@@ -35,7 +35,7 @@ The package exposes six `hermes_agent.plugins` entry points:
 - macOS or Linux. macOS can fall back from Secure Enclave to a software P-256
   key in the login Keychain. Linux requires TPM 2.0 and fails closed when its
   helper is unavailable.
-- The transparent `.env`, configuration, memory-key, and workspace encryption
+- The transparent `.env`, configuration, agent-memory, and workspace encryption
   lifecycle is currently macOS-only. Linux supports the TPM-backed keyvault,
   but these runtime targets report inactive and continue to use plaintext.
 
@@ -194,9 +194,14 @@ hermes-mordred network status
 hermes-mordred audit tail
 ```
 
-Agent memories (`~/.hermes/memories/`) are not encrypted by any Hermes
-release; `memory` only pre-provisions a key, and `encryption enable memory`
-refuses until Mordred ships a runtime for it.
+Agent memories (`~/.hermes/memories/`) are encrypted by Mordred itself — no
+Hermes release does it. The `memory` target is opt-in (via `setup` or
+`encryption enable memory`), macOS-only, and rides on the `env` target, which
+carries its key. Enabling seals the files already on disk; `disable` decrypts
+them back. Restart a running `hermes gateway` afterwards — until you do, it
+keeps writing plaintext memories. Known limitations (raw readers,
+out-of-process writers, approval-gated writes) are listed in
+[`USAGE.md` §3](docs/user/USAGE.md#encryption--the-recommended-onoff-switch).
 
 Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes

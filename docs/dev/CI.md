@@ -97,6 +97,16 @@ uses a paid account and mutates runner network state.
   shape). Check the extension-side composite builder uses the same team id the
   adapter stamps on `SessionSource.scope_id` before shipping.
   Record the date and result here; do not delete this entry until it passes.
+- **PENDING — agent-memory encryption: enable/disable round trip with a running
+  gateway on Apple Silicon.** No CI job covers it: the hook installs from the
+  keyvault plugin's `register()` inside a real Hermes process, and the restart
+  warning is about a live launchd-started gateway. With a gateway running,
+  verify all four: `encryption enable memory` seals the existing
+  `~/.hermes/memories/*.md` and warns to restart the gateway; after that restart
+  the agent reads and writes memories normally while the files stay sealed on
+  disk; `encryption status` shows `memory [on]`; and `encryption disable memory`
+  decrypts every file back to plaintext, still readable by the agent.
+  Record the date and result here; do not delete this entry until it passes.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

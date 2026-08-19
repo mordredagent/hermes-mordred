@@ -1,17 +1,18 @@
 """``hermes-mordred setup`` -- the one-command orchestrator for a fresh install.
 
 Before this module, getting Mordred fully protected on a new machine meant
-running six separate commands in the right order (``configure``, ``network
+running seven separate commands in the right order (``configure``, ``network
 init``, ``keyvault enable-se``/``enable-tpm``, ``keyvault init``, ``encryption
-enable env``) and knowing which ones were optional. ``setup`` walks that same
+enable env``, ``encryption enable memory``) and knowing which ones were
+optional. ``setup`` walks that same
 sequence for the operator, one step at a time, and is safe to re-run: it never
 repeats work that is already done and it never destroys existing state.
 
 State machine
 -------------
-Six steps run in a fixed order: **hermes** -> **configure** -> **network** ->
-**hardware-helper** -> **keyvault** -> **env-encryption**. Each step is a
-three-stage cycle:
+Seven steps run in a fixed order: **hermes** -> **configure** -> **network** ->
+**hardware-helper** -> **keyvault** -> **env-encryption** ->
+**memory-encryption**. Each step is a three-stage cycle:
 
 1. **probe** -- a read-only check of on-disk / PATH state, answering "is this
    step already done?". Probes never prompt, never write, and never touch the
@@ -19,8 +20,9 @@ three-stage cycle:
 2. **run** -- only when the probe says the step is incomplete, delegate to
    that subsystem's own command (``configure.run``, ``network_cli.run_init``,
    ``keyvault_native_cli.enable_se``/``enable_tpm``, ``_keyvault_init.init_keyvault``,
-   ``env_decrypt_cli.enable``). This module owns no persistence of its own --
-   every write happens inside the command it delegates to.
+   ``env_decrypt_cli.enable``, ``memory_cli.enable``). This module owns no
+   persistence of its own -- every write happens inside the command it
+   delegates to.
 3. **report** -- record one :class:`StepResult` (``name``, ``action``,
    ``detail``) per step, regardless of outcome.
 
@@ -29,8 +31,11 @@ A step's ``action`` is one of:
 - ``"done"``        -- the probe already found it complete; nothing ran.
 - ``"ran"``          -- it was incomplete and the delegated command completed
   it now.
-- ``"skipped"``      -- the operator explicitly opted out via a flag (only the
-  ``hermes`` step's ``--skip-hermes-setup`` / a declined prompt use this).
+- ``"skipped"``      -- nothing to do here, by the operator's choice or by
+  platform: the ``hermes`` step's ``--skip-hermes-setup`` / a declined prompt,
+  and the ``memory-encryption`` step off macOS (its sealing shims are
+  macOS-only, and unlike the hardware helper that is no reason to stop a
+  perfectly good Linux run).
 - ``"manual"``       -- it needs interaction that ``--non-interactive`` cannot
   supply, the operator was told to run a specific command themselves, or a
   build/prerequisite step failed in a way that still leaves the rest of the
@@ -51,11 +56,12 @@ A step's ``action`` is one of:
 The run stops immediately -- prints the report so far and exits 1 -- on
 ``"blocked"``, ``"failed"``, or ``"unsupported"``, and also when the
 **keyvault** step itself resolves to ``"manual"``: every step after it
-(env-encryption) and the final status dashboard assume a keyvault decision has
-actually been made, so there is nothing useful left to attempt. Every other
-``"manual"`` (network, env-encryption) lets the run continue -- those two
-steps are optional / independently re-runnable, so a missing prompt there
-should not stop the operator from finishing everything else.
+(env-encryption, memory-encryption) and the final status dashboard assume a
+keyvault decision has actually been made, so there is nothing useful left to
+attempt. Every other ``"manual"`` (network, env-encryption, memory-encryption)
+lets the run continue -- those steps are optional / independently re-runnable,
+so a missing prompt there should not stop the operator from finishing
+everything else.
 
 Re-running ``hermes-mordred setup`` after a partial run (or after fixing
 whatever made a step ``"blocked"``/``"failed"``) resumes exactly where it left
@@ -83,7 +89,9 @@ env-encryption probe extends this to an explicit operator opt-out: once
 silently reversing the decision -- a stray plaintext ``.env`` at rest while
 still vault-managed (drift) is the opposite case and is deliberately treated
 as *incomplete*, so ``enable()``'s reseal path runs instead of a secret being
-reported "already done" while it sits exposed on disk.
+reported "already done" while it sits exposed on disk. The memory-encryption
+probe follows exactly the same two rules on its own markers and its own drift
+(a plaintext memory file while the hook is armed).
 
 Keyvault preflight gate
 ------------------------
@@ -125,12 +133,13 @@ from typing import Literal
 
 from .._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
+from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import resolve_prompt_io
 from ._prompt_io import NonInteractiveAbort, PromptIO, _RefusingPromptIO
 from .configure import SetupRunner, SubprocessSetupRunner
-from .encryption_cli import WorkspacePaths, _default_workspace_paths, env_status
+from .encryption_cli import WorkspacePaths, _default_workspace_paths, _unsealed_memory_files, env_status
 from .policy_writer import PolicyWriter
 
 __all__ = [
@@ -153,6 +162,7 @@ _STEP_NETWORK = "network"
 _STEP_HARDWARE_HELPER = "hardware-helper"
 _STEP_KEYVAULT = "keyvault"
 _STEP_ENV_ENCRYPTION = "env-encryption"
+_STEP_MEMORY_ENCRYPTION = "memory-encryption"
 
 #: Actions that always stop the run immediately (see the module docstring).
 _STOPPING_ACTIONS: frozenset[StepAction] = frozenset({"blocked", "failed", "unsupported"})
@@ -929,6 +939,128 @@ def _resolve_step_env_encryption(
 
 
 # -----------------------------------------------------------------------------
+# Step 7 -- at-rest agent-memory encryption (`encryption enable memory`).
+# -----------------------------------------------------------------------------
+
+
+def _probe_memory_encryption(*, home: Path, platform: str) -> tuple[bool, str]:
+    """Read-only: is agent-memory encryption armed -- or deliberately paused?
+
+    Reads the two markers and the first bytes of the memory files; it opens no
+    vault and runs no probe, so it costs nothing on a profile that never
+    enabled the target. The same two completeness rules as the env step:
+
+    - **Operator opt-out**: ``encryption disable memory`` writes an opt-out
+      marker; that is a deliberate, reversible decision setup must not reverse.
+    - **Drift**: a plaintext memory file on disk while the hook is armed means
+      something wrote outside the hook. That must read as *incomplete* so
+      ``enable()`` re-runs its migration, not as "already done" while a memory
+      sits readable at rest.
+
+    Platform is not part of completeness: an armed marker stays armed across a
+    reboot into another OS. :func:`_resolve_step_memory_encryption` is where the
+    macOS-only runtime is accounted for.
+    """
+    if memory_optout_marker_path(home).exists():
+        return True, (
+            "paused by operator (`encryption disable memory`); re-enable with `hermes-mordred encryption enable memory`"
+        )
+    if not memory_marker_path(home).exists():
+        return False, "not enabled"
+    if _unsealed_memory_files(home):
+        return False, "plaintext memory file on disk while enabled"
+    return True, "enabled" if platform == "darwin" else "enabled; the sealing runtime is macOS-only"
+
+
+def _env_target_ready(*, home: Path, root: Path) -> bool:
+    """Whether the ``env`` target can carry the memory key to the runtime.
+
+    ``HERMES_MEMORY_KEY`` lives in the vault ``.env`` and reaches the hook only
+    through the ``.env`` injection shim, so ``enable memory`` refuses without it
+    (see :func:`.memory_cli._enable_gate_reason`). Checked here on the *state*
+    rather than on the env step's own result: that step reports ``"ran"`` for a
+    fresh system with no ``.env`` to protect at all, which is a success for env
+    and still not a usable carrier for memory.
+    """
+    from .encryption_cli import _enrolled_names
+
+    return ".env" in _enrolled_names(root) and not _env_optout_marker_path(home).exists()
+
+
+def _run_memory_encryption(*, home: Path, root: Path, platform: str, prompt_io: PromptIO) -> int:
+    """Arm memory encryption. Thin seam over ``memory_cli.enable``.
+
+    Like the env step, it deliberately does not expose
+    ``--force-runtime-unverified``: sealing files a runtime cannot prove it can
+    read back is not a call an orchestrator makes for the operator.
+    """
+    from . import memory_cli
+
+    return memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt_io)
+
+
+def _resolve_step_memory_encryption(
+    *,
+    home: Path,
+    root: Path,
+    platform: str,
+    prompt_io: PromptIO,
+    options: SetupOptions,
+) -> StepResult:
+    complete, detail = _probe_memory_encryption(home=home, platform=platform)
+    if complete:
+        return StepResult(_STEP_MEMORY_ENCRYPTION, "done", detail)
+
+    if platform != "darwin":
+        # `enable memory` refuses off macOS (the hook's shims are macOS-only), so
+        # attempting it would report a "failure" that is really just the OS. A
+        # skip keeps a Linux run clean instead of stopping it, which
+        # "unsupported" would do -- this is the last step, not a prerequisite.
+        return StepResult(
+            _STEP_MEMORY_ENCRYPTION,
+            "skipped",
+            f"macOS only — the memory sealing runtime is not available on {platform}",
+        )
+
+    if not _env_target_ready(home=home, root=root):
+        return StepResult(
+            _STEP_MEMORY_ENCRYPTION,
+            "manual",
+            "requires the env target (`hermes-mordred encryption enable env`) — the memory key reaches the "
+            "runtime through the `.env` injection shim",
+        )
+
+    if options.non_interactive:
+        # Same reasoning as the env step: enable() can reach an OS-level
+        # device-key unlock (Touch ID / passcode) to enroll the key, and that
+        # dialog sits outside the PromptIO seam entirely.
+        return StepResult(
+            _STEP_MEMORY_ENCRYPTION,
+            "manual",
+            "agent-memory encryption may need interactive confirmation (a vault recovery passphrase and/or an "
+            "OS device-key unlock) that --non-interactive cannot supply; run "
+            "`hermes-mordred encryption enable memory`",
+        )
+
+    try:
+        rc = _run_memory_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io)
+    except NonInteractiveAbort:
+        return StepResult(
+            _STEP_MEMORY_ENCRYPTION,
+            "manual",
+            "creating the at-rest vault needs a one-time recovery-passphrase prompt, and stdin is not a TTY; "
+            "run `hermes-mordred encryption enable memory` interactively",
+        )
+    except OSError as exc:
+        # Mirrors the env step: a disk-write failure reports a clean "failed"
+        # result instead of an unhandled traceback.
+        return StepResult(_STEP_MEMORY_ENCRYPTION, "failed", f"encryption enable memory failed: {exc}")
+    if rc != 0:
+        return StepResult(_STEP_MEMORY_ENCRYPTION, "failed", "encryption enable memory failed (see errors above)")
+    return StepResult(_STEP_MEMORY_ENCRYPTION, "ran", "agent memories are now sealed at rest")
+
+
+# -----------------------------------------------------------------------------
 # Orchestrator.
 # -----------------------------------------------------------------------------
 
@@ -962,6 +1094,9 @@ def run_setup(
         lambda: _resolve_step_hardware_helper(home=home, platform=platform),
         lambda: _resolve_step_keyvault(home=home, prompt_io=prompt_io, options=options),
         lambda: _resolve_step_env_encryption(
+            home=home, root=root, platform=platform, prompt_io=prompt_io, options=options
+        ),
+        lambda: _resolve_step_memory_encryption(
             home=home, root=root, platform=platform, prompt_io=prompt_io, options=options
         ),
     )

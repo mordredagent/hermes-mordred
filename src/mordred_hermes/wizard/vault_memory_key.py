@@ -32,10 +32,10 @@ _MEMORY_KEY_ENV = "HERMES_MEMORY_KEY"
 def _generate_memory_key() -> str:
     """A fresh URL-safe base64 256-bit key for ``HERMES_MEMORY_KEY``.
 
-    The key contract Mordred's memory-encryption runtime is specified against —
-    a URL-safe base64 encoding of 32 random bytes (AES-256); no Hermes release
-    reads this variable. The format contract is pinned by
-    ``tests/test_keyvault_memory_integration.py``.
+    The key contract Mordred's memory-encryption runtime reads — a URL-safe
+    base64 encoding of 32 random bytes (AES-256); no Hermes release reads this
+    variable, only :mod:`mordred_hermes.keyvault.memory_crypto`. The format
+    contract is pinned by ``tests/test_keyvault_memory_integration.py``.
     """
     import base64
     import secrets
@@ -157,9 +157,9 @@ def _print_memory_config_hint() -> None:
     """Tell the operator what the stored key does and does not do (never prints the key)."""
     print(
         f"The key stays protected at rest by the vault; the runtime shim injects {_MEMORY_KEY_ENV} into the "
-        "environment at startup. No Hermes release encrypts ~/.hermes/memories/*.md with it yet — "
-        "`hermes-mordred encryption enable memory` turns encryption on once a memory-encryption runtime "
-        "is installed, and refuses until then."
+        "environment at startup, where Mordred's memory hook reads it. Storing the key does not seal "
+        "anything by itself — turn agent-memory encryption on with "
+        "`hermes-mordred encryption enable memory` (it arms the hook and seals existing memory files)."
     )
 
 
@@ -170,14 +170,35 @@ def set_memory_key(
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
 ) -> int:
-    """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY`` (the agent-memory on-ramp).
+    """``vault set-memory-key``: :func:`ensure_memory_key` without the key value.
 
-    Intended for a memory-encryption runtime keyed by ``HERMES_MEMORY_KEY``
-    (AES-256-GCM, matching upstream ``tools/memory_tool.py``'s key format) —
-    no Hermes release reads it today. Keeping that key in the vault ``.env``
-    means the device wrapping key protects it at rest and the runtime decrypt
-    shim (:mod:`mordred_hermes.keyvault._runtime_env`) injects it into the
-    environment at startup. The key is never printed.
+    The CLI surface only needs the exit code; the value stays with the one
+    caller that must act on it (``encryption enable memory``, which seals
+    existing files with it through the same single vault open).
+    """
+    rc, _value = ensure_memory_key(root=root, rotate=rotate, backend=backend, store=store)
+    return rc
+
+
+def ensure_memory_key(
+    *,
+    root: Path,
+    rotate: bool = False,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+) -> tuple[int, str | None]:
+    """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY``, and report it.
+
+    Returns ``(exit_code, key_value)`` — the value is the effective key the
+    runtime shim will inject (``None`` whenever the exit code is 1), so a
+    caller that must seal files with it does not have to open the vault a
+    second time (a second Touch ID prompt). It is never printed.
+
+    The key Mordred's memory-encryption runtime is keyed by (AES-256-GCM, see
+    :mod:`mordred_hermes.keyvault.memory_crypto`). Keeping it in the vault
+    ``.env`` means the device wrapping key protects it at rest and the runtime
+    decrypt shim (:mod:`mordred_hermes.keyvault._runtime_env`) injects it into
+    the environment at startup.
 
     Opens the vault on the **hot path** (the device wrapping key — Secure Enclave
     or its software fallback, no passphrase) and decides off the *effective*
@@ -206,25 +227,25 @@ def set_memory_key(
 
     opened = _open_hot_path_or_report(root, backend=backend, store=store)
     if opened is None:
-        return 1
+        return 1, None
 
     with opened:
         existing = _read_enrolled_env(opened, root)
         if existing is None:
-            return 1
+            return 1, None
 
         # Decide off the *effective* (dotenv last-wins) value — exactly what the
         # runtime shim keys memory on — so we never silently switch the key Hermes
         # is actually using.
-        effective_valid = _is_valid_memory_key(_effective_memory_key(existing))
-        if effective_valid and not rotate:
+        effective = _effective_memory_key(existing)
+        if _is_valid_memory_key(effective) and not rotate:
             # The runtime already has a usable key; leave the file untouched.
             print(
                 f"{_MEMORY_KEY_ENV} is already set in the vault .env at {root} — leaving it unchanged "
                 "(pass --rotate to replace it)."
             )
             _print_memory_config_hint()
-            return 0
+            return 0, effective
 
         # No usable *effective* key, yet some assignment is a valid key: the .env is
         # malformed (e.g. a valid key shadowed by a later invalid duplicate). We
@@ -237,7 +258,7 @@ def set_memory_key(
                 f"existing memories: fix the .env by hand, or pass --rotate to replace it (which orphans "
                 f"memories encrypted under the old key)."
             )
-            return 1
+            return 1, None
 
         # Choose the key to write. Without --rotate, ADOPT a key the user is already
         # using (live env / plaintext home .env) so migrating into the vault keeps
@@ -256,7 +277,7 @@ def set_memory_key(
             generation = opened.generation
         except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
             _term.emit_error(f"cannot store {_MEMORY_KEY_ENV}: {exc}")
-            return 1
+            return 1, None
 
         verb = _store_verb_label(adopted=adopted, orphan_risk=orphan_risk)
         print(f"{verb} {_MEMORY_KEY_ENV} in the vault .env at {root} (now at generation {generation}).")
@@ -271,7 +292,7 @@ def set_memory_key(
                 "the next run."
             )
         _print_memory_config_hint()
-        return 0
+        return 0, chosen
 
 
 def _read_enrolled_env(opened: OpenVault, root: Path) -> str | None:
@@ -308,4 +329,4 @@ def cli_set_memory_key(args: argparse.Namespace) -> int:
     return set_memory_key(root=_resolve_root(getattr(args, "root", None)), rotate=bool(getattr(args, "rotate", False)))
 
 
-__all__ = ["cli_set_memory_key", "set_memory_key"]
+__all__ = ["cli_set_memory_key", "ensure_memory_key", "set_memory_key"]

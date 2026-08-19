@@ -4,8 +4,8 @@ One consistent command surface to turn on/off the at-rest encryption of:
 
 - ``env``       — ``~/.hermes/.env`` enrolled into the vault (runtime-injected)
 - ``config``    — ``~/.hermes/config.yaml`` via the ``.pth`` startup decrypt hook
-- ``memory``    — provisions ``HERMES_MEMORY_KEY`` + the ``config.yaml`` flag for a
-  memory-encryption runtime that does not exist yet (agent memories are plaintext today)
+- ``memory``    — ``~/.hermes/memories/*.md`` sealed by Mordred's memory hook
+  (:mod:`mordred_hermes.keyvault._memory_hook`), keyed by ``HERMES_MEMORY_KEY``
 - ``workspace`` — the external Touch ID/SE Claude Code workspace (``claude-private``)
 
 This module owns the ``status`` reader and the namespace dispatch. ``status`` is
@@ -17,7 +17,8 @@ artifacts —
   (:func:`mordred_hermes.keyvault.manifest.parse_unverified`; the names are
   operational metadata, not secret),
 - the config opt-in marker file,
-- the ``memory.encryption.enabled`` flag in ``config.yaml``,
+- the memory opt-in / opt-out markers plus the first bytes of each
+  ``<home>/memories/*.md`` (sealed or plaintext — no key needed),
 - the workspace sparsebundle / wrapped-passphrase / mountpoint.
 
 The one deliberate exception is :func:`gateway_runtime_lines`, appended to the
@@ -49,6 +50,7 @@ from .._home import hermes_home as _hermes_home
 from ..keyvault._config_bootstrap import _marker_path as _config_marker_path
 from ..keyvault._config_bootstrap import config_hook_installed
 from ..keyvault._identity import resolve_root
+from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import is_missing_keyvault_stack
@@ -79,6 +81,10 @@ TARGETS: tuple[str, ...] = ("env", "config", "memory", "workspace")
 
 _CONFIG_NAME = "config.yaml"
 _DARWIN = "darwin"
+_MEMORIES_DIR = "memories"
+#: Enough of a file to answer "is this sealed?": the magic line plus room for the
+#: BOM and leading whitespace ``memory_crypto.is_sealed`` tolerates.
+_SEAL_PROBE_BYTES = 64
 
 
 @dataclass(frozen=True)
@@ -151,11 +157,47 @@ def _enrolled_names(root: Path) -> set[str]:
     return set(parsed.files)
 
 
+def _memory_file_paths(home: Path) -> list[Path]:
+    """Every agent-memory file the hook seals, sorted.
+
+    The live ``<home>/memories/*.md`` plus upstream's ``*.md.bak.<ts>`` drift
+    snapshots: those hold the same content, written by upstream's own
+    ``write_text``, so migration and drift detection must both cover them.
+    """
+    memories = home / _MEMORIES_DIR
+    if not memories.is_dir():
+        return []
+    return sorted({p for pattern in ("*.md", "*.md.bak.*") for p in memories.glob(pattern) if p.is_file()})
+
+
+def _unsealed_memory_files(home: Path) -> list[Path]:
+    """Memory files that are plaintext at rest right now.
+
+    Classification only — no key, no decryption. A file that cannot be read
+    counts as *not* plaintext: an unreadable file is no evidence of exposure,
+    and ``status`` must never raise.
+    """
+    from ..keyvault.memory_crypto import is_sealed
+
+    plaintext = []
+    for path in _memory_file_paths(home):
+        try:
+            with path.open("rb") as fh:
+                head = fh.read(_SEAL_PROBE_BYTES)
+        except OSError:
+            continue
+        if not is_sealed(head):
+            plaintext.append(path)
+    return plaintext
+
+
 def _memory_flag_enabled(home: Path) -> bool:
-    """Whether ``config.yaml`` has ``memory.encryption.enabled: true``.
+    """Whether ``config.yaml`` has the legacy ``memory.encryption.enabled: true``.
 
     Side-effect-free read. A missing / unreadable / sealed-away config.yaml is
-    treated as not-enabled (the flag is simply not observable here).
+    treated as not-enabled (the flag is simply not observable here). The flag is
+    **legacy**: no runtime reads it (the marker arms the hook), and it is
+    reported only so a profile carrying it is not silently ignored.
     """
     from .._yaml_io import load_yaml_mapping
 
@@ -223,27 +265,62 @@ def config_status(*, home: Path, platform: str, hook_installed: bool | None = No
 
 
 def memory_runtime_available() -> tuple[bool, str]:
-    """Whether a memory-encryption runtime is installed for this Hermes.
+    """Whether **this** interpreter's Hermes has a memory seam Mordred can wrap.
 
-    No Hermes release encrypts agent memory, and Mordred does not yet ship
-    its own runtime for it, so this is always ``(False, reason)`` today. It
-    is the single seam a future Mordred-owned runtime hooks into — keep the
-    status reader and the enable gate routed through it.
+    The in-process half of the capability question, cheap enough for ``status``:
+    it classifies the installed ``tools.memory_tool`` by signature (see
+    :func:`mordred_hermes.keyvault._memory_hook.seam_check`). The
+    cross-interpreter half — can the runtime that actually runs ``hermes``, or a
+    gateway running right now, open sealed files? — is answered by
+    ``runtime_memory_encryption_available`` at enable time and in
+    :func:`gateway_runtime_lines`.
+
+    Fail-closed and total: any import or classification failure is reported as
+    unavailable, never raised, because both callers are read-only surfaces.
     """
-    return False, "no memory-encryption runtime in this release — memories are plaintext"
+    try:
+        from ..keyvault._memory_hook import seam_check
+
+        return seam_check()
+    except Exception as exc:
+        # Broad on purpose: `status` must never raise, and an unavailable
+        # runtime is exactly what an unexpected failure here means.
+        return False, f"the memory-encryption hook is unusable here: {exc!r}"
 
 
 def memory_status(*, home: Path, platform: str) -> TargetStatus:
-    configured = _memory_flag_enabled(home)
+    """Resolve the ``memory`` target from the Mordred markers and the files on disk.
+
+    ``<home>/mordred/memory-vault.marker`` is what arms the hook, so it — not
+    the legacy ``memory.encryption.enabled`` config key — decides ``configured``.
+    ``drift`` is a plaintext memory file sitting next to sealed ones while the
+    hook is armed (an out-of-process writer, or a migration that could not
+    finish): the data is exposed at rest right now, so it renders ``exposed``.
+    """
+    marker = memory_marker_path(home).exists()
+    optout = memory_optout_marker_path(home).exists()
     available, reason = memory_runtime_available()
-    active = configured and available and platform == _DARWIN
+    configured = marker or optout
+    active = marker and not optout and available and platform == _DARWIN
+    drift = marker and not optout and bool(_unsealed_memory_files(home))
+
     if not configured:
-        detail = "encryption disabled"
+        detail = (
+            "legacy config flag set, nothing sealed — run: encryption enable memory"
+            if _memory_flag_enabled(home)
+            else "not enabled"
+        )
+    elif optout:
+        detail = "disabled — memories are plaintext; re-enable: encryption enable memory"
     elif not available:
-        detail = f"key provisioned, but {reason}"
+        detail = f"enabled, but {reason} — memories written by this runtime are plaintext"
+    elif drift:
+        detail = "enabled, but a plaintext memory file is on disk — reseal with: encryption enable memory"
+    elif platform != _DARWIN:
+        detail = _os_note(False, platform)
     else:
-        detail = _os_note(active, platform)
-    return TargetStatus("memory", configured, active, detail)
+        detail = "sealed memory files; hook armed"
+    return TargetStatus("memory", configured, active, detail, drift=drift)
 
 
 def workspace_status(
@@ -326,11 +403,14 @@ STATUS_LEGEND_BODY = "on = protecting now | paused = set up but off, data kept |
 #: is present (see :func:`_workspace_mark`).
 WORKSPACE_LEGEND_BODY = "sealed = encrypted & locked at rest | open = mounted, in use | off = not set up here"
 
-#: Meaning of the env-only ``exposed`` mark. Shown only when an ``exposed`` row is
-#: present (drift): the target is vault-managed but a plaintext copy is on disk at
-#: rest — a host write slipped past the seal. ``encryption enable env`` merges it
-#: back into the vault and removes the plaintext.
-EXPOSED_LEGEND_BODY = "exposed = vault-managed but a plaintext copy is on disk at rest — reseal: encryption enable env"
+#: Meaning of the ``exposed`` mark. Shown only when an ``exposed`` row is present
+#: (drift): the target is protected, yet a plaintext copy is on disk at rest — a
+#: host write slipped past the ``.env`` seal, or a memory file was written by a
+#: process without the hook. Re-running that target's ``enable`` reconciles it.
+#: Target-neutral wording: both ``env`` and ``memory`` can report ``exposed``.
+EXPOSED_LEGEND_BODY = (
+    "exposed = protected target has a plaintext copy on disk at rest — reseal: encryption enable <target>"
+)
 
 
 def status_mark(status: TargetStatus) -> str:
@@ -444,19 +524,19 @@ def _shim_mark(ok: bool) -> str:
 def gateway_runtime_lines(*, home: Path, platform: str) -> list[str]:
     """One line per interpreter currently running a ``hermes gateway``.
 
-    ``gateway runtime: <python> (pid N) — env shim: ok | config hook: MISSING``
+    ``gateway runtime: <python> (pid N) — env shim: ok | config hook: MISSING | memory hook: ok``
 
-    The env/config seals are only as good as the interpreter that actually serves
-    the gateway: on 2026-06-25 a gateway running from a repo ``.venv`` without
+    The three seals are only as good as the interpreter that actually serves the
+    gateway: on 2026-06-25 a gateway running from a repo ``.venv`` without
     mordred could not unseal files the seal had removed, while the *expected*
     runtime looked healthy. This makes that interpreter visible before anything
     is sealed.
 
-    Unlike the rest of ``status`` this spends two short subprocess probes per
-    discovered gateway (macOS only, and only when one is actually running).
-    Neither probe opens the vault or prompts for Touch ID — the config probe runs
-    with the ``.pth`` hook neutralized. Any failure yields no lines: ``status``
-    must never raise or block.
+    Unlike the rest of ``status`` this spends three short subprocess probes per
+    discovered gateway (macOS only, and only when one is actually running). No
+    probe opens the vault or prompts for Touch ID — the config probe runs with
+    the ``.pth`` hook neutralized. Any failure yields no lines: ``status`` must
+    never raise or block.
     """
     if platform != _DARWIN:
         return []
@@ -465,15 +545,18 @@ def gateway_runtime_lines(*, home: Path, platform: str) -> list[str]:
             discover_running_gateway_runtimes,
             runtime_config_decrypt_available,
             runtime_env_injection_available,
+            runtime_memory_encryption_available,
         )
 
         lines = []
         for gateway in discover_running_gateway_runtimes(home=home):
             env_ok, _ = runtime_env_injection_available(home=home, runtime_python=gateway.python)
             config_ok, _ = runtime_config_decrypt_available(home=home, runtime_python=gateway.python)
+            memory_ok, _ = runtime_memory_encryption_available(home=home, runtime_python=gateway.python)
             where = f"{gateway.python}" + (f" (pid {gateway.pid})" if gateway.pid is not None else "")
             lines.append(
-                f"  gateway runtime: {where} — env shim: {_shim_mark(env_ok)} | config hook: {_shim_mark(config_ok)}"
+                f"  gateway runtime: {where} — env shim: {_shim_mark(env_ok)} "
+                f"| config hook: {_shim_mark(config_ok)} | memory hook: {_shim_mark(memory_ok)}"
             )
         return lines
     except Exception:
@@ -538,8 +621,8 @@ def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False)
     # only ever pass enable/disable/purge, and any non-enable/disable verb
     # resolves to the target's purge (preserves the original if-chain's
     # fall-through). workspace stays lazily imported (macOS-only path).
-    # ``force_runtime_unverified`` reaches the env and config enables (the
-    # runtime-gated seals); every other route ignores it.
+    # ``force_runtime_unverified`` reaches the env, config, and memory enables
+    # (the runtime-gated seals); every other route ignores it.
     routes: dict[str, dict[str, Callable[[], int]]] = {
         "env": {
             "enable": lambda: env_decrypt_cli.enable(
@@ -556,8 +639,10 @@ def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False)
             "purge": lambda: config_decrypt_cli.purge(home=home, root=root),
         },
         "memory": {
-            "enable": lambda: memory_cli.enable(home=home, root=root),
-            "disable": lambda: memory_cli.disable(home=home),
+            "enable": lambda: memory_cli.enable(
+                home=home, root=root, platform=platform, force_runtime_unverified=force_runtime_unverified
+            ),
+            "disable": lambda: memory_cli.disable(home=home, root=root),
             "purge": lambda: memory_cli.purge(home=home, root=root),
         },
     }
@@ -639,10 +724,11 @@ def _run_target(verb: str, target: str, *, force_runtime_unverified: bool = Fals
 def _run_core_target(verb: str, target: str, *, force_runtime_unverified: bool) -> tuple[str, int, bool]:
     """Run one core (env/config/memory) target; return ``(status_label, exit_code, skipped)``.
 
-    ``memory`` under ``enable`` is special-cased: with no memory-encryption
-    runtime installed (:func:`memory_runtime_available`) the engine would just
-    refuse, so it is never called — the fan-out records a skip instead of a
-    failure. ``disable`` / ``purge`` only clear state, so they always proceed.
+    ``memory`` under ``enable`` is special-cased: when this Hermes has no memory
+    seam Mordred can wrap (:func:`memory_runtime_available`) the engine would
+    just refuse, so it is never called — the fan-out records a skip instead of a
+    failure. ``disable`` / ``purge`` still run: they clear state and decrypt
+    files back, which is exactly what a broken seam needs.
     """
     if target == "memory" and verb == "enable":
         available, reason = memory_runtime_available()
@@ -673,7 +759,7 @@ def _dispatch_all(
     Core vault targets (env / config / memory) are always attempted; workspace
     is eligibility-gated (see :func:`_workspace_eligible`) and a skip never
     counts as a failure. ``memory`` under ``enable`` is likewise skipped, not
-    attempted, while no memory-encryption runtime exists (see
+    attempted, when this Hermes has no memory seam Mordred can wrap (see
     :func:`_run_core_target`). Every target runs even if an earlier one
     failed; the exit code is non-zero iff at least one *attempted* target
     failed. Per-target engine output streams inline; the ok/FAILED/skipped
