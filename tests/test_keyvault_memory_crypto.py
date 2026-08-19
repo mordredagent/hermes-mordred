@@ -178,6 +178,23 @@ def test_is_sealed_requires_the_whole_structure() -> None:
     assert is_sealed(MAGIC + b"\n" + body)
 
 
+def test_crlf_converted_seal_is_still_a_seal() -> None:
+    """A seal that has been through a Windows editor, ``git core.autocrlf``, or an
+    ``rsync --crlf`` comes back with ``\\r\\n``. Every text reader in the chain
+    decodes that in universal-newline mode and still sees a seal, so a byte-level
+    classifier that disagreed produced two views of one file — and the write side
+    published plaintext over the sealed bytes.
+    """
+    blob = seal(_PLAINTEXT, key=_KEY, name="MEMORY.md")
+    crlf = blob.replace(b"\n", b"\r\n")
+    assert crlf != blob
+
+    assert is_sealed(crlf)
+    assert is_sealed(b"\xef\xbb\xbf" + crlf)
+    assert looks_like_magic_line(crlf.decode("ascii"))
+    assert unseal(crlf, key=_KEY, name="MEMORY.md") == _PLAINTEXT
+
+
 def test_looks_like_magic_line_is_prefix_only() -> None:
     assert looks_like_magic_line(MAGIC.decode())
     assert looks_like_magic_line("\ufeff" + MAGIC.decode() + "\nanything at all")

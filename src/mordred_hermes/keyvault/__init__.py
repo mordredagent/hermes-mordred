@@ -30,7 +30,9 @@ def register(ctx: Any) -> None:
     sealed files), and any other exception is a bug that must keep its traceback.
     A no-op where the operator has not opted in. The ``.pth`` bootstrap arms the
     same installation through a post-import hook, for processes that never reach
-    plugin discovery.
+    plugin discovery. Immediately after it, the journey-mutation guard is installed
+    for the mirror-image case: a process that reaches plugin discovery but that the
+    ``.pth`` gate never engaged in (see :func:`_install_journey_guard`).
 
     Then installs the runtime env transparent-decrypt shim (design note §8.2 item 3):
     on macOS, secrets enrolled in the at-rest vault are decrypted and injected
@@ -61,6 +63,7 @@ def register(ctx: Any) -> None:
     from ._memory_hook import install_memory_hook
 
     install_memory_hook()
+    _install_journey_guard()
 
     from ._runtime_env import install_vault_env_decrypt
 
@@ -90,6 +93,37 @@ def register(ctx: Any) -> None:
 
     with contextlib.suppress(Exception):
         ctx.register_hook("on_session_start", _on_session_memory_check)
+
+
+def _install_journey_guard() -> None:
+    """Guard the journey mutations from ``register()`` as well as from the import hook.
+
+    ``agent/learning_graph`` indexes memory chunks by their RAW file offsets while
+    ``delete_node`` / ``edit_node`` mutate through the decrypted seam, so over a
+    sealed file the two views disagree and deleting the one garbage card the UI
+    shows removes a real entry. The ``.pth`` import hook covers that, but only in a
+    process it engaged in — a host that never matched the ``.pth`` gate, or an
+    embedded caller, reaches ``register()`` and nothing else.
+
+    Fail-open and lazy, unlike the memory seam above: a missing or refactored
+    ``agent.learning_mutations`` is a silent no-op (the guard is defence in depth —
+    the read seam already refuses to hand a sealed file back as entries), and a
+    guard problem must never break startup.
+
+    Importing the module here is the same trade ``_load_memory_tool`` already
+    makes: ``register()`` runs inside plugin discovery, well after the host has
+    imported ``agent``, and this module is pure stdlib at import time.
+    """
+    try:
+        import importlib
+
+        from ._memory_hook import install_journey_guard
+
+        install_journey_guard(importlib.import_module("agent.learning_mutations"))
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("journey guard not installed", exc_info=True)
 
 
 def _on_session_memory_check(**_kwargs: Any) -> None:
