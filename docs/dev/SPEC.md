@@ -652,9 +652,10 @@ disable memory` decrypts every sealed file back to plaintext, removes the
 marker and sets the opt-out marker (paused by operator), and keeps the key.
 `encryption purge memory` disables and then strips the key. `encryption
 status` reports `on`, `paused`, `off`, or `exposed`. `setup` runs a
-`memory-encryption` step right after `env-encryption`: prompted
-interactively, `manual` under `--non-interactive`, and honouring the
-operator opt-out.
+`memory-encryption` step right after `env-encryption`: it runs without a
+dedicated prompt, exactly like the env step (the opt-out marker is how an
+operator declines), resolves `manual` under `--non-interactive`, and honours
+the operator opt-out.
 
 The capability probe `runtime_memory_encryption_available` joins the env and
 config probes in the same family and appears in `encryption status`'s gateway
