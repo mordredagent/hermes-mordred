@@ -39,6 +39,7 @@ __all__ = [
     "aad_for",
     "decode_key",
     "is_sealed",
+    "looks_like_magic_line",
     "seal",
     "unseal",
 ]
@@ -57,6 +58,9 @@ _TAG_LEN: Final = 16
 #: upstream reads memory files with ``utf-8-sig``, so it would strip the BOM and
 #: hand us a sealed body we had already classified as plaintext.
 _BOM: Final = b"\xef\xbb\xbf"
+
+#: Every byte a sealed body can hold: URL-safe base64 plus its padding.
+_BODY_ALPHABET: Final = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
 
 
 class MemoryCryptoError(Exception):
@@ -105,16 +109,37 @@ def decode_key(value: str) -> bytes:
 
 
 def is_sealed(data: bytes | str) -> bool:
-    """Whether ``data`` carries the v1 magic line (BOM / leading whitespace tolerated).
+    """Whether ``data`` is structurally a v1 seal (BOM / surrounding whitespace tolerated).
+
+    The whole structure is required — magic line, newline, one base64url body long
+    enough to hold a nonce and a tag — not just the magic. An operator or the model
+    can write the magic *text* into a memory file; treating that as sealed would
+    make the file unopenable and hand the write path a "sealed" file with no key.
 
     Deliberately cheap and total: it classifies a file, so it must answer for
     arbitrary bytes without a key and without raising.
     """
     body = _strip_leading(_as_bytes(data))
-    if not body.startswith(MAGIC):
+    if not body.startswith(MAGIC + b"\n"):
         return False
-    rest = body[len(MAGIC) :]
-    return rest == b"" or rest.startswith(b"\n")
+    encoded = body[len(MAGIC) + 1 :].rstrip()
+    if not encoded or not _BODY_ALPHABET.issuperset(encoded):
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
+    except (ValueError, TypeError):
+        return False
+    return len(raw) >= _NONCE_LEN + _TAG_LEN
+
+
+def looks_like_magic_line(text: str) -> bool:
+    """Whether ``text`` merely *starts* with the magic (BOM / leading whitespace tolerated).
+
+    The prefix-only half of :func:`is_sealed`, for the two callers that must treat
+    an impersonation as suspicious rather than as a seal: the write guard (which
+    refuses to store such an entry) and the CLI's drift detection.
+    """
+    return _strip_leading(_as_bytes(text)).startswith(MAGIC)
 
 
 def seal(plaintext: bytes, *, key: bytes, name: str) -> bytes:

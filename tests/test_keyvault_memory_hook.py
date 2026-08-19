@@ -19,7 +19,10 @@ through ``MemoryStore.``: the wrapper must be picked up at call time.
 from __future__ import annotations
 
 import base64
+import importlib
 import os
+import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,11 +35,14 @@ from mordred_hermes.keyvault import _memory_hook
 from mordred_hermes.keyvault._memory_hook import (
     MemoryEncryptionUnavailable,
     classify_seam,
+    install_journey_guard,
     install_memory_hook,
+    install_memory_import_hook,
     memory_hook_installed,
     memory_marker_path,
     memory_optout_marker_path,
     memory_seam_shape,
+    warn_when_memory_is_locked,
 )
 from mordred_hermes.keyvault.memory_crypto import MAGIC, is_sealed, seal, unseal
 
@@ -341,20 +347,6 @@ def test_install_stamps_static_seams_as_staticmethods(shape: str, mem_dir: Path,
     assert isinstance(module.MemoryStore.__dict__["_write_file"], staticmethod)
 
 
-def test_install_is_a_noop_in_safe_mode(shape: str, mem_dir: Path, tmp_path: Path) -> None:
-    module = _fake_module(shape, mem_dir)
-    original = module.MemoryStore._write_file
-    _arm(tmp_path)
-    ok = install_memory_hook(
-        home=tmp_path,
-        memory_tool_module=module,
-        environ={"HERMES_MEMORY_KEY": KEY_ENV, "HERMES_SAFE_MODE": "1"},
-    )
-    assert ok is False
-    assert module.MemoryStore._write_file is original
-    assert memory_hook_installed(module) is False
-
-
 def test_install_fails_open_on_unsupported_seam_when_not_armed(mem_dir: Path, tmp_path: Path) -> None:
     module = _fake_module("B", mem_dir)
     module.ENTRY_DELIMITER = None
@@ -584,15 +576,73 @@ def test_shape_a_drift_passes_a_clean_result_through(mem_dir: Path, tmp_path: Pa
     assert list(mem_dir.glob("*.bak.*")) == []
 
 
-def test_shape_a_drift_tolerates_a_failed_backup(mem_dir: Path, tmp_path: Path) -> None:
+def test_shape_a_drift_reports_a_failed_backup(mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module = _fake_module("A", mem_dir)
-    failed = f"{mem_dir / 'MEMORY.md.bak.1'} (BACKUP FAILED — file unchanged on disk)"
-    module.MemoryStore._detect_external_drift = lambda self, target, raw: failed
     _install(module, tmp_path)
     store = module.MemoryStore()
 
-    assert store._detect_external_drift("memory", "x" * 9000) == failed
-    assert not (mem_dir / "MEMORY.md.bak.1").exists()
+    def _boom(path: Path, data: bytes) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(_memory_hook, "_write_private", _boom)
+
+    result = store._detect_external_drift("memory", "x" * 9000)
+
+    assert str(result).endswith("(BACKUP FAILED — file unchanged on disk)")
+    assert list(mem_dir.glob("*.bak.*")) == []
+
+
+def test_shape_a_drift_never_writes_a_plaintext_backup(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The H3 regression: upstream's own drift path writes the ``.bak`` with a bare
+    ``Path.write_text`` of the *decrypted* snapshot. Watch the writes as they
+    happen — a final-state check cannot see a plaintext file that is later sealed."""
+    module = _fake_module("A", mem_dir)
+    _install(module, tmp_path, armed=False)  # sealed on disk is enough; arming is not needed
+    path = _memory_path(module)
+    raw = "x" * 9000
+    path.write_bytes(seal(raw.encode("utf-8"), key=KEY, name="MEMORY.md"))
+
+    written: list[bytes] = []
+    real_write_private = _memory_hook._write_private
+
+    def _record(target: Path, data: bytes) -> None:
+        written.append(data)
+        real_write_private(target, data)
+
+    def _forbidden(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("the drift backup must not be written in the clear")
+
+    monkeypatch.setattr(_memory_hook, "_write_private", _record)
+    monkeypatch.setattr(Path, "write_text", _forbidden)
+
+    result = module.MemoryStore()._detect_external_drift("memory", raw)
+
+    assert written and all(is_sealed(data) for data in written)
+    bak = Path(str(result))
+    assert unseal(bak.read_bytes(), key=KEY, name=bak.name).decode("utf-8") == raw
+
+
+def test_shape_a_drift_delegates_for_a_plaintext_file(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module("A", mem_dir)
+    calls: list[str] = []
+    original = module.MemoryStore._detect_external_drift
+
+    def _spy(self: Any, target: str, raw: str) -> str | None:
+        calls.append(target)
+        return original(self, target, raw)
+
+    module.MemoryStore._detect_external_drift = _spy
+    _install(module, tmp_path, armed=False)
+    path = _memory_path(module)
+    raw = "x" * 9000
+    path.write_text(raw, encoding="utf-8")
+
+    result = module.MemoryStore()._detect_external_drift("memory", raw)
+
+    assert calls == ["memory"]
+    assert not is_sealed(Path(str(result)).read_bytes())
 
 
 def test_shape_b_drift_does_not_false_positive_on_a_sealed_file(mem_dir: Path, tmp_path: Path) -> None:
@@ -696,3 +746,534 @@ def test_mutate_cycle_keeps_prior_entries(shape: str, mem_dir: Path, tmp_path: P
     third._reload_target("memory")
     assert third._entries_for("memory") == ["first entry", "second entry"]
     assert is_sealed(path.read_bytes())
+
+
+# --------------------------------------------------------------------------
+# Sticky sealing: a sealed file is never overwritten with plaintext
+# --------------------------------------------------------------------------
+
+
+def _seed_sealed(module: ModuleType, text: str = "prior entry") -> Path:
+    path = _memory_path(module)
+    path.write_bytes(seal(text.encode("utf-8"), key=KEY, name=path.name))
+    return path
+
+
+def test_disarmed_write_over_a_sealed_file_stays_sealed(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False)
+    path = _seed_sealed(module)
+
+    module.MemoryStore._write_file(path, ["new entry"])
+
+    assert is_sealed(path.read_bytes())
+    assert unseal(path.read_bytes(), key=KEY, name="MEMORY.md") == b"new entry"
+
+
+def test_disarmed_write_over_a_sealed_file_without_a_key_refuses(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False, key=None)
+    path = _seed_sealed(module)
+    before = path.read_bytes()
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="refusing to overwrite sealed"):
+        module.MemoryStore._write_file(path, ["new entry"])
+
+    assert path.read_bytes() == before
+
+
+def test_safe_mode_write_over_a_sealed_file_stays_sealed(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, environ={"HERMES_SAFE_MODE": "1"})
+    path = _seed_sealed(module)
+
+    module.MemoryStore._write_file(path, ["new entry"])
+
+    assert is_sealed(path.read_bytes())
+
+
+def test_safe_mode_write_over_a_sealed_file_without_a_key_refuses(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, key=None, environ={"HERMES_SAFE_MODE": "1"})
+    path = _seed_sealed(module)
+    before = path.read_bytes()
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="refusing to overwrite sealed"):
+        module.MemoryStore._write_file(path, ["new entry"])
+
+    assert path.read_bytes() == before
+
+
+def test_disarmed_write_over_a_plaintext_file_stays_plaintext(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False)
+    path = _memory_path(module)
+    path.write_text("legacy entry", encoding="utf-8")
+
+    module.MemoryStore._write_file(path, ["new entry"])
+
+    assert path.read_text(encoding="utf-8") == "new entry"
+
+
+def test_safe_mode_still_wraps_a_supported_seam(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    # Safe mode means "no new sealing, no refusal to start" — not "no protection":
+    # unwrapping would let upstream truncate an already-sealed file.
+    module = _fake_module(shape, mem_dir)
+    _arm(tmp_path)
+    ok = install_memory_hook(
+        home=tmp_path,
+        memory_tool_module=module,
+        environ={"HERMES_MEMORY_KEY": KEY_ENV, "HERMES_SAFE_MODE": "1"},
+    )
+
+    assert ok is True
+    assert memory_hook_installed(module) is True
+    path = _memory_path(module)
+    module.MemoryStore._write_file(path, ["new entry"])
+    assert path.read_text(encoding="utf-8") == "new entry"  # armed off: no NEW sealing
+
+
+# --------------------------------------------------------------------------
+# Magic-line impersonation
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("armed", [True, False])
+def test_write_refuses_an_entry_that_impersonates_the_header(
+    shape: str, mem_dir: Path, tmp_path: Path, armed: bool
+) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=armed)
+    path = _memory_path(module)
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="sealed-memory header"):
+        module.MemoryStore._write_file(path, ["harmless", f"  {MAGIC.decode()}\nZm9v"])
+
+    assert not path.exists()
+
+
+def test_plaintext_entry_that_impersonates_the_header_reads_through(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    path.write_text(f"{MAGIC.decode()}\nnot base64 at all", encoding="utf-8")
+
+    assert module.MemoryStore._read_file(path) == [f"{MAGIC.decode()}\nnot base64 at all"]
+
+
+# --------------------------------------------------------------------------
+# Import hook
+# --------------------------------------------------------------------------
+
+
+_FAKE_MEMORY_TOOL_SRC = '''\
+"""A shape-B ``tools.memory_tool`` stand-in imported through the real machinery."""
+
+from pathlib import Path
+
+ENTRY_DELIMITER = "\\n\\u00a7\\n"
+
+
+class MemoryStore:
+    @staticmethod
+    def _write_file(path, entries):
+        content = ENTRY_DELIMITER.join(entries) if entries else ""
+        Path(path).write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _read_file(path):
+        target = Path(path)
+        if not target.exists():
+            return []
+        raw = target.read_text(encoding="utf-8")
+        return [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
+
+    def _detect_external_drift(self, target):
+        return None
+
+    def _char_limit(self, target):
+        return 2200
+'''
+
+_FAKE_LEARNING_MUTATIONS_SRC = '''\
+"""An ``agent.learning_mutations`` stand-in imported through the real machinery."""
+
+_MEMORY_FILES = {"memory": "MEMORY.md", "profile": "USER.md"}
+
+
+def parse_node_kind(node_id):
+    return "memory" if node_id.startswith("memory:") else "skill"
+
+
+def delete_node(node_id):
+    return {"ok": True, "message": "deleted"}
+
+
+def edit_node(node_id, content):
+    return {"ok": True, "message": "updated"}
+'''
+
+
+@pytest.fixture
+def import_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A throwaway ``tools`` / ``agent`` package on ``sys.path`` with the finder installed.
+
+    The real ``tools`` package is importable in this venv, so its modules are
+    evicted for the duration and restored afterwards — otherwise the fakes below
+    would never be reached (and the finder would wrap the live class).
+    """
+    site = tmp_path / "site"
+    for package, module_name, source in (
+        ("tools", "memory_tool", _FAKE_MEMORY_TOOL_SRC),
+        ("agent", "learning_mutations", _FAKE_LEARNING_MUTATIONS_SRC),
+    ):
+        (site / package).mkdir(parents=True)
+        (site / package / "__init__.py").write_text("", encoding="utf-8")
+        (site / package / f"{module_name}.py").write_text(source, encoding="utf-8")
+
+    prefixes = ("tools", "agent")
+    saved = {name: mod for name, mod in sys.modules.items() if name.split(".")[0] in prefixes}
+    for name in saved:
+        del sys.modules[name]
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    importlib.invalidate_caches()
+    try:
+        yield site
+    finally:
+        for name in [n for n in sys.modules if n.split(".")[0] in prefixes]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        _uninstall_import_hook()
+
+
+def _uninstall_import_hook() -> None:
+    sys.meta_path[:] = [f for f in sys.meta_path if not isinstance(f, _memory_hook._PostImportFinder)]
+    _memory_hook._IMPORT_HOOK = None
+
+
+def test_import_hook_wraps_the_seam_on_import(import_hook: Path) -> None:
+    assert install_memory_import_hook() is True
+
+    module = importlib.import_module("tools.memory_tool")
+
+    assert memory_hook_installed(module) is True
+
+
+def test_import_hook_wraps_an_already_imported_module(import_hook: Path) -> None:
+    module = importlib.import_module("tools.memory_tool")
+    assert memory_hook_installed(module) is False
+
+    assert install_memory_import_hook() is True
+
+    assert memory_hook_installed(module) is True
+
+
+def test_import_hook_ignores_every_other_module(import_hook: Path) -> None:
+    install_memory_import_hook()
+    finder = sys.meta_path[0]
+    assert isinstance(finder, _memory_hook._PostImportFinder)
+
+    assert finder.find_spec("json", None, None) is None
+    assert finder.find_spec("tools", None, None) is None
+    # ...and an unrelated import still works through the untouched machinery.
+    assert importlib.import_module("json") is sys.modules["json"]
+
+
+def test_import_hook_is_idempotent(import_hook: Path) -> None:
+    install_memory_import_hook()
+    install_memory_import_hook()
+
+    assert sum(isinstance(f, _memory_hook._PostImportFinder) for f in sys.meta_path) == 1
+
+
+def test_import_hook_installs_the_journey_guard(import_hook: Path) -> None:
+    install_memory_import_hook()
+
+    module = importlib.import_module("agent.learning_mutations")
+
+    assert getattr(module.delete_node, _memory_hook._WRAPPED_FLAG, False) is True
+    assert getattr(module.edit_node, _memory_hook._WRAPPED_FLAG, False) is True
+
+
+# --------------------------------------------------------------------------
+# Journey guard (learning_mutations)
+# --------------------------------------------------------------------------
+
+
+def _fake_mutations_module(mem_dir: Path) -> ModuleType:
+    """A fake ``agent.learning_mutations`` whose mutations record their calls."""
+    module = ModuleType("fake_learning_mutations")
+    calls: list[str] = []
+
+    def parse_node_kind(node_id: str) -> str:
+        return "memory" if node_id.startswith("memory:") else "skill"
+
+    def delete_node(node_id: str) -> dict[str, Any]:
+        calls.append(f"delete:{node_id}")
+        return {"ok": True, "message": "deleted"}
+
+    def edit_node(node_id: str, content: str) -> dict[str, Any]:
+        calls.append(f"edit:{node_id}")
+        return {"ok": True, "message": "updated"}
+
+    module.calls = calls  # type: ignore[attr-defined]
+    module.parse_node_kind = parse_node_kind  # type: ignore[attr-defined]
+    module.delete_node = delete_node  # type: ignore[attr-defined]
+    module.edit_node = edit_node  # type: ignore[attr-defined]
+    module._MEMORY_FILES = {"memory": "MEMORY.md", "profile": "USER.md"}  # type: ignore[attr-defined]
+    module._memories_dir = lambda: mem_dir  # type: ignore[attr-defined]
+    return module
+
+
+def test_journey_guard_refuses_to_delete_from_a_sealed_file(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_mutations_module(mem_dir)
+    (mem_dir / "MEMORY.md").write_bytes(seal(b"first entry", key=KEY, name="MEMORY.md"))
+    assert install_journey_guard(module, home=tmp_path) is True
+
+    result = module.delete_node("memory:memory:0")
+
+    assert result["ok"] is False
+    assert "sealed by Mordred" in result["message"]
+    assert module.calls == []  # upstream never ran: the entry survives
+
+
+def test_journey_guard_refuses_to_edit_a_sealed_file(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_mutations_module(mem_dir)
+    (mem_dir / "USER.md").write_bytes(seal(b"profile", key=KEY, name="USER.md"))
+    install_journey_guard(module, home=tmp_path)
+
+    result = module.edit_node("memory:profile:3", "new body")
+
+    assert result["ok"] is False
+    assert module.calls == []
+
+
+def test_journey_guard_passes_a_plaintext_memory_through(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_mutations_module(mem_dir)
+    (mem_dir / "MEMORY.md").write_text("first entry", encoding="utf-8")
+    install_journey_guard(module, home=tmp_path)
+
+    assert module.delete_node("memory:memory:0") == {"ok": True, "message": "deleted"}
+    assert module.calls == ["delete:memory:memory:0"]
+
+
+def test_journey_guard_leaves_skill_nodes_untouched(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_mutations_module(mem_dir)
+    (mem_dir / "MEMORY.md").write_bytes(seal(b"first entry", key=KEY, name="MEMORY.md"))
+    install_journey_guard(module, home=tmp_path)
+
+    assert module.delete_node("debugging-hermes-desktop")["ok"] is True
+    assert module.calls == ["delete:debugging-hermes-desktop"]
+
+
+def test_journey_guard_skips_a_mismatched_signature(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_mutations_module(mem_dir)
+    original = module.delete_node
+    module.delete_node = lambda node: {"ok": True}  # type: ignore[assignment]
+
+    assert install_journey_guard(module, home=tmp_path) is False
+    assert module.delete_node is not original
+    assert getattr(module.edit_node, _memory_hook._WRAPPED_FLAG, False) is False
+
+
+def test_journey_guard_is_idempotent(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_mutations_module(mem_dir)
+    install_journey_guard(module, home=tmp_path)
+    wrapped = module.delete_node
+    install_journey_guard(module, home=tmp_path)
+
+    assert module.delete_node is wrapped
+
+
+# --------------------------------------------------------------------------
+# Un-swallowable refusal
+# --------------------------------------------------------------------------
+
+
+def test_unsupported_seam_refusal_hard_exits_off_the_main_thread(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `threading.excepthook` swallows a SystemExit raised on a worker thread, so
+    # discovery running off-main must exit the process outright.
+    module = _fake_module("B", mem_dir)
+    module.ENTRY_DELIMITER = None
+    _arm(tmp_path)
+    codes: list[int] = []
+    monkeypatch.setattr(os, "_exit", lambda code: codes.append(code))
+
+    def _run() -> None:
+        install_memory_hook(home=tmp_path, memory_tool_module=module, environ={"HERMES_MEMORY_KEY": KEY_ENV})
+
+    worker = threading.Thread(target=_run)
+    worker.start()
+    worker.join()
+
+    assert codes == [1]
+
+
+def test_unsupported_seam_in_safe_mode_warns_instead_of_refusing(
+    mem_dir: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    module = _fake_module("B", mem_dir)
+    module.ENTRY_DELIMITER = None
+    _arm(tmp_path)
+
+    with caplog.at_level("WARNING", logger=_memory_hook.__name__):
+        ok = install_memory_hook(
+            home=tmp_path,
+            memory_tool_module=module,
+            environ={"HERMES_MEMORY_KEY": KEY_ENV, "HERMES_SAFE_MODE": "1"},
+        )
+
+    assert ok is False
+    assert "HERMES_SAFE_MODE" in caplog.text
+
+
+# --------------------------------------------------------------------------
+# Sealed-but-unopenable warning at session start
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_locked_warning() -> Iterator[None]:
+    _memory_hook._LOCKED_WARNED.clear()
+    yield
+    _memory_hook._LOCKED_WARNED.clear()
+
+
+def _memories_home(tmp_path: Path) -> Path:
+    (tmp_path / "memories").mkdir(parents=True, exist_ok=True)
+    return tmp_path
+
+
+def test_locked_memory_warning_fires_without_a_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    home = _memories_home(tmp_path)
+    (home / "memories" / "MEMORY.md").write_bytes(seal(b"entry", key=KEY, name="MEMORY.md"))
+
+    assert warn_when_memory_is_locked(home=home, environ={}) is True
+
+    err = capsys.readouterr().err
+    assert "agent memory is sealed" in err
+    assert "HERMES_MEMORY_KEY" in err
+
+
+def test_locked_memory_warning_fires_for_a_wrong_key(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    home = _memories_home(tmp_path)
+    (home / "memories" / "MEMORY.md").write_bytes(seal(b"entry", key=KEY, name="MEMORY.md"))
+
+    assert warn_when_memory_is_locked(home=home, environ={"HERMES_MEMORY_KEY": OTHER_KEY_ENV}) is True
+    assert "agent memory is sealed" in capsys.readouterr().err
+
+
+def test_locked_memory_warning_is_quiet_when_the_key_opens_the_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = _memories_home(tmp_path)
+    (home / "memories" / "MEMORY.md").write_bytes(seal(b"entry", key=KEY, name="MEMORY.md"))
+
+    assert warn_when_memory_is_locked(home=home, environ={"HERMES_MEMORY_KEY": KEY_ENV}) is False
+    assert capsys.readouterr().err == ""
+
+
+def test_locked_memory_warning_is_quiet_for_plaintext_memory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = _memories_home(tmp_path)
+    (home / "memories" / "MEMORY.md").write_text("legacy entry", encoding="utf-8")
+
+    assert warn_when_memory_is_locked(home=home, environ={}) is False
+    assert capsys.readouterr().err == ""
+
+
+def test_locked_memory_warning_fires_once_per_process(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    home = _memories_home(tmp_path)
+    (home / "memories" / "MEMORY.md").write_bytes(seal(b"entry", key=KEY, name="MEMORY.md"))
+
+    assert warn_when_memory_is_locked(home=home, environ={}) is True
+    capsys.readouterr()
+    assert warn_when_memory_is_locked(home=home, environ={}) is False
+    assert capsys.readouterr().err == ""
+
+
+# --------------------------------------------------------------------------
+# Delimiter safety
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("delimiter", ["\n---\n", "==", "\n", "MEM\n", ""])
+def test_classify_seam_rejects_a_delimiter_that_could_occur_in_a_sealed_blob(mem_dir: Path, delimiter: str) -> None:
+    module = _fake_module("B", mem_dir)
+    module.ENTRY_DELIMITER = delimiter
+    shape, reason = classify_seam(module)
+    assert shape == ""
+    assert reason == "ENTRY_DELIMITER could occur inside a sealed blob"
+
+
+def test_classify_seam_accepts_the_upstream_delimiter(mem_dir: Path) -> None:
+    assert classify_seam(_fake_module("B", mem_dir)) == ("B", "")
+
+
+# --------------------------------------------------------------------------
+# Small items: live home, install completeness, durable rename
+# --------------------------------------------------------------------------
+
+
+def test_home_is_resolved_per_call_when_not_injected(
+    shape: str, mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An in-process profile switch changes HERMES_HOME; arming must follow it
+    # rather than staying pinned to the home this process started in.
+    unarmed = tmp_path / "first"
+    armed = tmp_path / "second"
+    armed.mkdir()
+    _arm(armed)
+    live = [unarmed]
+    monkeypatch.setattr(_memory_hook, "_hermes_home", lambda: live[-1])
+
+    module = _fake_module(shape, mem_dir)
+    assert install_memory_hook(memory_tool_module=module, environ={"HERMES_MEMORY_KEY": KEY_ENV}) is True
+    path = _memory_path(module)
+
+    module.MemoryStore._write_file(path, ["new entry"])
+    assert not is_sealed(path.read_bytes())
+
+    live.append(armed)  # profile switch, same wrapper
+    module.MemoryStore._write_file(path, ["new entry"])
+    assert is_sealed(path.read_bytes())
+
+
+def test_memory_hook_installed_requires_every_seam_of_the_shape(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    assert memory_hook_installed(module) is True
+
+    other = _fake_module(shape, mem_dir)
+    other.MemoryStore._write_file = module.MemoryStore._write_file  # only the write seam is wrapped
+    assert memory_hook_installed(other) is False
+
+
+def test_write_private_fsyncs_the_parent_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # fsync on the file persists the bytes; only fsync on the directory persists
+    # the rename that publishes them.
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def _record(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _record)
+    opened: list[str] = []
+    real_open = os.open
+
+    def _spy_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        opened.append(str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _spy_open)
+
+    _memory_hook._write_private(tmp_path / "MEMORY.md", b"payload")
+
+    assert str(tmp_path) in opened
+    assert len(synced) == 2  # the file and its directory
