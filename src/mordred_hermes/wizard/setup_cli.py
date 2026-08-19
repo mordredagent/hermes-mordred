@@ -139,7 +139,13 @@ from . import _term
 from ._defaults import resolve_prompt_io
 from ._prompt_io import NonInteractiveAbort, PromptIO, _RefusingPromptIO
 from .configure import SetupRunner, SubprocessSetupRunner
-from .encryption_cli import WorkspacePaths, _default_workspace_paths, _unsealed_memory_files, env_status
+from .encryption_cli import (
+    WorkspacePaths,
+    _default_workspace_paths,
+    _env_target_ready,
+    _unsealed_memory_files,
+    env_status,
+)
 from .policy_writer import PolicyWriter
 
 __all__ = [
@@ -972,21 +978,6 @@ def _probe_memory_encryption(*, home: Path, platform: str) -> tuple[bool, str]:
     return True, "enabled" if platform == "darwin" else "enabled; the sealing runtime is macOS-only"
 
 
-def _env_target_ready(*, home: Path, root: Path) -> bool:
-    """Whether the ``env`` target can carry the memory key to the runtime.
-
-    ``HERMES_MEMORY_KEY`` lives in the vault ``.env`` and reaches the hook only
-    through the ``.env`` injection shim, so ``enable memory`` refuses without it
-    (see :func:`.memory_cli._enable_gate_reason`). Checked here on the *state*
-    rather than on the env step's own result: that step reports ``"ran"`` for a
-    fresh system with no ``.env`` to protect at all, which is a success for env
-    and still not a usable carrier for memory.
-    """
-    from .encryption_cli import _enrolled_names
-
-    return ".env" in _enrolled_names(root) and not _env_optout_marker_path(home).exists()
-
-
 def _run_memory_encryption(*, home: Path, root: Path, platform: str, prompt_io: PromptIO) -> int:
     """Arm memory encryption. Thin seam over ``memory_cli.enable``.
 
@@ -1022,6 +1013,11 @@ def _resolve_step_memory_encryption(
             f"macOS only — the memory sealing runtime is not available on {platform}",
         )
 
+    # Checked on the *state* (env enrolled and not opted out; see
+    # `encryption_cli._env_target_ready`, shared with `memory_cli`'s own
+    # gate) rather than on the env step's own result: that step reports
+    # "ran" for a fresh system with no `.env` to protect at all, which is a
+    # success for env and still not a usable carrier for memory.
     if not _env_target_ready(home=home, root=root):
         return StepResult(
             _STEP_MEMORY_ENCRYPTION,

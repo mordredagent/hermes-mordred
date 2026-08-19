@@ -82,8 +82,11 @@ TARGETS: tuple[str, ...] = ("env", "config", "memory", "workspace")
 _CONFIG_NAME = "config.yaml"
 _DARWIN = "darwin"
 _MEMORIES_DIR = "memories"
-#: Enough of a file to answer "is this sealed?": the magic line plus room for the
-#: BOM and leading whitespace ``memory_crypto.is_sealed`` tolerates.
+#: Enough of a file to answer "does this even start with the magic line?": the
+#: magic line plus room for the BOM and leading whitespace it tolerates. A
+#: *quick-reject* optimisation only — the deciding classification always runs
+#: ``is_sealed`` on the whole file, never on this truncated head (see
+#: :func:`_unsealed_memory_files`).
 _SEAL_PROBE_BYTES = 64
 
 
@@ -157,36 +160,74 @@ def _enrolled_names(root: Path) -> set[str]:
     return set(parsed.files)
 
 
+def _env_target_ready(*, home: Path, root: Path) -> bool:
+    """Whether the ``env`` target is enrolled and actually injecting.
+
+    ``.env`` enrolled and not opted out — the state agent-memory encryption
+    rides on to get ``HERMES_MEMORY_KEY`` to the runtime (see
+    :mod:`mordred_hermes.wizard.memory_cli`'s module docstring): the key is
+    carried by the ``.env`` injection shim, so it does not matter that the
+    manifest still lists ``.env`` as enrolled if the opt-out marker has
+    suppressed the shim. Shared by ``memory_cli._enable_gate_reason`` and
+    ``setup_cli``'s memory step so the two do not drift on what "the env
+    target is ready" means.
+    """
+    return ".env" in _enrolled_names(root) and not _env_optout_marker_path(home).exists()
+
+
 def _memory_file_paths(home: Path) -> list[Path]:
     """Every agent-memory file the hook seals, sorted.
 
     The live ``<home>/memories/*.md`` plus upstream's ``*.md.bak.<ts>`` drift
     snapshots: those hold the same content, written by upstream's own
     ``write_text``, so migration and drift detection must both cover them.
+
+    Symlinks are never followed: ``is_file()`` alone follows a link to
+    classify it, which would let a planted symlink under ``memories/`` have
+    its target read, sealed into the store, and the link itself destroyed by
+    the atomic-replace writer. Excluding ``is_symlink()`` entries here is the
+    primary guard; ``memory_cli``'s sealer/unsealer re-check it too (defence
+    in depth against a link swapped in after this scan).
     """
     memories = home / _MEMORIES_DIR
     if not memories.is_dir():
         return []
-    return sorted({p for pattern in ("*.md", "*.md.bak.*") for p in memories.glob(pattern) if p.is_file()})
+    return sorted(
+        {p for pattern in ("*.md", "*.md.bak.*") for p in memories.glob(pattern) if p.is_file() and not p.is_symlink()}
+    )
 
 
 def _unsealed_memory_files(home: Path) -> list[Path]:
     """Memory files that are plaintext at rest right now.
 
-    Classification only — no key, no decryption. A file that cannot be read
-    counts as *not* plaintext: an unreadable file is no evidence of exposure,
-    and ``status`` must never raise.
+    Classification only — no key, no decryption. Reads the WHOLE file before
+    calling ``is_sealed`` (memory files are small): classifying off a fixed
+    ``_SEAL_PROBE_BYTES`` head made the base64 body's alignment a matter of
+    luck across file lengths — a truncated body that happened to still look
+    structurally valid read as sealed, one that didn't read as plaintext, so a
+    real sealed file could misclassify as plaintext and let ``disable`` report
+    success without decrypting it, then ``purge`` strip the key out from under
+    it (permanent data loss). The head is still read first as a cheap,
+    *prefix-only* reject (:func:`~..keyvault.memory_crypto.looks_like_magic_line`,
+    never the full ``is_sealed``): a file that does not even start with the
+    magic line cannot be sealed, so the common plaintext case skips the full
+    read. A file that cannot be read counts as *not* plaintext: an unreadable
+    file is no evidence of exposure, and ``status`` must never raise.
     """
-    from ..keyvault.memory_crypto import is_sealed
+    from ..keyvault.memory_crypto import is_sealed, looks_like_magic_line
 
     plaintext = []
     for path in _memory_file_paths(home):
         try:
             with path.open("rb") as fh:
                 head = fh.read(_SEAL_PROBE_BYTES)
+                if not looks_like_magic_line(head.decode("utf-8", "surrogateescape")):
+                    plaintext.append(path)
+                    continue
+                data = head + fh.read()
         except OSError:
             continue
-        if not is_sealed(head):
+        if not is_sealed(data):
             plaintext.append(path)
     return plaintext
 
@@ -721,16 +762,30 @@ def _run_target(verb: str, target: str, *, force_runtime_unverified: bool = Fals
     return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
 
 
-def _run_core_target(verb: str, target: str, *, force_runtime_unverified: bool) -> tuple[str, int, bool]:
+def _run_core_target(verb: str, target: str, *, platform: str, force_runtime_unverified: bool) -> tuple[str, int, bool]:
     """Run one core (env/config/memory) target; return ``(status_label, exit_code, skipped)``.
 
-    ``memory`` under ``enable`` is special-cased: when this Hermes has no memory
-    seam Mordred can wrap (:func:`memory_runtime_available`) the engine would
-    just refuse, so it is never called — the fan-out records a skip instead of a
-    failure. ``disable`` / ``purge`` still run: they clear state and decrypt
-    files back, which is exactly what a broken seam needs.
+    ``memory`` under ``enable`` is special-cased, platform first: off macOS the
+    memory-sealing runtime shims do not exist at all (mirrors
+    ``setup_cli._resolve_step_memory_encryption``'s ordering), so the engine
+    would just refuse — that refusal used to be counted a *failure* here
+    because ``_dispatch``/the engine resolve their own ``sys.platform``
+    independently of the ``platform`` an ``all`` fan-out was given, so a
+    Linux ``enable all`` reported ``memory FAILED`` instead of a clean skip.
+    Only once the platform passes is this Hermes' memory seam
+    (:func:`memory_runtime_available`) checked; when that is also missing the
+    engine would again just refuse, so it is never called — both cases record
+    a skip instead of a failure. ``disable`` / ``purge`` still run regardless
+    of platform or seam: they clear state and decrypt files back, which is
+    exactly what a broken seam or the wrong OS needs.
     """
     if target == "memory" and verb == "enable":
+        if platform != _DARWIN:
+            return (
+                f"skipped (macOS only — the memory sealing runtime is not available on {platform})",
+                0,
+                True,
+            )
         available, reason = memory_runtime_available()
         if not available:
             return f"skipped ({reason})", 0, True
@@ -759,8 +814,11 @@ def _dispatch_all(
     Core vault targets (env / config / memory) are always attempted; workspace
     is eligibility-gated (see :func:`_workspace_eligible`) and a skip never
     counts as a failure. ``memory`` under ``enable`` is likewise skipped, not
-    attempted, when this Hermes has no memory seam Mordred can wrap (see
-    :func:`_run_core_target`). Every target runs even if an earlier one
+    attempted, off macOS or when this Hermes has no memory seam Mordred can
+    wrap (see :func:`_run_core_target`) — the ``platform`` given here (or
+    ``sys.platform`` by default) is what decides the former, so the skip is
+    accurate even though the per-target engine itself always resolves its own
+    ``sys.platform``. Every target runs even if an earlier one
     failed; the exit code is non-zero iff at least one *attempted* target
     failed. Per-target engine output streams inline; the ok/FAILED/skipped
     roll-up prints once at the end as a single block (see
@@ -777,7 +835,9 @@ def _dispatch_all(
     failed = 0
     skipped = 0
     for target in _ALL_CORE_TARGETS:
-        status, rc, was_skipped = _run_core_target(verb, target, force_runtime_unverified=force_runtime_unverified)
+        status, rc, was_skipped = _run_core_target(
+            verb, target, platform=platform, force_runtime_unverified=force_runtime_unverified
+        )
         outcomes.append((target, status))
         if was_skipped:
             skipped += 1

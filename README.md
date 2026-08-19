@@ -198,8 +198,9 @@ Agent memories (`~/.hermes/memories/`) are encrypted by Mordred itself — no
 Hermes release does it. The `memory` target is opt-in (via `setup` or
 `encryption enable memory`), macOS-only, and rides on the `env` target, which
 carries its key. Enabling seals the files already on disk; `disable` decrypts
-them back. Restart a running `hermes gateway` afterwards — until you do, it
-keeps writing plaintext memories. Known limitations (raw readers,
+them back. Restart a running `hermes gateway` afterwards — until you do, its
+memory reads/writes fail closed (they do not write plaintext), and a session
+may see an empty memory. Known limitations (raw readers,
 out-of-process writers, approval-gated writes) are listed in
 [`USAGE.md` §3](docs/user/USAGE.md#encryption--the-recommended-onoff-switch).
 

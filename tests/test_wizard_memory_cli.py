@@ -329,7 +329,13 @@ class TestEnable:
         assert _enable(home, root, backend, store) == 0
         err = capsys.readouterr().err
         assert "restart it (pid 777)" in err
-        assert "plaintext memories" in err
+        # The old wording claimed the still-running gateway "writes plaintext
+        # memories" -- wrong: it fails closed (write refusal / an apparently
+        # empty memory), never plaintext. See `_memory_hook`'s module docstring
+        # ("Fail-closed on the write side, loud on the read side").
+        assert "fail closed" in err
+        assert "do NOT write plaintext" in err
+        assert "plaintext memories" not in err
 
     def test_migration_failure_keeps_the_marker_and_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -383,6 +389,98 @@ class TestEnable:
 
         assert rc == 1
         assert not memory_marker_path(home).exists()
+
+    def test_symlinked_memory_file_is_not_followed(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """W2: `_memory_file_paths` excludes symlinks, so `enable` never even
+        sees one -- the target is untouched, the link stays a link, and the
+        sealed-file count reports only the real file."""
+        root, home, backend, store = _setup_home_and_vault(tmp_path)
+        memories = _memories(home)
+        outside = tmp_path / "outside.md"
+        outside.write_text("plaintext outside the memories dir\n", encoding="utf-8")
+        link = memories / "linked.md"
+        link.symlink_to(outside)
+        (memories / "MEMORY.md").write_text("real plaintext\n", encoding="utf-8")
+
+        rc = _enable(home, root, backend, store)
+
+        assert rc == 0
+        assert link.is_symlink()  # link intact, not replaced by a sealed regular file
+        assert outside.read_text(encoding="utf-8") == "plaintext outside the memories dir\n"  # target untouched
+        assert "(1 file(s) sealed" in capsys.readouterr().out  # only the real file was ever seen
+
+
+# -----------------------------------------------------------------------------
+# _seal_plaintext_files — direct coverage of the sealer's symlink guard (W2,
+# defence in depth) and its scan-to-write TOCTOU narrowing (W3).
+# -----------------------------------------------------------------------------
+class TestSealPlaintextFiles:
+    _KEY = b"\x01" * 32
+
+    def test_symlink_counts_as_a_failure_not_a_silent_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defence in depth: even if a symlink reached this function despite
+        `encryption_cli._memory_file_paths`'s primary filter (a caller that
+        does not go through it, or a race), it must never be followed."""
+        home = tmp_path / "home"
+        memories = _memories(home)
+        outside = tmp_path / "outside.md"
+        outside.write_text("plaintext outside\n", encoding="utf-8")
+        link = memories / "linked.md"
+        link.symlink_to(outside)
+        monkeypatch.setattr(encryption_cli, "_memory_file_paths", lambda _home: [link])
+
+        sealed, failures = memory_cli._seal_plaintext_files(home, key=self._KEY)
+
+        assert sealed == 0
+        assert failures == ["linked.md: is a symlink — refusing to follow it"]
+        assert outside.read_text(encoding="utf-8") == "plaintext outside\n"  # target untouched
+        assert link.is_symlink()  # link intact
+
+    def test_skips_a_file_sealed_between_the_read_and_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W3: a concurrently-armed hook (a still-running gateway) can seal a
+        plaintext file between our read and our write. Re-checking right
+        before `_write_private` must skip -- not clobber -- the concurrent
+        seal with our now-stale plaintext."""
+        from mordred_hermes.keyvault import memory_crypto
+
+        home = tmp_path / "home"
+        memories = _memories(home)
+        path = memories / "MEMORY.md"
+        path.write_text("original plaintext\n", encoding="utf-8")
+        concurrent_seal = seal(b"sealed by someone else in the meantime\n", key=_FOREIGN_KEY, name="MEMORY.md")
+
+        real_seal = memory_crypto.seal
+
+        def _seal_and_race(data: bytes, *, key: bytes, name: str) -> bytes:
+            # Simulate the race: something else seals the file between our
+            # first read (already done by the caller) and our write below.
+            path.write_bytes(concurrent_seal)
+            return real_seal(data, key=key, name=name)
+
+        monkeypatch.setattr(memory_crypto, "seal", _seal_and_race)
+
+        sealed, failures = memory_cli._seal_plaintext_files(home, key=self._KEY)
+
+        assert sealed == 0  # not counted a success -- the concurrent seal is what's on disk
+        assert failures == []  # and not a failure either: nothing was lost
+        assert path.read_bytes() == concurrent_seal  # the concurrent seal wins, never clobbered
+
+    def test_still_seals_files_untouched_by_a_concurrent_writer(self, tmp_path: Path) -> None:
+        """The TOCTOU guard must not make sealing spuriously skip everything —
+        only a file that actually changed underneath it."""
+        home = tmp_path / "home"
+        memories = _memories(home)
+        (memories / "MEMORY.md").write_text("quiet the whole time\n", encoding="utf-8")
+
+        sealed, failures = memory_cli._seal_plaintext_files(home, key=self._KEY)
+
+        assert sealed == 1
+        assert failures == []
+        assert is_sealed((memories / "MEMORY.md").read_bytes())
 
 
 # -----------------------------------------------------------------------------
@@ -484,6 +582,194 @@ class TestDisable:
         err = capsys.readouterr().err
         assert "pid 99" in err
         assert "armed" in err
+
+    def test_refuses_when_a_symlink_reaches_the_unseal_step(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Defence in depth (W2): if a symlink somehow reached the sealed-files
+        list (a race after the scan, or a future caller bug), `disable` must
+        refuse loudly rather than follow it."""
+        root, home, backend, store = _setup_home_and_vault(tmp_path)
+        memories = _memories(home)
+        outside = tmp_path / "outside.md"
+        outside.write_text("plaintext outside\n", encoding="utf-8")
+        link = memories / "linked.md"
+        link.symlink_to(outside)
+        monkeypatch.setattr(memory_cli, "_sealed_memory_files", lambda _home: [link])
+        monkeypatch.setattr(memory_cli, "_memory_key_from_vault", lambda **_kw: b"\x02" * 32)
+
+        rc = memory_cli.disable(home=home, root=root, backend=backend, store=store)
+
+        assert rc == 1
+        assert link.is_symlink()
+        assert outside.read_text(encoding="utf-8") == "plaintext outside\n"
+        assert "linked.md" in capsys.readouterr().err
+
+    def test_refuses_when_a_file_is_resealed_during_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """W3: the initial scan and the decrypt loop are not one atomic step —
+        a still-armed gateway can seal (or re-seal) a file after it was
+        scanned. `disable` must re-scan after the loop and refuse the marker
+        removal rather than report success while anything is sealed again."""
+        root, home, backend, store = _setup_home_and_vault(tmp_path)
+        (_memories(home) / "MEMORY.md").write_text("plain\n", encoding="utf-8")
+        assert _enable(home, root, backend, store) == 0
+        capsys.readouterr()
+
+        real_sealed_memory_files = memory_cli._sealed_memory_files
+        calls = {"n": 0}
+
+        def _flaky(home_arg: Path) -> list[Path]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_sealed_memory_files(home_arg)
+            # Simulate: a concurrent gateway re-sealed MEMORY.md while this
+            # run was decrypting it.
+            return [home_arg / "memories" / "MEMORY.md"]
+
+        monkeypatch.setattr(memory_cli, "_sealed_memory_files", _flaky)
+
+        rc = memory_cli.disable(home=home, root=root, backend=backend, store=store)
+
+        assert rc == 1
+        assert calls["n"] == 2  # scanned before the loop and re-scanned after
+        assert memory_marker_path(home).exists()  # marker stays armed -- the hook keeps working
+        assert not memory_optout_marker_path(home).exists()
+        err = capsys.readouterr().err
+        assert "MEMORY.md" in err
+        assert "re-run" in err
+        assert "gateway" in err.lower()
+
+    def test_succeeds_when_the_rescan_finds_nothing_sealed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The new post-loop re-scan must not turn an ordinary, uncontended
+        `disable` into a false refusal."""
+        root, home, backend, store = _setup_home_and_vault(tmp_path)
+        (_memories(home) / "MEMORY.md").write_text("plain\n", encoding="utf-8")
+        assert _enable(home, root, backend, store) == 0
+        capsys.readouterr()
+
+        rc = memory_cli.disable(home=home, root=root, backend=backend, store=store)
+
+        assert rc == 0
+        assert not memory_marker_path(home).exists()
+        assert memory_optout_marker_path(home).exists()
+
+
+# -----------------------------------------------------------------------------
+# _unseal_files — direct coverage of the unsealer's symlink guard (W2) and its
+# scan-to-write TOCTOU narrowing (W3): it must decrypt the RE-READ bytes, and
+# refuse (not silently skip) a file that is no longer sealed when it gets there.
+# -----------------------------------------------------------------------------
+class TestUnsealFiles:
+    def test_symlink_counts_as_a_failure(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        memories = _memories(home)
+        outside = tmp_path / "outside.md"
+        outside.write_bytes(seal(b"secret\n", key=_FOREIGN_KEY, name="linked.md"))
+        link = memories / "linked.md"
+        link.symlink_to(outside)
+
+        decrypted, failure = memory_cli._unseal_files([link], key=_FOREIGN_KEY)
+
+        assert decrypted == 0
+        assert failure == "linked.md: is a symlink — refusing to follow it"
+        assert link.is_symlink()
+
+    def test_reports_a_file_no_longer_sealed_at_write_time(self, tmp_path: Path) -> None:
+        """A file the earlier scan classified as sealed but which is plaintext
+        by the time this function gets to it (a concurrent writer beat it to
+        the punch) must be reported as a failure, not silently skipped —
+        skipping it would let `disable` claim success while this file was
+        simply never touched, sealed or not."""
+        home = tmp_path / "home"
+        memories = _memories(home)
+        path = memories / "MEMORY.md"
+        path.write_text("plaintext by the time we get here\n", encoding="utf-8")
+
+        decrypted, failure = memory_cli._unseal_files([path], key=_FOREIGN_KEY)
+
+        assert decrypted == 0
+        assert failure is not None
+        assert "no longer sealed" in failure
+        assert path.read_text(encoding="utf-8") == "plaintext by the time we get here\n"  # untouched
+
+    def test_decrypts_the_re_read_bytes_not_a_stale_copy(self, tmp_path: Path) -> None:
+        """However `_unseal_files` came to believe a path is sealed, it must
+        decrypt whatever is actually on disk right now."""
+        home = tmp_path / "home"
+        memories = _memories(home)
+        path = memories / "MEMORY.md"
+        path.write_bytes(seal(b"the latest content\n", key=_FOREIGN_KEY, name="MEMORY.md"))
+
+        decrypted, failure = memory_cli._unseal_files([path], key=_FOREIGN_KEY)
+
+        assert failure is None
+        assert decrypted == 1
+        assert path.read_text(encoding="utf-8") == "the latest content\n"
+
+
+# -----------------------------------------------------------------------------
+# _sealed_memory_files — a file whose text STARTS with the magic line but
+# fails the full `is_sealed` check (truncated, appended to, or otherwise
+# corrupted) must be treated as sealed (W4), not silently classified as
+# plaintext -- which would let `disable` skip it and `purge` strip the key out
+# from under it.
+# -----------------------------------------------------------------------------
+class TestSealedMemoryFilesBrokenSeal:
+    @staticmethod
+    def _break(blob: bytes) -> bytes:
+        """Corrupt one byte of the base64 body: still starts with the magic
+        line, but structurally invalid -- ``is_sealed`` must now say False."""
+        prefix_len = len(MAGIC) + 1  # b"<MAGIC>\n"
+        return blob[:prefix_len] + b"!" + blob[prefix_len + 1 :]
+
+    def test_broken_seal_is_treated_as_sealed(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        memories = _memories(home)
+        blob = seal(b"a real secret\n", key=_FOREIGN_KEY, name="MEMORY.md")
+        broken = self._break(blob)
+        assert not is_sealed(broken)  # sanity: the corruption actually broke it
+        (memories / "MEMORY.md").write_bytes(broken)
+
+        assert (memories / "MEMORY.md") in memory_cli._sealed_memory_files(home)
+
+    def test_disable_refuses_on_a_broken_seal_instead_of_skipping_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root, home, backend, store = _setup_home_and_vault(tmp_path)
+        memories = _memories(home)
+        (memories / "MEMORY.md").write_text("original notes\n", encoding="utf-8")
+        assert _enable(home, root, backend, store) == 0
+        capsys.readouterr()
+        broken = self._break((memories / "MEMORY.md").read_bytes())
+        (memories / "MEMORY.md").write_bytes(broken)
+
+        rc = memory_cli.disable(home=home, root=root, backend=backend, store=store)
+
+        assert rc == 1
+        assert memory_marker_path(home).exists()
+        assert not memory_optout_marker_path(home).exists()
+        assert "MEMORY.md" in capsys.readouterr().err
+
+    def test_purge_refuses_on_a_broken_seal_too(self, tmp_path: Path) -> None:
+        """The scenario the finding warns about: without this fix, `disable`
+        would silently skip the broken file, report success, and `purge`
+        would then strip the key -- permanently orphaning it."""
+        root, home, backend, store = _setup_home_and_vault(tmp_path)
+        memories = _memories(home)
+        (memories / "MEMORY.md").write_text("original notes\n", encoding="utf-8")
+        assert _enable(home, root, backend, store) == 0
+        broken = self._break((memories / "MEMORY.md").read_bytes())
+        (memories / "MEMORY.md").write_bytes(broken)
+
+        rc = memory_cli.purge(home=home, root=root, backend=backend, store=store)
+
+        assert rc == 1
+        assert _MEMORY_KEY_ENV in _vault_env_text(root, backend, store)  # key kept
+        assert memory_marker_path(home).exists()
 
 
 # -----------------------------------------------------------------------------

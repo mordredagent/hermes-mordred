@@ -215,9 +215,13 @@ hermes-mordred encryption change-passphrase             # rotate the recovery pa
 > plaintext memory file is on disk — re-run `encryption enable memory` to seal
 > it.
 >
-> **Restart a running gateway** after enabling or disabling: it installs the
-> hook when its plugins load, so until you restart it, an old process keeps
-> writing plaintext. `enable` warns and names the pid when it sees one.
+> **Restart a running gateway** after enabling or disabling. After `enable`,
+> the running process still lacks the freshly-minted key, so — fail-closed,
+> not plaintext — its memory reads/writes are refused until you restart it,
+> and a session may see an empty memory. After `disable`, it still has the
+> hook armed in-process; the marker being gone only stops it sealing new
+> writes starting at the next memory call. `enable` warns and names the pid
+> when it sees one.
 >
 > **Recovery.** `HERMES_SAFE_MODE=1` disarms the hook for one run (memories are
 > then read as-is, sealed ones unreadable) — the escape hatch if a memory
@@ -232,6 +236,11 @@ hermes-mordred encryption change-passphrase             # rotate the recovery pa
 > seals. `memory.write_approval` stages pending writes as plaintext JSON under
 > `~/.hermes/pending/memory/` until they are applied (`enable` warns when the
 > flag is on). Run `hermes agent-import` from an interpreter that has the hook.
+> Drift backups (`*.md.bak.<ts>`) are sealed too. Upstream's own drift error
+> tells you to open the `.bak` file directly — with memory encryption on, that
+> file is sealed, so decrypt it first with `encryption disable memory` (which
+> unseals every `.bak` snapshot alongside the live files) before following
+> that advice.
 
 > **Runtime guard before a seal (macOS).** `enable env` and `enable config`
 > remove the plaintext, so both first prove the file can be unsealed again at

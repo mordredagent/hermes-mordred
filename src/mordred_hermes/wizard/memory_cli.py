@@ -42,7 +42,6 @@ import sys
 from typing import TYPE_CHECKING
 
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
-from ..keyvault._runtime_env import _env_optout_marker_path
 from ..keyvault.memory_crypto import MAGIC
 from . import _term
 from ._runtime_gate import runtime_gate
@@ -197,8 +196,9 @@ def _warn_gateways(home: Path, *, enabling: bool) -> None:
     for gateway in _running_gateways(home):
         if enabling:
             _term.emit_warn(
-                f"a hermes gateway is running from {gateway.python} — {_restart_hint(gateway)} so it picks up "
-                "memory encryption; until then it writes plaintext memories."
+                f"a hermes gateway is running from {gateway.python} — {_restart_hint(gateway)} so it receives "
+                "the key; until then its memory reads/writes fail closed (they do NOT write plaintext), and a "
+                "session may see an empty memory."
             )
         else:
             _term.emit_warn(
@@ -217,7 +217,7 @@ def _enable_gate_reason(*, home: Path, root: Path, platform: str) -> str | None:
     Ordered cheapest-and-most-fundamental first, so an operator whose Hermes has
     no wrappable seam is not sent to fix their env target for nothing.
     """
-    from .encryption_cli import _enrolled_names, memory_runtime_available
+    from .encryption_cli import _env_target_ready, memory_runtime_available
 
     available, reason = memory_runtime_available()
     if not available:
@@ -227,7 +227,7 @@ def _enable_gate_reason(*, home: Path, root: Path, platform: str) -> str | None:
         )
     if platform != _DARWIN:
         return f"the memory-sealing runtime shims are macOS-only (this is {platform}); memories stay plaintext here."
-    if ".env" not in _enrolled_names(root) or _env_optout_marker_path(home).exists():
+    if not _env_target_ready(home=home, root=root):
         return (
             "memory encryption rides on the env target (the key is injected by the .env shim) — "
             "run `hermes-mordred encryption enable env` first."
@@ -317,6 +317,18 @@ def _seal_plaintext_files(home: Path, *, key: bytes) -> tuple[int, list[str]]:
     a same-directory 0o600 temp + ``os.replace`` (the hook's own writer), so a
     failure never leaves a half-written memory file. One file failing does not
     stop the others — the caller reports every failure at once.
+
+    Narrows, but does not close, the scan-to-write TOCTOU: between the first
+    read above and the ``os.replace`` below, a concurrently-armed hook (a
+    still-running gateway) may have already sealed this same file. Sealing our
+    now-stale plaintext over that would silently clobber whatever it just
+    wrote. Immediately before writing, the file is re-checked: still a regular
+    file (not swapped for a symlink — counted a failure, like the initial
+    check), and byte-identical to what was read (else a concurrent writer got
+    there first — *skipped*, not failed, since the file is not exposed and
+    nothing was lost). A write landing in the instant between that re-check
+    and ``os.replace`` itself is still possible — this narrows the window, it
+    does not close it.
     """
     from ..keyvault.memory_crypto import MemoryCryptoError, is_sealed, seal
     from .encryption_cli import _memory_file_paths
@@ -324,11 +336,20 @@ def _seal_plaintext_files(home: Path, *, key: bytes) -> tuple[int, list[str]]:
     sealed = 0
     failures: list[str] = []
     for path in _memory_file_paths(home):
+        if path.is_symlink():
+            failures.append(f"{path.name}: is a symlink — refusing to follow it")
+            continue
         try:
             data = path.read_bytes()
             if is_sealed(data):
                 continue
-            _write_private(path, seal(data, key=key, name=path.name))
+            blob = seal(data, key=key, name=path.name)
+            if path.is_symlink():
+                failures.append(f"{path.name}: is a symlink — refusing to follow it")
+                continue
+            if path.read_bytes() != data:
+                continue  # a concurrent writer beat us to it -- their write wins
+            _write_private(path, blob)
         except (OSError, MemoryCryptoError) as exc:
             failures.append(f"{path.name}: {exc}")
             continue
@@ -455,11 +476,35 @@ def _memory_key_from_vault(
 
 
 def _sealed_memory_files(home: Path) -> list[Path]:
-    """Memory files that are sealed right now (the complement of the drift scan)."""
+    """Memory files that are sealed right now (mostly the complement of the drift scan).
+
+    A file the drift scan (:func:`encryption_cli._unsealed_memory_files`)
+    classifies as plaintext, but whose text still *starts* with the magic line
+    (:func:`~..keyvault.memory_crypto.looks_like_magic_line`), is a broken seal
+    — truncated or appended to, not a plaintext file that never got sealed —
+    and is counted sealed here too, not excluded. Otherwise it would be
+    invisible to ``disable``: silently left alone, on disk in an unreadable
+    half-state, while ``disable`` reports success and ``purge`` then strips
+    the key out from under it (permanent data loss). Routing it through
+    ``disable``'s normal ``_unseal_files`` instead makes ``unseal`` fail on it
+    loudly and ``disable`` refuse, which is the safe outcome.
+    """
+    from ..keyvault.memory_crypto import looks_like_magic_line
     from .encryption_cli import _memory_file_paths, _unsealed_memory_files
 
     plaintext = set(_unsealed_memory_files(home))
-    return [path for path in _memory_file_paths(home) if path not in plaintext]
+    sealed = []
+    for path in _memory_file_paths(home):
+        if path not in plaintext:
+            sealed.append(path)
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8", "surrogateescape")
+        except OSError:
+            continue
+        if looks_like_magic_line(text):
+            sealed.append(path)
+    return sealed
 
 
 def _unseal_files(paths: list[Path], *, key: bytes) -> tuple[int, str | None]:
@@ -468,13 +513,27 @@ def _unseal_files(paths: list[Path], *, key: bytes) -> tuple[int, str | None]:
     Returns ``(decrypted, failure)``. Stopping (rather than continuing) keeps the
     remaining files sealed and readable by the still-armed hook, which is the
     recoverable state: the operator restores the right key and re-runs.
+
+    Narrows, but does not close, the same scan-to-write TOCTOU
+    ``_seal_plaintext_files`` narrows: ``paths`` came from an earlier
+    ``_sealed_memory_files`` scan, so immediately before writing each file is
+    re-read and re-verified still sealed, and it is THAT re-read data which
+    gets decrypted — never the classification-time bytes. A file no longer
+    sealed at that point (or swapped for a symlink) is reported as a failure
+    rather than silently skipped: skipping it here would let ``disable``
+    report success while it stays exactly as it was, undecrypted.
     """
-    from ..keyvault.memory_crypto import MemoryCryptoError, unseal
+    from ..keyvault.memory_crypto import MemoryCryptoError, is_sealed, unseal
 
     decrypted = 0
     for path in paths:
+        if path.is_symlink():
+            return decrypted, f"{path.name}: is a symlink — refusing to follow it"
         try:
-            _write_private(path, unseal(path.read_bytes(), key=key, name=path.name))
+            current = path.read_bytes()
+            if not is_sealed(current):
+                return decrypted, f"{path.name}: no longer sealed — a concurrent writer changed it since the scan"
+            _write_private(path, unseal(current, key=key, name=path.name))
         except (OSError, MemoryCryptoError) as exc:
             return decrypted, f"{path.name}: {exc}"
         decrypted += 1
@@ -501,6 +560,13 @@ def disable(
     decrypted — in that case nothing is changed: the marker stays, so the armed
     hook can still read the files, and the operator can restore the key and
     re-run rather than face a directory of unreadable blobs.
+
+    The initial scan and the decrypt loop are not one atomic step: a
+    still-armed gateway can seal a file — a fresh write, or a re-seal of one
+    this run already decrypted — after it was scanned. Before removing the
+    marker, ``_sealed_memory_files`` is therefore re-run; if anything comes
+    back sealed, the marker removal is refused too, so ``disable`` never
+    reports success while a sealed file remains on disk.
     """
     sealed_paths = _sealed_memory_files(home)
     decrypted = 0
@@ -520,6 +586,17 @@ def disable(
                 f"cannot decrypt {failure} — stopped. The remaining files stay sealed and memory encryption "
                 "stays on, so nothing becomes unreadable.",
             )
+
+    still_sealed = _sealed_memory_files(home)
+    if still_sealed:
+        names = ", ".join(path.name for path in still_sealed)
+        return _refuse(
+            "disable",
+            f"{len(still_sealed)} file(s) are sealed again after decrypting ({names}) — a gateway is still "
+            "armed and wrote to them during this run. Stop every running `hermes gateway`, then re-run "
+            "`encryption disable memory`; the marker and key are left untouched so the hook keeps working "
+            "meanwhile.",
+        )
 
     memory_marker_path(home).unlink(missing_ok=True)
     _write_optout_marker(home)

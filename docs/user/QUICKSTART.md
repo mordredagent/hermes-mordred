@@ -235,9 +235,10 @@ encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recomme
 
 `encryption enable memory` needs the `env` target first (it carries the memory
 key) and seals `~/.hermes/memories/*.md` as it goes. If a `hermes gateway` is
-running, restart it afterwards — until then it keeps writing plaintext
-memories. Separately, the audit log itself is encrypted only after
-`keyvault init` — before that, entries are written in plaintext.
+running, restart it afterwards — until then its memory reads/writes fail
+closed (not plaintext), and a session may see an empty memory. Separately,
+the audit log itself is encrypted only after `keyvault init` — before that,
+entries are written in plaintext.
 
 ## 5. Network settings 🌐
 
