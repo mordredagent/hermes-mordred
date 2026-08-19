@@ -169,12 +169,13 @@ class _FakeCtx:
 
 
 def _isolate_register(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the two installers ``register()`` calls so the wiring test never reads
-    the real vault or patches the host writer."""
-    from mordred_hermes.keyvault import _runtime_env
+    """Stub the installers ``register()`` calls so the wiring test never reads the
+    real vault, patches the host writer, or wraps the upstream memory seam."""
+    from mordred_hermes.keyvault import _memory_hook, _runtime_env
 
     monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", lambda **_k: 0)
     monkeypatch.setattr(_env_write_guard, "install_env_write_guard", lambda **_k: False)
+    monkeypatch.setattr(_memory_hook, "install_memory_hook", lambda **_k: False)
 
 
 class TestRegisterWiring:

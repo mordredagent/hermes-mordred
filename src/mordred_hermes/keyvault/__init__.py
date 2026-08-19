@@ -3,8 +3,8 @@
 The public API covers key generation, envelope encryption, backup/recovery,
 vault lifecycle, audit-log encryption, and extension wallet signing. At plugin
 registration time this module installs the transparent environment decrypt
-shim, the host ``.env`` write guard, the shared integrity gate, and
-best-effort session-boundary resealing.
+shim, the agent-memory encryption hook, the host ``.env`` write guard, the
+shared integrity gate, and best-effort session-boundary resealing.
 
 Native protection is selected by capability: Secure Enclave on supported
 macOS systems and TPM 2.0 through the packaged helper on Linux. Pure crypto and
@@ -25,6 +25,15 @@ def register(ctx: Any) -> None:
     vault raises rather than starting with unverified secret provisioning. A no-op
     where no vault is set up or off macOS.
 
+    Then installs the agent-memory encryption hook: it wraps upstream's
+    ``tools/memory_tool.py`` read/write seam so ``~/.hermes/memories/*.md`` are
+    AES-256-GCM sealed at rest under the ``HERMES_MEMORY_KEY`` the shim above just
+    injected. Also fail-closed, and deliberately not wrapped in a swallowing
+    ``try``/``except``: its one deliberate raise is ``SystemExit`` (an armed
+    operator whose memory seam cannot be wrapped must not start and overwrite
+    sealed files), and any other exception is a bug that must keep its traceback.
+    A no-op where the operator has not opted in.
+
     Also installs the write-side guard: it wraps the host ``.env`` writer so a
     ``hermes config set`` / setup write made while the env target is sealed is
     resealed back into the vault (merged, not clobbered) instead of leaving a
@@ -43,6 +52,11 @@ def register(ctx: Any) -> None:
     from ._runtime_env import install_vault_env_decrypt
 
     install_vault_env_decrypt()
+
+    from ._memory_hook import install_memory_hook
+
+    install_memory_hook()
+
     from ..privacy_check.hooks import check_plugin_integrity
 
     # This gate is intentionally not best-effort: every live runtime sibling
