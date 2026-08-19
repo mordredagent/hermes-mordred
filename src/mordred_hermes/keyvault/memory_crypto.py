@@ -109,7 +109,7 @@ def decode_key(value: str) -> bytes:
 
 
 def is_sealed(data: bytes | str) -> bool:
-    """Whether ``data`` is structurally a v1 seal (BOM / surrounding whitespace tolerated).
+    """Whether ``data`` is structurally a v1 seal (BOM / whitespace / CRLF tolerated).
 
     The whole structure is required — magic line, newline, one base64url body long
     enough to hold a nonce and a tag — not just the magic. An operator or the model
@@ -133,11 +133,13 @@ def is_sealed(data: bytes | str) -> bool:
 
 
 def looks_like_magic_line(text: str) -> bool:
-    """Whether ``text`` merely *starts* with the magic (BOM / leading whitespace tolerated).
+    """Whether ``text`` merely *starts* with the magic (BOM / whitespace / CRLF tolerated).
 
-    The prefix-only half of :func:`is_sealed`, for the two callers that must treat
-    an impersonation as suspicious rather than as a seal: the write guard (which
-    refuses to store such an entry) and the CLI's drift detection.
+    The prefix-only half of :func:`is_sealed`, for the callers that must treat an
+    impersonation as suspicious rather than as a seal: the write guard (which
+    refuses to create a plaintext file starting with it), the three-state read
+    (which refuses a file that starts with the magic but is not a valid seal), and
+    the CLI's drift detection.
     """
     return _strip_leading(_as_bytes(text)).startswith(MAGIC)
 
@@ -155,8 +157,9 @@ def seal(plaintext: bytes, *, key: bytes, name: str) -> bytes:
 def unseal(blob: bytes, *, key: bytes, name: str) -> bytes:
     """Open a blob sealed for the file called ``name``.
 
-    Tolerates a BOM, surrounding whitespace, and the trailing newline — the
-    upstream reader hands us entries it has already ``strip()``ped. Raises
+    Tolerates a BOM, surrounding whitespace, ``\\r\\n`` line ends, and the trailing
+    newline — the upstream reader hands us entries it has already ``strip()``ped
+    (and a file may have been CRLF-converted at rest, see :func:`is_sealed`). Raises
     :class:`MemoryCryptoError` for a missing magic, a malformed body, or a failed
     authentication (wrong key, wrong filename, tampered bytes).
     """
@@ -196,5 +199,16 @@ def _as_bytes(data: bytes | str) -> bytes:
 
 
 def _strip_leading(blob: bytes) -> bytes:
+    """Drop a BOM and leading whitespace, and normalise ``\\r\\n`` line ends.
+
+    CRLF is not cosmetic here. A sealed file that has been through a Windows
+    editor, ``git`` with ``core.autocrlf``, or an ``rsync --crlf`` comes back with
+    ``\\r\\n``, and every *text* reader in the chain (upstream's ``read_text``, ours)
+    decodes it in universal-newline mode and sees the original ``\\n`` — while a
+    classifier looking at the raw bytes would call the same file plaintext. That
+    split view is a data-loss bug: the read seam decrypts the file and the write
+    seam publishes plaintext over it. Normalising here gives every caller, bytes or
+    text, one answer.
+    """
     body = blob[len(_BOM) :] if blob.startswith(_BOM) else blob
-    return body.lstrip()
+    return body.replace(b"\r\n", b"\n").lstrip()

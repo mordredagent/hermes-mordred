@@ -26,6 +26,7 @@ import pytest
 from mordred_hermes.keyvault import _memory_hook
 from mordred_hermes.keyvault._memory_hook import (
     MemoryEncryptionUnavailable,
+    install_journey_guard,
     install_memory_hook,
     memory_marker_path,
     memory_seam_shape,
@@ -167,6 +168,22 @@ def test_write_refusal_propagates_out_of_store_add(
     with pytest.raises(MemoryEncryptionUnavailable):
         store.add("memory", "another fact")
     assert path.read_bytes() == before
+
+
+def test_journey_guard_wraps_the_real_learning_mutations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The journey-guard half of the canary: ``delete_node`` / ``edit_node`` still
+    take the parameters we pin. A rename upstream silently turns the guard into a
+    no-op, and ``learning_graph`` then deletes real entries by raw-file index."""
+    mutations = pytest.importorskip("agent.learning_mutations")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    saved = {name: getattr(mutations, name) for name in ("delete_node", "edit_node")}
+    try:
+        assert install_journey_guard(mutations, home=tmp_path) is True
+        assert getattr(mutations.delete_node, _memory_hook._WRAPPED_FLAG, False) is True
+        assert getattr(mutations.edit_node, _memory_hook._WRAPPED_FLAG, False) is True
+    finally:
+        for name, value in saved.items():
+            setattr(mutations, name, value)
 
 
 def test_runtime_probe_sees_this_interpreter_as_capable(tmp_path: Path) -> None:

@@ -30,6 +30,14 @@ shapes B/C that degradation would let the next ``add`` overwrite the sealed file
 (upstream's own wipe class, issue #26045), and in shape A the operator would
 silently see an empty memory.
 
+A read therefore has **three** answers, not two: sealed, plaintext, and *broken
+seal* — a file whose first bytes are the magic line but whose structure no longer
+parses (appended to, truncated, re-wrapped). Classifying that third state as
+plaintext is how AEAD tamper-evidence gets bypassed, so it refuses instead. The
+two halves depend on each other: the write guard refuses to create a plaintext
+file whose first entry starts with the magic, which is what makes
+magic-at-file-start a sound signal for the read side.
+
 **Sealing is sticky.** A write is decided by the file on disk first, the arming
 state second:
 
@@ -230,23 +238,80 @@ def _require_key_for_sealed(cfg: _HookConfig, path: Path) -> bytes:
     )
 
 
+def _disk_text(path: Path) -> str | None:
+    """The one on-disk view every classifier in this module uses; ``None`` if unreadable.
+
+    ``read_text`` and not ``read_bytes``: it decodes in universal-newline mode,
+    exactly like upstream's own readers. Reading the bytes instead would classify a
+    CRLF-converted seal as plaintext while the read seam happily decrypted it, and
+    the write seam would then publish plaintext over sealed bytes.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _sealed_on_disk(path: Path) -> bool:
     """Whether the file at ``path`` currently holds a seal (absent / unreadable: no)."""
-    try:
-        return is_sealed(path.read_bytes())
-    except OSError:
-        return False
+    text = _disk_text(path)
+    return text is not None and is_sealed(text)
 
 
-def _refuse_impersonating_entries(entries: Sequence[str]) -> None:
-    """Refuse an entry that starts with the magic line.
+def _refuse_broken_seal(text: str, path: Path) -> None:
+    """Refuse text that starts with the magic line but is not a whole seal.
 
-    Stored verbatim it would make a plaintext file look sealed to every later
-    classification — including this hook's own write decision, which would then
-    refuse to touch a file that was never encrypted.
+    The third state between "sealed" and "plaintext". A seal that was appended to,
+    truncated, or re-wrapped fails :func:`is_sealed`, and treating that as plaintext
+    would hand the ciphertext to upstream as one entry, keep the locked-memory
+    warning silent, and let the next write overwrite what AEAD was supposed to
+    protect — tamper-evidence turned into tamper-tolerance.
+
+    Only the *file's first bytes* are classified this way, and only the write guard
+    below makes that sound: it refuses to create a plaintext file whose first entry
+    starts with the magic, so magic-at-file-start is always a seal or a broken one.
     """
-    if any(looks_like_magic_line(entry) for entry in entries):
-        raise MemoryEncryptionUnavailable("refusing to store a memory entry that starts with the sealed-memory header")
+    if not looks_like_magic_line(text) or is_sealed(text):
+        return
+    raise MemoryEncryptionUnavailable(
+        f"{path} looks sealed but its structure is broken (appended to, truncated, or re-wrapped) — "
+        f"restore it from a backup or remove it; it cannot be read as memory."
+    )
+
+
+def _refuse_broken_seal_on_disk(entries: Sequence[str], path: Path) -> None:
+    """Shapes B/C: the same check, run on the file text upstream just parsed.
+
+    Those shapes only hand back parsed entries, and "one entry that is not a seal"
+    is far too broad to refuse on. Re-reading the file (through :func:`_disk_text`,
+    the same view upstream used) is the only way to tell a broken seal from a
+    plaintext store, and it is worth a stat only when entry 0 carries the magic.
+    """
+    if not entries or not looks_like_magic_line(entries[0]):
+        return
+    text = _disk_text(path)
+    if text is not None:
+        _refuse_broken_seal(text, path)
+
+
+def _refuse_magic_first_entry(entries: Sequence[str], path: Path) -> None:
+    """Refuse a **plaintext** write whose first entry starts with the magic line.
+
+    Written verbatim it would put the magic at the head of the file, which every
+    later classification — this hook's own write decision included — reads as a
+    seal, or as the broken seal :func:`_refuse_broken_seal` refuses. Narrow on
+    purpose: only entry 0 can land at the file's head, and only the plaintext
+    branch writes an entry there verbatim. A sealed write is harmless (the blob
+    lives inside the ciphertext) and must not be refused, or an already-stored
+    impersonation would brick every ``add`` on an encrypted store.
+    """
+    if not entries or not looks_like_magic_line(entries[0]):
+        return
+    raise MemoryEncryptionUnavailable(
+        f"refusing to write {path} in plaintext: its first memory entry starts with the sealed-memory "
+        f"header, which would make the file look sealed — delete that entry first (memory action=remove) "
+        f"or enable memory encryption."
+    )
 
 
 def _unseal_text(raw: str, *, path: Path, key: bytes) -> str:
@@ -339,6 +404,24 @@ def _check_params(owner: Any, name: str, expected: tuple[str, ...]) -> str:
     return ""
 
 
+#: What the shape A/B drift wrappers call on the store *besides* the seam they
+#: replace. ``_path_for`` is a ``staticmethod(target)`` and ``_char_limit`` an
+#: instance method in every reference release (0.13 → 0.20). Unchecked, a variant
+#: that renamed either one classified fine and then raised ``AttributeError`` from
+#: inside a ``replace`` / ``remove`` — after installation had already promised the
+#: seam was understood.
+_DRIFT_DEPENDENCIES: Final = (("_path_for", ("target",)), ("_char_limit", ("self", "target")))
+
+
+def _check_drift_dependencies(store: Any) -> str:
+    """``""`` when both drift helpers are upstream's, else the reason they are not."""
+    for name, expected in _DRIFT_DEPENDENCIES:
+        reason = _check_params(store, name, expected)
+        if reason:
+            return reason
+    return ""
+
+
 def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
     """Classify the upstream seam by signature: ``("A"|"B"|"C", "")`` or ``("", reason)``.
 
@@ -366,32 +449,62 @@ def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
             return "", reason
 
     if getattr(store, "_read_raw_checked", None) is not None:
-        reason = _check_params(store, "_read_raw_checked", ("path",)) or _check_params(
-            store, "_detect_external_drift", ("self", "target", "raw")
+        reason = (
+            _check_params(store, "_read_raw_checked", ("path",))
+            or _check_params(store, "_detect_external_drift", ("self", "target", "raw"))
+            or _check_drift_dependencies(store)
         )
         return ("", reason) if reason else ("A", "")
 
     if getattr(store, "_detect_external_drift", None) is None:
-        return "C", ""
-    reason = _check_params(store, "_detect_external_drift", ("self", "target"))
+        return "C", ""  # no drift wrapper, so no drift dependencies to pin
+    reason = _check_params(store, "_detect_external_drift", ("self", "target")) or _check_drift_dependencies(store)
     return ("", reason) if reason else ("B", "")
 
 
+#: Set while :func:`_load_memory_tool` is importing the seam purely to CLASSIFY it.
+#: The import hook's action runs during that import and would otherwise stop the
+#: process on an unsupported seam — killing ``seam_check`` / ``memory_seam_shape``
+#: / ``--probe``, i.e. exactly the diagnostics an operator runs to find out *why*
+#: the seam is unsupported.
+#:
+#: A plain module-level flag, not a thread-local, and deliberately so: the post-
+#: import action always runs on the thread that asked for the import, and a second
+#: thread reaching the same module blocks on CPython's per-module import lock and
+#: then takes it from ``sys.modules`` without re-running the action. So the flag is
+#: never observed by a thread it was not set for, and thread-local machinery would
+#: buy nothing. It is restored in a ``finally``, so the window is one
+#: ``import_module`` call.
+_SUPPRESS_REFUSAL = False
+
+
 def _load_memory_tool() -> tuple[Any | None, str]:
-    """Import the live ``tools.memory_tool``, or report why it is unavailable.
+    """Import the live ``tools.memory_tool`` for classification, or say why it is not there.
 
     That import has an upstream side effect (it registers the ``memory`` tool in
     the host registry). Acceptable here: ``register()`` runs inside plugin
     discovery, after the host's own tool discovery has already imported it.
+
+    Every classification entry point goes through this function, so all of them
+    inherit :data:`_SUPPRESS_REFUSAL`. Nothing else does — an agent process or a
+    gateway importing the seam normally still gets the fail-closed refusal, and so
+    does :func:`install_memory_hook` itself, which classifies the *returned* module
+    after the flag has been restored.
     """
+    global _SUPPRESS_REFUSAL
+
     import importlib
 
+    previous = _SUPPRESS_REFUSAL
+    _SUPPRESS_REFUSAL = True
     try:
         # importlib rather than `from tools import memory_tool`: `tools` ships no
         # stubs, so the attribute form does not type-check under --strict.
         return importlib.import_module("tools.memory_tool"), ""
     except Exception as exc:
         return None, f"tools.memory_tool is not importable: {exc!r}"
+    finally:
+        _SUPPRESS_REFUSAL = previous
 
 
 def seam_check(memory_tool_module: Any | None = None) -> tuple[bool, str]:
@@ -452,12 +565,12 @@ def _wrap_write_file(store: Any, cfg: _HookConfig) -> None:
 
     @functools.wraps(original)
     def _write_file(path: Path, entries: list[str]) -> Any:
-        _refuse_impersonating_entries(entries)
         if _sealed_on_disk(path):
             key = _require_key_for_sealed(cfg, path)  # sealed stays sealed, armed or not
         elif cfg.armed:
             key = _require_key(cfg, path, writing=True)
         else:
+            _refuse_magic_first_entry(entries, path)  # only this branch writes entries verbatim
             return original(path, entries)
         content = cfg.delimiter.join(entries) if entries else ""
         sealed = seal(content.encode("utf-8"), key=key, name=path.name)
@@ -480,6 +593,7 @@ def _wrap_read_raw_checked(store: Any, cfg: _HookConfig) -> None:
             return raw, read_ok  # absent / unreadable: upstream's contract is untouched
         if is_sealed(raw):
             return _unseal_text(raw, path=path, key=_require_key(cfg, path, writing=False)), True
+        _refuse_broken_seal(raw, path)  # `raw` IS the file text here: classify it directly
         if cfg.armed:
             _note_plaintext_seen(path)
         return raw, True
@@ -505,6 +619,7 @@ def _wrap_read_file(store: Any, cfg: _HookConfig) -> None:
         if len(entries) == 1 and is_sealed(entries[0]):
             plaintext = _unseal_text(entries[0], path=path, key=_require_key(cfg, path, writing=False))
             return _split_entries(plaintext, cfg.delimiter)
+        _refuse_broken_seal_on_disk(entries, path)
         if entries and cfg.armed:
             _note_plaintext_seen(path)
         return entries
@@ -558,11 +673,8 @@ def _wrap_drift_self_read(store: Any, cfg: _HookConfig) -> None:
 
 def _sealed_text_at(path: Path) -> str | None:
     """The file's text when it exists and is sealed, else ``None``."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    return raw if is_sealed(raw) else None
+    text = _disk_text(path)
+    return text if text is not None and is_sealed(text) else None
 
 
 def _drift_on_plaintext(
@@ -618,11 +730,21 @@ def _seam_names(shape: str) -> tuple[str, ...]:
     return tuple(name for name, _ in _SEAM_WRAPPERS.get(shape, ()))
 
 
+#: Serialises seam wrapping. Two installers racing (plugin discovery on a worker
+#: thread against the import hook on the main one) would both read "not wrapped"
+#: and stack a wrapper on a wrapper — and a double-wrapped write hands the inner
+#: wrapper's sealed blob to the outer one as a plaintext entry, which then refuses
+#: it. Its own lock, not :data:`_IMPORT_HOOK_LOCK`: the import hook calls into here
+#: while installing, and a shared non-reentrant lock would deadlock.
+_WRAP_LOCK: Final = threading.Lock()
+
+
 def _wrap_seam(store: Any, shape: str, cfg: _HookConfig) -> None:
     """Wrap every seam of ``shape`` that is not wrapped already."""
-    for name, wrap in _SEAM_WRAPPERS[shape]:
-        if not _is_wrapped(store, name):
-            wrap(store, cfg)
+    with _WRAP_LOCK:
+        for name, wrap in _SEAM_WRAPPERS[shape]:
+            if not _is_wrapped(store, name):
+                wrap(store, cfg)
 
 
 def install_memory_hook(
@@ -670,8 +792,20 @@ def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) ->
     interpreter: upstream only debug-logs what ``register()`` raises, and
     ``threading.excepthook`` swallows a ``SystemExit`` raised off the main thread
     (plugin discovery can run on a worker). So off-main it is ``os._exit``.
+
+    The one exception is a Mordred classification import (:data:`_SUPPRESS_REFUSAL`):
+    the caller asked *whether* the seam is supported and is about to be told, so
+    stopping the process would only take out the diagnostic. Nothing is wrapped
+    either way, and every other importer still refuses.
     """
     if not _marker_armed(home):
+        return
+    if _SUPPRESS_REFUSAL:
+        logger.warning(
+            "memory encryption is on but the Hermes memory seam cannot be wrapped: %s "
+            "(reported by a Mordred classification call, so this process is not stopped)",
+            reason,
+        )
         return
     if _safe_mode(environ):
         logger.warning(
@@ -684,9 +818,14 @@ def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) ->
         "mordred: refusing to start — memory encryption is on but the Hermes memory seam "
         f"cannot be wrapped: {reason} (set HERMES_SAFE_MODE=1 to bypass for recovery)\n"
     )
-    sys.stderr.flush()
+    with contextlib.suppress(OSError):
+        sys.stderr.flush()
     if threading.current_thread() is threading.main_thread():
         raise SystemExit(1)
+    # ``os._exit`` skips interpreter shutdown, so nothing buffered is flushed for
+    # us — including whatever the host had already written to stdout.
+    with contextlib.suppress(OSError):
+        sys.stdout.flush()
     os._exit(1)
 
 
@@ -728,7 +867,14 @@ class _PostImportLoader(Loader):
 
     def exec_module(self, module: ModuleType) -> None:
         self._inner.exec_module(module)
-        self._action(module)
+        try:
+            self._action(module)
+        except Exception:
+            # A bug on our side must not take an upstream module down with it: the
+            # module has already executed and is usable, but a raise here leaves it
+            # out of ``sys.modules`` and breaks an import we merely observed. Only
+            # BaseException — the deliberate ``SystemExit`` refusal — propagates.
+            logger.exception("post-import action for %s failed", getattr(module, "__name__", "?"))
 
     def __getattr__(self, name: str) -> Any:
         # get_source / get_code / is_package / get_resource_reader: whatever the
@@ -786,11 +932,24 @@ def install_memory_import_hook() -> bool:
     with _IMPORT_HOOK_LOCK:
         if _IMPORT_HOOK is None:
             _IMPORT_HOOK = _PostImportFinder()
+        if _IMPORT_HOOK not in sys.meta_path:
+            # Not just "first install": test harnesses and embedded hosts snapshot
+            # and restore ``sys.meta_path``, which silently drops the finder. Keying
+            # off the module global alone made the re-install a no-op that reported
+            # success while the seam was left unarmed.
             sys.meta_path.insert(0, _IMPORT_HOOK)
     for name, action in _POST_IMPORT_ACTIONS.items():
         module = sys.modules.get(name)
-        if module is not None:
-            action(module)  # imported before we got here: no find_spec will fire
+        if module is None:
+            continue  # not imported yet: find_spec fires later
+        try:
+            action(module)
+        except Exception:
+            # Same containment as _PostImportLoader.exec_module: a bug in an
+            # action must not refuse startup for every Hermes process via the
+            # fail-closed `.pth` bootstrap. The deliberate armed-and-unsupported
+            # SystemExit still propagates.
+            logger.exception("post-import action for %s failed", name)
     return True
 
 
@@ -901,7 +1060,8 @@ def warn_when_memory_is_locked(
 
     ``agent/agent_init.py`` wraps ``load_from_disk()`` in ``except Exception:
     pass``, so a sealed memory with no usable key is indistinguishable from an
-    empty one — the operator sees an agent that quietly forgot everything.
+    empty one — the operator sees an agent that quietly forgot everything. A seal
+    whose *structure* is broken is just as silent, and is reported here too.
     Returns whether a warning was written.
     """
     resolved = _home_factory(home)()
@@ -909,32 +1069,49 @@ def warn_when_memory_is_locked(
         return False
     key = _decode_env_key(os.environ if environ is None else environ)
     for path in sorted((resolved / "memories").glob("*.md")):
-        if not _is_locked_memory(path, key):
+        note = _locked_memory_note(path, key)
+        if not note:
             continue
         _LOCKED_WARNED.add(str(resolved))
-        sys.stderr.write(
-            f"mordred: agent memory is sealed but {_MEMORY_KEY_ENV} is not available — {path.name} "
-            f"cannot be opened, so this session starts with an empty memory; {_REMEDY}.\n"
+        sys.stderr.write(f"mordred: {note}\n")
+        return True
+    return False
+
+
+def _locked_memory_note(path: Path, key: bytes | None) -> str:
+    """Why ``path`` cannot be opened as memory, or ``""`` when it can.
+
+    Only files whose first bytes carry the magic are judged (an unreadable or
+    plaintext file is not our call). Both failure modes are silent upstream, so
+    both get a line: a seal ``key`` does not open, and a seal that is no longer
+    structurally whole.
+    """
+    text = _disk_text(path)
+    if text is None or not looks_like_magic_line(text):
+        return ""
+    if not is_sealed(text):
+        return (
+            f"agent memory {path.name} looks sealed but its structure is broken (appended to, "
+            f"truncated, or re-wrapped), so this session starts with an empty memory; restore it "
+            f"from a backup or remove it."
         )
-        return True
-    return False
+    if _opens_with(text, path, key):
+        return ""
+    return (
+        f"agent memory is sealed but {_MEMORY_KEY_ENV} is not available — {path.name} "
+        f"cannot be opened, so this session starts with an empty memory; {_REMEDY}."
+    )
 
 
-def _is_locked_memory(path: Path, key: bytes | None) -> bool:
-    """Whether ``path`` is sealed and ``key`` does not open it (unreadable: not our call)."""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return False
-    if not is_sealed(data):
-        return False
+def _opens_with(text: str, path: Path, key: bytes | None) -> bool:
+    """Whether ``key`` authenticates the seal in ``text`` for ``path``'s basename."""
     if key is None:
-        return True
+        return False
     try:
-        unseal(data, key=key, name=path.name)
+        unseal(text.encode("utf-8"), key=key, name=path.name)
     except MemoryCryptoError:
-        return True
-    return False
+        return False
+    return True
 
 
 def _main(argv: Sequence[str] | None = None) -> int:

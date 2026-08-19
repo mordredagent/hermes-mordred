@@ -19,6 +19,7 @@ through ``MemoryStore.``: the wrapper must be picked up at call time.
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib
 import os
 import sys
@@ -42,6 +43,7 @@ from mordred_hermes.keyvault._memory_hook import (
     memory_marker_path,
     memory_optout_marker_path,
     memory_seam_shape,
+    seam_check,
     warn_when_memory_is_locked,
 )
 from mordred_hermes.keyvault.memory_crypto import MAGIC, is_sealed, seal, unseal
@@ -325,6 +327,42 @@ def test_memory_seam_shape_reports_the_shape(shape: str, mem_dir: Path) -> None:
     assert memory_seam_shape(_fake_module(shape, mem_dir)) == shape
 
 
+@pytest.mark.parametrize("drift_shape", ["A", "B"])
+@pytest.mark.parametrize("missing", ["_path_for", "_char_limit"])
+def test_classify_seam_pins_the_drift_wrappers_dependencies(mem_dir: Path, drift_shape: str, missing: str) -> None:
+    """The A/B drift wrappers replicate upstream's logic and call these two
+    themselves. Unchecked, a variant that renamed one classified fine and then
+    raised ``AttributeError`` from inside a ``replace`` — after installation had
+    already promised the seam was understood."""
+    module = _fake_module(drift_shape, mem_dir)
+    setattr(module.MemoryStore, missing, None)
+
+    seam, reason = classify_seam(module)
+
+    assert seam == ""
+    assert missing in reason
+
+
+@pytest.mark.parametrize("drift_shape", ["A", "B"])
+def test_classify_seam_rejects_a_renamed_drift_dependency(mem_dir: Path, drift_shape: str) -> None:
+    module = _fake_module(drift_shape, mem_dir)
+    module.MemoryStore._char_limit = lambda self, which: 2200
+
+    seam, reason = classify_seam(module)
+
+    assert seam == ""
+    assert "_char_limit takes ('self', 'which')" in reason
+
+
+def test_shape_c_classifies_without_the_drift_dependencies(mem_dir: Path) -> None:
+    """Shape C has no drift wrapper, so it must not be held to the drift helpers."""
+    module = _fake_module("C", mem_dir)
+    module.MemoryStore._path_for = None
+    module.MemoryStore._char_limit = None
+
+    assert classify_seam(module) == ("C", "")
+
+
 # --------------------------------------------------------------------------
 # Installation
 # --------------------------------------------------------------------------
@@ -544,6 +582,88 @@ def test_shape_a_read_preserves_the_read_ok_contract(mem_dir: Path, tmp_path: Pa
 
     path.write_bytes(seal(b"prior entry", key=KEY, name="MEMORY.md"))
     assert module.MemoryStore._read_raw_checked(path) == ("prior entry", True)
+
+
+# --------------------------------------------------------------------------
+# Three-state read: sealed / plaintext / broken seal
+# --------------------------------------------------------------------------
+
+
+def _broken_seal(flavour: str, text: str = "prior entry") -> bytes:
+    """A seal a shell append, a truncation, or a re-wrap has damaged.
+
+    All three still *start* with the magic line, and all three used to classify as
+    plaintext — handing upstream the ciphertext as one entry, with AEAD's whole
+    point (tamper evidence) silently skipped.
+    """
+    blob = seal(text.encode("utf-8"), key=KEY, name="MEMORY.md")
+    body = blob[len(MAGIC) + 1 :].strip()
+    return {
+        "appended": blob + b"a note appended by a shell redirect\n",
+        # -3 leaves a base64 length of 1 (mod 4): no padding makes it decodable.
+        "truncated": blob.strip()[:-3],
+        "rewrapped": MAGIC + b"\n" + body[:20] + b"\n" + body[20:] + b"\n",
+    }[flavour]
+
+
+@pytest.mark.parametrize("flavour", ["appended", "truncated", "rewrapped"])
+def test_read_of_a_structurally_broken_seal_refuses(shape: str, mem_dir: Path, tmp_path: Path, flavour: str) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    data = _broken_seal(flavour)
+    assert not is_sealed(data)  # what used to make this read as one plaintext entry
+    path.write_bytes(data)
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="structure is broken"):
+        module.MemoryStore._read_file(path)
+
+
+def test_read_of_a_broken_seal_refuses_while_disarmed_and_keyless(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    """The process that would do the damage is exactly the one with no key: it
+    reads the ciphertext as an entry and writes it back mangled."""
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False, key=None)
+    path = _memory_path(module)
+    path.write_bytes(_broken_seal("appended"))
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="structure is broken"):
+        module.MemoryStore._read_file(path)
+
+
+def test_shape_a_read_raw_checked_refuses_a_broken_seal(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module("A", mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    path.write_bytes(_broken_seal("truncated"))
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="structure is broken"):
+        module.MemoryStore._read_raw_checked(path)
+
+
+def test_an_impersonating_entry_below_the_first_stays_readable(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    """Only the file's *first* bytes are classified, so an entry carrying the magic
+    anywhere else is ordinary plaintext and must still be readable."""
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    path = _memory_path(module)
+    entries = ["an ordinary entry", f"{MAGIC.decode()}\nnot base64 at all"]
+    path.write_text(ENTRY_DELIMITER.join(entries), encoding="utf-8")
+
+    assert module.MemoryStore._read_file(path) == entries
+
+
+def test_broken_seal_fires_the_locked_memory_warning(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The M4 diagnosis has to cover this state too: upstream swallows the failed
+    load either way, so a broken seal is as silent as a missing key."""
+    home = _memories_home(tmp_path)
+    (home / "memories" / "MEMORY.md").write_bytes(_broken_seal("appended"))
+
+    assert warn_when_memory_is_locked(home=home, environ={"HERMES_MEMORY_KEY": KEY_ENV}) is True
+
+    err = capsys.readouterr().err
+    assert "structure is broken" in err
+    assert "MEMORY.md" in err
 
 
 # --------------------------------------------------------------------------
@@ -834,31 +954,111 @@ def test_safe_mode_still_wraps_a_supported_seam(shape: str, mem_dir: Path, tmp_p
 
 
 # --------------------------------------------------------------------------
+# One on-disk view for every classifier (CRLF)
+# --------------------------------------------------------------------------
+
+
+def _seed_crlf_seal(module: ModuleType, text: str = "first entry\n§\nsecond entry") -> Path:
+    """A seal that has been through a CRLF-converting round trip (editor, git, rsync)."""
+    path = _memory_path(module)
+    path.write_bytes(seal(text.encode("utf-8"), key=KEY, name=path.name).replace(b"\n", b"\r\n"))
+    return path
+
+
+def test_crlf_seal_is_read_as_a_seal(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    path = _seed_crlf_seal(module)
+
+    assert module.MemoryStore._read_file(path) == ["first entry", "second entry"]
+
+
+def test_crlf_seal_is_classified_as_sealed_by_the_write_side(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    """The read seam decodes in universal-newline mode, so a byte-level classifier
+    called the same file plaintext — and a disarmed write then published plaintext
+    over sealed bytes."""
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    path = _seed_crlf_seal(module)
+
+    assert _memory_hook._sealed_on_disk(path) is True
+
+
+def test_disarmed_write_over_a_crlf_seal_without_a_key_refuses(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False, key=None)
+    path = _seed_crlf_seal(module)
+    before = path.read_bytes()
+
+    with pytest.raises(MemoryEncryptionUnavailable, match="refusing to overwrite sealed"):
+        module.MemoryStore._write_file(path, ["the model's new entry"])
+
+    assert path.read_bytes() == before
+
+
+def test_disarmed_write_over_a_crlf_seal_reseals_it(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False)
+    path = _seed_crlf_seal(module)
+
+    module.MemoryStore._write_file(path, ["the model's new entry"])
+
+    assert is_sealed(path.read_bytes())
+    assert unseal(path.read_bytes(), key=KEY, name="MEMORY.md") == b"the model's new entry"
+
+
+# --------------------------------------------------------------------------
 # Magic-line impersonation
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("armed", [True, False])
-def test_write_refuses_an_entry_that_impersonates_the_header(
-    shape: str, mem_dir: Path, tmp_path: Path, armed: bool
+def test_plaintext_write_refuses_a_first_entry_that_impersonates_the_header(
+    shape: str, mem_dir: Path, tmp_path: Path
 ) -> None:
+    """Only entry 0 can put the magic at the head of the file, and only a plaintext
+    write puts an entry there verbatim — the file would then read as a seal."""
     module = _fake_module(shape, mem_dir)
-    _install(module, tmp_path, armed=armed)
+    _install(module, tmp_path, armed=False)
     path = _memory_path(module)
 
-    with pytest.raises(MemoryEncryptionUnavailable, match="sealed-memory header"):
-        module.MemoryStore._write_file(path, ["harmless", f"  {MAGIC.decode()}\nZm9v"])
+    with pytest.raises(MemoryEncryptionUnavailable, match="sealed-memory header") as excinfo:
+        module.MemoryStore._write_file(path, [f"  {MAGIC.decode()}\nZm9v", "harmless"])
 
+    assert str(path) in str(excinfo.value)
+    assert "memory action=remove" in str(excinfo.value)
     assert not path.exists()
 
 
-def test_plaintext_entry_that_impersonates_the_header_reads_through(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+def test_plaintext_write_allows_an_impersonating_entry_that_is_not_first(
+    shape: str, mem_dir: Path, tmp_path: Path
+) -> None:
+    """The refusal used to be unconditional, so one stored entry bricked every
+    write. Anywhere but position 0 the magic cannot reach the file's head."""
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path, armed=False)
+    path = _memory_path(module)
+
+    module.MemoryStore._write_file(path, ["first", "second", f"{MAGIC.decode()}\nZm9v"])
+
+    assert not _memory_hook._sealed_on_disk(path)
+    assert not path.read_text(encoding="utf-8").startswith(MAGIC.decode())
+    assert module.MemoryStore._read_file(path) == ["first", "second", f"{MAGIC.decode()}\nZm9v"]
+
+
+def test_sealed_write_of_a_store_holding_an_impersonating_entry_succeeds(
+    shape: str, mem_dir: Path, tmp_path: Path
+) -> None:
+    """Inside the ciphertext the blob is inert, so refusing here only bricked
+    ``add`` on an encrypted store — and escaped the tool's error-dict contract."""
     module = _fake_module(shape, mem_dir)
     _install(module, tmp_path)
     path = _memory_path(module)
-    path.write_text(f"{MAGIC.decode()}\nnot base64 at all", encoding="utf-8")
+    entries = [f"{MAGIC.decode()}\nnotes about the sealed memory format", "an ordinary entry"]
 
-    assert module.MemoryStore._read_file(path) == [f"{MAGIC.decode()}\nnot base64 at all"]
+    module.MemoryStore._write_file(path, entries)
+
+    assert is_sealed(path.read_bytes())
+    assert module.MemoryStore._read_file(path) == entries
 
 
 # --------------------------------------------------------------------------
@@ -891,8 +1091,28 @@ class MemoryStore:
     def _detect_external_drift(self, target):
         return None
 
+    @staticmethod
+    def _path_for(target):
+        return Path(__file__).with_name("USER.md" if target == "user" else "MEMORY.md")
+
     def _char_limit(self, target):
         return 2200
+'''
+
+_UNSUPPORTED_MEMORY_TOOL_SRC = '''\
+"""A ``tools.memory_tool`` stand-in whose seam Mordred cannot classify."""
+
+ENTRY_DELIMITER = None
+
+
+class MemoryStore:
+    @staticmethod
+    def _write_file(path, entries):
+        pass
+
+    @staticmethod
+    def _read_file(path):
+        return []
 '''
 
 _FAKE_LEARNING_MUTATIONS_SRC = '''\
@@ -914,8 +1134,8 @@ def edit_node(node_id, content):
 '''
 
 
-@pytest.fixture
-def import_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+@contextlib.contextmanager
+def _fake_upstream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, memory_tool_src: str) -> Iterator[Path]:
     """A throwaway ``tools`` / ``agent`` package on ``sys.path`` with the finder installed.
 
     The real ``tools`` package is importable in this venv, so its modules are
@@ -924,7 +1144,7 @@ def import_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     """
     site = tmp_path / "site"
     for package, module_name, source in (
-        ("tools", "memory_tool", _FAKE_MEMORY_TOOL_SRC),
+        ("tools", "memory_tool", memory_tool_src),
         ("agent", "learning_mutations", _FAKE_LEARNING_MUTATIONS_SRC),
     ):
         (site / package).mkdir(parents=True)
@@ -945,6 +1165,20 @@ def import_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
             del sys.modules[name]
         sys.modules.update(saved)
         _uninstall_import_hook()
+
+
+@pytest.fixture
+def import_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """The supported (shape-B) fake upstream."""
+    with _fake_upstream(tmp_path, monkeypatch, _FAKE_MEMORY_TOOL_SRC) as site:
+        yield site
+
+
+@pytest.fixture
+def unsupported_import_hook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """The same machinery over a seam ``classify_seam`` refuses."""
+    with _fake_upstream(tmp_path, monkeypatch, _UNSUPPORTED_MEMORY_TOOL_SRC) as site:
+        yield site
 
 
 def _uninstall_import_hook() -> None:
@@ -994,6 +1228,105 @@ def test_import_hook_installs_the_journey_guard(import_hook: Path) -> None:
 
     assert getattr(module.delete_node, _memory_hook._WRAPPED_FLAG, False) is True
     assert getattr(module.edit_node, _memory_hook._WRAPPED_FLAG, False) is True
+
+
+def test_import_hook_reinstalls_after_an_external_meta_path_reset(import_hook: Path) -> None:
+    """A host (or a test harness) that snapshots and restores ``sys.meta_path``
+    silently drops the finder; keying only off the module global made the
+    re-install a no-op that reported success while the seam stayed unarmed."""
+    install_memory_import_hook()
+    sys.meta_path[:] = [f for f in sys.meta_path if not isinstance(f, _memory_hook._PostImportFinder)]
+
+    assert install_memory_import_hook() is True
+    assert sum(isinstance(f, _memory_hook._PostImportFinder) for f in sys.meta_path) == 1
+
+    module = importlib.import_module("tools.memory_tool")
+    assert memory_hook_installed(module) is True
+
+
+def test_a_failing_post_import_action_does_not_break_the_import(
+    import_hook: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bug in our own action must not take an upstream module with it: raising out
+    of ``exec_module`` leaves the module out of ``sys.modules`` entirely."""
+
+    def _boom(_module: ModuleType) -> None:
+        raise ValueError("hook bug")
+
+    monkeypatch.setitem(_memory_hook._POST_IMPORT_ACTIONS, "agent.learning_mutations", _boom)
+    install_memory_import_hook()
+
+    with caplog.at_level("ERROR", logger=_memory_hook.__name__):
+        module = importlib.import_module("agent.learning_mutations")
+
+    assert module.delete_node("memory:memory:0") == {"ok": True, "message": "deleted"}
+    assert sys.modules["agent.learning_mutations"] is module
+    assert "hook bug" in caplog.text
+
+
+def test_a_failing_action_on_the_catch_up_path_does_not_break_install(
+    import_hook: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The already-imported sweep runs inside the fail-closed ``.pth`` bootstrap, so a
+    bug there would refuse startup for every Hermes process — same containment as
+    ``exec_module``. The deliberate ``SystemExit`` refusal must still propagate."""
+
+    def _boom(_module: ModuleType) -> None:
+        raise ValueError("catch-up bug")
+
+    module = importlib.import_module("agent.learning_mutations")
+    assert sys.modules["agent.learning_mutations"] is module
+    monkeypatch.setitem(_memory_hook._POST_IMPORT_ACTIONS, "agent.learning_mutations", _boom)
+
+    with caplog.at_level("ERROR", logger=_memory_hook.__name__):
+        assert install_memory_import_hook() is True
+    assert "catch-up bug" in caplog.text
+
+    def _refuse(_module: ModuleType) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setitem(_memory_hook._POST_IMPORT_ACTIONS, "agent.learning_mutations", _refuse)
+    with pytest.raises(SystemExit):
+        install_memory_import_hook()
+
+
+def test_classification_import_reports_an_unsupported_seam_without_exiting(
+    unsupported_import_hook: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``seam_check`` and the ``--probe`` main exist to diagnose exactly this state.
+    Stopping the process from the finder's action killed the diagnostic instead —
+    an armed operator with an unsupported seam had no way left to ask why."""
+    _arm(tmp_path / "home")
+    install_memory_import_hook()
+
+    with caplog.at_level("WARNING", logger=_memory_hook.__name__):
+        ok, reason = seam_check()
+
+    assert ok is False
+    assert "ENTRY_DELIMITER" in reason
+    assert "classification call" in caplog.text
+
+
+def test_classification_import_still_wraps_a_supported_seam(import_hook: Path, tmp_path: Path) -> None:
+    """The suppression only skips the refusal; a seam we understand is still wrapped."""
+    _arm(tmp_path / "home")
+
+    install_memory_import_hook()
+    assert seam_check() == (True, "")
+
+    assert memory_hook_installed(sys.modules["tools.memory_tool"]) is True
+
+
+def test_a_normal_import_of_an_unsupported_seam_still_refuses(unsupported_import_hook: Path, tmp_path: Path) -> None:
+    """C2 is kept: only ``_load_memory_tool``-mediated imports are exempt, so an
+    agent process or a gateway importing the seam normally still fails closed."""
+    _arm(tmp_path / "home")
+    install_memory_import_hook()
+
+    with pytest.raises(SystemExit) as excinfo:
+        importlib.import_module("tools.memory_tool")
+
+    assert excinfo.value.code == 1
 
 
 # --------------------------------------------------------------------------
@@ -1110,6 +1443,37 @@ def test_unsupported_seam_refusal_hard_exits_off_the_main_thread(
     worker.join()
 
     assert codes == [1]
+
+
+def test_hard_exit_flushes_stdout_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``os._exit`` skips interpreter shutdown, so whatever the host had buffered on
+    stdout is lost unless we flush it ourselves."""
+
+    class _Stdout:
+        def __init__(self) -> None:
+            self.flushes = 0
+
+        def write(self, text: str) -> int:
+            return len(text)
+
+        def flush(self) -> None:
+            self.flushes += 1
+
+    _arm(tmp_path)
+    recorder = _Stdout()
+    codes: list[int] = []
+    monkeypatch.setattr(sys, "stdout", recorder)
+    monkeypatch.setattr(os, "_exit", lambda code: codes.append(code))
+
+    def _run() -> None:
+        _memory_hook._refuse_or_ignore("synthetic reason", home=tmp_path, environ={})
+
+    worker = threading.Thread(target=_run)
+    worker.start()
+    worker.join()
+
+    assert codes == [1]
+    assert recorder.flushes == 1
 
 
 def test_unsupported_seam_in_safe_mode_warns_instead_of_refusing(
@@ -1251,6 +1615,23 @@ def test_memory_hook_installed_requires_every_seam_of_the_shape(shape: str, mem_
     other = _fake_module(shape, mem_dir)
     other.MemoryStore._write_file = module.MemoryStore._write_file  # only the write seam is wrapped
     assert memory_hook_installed(other) is False
+
+
+def test_seams_are_never_wrapped_twice(shape: str, mem_dir: Path, tmp_path: Path) -> None:
+    """A double-wrapped write hands the inner wrapper's sealed blob to the outer one
+    as a plaintext entry, and the write dies. ``_wrap_seam`` holds a lock so two
+    installers racing (discovery on a worker vs. the import hook on main) cannot
+    both read "not wrapped"."""
+    module = _fake_module(shape, mem_dir)
+    _install(module, tmp_path)
+    _install(module, tmp_path)
+
+    inner = module.MemoryStore.__dict__["_write_file"].__func__.__wrapped__
+    assert not getattr(inner, _memory_hook._WRAPPED_FLAG, False)
+
+    path = _memory_path(module)
+    module.MemoryStore._write_file(path, ["only entry"])
+    assert unseal(path.read_bytes(), key=KEY, name="MEMORY.md") == b"only entry"
 
 
 def test_write_private_fsyncs_the_parent_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
