@@ -190,6 +190,14 @@ hermes-mordred encryption purge   {env,config,memory,workspace,all} --yes   # de
 hermes-mordred encryption change-passphrase             # rotate the recovery passphrase (alias of `vault change-passphrase`)
 ```
 
+> **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
+> implements agent-memory encryption, so `memory` is provisioning-only: it
+> stores `HERMES_MEMORY_KEY` in the vault `.env` and sets the
+> `memory.encryption.enabled` config flag, but `~/.hermes/memories/*.md`
+> stays plaintext. `encryption enable memory` refuses (exit 1) rather than
+> report memory as encrypted; use `vault set-memory-key` to pre-provision the
+> key anyway. `disable` / `purge` still work — they only clear state.
+
 > **Runtime guard before a seal (macOS).** `enable env` and `enable config`
 > remove the plaintext, so both first prove the file can be unsealed again at
 > startup. Two interpreters are probed. The first is the one that *should* run
@@ -316,7 +324,7 @@ hermes-mordred vault cat <name>             # decrypt one entry to stdout
 hermes-mordred vault migrate                # import plaintext .env + config.yaml
 hermes-mordred vault recover                # macOS only: re-key a copied vault onto this Mac
 hermes-mordred vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
-hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY
+hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY (pre-provisioning only; no Hermes release encrypts memory yet)
 hermes-mordred vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
 hermes-mordred vault disable-config-decrypt # stop managing config.yaml; restore plaintext
 ```
@@ -481,7 +489,7 @@ unwrapped**. Each component that opens the vault prompts independently, so a
 
 - the `config` decrypt hook at interpreter startup (after `encryption enable config`),
 - the `.env` injection when the plugin loads (after `encryption enable env`),
-- plus whatever the command itself touches (e.g. `encryption enable memory`
+- plus whatever the command itself touches (e.g. `vault set-memory-key`
   re-enrolls `.env`).
 
 So with `env` + `config` on you will typically see **2–3 Touch ID prompts per

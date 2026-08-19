@@ -30,7 +30,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
-| `<home>/memories/*.md` | Hermes memory tool | optional upstream memory encryption target |
+| `<home>/memories/*.md` | Hermes memory tool | plaintext today; Mordred stores a key + flag for a future memory-encryption runtime |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
 
 Unless a section says otherwise, private Mordred directories are mode `0700`
@@ -328,9 +328,11 @@ do not publish them as diagnostics.
 - `<home>/config.yaml`: Hermes's canonical config. The wizard round-trips only
   Mordred sections and plugin enablement; the optional macOS vault lifecycle
   materializes plaintext while Hermes runs and reseals it at exit.
-- `<home>/memories/*.md`: written/encrypted by Hermes's memory tool when
-  `memory.encryption.enabled` and `HERMES_MEMORY_KEY` are active. Mordred stores
-  or removes that key and edits the flag; it does not own the file format.
+- `<home>/memories/*.md`: written by Hermes's memory tool. No Hermes release
+  reads `memory.encryption.enabled` or `HERMES_MEMORY_KEY` today, so these
+  files are always plaintext. Mordred stores or removes that key and edits
+  the flag for a future Mordred-owned memory-encryption runtime; it does not
+  own the file format.
 - `~/.local/bin/mordred-hermes-sekey` and
   `~/.local/bin/mordred-hermes-tpmkey`: helper executables installed by the
   native-helper commands. Explicit helper environment variables and a final

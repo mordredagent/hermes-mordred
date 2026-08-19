@@ -194,6 +194,10 @@ hermes-mordred network status
 hermes-mordred audit tail
 ```
 
+Agent memories (`~/.hermes/memories/`) are not encrypted by any Hermes
+release; `memory` only pre-provisions a key, and `encryption enable memory`
+refuses until Mordred ships a runtime for it.
+
 Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
 versions, or before the first `configure`, keep using `hermes-mordred`.
@@ -314,6 +318,9 @@ for safe isolation, loaded-code verification, and the full check suite.
 - If the audit log falls back to plaintext with
   `mordred.degraded.audit_encryption_unavailable`, restart from a context that
   can access the device key. Recovery is automatic.
+- The audit log is encrypted only after `keyvault init` (it needs the
+  device-wrapped log key); before that, entries are written in plaintext and
+  `hermes-mordred status` shows the audit-log row accordingly.
 
 ## Upgrading
 

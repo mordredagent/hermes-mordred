@@ -4,7 +4,8 @@ One consistent command surface to turn on/off the at-rest encryption of:
 
 - ``env``       — ``~/.hermes/.env`` enrolled into the vault (runtime-injected)
 - ``config``    — ``~/.hermes/config.yaml`` via the ``.pth`` startup decrypt hook
-- ``memory``    — Hermes agent memory (``HERMES_MEMORY_KEY`` + ``config.yaml`` flag)
+- ``memory``    — provisions ``HERMES_MEMORY_KEY`` + the ``config.yaml`` flag for a
+  memory-encryption runtime that does not exist yet (agent memories are plaintext today)
 - ``workspace`` — the external Touch ID/SE Claude Code workspace (``claude-private``)
 
 This module owns the ``status`` reader and the namespace dispatch. ``status`` is
@@ -63,6 +64,7 @@ __all__ = [
     "config_status",
     "env_status",
     "gateway_runtime_lines",
+    "memory_runtime_available",
     "memory_status",
     "render_json",
     "render_text",
@@ -220,10 +222,27 @@ def config_status(*, home: Path, platform: str, hook_installed: bool | None = No
     return TargetStatus("config", True, False, detail)
 
 
+def memory_runtime_available() -> tuple[bool, str]:
+    """Whether a memory-encryption runtime is installed for this Hermes.
+
+    No Hermes release encrypts agent memory, and Mordred does not yet ship
+    its own runtime for it, so this is always ``(False, reason)`` today. It
+    is the single seam a future Mordred-owned runtime hooks into — keep the
+    status reader and the enable gate routed through it.
+    """
+    return False, "no memory-encryption runtime in this release — memories are plaintext"
+
+
 def memory_status(*, home: Path, platform: str) -> TargetStatus:
     configured = _memory_flag_enabled(home)
-    active = configured and platform == _DARWIN
-    detail = _os_note(active, platform) if configured else "encryption disabled"
+    available, reason = memory_runtime_available()
+    active = configured and available and platform == _DARWIN
+    if not configured:
+        detail = "encryption disabled"
+    elif not available:
+        detail = f"key provisioned, but {reason}"
+    else:
+        detail = _os_note(active, platform)
     return TargetStatus("memory", configured, active, detail)
 
 
@@ -617,6 +636,22 @@ def _run_target(verb: str, target: str, *, force_runtime_unverified: bool = Fals
     return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
 
 
+def _run_core_target(verb: str, target: str, *, force_runtime_unverified: bool) -> tuple[str, int, bool]:
+    """Run one core (env/config/memory) target; return ``(status_label, exit_code, skipped)``.
+
+    ``memory`` under ``enable`` is special-cased: with no memory-encryption
+    runtime installed (:func:`memory_runtime_available`) the engine would just
+    refuse, so it is never called — the fan-out records a skip instead of a
+    failure. ``disable`` / ``purge`` only clear state, so they always proceed.
+    """
+    if target == "memory" and verb == "enable":
+        available, reason = memory_runtime_available()
+        if not available:
+            return f"skipped ({reason})", 0, True
+    status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified)
+    return status, rc, False
+
+
 def _print_all_summary(verb: str, outcomes: list[tuple[str, str]], *, failed: int, skipped: int) -> None:
     """Print the contiguous result block after all per-target engine output."""
     print(f"encryption {verb} all:")
@@ -637,10 +672,13 @@ def _dispatch_all(
 
     Core vault targets (env / config / memory) are always attempted; workspace
     is eligibility-gated (see :func:`_workspace_eligible`) and a skip never
-    counts as a failure. Every target runs even if an earlier one failed; the
-    exit code is non-zero iff at least one *attempted* target failed. Per-target
-    engine output streams inline; the ok/FAILED/skipped roll-up prints once at
-    the end as a single block (see :func:`_print_all_summary`).
+    counts as a failure. ``memory`` under ``enable`` is likewise skipped, not
+    attempted, while no memory-encryption runtime exists (see
+    :func:`_run_core_target`). Every target runs even if an earlier one
+    failed; the exit code is non-zero iff at least one *attempted* target
+    failed. Per-target engine output streams inline; the ok/FAILED/skipped
+    roll-up prints once at the end as a single block (see
+    :func:`_print_all_summary`).
 
     ``force_runtime_unverified`` is forwarded to every target's dispatch but only
     affects the env and config enables (the runtime-gated seals); see
@@ -651,20 +689,23 @@ def _dispatch_all(
 
     outcomes: list[tuple[str, str]] = []
     failed = 0
+    skipped = 0
     for target in _ALL_CORE_TARGETS:
-        status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified)
+        status, rc, was_skipped = _run_core_target(verb, target, force_runtime_unverified=force_runtime_unverified)
         outcomes.append((target, status))
-        failed += rc != 0
+        if was_skipped:
+            skipped += 1
+        else:
+            failed += rc != 0
 
     eligible, reason = _workspace_eligible(verb, platform=platform, on_path=on_path)
     if eligible:
         status, rc = _run_target(verb, "workspace", force_runtime_unverified=force_runtime_unverified)
         outcomes.append(("workspace", status))
         failed += rc != 0
-        skipped = 0
     else:
         outcomes.append(("workspace", f"skipped ({reason})"))
-        skipped = 1
+        skipped += 1
 
     _print_all_summary(verb, outcomes, failed=failed, skipped=skipped)
     return 1 if failed else 0

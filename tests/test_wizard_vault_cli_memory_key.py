@@ -18,9 +18,10 @@ from ._wizard_vault_cli_helpers import _PASSPHRASE, _PromptIO, _ReadOSErrorVault
 class TestSetMemoryKey:
     """``vault set-memory-key`` — enroll/rotate ``HERMES_MEMORY_KEY`` in the vault ``.env``.
 
-    The key lets Hermes encrypt ``~/.hermes/memories/*.md`` (upstream
-    AES-256-GCM); storing it in the vault ``.env`` means the device key protects
-    it at rest and the runtime shim injects it into the environment at startup.
+    Pre-provisioning only: no Hermes release reads this key today. Storing it
+    in the vault ``.env`` means the device key protects it at rest and the
+    runtime shim injects it into the environment at startup, ready for a
+    future memory-encryption runtime.
     """
 
     @pytest.fixture(autouse=True)
@@ -127,8 +128,10 @@ class TestSetMemoryKey:
         self._init(root, backend, store)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         out = capsys.readouterr().out.lower()
-        assert "config.yaml" in out
-        assert "encryption" in out  # tells the operator how to turn it on
+        # Honest about today's state: the key is stored, nothing encrypts memory
+        # yet, and `encryption enable memory` is the switch once a runtime exists.
+        assert "no hermes release encrypts" in out
+        assert "encryption enable memory" in out
 
     def test_uninitialised_vault_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = vault_memory_key.set_memory_key(root=tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())

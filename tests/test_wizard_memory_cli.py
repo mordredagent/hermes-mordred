@@ -1,11 +1,12 @@
 """Tests for ``hermes mordred encryption {enable,disable,purge} memory``.
 
-Agent-memory encryption is two coupled pieces: the ``HERMES_MEMORY_KEY`` in the
-vault ``.env`` (protected at rest, injected at startup) and the
-``memory.encryption.enabled`` flag in ``config.yaml`` that tells upstream
-``tools/memory_tool.py`` to actually encrypt ``~/.hermes/memories/*.md``. Today
-``vault set-memory-key`` writes the key but only *prints a hint* about the flag;
-this target writes the flag for real and gives it disable/purge.
+The target manages two pieces: the ``HERMES_MEMORY_KEY`` in the vault ``.env``
+(protected at rest, injected at startup) and the ``memory.encryption.enabled``
+flag in ``config.yaml``. No Hermes release consumes either (memories are
+plaintext today), so ``enable`` refuses unless a memory-encryption runtime is
+available (``encryption_cli.memory_runtime_available`` — monkeypatched to
+``(True, "")`` below to exercise the provisioning path); ``disable`` / ``purge``
+only clear state and always proceed.
 
 State transitions (not symmetric):
 
@@ -25,12 +26,25 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.keyvault import _identity, vault
-from mordred_hermes.wizard import memory_cli
+from mordred_hermes.wizard import encryption_cli, memory_cli
 from mordred_hermes.wizard.vault_memory_key import _MEMORY_KEY_ENV, _is_valid_memory_key
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
+
+
+@pytest.fixture(autouse=True)
+def _memory_runtime_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default every test here to a runtime being installed.
+
+    No Hermes release encrypts agent memory yet, so production's
+    ``memory_runtime_available`` is always ``(False, reason)`` and
+    ``memory_cli.enable`` refuses before touching the vault. Most tests below
+    exercise the provisioning path *past* that gate; ``test_refuses_without_runtime``
+    overrides this back to the real (unavailable) seam.
+    """
+    monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
 
 
 def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
@@ -125,6 +139,27 @@ class TestEnable:
             prompt_io=FixedPassphrasePromptIO(""),
         )
         assert rc == 1
+
+    def test_refuses_without_runtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No memory-encryption runtime (the real production seam): refuse
+        before touching the vault or config.yaml — reporting memory as
+        encrypted here would be false."""
+        monkeypatch.setattr(
+            encryption_cli,
+            "memory_runtime_available",
+            lambda: (False, "no memory-encryption runtime in this release — memories are plaintext"),
+        )
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+
+        rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore())
+
+        assert rc == 1
+        assert not (home / "config.yaml").exists()
+        assert not root.exists()  # no vault created
+        assert "set-memory-key" in capsys.readouterr().err
 
 
 # -----------------------------------------------------------------------------

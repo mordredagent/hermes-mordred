@@ -460,7 +460,8 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
 
     p_set_memory_key = vsub.add_parser(
         "set-memory-key",
-        help="Store/rotate HERMES_MEMORY_KEY in the vault .env so Hermes can encrypt agent memory at rest",
+        help="Store/rotate HERMES_MEMORY_KEY in the vault .env (pre-provisioning only — "
+        "no Hermes release encrypts agent memory yet)",
     )
     p_set_memory_key.add_argument(
         "--root",
