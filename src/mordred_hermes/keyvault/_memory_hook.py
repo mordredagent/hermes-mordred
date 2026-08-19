@@ -29,6 +29,29 @@ write plaintext, and a sealed file that cannot be decrypted raises
 shapes B/C that degradation would let the next ``add`` overwrite the sealed file
 (upstream's own wipe class, issue #26045), and in shape A the operator would
 silently see an empty memory.
+
+**Sealing is sticky.** A write is decided by the file on disk first, the arming
+state second:
+
+=====================  ==========  ==================================================
+On disk                Armed       Write
+=====================  ==========  ==================================================
+sealed                 either      seal (key required, else refuse)
+plaintext / absent     yes         seal (key required, else refuse)
+plaintext / absent     no          plaintext (upstream's own write, verbatim)
+=====================  ==========  ==================================================
+
+So a disarmed, safe-mode, or keyless process can never put plaintext back over
+sealed bytes: sealed stays sealed until the CLI decrypts it back explicitly.
+``HERMES_SAFE_MODE`` therefore means "no NEW sealing and no refusal to start",
+not "no protection" — the seams stay wrapped whenever the shape is supported.
+
+Installation happens twice on purpose. The keyvault plugin ``register()`` calls
+:func:`install_memory_hook` directly, and :func:`install_memory_import_hook`
+registers a ``sys.meta_path`` finder from the ``.pth`` bootstrap, so a process
+that never runs plugin discovery — or whose discovery fails, or runs off the main
+thread — still gets the seam wrapped the moment upstream imports it. The finder
+never imports ``tools.memory_tool`` itself: that import has upstream side effects.
 """
 
 from __future__ import annotations
@@ -40,27 +63,41 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from importlib.abc import Loader, MetaPathFinder
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from .._home import hermes_home as _hermes_home
 from .._runtime_bootstrap import _SAFE_MODE_TRUTHY
-from .memory_crypto import MemoryCryptoError, decode_key, is_sealed, seal, unseal
+from .memory_crypto import (
+    MemoryCryptoError,
+    decode_key,
+    is_sealed,
+    looks_like_magic_line,
+    seal,
+    unseal,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+    from importlib.machinery import ModuleSpec
+    from types import ModuleType
 
 __all__ = [
     "MemoryEncryptionUnavailable",
     "classify_seam",
+    "install_journey_guard",
     "install_memory_hook",
+    "install_memory_import_hook",
     "memory_hook_installed",
     "memory_marker_path",
     "memory_optout_marker_path",
     "memory_seam_shape",
     "seam_check",
+    "warn_when_memory_is_locked",
 ]
 
 logger = logging.getLogger(__name__)
@@ -83,6 +120,9 @@ _REMEDY: Final = (
 #: Paths already reported as plaintext — one warning per path per process.
 _PLAINTEXT_SEEN: set[str] = set()
 
+#: Homes already reported as "sealed memory, no usable key" — one warning per process.
+_LOCKED_WARNED: set[str] = set()
+
 
 class MemoryEncryptionUnavailable(RuntimeError):
     """Memory could not be sealed or opened.
@@ -103,31 +143,56 @@ def memory_optout_marker_path(home: Path) -> Path:
     return home.joinpath(*_MEMORY_OPTOUT_SUBPATH)
 
 
+def _marker_armed(home: Path) -> bool:
+    """Opt-in present and not paused — the on-disk half of "armed"."""
+    return memory_marker_path(home).exists() and not memory_optout_marker_path(home).exists()
+
+
+def _live_home() -> Path:
+    """Hermes's home resolved at call time (not bound at import: profiles switch)."""
+    return _hermes_home()
+
+
+def _home_factory(home: Path | None) -> Callable[[], Path]:
+    """An injected home is fixed; otherwise every call re-resolves it."""
+    return _live_home if home is None else (lambda: home)
+
+
 @dataclass(frozen=True)
 class _HookConfig:
     """What the wrappers close over. ``home`` / ``environ`` are injectable for tests."""
 
-    home: Path
     environ: Mapping[str, str]
     delimiter: str
+    home_factory: Callable[[], Path] = field(default=_live_home)
+
+    @property
+    def home(self) -> Path:
+        """Resolved per call unless injected: a profile switch changes it mid-process."""
+        return self.home_factory()
 
     @property
     def armed(self) -> bool:
-        """Whether sealing is on **right now** — re-read on every call, never cached."""
+        """Whether sealing NEW files is on **right now** — re-read per call, never cached."""
         if _safe_mode(self.environ):
             return False
-        return memory_marker_path(self.home).exists() and not memory_optout_marker_path(self.home).exists()
+        return _marker_armed(self.home)
 
     @property
     def key(self) -> bytes | None:
         """The live memory key, or ``None`` when unset / unusable."""
-        value = self.environ.get(_MEMORY_KEY_ENV)
-        if not value:
-            return None
-        try:
-            return decode_key(value)
-        except MemoryCryptoError:
-            return None
+        return _decode_env_key(self.environ)
+
+
+def _decode_env_key(environ: Mapping[str, str]) -> bytes | None:
+    """``HERMES_MEMORY_KEY`` as raw bytes, or ``None`` when unset or malformed."""
+    value = environ.get(_MEMORY_KEY_ENV)
+    if not value:
+        return None
+    try:
+        return decode_key(value)
+    except MemoryCryptoError:
+        return None
 
 
 def _safe_mode(environ: Mapping[str, str]) -> bool:
@@ -149,6 +214,39 @@ def _require_key(cfg: _HookConfig, path: Path, *, writing: bool) -> bytes:
         f"refusing to write {path} in plaintext: memory encryption is on but" if writing else f"{path} is encrypted but"
     )
     raise MemoryEncryptionUnavailable(f"{what} {_MEMORY_KEY_ENV} is not set or not usable — {_REMEDY}.")
+
+
+def _require_key_for_sealed(cfg: _HookConfig, path: Path) -> bytes:
+    """The live key for a file that is already sealed on disk, or refuse.
+
+    Rewriting it in plaintext would destroy content this process cannot read, so a
+    keyless write is a refusal even when the hook is disarmed.
+    """
+    key = cfg.key
+    if key is not None:
+        return key
+    raise MemoryEncryptionUnavailable(
+        f"refusing to overwrite sealed {path} without its key: {_MEMORY_KEY_ENV} is not set or not usable — {_REMEDY}."
+    )
+
+
+def _sealed_on_disk(path: Path) -> bool:
+    """Whether the file at ``path`` currently holds a seal (absent / unreadable: no)."""
+    try:
+        return is_sealed(path.read_bytes())
+    except OSError:
+        return False
+
+
+def _refuse_impersonating_entries(entries: Sequence[str]) -> None:
+    """Refuse an entry that starts with the magic line.
+
+    Stored verbatim it would make a plaintext file look sealed to every later
+    classification — including this hook's own write decision, which would then
+    refuse to touch a file that was never encrypted.
+    """
+    if any(looks_like_magic_line(entry) for entry in entries):
+        raise MemoryEncryptionUnavailable("refusing to store a memory entry that starts with the sealed-memory header")
 
 
 def _unseal_text(raw: str, *, path: Path, key: bytes) -> str:
@@ -181,7 +279,9 @@ def _write_private(path: Path, data: bytes) -> None:
     """Atomically publish ``data`` at ``path`` through a same-directory temp file.
 
     Same directory so the rename stays on one filesystem; ``mkstemp`` creates the
-    temp at 0o600, so nothing we write is briefly world-readable.
+    temp at 0o600, so nothing we write is briefly world-readable. The directory is
+    fsynced too — fsyncing the file persists the bytes, only fsyncing the parent
+    persists the rename that publishes them.
     """
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".mordred_mem_", suffix=".tmp")
     try:
@@ -194,19 +294,29 @@ def _write_private(path: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+    _fsync_dir(path.parent)
 
 
-def _seal_file_in_place(path: Path, *, key: bytes) -> None:
-    """Seal an existing plaintext file; a no-op when it is already sealed."""
-    data = path.read_bytes()
-    if is_sealed(data):
+def _fsync_dir(directory: Path) -> None:
+    """Persist a rename in ``directory``. A no-op where directories cannot be opened (Windows)."""
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
         return
-    _write_private(path, seal(data, key=key, name=path.name))
+    try:
+        with contextlib.suppress(OSError):
+            os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 # ---------------------------------------------------------------------------
 # Seam classification
 # ---------------------------------------------------------------------------
+
+#: Every character a sealed file can contain: the magic line plus base64url and
+#: its padding, joined by newlines.
+_SEALED_BLOB_CHARS: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=\n")
 
 
 def _params(owner: Any, name: str) -> tuple[str, ...] | None:
@@ -240,8 +350,15 @@ def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
     store = getattr(memory_tool_module, "MemoryStore", None)
     if store is None:
         return "", "tools.memory_tool has no MemoryStore"
-    if not isinstance(getattr(memory_tool_module, "ENTRY_DELIMITER", None), str):
+    delimiter = getattr(memory_tool_module, "ENTRY_DELIMITER", None)
+    if not isinstance(delimiter, str):
         return "", "tools.memory_tool.ENTRY_DELIMITER is missing or not a str"
+    if _SEALED_BLOB_CHARS.issuperset(delimiter):
+        # Shapes B/C recognise a sealed file by it parsing as exactly one entry.
+        # A delimiter drawn only from the blob's own alphabet could occur inside a
+        # seal, split it, and leave the sealed halves to be written back as
+        # plaintext entries.
+        return "", "ENTRY_DELIMITER could occur inside a sealed blob"
 
     for name, expected in (("_write_file", ("path", "entries")), ("_read_file", ("path",))):
         reason = _check_params(store, name, expected)
@@ -293,10 +410,20 @@ def memory_seam_shape(memory_tool_module: Any | None = None) -> str:
 
 
 def memory_hook_installed(memory_tool_module: Any | None = None) -> bool:
-    """Whether **this process** has the seam wrapped (in-process state, not on-disk)."""
+    """Whether **this process** has every seam of the live shape wrapped.
+
+    In-process state, not on-disk. A partially wrapped store is reported as *not*
+    installed: with the write seam wrapped but a read seam bare, upstream would
+    parse a sealed file as one garbage entry and write it back mangled.
+    """
     module = memory_tool_module if memory_tool_module is not None else _load_memory_tool()[0]
-    store = getattr(module, "MemoryStore", None) if module is not None else None
-    return store is not None and _is_wrapped(store, "_write_file")
+    if module is None:
+        return False
+    shape, _ = classify_seam(module)
+    store = getattr(module, "MemoryStore", None)
+    if not shape or store is None:
+        return False
+    return all(_is_wrapped(store, name) for name in _seam_names(shape))
 
 
 # ---------------------------------------------------------------------------
@@ -320,13 +447,18 @@ def _publish(store: Any, name: str, wrapper: Any, *, static: bool) -> None:
 
 
 def _wrap_write_file(store: Any, cfg: _HookConfig) -> None:
+    """The single content write of every shape — and the one place plaintext can escape."""
     original = store._write_file
 
     @functools.wraps(original)
     def _write_file(path: Path, entries: list[str]) -> Any:
-        if not cfg.armed:
+        _refuse_impersonating_entries(entries)
+        if _sealed_on_disk(path):
+            key = _require_key_for_sealed(cfg, path)  # sealed stays sealed, armed or not
+        elif cfg.armed:
+            key = _require_key(cfg, path, writing=True)
+        else:
             return original(path, entries)
-        key = _require_key(cfg, path, writing=True)
         content = cfg.delimiter.join(entries) if entries else ""
         sealed = seal(content.encode("utf-8"), key=key, name=path.name)
         # Hand the blob back as a ONE-entry list: `delimiter.join([x]) == x`, so
@@ -381,36 +513,24 @@ def _wrap_read_file(store: Any, cfg: _HookConfig) -> None:
 
 
 def _wrap_drift_on_snapshot(store: Any, cfg: _HookConfig) -> None:
-    """Shape A: upstream already sees plaintext (the read wrapper opened it).
+    """Shape A: ``raw`` is already plaintext (the read wrapper opened it).
 
-    Only the ``.bak`` snapshot it writes needs sealing — upstream writes it with a
-    raw ``Path.write_text``, which would leave recovered memory in the clear.
+    Upstream writes its ``.bak`` with a bare ``Path.write_text(raw)``, so
+    delegating would publish the decrypted memory in the clear and only let us
+    re-seal it afterwards — the window is the bug. Replicate upstream's two drift
+    signals on ``raw`` instead and write the backup sealed in the first place.
     """
     original = store._detect_external_drift
 
     @functools.wraps(original)
     def _detect_external_drift(self: Any, target: str, raw: str) -> Any:
-        result = original(self, target, raw)
-        _seal_drift_backup(result, cfg)
-        return result
+        path = Path(self._path_for(target))
+        if not (cfg.armed or _sealed_on_disk(path)):
+            return original(self, target, raw)  # plaintext at rest and disarmed: upstream logic intact
+        key = _require_key(cfg, path, writing=True)
+        return _drift_on_plaintext(self, target, path, raw, cfg=cfg, key=key)
 
     _publish(store, "_detect_external_drift", _detect_external_drift, static=False)
-
-
-def _seal_drift_backup(result: Any, cfg: _HookConfig) -> None:
-    """Best-effort seal of the backup upstream just wrote (a failure must not abort the mutation)."""
-    if not isinstance(result, str) or not cfg.armed:
-        return
-    key = cfg.key
-    if key is None:
-        return
-    path = Path(result)
-    try:
-        # The "(BACKUP FAILED …)" result is not a path that exists — nothing to seal.
-        if path.is_file():
-            _seal_file_in_place(path, key=key)
-    except (OSError, MemoryCryptoError) as exc:
-        logger.warning("could not seal the memory drift backup %s: %s", path, exc)
 
 
 def _wrap_drift_self_read(store: Any, cfg: _HookConfig) -> None:
@@ -474,20 +594,35 @@ def _drift_on_plaintext(
 # ---------------------------------------------------------------------------
 
 
+#: Every seam of each shape and the wrapper that owns it — the single source of
+#: truth for both installing and reporting installation.
+_SEAM_WRAPPERS: Final[dict[str, tuple[tuple[str, Callable[[Any, _HookConfig], None]], ...]]] = {
+    "A": (
+        ("_write_file", _wrap_write_file),
+        ("_read_raw_checked", _wrap_read_raw_checked),
+        ("_detect_external_drift", _wrap_drift_on_snapshot),
+    ),
+    "B": (
+        ("_write_file", _wrap_write_file),
+        ("_read_file", _wrap_read_file),
+        ("_detect_external_drift", _wrap_drift_self_read),
+    ),
+    "C": (
+        ("_write_file", _wrap_write_file),
+        ("_read_file", _wrap_read_file),
+    ),
+}
+
+
+def _seam_names(shape: str) -> tuple[str, ...]:
+    return tuple(name for name, _ in _SEAM_WRAPPERS.get(shape, ()))
+
+
 def _wrap_seam(store: Any, shape: str, cfg: _HookConfig) -> None:
     """Wrap every seam of ``shape`` that is not wrapped already."""
-    if not _is_wrapped(store, "_write_file"):
-        _wrap_write_file(store, cfg)
-    if shape == "A":
-        if not _is_wrapped(store, "_read_raw_checked"):
-            _wrap_read_raw_checked(store, cfg)
-        if not _is_wrapped(store, "_detect_external_drift"):
-            _wrap_drift_on_snapshot(store, cfg)
-        return
-    if not _is_wrapped(store, "_read_file"):
-        _wrap_read_file(store, cfg)
-    if shape == "B" and not _is_wrapped(store, "_detect_external_drift"):
-        _wrap_drift_self_read(store, cfg)
+    for name, wrap in _SEAM_WRAPPERS[shape]:
+        if not _is_wrapped(store, name):
+            wrap(store, cfg)
 
 
 def install_memory_hook(
@@ -498,47 +633,308 @@ def install_memory_hook(
 ) -> bool:
     """Wrap the upstream memory seam for this process. Returns whether it is wrapped.
 
-    Called from the keyvault plugin ``register()``, which runs before the first
-    disk-touching ``MemoryStore`` for every ``run_agent``-driven entry point.
-    Idempotent.
+    Called from the keyvault plugin ``register()`` and from the import hook that
+    the ``.pth`` bootstrap installs, so it runs before the first disk-touching
+    ``MemoryStore`` even when plugin discovery does not. Idempotent.
 
-    * ``HERMES_SAFE_MODE`` truthy → no-op (the operator's recovery escape hatch).
+    * ``HERMES_SAFE_MODE`` truthy → still wrapped when the shape is supported, but
+      nothing NEW is sealed and an unsupported seam does not refuse. Unwrapping
+      would let upstream truncate the files that are already sealed.
     * Unsupported seam **and not armed** → ``False``: Hermes runs exactly as it
       does today, in plaintext. Nothing is at risk because nothing is sealed.
-    * Unsupported seam **while armed** → ``SystemExit(1)``. Sealed memories are on
-      disk and we cannot open them; starting would let upstream treat them as
-      garbage and overwrite them. ``SystemExit`` because upstream only debug-logs
-      exceptions raised from ``register()``.
+    * Unsupported seam **while armed** → the process is stopped (see
+      :func:`_refuse_or_ignore`). Sealed memories are on disk and we cannot open
+      them; starting would let upstream treat them as garbage and overwrite them.
     """
     environ = os.environ if environ is None else environ
-    if _safe_mode(environ):
-        return False
-    home = _hermes_home() if home is None else home
+    factory = _home_factory(home)
 
     module, load_reason = (memory_tool_module, "") if memory_tool_module is not None else _load_memory_tool()
     if module is None:
-        _refuse_or_ignore(load_reason, home=home, environ=environ)
+        _refuse_or_ignore(load_reason, home=factory(), environ=environ)
         return False
     shape, reason = classify_seam(module)
     if not shape:
-        _refuse_or_ignore(reason, home=home, environ=environ)
+        _refuse_or_ignore(reason, home=factory(), environ=environ)
         return False
 
-    cfg = _HookConfig(home=home, environ=environ, delimiter=module.ENTRY_DELIMITER)
+    cfg = _HookConfig(environ=environ, delimiter=module.ENTRY_DELIMITER, home_factory=factory)
     _wrap_seam(module.MemoryStore, shape, cfg)
     return True
 
 
 def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) -> None:
-    """Fail closed on an unsupported seam only when memory encryption is actually on."""
-    armed = memory_marker_path(home).exists() and not memory_optout_marker_path(home).exists()
-    if not armed:
+    """Stop the process on an unsupported seam, but only when memory encryption is on.
+
+    The exit must survive every ``except Exception`` between here and the
+    interpreter: upstream only debug-logs what ``register()`` raises, and
+    ``threading.excepthook`` swallows a ``SystemExit`` raised off the main thread
+    (plugin discovery can run on a worker). So off-main it is ``os._exit``.
+    """
+    if not _marker_armed(home):
+        return
+    if _safe_mode(environ):
+        logger.warning(
+            "memory encryption is on but the Hermes memory seam cannot be wrapped: %s "
+            "(HERMES_SAFE_MODE is set, so startup continues and nothing new is sealed)",
+            reason,
+        )
         return
     sys.stderr.write(
         "mordred: refusing to start — memory encryption is on but the Hermes memory seam "
         f"cannot be wrapped: {reason} (set HERMES_SAFE_MODE=1 to bypass for recovery)\n"
     )
-    raise SystemExit(1)
+    sys.stderr.flush()
+    if threading.current_thread() is threading.main_thread():
+        raise SystemExit(1)
+    os._exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Post-import installation (sys.meta_path)
+# ---------------------------------------------------------------------------
+
+
+def _on_memory_tool_imported(module: ModuleType) -> None:
+    install_memory_hook(memory_tool_module=module)
+
+
+def _on_learning_mutations_imported(module: ModuleType) -> None:
+    install_journey_guard(module)
+
+
+#: Import of these modules must be followed by an installation. Never imported
+#: from here: both carry upstream import-time side effects (tool registration).
+_POST_IMPORT_ACTIONS: Final[dict[str, Callable[[ModuleType], None]]] = {
+    "tools.memory_tool": _on_memory_tool_imported,
+    "agent.learning_mutations": _on_learning_mutations_imported,
+}
+
+_IMPORT_HOOK_LOCK: Final = threading.Lock()
+
+#: The one finder this process installed — a second install must not add another.
+_IMPORT_HOOK: _PostImportFinder | None = None
+
+
+class _PostImportLoader(Loader):
+    """Delegating loader that runs ``action`` once the module has executed."""
+
+    def __init__(self, inner: Loader, action: Callable[[ModuleType], None]) -> None:
+        self._inner = inner
+        self._action = action
+
+    def create_module(self, spec: ModuleSpec) -> ModuleType | None:
+        return self._inner.create_module(spec)
+
+    def exec_module(self, module: ModuleType) -> None:
+        self._inner.exec_module(module)
+        self._action(module)
+
+    def __getattr__(self, name: str) -> Any:
+        # get_source / get_code / is_package / get_resource_reader: whatever the
+        # machinery or an inspecting caller asks the real loader for.
+        return getattr(self._inner, name)
+
+
+class _PostImportFinder(MetaPathFinder):
+    """First finder on ``sys.meta_path``; observes two module names, stands aside for the rest."""
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None = None,
+        target: ModuleType | None = None,
+    ) -> ModuleSpec | None:
+        action = _POST_IMPORT_ACTIONS.get(fullname)
+        if action is None:
+            return None
+        spec = self._delegate(fullname, path, target)
+        if spec is None or spec.loader is None:
+            return spec  # nothing found, or a namespace package: no loader to wrap
+        spec.loader = _PostImportLoader(spec.loader, action)
+        return spec
+
+    @staticmethod
+    def _delegate(fullname: str, path: Sequence[str] | None, target: ModuleType | None) -> ModuleSpec | None:
+        """The spec the rest of ``sys.meta_path`` would have produced.
+
+        Every instance of this class is skipped, not just ``self``: two finders
+        delegating to each other would recurse forever.
+        """
+        for finder in list(sys.meta_path):
+            if isinstance(finder, _PostImportFinder):
+                continue
+            find_spec = getattr(finder, "find_spec", None)
+            if find_spec is None:
+                continue
+            spec = find_spec(fullname, path, target)
+            if spec is not None:
+                return cast("ModuleSpec", spec)
+        return None
+
+
+def install_memory_import_hook() -> bool:
+    """Arm the memory seam from interpreter startup, before Hermes imports it.
+
+    ``register()`` only runs for processes that complete plugin discovery, so a
+    process that skips it (or whose discovery fails, or runs on a worker thread)
+    would drive an UNWRAPPED ``MemoryStore`` over sealed files. Registering the
+    finder cannot fail; what it triggers later can, and must — an armed process
+    whose seam is unsupported has to stop rather than corrupt.
+    """
+    global _IMPORT_HOOK
+    with _IMPORT_HOOK_LOCK:
+        if _IMPORT_HOOK is None:
+            _IMPORT_HOOK = _PostImportFinder()
+            sys.meta_path.insert(0, _IMPORT_HOOK)
+    for name, action in _POST_IMPORT_ACTIONS.items():
+        module = sys.modules.get(name)
+        if module is not None:
+            action(module)  # imported before we got here: no find_spec will fire
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Journey guard (agent/learning_mutations)
+# ---------------------------------------------------------------------------
+
+#: ``agent/learning_graph._memory_cards`` indexes chunks it reads from the file
+#: RAW, while ``delete_node`` / ``edit_node`` mutate by that index through the
+#: wrapped — decrypted — seam. Over a sealed file the two views disagree: the UI
+#: shows one garbage card and deleting it removes a real entry.
+_JOURNEY_SEALED_MESSAGE: Final = (
+    "this memory file is sealed by Mordred; edit it through the memory tool or run "
+    "`hermes-mordred encryption disable memory` first"
+)
+
+#: Node source -> file, replicating ``agent/learning_mutations._MEMORY_FILES`` for
+#: the case where upstream stops exposing it.
+_JOURNEY_MEMORY_FILES: Final = {"memory": "MEMORY.md", "profile": "USER.md"}
+
+#: The mutations we guard and the exact signature each must have.
+_JOURNEY_SEAMS: Final = (("delete_node", ("node_id",)), ("edit_node", ("node_id", "content")))
+
+
+def install_journey_guard(module: Any, *, home: Path | None = None) -> bool:
+    """Refuse journey mutations that would rewrite a sealed memory file by index.
+
+    Returns whether both mutations are wrapped. A signature that is not exactly
+    upstream's is left alone (debug-logged): guessing at a renamed parameter is
+    how a guard becomes the data-loss bug it exists to prevent. Skill nodes are
+    untouched. Idempotent.
+    """
+    for name, expected in _JOURNEY_SEAMS:
+        reason = _journey_signature_mismatch(module, name, expected)
+        if reason:
+            logger.debug("journey guard not installed: %s", reason)
+            return False
+    home_factory = _home_factory(home)
+    for name, _expected in _JOURNEY_SEAMS:
+        if not bool(getattr(getattr(module, name, None), _WRAPPED_FLAG, False)):
+            _wrap_journey_mutation(module, name, home_factory)
+    return True
+
+
+def _journey_signature_mismatch(module: Any, name: str, expected: tuple[str, ...]) -> str:
+    """``""`` when ``module.name`` takes exactly ``expected``, else the reason it does not."""
+    found = _params(module, name)
+    if found is None:
+        return f"agent.learning_mutations.{name} is missing or not callable"
+    if found != expected:
+        return f"agent.learning_mutations.{name} takes {found} (expected {expected})"
+    return ""
+
+
+def _wrap_journey_mutation(module: Any, name: str, home_factory: Callable[[], Path]) -> None:
+    original = getattr(module, name)
+
+    @functools.wraps(original)
+    def _guarded(*args: Any, **kwargs: Any) -> Any:
+        node_id = args[0] if args else kwargs.get("node_id")
+        path = _journey_memory_path(module, node_id, home_factory) if isinstance(node_id, str) else None
+        if path is not None and _sealed_on_disk(path):
+            # Upstream's own error shape: {"ok": False, "message": ...}.
+            return {"ok": False, "message": _JOURNEY_SEALED_MESSAGE}
+        return original(*args, **kwargs)
+
+    setattr(_guarded, _WRAPPED_FLAG, True)
+    setattr(module, name, _guarded)
+
+
+def _journey_memory_path(module: Any, node_id: str, home_factory: Callable[[], Path]) -> Path | None:
+    """The memory file a node id names, or ``None`` for a skill node or an id we cannot parse."""
+    parse_kind = getattr(module, "parse_node_kind", None)
+    if not callable(parse_kind) or parse_kind(node_id) != "memory":
+        return None
+    parts = node_id.split(":", 2)
+    if len(parts) != 3:
+        return None
+    names = getattr(module, "_MEMORY_FILES", None)
+    name = (names if isinstance(names, dict) else _JOURNEY_MEMORY_FILES).get(parts[1])
+    if not isinstance(name, str):
+        return None
+    return _journey_memories_dir(module, home_factory) / name
+
+
+def _journey_memories_dir(module: Any, home_factory: Callable[[], Path]) -> Path:
+    """Upstream's own memories directory when it exposes one, else ``<home>/memories``."""
+    resolver = getattr(module, "_memories_dir", None)
+    if callable(resolver):
+        try:
+            return Path(resolver())
+        except Exception:
+            logger.debug("agent.learning_mutations._memories_dir failed", exc_info=True)
+    return home_factory() / "memories"
+
+
+# ---------------------------------------------------------------------------
+# Session-start diagnosis
+# ---------------------------------------------------------------------------
+
+
+def warn_when_memory_is_locked(
+    *,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Say so once when memory is sealed and this process cannot open it.
+
+    ``agent/agent_init.py`` wraps ``load_from_disk()`` in ``except Exception:
+    pass``, so a sealed memory with no usable key is indistinguishable from an
+    empty one — the operator sees an agent that quietly forgot everything.
+    Returns whether a warning was written.
+    """
+    resolved = _home_factory(home)()
+    if str(resolved) in _LOCKED_WARNED:
+        return False
+    key = _decode_env_key(os.environ if environ is None else environ)
+    for path in sorted((resolved / "memories").glob("*.md")):
+        if not _is_locked_memory(path, key):
+            continue
+        _LOCKED_WARNED.add(str(resolved))
+        sys.stderr.write(
+            f"mordred: agent memory is sealed but {_MEMORY_KEY_ENV} is not available — {path.name} "
+            f"cannot be opened, so this session starts with an empty memory; {_REMEDY}.\n"
+        )
+        return True
+    return False
+
+
+def _is_locked_memory(path: Path, key: bytes | None) -> bool:
+    """Whether ``path`` is sealed and ``key`` does not open it (unreadable: not our call)."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if not is_sealed(data):
+        return False
+    if key is None:
+        return True
+    try:
+        unseal(data, key=key, name=path.name)
+    except MemoryCryptoError:
+        return True
+    return False
 
 
 def _main(argv: Sequence[str] | None = None) -> int:

@@ -43,7 +43,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 from .._home import hermes_home as _hermes_home
 
@@ -63,6 +63,10 @@ RUNTIME_PYTHON_ENV = "MORDRED_HERMES_RUNTIME_PYTHON"
 
 #: Seconds to wait for the probe subprocess before treating it as unavailable.
 _PROBE_TIMEOUT_S = 20.0
+
+#: Never inherited by a probe: the two that would falsify its answer, and the
+#: memory key, which no probe needs.
+_PROBE_ENV_STRIPPED: Final = frozenset({"PYTHONPATH", "PYTHONHOME", "HERMES_MEMORY_KEY"})
 
 #: Cap on launcher-wrapper indirection while resolving an interpreter (a bash
 #: ``hermes`` that exec's a venv ``hermes`` that has a python shebang = depth 2).
@@ -721,10 +725,12 @@ def _run_runtime_probe(
     (``error_detail`` set), else the completed process (``error_detail`` empty).
     ``PYTHONPATH`` / ``PYTHONHOME`` are stripped so the probe sees exactly what the
     host's ``hermes`` wrapper sees (it ``unset``s both) — a stray ``PYTHONPATH``
-    must not make a runtime look capable when it is not. ``extra_env`` is overlaid
-    last (e.g. a hook-disable flag). Any timeout / OSError is a fail-closed miss.
+    must not make a runtime look capable when it is not. ``HERMES_MEMORY_KEY`` is
+    stripped too: no probe needs the memory key, so it never enters a child
+    process's environment from here. ``extra_env`` is overlaid last (e.g. a
+    hook-disable flag). Any timeout / OSError is a fail-closed miss.
     """
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    env = {k: v for k, v in os.environ.items() if k not in _PROBE_ENV_STRIPPED}
     if extra_env:
         env.update(extra_env)
     try:

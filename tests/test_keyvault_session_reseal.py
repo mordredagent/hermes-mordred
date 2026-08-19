@@ -186,8 +186,28 @@ class TestRegisterWiring:
         ctx = _FakeCtx()
         keyvault.register(ctx)
 
-        assert ctx.hooks.count("on_session_start") == 2
+        assert ctx.hooks.count("on_session_start") == 3
         assert "on_session_end" in ctx.hooks
+
+    def test_register_installs_the_memory_hook_before_the_vault_shim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fail-closed vault raise must not cost the memory seam its wrapper —
+        upstream would then truncate already-sealed files."""
+        from mordred_hermes import keyvault
+        from mordred_hermes.keyvault import _memory_hook, _runtime_env
+
+        installed: list[str] = []
+
+        def _boom(**_kwargs: Any) -> int:
+            raise RuntimeError("vault present but unverifiable")
+
+        monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", _boom)
+        monkeypatch.setattr(_env_write_guard, "install_env_write_guard", lambda **_k: False)
+        monkeypatch.setattr(_memory_hook, "install_memory_hook", lambda **_k: bool(installed.append("memory")))
+
+        with pytest.raises(RuntimeError, match="unverifiable"):
+            keyvault.register(_FakeCtx())
+
+        assert installed == ["memory"]
 
     def test_register_survives_hook_rejection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes import keyvault
@@ -198,6 +218,30 @@ class TestRegisterWiring:
 
         assert "on_session_start" in ctx.hooks
         assert "on_session_end" not in ctx.hooks
+
+
+class TestOnSessionMemoryCheck:
+    """Upstream's ``agent_init`` swallows a failed ``load_from_disk``, so a sealed
+    memory whose key is missing shows up as an empty memory with no signal."""
+
+    def test_callback_invokes_the_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import keyvault
+        from mordred_hermes.keyvault import _memory_hook
+
+        seen: list[dict[str, Any]] = []
+        monkeypatch.setattr(_memory_hook, "warn_when_memory_is_locked", lambda **kw: bool(seen.append(kw)))
+        keyvault._on_session_memory_check(session_id="abc")
+        assert seen == [{}]  # the host payload is absorbed, not forwarded
+
+    def test_callback_swallows_a_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes import keyvault
+        from mordred_hermes.keyvault import _memory_hook
+
+        def _boom(**_kwargs: Any) -> bool:
+            raise RuntimeError("stat blew up")
+
+        monkeypatch.setattr(_memory_hook, "warn_when_memory_is_locked", _boom)
+        keyvault._on_session_memory_check()  # must not raise into the session boundary
 
 
 class TestOnSessionResealCallback:

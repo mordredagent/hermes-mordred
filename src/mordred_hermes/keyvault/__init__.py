@@ -18,21 +18,26 @@ from typing import Any
 def register(ctx: Any) -> None:
     """Hermes plugin entry point.
 
-    Installs the runtime env transparent-decrypt shim (design note §8.2 item 3):
+    Installs the agent-memory encryption hook FIRST: it wraps upstream's
+    ``tools/memory_tool.py`` read/write seam so ``~/.hermes/memories/*.md`` are
+    AES-256-GCM sealed at rest under ``HERMES_MEMORY_KEY``. It goes before the
+    fail-closed env shim below because that shim's deliberate raise must not cost
+    the memory seam its wrapper — an unwrapped seam truncates sealed files.
+    Arming and the key are read per call, so the order against the key injection
+    does not matter. Fail-closed, and deliberately not wrapped in a swallowing
+    ``try``/``except``: its one deliberate refusal stops the process (an armed
+    operator whose memory seam cannot be wrapped must not start and overwrite
+    sealed files), and any other exception is a bug that must keep its traceback.
+    A no-op where the operator has not opted in. The ``.pth`` bootstrap arms the
+    same installation through a post-import hook, for processes that never reach
+    plugin discovery.
+
+    Then installs the runtime env transparent-decrypt shim (design note §8.2 item 3):
     on macOS, secrets enrolled in the at-rest vault are decrypted and injected
     into ``os.environ`` at startup, so an unattended process reads them from the
     vault instead of plaintext on disk. Fail-closed — a present-but-unverifiable
     vault raises rather than starting with unverified secret provisioning. A no-op
     where no vault is set up or off macOS.
-
-    Then installs the agent-memory encryption hook: it wraps upstream's
-    ``tools/memory_tool.py`` read/write seam so ``~/.hermes/memories/*.md`` are
-    AES-256-GCM sealed at rest under the ``HERMES_MEMORY_KEY`` the shim above just
-    injected. Also fail-closed, and deliberately not wrapped in a swallowing
-    ``try``/``except``: its one deliberate raise is ``SystemExit`` (an armed
-    operator whose memory seam cannot be wrapped must not start and overwrite
-    sealed files), and any other exception is a bug that must keep its traceback.
-    A no-op where the operator has not opted in.
 
     Also installs the write-side guard: it wraps the host ``.env`` writer so a
     ``hermes config set`` / setup write made while the env target is sealed is
@@ -48,14 +53,18 @@ def register(ctx: Any) -> None:
     automatically at each session boundary (macOS only, opt-out-aware, fail-open).
     A resealed *changed* value takes effect for the next process; the running
     process keeps whatever the read shim injected at startup.
+
+    Also on ``on_session_start``, reports a sealed memory this process cannot
+    open: upstream's ``agent_init`` swallows a failed ``load_from_disk()``, so
+    without it a locked memory looks exactly like an empty one.
     """
-    from ._runtime_env import install_vault_env_decrypt
-
-    install_vault_env_decrypt()
-
     from ._memory_hook import install_memory_hook
 
     install_memory_hook()
+
+    from ._runtime_env import install_vault_env_decrypt
+
+    install_vault_env_decrypt()
 
     from ..privacy_check.hooks import check_plugin_integrity
 
@@ -78,6 +87,19 @@ def register(ctx: Any) -> None:
     for _hook_name in ("on_session_start", "on_session_end"):
         with contextlib.suppress(Exception):
             ctx.register_hook(_hook_name, _on_session_reseal)
+
+    with contextlib.suppress(Exception):
+        ctx.register_hook("on_session_start", _on_session_memory_check)
+
+
+def _on_session_memory_check(**_kwargs: Any) -> None:
+    """``on_session_start`` callback: warn once when agent memory is sealed but locked.
+
+    Fail-open — a diagnosis must never break a session boundary."""
+    with contextlib.suppress(Exception):
+        from ._memory_hook import warn_when_memory_is_locked
+
+        warn_when_memory_is_locked()
 
 
 def _on_session_reseal(**_kwargs: Any) -> None:

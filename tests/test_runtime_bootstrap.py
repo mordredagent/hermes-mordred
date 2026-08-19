@@ -60,6 +60,25 @@ def test_runtime_pth_gate_matches_existing_hermes_matcher(argv0: str, expected: 
     assert engaged == _pth_bootstrap._looks_like_hermes([argv0])
 
 
+def test_install_registers_the_memory_import_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The keyvault plugin's ``register()`` is not reached in every Hermes process
+    (discovery can be skipped or fail), so the memory seam is armed from the
+    ``.pth`` bootstrap too — via a finder, never an eager import."""
+    from mordred_hermes.keyvault import _memory_hook
+
+    calls: list[str] = []
+    monkeypatch.setattr(_runtime_bootstrap, "ensure_loopback_proxy_bypass", lambda: calls.append("proxy"))
+    monkeypatch.setattr(_runtime_bootstrap, "_install_plugin_discovery_wrapper", lambda: calls.append("discovery"))
+    try:
+        _runtime_bootstrap.install()
+
+        assert calls == ["proxy", "discovery"]
+        assert sum(isinstance(f, _memory_hook._PostImportFinder) for f in sys.meta_path) == 1
+    finally:
+        sys.meta_path[:] = [f for f in sys.meta_path if not isinstance(f, _memory_hook._PostImportFinder)]
+        _memory_hook._IMPORT_HOOK = None
+
+
 def test_runtime_bootstrap_failure_aborts_startup() -> None:
     def fail() -> None:
         raise RuntimeError("synthetic bootstrap failure")

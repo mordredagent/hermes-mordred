@@ -19,6 +19,7 @@ from mordred_hermes.keyvault.memory_crypto import (
     aad_for,
     decode_key,
     is_sealed,
+    looks_like_magic_line,
     seal,
     unseal,
 )
@@ -118,7 +119,6 @@ def test_is_sealed_classification() -> None:
     assert is_sealed(b"\xef\xbb\xbf" + blob)  # BOM-prefixed
     assert is_sealed(blob + b"\n")  # trailing newline
     assert is_sealed(blob.strip())  # stripped by the upstream entry parser
-    assert is_sealed(MAGIC)  # magic with nothing after it
     assert not is_sealed(b"the cat is on the mat")
     assert not is_sealed(b"")
     assert not is_sealed(b"HERMES-MEMORY-ENC-v2\nxxxx\n")
@@ -160,3 +160,28 @@ def test_decode_key_rejects(value: str) -> None:
 
 def test_decode_key_error_is_a_memory_crypto_error() -> None:
     assert issubclass(MemoryKeyError, MemoryCryptoError)
+
+
+def test_is_sealed_requires_the_whole_structure() -> None:
+    """A memory entry that merely *starts* with the magic is not a seal.
+
+    An operator (or the model) can write that text into MEMORY.md; classifying it
+    as sealed would make the file unreadable and hand the write path a "sealed"
+    file it cannot open.
+    """
+    body = seal(_PLAINTEXT, key=_KEY, name="MEMORY.md")[len(MAGIC) + 1 :]
+    assert not is_sealed(MAGIC)  # magic with nothing after it
+    assert not is_sealed(MAGIC + b" \n" + body)  # no newline directly after the magic
+    assert not is_sealed(MAGIC + b"\nnot base64 at all!")  # body outside the alphabet
+    assert not is_sealed(MAGIC + b"\n" + body[:8])  # too short to hold a nonce and a tag
+    assert not is_sealed(MAGIC + b"\n" + body[:20] + b"\n" + body[20:])  # split body
+    assert is_sealed(MAGIC + b"\n" + body)
+
+
+def test_looks_like_magic_line_is_prefix_only() -> None:
+    assert looks_like_magic_line(MAGIC.decode())
+    assert looks_like_magic_line("\ufeff" + MAGIC.decode() + "\nanything at all")
+    assert looks_like_magic_line("  " + MAGIC.decode())
+    assert not looks_like_magic_line("HERMES-MEMORY-ENC-v0")
+    assert not looks_like_magic_line("a note about " + MAGIC.decode())
+    assert not looks_like_magic_line("")
