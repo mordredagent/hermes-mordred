@@ -211,9 +211,9 @@ operator surface.
 
 - [x] Docs: specify the sealed memory file format, arming rule, seam
   coverage, and lifecycle in SPEC/PLAN/PATHS/ROADMAP (this PR).
-- [ ] Keyvault runtime: the memory-hook wrapper around the memory tool seam,
+- [x] Keyvault runtime: the memory-hook wrapper around the memory tool seam,
   the capability probe, and the CI canary against the installed upstream.
-- [ ] Wizard lifecycle: `encryption enable/disable/purge memory`, `status`
+- [x] Wizard lifecycle: `encryption enable/disable/purge memory`, `status`
   drift, and the `setup` `memory-encryption` step.
 - [ ] Live verification on Apple Silicon with a running gateway.
 - [ ] Record the live-verification result in [`CI.md`](./CI.md) §Manual
