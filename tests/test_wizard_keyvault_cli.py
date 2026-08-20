@@ -1561,3 +1561,29 @@ class TestOfflineDigestScriptLocator:
         assert path is not None
         assert path.is_file()
         assert path.name == "keyvault_offline_digest.py"
+
+
+class TestOfflineCopyHint:
+    """The seed banner's copy hint must show a concrete, paste-safe copy
+    command when the digest tool was located (UX review 2026-08-20: naming
+    the path alone still left operators to invent the copy step), and must
+    state what the offline device needs in both branches.
+    """
+
+    def test_hint_with_located_script_shows_quoted_cp_command(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import _keyvault_init
+
+        script = tmp_path / "keyvault_offline_digest.py"
+        script.write_text("#!/usr/bin/env python3\n")
+        hint = _keyvault_init._offline_copy_hint(script)
+        # Both paths quoted: pasting the line verbatim must never let the
+        # <your-usb> placeholder act as shell redirection.
+        assert f'cp "{script}" "/Volumes/<your-usb>/"' in hint
+        assert "python3 with the blake3 package" in hint
+
+    def test_hint_without_script_still_names_requirements(self) -> None:
+        from mordred_hermes.wizard import _keyvault_init
+
+        hint = _keyvault_init._offline_copy_hint(None)
+        assert "ships with hermes-mordred" in hint
+        assert "python3 with the blake3 package" in hint
