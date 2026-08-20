@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 keys, Tor/VPN routing, local-LLM policy enforcement, end-to-end gateway
 messages, and macOS-integrated at-rest secret encryption.
 
-**Status: active alpha** — current release `0.1.0a17`.
+**Status: active alpha** — current release `0.1.0a18`.
 
 New here? Follow the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
@@ -84,11 +84,11 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a17"
+  "hermes-mordred[macos]==0.1.0a18"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a17"
+  "hermes-mordred[keyvault]==0.1.0a18"
 ```
 
 See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
@@ -251,7 +251,7 @@ The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a17"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a18"
 ```
 
 Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
