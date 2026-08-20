@@ -189,7 +189,9 @@ an explicitly gated live-device test.
   with atomic writes, process locks, permission checks, and purpose-bound AAD.
 - Provide recovery seed/digest, portable backup export/import in both the
   Python API and operator CLI, passphrase recovery, audit encryption, Ethereum
-  keys, extension signing, and macOS-only config/env/memory runtime integration.
+  keys, extension signing, and the macOS-only config/env materialize-and-inject
+  shims plus the agent-memory at-rest encryption runtime (a wrapper around the
+  memory tool seam, fail-closed).
 - Keep native imports lazy so unsupported platforms can still import the
   package and report capabilities.
 
@@ -199,12 +201,17 @@ The CLI owns `keyvault init/list/verify-digest/export/recover/reset`, native
 helper installation, Ethereum subcommands, the lower-level vault interface,
 and the `encryption` facade. Export collects recovery material through masked
 prompts and publishes a new mode-`0600` MRKV snapshot without replacement.
+The facade's `memory` target drives key provisioning, the marker, eager
+migration, and the `setup` step for agent-memory at-rest encryption.
 
 ### 4.3 Tests
 
 Pure-Python tests cover formats, normalization, storage, backup rollback,
 recovery ordering, and fake native backends. CI builds both helpers and runs a
-software TPM. Real Secure Enclave validation remains manually gated.
+software TPM. Real Secure Enclave validation remains manually gated. A CI
+canary test runs the memory-encryption hook against the installed upstream
+memory tool, so an upstream seam refactor fails the build instead of
+regressing silently.
 
 ## Cross-cutting concerns
 
@@ -274,3 +281,7 @@ historical context, not the source of truth.
    dependency code.
 5. Record one-line Changes/Fixes entries in the PR description; do not create a
    `CHANGELOG.md`.
+
+Current in-flight item: agent-memory at-rest encryption, in three PRs — docs
+first, then the keyvault runtime hook, then the wizard lifecycle and `setup`
+step.

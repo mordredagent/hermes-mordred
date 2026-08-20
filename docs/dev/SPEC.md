@@ -48,10 +48,10 @@ compatibility policy.
   fallbacks.
 - On Linux, the keyvault requires the installed TPM 2.0 helper and fails
   closed if it is absent or unusable. There is no Linux software-key fallback.
-- Transparent `.env` injection, `config.yaml` materialize/reseal, memory-key
-  provisioning through that startup lifecycle, and the encrypted workspace
-  integration are active only on macOS. Off macOS they may be enrolled, but
-  status reports them inactive and plaintext remains the runtime source.
+- Transparent `.env` injection, `config.yaml` materialize/reseal, agent-memory
+  at-rest encryption, and the encrypted workspace integration are active only
+  on macOS. Off macOS they may be enrolled, but status reports them inactive
+  and plaintext remains the runtime source.
 - Arming those macOS seals is fail-closed on the runtime: before removing a
   plaintext, the CLI probes the interpreter that should run `hermes` and also
   the interpreter of each `hermes gateway run` process it can identify in the
@@ -279,11 +279,11 @@ artifacts and must be recreated after Keyvault contents change.
 ### Story 6: Coexistence with Hermes's existing features
 
 Mordred preserves unrelated Hermes configuration and uses profile-aware paths.
-An agent-memory encryption key can be provisioned through the vault, but no
-Hermes release currently implements memory encryption; until Mordred ships its
-own runtime (a follow-up tracked in TODO.md), the `memory` target is provisioning-only and
-`encryption enable memory` fails closed. Hermes owns the memory file format
-itself. Extension state uses Hermes's established `<home>/extension/`
+Mordred owns agent-memory at-rest encryption as a runtime wrapper around the
+memory tool's read/write seam in `tools/memory_tool.py`: no Hermes release
+encrypts memories, and the zero-PR commitment means upstream cannot be asked
+to. Hermes still owns the entry format inside the plaintext and the memory
+tool itself. Extension state uses Hermes's established `<home>/extension/`
 directory rather than the private keyvault tree.
 
 ## Scope (In) — what we build in v1
@@ -585,6 +585,84 @@ hardware capability, helper installation, or authorization is a failure, not
 a green skip. CI cannot provide the device interaction; maintainers record the
 manual result as required by [`CI.md`](./CI.md).
 
+#### Agent-memory at-rest encryption (sealed memory file format v1)
+
+No Hermes release encrypts `<home>/memories/*.md`, and the `memory`
+encryption target previously only provisioned a key without protecting
+anything on disk. This runtime makes that protection real, on the same
+precedent as the `.env` write guard and the config `.pth` hook: a defensive
+wrapper Mordred installs around a private upstream seam, fail-closed on the
+read path.
+
+The sealed memory file format is a two-line text container:
+
+```text
+line 0: HERMES-MEMORY-ENC-v1
+line 1: base64url(nonce[12] || AES-256-GCM(plaintext, aad))
+```
+
+The key is `HERMES_MEMORY_KEY`: URL-safe base64 of exactly 32 bytes, with an
+optional `base64:` or `hex:` prefix. AAD binds each ciphertext to its file's
+basename (`hermes-memory-v1:<file basename>`) so `MEMORY.md` and `USER.md`
+ciphertexts cannot be swapped for each other. The format is text-safe on
+purpose — an upstream `read_text()` of a sealed file yields a recognisable
+magic line instead of a `UnicodeDecodeError`. Every write uses a fresh nonce,
+and the plaintext is always the whole file body: Mordred encrypts bytes and
+leaves entry parsing to Hermes.
+
+Arming is evaluated per call, from a marker file and the current key, never
+cached:
+
+| marker | key | behavior |
+|---|---|---|
+| absent | any | not armed — plaintext as today |
+| present | valid | armed — writes seal; reads unseal sealed files and pass plaintext files through (migration on write) |
+| present | missing or invalid | armed, fails closed for memory I/O — every write refuses, and reading a *sealed* file refuses; plaintext files still read |
+| present | valid, but ciphertext fails to authenticate | refuses loudly — the read raises, so the affected load or mutation aborts and nothing is overwritten |
+
+`HERMES_SAFE_MODE` disarms the hook outright. An undecryptable sealed file
+always refuses loudly rather than reporting an empty memory. The hook never
+blocks interpreter start-up; when sealed files exist and the key is missing,
+the first memory load fails with the remedy in the message (so agent start-up
+stops there) instead of presenting an empty memory, and every memory write
+refuses — Mordred never silently writes plaintext while armed.
+
+Seam coverage depends on which shape of the upstream memory tool is
+installed. Mordred wraps three call sites per seam shape shipped by
+hermes-agent 0.13–0.15, 0.16–0.19, and current main: the read chokepoint, the
+write chokepoint, and the drift-backup write. An unrecognised seam is
+unsupported: when armed, the process refuses to start (`sys.stderr` plus exit
+1, recoverable with `HERMES_SAFE_MODE=1`); when not armed, nothing is wrapped
+and memory stays plaintext.
+
+Known out-of-band paths are documented limitations, not silent gaps: `hermes
+agent-import` is best-effort patched; raw readers (`hermes doctor` size
+reporting, the Desktop learning graph, the Honcho migration upload) see
+sealed text and degrade gracefully rather than leak plaintext; an
+out-of-process writer produces plaintext that is sealed on its next write and
+shown as `exposed` in the meantime; and `memory.write_approval` pending JSON
+stays plaintext (`encryption enable memory` warns about it).
+
+`encryption enable memory` requires the runtime probe to pass and the env
+target to already be enrolled and not opted out — the key rides on the env
+shim. It performs one Touch ID authorization through `set_memory_key`, writes
+the marker, eagerly migrates existing plaintext files to sealed, and warns
+when a running gateway needs a restart to pick up the change. `encryption
+disable memory` decrypts every sealed file back to plaintext, removes the
+marker and sets the opt-out marker (paused by operator), and keeps the key.
+`encryption purge memory` disables and then strips the key. `encryption
+status` reports `on`, `paused`, `off`, or `exposed`. `setup` runs a
+`memory-encryption` step right after `env-encryption`: it runs without a
+dedicated prompt, exactly like the env step (the opt-out marker is how an
+operator declines), resolves `manual` under `--non-interactive`, and honours
+the operator opt-out.
+
+The capability probe `runtime_memory_encryption_available` joins the env and
+config probes in the same family and appears in `encryption status`'s gateway
+lines. A CI canary test runs the round trip against the installed upstream
+memory tool so an upstream refactor of the seam trips a red build rather than
+a silent regression.
+
 #### Explicitly out of v1
 
 - exporting private native wrapping keys;
@@ -724,7 +802,7 @@ and interactive unless a narrowly scoped confirmation flag exists.
 - trusted per-skill runtime provenance without a new host seam;
 - hard prevention of plugin disable/uninstall by the local user;
 - Windows/mobile product support and a supported Windows helper workflow;
-- transparent env/config/workspace lifecycle outside macOS;
+- transparent env/config/memory/workspace lifecycle outside macOS;
 - audit hash chains, external anchoring, or same-UID tamper resistance;
 - isolated signer/payment authorization;
 - automatic migration of native-key protection tiers; and
