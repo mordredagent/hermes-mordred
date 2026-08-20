@@ -1,19 +1,26 @@
-"""``hermes mordred encryption {enable,disable,purge} memory`` — agent-memory toggle.
+"""``hermes mordred encryption {enable,disable,purge} memory`` — agent-memory key/flag toggle.
 
-Agent-memory encryption is two coupled pieces:
+No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD) implements agent-memory
+encryption: nothing upstream consumes ``HERMES_MEMORY_KEY``, the
+``memory.encryption.enabled`` flag, or the ``HERMES-MEMORY-ENC-v1`` header, so
+``~/.hermes/memories/*.md`` is always plaintext today. This target is
+therefore **provisioning-only** until Mordred ships its own memory-encryption
+runtime:
 
 1. the ``HERMES_MEMORY_KEY`` in the vault ``.env`` (protected at rest by the
    device key, injected into the environment at startup), managed by
    :func:`mordred_hermes.wizard.vault_memory_key.set_memory_key`, and
-2. the ``memory.encryption.enabled`` flag in ``config.yaml`` that tells upstream
-   ``tools/memory_tool.py`` to actually AES-256-GCM-encrypt
-   ``~/.hermes/memories/*.md``.
+2. the ``memory.encryption.enabled`` flag in ``config.yaml``, which no
+   consumer reads today.
 
-``vault set-memory-key`` only ever wrote the key and *printed a hint* about the
-flag. This target writes the flag for real (round-trip ``ruamel`` so the rest of
-config.yaml is preserved) and gives memory encryption a real disable/purge:
+``enable`` refuses (rc 1) rather than report memory as encrypted while no
+runtime exists — gated through
+:func:`mordred_hermes.wizard.encryption_cli.memory_runtime_available`, the
+single seam a future runtime hooks into. Use ``vault set-memory-key`` to
+pre-provision the key without that gate. ``disable`` / ``purge`` only clear
+state, so they proceed unconditionally:
 
-- **enable**  — ensure the key + set the flag true.
+- **enable**  — refuses without a runtime; otherwise ensures the key + sets the flag true.
 - **disable** — set the flag false but keep the key (suspend: reversible). Existing
   encrypted memories become unreadable until re-enabled — warned, not migrated.
 - **purge**   — set the flag false and strip the key from the vault ``.env``.
@@ -154,13 +161,26 @@ def enable(
 ) -> int:
     """Ensure the memory key in the vault and turn the config flag on.
 
+    Refuses (rc 1, nothing written) while no memory-encryption runtime exists
+    (:func:`mordred_hermes.wizard.encryption_cli.memory_runtime_available`) —
+    reporting the flag as encrypted would be false. To pre-provision the key
+    anyway, use ``vault set-memory-key``.
+
     If no vault exists yet, one is created first (prompting once for a recovery
     passphrase) — ``encryption enable`` drives the vault, so a fresh install need
-    not run ``vault init`` by hand. Returns 0 on success, 1 when the vault cannot
-    be created or opened, a device key-store error (propagated from
-    :func:`set_memory_key`), or an unexpected config.yaml shape.
+    not run ``vault init`` by hand. Returns 0 on success, 1 when the runtime gate
+    refuses, the vault cannot be created or opened, a device key-store error
+    (propagated from :func:`set_memory_key`), or an unexpected config.yaml shape.
     """
-    from . import vault_cli, vault_memory_key
+    from . import encryption_cli, vault_cli, vault_memory_key
+
+    available, reason = encryption_cli.memory_runtime_available()
+    if not available:
+        _term.emit_error(
+            f"encryption enable memory: {reason}. Refusing to report memory as encrypted. "
+            "To pre-provision the key anyway use `hermes-mordred vault set-memory-key`."
+        )
+        return 1
 
     rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
     if rc != 0:

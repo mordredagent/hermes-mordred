@@ -222,3 +222,4 @@ the source remains usable, and failure paths leave no partial destination.
   record the result in [`CI.md`](./CI.md).
 - Keep each implementation PR scoped to one plugin; land cross-plugin contract
   documentation first.
+- Memory-encryption runtime (Mordred-owned): make the `memory` target real — keyvault runtime hook around the memory tool seam, then wizard lifecycle (migrate/decrypt-back) and a `setup` step.

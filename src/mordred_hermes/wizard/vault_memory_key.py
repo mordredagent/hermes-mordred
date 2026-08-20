@@ -32,10 +32,10 @@ _MEMORY_KEY_ENV = "HERMES_MEMORY_KEY"
 def _generate_memory_key() -> str:
     """A fresh URL-safe base64 256-bit key for ``HERMES_MEMORY_KEY``.
 
-    Matches the format Hermes upstream (``tools/memory_tool.py``) accepts — a
-    URL-safe base64 encoding of 32 random bytes (AES-256). Replicated here rather
-    than imported so this plugin does not couple to the upstream module path; the
-    format contract is pinned by ``tests/test_keyvault_memory_integration.py``.
+    The key contract Mordred's memory-encryption runtime is specified against —
+    a URL-safe base64 encoding of 32 random bytes (AES-256); no Hermes release
+    reads this variable. The format contract is pinned by
+    ``tests/test_keyvault_memory_integration.py``.
     """
     import base64
     import secrets
@@ -46,10 +46,11 @@ def _generate_memory_key() -> str:
 def _is_valid_memory_key(value: str | None) -> bool:
     """Whether ``value`` decodes to a 32-byte AES-256 key.
 
-    Mirrors upstream ``tools/memory_tool.py:_decode_memory_key`` (plain URL-safe
-    base64, or a ``base64:`` / ``hex:`` prefix; exactly 32 bytes). A key this
-    command treats as "already set" must be one the memory encryptor will accept —
-    an empty or wrong-length assignment is *not* usable and should be replaced.
+    Accepts plain URL-safe base64, or a ``base64:`` / ``hex:`` prefix; exactly
+    32 bytes — the contract a memory-encryption runtime keyed by this variable
+    must honour. A key this command treats as "already set" must be usable by
+    that runtime — an empty or wrong-length assignment is *not* usable and
+    should be replaced.
     """
     if not value:
         return False
@@ -79,7 +80,7 @@ def _effective_memory_key(text: str) -> str | None:
 
     Parsed with ``dotenv_values`` (last-wins, no interpolation, quotes stripped) —
     exactly the value :func:`...keyvault._runtime_env.inject_vault_env` injects at
-    startup, so this decision matches what Hermes actually keys memory on.
+    startup, matching what a future memory-encryption runtime would key on.
     """
     import io
 
@@ -153,16 +154,12 @@ def _env_with_memory_key(text: str, value: str) -> str:
 
 
 def _print_memory_config_hint() -> None:
-    """Tell the operator how to turn on memory encryption (never prints the key)."""
-    print("To turn on agent-memory encryption, add this to your Hermes config.yaml:")
-    print()
-    print("  memory:")
-    print("    encryption:")
-    print("      enabled: true")
-    print()
+    """Tell the operator what the stored key does and does not do (never prints the key)."""
     print(
         f"The key stays protected at rest by the vault; the runtime shim injects {_MEMORY_KEY_ENV} into the "
-        "environment at startup so Hermes can encrypt ~/.hermes/memories/*.md with it."
+        "environment at startup. No Hermes release encrypts ~/.hermes/memories/*.md with it yet — "
+        "`hermes-mordred encryption enable memory` turns encryption on once a memory-encryption runtime "
+        "is installed, and refuses until then."
     )
 
 
@@ -175,17 +172,17 @@ def set_memory_key(
 ) -> int:
     """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY`` (the agent-memory on-ramp).
 
-    Hermes encrypts ``~/.hermes/memories/*.md`` with AES-256-GCM keyed by the
-    ``HERMES_MEMORY_KEY`` environment variable (upstream ``tools/memory_tool.py``).
-    Keeping that key in the vault ``.env`` means the device wrapping key protects
-    it at rest and the runtime decrypt shim
-    (:mod:`mordred_hermes.keyvault._runtime_env`) injects it into the environment
-    at startup. The key is never printed.
+    Intended for a memory-encryption runtime keyed by ``HERMES_MEMORY_KEY``
+    (AES-256-GCM, matching upstream ``tools/memory_tool.py``'s key format) —
+    no Hermes release reads it today. Keeping that key in the vault ``.env``
+    means the device wrapping key protects it at rest and the runtime decrypt
+    shim (:mod:`mordred_hermes.keyvault._runtime_env`) injects it into the
+    environment at startup. The key is never printed.
 
     Opens the vault on the **hot path** (the device wrapping key — Secure Enclave
     or its software fallback, no passphrase) and decides off the *effective*
     (dotenv last-wins) ``HERMES_MEMORY_KEY``, so it never silently switches the key
-    Hermes is actually using:
+    already in effect:
 
     - **Already usable** (the effective value decodes to 32 bytes) and no
       ``rotate`` → no-op; the ``.env`` is left untouched.

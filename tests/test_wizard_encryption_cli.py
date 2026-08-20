@@ -228,11 +228,14 @@ class TestMemoryStatus:
         assert st.target == "memory"
         assert st.configured is False
 
-    def test_flag_true_active_on_macos(self, tmp_path: Path) -> None:
+    def test_flag_true_but_no_runtime_stays_inactive_on_macos(self, tmp_path: Path) -> None:
+        # No Hermes release encrypts agent memory yet, so a set flag is
+        # configured but never active — the memory files stay plaintext.
         (tmp_path / "config.yaml").write_text("memory:\n  encryption:\n    enabled: true\n", encoding="utf-8")
         st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
         assert st.configured is True
-        assert st.active is True
+        assert st.active is False
+        assert "plaintext" in st.detail.lower()
 
     def test_flag_true_inactive_off_macos(self, tmp_path: Path) -> None:
         (tmp_path / "config.yaml").write_text("memory:\n  encryption:\n    enabled: true\n", encoding="utf-8")
@@ -243,6 +246,18 @@ class TestMemoryStatus:
     def test_missing_config_is_not_configured(self, tmp_path: Path) -> None:
         st = encryption_cli.memory_status(home=tmp_path, platform="darwin")
         assert st.configured is False
+
+    def test_active_when_runtime_available_honours_the_seam(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Proves memory_status is routed through the seam: flip it available
+        # and the target behaves like env/config again (darwin-gated).
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
+        (tmp_path / "config.yaml").write_text("memory:\n  encryption:\n    enabled: true\n", encoding="utf-8")
+        darwin = encryption_cli.memory_status(home=tmp_path, platform="darwin")
+        assert darwin.active is True
+        linux = encryption_cli.memory_status(home=tmp_path, platform="linux")
+        assert linux.active is False
 
 
 class TestWorkspaceStatus:
@@ -621,6 +636,7 @@ class TestCliDispatchAll:
 
     def test_enable_all_runs_core_and_workspace_on_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="darwin", on_path=lambda _n: True)
         assert rc == 0
@@ -628,10 +644,25 @@ class TestCliDispatchAll:
 
     def test_enable_all_skips_workspace_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
         assert rc == 0
         assert calls == {"env": 1, "config": 1, "memory": 1}  # workspace skipped, not failed
+
+    def test_enable_all_skips_memory_without_runtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # No monkeypatch of memory_runtime_available — exercises the real
+        # (False, reason) seam, matching production until a runtime ships.
+        self._patch_home(monkeypatch, tmp_path / "home")
+        calls = self._spy_engines(monkeypatch, "enable")
+        rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
+        assert rc == 0  # a skip never fails the batch
+        assert "memory" not in calls  # the engine is never called — it would just refuse
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        assert any("memory" in ln and "skipped" in ln for ln in lines)
+        assert "  2 ok, 0 failed, 2 skipped" in lines  # env+config ok; memory+workspace skipped
 
     def test_enable_all_skips_workspace_when_tooling_missing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -647,6 +678,7 @@ class TestCliDispatchAll:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable", rc_for={"memory": 1})
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
         assert rc == 1  # a target failed
@@ -656,6 +688,7 @@ class TestCliDispatchAll:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         self._spy_engines(monkeypatch, "enable")  # silent spies → output is only the summary
         encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
@@ -668,6 +701,7 @@ class TestCliDispatchAll:
         from mordred_hermes.wizard import cli
 
         self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         calls = self._spy_engines(monkeypatch, "enable")
         monkeypatch.setattr(encryption_cli, "_workspace_eligible", lambda *_a, **_k: (False, "test"))
         assert cli.main(["encryption", "enable", "all"]) == 0

@@ -9,8 +9,9 @@
 
 Mordred adds privacy controls to Hermes without modifying Hermes itself. It can
 keep keys behind Secure Enclave or TPM 2.0, route traffic through Tor or a VPN,
-enforce local-LLM policy, and on macOS transparently encrypt `.env`,
-configuration, and agent memory keys at rest.
+enforce local-LLM policy, and on macOS transparently encrypt `.env` and
+configuration at rest (and pre-provision an agent-memory key — agent memories
+themselves are not encrypted by any Hermes release yet).
 
 ## Before you start
 
@@ -223,7 +224,6 @@ ceremonies are in
 
 ```sh
 hermes-mordred encryption enable config
-hermes-mordred encryption enable memory
 hermes-mordred encryption enable all
 hermes-mordred encryption status
 ```
@@ -231,6 +231,12 @@ hermes-mordred encryption status
 `disable` is reversible and retains the encrypted copy. `purge` deletes it and
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).
+
+`encryption enable memory` is deliberately left out of this happy path: no
+Hermes release encrypts agent memory yet, so it refuses until Mordred ships
+its own runtime for it, and `encryption status` reports `memory` as plaintext
+until then. Separately, the audit log itself is encrypted only after
+`keyvault init` — before that, entries are written in plaintext.
 
 ## 5. Network settings 🌐
 

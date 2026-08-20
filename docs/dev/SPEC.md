@@ -279,9 +279,12 @@ artifacts and must be recreated after Keyvault contents change.
 ### Story 6: Coexistence with Hermes's existing features
 
 Mordred preserves unrelated Hermes configuration and uses profile-aware paths.
-Hermes memory encryption can be provisioned through the vault, but Hermes owns
-the memory files and runtime feature. Extension state uses Hermes's established
-`<home>/extension/` directory rather than the private keyvault tree.
+An agent-memory encryption key can be provisioned through the vault, but no
+Hermes release currently implements memory encryption; until Mordred ships its
+own runtime (a follow-up tracked in TODO.md), the `memory` target is provisioning-only and
+`encryption enable memory` fails closed. Hermes owns the memory file format
+itself. Extension state uses Hermes's established `<home>/extension/`
+directory rather than the private keyvault tree.
 
 ## Scope (In) — what we build in v1
 
