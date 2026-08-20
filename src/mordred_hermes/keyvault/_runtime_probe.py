@@ -43,7 +43,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 from .._home import hermes_home as _hermes_home
 
@@ -55,6 +55,7 @@ __all__ = [
     "environment_key",
     "runtime_config_decrypt_available",
     "runtime_env_injection_available",
+    "runtime_memory_encryption_available",
 ]
 
 #: Env override: operator points us at the exact interpreter that runs ``hermes``.
@@ -62,6 +63,10 @@ RUNTIME_PYTHON_ENV = "MORDRED_HERMES_RUNTIME_PYTHON"
 
 #: Seconds to wait for the probe subprocess before treating it as unavailable.
 _PROBE_TIMEOUT_S = 20.0
+
+#: Never inherited by a probe: the two that would falsify its answer, and the
+#: memory key, which no probe needs.
+_PROBE_ENV_STRIPPED: Final = frozenset({"PYTHONPATH", "PYTHONHOME", "HERMES_MEMORY_KEY"})
 
 #: Cap on launcher-wrapper indirection while resolving an interpreter (a bash
 #: ``hermes`` that exec's a venv ``hermes`` that has a python shebang = depth 2).
@@ -143,6 +148,26 @@ try:
 except Exception as exc:  # noqa: BLE001 - any failure means the hook won't decrypt
     sys.stderr.write(repr(exc))
     sys.exit(22)
+sys.exit(0)
+"""
+
+# The agent-memory analogue. Memory encryption wraps upstream's private
+# ``tools/memory_tool.py`` seam, so capability here is not "is mordred installed"
+# but "does THIS runtime's memory_tool still have a seam we can wrap" — a
+# vendored or newer Hermes can refactor it out from under a perfectly healthy
+# install. The shape is echoed on stdout for the caller's message.
+_MEMORY_PROBE_SRC = """
+import sys
+try:
+    from mordred_hermes.keyvault._memory_hook import memory_seam_shape, seam_check
+    ok, reason = seam_check()
+    if not ok:
+        sys.stderr.write(reason or "the memory seam is unsupported")
+        sys.exit(31)
+    sys.stdout.write(memory_seam_shape())
+except Exception as exc:  # noqa: BLE001 - any failure means the hook won't seal
+    sys.stderr.write(repr(exc))
+    sys.exit(32)
 sys.exit(0)
 """
 
@@ -700,10 +725,12 @@ def _run_runtime_probe(
     (``error_detail`` set), else the completed process (``error_detail`` empty).
     ``PYTHONPATH`` / ``PYTHONHOME`` are stripped so the probe sees exactly what the
     host's ``hermes`` wrapper sees (it ``unset``s both) — a stray ``PYTHONPATH``
-    must not make a runtime look capable when it is not. ``extra_env`` is overlaid
-    last (e.g. a hook-disable flag). Any timeout / OSError is a fail-closed miss.
+    must not make a runtime look capable when it is not. ``HERMES_MEMORY_KEY`` is
+    stripped too: no probe needs the memory key, so it never enters a child
+    process's environment from here. ``extra_env`` is overlaid last (e.g. a
+    hook-disable flag). Any timeout / OSError is a fail-closed miss.
     """
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
+    env = {k: v for k, v in os.environ.items() if k not in _PROBE_ENV_STRIPPED}
     if extra_env:
         env.update(extra_env)
     try:
@@ -786,3 +813,34 @@ def runtime_config_decrypt_available(
         return True, f"hermes runtime ({python}) can decrypt a sealed config.yaml"
     reason = (proc.stderr or proc.stdout or "unknown error").strip()
     return False, f"the hermes runtime ({python}) cannot decrypt a sealed config.yaml: {reason}"
+
+
+def runtime_memory_encryption_available(
+    *,
+    home: Path | None = None,
+    runtime_python: Path | None = None,
+    timeout: float = _PROBE_TIMEOUT_S,
+) -> tuple[bool, str]:
+    """Whether the Hermes runtime can seal agent memory at rest.
+
+    The ``memories/*.md`` analogue of :func:`runtime_env_injection_available`.
+    ``ok`` is ``True`` only when ``mordred_hermes.keyvault._memory_hook`` imports
+    in that interpreter *and* classifies its ``tools.memory_tool`` as a seam it
+    can wrap; the detail then names the shape. Same ``PYTHONPATH`` /
+    ``PYTHONHOME`` stripping, ``MORDRED_CONFIG_DECRYPT=0``, and fail-closed
+    semantics as the other probes — a seal must never be promised on a runtime
+    that would then read the sealed files as garbage.
+    """
+    python, locate_err = _resolve_runtime_python(home, runtime_python)
+    if python is None:
+        return False, locate_err
+    proc, run_err = _run_runtime_probe(
+        python, _MEMORY_PROBE_SRC, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"}
+    )
+    if proc is None:
+        return False, run_err
+    if proc.returncode == 0:
+        shape = (proc.stdout or "").strip() or "?"
+        return True, f"hermes runtime ({python}) can encrypt agent memory (seam {shape})"
+    reason = (proc.stderr or proc.stdout or "unknown error").strip()
+    return False, f"the hermes runtime ({python}) cannot encrypt agent memory: {reason}"
