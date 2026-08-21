@@ -91,17 +91,17 @@ uses a paid account and mutates runner network state.
   `key_not_bound_to_channel`. The captured generic-event shape now has strict
   regression coverage for the authenticated installing-team fallback,
   including stale-scope and forged-raw-team rejection.
-- **PENDING — isolated Slack `/hermes` slash-command dispatch.** Required before
-  the next release. On 2026-08-21, Chrome in the installing workspace prepared
-  `/hermes` with a bare `ENC:v3` argument: the plaintext `/version`, Unicode
-  lock, and Slack `:lock:` alias were all absent from the wire value. Slack
-  accepted each command, but routed every attempt to a pre-existing Socket Mode
-  connection instead of the foreground test gateway; that older connection
-  treated the envelope as a regular prompt. The exact installing-workspace
-  scope and rewrite path pass the gateway integration suite, but the live
-  foreground process did not receive a slash payload. Stop the competing
-  connection, repeat one encrypted `/hermes /version`, and require a decrypted
-  version reply before clearing this entry.
+- **2026-08-21 — isolated Slack `/hermes` slash-command dispatch passed on live
+  Slack.** The app-level token was rotated to stop the competing Socket Mode
+  client, and a fresh foreground gateway then received a Slack hello reporting
+  one connection. In the installing workspace, `/hermes` carried a bare
+  `ENC:v3` argument: the plaintext `/version`, Unicode lock, and Slack `:lock:`
+  alias were absent from the wire value. The foreground gateway authenticated
+  and released `/version`, and the bot posted a top-level encrypted reply. A
+  Web API read confirmed that the reply was from the bot, decrypted under the
+  bound channel key to `Hermes Agent v0.19.0`, and did not expose the version in
+  plaintext. The gateway recorded no invalid-envelope, replay, encrypted-send,
+  or Slack-send failure for the round trip.
 - **2026-08-20 — agent-memory encryption passed on Apple Silicon with a running
   gateway.** Enabling memory encryption sealed the existing memory file and
   emitted the restart warning. After restarting the gateway, the Hermes memory
