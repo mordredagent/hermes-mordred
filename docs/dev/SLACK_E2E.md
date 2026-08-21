@@ -236,18 +236,19 @@ encrypted-send path directly and never passes through the wrapper.
 > extension, and a plaintext post still receiving a readable needs-key notice)
 > and record the result in `docs/dev/CI.md` §Manual live-device validation log.
 >
-> **Also verify the scope tightening in a Slack Connect (externally shared)
-> channel, including a `/hermes` slash command there.** The two inbound paths
-> derive the team id differently: `_event_team_id` reads the inner event's
-> `team_id`/`team` first — in a shared channel that is the **posting user's**
-> workspace, and only falls back to `authorizations[].team_id`, the installing
-> workspace — while slash commands take `team_id` from the command payload
-> (installing workspace). If the extension's composite id embeds the installing
-> team, an external member's `ENC:v3` command can now fail closed as
-> `key_not_bound_to_channel`, which is the #83 shape. Confirm on the extension
-> side that its composite builder uses the same team id the adapter stamps on
-> `SessionSource.scope_id`; if the two can disagree, the scope check must be
-> relaxed for shared channels rather than left to fail closed in production.
+> **Also verify Slack Connect (externally shared) channels, including a
+> `/hermes` slash command.** The two inbound paths derive the team id
+> differently: `_event_team_id` reads the inner event's `team_id`/`team` first
+> — in a shared channel that is the **posting user's** workspace — while slash
+> commands take the installing workspace from the command payload. The gateway
+> keeps exact scope binding for normal events and slash commands. It accepts an
+> installing-team alternative only for a proven external Slack channel event:
+> the raw event's channel and team must match the `SessionSource`, the source
+> team must not be an installed team, and the alternative must be one of the
+> live adapter's `auth_test`-backed installations. DMs, malformed events,
+> uninstalled or stale key scopes, and every non-Slack platform remain
+> fail-closed. Record both the external-member round-trip and the installing-
+> workspace slash result in `docs/dev/CI.md` §Manual live-device validation log.
 
 **An empty `text` value is also rejected as unencrypted input.** The Slack
 adapter strips bot mentions (`text.replace(f"<@{bot_uid}>", "").strip()`) and

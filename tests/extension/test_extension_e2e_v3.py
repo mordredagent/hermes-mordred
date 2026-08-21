@@ -735,7 +735,18 @@ class _WrappableAdapter:
         raise AssertionError("not called by inbound verification")
 
 
-def _scoped_slack_event(token: str, chat_id: str, scope_id: str | None):
+class _SlackConnectWrappableAdapter(_WrappableAdapter):
+    def __init__(self, *installed_team_ids: str) -> None:
+        self._team_clients = {team_id: object() for team_id in installed_team_ids}
+
+
+def _scoped_slack_event(
+    token: str,
+    chat_id: str,
+    scope_id: str | None,
+    *,
+    raw_team_id: str | None = None,
+):
     return SimpleNamespace(
         text=token,
         source=SimpleNamespace(
@@ -745,6 +756,7 @@ def _scoped_slack_event(token: str, chat_id: str, scope_id: str | None):
             profile=None,
             scope_id=scope_id,
         ),
+        raw_message=({"type": "message", "channel": chat_id, "team": raw_team_id} if raw_team_id is not None else None),
     )
 
 
@@ -767,6 +779,51 @@ def test_gateway_hook_binds_a_slack_command_to_its_workspace() -> None:
         event=_scoped_slack_event(_command(raw_key, chat_id="C0BCX916V6Z"), "C0BCX916V6Z", "T0TEAM"),
         gateway=gateway,
     ) == {"action": "rewrite", "text": "authenticated command"}
+
+
+def test_gateway_hook_accepts_external_slack_connect_scope_for_an_installed_host() -> None:
+    raw_key = _bind_key("slack:T0HOSTTEAM:C0BCX916V6Z")
+    gateway = SimpleNamespace(adapters={"slack": _SlackConnectWrappableAdapter("T0HOSTTEAM")})
+
+    assert gateway_plugin.pre_gateway_dispatch(
+        event=_scoped_slack_event(
+            _command(raw_key, chat_id="C0BCX916V6Z"),
+            "C0BCX916V6Z",
+            "T0EXTERNALTEAM",
+            raw_team_id="T0EXTERNALTEAM",
+        ),
+        gateway=gateway,
+    ) == {"action": "rewrite", "text": "authenticated command"}
+
+
+def test_gateway_hook_never_relaxes_slack_connect_to_an_uninstalled_key_scope() -> None:
+    raw_key = _bind_key("slack:T0STALETEAM:C0BCX916V6Z")
+    gateway = SimpleNamespace(adapters={"slack": _SlackConnectWrappableAdapter("T0HOSTTEAM")})
+
+    assert gateway_plugin.pre_gateway_dispatch(
+        event=_scoped_slack_event(
+            _command(raw_key, chat_id="C0BCX916V6Z"),
+            "C0BCX916V6Z",
+            "T0EXTERNALTEAM",
+            raw_team_id="T0EXTERNALTEAM",
+        ),
+        gateway=gateway,
+    ) == {"action": "skip", "reason": "mordred-invalid-encrypted-envelope"}
+
+
+def test_gateway_hook_requires_the_raw_slack_team_to_prove_the_external_scope() -> None:
+    raw_key = _bind_key("slack:T0HOSTTEAM:C0BCX916V6Z")
+    gateway = SimpleNamespace(adapters={"slack": _SlackConnectWrappableAdapter("T0HOSTTEAM")})
+
+    assert gateway_plugin.pre_gateway_dispatch(
+        event=_scoped_slack_event(
+            _command(raw_key, chat_id="C0BCX916V6Z"),
+            "C0BCX916V6Z",
+            "T0EXTERNALTEAM",
+            raw_team_id="T0DIFFERENTTEAM",
+        ),
+        gateway=gateway,
+    ) == {"action": "skip", "reason": "mordred-invalid-encrypted-envelope"}
 
 
 @pytest.mark.parametrize("scope_id", [None, "", 12345, object()])

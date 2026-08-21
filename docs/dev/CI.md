@@ -78,25 +78,30 @@ uses a paid account and mutates runner network state.
 - **2026-05-25 — passed on real devices**:
   - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v`
   - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v`
-- **PENDING — Slack E2E outbound channel-key binding** (`docs/dev/SLACK_E2E.md`
-  §5 "Outbound: channel-key binding"). Required before the next release: the
-  rule changes what leaves a live workspace, and no CI job can exercise it. In a
-  Slack channel with a bound `K_chan`, verify all four:
-  1. encrypted command in, encrypted reply out (the existing round-trip);
-  2. an agent-initiated send with no thread context (for example a cron
-     delivery) arrives as `ENC:v3` and decrypts in the extension;
-  3. a plaintext post still receives a **readable** needs-key notice;
-  4. a channel with no bound key is unchanged.
-  Plus the top-risk case for the `{team}` scope tightening: an `ENC:v3` command
-  from an external member in a **Slack Connect / externally shared** channel,
-  and a `/hermes` **slash command** in that same channel. The adapter derives
-  the team id from the inner event (`team_id` or `team` — the posting user's
-  workspace in a shared channel) for messages but from the command payload (the
-  installing workspace) for slash commands, so a composite id built around the
-  installing team can now fail closed as `key_not_bound_to_channel` (#83
-  shape). Check the extension-side composite builder uses the same team id the
-  adapter stamps on `SessionSource.scope_id` before shipping.
-  Record the date and result here; do not delete this entry until it passes.
+- **2026-08-21 — Slack E2E outbound channel-key binding passed on live Slack.**
+  In an externally shared channel with a bound `K_chan`, an encrypted command
+  reached the gateway, was released as `/version`, and received an encrypted
+  reply that the browser extension rendered as the Hermes version with no
+  decrypt failure. An agent-initiated top-level send also arrived as `ENC:v3`
+  and decrypted, a plaintext post received the readable needs-key notice, and
+  an unbound channel remained unchanged. The same end-user round-trip passed
+  when the sender was an external Slack Connect member. The successful
+  `app_mention` was stamped with the installing workspace; an earlier generic
+  message supplied the external workspace scope and reproduced
+  `key_not_bound_to_channel`. The captured generic-event shape now has strict
+  regression coverage for the authenticated installing-team fallback,
+  including stale-scope and forged-raw-team rejection.
+- **PENDING — isolated Slack `/hermes` slash-command dispatch.** Required before
+  the next release. On 2026-08-21, Chrome in the installing workspace prepared
+  `/hermes` with a bare `ENC:v3` argument: the plaintext `/version`, Unicode
+  lock, and Slack `:lock:` alias were all absent from the wire value. Slack
+  accepted each command, but routed every attempt to a pre-existing Socket Mode
+  connection instead of the foreground test gateway; that older connection
+  treated the envelope as a regular prompt. The exact installing-workspace
+  scope and rewrite path pass the gateway integration suite, but the live
+  foreground process did not receive a slash payload. Stop the competing
+  connection, repeat one encrypted `/hermes /version`, and require a decrypted
+  version reply before clearing this entry.
 - **2026-08-20 — agent-memory encryption passed on Apple Silicon with a running
   gateway.** Enabling memory encryption sealed the existing memory file and
   emitted the restart warning. After restarting the gateway, the Hermes memory
