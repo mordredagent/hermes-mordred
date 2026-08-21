@@ -78,6 +78,39 @@ uses a paid account and mutates runner network state.
 - **2026-05-25 — passed on real devices**:
   - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v`
   - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v`
+- **2026-08-21 — Slack E2E outbound channel-key binding passed on live Slack.**
+  In an externally shared channel with a bound `K_chan`, an encrypted command
+  reached the gateway, was released as `/version`, and received an encrypted
+  reply that the browser extension rendered as the Hermes version with no
+  decrypt failure. An agent-initiated top-level send also arrived as `ENC:v3`
+  and decrypted, a plaintext post received the readable needs-key notice, and
+  an unbound channel remained unchanged. The same end-user round-trip passed
+  when the sender was an external Slack Connect member. The successful
+  `app_mention` was stamped with the installing workspace; an earlier generic
+  message supplied the external workspace scope and reproduced
+  `key_not_bound_to_channel`. The captured generic-event shape now has strict
+  regression coverage for the authenticated installing-team fallback,
+  including stale-scope and forged-raw-team rejection.
+- **2026-08-21 — isolated Slack `/hermes` slash-command dispatch passed on live
+  Slack.** The app-level token was rotated to stop the competing Socket Mode
+  client, and a fresh foreground gateway then received a Slack hello reporting
+  one connection. In the installing workspace, `/hermes` carried a bare
+  `ENC:v3` argument: the plaintext `/version`, Unicode lock, and Slack `:lock:`
+  alias were absent from the wire value. The foreground gateway authenticated
+  and released `/version`, and the bot posted a top-level encrypted reply. A
+  Web API read confirmed that the reply was from the bot, decrypted under the
+  bound channel key to `Hermes Agent v0.19.0`, and did not expose the version in
+  plaintext. The gateway recorded no invalid-envelope, replay, encrypted-send,
+  or Slack-send failure for the round trip.
+- **2026-08-20 — agent-memory encryption passed on Apple Silicon with a running
+  gateway.** Enabling memory encryption sealed the existing memory file and
+  emitted the restart warning. After restarting the gateway, the Hermes memory
+  seam read both existing entries, added and reloaded a temporary fact, and
+  removed it again while the on-disk file remained mode `0600` with the
+  `HERMES-MEMORY-ENC-v1` header; `encryption status` reported `memory [on]`.
+  Disabling memory encryption restored the whole file to plaintext, the same
+  two entries remained readable through Hermes, and the temporary fact was
+  absent. The pre-test gateway and encryption states were restored afterward.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

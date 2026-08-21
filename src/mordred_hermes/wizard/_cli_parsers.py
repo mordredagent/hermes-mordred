@@ -14,7 +14,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
-- ``keyvault {init,list,verify-digest,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
+- ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — list discovered Mordred plugins
 """
@@ -338,6 +338,9 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     ksub.add_parser("verify-digest", help="Verify the keyvault digest").set_defaults(
         func=_handle_keyvault_verify_digest
     )
+    p_export = ksub.add_parser("export", help="Create a portable, passphrase-protected Keyvault backup snapshot")
+    p_export.add_argument("--output", required=True, help="New output file (must not already exist; written mode 0600)")
+    p_export.set_defaults(func=_handle_keyvault_export)
     p_recover = ksub.add_parser("recover", help="Restore from a backup blob")
     p_recover.add_argument("--blob", required=True, help="Path to the backup blob file")
     p_recover.set_defaults(func=_handle_keyvault_recover)
@@ -457,7 +460,8 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
 
     p_set_memory_key = vsub.add_parser(
         "set-memory-key",
-        help="Store/rotate HERMES_MEMORY_KEY in the vault .env so Hermes can encrypt agent memory at rest",
+        help="Store/rotate HERMES_MEMORY_KEY in the vault .env (the agent-memory encryption key; "
+        "`encryption enable memory` is what turns sealing on)",
     )
     p_set_memory_key.add_argument(
         "--root",
@@ -684,6 +688,12 @@ def _handle_keyvault_verify_digest(args: argparse.Namespace) -> int:
     from . import keyvault_cli
 
     return keyvault_cli.cli_verify_digest(args)
+
+
+def _handle_keyvault_export(args: argparse.Namespace) -> int:
+    from . import keyvault_export_cli
+
+    return keyvault_export_cli.cli_export(args)
 
 
 def _handle_keyvault_recover(args: argparse.Namespace) -> int:

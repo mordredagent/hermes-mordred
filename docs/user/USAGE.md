@@ -190,6 +190,95 @@ hermes-mordred encryption purge   {env,config,memory,workspace,all} --yes   # de
 hermes-mordred encryption change-passphrase             # rotate the recovery passphrase (alias of `vault change-passphrase`)
 ```
 
+> **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
+> encrypts `~/.hermes/memories/*.md`, so Mordred owns this one end to end: a
+> runtime hook seals every memory write and opens every sealed read, keyed by
+> `HERMES_MEMORY_KEY` from the vault `.env`.
+>
+> **Preconditions** (`enable memory` refuses, exit 1, writing nothing, unless
+> all hold): the `env` target is enabled and injecting — that shim is how the
+> key reaches the runtime; macOS; and the interpreter that runs `hermes` (plus
+> any gateway running right now) proves it can open a sealed file. The last
+> check is the same runtime guard the `.env` seal uses, and
+> `--force-runtime-unverified` bypasses it at your own risk.
+>
+> **What the verbs do.** `enable` stores the key (one Touch ID), writes the
+> opt-in marker, and migrates every plaintext `*.md` (and `*.md.bak.*`
+> snapshot) already on disk to sealed. `disable` decrypts them all back to
+> plaintext, keeps the key, and writes an opt-out marker (`paused`); it
+> *refuses* rather than proceed if a sealed file cannot be decrypted, so you
+> never end up with unreadable blobs. `purge` runs that same `disable` first
+> and only then strips the key.
+>
+> **Status marks.** `on` = armed and everything on disk is sealed; `paused` =
+> opt-out marker (or off macOS); `off` = never enabled; `exposed` = armed but a
+> plaintext memory file is on disk — re-run `encryption enable memory` to seal
+> it.
+>
+> **Restart a running gateway** after enabling or disabling. After `enable`,
+> the running process still lacks the freshly-minted key, so — fail-closed,
+> not plaintext — its memory reads/writes are refused until you restart it,
+> and a session may see an empty memory. After `disable`, it still has the
+> hook armed in-process; the marker being gone only stops it sealing new
+> writes starting at the next memory call. `enable` warns and names the pid
+> when it sees one.
+>
+> **Recovery.** `HERMES_SAFE_MODE=1` disarms the hook for one run (memories are
+> then read as-is, sealed ones unreadable) — the escape hatch if a memory
+> problem blocks start-up. The key itself lives in the vault `.env`; without
+> it, sealed memories cannot be recovered.
+>
+> **Known limitations.** Readers that bypass the memory tool see the sealed
+> text rather than plaintext (`hermes doctor`'s size report, the Desktop
+> learning graph, the Honcho migration upload) — degraded display, never a
+> leak. A writer in a process without the hook (a migration script) leaves
+> plaintext, which `status` shows as `exposed` and the next in-process write
+> seals. `memory.write_approval` stages pending writes as plaintext JSON under
+> `~/.hermes/pending/memory/` until they are applied (`enable` warns when the
+> flag is on). Run `hermes agent-import` from an interpreter that has the hook.
+> Drift backups (`*.md.bak.<ts>`) are sealed too. Upstream's own drift error
+> tells you to open the `.bak` file directly — with memory encryption on, that
+> file is sealed, so decrypt it first with `encryption disable memory` (which
+> unseals every `.bak` snapshot alongside the live files) before following
+> that advice.
+
+> **Runtime guard before a seal (macOS).** `enable env` and `enable config`
+> remove the plaintext, so both first prove the file can be unsealed again at
+> startup. Two interpreters are probed. The first is the one that *should* run
+> `hermes`: `MORDRED_HERMES_RUNTIME_PYTHON` if set, else
+> `~/.hermes/hermes-agent/venv`, else the `hermes` launcher on `$PATH`. The
+> second is the interpreter of each `hermes … gateway run` process running
+> **right now** under your account — read from the process table, because a
+> gateway started from some other virtualenv is what actually has to unseal the
+> file, and its recorded `gateway_state.json` argv can name a different
+> interpreter than the one the kernel exec'd. Four argv shapes are recognised:
+> `<python> -m hermes_cli… gateway run`, `<python> <launcher> gateway run` (how a
+> console script appears once the kernel rewrites the `#!` exec),
+> `<launcher> gateway run`, and `<shell> <launcher> gateway run` — the launcher
+> path must be absolute. A gateway running under another account (or a shape
+> outside that set) is not seen, and therefore not probed. If a running gateway
+> cannot load the shim, the command refuses and touches nothing (excerpt):
+>
+> ```text
+> error: refusing to vault-seal .env — a hermes gateway is RUNNING from a different
+>   interpreter that cannot handle the seal: /path/to/repo/.venv/bin/python (pid 4242).
+>   probe: the hermes runtime (/path/to/repo/.venv/bin/python) cannot decrypt a sealed
+>   .env: ModuleNotFoundError("No module named 'mordred_hermes'")
+>   …
+> ```
+>
+> Fix it by installing the package into that interpreter
+> (`uv pip install --python <that-python> 'hermes-mordred[macos]'`) or by stopping
+> that gateway and restarting it from the expected runtime, then re-run the
+> command. `--force-runtime-unverified` skips both checks and seals anyway
+> (advanced — the file stays unreadable until that runtime has Mordred). When no
+> gateway is running, or the process table cannot be read, the extra check is
+> skipped silently: it never blocks a seal on an inconclusive scan.
+>
+> `encryption status` reports the same discovery on macOS, one line per running
+> gateway: `gateway runtime: <python> (pid N) — env shim: ok | config hook:
+> MISSING`. `--json` output is unchanged (and skips the probes).
+
 > **Changing the recovery passphrase.** `change-passphrase` rewraps the vault
 > under a new passphrase and leaves the master key, the device key, and every
 > enrolled file untouched — nothing is re-encrypted, and day-to-day automatic
@@ -203,6 +292,7 @@ hermes-mordred encryption change-passphrase             # rotate the recovery pa
 hermes-mordred keyvault init                # initialise the keyvault
 hermes-mordred keyvault list                # list key IDs
 hermes-mordred keyvault verify-digest       # integrity check
+hermes-mordred keyvault export --output <path>  # create a new mode-0600 MRKV snapshot
 hermes-mordred keyvault recover --blob <path>   # restore from a backup blob
 hermes-mordred keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
 hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
@@ -211,11 +301,16 @@ hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helpe
 hermes-mordred keyvault eth <sub>           # Ethereum keys — see below
 ```
 
-`recover --blob` is import-only. The Python API has an internal
-`export_backup()` operation, but the current operator CLI has no
-`keyvault export` command and does not create a backup file for you. Never run
-`reset` on a profile that still protects data unless you already hold and have
-independently verified a usable backup blob or have removed every dependency.
+`keyvault export` refuses an existing output path and requires its immediate
+parent to be a real directory. It prompts for the Keyvault init passphrase and,
+for a paper-only Keyvault, the 24-word Seed Phrase; neither belongs in argv.
+The snapshot is point-in-time, so export again after every Keyvault content
+change. If the command exits non-zero but reports that the backup *was*
+published and only a post-publication durability or cleanup step failed, the
+file at `--output` is complete (mode `0600`); verify it and remove the private
+`.<name>.mordred-materialize-*` staging copy if one was left beside it before
+relying on it. Never run `reset` unless an isolated recovery test has verified the
+latest blob or every dependency on the source has been removed.
 
 #### `keyvault eth` — Ethereum keys (HD wallet)
 
@@ -241,7 +336,7 @@ hermes-mordred keyvault eth address --envelope-id <id>   # show the address for 
 - `--seed-envelope-id` is needed only when several seeds are stored.
 - `derive` and `address` decrypt key material, so they trigger a Touch ID /
   passcode prompt unless the wrapping key is unattended (§4.3).
-- Requires the optional extra: `pip install "hermes-mordred[ethereum]"`.
+- Requires the `ethereum` extra; rerun the installer with `--extras ethereum`.
 
 #### Legacy vaults and cross-profile migration
 
@@ -251,12 +346,10 @@ key IDs, or moving one between `HERMES_HOME` profiles.*
 Keys created by current releases are isolated per `HERMES_HOME`. A legacy
 keyvault remains readable, but `keyvault reset` intentionally retains its
 machine-global legacy Keychain tag because another profile may share it.
-There is no supported public-CLI migration path unless you already possess an
-`MRKV` backup blob: the CLI can import with `recover --blob`, but it cannot
-export the old keyvault. Do not improvise a reset/export sequence from internal
-environment variables or Python APIs on production data. Keep the original
-profile and native helper store intact until the supported export workflow is
-available.
+Create an `MRKV` snapshot with `keyvault export --output <path>`, then import it
+into a fresh profile with `recover --blob <path>`. Keep the original profile
+and native helper store intact until the destination has been verified; export
+does not make reset or source removal safe by itself.
 
 Current profiles also record the profile-scoped audit wrapping key separately
 from the main key. If audit-key generation or its durability check is
@@ -275,7 +368,7 @@ hermes-mordred vault cat <name>             # decrypt one entry to stdout
 hermes-mordred vault migrate                # import plaintext .env + config.yaml
 hermes-mordred vault recover                # macOS only: re-key a copied vault onto this Mac
 hermes-mordred vault change-passphrase      # rotate the recovery passphrase (also exposed as `encryption change-passphrase`)
-hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY
+hermes-mordred vault set-memory-key         # store/rotate HERMES_MEMORY_KEY (the agent-memory key; `encryption enable memory` turns sealing on)
 hermes-mordred vault enable-config-decrypt  # put config.yaml under transparent at-rest decrypt
 hermes-mordred vault disable-config-decrypt # stop managing config.yaml; restore plaintext
 ```
@@ -397,8 +490,8 @@ Three steps, in order:
 > envelopes or HD-wallet derivation. Run `encryption enable env` to create the
 > at-rest file vault. The 24-word keyvault seed does not replace the file
 > vault's recovery passphrase and does not reconstruct its encrypted files.
-> The current CLI also cannot create the backup blob required to restore the
-> keyvault envelopes on another device.
+> After Keyvault initialization, create and separately store a portable
+> snapshot with `keyvault export`; it does not back up the at-rest file vault.
 
 ### 4.2 The device key and the recovery passphrase are different things
 
@@ -441,7 +534,7 @@ unwrapped**. Each component that opens the vault prompts independently, so a
 - the `config` decrypt hook at interpreter startup (after `encryption enable config`),
 - the `.env` injection when the plugin loads (after `encryption enable env`),
 - plus whatever the command itself touches (e.g. `encryption enable memory`
-  re-enrolls `.env`).
+  re-enrolls `.env` once to store the memory key).
 
 So with `env` + `config` on you will typically see **2–3 Touch ID prompts per
 command** — expected, not a bug.
@@ -485,10 +578,9 @@ command creates a genuinely fresh device key.
 > but cannot convert that key. For the file vault, keep the complete vault
 > directory and recovery passphrase; `vault recover` can re-key a copied vault
 > on a genuinely fresh device/profile, but it is not an in-place policy toggle.
-> For the main keyvault, the CLI can import a backup blob but cannot export one,
-> so there is no general supported conversion ceremony unless you already have
-> that blob. Keep using attended keys in a foreground session, and never reset
-> either store while secrets or wallets still depend on it.
+> For the main keyvault, export a fresh portable blob and verify recovery into
+> a fresh profile before considering an attended-to-unattended replacement.
+> Never reset either store while secrets or wallets still depend on it.
 
 ### 4.4 `network init` — the dialog and prompts
 
@@ -763,9 +855,9 @@ including under strict mode).
   idle" only (not while mounted under the same user).
 - **Linux**: TPM 2.0 is the key backend (`keyvault enable-tpm`). MVP binding is
   machine-only (Tier 2 — no per-use PIN/PCR prompt). Transparent `.env` and
-  `config.yaml` loading/resealing, memory-key provisioning through that
-  lifecycle, and workspace encryption are inactive; plaintext stays the
-  runtime source and status reports the limitation.
+  `config.yaml` loading/resealing, agent-memory sealing, and workspace
+  encryption are inactive; plaintext stays the runtime source and status
+  reports the limitation.
 - **Fallback behavior**: macOS can use a software P-256 key in the login
   Keychain when Secure Enclave access is unavailable. Linux deliberately has no
   software fallback and fails closed without the TPM helper.

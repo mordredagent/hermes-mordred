@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 keys, Tor/VPN routing, local-LLM policy enforcement, end-to-end gateway
 messages, and macOS-integrated at-rest secret encryption.
 
-**Status: active alpha** — current release `0.1.0a17`.
+**Status: active alpha** — current release `0.1.0a18`.
 
 New here? Follow the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
@@ -35,7 +35,7 @@ The package exposes six `hermes_agent.plugins` entry points:
 - macOS or Linux. macOS can fall back from Secure Enclave to a software P-256
   key in the login Keychain. Linux requires TPM 2.0 and fails closed when its
   helper is unavailable.
-- The transparent `.env`, configuration, memory-key, and workspace encryption
+- The transparent `.env`, configuration, agent-memory, and workspace encryption
   lifecycle is currently macOS-only. Linux supports the TPM-backed keyvault,
   but these runtime targets report inactive and continue to use plaintext.
 
@@ -84,28 +84,33 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a17"
+  "hermes-mordred[macos]==0.1.0a18"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a17"
+  "hermes-mordred[keyvault]==0.1.0a18"
 ```
 
 See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for the inspect-before-running sequence and first-time setup.
 
-Optional extras are dependency groups selected at installation time, not Hermes
-plugins. The installer automatically selects `macos` on macOS or `keyvault` on
-Linux; add the other extras only when you need the corresponding features:
+Optional extras are dependency groups, not Hermes plugins. Install any
+combination in one step, or add them later by rerunning the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --extras extension,ethereum,messaging
+```
+
+The installer selects `macos` or `keyvault` automatically. Use `--all-extras`
+for all four feature extras, or set `MORDRED_INSTALL_EXTRAS` to the same
+comma-separated list in automation.
 
 | Extra | Use it for |
 |---|---|
-| `keyvault` | Cross-platform cryptography used by `encryption` and `keyvault` |
-| `macos` | `keyvault` plus Secure Enclave and macOS system bridges |
-| `ethereum` | HD-wallet derivation and signing |
-| `tor-control` | Deep Tor liveness checks |
-| `messaging` | Terminal QR codes for extension pairing |
 | `extension` | Browser-extension WebSocket server and wallet RPC transport |
+| `ethereum` | HD-wallet derivation and signing |
+| `messaging` | Terminal QR codes for extension pairing |
+| `tor-control` | Deep Tor liveness checks |
 
 ### Enable the plugins
 
@@ -149,6 +154,17 @@ hermes-mordred keyvault enable-tpm
 hermes-mordred keyvault init
 ```
 
+After initialization, create the first portable Keyvault snapshot in an
+existing private directory:
+
+```sh
+hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv
+```
+
+The destination must not already exist. Store the snapshot separately from the
+Keyvault init passphrase and 24-word Seed Phrase, and export a new snapshot
+after every Keyvault content change, including `keyvault eth new`.
+
 On macOS, turn on transparent `.env` encryption and verify it:
 
 ```sh
@@ -177,6 +193,16 @@ hermes-mordred network use <tor|vpn|clearnet>
 hermes-mordred network status
 hermes-mordred audit tail
 ```
+
+Agent memories (`~/.hermes/memories/`) are encrypted by Mordred itself — no
+Hermes release does it. The `memory` target is opt-in (via `setup` or
+`encryption enable memory`), macOS-only, and rides on the `env` target, which
+carries its key. Enabling seals the files already on disk; `disable` decrypts
+them back. Restart a running `hermes gateway` afterwards — until you do, its
+memory reads/writes fail closed (they do not write plaintext), and a session
+may see an empty memory. Known limitations (raw readers,
+out-of-process writers, approval-gated writes) are listed in
+[`USAGE.md` §3](docs/user/USAGE.md#encryption--the-recommended-onoff-switch).
 
 Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
@@ -213,18 +239,26 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --with-extension
 ```
 
+For a custom feature set, use `--extras`; `--all-extras` adds every
+user-facing feature extra:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --extras extension,ethereum,messaging
+```
+
 The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a17"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a18"
 ```
 
 Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
 a terminal pairing QR.
 
 The browser client is distributed separately as a
-[prebuilt Chromium extension](https://github.com/InternetMaximalism/Mordred-Extension-dist).
+[prebuilt Chromium extension](https://github.com/mordredagent/mordred-extension-dist).
 Load its `dist/` directory as an unpacked extension.
 
 ### How it works
@@ -280,7 +314,8 @@ for safe isolation, loaded-code verification, and the full check suite.
   [USAGE §4](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#4-interactive-command-walkthroughs).
   The file-vault recovery command is currently macOS-only; encrypted data
   cannot be recovered if both its device key and recovery passphrase are lost.
-  The main keyvault CLI can import but does not yet export a backup blob.
+  Keyvault snapshots are created with `keyvault export` and restored with
+  `keyvault recover`; keep the blob, init passphrase, and Seed Phrase separate.
 - For extension, gateway, and port 7788 issues, see the
   [extension troubleshooting guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md#troubleshooting).
 - For Tor/VPN issues, run `hermes-mordred network status`, then
@@ -289,19 +324,29 @@ for safe isolation, loaded-code verification, and the full check suite.
 - If the audit log falls back to plaintext with
   `mordred.degraded.audit_encryption_unavailable`, restart from a context that
   can access the device key. Recovery is automatic.
+- The audit log is encrypted only after `keyvault init` (it needs the
+  device-wrapped log key); before that, entries are written in plaintext and
+  `hermes-mordred status` shows the audit-log row accordingly.
 
 ## Upgrading
 
-Re-run the installer, then restart the Hermes gateway or a standalone
-`extension serve` process:
+Re-run the installer with the same `--extras`, `--all-extras`, or
+`--with-extension` flags you used originally, then restart the Hermes gateway
+or a standalone `extension serve` process:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
 ```
 
 This upgrades Mordred only and handles the transition from the old
-`mordred-hermes` package name. Run it again if a Hermes update recreates its
-virtual environment.
+`mordred-hermes` package name. A Hermes self-update can recreate
+`~/.hermes/hermes-agent/venv`; when that happens, a bare re-run installs only
+the base package and silently drops any `extension`, `ethereum`, `messaging`,
+or `tor-control` extras from before, because a recreated venv only gets what
+the re-run itself asks for. Repeat the same extras flags to keep them. A
+re-run against an intact venv leaves already-installed extra dependencies in
+place, but only a re-run with the same flags re-resolves those extras against
+the new release, so pass them every time.
 
 For a version-pinned upgrade, pass the desired PEP 440 release to the installer
 (replace `VERSION` before running the command):
@@ -311,8 +356,9 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --version VERSION
 ```
 
-Add `--with-extension` before `--version` when that installation also runs the
-browser-extension gateway or uses its Ethereum wallet bridge.
+Add `--with-extension` (or `--extras ...` / `--all-extras`) before `--version`
+when that installation also runs the browser-extension gateway or uses its
+Ethereum wallet bridge.
 
 `hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration;
 it does not upgrade the package:

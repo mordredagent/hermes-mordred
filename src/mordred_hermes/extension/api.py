@@ -35,7 +35,7 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
-from . import pairing
+from . import page_headers, pairing
 from .crypto import (
     DecryptError,
     decrypt_message,
@@ -50,6 +50,7 @@ from .discord_context import (
     DiscordContextError,
     resolve_discord_channel,
 )
+from .errors import wire_error_code
 from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
 from .webauthn import InvalidWebAuthnPublicKey
 
@@ -70,6 +71,15 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # delivered out-of-band in the launch URL's fragment (never in an HTTP response)
 # and removed from browser history by the page bootstrap. Any handler added to
 # the `authed` table is refused for page sessions unless it is added here too.
+#
+# These are the page's *own* actions, not a read-only set: ``history_clear``
+# deletes the encrypted store. It is allowed because the bundled page triggers
+# it from an explicit, confirmed user action on data the page is already showing
+# — never on the page's behalf and never automatically. What stays out is
+# everything that acts beyond the page: credential/key writes, the K_master
+# crypto oracle, and the wallet signer.
+# ``test_page_allowlist_entries_are_all_used_by_the_shipped_page`` pins each
+# entry to a call site in the shipped bundle.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
 _EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1"]
 
@@ -113,16 +123,23 @@ def _bounded_history_result(
     turns: list[dict[str, str]],
     *,
     max_chars: int = MAX_WS_FRAME_CHARS,
+    status: str = "ok",  # history.STATUS_OK (kept a literal: history imports lazily)
 ) -> dict[str, Any]:
     """Return all projected turns or the longest complete newest suffix.
 
     The encrypted history itself is never modified. Per-turn serialization is
     reused to compute the exact compact JSON frame size without repeatedly
     serializing progressively smaller copies of a potentially large history.
+
+    ``status`` is an ADDITIVE field (``ok`` / ``empty`` / ``unavailable`` /
+    ``undecryptable``): ``turns`` stays a list of the same shape, so a client
+    built against the older frame keeps working while a newer one can tell an
+    empty conversation from one it can no longer decrypt.
     """
     full = {
         "id": request_id,
         "type": "history_result",
+        "status": status,
         "turns": turns,
         "truncated": False,
     }
@@ -270,12 +287,13 @@ class ExtensionAPIServer:
 
     async def _handle_page(self, request: web.Request) -> web.Response:
         if not _request_is_loopback(request):
-            return web.Response(status=403, text="loopback only")
+            return web.Response(status=403, text="loopback only", headers=page_headers.plain_response_headers())
         index = _WEB_DIR / "index.html"
         if not index.exists():
             return web.Response(
                 status=503,
                 text="Mordred web app not built. Run `npm run build:page` in the extension repo.",
+                headers=page_headers.plain_response_headers(),
             )
         # The shared bundle retains the legacy placeholder so older Hermes
         # releases can inject their page token. This server launches with a
@@ -285,14 +303,13 @@ class ExtensionAPIServer:
         return web.Response(
             text=html,
             content_type="text/html",
-            headers={
-                # The fragment token is process-bound. Avoid retaining even the
-                # token-free shell across restarts and keep security headers
-                # deterministic for both "/" and "/app".
-                "Cache-Control": "no-store",
-                "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer",
-            },
+            # Derived from the bytes actually being served (see page_headers):
+            # the bundle is built in the extension repo, so a refreshed bundle
+            # must not be able to ship a page its own policy blocks.
+            headers=page_headers.security_headers(
+                html,
+                connect_origins=page_headers.websocket_origins(self._local_origins),
+            ),
         )
 
     # -- connection ---------------------------------------------------------
@@ -681,7 +698,10 @@ class _Connection:
                     return
             await self._send({"id": mid, "type": "chat_end"})
         except Exception as exc:
-            await self._send({"id": mid, "type": "chat_error", "reason": str(exc)})
+            # An injected chat handler's exception text is not ours to publish
+            # (agent internals, provider URLs, file paths): reply with a code.
+            reason = wire_error_code(exc, fallback="agent_error", context="chat")
+            await self._send({"id": mid, "type": "chat_error", "reason": reason})
         finally:
             aclose = getattr(gen, "aclose", None)
             if aclose is not None:
@@ -767,7 +787,8 @@ class _Connection:
                 return
             await _reply(True, note="tokens written to ~/.hermes/.env — restart Hermes to apply")
         except Exception as exc:
-            await _reply(False, error=str(exc))
+            # Typically an OSError naming ~/.hermes/.env — logged, not returned.
+            await _reply(False, error=wire_error_code(exc, fallback="slack_setup_failed", context="slack_setup"))
 
     async def _on_discord_channel_resolve(self, msg: dict[str, Any]) -> None:
         """Resolve a Discord route without exposing the configured bot token."""
@@ -848,12 +869,13 @@ class _Connection:
     async def _on_history_get(self, msg: dict[str, Any]) -> None:
         from . import history as extension_history
 
-        turns = await asyncio.get_event_loop().run_in_executor(None, extension_history.projected_turns)
+        projection = await asyncio.get_event_loop().run_in_executor(None, extension_history.projected_history)
         await self._send(
             _bounded_history_result(
                 msg.get("id"),
-                turns,
+                projection.turns,
                 max_chars=MAX_WS_FRAME_CHARS,
+                status=projection.status,
             )
         )
 
@@ -872,8 +894,10 @@ class _Connection:
         except Exception as exc:
             # This is an accounts RPC failure, not a chat stream failure. The
             # generic correlated error lets every client reject immediately
-            # rather than waiting for its accounts_result timeout.
-            await self._send({"id": mid, "type": "error", "reason": f"wallet: {exc}"})
+            # rather than waiting for its accounts_result timeout. The keyvault
+            # detail (wallet paths, backend state) stays in the server log.
+            reason = wire_error_code(exc, fallback="wallet_unavailable", context="accounts_request")
+            await self._send({"id": mid, "type": "error", "reason": reason})
             return
         await self._send(
             {
@@ -917,12 +941,13 @@ class _Connection:
                 msg.get("rpc_url"),
             )
         except Exception as exc:
+            detail = wire_error_code(exc, fallback="", context="sign_request")
             await self._send(
                 {
                     "id": mid,
                     "type": "sign_result",
                     "request_id": request_id,
-                    "error": f"transaction_prepare_failed: {exc}",
+                    "error": f"transaction_prepare_failed: {detail}" if detail else "transaction_prepare_failed",
                 }
             )
             return
@@ -991,7 +1016,8 @@ class _Connection:
                 pend.get("expected_signer"),
             )
         except Exception as exc:
-            await self._send({"id": mid, "type": "sign_result", "request_id": request_id, "error": str(exc)})
+            error = wire_error_code(exc, fallback="sign_failed", context="sign_approve")
+            await self._send({"id": mid, "type": "sign_result", "request_id": request_id, "error": error})
             return
         await self._send({"id": mid, "type": "sign_result", "request_id": request_id, "signature": signature})
 

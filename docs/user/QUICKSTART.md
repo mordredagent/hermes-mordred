@@ -10,7 +10,7 @@
 Mordred adds privacy controls to Hermes without modifying Hermes itself. It can
 keep keys behind Secure Enclave or TPM 2.0, route traffic through Tor or a VPN,
 enforce local-LLM policy, and on macOS transparently encrypt `.env`,
-configuration, and agent memory keys at rest.
+configuration, and agent memories at rest.
 
 ## Before you start
 
@@ -66,6 +66,14 @@ Add `--version VERSION` after replacing `VERSION` with a release number when
 you need an exact PyPI version. For example, the two options can be combined as
 `bash -s -- --with-extension --version VERSION`. Deep Tor liveness checks and
 terminal QR rendering remain separate optional extras.
+
+Use `--extras` when you want a custom feature set, or `--all-extras` to include
+all user-facing extras, including deep Tor liveness checks:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --extras extension,ethereum,messaging
+```
 
 If you prefer to inspect a downloaded script before running it:
 
@@ -167,7 +175,7 @@ shell.
 ## 2. First run, in order
 
 `hermes-mordred setup` first checks that upstream Hermes itself is set up
-(offering to run `hermes setup` if not), then runs the six steps below in
+(offering to run `hermes setup` if not), then runs the seven steps below in
 order, probing each one first and skipping whatever is already complete — so
 re-running it after an interruption picks up where it left off. Two moments
 still need you at the keyboard: the keyvault Passphrase and 24-word Seed
@@ -181,7 +189,8 @@ passphrase the first time step 5 enables encryption.
 | 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
 | 4 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
 | 5 | `hermes-mordred encryption enable env` (macOS only) | Enrolls `.env` and activates the transparent runtime lifecycle. |
-| 6 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
+| 6 | `hermes-mordred encryption enable memory` (macOS only) | Arms the memory hook and seals `~/.hermes/memories/*.md`. |
+| 7 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
 
 On macOS, a successful final status includes an `env [on] enrolled` row. On
 Linux the row is inactive even if enrolled; that is an explicit platform
@@ -224,6 +233,13 @@ hermes-mordred encryption status
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).
 
+`encryption enable memory` needs the `env` target first (it carries the memory
+key) and seals `~/.hermes/memories/*.md` as it goes. If a `hermes gateway` is
+running, restart it afterwards — until then its memory reads/writes fail
+closed (not plaintext), and a session may see an empty memory. Separately,
+the audit log itself is encrypted only after `keyvault init` — before that,
+entries are written in plaintext.
+
 ## 5. Network settings 🌐
 
 ```sh
@@ -261,13 +277,17 @@ hermes-mordred keyvault reset         # asks you to type reset
 hermes-mordred keyvault reset --yes   # non-interactive and immediate
 ```
 
-This destroys profile-owned key material. The current CLI can recover an
-existing backup blob but cannot create one: there is no supported
-`keyvault export` command yet. Do not reset a profile whose encrypted secrets
-or wallets still depend on it. Use reset only for an expendable profile, or
-after decrypting/removing every dependency and independently verifying any
-backup blob you already possess. The command prints the exact key IDs before
-interactive confirmation.
+This destroys profile-owned key material. Before reset, create a fresh snapshot
+in an existing private directory:
+
+```sh
+hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv
+```
+
+Keep the blob separate from the Keyvault init passphrase and 24-word Seed
+Phrase. Verify recovery against an isolated fresh profile before relying on it.
+Do not reset while encrypted secrets or wallets still depend on the source.
+The reset command prints the exact key IDs before interactive confirmation.
 
 ## Common checks
 

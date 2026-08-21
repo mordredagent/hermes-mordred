@@ -386,6 +386,27 @@ def _locate_offline_digest_script() -> Path | None:
     return None
 
 
+def _offline_copy_hint(script: Path | None) -> str:
+    """Render the copy-to-offline-device hint for the seed banner.
+
+    With a located script, show a concrete, paste-safe copy command — both
+    paths are quoted so the ``<your-usb>`` placeholder cannot act as shell
+    redirection if an operator pastes the line verbatim. Without one, fall
+    back to naming the file only (the 2026-07-07 locator fix already keeps
+    this branch rare). Either way, state what the second device actually
+    needs — python3 plus the blake3 package; the file itself is
+    self-contained (UX review 2026-08-20: naming the path alone still left
+    operators to invent the copy step themselves).
+    """
+    needs = "  (one self-contained file; the offline device only needs\n   python3 with the blake3 package installed)\n"
+    if script is not None:
+        return (
+            "  Copy it to that device from this machine, e.g. via USB stick:\n"
+            f'      cp "{script}" "/Volumes/<your-usb>/"\n' + needs
+        )
+    return "  (ships with hermes-mordred; copy it to that device first)\n" + needs
+
+
 def _display_seed_or_refuse(
     handle: SeedDisplayHandle,
     pow_bytes: bytes,
@@ -411,11 +432,7 @@ def _display_seed_or_refuse(
     # here exists after a plain `pip install`, not only in a repo clone; the
     # second-device preparation steps live in the script's own header.
     script = _locate_offline_digest_script()
-    copy_hint = (
-        f"  (copy it to that device from this machine: {script})\n"
-        if script is not None
-        else "  (ships with hermes-mordred; copy it to that device first)\n"
-    )
+    copy_hint = _offline_copy_hint(script)
     surface.banner(
         "\n"
         "────────────────────────────────────────────────────────────\n"
@@ -850,8 +867,13 @@ def init_keyvault(
 
     print(f"Keyvault initialised. Key: {result.key_id}")
     print(
-        "Next: `hermes-mordred encryption enable env` to encrypt secrets at rest "
-        "(the first enable creates the vault and asks once for a recovery passphrase), "
-        "or `hermes-mordred status` for an overview."
+        "Next: create the portable Keyvault snapshot with "
+        "`hermes-mordred keyvault export --output /secure/path/keyvault-backup.mrkv`. "
+        "Store it separately from the init passphrase and 24-word Seed Phrase."
+    )
+    print(
+        "The backup is a snapshot: export it again after `keyvault eth new`, direct Keyvault API writes, "
+        "or any other Keyvault content change. Then use `hermes-mordred encryption enable env` for "
+        "ordinary Hermes secrets, or `hermes-mordred status` for an overview."
     )
     return 0

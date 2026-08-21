@@ -27,10 +27,12 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/vault/` | vault/encryption CLI | at-rest file vault |
 | `<home>/mordred/env-vault.optout` | encryption CLI | disables runtime `.env` injection |
 | `<home>/mordred/config-vault.marker` | encryption CLI | enables config materialize/reseal lifecycle |
+| `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
-| `<home>/memories/*.md` | Hermes memory tool | optional upstream memory encryption target |
+| `<home>/memories/*.md` | Hermes memory tool | sealed by Mordred's memory hook when armed, otherwise plaintext |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
 
 Unless a section says otherwise, private Mordred directories are mode `0700`
@@ -263,14 +265,17 @@ The stable internal surface includes `prepare_generate`, `confirm_generate`,
 `generate`, `encrypt`, `decrypt`, `verify_digest`, `export_backup`, and
 `import_backup` in `mordred_hermes.keyvault.api`.
 
-`export_backup()` is an API, not a current operator command. Do not document a
-`keyvault export` CLI until the task in [`TODO.md`](./TODO.md) §4.2 lands.
+`export_backup()` returns bytes without choosing a path. The wizard's
+`keyvault export --output <path>` command owns safe publication of those bytes.
 
 ### Consumer CLI
 
 The current keyvault subtree provides `init`, `list`, `verify-digest`,
-`recover --blob`, `reset`, `enable-se`, `enable-tpm`, and `eth`. `recover`
-imports an existing MRKV blob; the CLI does not currently create that blob.
+`export --output`, `recover --blob`, `reset`, `enable-se`, `enable-tpm`, and
+`eth`. Export output is caller-owned and may be outside the managed layout.
+Its immediate parent must be a real directory and the final path must not
+exist. The wizard publishes a complete mode-`0600` file atomically without
+replacement and leaves no partial final file on failure.
 
 ### Pre-Phase-4 behavior
 
@@ -296,11 +301,14 @@ are inactive and plaintext runtime files remain; `encryption status` reports
 the enrolled target as paused/inactive rather than claiming protection.
 
 The markers `<home>/mordred/env-vault.optout` and
-`<home>/mordred/config-vault.marker` control those macOS lifecycles. On macOS,
-a copied vault can be re-keyed on a new device with `vault recover` and its
-recovery passphrase; this is different from `keyvault recover --blob`. Linux
-has a TPM wrapping backend but no production device-anchor store for this file
-vault, so `vault recover` is unsupported there.
+`<home>/mordred/config-vault.marker` control those macOS lifecycles;
+`<home>/mordred/memory-vault.marker` and `<home>/mordred/memory-vault.optout`
+control the agent-memory at-rest encryption runtime the same way — marker
+present arms the hook, optout present pauses it regardless of the marker. On
+macOS, a copied vault can be re-keyed on a new device with `vault recover` and
+its recovery passphrase; this is different from `keyvault recover --blob`.
+Linux has a TPM wrapping backend but no production device-anchor store for
+this file vault, so `vault recover` is unsupported there.
 
 ## `<home>/extension/`
 
@@ -325,9 +333,15 @@ do not publish them as diagnostics.
 - `<home>/config.yaml`: Hermes's canonical config. The wizard round-trips only
   Mordred sections and plugin enablement; the optional macOS vault lifecycle
   materializes plaintext while Hermes runs and reseals it at exit.
-- `<home>/memories/*.md`: written/encrypted by Hermes's memory tool when
-  `memory.encryption.enabled` and `HERMES_MEMORY_KEY` are active. Mordred stores
-  or removes that key and edits the flag; it does not own the file format.
+- `<home>/memories/*.md`: written by Hermes's memory tool. Files are
+  plaintext unless Mordred's memory hook is armed; when armed, every write is
+  sealed in the `HERMES-MEMORY-ENC-v1` format, and drift backups
+  (`*.md.bak.<ts>`) are sealed too. Mordred stores `HERMES_MEMORY_KEY` in the
+  vault `.env` and owns the sealed container format; Hermes owns the entry
+  format inside the plaintext and the memory tool itself. The legacy
+  `memory.encryption.enabled` config flag is inert; `encryption status`
+  reports a legacy flag without a marker as "legacy flag set — run
+  `encryption enable memory`".
 - `~/.local/bin/mordred-hermes-sekey` and
   `~/.local/bin/mordred-hermes-tpmkey`: helper executables installed by the
   native-helper commands. Explicit helper environment variables and a final
@@ -351,9 +365,9 @@ legacy audit log, policy snapshot/config, keyvault tree, and credentials tree.
 - Sensitive trees reject links/special files, stage privately, compare a final
   source rescan, and never overwrite differing destination data implicitly.
 - Copying a native-key-backed keyvault is only useful where the corresponding
-  native key remains available. The current CLI can import an existing backup
-  blob but cannot create one; do not promise cross-machine keyvault migration
-  through a nonexistent export command.
+  native key remains available. For cross-machine migration, create a portable
+  MRKV snapshot with `keyvault export` and restore it into a fresh profile with
+  `keyvault recover` instead of copying the managed keyvault directory.
 - `--reset` selects destructive overwrite behavior for migration conflicts; it
   is unrelated to `keyvault reset`.
 
