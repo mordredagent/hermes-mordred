@@ -220,26 +220,13 @@ session, bound by QR and a short expiry.
 
 ### v2-F8: `config.yaml` at-rest transparent decryption
 
-Complete. Transparent config decryption ships as an explicit opt-in and will
-not become the default. Future work belongs in bug fixes, not this roadmap item.
+Complete; the current opt-in contract and plaintext working-file limitation
+live in [`SPEC.md`](./SPEC.md) and [`PATHS.md`](./PATHS.md).
 
 ### v2-F9: agent-memory at-rest encryption
 
-Mordred owns encryption of `<home>/memories/*.md` at rest, as a runtime
-wrapper around the memory tool's read/write seam — no Hermes release does
-this itself. Opt-in through the `setup` wizard's `memory-encryption` step
-(default yes) or directly through `encryption enable memory`; the runtime is
-active only on macOS, and `encryption status` marks it `on`/`paused`/`off`/
-`exposed` like the other targets.
-
-Release requirements:
-
-- the seam canary stays green in CI so an upstream memory-tool refactor is
-  caught before release;
-- live verification on Apple Silicon with a running gateway, recorded in
-  [`CI.md`](./CI.md) §Manual live-device validation log; and
-- `encryption status` stays honest when the runtime is missing rather than
-  claiming protection it cannot deliver.
+Complete; the shipped runtime contract lives in [`SPEC.md`](./SPEC.md), and its
+live Apple Silicon result is recorded in [`CI.md`](./CI.md).
 
 ## v3+ candidates: Payment layer
 

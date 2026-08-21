@@ -73,6 +73,7 @@ hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privac
 hermes-mordred keyvault enable-se     # build the platform key helper (Linux: enable-tpm)
 hermes-mordred keyvault init          # create the hardware-backed keyvault
 hermes-mordred encryption enable env  # macOS only: turn on transparent at-rest encryption
+hermes-mordred encryption enable memory  # macOS only: seal agent-memory files
 hermes-mordred status                 # verify the result at a glance
 ```
 
@@ -100,9 +101,10 @@ hermes-mordred status --json     # machine-readable
 ### `setup` — resumable first-run orchestrator
 
 Runs the upstream-Hermes check, Mordred configuration, network selection,
-platform helper, keyvault ceremony, macOS env encryption, and final status in
-order. Completed steps are skipped on a rerun. A blocked or corrupt keyvault
-stops with repair guidance; setup never resets it automatically.
+platform helper, keyvault ceremony, macOS env and agent-memory encryption, and
+final status in order. Completed steps are skipped on a rerun. A blocked or
+corrupt keyvault stops with repair guidance; setup never resets it
+automatically.
 
 ```sh
 hermes-mordred setup
@@ -159,7 +161,7 @@ hermes-mordred policy reload                # re-read policy from config.yaml
 ### `network` — privacy path control
 ```sh
 hermes-mordred network init                 # set up Tor / VPN / clearnet (Mullvad account)
-hermes-mordred network use {tor,vpn,clearnet}
+hermes-mordred network use tor              # or: vpn, clearnet
 hermes-mordred network status               # active path + liveness
 ```
 
@@ -184,11 +186,19 @@ target inactive and plaintext remains authoritative; `workspace` is skipped
 when its macOS tooling is unavailable and never fails an `all` batch.
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
-hermes-mordred encryption enable  {env,config,memory,workspace,all}
-hermes-mordred encryption disable {env,config,memory,workspace,all}   # reversible; keeps vault copy
-hermes-mordred encryption purge   {env,config,memory,workspace,all} --yes   # destructive
+hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
+hermes-mordred encryption disable TARGET                # reversible; keeps vault copy
+hermes-mordred encryption purge   TARGET --yes          # destructive
 hermes-mordred encryption change-passphrase             # rotate the recovery passphrase (alias of `vault change-passphrase`)
 ```
+
+`on` means that the target's protection lifecycle is active, not that its
+plaintext never exists while in use. Most importantly, `config [on]`
+materializes a mode-`0600` plaintext `config.yaml` on disk for the lifetime of
+each managed Hermes process and reseals it on clean exit; an unclean exit can
+leave the working copy until the next managed start and exit. The concise
+target-by-target plaintext and restart matrix is in
+[`QUICKSTART.md` §What the protected states mean](./QUICKSTART.md#what-the-protected-states-mean).
 
 > **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
 > encrypts `~/.hermes/memories/*.md`, so Mordred owns this one end to end: a

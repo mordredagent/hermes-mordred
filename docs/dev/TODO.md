@@ -215,9 +215,9 @@ operator surface.
   the capability probe, and the CI canary against the installed upstream.
 - [x] Wizard lifecycle: `encryption enable/disable/purge memory`, `status`
   drift, and the `setup` `memory-encryption` step.
-- [ ] Live verification on Apple Silicon with a running gateway.
-- [ ] Record the live-verification result in [`CI.md`](./CI.md) §Manual
-  live-device validation log.
+- [x] Live verification on Apple Silicon with a running gateway (2026-08-20).
+- [x] Record the live-verification result in [`CI.md`](./CI.md) §Manual
+  live-device validation log (2026-08-20).
 
 ### Acceptance gate (Phase 4)
 

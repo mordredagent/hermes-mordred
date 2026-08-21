@@ -62,6 +62,10 @@ compatibility policy.
   running under another account, or argv shapes outside that set, are not
   probed. A scan that finds nothing is not a refusal, and
   `--force-runtime-unverified` seals without either check.
+- The `config` target protects `config.yaml` between managed process runs, not
+  throughout a run. Its startup hook materializes a mode-`0600` plaintext file
+  for the managed process lifetime and reseals it on clean exit; an unclean
+  exit can leave that working copy until the next managed start and exit.
 - File-vault `vault recover` is supported only on macOS. The Linux TPM helper
   implements native wrapping, but the file vault has no Linux device-anchor
   store and must not claim a working recovery hot path there.
@@ -667,7 +671,6 @@ a silent regression.
 
 - exporting private native wrapping keys;
 - silently downgrading Linux TPM protection to a software key;
-- a supported CLI command that exports a keyvault recovery blob;
 - automatic migration of an existing key when `enable-se` or `enable-tpm`
   installs a helper;
 - unattended claims for keys created with attended authorization policy;
@@ -687,7 +690,7 @@ install
 network     use | status | init
 policy      show | explain | dry-run | reload
 audit       tail | grep | decrypt | purge
-keyvault    init | list | verify-digest | recover | reset |
+keyvault    init | list | verify-digest | export | recover | reset |
             enable-se | enable-tpm | eth
 vault       init | change-passphrase | recover | add | status | cat |
             migrate | set-memory-key | enable-config-decrypt |
@@ -709,9 +712,10 @@ seed phrase, or recovery passphrase as a normal command-line flag.
 
 `setup` is a re-runnable first-run orchestrator. It probes upstream Hermes,
 configuration, the selected network route, the platform helper, keyvault, and
-macOS env encryption, then runs only incomplete steps and prints status. It
-never resets or overwrites a blocked/corrupt keyvault. Non-interactive mode runs
-only the automatable subset and reports the interactive commands still needed.
+macOS env and agent-memory encryption, then runs only incomplete steps and
+prints status. It never resets or overwrites a blocked/corrupt keyvault.
+Non-interactive mode runs only the automatable subset and reports the
+interactive commands still needed.
 
 ## Operational Guarantees & Caveats
 
@@ -805,8 +809,7 @@ and interactive unless a narrowly scoped confirmation flag exists.
 - transparent env/config/memory/workspace lifecycle outside macOS;
 - audit hash chains, external anchoring, or same-UID tamper resistance;
 - isolated signer/payment authorization;
-- automatic migration of native-key protection tiers; and
-- unsupported claims that a keyvault backup can currently be exported by CLI.
+- automatic migration of native-key protection tiers.
 
 Future candidates and their release gates live in
 [`ROADMAP.md`](./ROADMAP.md); actionable unfinished work lives in
