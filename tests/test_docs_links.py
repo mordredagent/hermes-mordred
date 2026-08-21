@@ -267,6 +267,75 @@ def test_usage_documents_every_top_level_cli_command() -> None:
     assert not missing, f"USAGE.md omits top-level CLI commands: {missing}"
 
 
+def _direct_subcommands(parser: argparse.ArgumentParser) -> set[str]:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return set(action.choices)
+    return set()
+
+
+def _documented_spec_cli_tree() -> dict[str, set[str]]:
+    spec = (ROOT / "docs" / "dev" / "SPEC.md").read_text(encoding="utf-8")
+    match = re.search(r"```text\nstatus\nsetup\n(?P<tail>.*?)\n```", spec, re.DOTALL)
+    assert match is not None, "SPEC.md is missing the canonical CLI tree"
+
+    entries: dict[str, str] = {}
+    current = ""
+    for line in ("status\nsetup\n" + match.group("tail")).splitlines():
+        if line[:1].isspace():
+            assert current, f"SPEC.md CLI continuation has no parent: {line!r}"
+            entries[current] += " " + line.strip()
+            continue
+        parts = line.split(maxsplit=1)
+        current = parts[0]
+        entries[current] = parts[1] if len(parts) == 2 else ""
+
+    return {command: set(re.findall(r"[a-z][a-z0-9-]*", children)) for command, children in entries.items()}
+
+
+def test_spec_cli_tree_matches_parser_direct_subcommands() -> None:
+    from mordred_hermes.wizard._cli_parsers import _setup_subparser
+
+    parser = argparse.ArgumentParser()
+    _setup_subparser(parser, required=False)
+    subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    documented = _documented_spec_cli_tree()
+
+    assert set(documented) == set(subparsers.choices), "SPEC.md top-level CLI tree differs from the parser"
+    mismatches = {
+        command: {
+            "documented": sorted(documented[command]),
+            "parser": sorted(_direct_subcommands(command_parser)),
+        }
+        for command, command_parser in subparsers.choices.items()
+        if documented[command] != _direct_subcommands(command_parser)
+    }
+    assert not mismatches, f"SPEC.md direct subcommands differ from the parser: {mismatches}"
+
+
+def test_setup_guides_include_agent_memory_encryption() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_setup = readme.split("### Use it", 1)[1].split("### Verify discovery", 1)[0]
+    usage = (ROOT / "docs" / "user" / "USAGE.md").read_text(encoding="utf-8")
+    usage_setup = usage.split("## 2. First-run quickstart", 1)[1].split("## 3. Command reference", 1)[0]
+    quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
+    quickstart_setup = quickstart.split("## 2. First run, in order", 1)[1].split(
+        "## 3. Fastest path: secrets encrypted at rest", 1
+    )[0]
+    spec = (ROOT / "docs" / "dev" / "SPEC.md").read_text(encoding="utf-8")
+    spec_setup = spec.split("`setup` is a re-runnable first-run orchestrator", 1)[1].split(
+        "## Operational Guarantees & Caveats", 1
+    )[0]
+
+    for name, section in {
+        "README.md": readme_setup,
+        "docs/user/USAGE.md": usage_setup,
+        "docs/user/QUICKSTART.md": quickstart_setup,
+    }.items():
+        assert "encryption enable memory" in section, f"{name} setup sequence omits memory encryption"
+    assert "agent-memory encryption" in spec_setup, "SPEC.md setup contract omits memory encryption"
+
+
 def test_maintained_docs_do_not_embed_a_developer_home_path() -> None:
     failures = [
         str(path.relative_to(ROOT)) for path in _markdown_files() if "/Users/" in path.read_text(encoding="utf-8")

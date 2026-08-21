@@ -178,11 +178,32 @@ uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
 ~/.hermes/hermes-agent/venv/bin/python3 -c "import mordred_hermes; print(mordred_hermes.__file__)"
 ```
 
-**Make sure to revert to the PyPI release** (if you forget, unreleased dev code keeps running as production indefinitely):
+**Make sure to revert to the PyPI release** (if you forget, unreleased dev code
+keeps running as production indefinitely). Reinstall the same extras used for
+the editable swap so the production feature set is re-resolved against the
+released package:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "hermes-mordred[macos]==0.1.0a18"   # ← substitute the current PyPI version here
+  --reinstall "hermes-mordred[macos,extension,ethereum]==0.1.0a18"
+
+uv pip check --python ~/.hermes/hermes-agent/venv/bin/python3
+~/.hermes/hermes-agent/venv/bin/python3 -c \
+  "import mordred_hermes; print(mordred_hermes.__file__)"
+# The import must now resolve under .../site-packages/, not the checkout's src/.
+```
+
+Substitute the current PyPI version and the exact extras your production
+process uses. Then stop and restart the Hermes gateway or standalone
+`extension serve` process through its normal deployment mechanism; replacing
+files in the venv does not change an already-running process. Confirm the new
+PID owns the expected port and that the local endpoint responds before treating
+the rollback as complete:
+
+```sh
+# If production runs the standalone Extension gateway on its default port:
+lsof -nP -iTCP:7788 -sTCP:LISTEN
+curl -fsS http://127.0.0.1:7788/ >/dev/null
 ```
 
 ## (Optional) Hermes upstream remote

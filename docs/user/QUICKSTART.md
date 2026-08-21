@@ -233,6 +233,29 @@ hermes-mordred encryption status
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).
 
+### What the protected states mean
+
+Protection is target-specific. An `on` mark means the target's lifecycle is
+active on this OS; it does not mean plaintext never exists while the data is in
+use.
+
+| Target and protected mark | What remains protected | Plaintext while in use | Restart requirement |
+|---|---|---|---|
+| `env [on]` | The vault copy is encrypted and the plaintext `.env` is absent from disk. | Values are injected into the Hermes process environment. | Restart a running gateway after enabling or changing the target. |
+| `config [on]` | The vault copy is encrypted between managed Hermes processes. | A mode-`0600` plaintext `config.yaml` exists on disk for the process lifetime and is resealed on clean exit. An unclean exit can leave it until the next managed start and exit. | Restart a running gateway after enabling or disabling the target. |
+| `memory [on]` | `~/.hermes/memories/*.md` and drift backups stay sealed on disk; reads and writes pass through the hook. | Plaintext exists in process memory. Approval-pending JSON remains a documented plaintext exception. | Restart a running gateway after enabling or disabling the target. |
+| `workspace [sealed]` | The encrypted volume is unmounted and protected at rest. | `workspace [open]` means the volume is mounted and visible to the same user. | No gateway restart; unmount it to return to `sealed`. |
+
+For `env`, `config`, and `memory`, `paused` means the encrypted data is retained
+but protection is not active, `off` means the target is not configured, and
+`exposed` means plaintext drift was found on disk and must be resealed. The
+workspace uses `sealed` / `open` / `off` instead.
+
+The audit log is separate from these four targets. It starts as plaintext and
+becomes encrypted after a successful `keyvault init`; `hermes-mordred status`
+reports the actual audit-log state and calls out any encrypted-to-plaintext
+downgrade.
+
 `encryption enable memory` needs the `env` target first (it carries the memory
 key) and seals `~/.hermes/memories/*.md` as it goes. If a `hermes gateway` is
 running, restart it afterwards — until then its memory reads/writes fail
@@ -244,7 +267,7 @@ entries are written in plaintext.
 
 ```sh
 hermes-mordred network init
-hermes-mordred network use <tor|vpn|clearnet>
+hermes-mordred network use tor              # or: vpn, clearnet
 hermes-mordred network status
 ```
 
