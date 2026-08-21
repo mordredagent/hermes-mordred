@@ -239,6 +239,7 @@ def _channel_key_matches(
     platform: str,
     chat_id: str,
     scope_id: str | None = None,
+    slack_connect_host_scope_ids: frozenset[str] | None = None,
 ) -> bool:
     """Does a stored channel-key id name exactly ``chat_id`` on ``platform``?
 
@@ -264,6 +265,14 @@ def _channel_key_matches(
     wrapper has no event at all. Refusing those would resurrect the #83 outage
     (every v3 command failing ``key_not_bound_to_channel``), so an unknown
     scope keeps the lenient first/last-segment match.
+
+    A Slack Connect event from an external member carries that member's team
+    as ``scope_id`` even though the extension key is normally stored under the
+    bot's installing team. ``slack_connect_host_scope_ids`` is the gateway's
+    independently authenticated set of installing Slack teams for that exact
+    external event. Only those scopes are accepted as alternates; callers may
+    not use it to disable scope binding generally, and it has no effect on
+    non-Slack platforms.
     """
     if stored_id == chat_id:
         return True
@@ -271,7 +280,12 @@ def _channel_key_matches(
     if len(segments) < 2 or segments[0].lower() != platform or segments[-1] != chat_id:
         return False
     if scope_id and len(segments) > 2:
-        return ":".join(segments[1:-1]) == scope_id
+        stored_scope = ":".join(segments[1:-1])
+        return stored_scope == scope_id or (
+            platform == "slack"
+            and slack_connect_host_scope_ids is not None
+            and stored_scope in slack_connect_host_scope_ids
+        )
     return True
 
 
@@ -282,6 +296,7 @@ def _context_channel_key(
     chat_id: str,
     parent_chat_id: str | None,
     scope_id: str | None = None,
+    slack_connect_host_scope_ids: frozenset[str] | None = None,
 ) -> bytes:
     """Resolve a key only from the authenticated event's channel context."""
     from mordred_hermes.extension.crypto import key_id
@@ -293,7 +308,13 @@ def _context_channel_key(
         candidates.append(parent_chat_id)
     for channel_id in candidates:
         for stored_id, raw_key in channel_keys.items():
-            if not _channel_key_matches(stored_id, platform=platform, chat_id=channel_id, scope_id=scope_id):
+            if not _channel_key_matches(
+                stored_id,
+                platform=platform,
+                chat_id=channel_id,
+                scope_id=scope_id,
+                slack_connect_host_scope_ids=slack_connect_host_scope_ids,
+            ):
                 continue
             if key_id(raw_key) == kid:
                 return raw_key
@@ -308,6 +329,7 @@ def _decrypt_gateway_claim(
     thread_root: str | None,
     parent_chat_id: str | None,
     scope_id: str | None = None,
+    slack_connect_host_scope_ids: frozenset[str] | None = None,
 ) -> tuple[str, str, ReplayClaim]:
     """Parse and authenticate one context-bound v3 platform message."""
     from mordred_hermes.extension.crypto import DecryptError, decrypt_message_v3
@@ -335,6 +357,7 @@ def _decrypt_gateway_claim(
         chat_id=chat_id,
         parent_chat_id=parent_chat_id,
         scope_id=scope_id,
+        slack_connect_host_scope_ids=slack_connect_host_scope_ids,
     )
     try:
         plaintext = decrypt_message_v3(
@@ -358,6 +381,7 @@ def decrypt_gateway_envelope(
     thread_root: str | None,
     parent_chat_id: str | None = None,
     scope_id: str | None = None,
+    slack_connect_host_scope_ids: frozenset[str] | None = None,
 ) -> tuple[str | None, str | None, ReplayClaim | None]:
     """Authenticate and decrypt a complete gateway wire envelope.
 
@@ -375,6 +399,8 @@ def decrypt_gateway_envelope(
 
     ``scope_id`` is the event's workspace/guild id when the caller knows it;
     it tightens composite channel-key binding (see :func:`_channel_key_matches`).
+    ``slack_connect_host_scope_ids`` permits only authenticated installing-team
+    alternatives for a proven external Slack Connect event.
     """
     if not text or ENC_CLAIM_RE.search(text) is None:
         return None, None, None
@@ -389,6 +415,7 @@ def decrypt_gateway_envelope(
             thread_root=thread_root,
             parent_chat_id=parent_chat_id,
             scope_id=scope_id,
+            slack_connect_host_scope_ids=slack_connect_host_scope_ids,
         )
     except InvalidEncryptedEnvelope:
         raise
