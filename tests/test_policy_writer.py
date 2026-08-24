@@ -22,17 +22,10 @@ import pytest
 from mordred_hermes.wizard.policy_writer import (
     MORDRED_PLUGIN_NAMES,
     PolicySnapshot,
-    PolicyWriter,
     _atomic_write_text,
 )
 
-
-def _writer(tmp_path: Path) -> PolicyWriter:
-    return PolicyWriter(
-        config_path=tmp_path / "config.yaml",
-        policy_json_path=tmp_path / "mordred" / "policy.json",
-        mordred_dir=tmp_path / "mordred",
-    )
+from ._helpers import _writer
 
 
 class TestEmitPolicyJson:

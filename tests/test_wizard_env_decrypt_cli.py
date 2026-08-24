@@ -33,19 +33,12 @@ from mordred_hermes.keyvault._runtime_env import _env_optout_marker_path
 from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 from mordred_hermes.wizard import _runtime_gate, env_decrypt_cli
 
+from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
 _ENV_A = b"ANTHROPIC_API_KEY=sk-secret\n"
 _ENV_B = b"ANTHROPIC_API_KEY=sk-other\n"
-
-
-def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    key_id = anchor_label = _identity.vault_identity(root)
-    backend.generate_enclave_key(key_id)
-    vault.init_vault(
-        root, key_id=key_id, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=anchor_label
-    ).close()
 
 
 def _vault_env(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> bytes | None:
