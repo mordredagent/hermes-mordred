@@ -202,6 +202,47 @@ class TestEnable:
         assert rc == 0
         assert "leaving the plaintext" in capsys.readouterr().err.lower()
 
+    def test_mismatch_check_runs_before_unlink_is_ever_attempted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Multi-fault: the on-disk plaintext both mismatches the enrolled bytes
+        AND would blow up if unlinking were ever attempted on it. The mismatch
+        check inside ``_delete_enrolled_plaintext`` must run and return FIRST —
+        the same "leaving the plaintext in place" message as a lone mismatch
+        (see ``test_keeps_plaintext_if_disk_diverges_from_vault``) — never
+        reaching the unlink step at all.
+
+        Mutation-sensitive: swapping the mismatch-check block and the unlink
+        block inside ``_delete_enrolled_plaintext`` makes this fail — the
+        unlink would run first, trip the injected AssertionError below, and
+        the plaintext would be gone instead of kept.
+        """
+        from mordred_hermes.wizard import vault_cli
+
+        root, home = tmp_path / "v", tmp_path / "home"
+        home.mkdir()
+        backend, store = FakeBackend(), FakeAnchorStore()
+        _init_empty_vault(root, backend, store)
+        (home / ".env").write_bytes(_ENV_A)
+        # The enrolled copy differs from what's on disk (mismatch) ...
+        monkeypatch.setattr(vault_cli, "add_and_verify", lambda **_k: (0, _ENV_B))
+        # ... AND unlinking it would also fail, if the code ever got that far.
+        real_unlink = Path.unlink
+        env_path = home / ".env"
+
+        def _boom_if_unlinking_env(self: Path, *a: object, **k: object) -> None:
+            if self == env_path:
+                raise AssertionError("unlink must not run before the mismatch check has returned")
+            real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(Path, "unlink", _boom_if_unlinking_env)
+
+        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+
+        assert rc == 0
+        assert env_path.read_bytes() == _ENV_A  # kept — the unlink path was never reached
+        assert "leaving the plaintext" in capsys.readouterr().err.lower()
+
     def test_enable_unlocks_the_enclave_once(self, tmp_path: Path) -> None:
         """enable() must open the vault — one Secure-Enclave unlock, i.e. one Touch ID
         prompt — exactly once: the enroll and the pre-delete verify share a single open."""

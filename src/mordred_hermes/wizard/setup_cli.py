@@ -822,6 +822,57 @@ def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOpt
 
 
 # -----------------------------------------------------------------------------
+# Shared tail for steps 6 and 7 (env / memory encryption).
+# -----------------------------------------------------------------------------
+
+
+def _run_gated_encryption_step(
+    *,
+    step: str,
+    target: str,
+    run: Callable[[], int],
+    non_interactive: bool,
+    non_interactive_detail: str,
+    abort_detail: str,
+    ran_detail: str,
+) -> StepResult:
+    """Shared tail of :func:`_resolve_step_env_encryption` and
+    :func:`_resolve_step_memory_encryption`, once each has handled its own
+    pre-checks (the env step's no-``.env``-file shortcut; the memory step's
+    platform gate and its ``_env_target_ready`` gate) and decided there is
+    real work left to attempt.
+
+    ``target`` names the ``encryption enable <target>`` command for the two
+    generic failure details below; ``run`` is the already-bound
+    ``_run_env_encryption``/``_run_memory_encryption`` seam call.
+
+    Both callers can reach interactive machinery that sits outside the
+    ``PromptIO`` seam entirely -- a one-time vault recovery-passphrase prompt
+    and/or an OS-level device-key unlock (Touch ID / passcode) -- so the
+    non-interactive gate is checked unconditionally, before attempting the
+    run, rather than discovering it partway through.
+    """
+    if non_interactive:
+        return StepResult(step, "manual", non_interactive_detail)
+
+    try:
+        # Interactive from here on (the gate above already returned for
+        # --non-interactive); this catch is for PromptToolkitIO's fail-closed
+        # non-TTY guard.
+        rc = run()
+    except NonInteractiveAbort:
+        return StepResult(step, "manual", abort_detail)
+    except OSError as exc:
+        # A disk-write failure (full disk, permission error, read-only
+        # ~/.hermes) reports a clean "failed" result instead of an unhandled
+        # traceback.
+        return StepResult(step, "failed", f"encryption enable {target} failed: {exc}")
+    if rc != 0:
+        return StepResult(step, "failed", f"encryption enable {target} failed (see errors above)")
+    return StepResult(step, "ran", ran_detail)
+
+
+# -----------------------------------------------------------------------------
 # Step 6 -- at-rest `.env` encryption (`encryption enable env`).
 # -----------------------------------------------------------------------------
 
@@ -905,43 +956,27 @@ def _resolve_step_env_encryption(
                 "no .env file yet; nothing to encrypt (create one, then re-run `hermes-mordred encryption enable env`)",
             )
 
-    if options.non_interactive:
-        # Mirrors the keyvault step's hardcoded non-interactive gate (see
-        # _resolve_step_keyvault): the NonInteractiveAbort catch below already
-        # covers the vault's one-time recovery-passphrase prompt, but enable()
-        # can also reach an OS-level device-key unlock (Touch ID / passcode)
-        # to add_and_verify() the enrollment -- that dialog sits outside the
-        # PromptIO seam entirely, so --non-interactive can never supply it.
-        # Checked unconditionally, before attempting the run, rather than
-        # discovering it partway through.
-        return StepResult(
-            _STEP_ENV_ENCRYPTION,
-            "manual",
+    # enable() only prompts (for a one-time vault recovery passphrase) if no
+    # vault exists yet; the OS-level device-key unlock (Touch ID / passcode)
+    # for add_and_verify() the enrollment sits outside the PromptIO seam
+    # entirely. See _run_gated_encryption_step for the shared gate/dispatch
+    # logic (mirrors the keyvault step's hardcoded non-interactive gate, see
+    # _resolve_step_keyvault).
+    return _run_gated_encryption_step(
+        step=_STEP_ENV_ENCRYPTION,
+        target="env",
+        run=lambda: _run_env_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io),
+        non_interactive=options.non_interactive,
+        non_interactive_detail=(
             "`.env` encryption may need interactive confirmation (a vault recovery passphrase and/or an "
-            "OS device-key unlock) that --non-interactive cannot supply; run `hermes-mordred encryption enable env`",
-        )
-
-    try:
-        # enable() only prompts (for a one-time vault recovery passphrase) if
-        # no vault exists yet. Interactive from here on (the gate above
-        # already returned for --non-interactive); this catch is for
-        # PromptToolkitIO's fail-closed non-TTY guard.
-        rc = _run_env_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io)
-    except NonInteractiveAbort:
-        return StepResult(
-            _STEP_ENV_ENCRYPTION,
-            "manual",
+            "OS device-key unlock) that --non-interactive cannot supply; run `hermes-mordred encryption enable env`"
+        ),
+        abort_detail=(
             "creating the at-rest vault needs a one-time recovery-passphrase prompt, and stdin "
-            "is not a TTY; run `hermes-mordred encryption enable env` interactively",
-        )
-    except OSError as exc:
-        # Mirrors the configure step's OSError handling: a disk-write failure
-        # (full disk, permission error, read-only ~/.hermes) reports a clean
-        # "failed" result instead of an unhandled traceback.
-        return StepResult(_STEP_ENV_ENCRYPTION, "failed", f"encryption enable env failed: {exc}")
-    if rc != 0:
-        return StepResult(_STEP_ENV_ENCRYPTION, "failed", "encryption enable env failed (see errors above)")
-    return StepResult(_STEP_ENV_ENCRYPTION, "ran", "`.env` is now vault-managed")
+            "is not a TTY; run `hermes-mordred encryption enable env` interactively"
+        ),
+        ran_detail="`.env` is now vault-managed",
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1026,34 +1061,26 @@ def _resolve_step_memory_encryption(
             "runtime through the `.env` injection shim",
         )
 
-    if options.non_interactive:
-        # Same reasoning as the env step: enable() can reach an OS-level
-        # device-key unlock (Touch ID / passcode) to enroll the key, and that
-        # dialog sits outside the PromptIO seam entirely.
-        return StepResult(
-            _STEP_MEMORY_ENCRYPTION,
-            "manual",
+    # Same reasoning as the env step: enable() can reach an OS-level
+    # device-key unlock (Touch ID / passcode) to enroll the key, and that
+    # dialog sits outside the PromptIO seam entirely. See
+    # _run_gated_encryption_step for the shared gate/dispatch logic.
+    return _run_gated_encryption_step(
+        step=_STEP_MEMORY_ENCRYPTION,
+        target="memory",
+        run=lambda: _run_memory_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io),
+        non_interactive=options.non_interactive,
+        non_interactive_detail=(
             "agent-memory encryption may need interactive confirmation (a vault recovery passphrase and/or an "
             "OS device-key unlock) that --non-interactive cannot supply; run "
-            "`hermes-mordred encryption enable memory`",
-        )
-
-    try:
-        rc = _run_memory_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io)
-    except NonInteractiveAbort:
-        return StepResult(
-            _STEP_MEMORY_ENCRYPTION,
-            "manual",
+            "`hermes-mordred encryption enable memory`"
+        ),
+        abort_detail=(
             "creating the at-rest vault needs a one-time recovery-passphrase prompt, and stdin is not a TTY; "
-            "run `hermes-mordred encryption enable memory` interactively",
-        )
-    except OSError as exc:
-        # Mirrors the env step: a disk-write failure reports a clean "failed"
-        # result instead of an unhandled traceback.
-        return StepResult(_STEP_MEMORY_ENCRYPTION, "failed", f"encryption enable memory failed: {exc}")
-    if rc != 0:
-        return StepResult(_STEP_MEMORY_ENCRYPTION, "failed", "encryption enable memory failed (see errors above)")
-    return StepResult(_STEP_MEMORY_ENCRYPTION, "ran", "agent memories are now sealed at rest")
+            "run `hermes-mordred encryption enable memory` interactively"
+        ),
+        ran_detail="agent memories are now sealed at rest",
+    )
 
 
 # -----------------------------------------------------------------------------
