@@ -20,22 +20,16 @@ Contract (mirrors PATHS.md §193 "credentials directory"):
 from __future__ import annotations
 
 import errno
-import os
 import re
-import stat
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import NoReturn, Protocol, runtime_checkable
 
+from .._file_lock import private_flock
 from .policy_writer import _atomic_write_text, _ensure_real_directory, _read_regular_text
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None  # type: ignore[assignment]
 
 # POSIX env-var name: start with letter/underscore, followed by alnum/underscore.
 # We also require at least one uppercase letter -- Mordred owns the
@@ -43,35 +37,35 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 # names. Restricting at this layer makes the file shell-injection-safe.
 _VALID_ENV_KEY = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _ENV_THREAD_LOCK = threading.RLock()
-_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def _reject_unopenable_dotenv_lock(lock_path: Path, exc: OSError) -> NoReturn:
+    """Wrap an ``os.open`` failure on the dotenv lock as a tagged ``EPERM``."""
+    raise OSError(errno.EPERM, "dotenv lock is unsafe or unavailable", str(lock_path)) from exc
+
+
+def _reject_unsafe_dotenv_lock(lock_path: Path) -> NoReturn:
+    """Fail closed when ``.env.lock`` is not a private regular file."""
+    raise OSError(errno.EPERM, "dotenv lock must be a mode-0600 regular file", str(lock_path))
 
 
 @contextmanager
 def _dotenv_lock(path: Path) -> Iterator[None]:
-    """Stable sibling lock shared by every Mordred ``.env`` RMW writer."""
+    """Stable sibling lock shared by every Mordred ``.env`` RMW writer.
+
+    The descriptor lifecycle is :func:`mordred_hermes._file_lock.private_flock`;
+    the in-process ``RLock``, the parent-directory check, and both raises stay
+    here so the tagged ``EPERM`` :exc:`OSError`\\ s (and the ``from exc``
+    chaining on the open failure) are unchanged.
+    """
     with _ENV_THREAD_LOCK:
         _ensure_real_directory(path.parent)
-        lock_path = path.with_name(path.name + ".lock")
-        flags = os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK
-        try:
-            fd = os.open(lock_path, flags, 0o600)
-        except OSError as exc:
-            raise OSError(errno.EPERM, "dotenv lock is unsafe or unavailable", str(lock_path)) from exc
-        try:
-            metadata = os.fstat(fd)
-            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-                raise OSError(errno.EPERM, "dotenv lock must be a mode-0600 regular file", str(lock_path))
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        with private_flock(
+            path.with_name(path.name + ".lock"),
+            on_unsafe=_reject_unsafe_dotenv_lock,
+            on_open_error=_reject_unopenable_dotenv_lock,
+        ):
+            yield
 
 
 def update_dotenv_file(path: Path, transform: Callable[[str], str]) -> None:
