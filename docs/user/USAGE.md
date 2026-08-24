@@ -704,6 +704,8 @@ are skipped entirely when you don't pick Mullvad. So **Proton VPN** →
 `hermes-mordred configure` walks through a short list of Mordred questions. It
 does not run upstream `hermes setup` unless you pass `--with-hermes-setup`.
 **If in doubt, press Enter through the Mordred prompts** to keep their defaults.
+After you select `lenient`, the wizard also explains that the remaining settings
+only affect strict mode and that accepting their defaults is safe.
 
 | # | Question | Default | What it means | Do |
 |---|---|---|---|---|

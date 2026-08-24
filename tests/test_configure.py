@@ -123,6 +123,27 @@ def _core_answers(
 
 
 class TestCollectAnswers:
+    def test_lenient_explains_that_remaining_prompts_can_keep_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        messages: list[str] = []
+        monkeypatch.setattr(configure, "_emit_prompt_help", messages.append)
+
+        collect_answers(_ScriptedPromptIO(answers=_core_answers(policy="lenient")))
+
+        assert messages == [configure._LENIENT_MODE_NOTE]
+        note = messages[0].lower()
+        assert "strict mode" in note
+        assert "enter" in note
+        assert "defaults" in note
+
+    @pytest.mark.parametrize("policy", ["strict", "off"])
+    def test_non_lenient_modes_do_not_show_lenient_note(self, policy: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        messages: list[str] = []
+        monkeypatch.setattr(configure, "_emit_prompt_help", messages.append)
+
+        collect_answers(_ScriptedPromptIO(answers=_core_answers(policy=policy)))
+
+        assert messages == []
+
     def test_strict_with_anthropic_allowlist(self) -> None:
         prompts = _ScriptedPromptIO(
             answers=_core_answers(
