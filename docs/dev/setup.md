@@ -233,7 +233,7 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 
 | Purpose | Command | Notes |
 |---|---|---|
-| Run tests | `uv run pytest -q` | Excludes the integration marker by default (`addopts` in `pyproject.toml`). For coverage use `uv run pytest --cov=src/mordred_hermes` (same as CI, floor 80%) |
+| Run tests | `uv run pytest -q` | Excludes the integration marker by default (`addopts` in `pyproject.toml`). For coverage use `uv run pytest --cov=src/mordred_hermes` (same as CI, floor 80%). The root `tests/conftest.py` defaults `HERMES_HOME` to a fresh temp directory before anything imports `mordred_hermes`, so a bare run never touches your real `~/.hermes`; an explicit `HERMES_HOME` set beforehand still wins untouched |
 | Integration tests | `uv run pytest -m integration` | Requires Docker / a real Mullvad account / a real network. `integration` extra required |
 | Lint | `uv run ruff check src tests scripts` | Blocking in CI |
 | Format check | `uv run ruff format --check src tests scripts` | Blocking in CI |

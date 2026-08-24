@@ -13,16 +13,9 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.wizard import upgrade
-from mordred_hermes.wizard.policy_writer import PolicySnapshot, PolicyWriter
+from mordred_hermes.wizard.policy_writer import PolicySnapshot
 
-
-def _writer(tmp_path: Path) -> PolicyWriter:
-    return PolicyWriter(
-        config_path=tmp_path / "config.yaml",
-        policy_json_path=tmp_path / "mordred" / "policy.json",
-        mordred_dir=tmp_path / "mordred",
-    )
-
+from ._helpers import _writer
 
 # -----------------------------------------------------------------------------
 # UpgradeOptions dataclass

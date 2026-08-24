@@ -210,6 +210,57 @@ def reseal(
     return reseal_env(home=home, root=root, backend=backend, store=store)
 
 
+def _should_reseal_instead(*, platform: str, home: Path, root: Path) -> bool:
+    """Whether ``enable`` should merge-reseal instead of enrolling from scratch.
+
+    The caller has already established that a plaintext ``.env`` is on disk;
+    this is the remaining test — the vault already manages ``.env``, injection
+    is ON (no opt-out marker), and we are on macOS. Together that means a host
+    write slipped a *partial* .env past the seal, so re-enrolling it wholesale
+    would drop every other enrolled secret; merging is the safe path instead.
+    Split out of :func:`enable` for cyclomatic headroom only — same three
+    conditions, same order, same short-circuiting.
+    """
+    return platform == "darwin" and not _env_optout_marker_path(home).exists() and _env_enrolled(root)
+
+
+def _delete_enrolled_plaintext(env_path: Path, enrolled: bytes | None) -> None:
+    """Remove the plaintext ``.env`` after a clean macOS enroll, or explain why not.
+
+    Split out of :func:`enable` for cyclomatic headroom only — the read/compare/
+    unlink sequence, both guard conditions, and both warning messages are
+    unchanged; this always leaves ``enable`` returning 0 either way (a failure
+    here is reported, not propagated as an error code), exactly as before.
+
+    Guards against a concurrent edit between ``add_and_verify()``'s read and
+    now (never delete an on-disk copy that no longer matches what was
+    enrolled) and against an unlink failure being reported as success while
+    the plaintext remains at rest.
+    """
+    try:
+        current: bytes | None = env_path.read_bytes()
+    except OSError:
+        current = None
+    # `enrolled` is bytes whenever add_and_verify returned rc==0, so the None
+    # check is a defensive belt-and-suspenders: if that contract ever loosens,
+    # fail safe and keep the plaintext rather than delete it unverified.
+    if enrolled is None or current != enrolled:
+        _term.emit_warn(
+            ".env was enrolled but the on-disk copy no longer matches the vault "
+            "(changed during enable?) — leaving the plaintext in place; re-run enable."
+        )
+        return
+    try:
+        env_path.unlink()
+    except OSError as exc:
+        _term.emit_warn(
+            f".env enrolled but the plaintext at {env_path} could not be removed: {exc} "
+            "— remove it by hand (it is still readable at rest)."
+        )
+        return
+    print(".env is now vault-managed; the plaintext was removed (the runtime injects it at startup).")
+
+
 def enable(
     *,
     home: Path,
@@ -269,7 +320,7 @@ def enable(
     # opt-out marker), and we are on macOS, yet a plaintext is on disk. That means
     # a host write slipped a *partial* .env past the seal — re-enrolling it
     # wholesale here would drop every other enrolled secret, so merge instead.
-    if platform == "darwin" and not _env_optout_marker_path(home).exists() and _env_enrolled(root):
+    if _should_reseal_instead(platform=platform, home=home, root=root):
         return reseal(home=home, root=root, backend=backend, store=store)
 
     rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
@@ -290,28 +341,7 @@ def enable(
         # concurrent edit between add_and_verify()'s read and now must NOT be
         # deleted unvaulted, and an unlink failure must NOT be reported as success
         # while the plaintext remains at rest.
-        try:
-            current: bytes | None = env_path.read_bytes()
-        except OSError:
-            current = None
-        # `enrolled` is bytes whenever add_and_verify returned rc==0, so the None
-        # check is a defensive belt-and-suspenders: if that contract ever loosens,
-        # fail safe and keep the plaintext rather than delete it unverified.
-        if enrolled is None or current != enrolled:
-            _term.emit_warn(
-                ".env was enrolled but the on-disk copy no longer matches the vault "
-                "(changed during enable?) — leaving the plaintext in place; re-run enable."
-            )
-            return 0
-        try:
-            env_path.unlink()
-        except OSError as exc:
-            _term.emit_warn(
-                f".env enrolled but the plaintext at {env_path} could not be removed: {exc} "
-                "— remove it by hand (it is still readable at rest)."
-            )
-            return 0
-        print(".env is now vault-managed; the plaintext was removed (the runtime injects it at startup).")
+        _delete_enrolled_plaintext(env_path, enrolled)
     else:
         print(
             ".env enrolled into the vault, but the runtime decrypt shim is macOS-only — the plaintext was "
