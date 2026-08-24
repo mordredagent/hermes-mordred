@@ -347,6 +347,19 @@ def _write_private(path: Path, data: bytes) -> None:
     temp at 0o600, so nothing we write is briefly world-readable. The directory is
     fsynced too — fsyncing the file persists the bytes, only fsyncing the parent
     persists the rename that publishes them.
+
+    Deliberately **not** :func:`mordred_hermes.keyvault._storage.atomic_write`,
+    the canonical private writer that ``extension.pairing._write_private``
+    delegates to. That helper asserts an *existing* target is already mode
+    ``0o600`` and refuses otherwise — correct for keyvault-owned files, fatal
+    here: the file this seals is upstream Hermes' ``MEMORY.md``, created by
+    ``MemoryStore`` at the process umask (typically ``0o644``), and the very
+    first sealing write is the one that would be rejected. This writer takes
+    ownership of whatever mode it finds and publishes at ``0o600`` instead. It
+    also fsyncs with plain :func:`os.fsync` rather than ``_fsync_durable``'s
+    ``F_FULLFSYNC``, which ``test_write_private_fsyncs_the_parent_directory``
+    pins by counting exactly two ``os.fsync`` calls. Unifying the two would
+    break memory encryption outright, not merely churn it.
     """
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".mordred_mem_", suffix=".tmp")
     try:

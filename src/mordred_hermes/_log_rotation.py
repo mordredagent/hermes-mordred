@@ -38,8 +38,12 @@ call at the use site would silently break that monkeypatch.
 
 from __future__ import annotations
 
+import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from ._audit_io import audit_path_stat, compress_rotated_file
 
 
 def utcnow_iso() -> str:
@@ -109,3 +113,60 @@ def sweep_retention(path: Path, retention_days: int) -> None:
             continue
         if mtime < cutoff:
             child.unlink(missing_ok=True)
+
+
+def rotate_and_compress(path: Path, date_suffix: str, *, retention_days: int, log: logging.Logger) -> None:
+    """Rename the active log aside, gzip it, and sweep expired rotations.
+
+    The whole body of ``NDJSONWriter._rotate``
+    (:mod:`mordred_hermes.privacy_check.audit`) and ``EncryptedWriter._rotate``
+    (:mod:`mordred_hermes.keyvault.log_encryption`), which were byte-for-byte
+    identical apart from which module's ``_LOG`` emitted the gzip warning.
+    Each writer keeps its own ``_rotate`` method (the size/date decision in
+    ``_maybe_rotate`` differs, and ``EncryptedWriter`` must also wipe its DEK)
+    and passes its own logger in, so warnings still carry
+    ``mordred.privacy_check.audit`` / ``mordred.keyvault.log_encryption``.
+
+    Sequence, and why each step is load-bearing:
+
+    1. ``audit_path_stat`` before the rename — a missing active file means
+       there is nothing to rotate (return quietly), and a symlink / FIFO /
+       device raises rather than being renamed.
+    2. ``os.replace`` onto :func:`next_rotation_target`, which never picks a
+       name a prior rotation already took (gzipped or not), so a same-day
+       rotation cannot overwrite history.
+    3. Re-stat the *target* and compare ``(st_dev, st_ino)`` with the
+       pre-rename identity. A mismatch means the path was swapped underneath
+       the rename, so the caller must not go on to create a fresh active file
+       over an attacker-chosen inode — hence the fail-closed
+       ``OSError("audit path changed during rotation")``.
+    4. Gzip is best-effort **by design**: ``target`` already holds the rotated
+       content, so a gzip failure loses nothing. It is logged at WARNING and
+       the un-gzipped file is left in place; the next rotation's collision loop
+       simply picks a new suffix.
+    5. Retention sweep last, so the file just rotated is itself eligible for
+       deletion under the same age rule as every older sibling.
+
+    Note for ``privacy_check``: this module is pure stdlib and imports only
+    :mod:`mordred_hermes._audit_io` (also pure stdlib), so hosting the shared
+    body here keeps ``privacy_check.audit`` importable without the
+    macOS-extra-gated keyvault crypto stack — the property that kept these two
+    copies separate in the first place.
+    """
+    before = audit_path_stat(path)
+    if before is None:
+        return
+
+    target = next_rotation_target(path, date_suffix)
+    os.replace(path, target)
+    moved = audit_path_stat(target)
+    if moved is None or (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+        raise OSError("audit path changed during rotation")
+
+    gz_target = target.with_suffix(target.suffix + ".gz")
+    try:
+        compress_rotated_file(target, gz_target)
+    except Exception as e:
+        log.warning("audit gzip rotation failed; raw rotated file kept at %s: %s", target, e)
+
+    sweep_retention(path, retention_days)

@@ -130,26 +130,27 @@ def _open_hot_path_or_report(
     printed to stderr and ``None`` is returned (a freshness-pin mismatch is
     surfaced as possible tampering, an uninitialised vault points at ``vault
     init``). The caller owns closing the returned vault.
+
+    The fail-closed ``except`` chain is
+    :func:`mordred_hermes.keyvault._vault_open_report.report_hot_open_failure`,
+    shared with ``keyvault._env_reseal._open_hot_or_report`` (which used to
+    carry a byte-for-byte copy of it). The dependency direction is unchanged —
+    ``wizard`` imports down into ``keyvault``, never the reverse — and the
+    ``vault.open_vault`` call stays here because tests pin it with
+    ``monkeypatch.setattr(vault, "open_vault", ...)``. The reporter emits
+    through the root :mod:`mordred_hermes._term` (its own import), not this
+    module's ``_term`` alias — patch ``mordred_hermes._term.emit_error`` to
+    intercept those messages.
     """
-    from ..keyvault import anchor, manifest, vault
-    from ..keyvault._exceptions import WrapError
+    from ..keyvault import vault
+    from ..keyvault._vault_open_report import report_hot_open_failure
 
     key_id = anchor_label = _vault_identity(root)
     backend = resolve_backend(backend)
     store = resolve_store(store)
 
-    try:
+    with report_hot_open_failure(root):
         return vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
-    except anchor.AnchorMissing:
-        _term.emit_error(f"no vault at {root} — run `vault init` first.")
-    except (anchor.AnchorMismatch, anchor.AnchorCorrupt) as exc:
-        # A freshness-pin mismatch is the anchor's whole purpose — surface it as
-        # possible tampering / rollback, not a generic open failure.
-        _term.emit_error(f"vault freshness check failed at {root} (possible tampering): {exc}")
-    except (anchor.AnchorError, vault.VaultError, manifest.ManifestError, OSError) as exc:
-        _term.emit_error(f"cannot open vault at {root}: {exc}")
-    except WrapError as exc:
-        _term.emit_error(f"cannot open vault at {root}: device key store error — {exc}")
     return None
 
 
