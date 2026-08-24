@@ -1,10 +1,14 @@
-"""Canary: the memory hook against the **real installed** ``tools/memory_tool.py``.
+"""Canary: the memory hook against the real selected ``tools/memory_tool.py``.
 
 The unit tests run against faithful copies of the three upstream seam shapes;
-this file runs against whatever Hermes is actually installed. It is the tripwire
-for an upstream refactor — if ``MemoryStore`` grows a new read chokepoint or
-renames a parameter, ``seam_check`` stops recognising it and this fails in CI
-rather than in an operator's memory directory.
+this file runs against whatever Hermes is first on the import path. Normal CI
+selects the installed PyPI package; the weekly upstream job puts its `main`
+checkout first on `PYTHONPATH` and sets
+``MORDRED_REQUIRE_UPSTREAM_MEMORY_SEAMS=1``. Older supported releases skip
+seams they predate; the weekly job requires every current-main seam. It is the
+tripwire for an upstream refactor — if the module disappears, ``MemoryStore``
+grows a new read chokepoint, or a parameter is renamed, this fails in CI rather
+than in an operator's memory directory.
 
 Hermetic: the seam attributes are restored on the live class in a ``finally``, and
 every path is under ``tmp_path`` via ``HERMES_HOME``.
@@ -14,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import importlib
 import os
 import secrets
 import sys
@@ -37,6 +42,54 @@ from mordred_hermes.keyvault.memory_crypto import MAGIC
 
 _SEAM_NAMES = ("_write_file", "_read_file", "_read_raw_checked", "_detect_external_drift")
 _ABSENT = object()
+_REQUIRE_UPSTREAM_SEAMS_ENV = "MORDRED_REQUIRE_UPSTREAM_MEMORY_SEAMS"
+
+
+def _import_canary_module(name: str) -> Any:
+    """Import a selected Hermes seam, requiring it only in the upstream job.
+
+    Released Hermes versions predating a seam remain supported by the normal
+    compatibility matrix, where the corresponding canary is inapplicable and
+    skips.  The weekly upstream-main job sets the environment gate so a missing
+    or renamed module is reported as drift instead of silently skipping.
+    """
+    if os.environ.get(_REQUIRE_UPSTREAM_SEAMS_ENV) == "1":
+        return importlib.import_module(name)
+    return pytest.importorskip(name)
+
+
+def test_canary_module_is_optional_in_the_supported_release_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = object()
+    seen: list[str] = []
+
+    def _optional(name: str) -> object:
+        seen.append(name)
+        return sentinel
+
+    monkeypatch.delenv(_REQUIRE_UPSTREAM_SEAMS_ENV, raising=False)
+    monkeypatch.setattr(pytest, "importorskip", _optional)
+
+    assert _import_canary_module("agent.optional_seam") is sentinel
+    assert seen == ["agent.optional_seam"]
+
+
+def test_canary_module_is_required_by_the_upstream_main_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = object()
+    seen: list[str] = []
+
+    def _required(name: str) -> object:
+        seen.append(name)
+        return sentinel
+
+    def _never_optional(name: str) -> object:
+        raise AssertionError(f"required canary unexpectedly skipped {name}")
+
+    monkeypatch.setenv(_REQUIRE_UPSTREAM_SEAMS_ENV, "1")
+    monkeypatch.setattr(importlib, "import_module", _required)
+    monkeypatch.setattr(pytest, "importorskip", _never_optional)
+
+    assert _import_canary_module("agent.required_seam") is sentinel
+    assert seen == ["agent.required_seam"]
 
 
 def _unwrap_seams(store_cls: Any) -> None:
@@ -60,7 +113,7 @@ def _unwrap_seams(store_cls: Any) -> None:
 @pytest.fixture
 def upstream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """The live ``tools.memory_tool``, rooted at ``tmp_path`` and restored afterwards."""
-    memory_tool = pytest.importorskip("tools.memory_tool")
+    memory_tool = _import_canary_module("tools.memory_tool")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     store_cls = memory_tool.MemoryStore
     saved = {name: store_cls.__dict__.get(name, _ABSENT) for name in _SEAM_NAMES}
@@ -174,7 +227,7 @@ def test_journey_guard_wraps_the_real_learning_mutations(tmp_path: Path, monkeyp
     """The journey-guard half of the canary: ``delete_node`` / ``edit_node`` still
     take the parameters we pin. A rename upstream silently turns the guard into a
     no-op, and ``learning_graph`` then deletes real entries by raw-file index."""
-    mutations = pytest.importorskip("agent.learning_mutations")
+    mutations = _import_canary_module("agent.learning_mutations")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     saved = {name: getattr(mutations, name) for name in ("delete_node", "edit_node")}
     try:
@@ -187,14 +240,14 @@ def test_journey_guard_wraps_the_real_learning_mutations(tmp_path: Path, monkeyp
 
 
 def test_runtime_probe_sees_this_interpreter_as_capable(tmp_path: Path) -> None:
-    pytest.importorskip("tools.memory_tool")
+    _import_canary_module("tools.memory_tool")
     ok, detail = runtime_memory_encryption_available(home=tmp_path, runtime_python=Path(sys.executable))
     assert ok is True, detail
     assert "seam" in detail
 
 
 def test_probe_entry_point_rejects_other_arguments(capsys: pytest.CaptureFixture[str]) -> None:
-    pytest.importorskip("tools.memory_tool")
+    _import_canary_module("tools.memory_tool")
     assert _memory_hook._main(["--probe"]) == 0
     assert capsys.readouterr().out.strip() in {"A", "B", "C"}
     assert _memory_hook._main([]) == 2
@@ -202,7 +255,7 @@ def test_probe_entry_point_rejects_other_arguments(capsys: pytest.CaptureFixture
 
 
 def test_probe_entry_point_exits_zero() -> None:
-    pytest.importorskip("tools.memory_tool")
+    _import_canary_module("tools.memory_tool")
     import subprocess
 
     proc = subprocess.run(
@@ -210,7 +263,7 @@ def test_probe_entry_point_exits_zero() -> None:
         capture_output=True,
         text=True,
         check=False,
-        env={k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")},
+        env={k: v for k, v in os.environ.items() if k != "PYTHONHOME"},
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() in {"A", "B", "C"}

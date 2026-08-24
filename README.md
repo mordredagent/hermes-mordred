@@ -37,7 +37,8 @@ The package exposes six `hermes_agent.plugins` entry points:
   helper is unavailable.
 - The transparent `.env`, configuration, agent-memory, and workspace encryption
   lifecycle is currently macOS-only. Linux supports the TPM-backed keyvault,
-  but these runtime targets report inactive and continue to use plaintext.
+  but production file-vault enables refuse (or are skipped by `setup` / `all`)
+  and continue to use plaintext. A copied enrollment reports inactive.
 
 ## Install (users, from PyPI)
 
@@ -205,8 +206,8 @@ when both keys must be unattended.
 On Linux, the supported operator path stops after keyvault initialization and
 status. The transparent env/config startup shims are not active there, and
 `vault recover` does not yet have a Linux device-anchor store;
-`encryption status` reports enrolled targets as inactive and plaintext remains
-the runtime source.
+production file-vault enrollment is unavailable. A copied enrollment is
+reported inactive, and plaintext remains the runtime source.
 
 Everyday commands:
 

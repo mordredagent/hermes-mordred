@@ -296,9 +296,12 @@ fingerprint; the passphrase sidecar is the cold recovery path.
 
 `encryption enable env|config|memory` and the low-level `vault` commands manage
 this root. On macOS, `.env` injection and config materialize/reseal can make an
-enrolled copy the active runtime source. Outside macOS, current startup shims
-are inactive and plaintext runtime files remain; `encryption status` reports
-the enrolled target as paused/inactive rather than claiming protection.
+enrolled copy the active runtime source. The production device-anchor store is
+the macOS login Keychain, so direct enrollment refuses outside macOS and
+`setup` / `encryption enable all` skip these targets. If a copied vault or an
+injected test backend already exposes enrollment metadata, `encryption status`
+reports it as paused/inactive rather than claiming protection; plaintext
+runtime files remain authoritative.
 
 The markers `<home>/mordred/env-vault.optout` and
 `<home>/mordred/config-vault.marker` control those macOS lifecycles;
@@ -307,8 +310,9 @@ control the agent-memory at-rest encryption runtime the same way — marker
 present arms the hook, optout present pauses it regardless of the marker. On
 macOS, a copied vault can be re-keyed on a new device with `vault recover` and
 its recovery passphrase; this is different from `keyvault recover --blob`.
-Linux has a TPM wrapping backend but no production device-anchor store for
-this file vault, so `vault recover` is unsupported there.
+Linux has a TPM wrapping backend for the separate keyvault but no production
+device-anchor store for this file vault. Production enrollment and
+`vault recover` are therefore unsupported there.
 
 ## `<home>/extension/`
 

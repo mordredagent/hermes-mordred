@@ -104,6 +104,7 @@ from ._encryption_status import render_text as render_text
 from ._encryption_status import status_mark as status_mark
 from ._encryption_status import style_mark as style_mark
 from ._encryption_status import workspace_status as workspace_status
+from ._file_vault_support import file_vault_plaintext_warning, production_file_vault_eligibility
 from ._workspace_paths import WorkspacePaths, resolve_workspace_env
 
 __all__ = [
@@ -340,12 +341,24 @@ def cli_status(args: argparse.Namespace) -> int:
 # The encryption surface always uses the default vault root (a custom --root would
 # not be seen by the macOS startup shims, which read default_vault_root()).
 # -----------------------------------------------------------------------------
-def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False) -> int:
+def _dispatch(
+    verb: str,
+    target: str,
+    *,
+    force_runtime_unverified: bool = False,
+    platform: str | None = None,
+) -> int:
+    platform = sys.platform if platform is None else platform
+    if verb == "enable" and target in _ALL_CORE_TARGETS:
+        eligible, reason = production_file_vault_eligibility(platform)
+        if not eligible:
+            _term.emit_error(f"encryption enable {target}: {reason}.")
+            return 1
+
     from . import config_decrypt_cli, env_decrypt_cli, memory_cli
 
     home = _hermes_home()
     root = resolve_root(None)
-    platform = sys.platform
 
     # target -> {verb: action}. enable/disable are explicit; the CLI adapters
     # only ever pass enable/disable/purge, and any non-enable/disable verb
@@ -441,44 +454,55 @@ def _workspace_eligible(
     return False, "workspace not set up"
 
 
-def _run_target(verb: str, target: str, *, force_runtime_unverified: bool = False) -> tuple[str, int]:
+def _run_target(
+    verb: str,
+    target: str,
+    *,
+    force_runtime_unverified: bool = False,
+    platform: str | None = None,
+) -> tuple[str, int]:
     """Dispatch one target for an ``all`` fan-out; return ``(status_label, exit_code)``.
 
     The engine streams its own detail to stdout here; the caller emits the
     one-line per-target status afterwards as a single contiguous summary block.
     """
-    rc = _dispatch(verb, target, force_runtime_unverified=force_runtime_unverified)
+    rc = _dispatch(
+        verb,
+        target,
+        force_runtime_unverified=force_runtime_unverified,
+        platform=platform,
+    )
     return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
 
 
 def _run_core_target(verb: str, target: str, *, platform: str, force_runtime_unverified: bool) -> tuple[str, int, bool]:
     """Run one core (env/config/memory) target; return ``(status_label, exit_code, skipped)``.
 
-    ``memory`` under ``enable`` is special-cased, platform first: off macOS the
-    memory-sealing runtime shims do not exist at all (mirrors
-    ``setup_cli._resolve_step_memory_encryption``'s ordering), so the engine
-    would just refuse — that refusal used to be counted a *failure* here
-    because ``_dispatch``/the engine resolve their own ``sys.platform``
-    independently of the ``platform`` an ``all`` fan-out was given, so a
-    Linux ``enable all`` reported ``memory FAILED`` instead of a clean skip.
-    Only once the platform passes is this Hermes' memory seam
+    Every ``enable`` is platform-gated first: production file-vault enrollment
+    has a macOS device-anchor store, but no supported Linux counterpart.  A
+    Linux ``enable all`` therefore reports all three core targets as clean
+    skips instead of entering a ceremony that will fail in the anchor store.
+    Only once the platform passes is the ``memory`` target's Hermes seam
     (:func:`memory_runtime_available`) checked; when that is also missing the
     engine would again just refuse, so it is never called — both cases record
     a skip instead of a failure. ``disable`` / ``purge`` still run regardless
     of platform or seam: they clear state and decrypt files back, which is
     exactly what a broken seam or the wrong OS needs.
     """
+    if verb == "enable":
+        eligible, reason = production_file_vault_eligibility(platform)
+        if not eligible:
+            return f"skipped ({reason})", 0, True
     if target == "memory" and verb == "enable":
-        if platform != _DARWIN:
-            return (
-                f"skipped (macOS only — the memory sealing runtime is not available on {platform})",
-                0,
-                True,
-            )
         available, reason = memory_runtime_available()
         if not available:
             return f"skipped ({reason})", 0, True
-    status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified)
+    status, rc = _run_target(
+        verb,
+        target,
+        force_runtime_unverified=force_runtime_unverified,
+        platform=platform,
+    )
     return status, rc, False
 
 
@@ -500,21 +524,21 @@ def _dispatch_all(
 ) -> int:
     """Fan ``verb`` out over every target, best-effort. Returns an exit code.
 
-    Core vault targets (env / config / memory) are always attempted; workspace
-    is eligibility-gated (see :func:`_workspace_eligible`) and a skip never
-    counts as a failure. ``memory`` under ``enable`` is likewise skipped, not
-    attempted, off macOS or when this Hermes has no memory seam Mordred can
-    wrap (see :func:`_run_core_target`) — the ``platform`` given here (or
-    ``sys.platform`` by default) is what decides the former, so the skip is
-    accurate even though the per-target engine itself always resolves its own
-    ``sys.platform``. Every target runs even if an earlier one
+    Core vault targets (env / config / memory) are attempted when their
+    production platform is eligible; workspace is separately gated (see
+    :func:`_workspace_eligible`) and a skip never counts as a failure. Under
+    ``enable``, all file-vault targets are skipped off macOS, and ``memory`` is
+    also skipped when this Hermes has no seam Mordred can wrap (see
+    :func:`_run_core_target`). The resolved ``platform`` is passed through to
+    each target, so eligibility and engine behaviour cannot disagree. Every
+    eligible target runs even if an earlier one
     failed; the exit code is non-zero iff at least one *attempted* target
     failed. Per-target engine output streams inline; the ok/FAILED/skipped
     roll-up prints once at the end as a single block (see
     :func:`_print_all_summary`).
 
     ``force_runtime_unverified`` is forwarded to every target's dispatch but only
-    affects the env and config enables (the runtime-gated seals); see
+    affects env, config, and memory enables (the runtime-gated seals); see
     :func:`_dispatch`.
     """
     platform = sys.platform if platform is None else platform
@@ -535,7 +559,12 @@ def _dispatch_all(
 
     eligible, reason = _workspace_eligible(verb, platform=platform, on_path=on_path)
     if eligible:
-        status, rc = _run_target(verb, "workspace", force_runtime_unverified=force_runtime_unverified)
+        status, rc = _run_target(
+            verb,
+            "workspace",
+            force_runtime_unverified=force_runtime_unverified,
+            platform=platform,
+        )
         outcomes.append(("workspace", status))
         failed += rc != 0
     else:
@@ -543,6 +572,9 @@ def _dispatch_all(
         skipped += 1
 
     _print_all_summary(verb, outcomes, failed=failed, skipped=skipped)
+    platform_eligible, _reason = production_file_vault_eligibility(platform)
+    if verb == "enable" and not platform_eligible:
+        _term.emit_warn(file_vault_plaintext_warning(platform))
     return 1 if failed else 0
 
 

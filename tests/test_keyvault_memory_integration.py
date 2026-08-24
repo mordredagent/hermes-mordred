@@ -1,21 +1,17 @@
 """Integration: vault ``.env`` → env shim → usable ``HERMES_MEMORY_KEY``.
 
-No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD) implements agent-memory
-encryption — nothing upstream consumes ``HERMES_MEMORY_KEY`` today. This is
-**not** a test of Hermes's built-in agent-memory encryption; it proves the
-*intended* contract for a future Mordred-owned memory-encryption runtime
-(a Mordred-owned runtime tracked in docs/dev/TODO.md), which will be the actual consumer:
+Hermes persists its agent-memory Markdown as plaintext; Mordred's shipped
+runtime hook owns its at-rest encryption. This is not a test of built-in Hermes
+encryption. It proves the live Mordred contract:
 
   vault-enrolled ``.env`` (``HERMES_MEMORY_KEY=...``)
     → ``_runtime_env.inject_vault_env`` lands it in ``os.environ`` at startup
-    → the value decodes to a 32-byte AES-256 key a memory encryptor would accept.
+    → the value decodes to the 32-byte AES-256 key the memory hook consumes.
 
 The AES-256-GCM key format (URL-safe base64, exactly 32 bytes, with a
-filename-bound AAD) mirrors upstream ``tools/memory_tool.py``'s documented
-contract, reproduced here rather than imported (cross-package coupling; and
-that module does not exist upstream today) — so the proof is self-contained
-and runs on any platform via the software fakes (real P-256 ECDH + in-memory
-anchor).
+filename-bound AAD) mirrors Mordred's ``memory_crypto`` contract. The proof is
+self-contained and runs on any platform via the software fakes (real P-256
+ECDH + in-memory anchor).
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ from mordred_hermes.wizard import vault_memory_key
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
 _PASSPHRASE = "correct horse battery staple"
-# Mirrors upstream tools/memory_tool.py _aad_for_path: "hermes-memory-v1:<name>".
+# Mirrors Mordred memory_crypto._aad_for_path: "hermes-memory-v1:<name>".
 _MEMORY_AAD = b"hermes-memory-v1:MEMORY.md"
 
 

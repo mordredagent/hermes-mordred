@@ -107,6 +107,19 @@ def test_bump_updates_every_surface_in_lockstep(bump: tuple[ModuleType, Path, Pa
     assert 'hermes-mordred[macos]==0.1.0b0"' in compat_text
 
 
+def test_next_steps_follow_pr_changelog_and_editable_metadata_conventions(
+    bump: tuple[ModuleType, Path, Path, list[Path]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    mod, *_ = bump
+
+    assert mod.main(["0.1.0b0"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Changes/Fixes entry" in out
+    assert "changelog entry" not in out.lower()
+    assert "uv sync --all-extras --reinstall-package hermes-mordred" in out
+
+
 def test_dry_run_writes_nothing(bump: tuple[ModuleType, Path, Path, list[Path]]) -> None:
     mod, about, doc, manifests = bump
     assert mod.main(["0.1.0b0", "--dry-run"]) == 0

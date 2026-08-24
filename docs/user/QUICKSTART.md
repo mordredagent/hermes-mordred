@@ -21,8 +21,10 @@ You need:
 - an installed [Hermes Agent](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md).
 
 Linux supports the hardware-backed keyvault, but the transparent env/config
-startup lifecycle is not active there yet. On Linux those encryption targets
-report inactive and plaintext remains the runtime source.
+startup lifecycle and production file-vault enrollment are not available
+there yet. Direct enables refuse; `setup` and `encryption enable all` skip the
+targets. A copied enrollment reports inactive, and plaintext remains the
+runtime source.
 
 If `hermes` is not installed yet, use its official installer, then reload your
 shell:
@@ -184,29 +186,31 @@ shell.
 
 ## 2. First run, in order
 
-`hermes-mordred setup` first checks that upstream Hermes itself is set up
-(offering to run `hermes setup` if not), then runs the seven steps below in
-order, probing each one first and skipping whatever is already complete — so
-re-running it after an interruption picks up where it left off. Two moments
-still need you at the keyboard: the keyvault Passphrase and 24-word Seed
-Phrase backup at step 4 (have pen and paper ready), and the vault recovery
-passphrase the first time step 5 enables encryption.
+`hermes-mordred setup` runs the seven steps below in order, probing each one
+first and skipping whatever is already complete — so re-running it after an
+interruption picks up where it left off. The run is interactive unless you use
+its explicit non-interactive flags. In addition to policy and network choices,
+prepare for the keyvault Passphrase and 24-word Seed Phrase backup at step 5
+(have pen and paper ready), and the separate file-vault recovery passphrase the
+first time step 6 enables encryption.
 
 | # | Command | Result |
 |---|---|---|
-| 1 | `hermes-mordred configure` | Writes Mordred policy and enables all six plugins. |
-| 2 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
-| 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
-| 4 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
-| 5 | `hermes-mordred encryption enable env` (macOS only) | Enrolls `.env` and activates the transparent runtime lifecycle. |
-| 6 | `hermes-mordred encryption enable memory` (macOS only) | Arms the memory hook and seals `~/.hermes/memories/*.md`. |
-| 7 | `hermes-mordred status` | Shows policy, route, keyvault, and encryption state. |
+| 1 | `hermes setup` (when offered) | Confirms upstream Hermes is ready before Mordred configuration. |
+| 2 | `hermes-mordred configure` | Writes Mordred policy and enables all six plugins. |
+| 3 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
+| 4 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
+| 5 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
+| 6 | `hermes-mordred encryption enable env` (macOS only) | Enrolls `.env` and activates the transparent runtime lifecycle. |
+| 7 | `hermes-mordred encryption enable memory` (macOS only) | Arms the memory hook and seals `~/.hermes/memories/*.md`. |
 
-On macOS, a successful final status includes an `env [on] enrolled` row. On
-Linux the row is inactive even if enrolled; that is an explicit platform
-limit, not protected runtime state. The macOS-only `workspace` target has a
-separate `sealed` / `open` / `off` state: `sealed` is protected, not disabled.
-Add `--json` for machine-readable status.
+After the seven steps, `setup` prints the final `hermes-mordred status`
+dashboard. On macOS, a successful result includes an `env [on] enrolled` row.
+On Linux the target is normally `off`; a copied enrollment is inactive, which
+is an explicit platform limit rather than protected runtime state. The
+macOS-only `workspace` target has a separate `sealed` / `open` / `off` state:
+`sealed` is protected, not disabled. Add `--json` to the standalone status
+command for machine-readable output.
 
 ## 3. Fastest path: secrets encrypted at rest
 
@@ -358,10 +362,13 @@ for provider authentication, interactive use, and gateway operation.
 
 ## Glossary
 
-- **vault** — encrypted storage for secrets.
-- **keyvault** — the hardware-backed key that opens the vault.
-- **device key** — the normal machine-local unlock path.
-- **recovery passphrase / seed** — the offline recovery path.
+- **file vault** — the separate encrypted container for env, config, and
+  memory data, opened by its device key or recovery passphrase.
+- **keyvault** — the hardware-backed envelope and wallet/seed store, with its
+  own main key, Seed Phrase, and export backup.
+- **device key** — the everyday machine-local opener for the file vault.
+- **recovery passphrase** — the file vault's cold recovery secret.
+- **Seed Phrase** — the distinct 24-word keyvault recovery secret.
 - **attended / unattended** — whether macOS asks for Touch ID on every unwrap.
 - **network path** — Tor, VPN, or direct clearnet routing.
 - **policy mode** — `strict`, `lenient`, or `off` enforcement behavior.

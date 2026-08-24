@@ -286,6 +286,7 @@ historical context, not the source of truth.
 5. Record one-line Changes/Fixes entries in the PR description; do not create a
    `CHANGELOG.md`.
 
-Current in-flight item: agent-memory at-rest encryption, in three PRs — docs
-first, then the keyvault runtime hook, then the wizard lifecycle and `setup`
-step.
+Agent-memory at-rest encryption is implemented. Its compatibility coverage now
+includes the weekly upstream-main memory-seam canary described in
+[`CI.md`](./CI.md); unfinished work remains tracked by unchecked
+[`TODO.md`](./TODO.md) items rather than an in-flight note here.

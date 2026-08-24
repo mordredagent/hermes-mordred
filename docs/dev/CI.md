@@ -124,6 +124,13 @@ Tor and TPM use hermetic CI coverage and do not belong in this manual log.
 - `tools/check_hook_payload_drift.py` statically verifies `VALID_HOOKS` and the
   fields in literal `invoke_hook(...)` dispatches against
   `tools/hook_payload_contract.json`.
+- `tests/test_keyvault_memory_hook_canary.py` runs against the shallow upstream
+  `main` checkout via `PYTHONPATH`, exercising the supported memory read,
+  mutation, and backup-write seams rather than relying only on static names.
+- That executable upstream check runs in a `contents: read` job with checkout
+  credentials disabled. A separate fresh-runner job has `issues: write` and
+  receives only normalized `ok` / `drift` status values; it never checks out or
+  executes upstream code.
 - A mismatch opens or updates an `actionable` + `upstream-drift` issue. It never
   patches Hermes or opens an upstream PR.
 - `tests/test_hook_payload_drift.py` runs the same contract against the locally
@@ -200,7 +207,9 @@ add-first with the new repository claim while preserving `release.yml` and the
 ### Normal release (runbook)
 
 1. Run `python tools/bump_version.py <version>`; never reuse a published PyPI
-   version or edit version surfaces separately.
+   version or edit version surfaces separately. If inspecting distribution
+   metadata in the editable development venv, refresh it with
+   `uv sync --all-extras --reinstall-package hermes-mordred`.
 2. Run the full local checks and merge the version bump to `dev` through a PR.
 3. Open the release PR from `dev` to `main`, aggregate the included PRs'
    Changes/Fixes entries, confirm CI, and merge.

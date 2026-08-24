@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.keyvault import vault
-from mordred_hermes.wizard import vault_cli
+from mordred_hermes.wizard import _vault_open, vault_cli
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 from ._wizard_vault_cli_helpers import _PASSPHRASE, _PromptIO, _ReadRaisesStore
@@ -235,6 +235,24 @@ class TestRecover:
     with a FRESH backend+store (the 'new machine' — no wrapping key, no anchor).
     A successful recover restores the writable device hot path on the new host.
     """
+
+    def test_unsupported_production_platform_refuses_before_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            _vault_open,
+            "production_file_vault_eligibility",
+            lambda: (False, "no production anchor on test-platform"),
+        )
+
+        rc = vault_cli.recover(
+            root=tmp_path / "vault",
+            prompt_io=_PromptIO(passwords=[]),
+            backend=FakeBackend(),
+        )
+
+        assert rc == 1
+        assert "anchor store" in capsys.readouterr().err
 
     def test_happy_path_restores_hot_path(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         old_backend, old_store = FakeBackend(), FakeAnchorStore()

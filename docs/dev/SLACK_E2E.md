@@ -93,7 +93,12 @@ is the event's platform and its last segment is exactly the channel id. The
 middle `{team}`/`{guild}` segment is additionally required to equal the event's
 `SessionSource.scope_id` (`guild_id` is read as the deprecated alias) **when the
 event carries one**: a key bound in one workspace then cannot unlock a
-same-id channel in another. An absent, blank, or non-string scope keeps the
+same-id channel in another. The sole alternative is a proven externally shared
+Slack channel event: the source event must be structurally consistent, its
+posting team must not be an installed team, and the key's installing-team
+scope must be an `auth_test`-verified live installation. DMs, malformed
+events, stale/uninstalled scopes, and non-Slack platforms do not receive this
+exception. An absent, blank, or non-string scope keeps the
 lenient first-and-last match, because refusing there would recreate the failure
 in which no v3 command authenticates at all. Today the shipped Slack adapter
 stamps `scope_id` from the event's team id, the shipped Discord adapter stamps

@@ -336,6 +336,43 @@ def test_setup_guides_include_agent_memory_encryption() -> None:
     assert "agent-memory encryption" in spec_setup, "SPEC.md setup contract omits memory encryption"
 
 
+def test_quickstart_table_matches_setup_orchestrator_order() -> None:
+    from mordred_hermes.wizard import setup_cli
+
+    quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
+    section = quickstart.split("## 2. First run, in order", 1)[1].split(
+        "## 3. Fastest path: secrets encrypted at rest", 1
+    )[0]
+    rows = re.findall(r"^\| (?P<number>\d+) \| (?P<command>.*?) \|", section, re.MULTILINE)
+    expected = (
+        ("hermes", "`hermes setup`"),
+        ("configure", "`hermes-mordred configure`"),
+        ("network", "`hermes-mordred network init`"),
+        ("hardware-helper", "`hermes-mordred keyvault enable-se`"),
+        ("keyvault", "`hermes-mordred keyvault init`"),
+        ("env-encryption", "`hermes-mordred encryption enable env`"),
+        ("memory-encryption", "`hermes-mordred encryption enable memory`"),
+    )
+
+    assert tuple(step for step, _command in expected) == setup_cli._SETUP_STEP_ORDER
+    assert [number for number, _command in rows] == [str(index) for index in range(1, 8)]
+    assert len(rows) == len(expected)
+    for (_step, command), (_number, documented) in zip(expected, rows, strict=True):
+        assert command in documented
+    assert all("hermes-mordred status" not in command for _number, command in rows)
+    assert "After the seven steps" in section and "`hermes-mordred status`" in section
+
+
+def test_extension_docs_cover_advertised_protocol_capabilities() -> None:
+    from mordred_hermes.extension.api import _EXTENSION_CAPABILITIES
+
+    extension = (ROOT / "docs" / "user" / "EXTENSION.md").read_text(encoding="utf-8")
+    for capability in _EXTENSION_CAPABILITIES:
+        message = re.sub(r"_v\d+$", "", capability)
+        assert capability in extension, f"EXTENSION.md omits advertised capability {capability!r}"
+        assert f"`{message}`" in extension, f"EXTENSION.md omits message for capability {capability!r}"
+
+
 def test_maintained_docs_do_not_embed_a_developer_home_path() -> None:
     failures = [
         str(path.relative_to(ROOT)) for path in _markdown_files() if "/Users/" in path.read_text(encoding="utf-8")
