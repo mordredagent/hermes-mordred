@@ -42,6 +42,7 @@ import shlex
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final, NamedTuple
 
@@ -698,7 +699,7 @@ def discover_running_gateway_pythons(home: Path | None = None) -> list[Path]:
 def _resolve_runtime_python(home: Path | None, runtime_python: Path | None) -> tuple[Path | None, str]:
     """Resolve the interpreter to probe, or ``(None, detail)`` when none is found.
 
-    Shared by both capability probes: an explicit ``runtime_python`` wins, else
+    Shared by the three capability probes: an explicit ``runtime_python`` wins, else
     :func:`discover_runtime_python` resolves it from ``home``.
     """
     home = _hermes_home() if home is None else home
@@ -750,6 +751,45 @@ def _run_runtime_probe(
     return proc, ""
 
 
+def _probe_capability(
+    home: Path | None,
+    runtime_python: Path | None,
+    *,
+    timeout: float,
+    probe_src: str,
+    can: str,
+    cannot: str,
+    ok_suffix: Callable[[str], str] | None = None,
+) -> tuple[bool, str]:
+    """Shared control flow for the three ``runtime_*_available`` probes.
+
+    Resolves the runtime interpreter (fail-closed, via :func:`_resolve_runtime_python`),
+    then runs ``probe_src`` there via :func:`_run_runtime_probe` with
+    ``PYTHONPATH`` / ``PYTHONHOME`` / ``HERMES_MEMORY_KEY`` stripped and
+    ``MORDRED_CONFIG_DECRYPT=0`` set — an exported ``MORDRED_CONFIG_DECRYPT=1``
+    would otherwise force-engage the config-decrypt ``.pth`` hook in the probe
+    process, opening the vault (and prompting Touch ID) merely to answer a
+    capability question. Any launch error, timeout, or non-zero exit is
+    **unavailable** (fail-closed): we never claim capability we could not prove.
+
+    ``can`` / ``cannot`` complete the success and failure details
+    (``"hermes runtime (…) can {can}"`` / ``"the hermes runtime (…) cannot
+    {cannot}: {reason}"``); ``ok_suffix`` may append text derived from the
+    probe's stdout on success.
+    """
+    python, locate_err = _resolve_runtime_python(home, runtime_python)
+    if python is None:
+        return False, locate_err
+    proc, run_err = _run_runtime_probe(python, probe_src, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"})
+    if proc is None:
+        return False, run_err
+    if proc.returncode == 0:
+        suffix = ok_suffix(proc.stdout or "") if ok_suffix is not None else ""
+        return True, f"hermes runtime ({python}) can {can}{suffix}"
+    reason = (proc.stderr or proc.stdout or "unknown error").strip()
+    return False, f"the hermes runtime ({python}) cannot {cannot}: {reason}"
+
+
 def runtime_env_injection_available(
     *,
     home: Path | None = None,
@@ -758,28 +798,20 @@ def runtime_env_injection_available(
 ) -> tuple[bool, str]:
     """Whether the Hermes runtime can decrypt a sealed ``.env`` at startup.
 
-    Returns ``(ok, detail)``. ``ok`` is ``True`` only when the runtime
-    interpreter has the ``mordred_keyvault`` plugin registered *and* the shim's
-    hot-path imports resolve there. ``detail`` is a human-readable reason for the
-    caller's fail-closed message. Any launch error, timeout, or non-zero exit is
-    reported as **unavailable** (fail-closed): we never claim capability we could
-    not prove. Like the config probe, it runs with ``MORDRED_CONFIG_DECRYPT=0`` so
-    the config-decrypt ``.pth`` hook cannot engage in the probe process.
+    ``ok`` is ``True`` only when the runtime interpreter has the
+    ``mordred_keyvault`` plugin registered *and* the shim's hot-path imports
+    resolve there. Shared semantics: :func:`_probe_capability`.
     """
-    python, locate_err = _resolve_runtime_python(home, runtime_python)
-    if python is None:
-        return False, locate_err
-    # ``MORDRED_CONFIG_DECRYPT=0`` for the same reason the config probe sets it:
-    # an exported ``MORDRED_CONFIG_DECRYPT=1`` force-engages the ``.pth`` hook in
-    # the probe process, which would open the vault (and prompt Touch ID) merely
-    # to answer a capability question — `encryption status` now runs this probe.
-    proc, run_err = _run_runtime_probe(python, _PROBE_SRC, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"})
-    if proc is None:
-        return False, run_err
-    if proc.returncode == 0:
-        return True, f"hermes runtime ({python}) can inject a sealed .env"
-    reason = (proc.stderr or proc.stdout or "unknown error").strip()
-    return False, f"the hermes runtime ({python}) cannot decrypt a sealed .env: {reason}"
+    return _probe_capability(
+        home,
+        runtime_python,
+        timeout=timeout,
+        probe_src=_PROBE_SRC,
+        # Asymmetric on purpose (pre-split wording): success speaks of *injecting*
+        # the sealed .env at startup, failure of not being able to *decrypt* it.
+        can="inject a sealed .env",
+        cannot="decrypt a sealed .env",
+    )
 
 
 def runtime_config_decrypt_available(
@@ -792,27 +824,18 @@ def runtime_config_decrypt_available(
 
     The ``config.yaml`` analogue of :func:`runtime_env_injection_available`. ``ok``
     is ``True`` only when the runtime interpreter has the config-decrypt ``.pth``
-    startup hook installed *and* the materialize hot-path imports resolve there.
-
-    The probe runs with ``MORDRED_CONFIG_DECRYPT=0`` so the ``.pth`` hook is
-    neutralized for the probe process itself — it cannot open the vault or prompt
-    for Touch ID while we merely check capability (the explicit
-    ``config_hook_installed()`` + import checks do the verification). Same
-    ``PYTHONPATH`` / ``PYTHONHOME`` stripping and fail-closed semantics as the env
-    probe.
+    startup hook installed *and* the materialize hot-path imports resolve there
+    (the explicit ``config_hook_installed()`` + import checks in the probe source
+    do the verification). Shared semantics: :func:`_probe_capability`.
     """
-    python, locate_err = _resolve_runtime_python(home, runtime_python)
-    if python is None:
-        return False, locate_err
-    proc, run_err = _run_runtime_probe(
-        python, _CONFIG_PROBE_SRC, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"}
+    return _probe_capability(
+        home,
+        runtime_python,
+        timeout=timeout,
+        probe_src=_CONFIG_PROBE_SRC,
+        can="decrypt a sealed config.yaml",
+        cannot="decrypt a sealed config.yaml",
     )
-    if proc is None:
-        return False, run_err
-    if proc.returncode == 0:
-        return True, f"hermes runtime ({python}) can decrypt a sealed config.yaml"
-    reason = (proc.stderr or proc.stdout or "unknown error").strip()
-    return False, f"the hermes runtime ({python}) cannot decrypt a sealed config.yaml: {reason}"
 
 
 def runtime_memory_encryption_available(
@@ -826,21 +849,17 @@ def runtime_memory_encryption_available(
     The ``memories/*.md`` analogue of :func:`runtime_env_injection_available`.
     ``ok`` is ``True`` only when ``mordred_hermes.keyvault._memory_hook`` imports
     in that interpreter *and* classifies its ``tools.memory_tool`` as a seam it
-    can wrap; the detail then names the shape. Same ``PYTHONPATH`` /
-    ``PYTHONHOME`` stripping, ``MORDRED_CONFIG_DECRYPT=0``, and fail-closed
-    semantics as the other probes — a seal must never be promised on a runtime
-    that would then read the sealed files as garbage.
+    can wrap; the detail then names the shape, read from the probe's stdout (``?``
+    if it printed nothing) — a seal must never be promised on a runtime that would
+    then read the sealed files as garbage. Shared semantics:
+    :func:`_probe_capability`.
     """
-    python, locate_err = _resolve_runtime_python(home, runtime_python)
-    if python is None:
-        return False, locate_err
-    proc, run_err = _run_runtime_probe(
-        python, _MEMORY_PROBE_SRC, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"}
+    return _probe_capability(
+        home,
+        runtime_python,
+        timeout=timeout,
+        probe_src=_MEMORY_PROBE_SRC,
+        can="encrypt agent memory",
+        cannot="encrypt agent memory",
+        ok_suffix=lambda out: f" (seam {out.strip() or '?'})",
     )
-    if proc is None:
-        return False, run_err
-    if proc.returncode == 0:
-        shape = (proc.stdout or "").strip() or "?"
-        return True, f"hermes runtime ({python}) can encrypt agent memory (seam {shape})"
-    reason = (proc.stderr or proc.stdout or "unknown error").strip()
-    return False, f"the hermes runtime ({python}) cannot encrypt agent memory: {reason}"
