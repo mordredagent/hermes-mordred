@@ -15,24 +15,19 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --with-extension
 ```
 
-Add `--version VERSION` after replacing `VERSION` with the exact PyPI release
-you need. Terminal QR rendering is optional; without the `messaging` extra,
-`extension pair` prints the pairing code as text. If you selected an exact
-release, add QR rendering without changing that release by replacing `VERSION`
-below with the same version:
-
-```sh
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --upgrade-package hermes-mordred "hermes-mordred[messaging]==VERSION"
-```
-
-Alternatively, install the extension features and terminal QR rendering in one
-step with the generic extras option:
+The `messaging` extra is not required to use the browser extension. Without it,
+`hermes-mordred extension pair` prints the `MORT-...` pairing code as text. If
+you also want the same code rendered as a terminal QR, add only `messaging` to
+the recommended extension bundle:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
-  bash -s -- --extras extension,ethereum,messaging
+  bash -s -- --with-extension --extras messaging
 ```
+
+Add `--version VERSION` to either form after replacing `VERSION` with the exact
+PyPI release you need. When rerunning the installer, repeat the same feature
+options and version pin.
 
 The browser client is a separately distributed
 [Chromium Manifest V3 bundle](https://github.com/mordredagent/mordred-extension-dist):

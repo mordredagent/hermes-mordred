@@ -319,8 +319,21 @@ def test_user_docs_describe_installer_options() -> None:
     for path in paths:
         document = path.read_text(encoding="utf-8")
         assert "bash -s -- --with-extension" in document, f"{path.relative_to(ROOT)} omits --with-extension"
-        assert "--extras extension,ethereum,messaging" in document, f"{path.relative_to(ROOT)} omits --extras"
         assert "--version VERSION" in document, f"{path.relative_to(ROOT)} omits --version"
+        assert re.search(r"The `messaging` extra is not required to use the\s+browser extension\.", document), (
+            f"{path.relative_to(ROOT)} does not explain that messaging is optional"
+        )
+        assert "terminal QR" in document, f"{path.relative_to(ROOT)} does not explain what messaging adds"
+
+    # Keep the common path focused on --with-extension. The README's advanced
+    # section retains one fully explicit three-extra example, while the
+    # extension guide shows the shorter additive form for users who want a QR.
+    readme = paths[0].read_text(encoding="utf-8")
+    extension_guide = paths[2].read_text(encoding="utf-8")
+    assert "--extras LIST" in readme
+    assert readme.count("--extras extension,ethereum,messaging") == 1
+    assert "--all-extras" in readme
+    assert "--with-extension --extras messaging" in extension_guide
 
     # A `hermes` self-update recreates ~/.hermes/hermes-agent/venv, so a bare
     # re-run of the installer only gets what that re-run itself asks for; the
