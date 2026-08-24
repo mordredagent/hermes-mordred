@@ -254,7 +254,7 @@ the source remains usable, and failure paths leave no partial destination.
   (`tests/integration/test_secure_home_macos.py`), manual-only behind
   `MORDRED_LIVE_SECURE_HOME_TEST=1` plus the `integration` marker.
 - [x] Docs: SPEC/PLAN/TODO/PATHS/USAGE updated in this PR.
-- [ ] Live-device validation run on Apple Silicon, recorded in
+- [x] Live-device validation run on Apple Silicon (2026-08-25), recorded in
   [`CI.md`](./CI.md) §Manual live-device validation log.
 
 ### Acceptance gate (Phase 5, Phase 1 slice)
