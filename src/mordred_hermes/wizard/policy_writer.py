@@ -38,10 +38,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal, NoReturn, Protocol, runtime_checkable
 
 from ruamel.yaml import YAML
 
+from .._file_lock import private_flock
 from .._policy_io import (
     load_policy_mapping,
     policy_transaction_marker_for_policy,
@@ -164,9 +165,29 @@ def _ensure_real_directory(directory: Path) -> None:
         raise OSError(errno.ENOTDIR, "writer parent must be a real directory", str(directory))
 
 
+def _reject_unopenable_policy_lock(lock_path: Path, exc: OSError) -> NoReturn:
+    """Wrap an ``os.open`` failure on the policy lock as a tagged ``EPERM``."""
+    raise OSError(errno.EPERM, "policy writer lock is unsafe or unavailable", str(lock_path)) from exc
+
+
+def _reject_unsafe_policy_lock(lock_path: Path) -> NoReturn:
+    """Fail closed when the policy lock is not a private regular file."""
+    raise OSError(errno.EPERM, "policy writer lock must be a mode-0600 regular file", str(lock_path))
+
+
 @contextmanager
 def _policy_write_lock(directory: Path) -> Iterator[None]:
-    """Serialize policy/config read-modify-write cycles across threads/processes."""
+    """Serialize policy/config read-modify-write cycles across threads/processes.
+
+    The descriptor lifecycle is
+    :func:`mordred_hermes._file_lock.private_flock`. The reentrancy-depth
+    bookkeeping, the ``RLock``, the parent-directory check, and both raises
+    stay here: the depth counter is specific to this module's nested
+    transactions, and keeping the raises local keeps the tagged ``EPERM``
+    :exc:`OSError`\\ s (and the ``from exc`` chaining) byte-identical. ``depth``
+    is still set only *after* the flock is held and cleared *before* it is
+    released, so a nested caller can never observe the flag without the lock.
+    """
     with _POLICY_THREAD_LOCK:
         depth = getattr(_POLICY_LOCK_STATE, "depth", 0)
         if depth:
@@ -178,27 +199,16 @@ def _policy_write_lock(directory: Path) -> Iterator[None]:
             return
 
         _ensure_real_directory(directory)
-        lock_path = directory / _POLICY_LOCK_FILENAME
-        flags = os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK
-        try:
-            fd = os.open(lock_path, flags, 0o600)
-        except OSError as exc:
-            raise OSError(errno.EPERM, "policy writer lock is unsafe or unavailable", str(lock_path)) from exc
-        try:
-            metadata = os.fstat(fd)
-            if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
-                raise OSError(errno.EPERM, "policy writer lock must be a mode-0600 regular file", str(lock_path))
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+        with private_flock(
+            directory / _POLICY_LOCK_FILENAME,
+            on_unsafe=_reject_unsafe_policy_lock,
+            on_open_error=_reject_unopenable_policy_lock,
+        ):
             _POLICY_LOCK_STATE.depth = 1
             try:
                 yield
             finally:
                 _POLICY_LOCK_STATE.depth = 0
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
 
 
 def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:

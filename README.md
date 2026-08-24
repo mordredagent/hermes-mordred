@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 keys, Tor/VPN routing, local-LLM policy enforcement, end-to-end gateway
 messages, and macOS-integrated at-rest secret encryption.
 
-**Status: active alpha** — current release `0.1.0a18`.
+**Status: active alpha** — current release `0.1.0a19`.
 
 New here? Follow the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
@@ -84,11 +84,11 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a18"
+  "hermes-mordred[macos]==0.1.0a19"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a18"
+  "hermes-mordred[keyvault]==0.1.0a19"
 ```
 
 See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
@@ -165,11 +165,13 @@ The destination must not already exist. Store the snapshot separately from the
 Keyvault init passphrase and 24-word Seed Phrase, and export a new snapshot
 after every Keyvault content change, including `keyvault eth new`.
 
-On macOS, turn on transparent `.env` encryption and verify it:
+On macOS, turn on transparent `.env` and agent-memory encryption and verify
+both targets:
 
 ```sh
 MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
-hermes-mordred status                    # the env row should read [on] enrolled
+hermes-mordred encryption enable memory
+hermes-mordred status              # the env and memory rows should both read [on]
 ```
 
 The environment variable applies to each command separately. `keyvault init`
@@ -188,8 +190,8 @@ Everyday commands:
 ```sh
 hermes-mordred status
 hermes-mordred encryption status
-hermes-mordred encryption enable <env|config|memory|workspace|all>
-hermes-mordred network use <tor|vpn|clearnet>
+hermes-mordred encryption enable env       # or: config, memory, workspace, all
+hermes-mordred network use tor              # or: vpn, clearnet
 hermes-mordred network status
 hermes-mordred audit tail
 ```
@@ -203,6 +205,15 @@ memory reads/writes fail closed (they do not write plaintext), and a session
 may see an empty memory. Known limitations (raw readers,
 out-of-process writers, approval-gated writes) are listed in
 [`USAGE.md` §3](docs/user/USAGE.md#encryption--the-recommended-onoff-switch).
+
+An `[on]` mark means that target's protection lifecycle is active; it does not
+mean plaintext never exists while the data is in use. In particular, the
+`config` target materializes a mode-`0600` plaintext `config.yaml` for the
+lifetime of each managed Hermes process and reseals it on clean exit. The
+`workspace` target is protected only while its status is `sealed`, not while it
+is `open`. The
+[Quickstart protection table](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md#what-the-protected-states-mean)
+summarizes every target, plaintext window, and restart requirement.
 
 Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
@@ -251,7 +262,7 @@ The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a18"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a19"
 ```
 
 Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
@@ -318,9 +329,9 @@ for safe isolation, loaded-code verification, and the full check suite.
   `keyvault recover`; keep the blob, init passphrase, and Seed Phrase separate.
 - For extension, gateway, and port 7788 issues, see the
   [extension troubleshooting guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md#troubleshooting).
-- For Tor/VPN issues, run `hermes-mordred network status`, then
-  `hermes-mordred network use <tor|vpn|clearnet>`; restart Hermes if the route
-  changed.
+- For Tor/VPN issues, run `hermes-mordred network status`, then select a route
+  with `hermes-mordred network use tor` (or `vpn` / `clearnet`); restart Hermes
+  if the route changed.
 - If the audit log falls back to plaintext with
   `mordred.degraded.audit_encryption_unavailable`, restart from a context that
   can access the device key. Recovery is automatic.

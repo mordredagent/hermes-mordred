@@ -36,6 +36,8 @@ from mordred_hermes.wizard.configure import (
 )
 from mordred_hermes.wizard.policy_writer import PolicySnapshot, PolicyWriter
 
+from ._helpers import _writer
+
 # -----------------------------------------------------------------------------
 # Test doubles.
 # -----------------------------------------------------------------------------
@@ -91,14 +93,6 @@ class _SetupRunnerSpy:
     def run(self, *, non_interactive: bool) -> int:
         self.calls.append(non_interactive)
         return self.returncode
-
-
-def _writer(tmp_path: Path) -> PolicyWriter:
-    return PolicyWriter(
-        config_path=tmp_path / "config.yaml",
-        policy_json_path=tmp_path / "mordred" / "policy.json",
-        mordred_dir=tmp_path / "mordred",
-    )
 
 
 # The core prompts collected by ``configure`` after the network split.

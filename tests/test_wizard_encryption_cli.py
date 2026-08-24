@@ -29,22 +29,14 @@ from mordred_hermes.keyvault._memory_hook import memory_marker_path, memory_opto
 from mordred_hermes.keyvault.memory_crypto import seal
 from mordred_hermes.wizard import encryption_cli
 
+from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
-_PASSPHRASE = "correct horse battery staple"
 #: Any 32 bytes: these tests only care whether a file *looks* sealed.
 _MEMORY_KEY = b"\x07" * 32
 
 
 # --- shared vault helpers (mirror test_wizard_config_decrypt_cli) -------------
-def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    key_id = anchor_label = _identity.vault_identity(root)
-    backend.generate_enclave_key(key_id)
-    vault.init_vault(
-        root, key_id=key_id, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=anchor_label
-    ).close()
-
-
 def _enroll(root: Path, name: str, data: bytes, backend: FakeBackend, store: FakeAnchorStore) -> None:
     key_id = anchor_label = _identity.vault_identity(root)
     with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:

@@ -33,6 +33,7 @@ from mordred_hermes.keyvault.memory_crypto import MAGIC, decode_key, is_sealed, 
 from mordred_hermes.wizard import encryption_cli, memory_cli
 from mordred_hermes.wizard.vault_memory_key import _MEMORY_KEY_ENV, _effective_memory_key, _is_valid_memory_key
 
+from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
@@ -58,14 +59,6 @@ def _runtime_ready(monkeypatch: pytest.MonkeyPatch) -> None:
 def _env_target_enrolled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default the env precondition to satisfied (memory rides on the .env shim)."""
     monkeypatch.setattr(encryption_cli, "_enrolled_names", lambda _root: {".env"})
-
-
-def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    key_id = anchor_label = _identity.vault_identity(root)
-    backend.generate_enclave_key(key_id)
-    vault.init_vault(
-        root, key_id=key_id, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=anchor_label
-    ).close()
 
 
 def _vault_env_text(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> str:

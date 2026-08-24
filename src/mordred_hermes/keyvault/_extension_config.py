@@ -37,7 +37,6 @@ concrete example.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -47,16 +46,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NoReturn
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None  # type: ignore[assignment]
+from .._file_lock import private_flock
 
 _WALLET_FILE = "wallet.json"
 _WALLET_LOCK_FILE = ".wallet.lock"
 _WALLET_CONFIG_MAX_BYTES = 1024 * 1024
 _WALLET_CONFIG_ERROR = "extension wallet configuration is unreadable or invalid; refusing automatic wallet fallback"
 _WALLET_DIRECTORY_ERROR = "extension wallet directory is unsafe; refusing wallet access"
+# Nothing in this module reads these any more: ``_wallet_file_lock``'s open
+# flags are assembled inside ``mordred_hermes._file_lock.private_flock``, so
+# changing them here has no effect on the lock. They survive only because
+# ``extension_sign`` re-exports them by name (a #137 facade guarantee).
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _CANONICAL_CHAIN_HEX = re.compile(r"0x[1-9a-f][0-9a-f]*\Z")
@@ -151,38 +151,41 @@ def _validate_extension_dir(path: Path, *, create: bool) -> bool:
     return True
 
 
+def _reject_unsafe_wallet_lock(_lock_path: Path, _exc: OSError | None = None) -> NoReturn:
+    """Fail closed on any wallet-lock descriptor problem.
+
+    One handler covers all three failure points (``os.open``, the mode
+    assertion, ``flock``) because this module deliberately answers every one of
+    them with the same content-free :exc:`WalletConfigError` — an extension
+    response must not disclose which part of the operator's filesystem was
+    wrong. Raising here rather than inside ``private_flock`` also keeps the
+    implicit ``__context__`` chaining the original ``except OSError:`` blocks
+    produced (never ``raise ... from``).
+    """
+    _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+
+
 @contextmanager
 def _wallet_file_lock(directory: Path) -> Iterator[None]:
-    """Exclusive cross-process lock for wallet config reads and writes."""
-    lock_path = directory / _WALLET_LOCK_FILE
-    try:
-        fd = os.open(
-            lock_path,
-            os.O_RDWR | os.O_CREAT | _O_CLOEXEC | _O_NOFOLLOW,
-            0o600,
-        )
-    except OSError:
-        _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
+    """Exclusive cross-process lock for wallet config reads and writes.
 
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
-        if stat.S_IMODE(info.st_mode) != 0o600:
-            _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            except OSError:
-                _raise_wallet_config_error(_WALLET_DIRECTORY_ERROR)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                with contextlib.suppress(OSError):
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+    The descriptor lifecycle is
+    :func:`mordred_hermes._file_lock.private_flock`. Three things stay specific
+    to this call site and are passed in rather than defaulted: there is no
+    in-process thread lock (the caller's ``_validate_extension_dir`` plus the
+    flock are the whole contract), the open flags omit ``O_NONBLOCK`` exactly
+    as before, and the unlock swallows :exc:`OSError` so a teardown failure
+    cannot mask whatever the body was already raising.
+    """
+    with private_flock(
+        directory / _WALLET_LOCK_FILE,
+        nonblock=False,
+        on_unsafe=_reject_unsafe_wallet_lock,
+        on_open_error=_reject_unsafe_wallet_lock,
+        on_lock_error=_reject_unsafe_wallet_lock,
+        suppress_unlock_errors=True,
+    ):
+        yield
 
 
 def _required_nonempty_string(cfg: dict[str, Any], field: str) -> None:

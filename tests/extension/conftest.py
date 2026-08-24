@@ -8,8 +8,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 # tests/extension/conftest.py -> repo root is two levels up; the package lives
 # under ``src`` in this plugin-only layout.
 _SRC = Path(__file__).resolve().parents[2] / "src"
 if _SRC.exists() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))

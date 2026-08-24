@@ -11,11 +11,6 @@ import pytest
 from mordred_hermes.extension import crypto, e2e, gateway_plugin, pairing
 
 
-@pytest.fixture(autouse=True)
-def _isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-
 @pytest.fixture
 def channel_key() -> bytes:
     pairing._save_pairing(
