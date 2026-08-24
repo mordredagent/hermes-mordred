@@ -32,11 +32,6 @@ from mordred_hermes.extension import crypto, e2e, gateway_plugin, outbound, pair
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-
-@pytest.fixture(autouse=True)
 def _reset_needs_key_rate_limit():
     """The needs-key notice cooldown is module-level in-memory state, so an
     entry left by an earlier test would silently suppress the notice a later

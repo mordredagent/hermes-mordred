@@ -51,7 +51,8 @@ from mordred_hermes.wizard.network_cli import (
     handle_init,
     run_init,
 )
-from mordred_hermes.wizard.policy_writer import PolicyWriter
+
+from ._helpers import _writer
 
 # --------------------------------------------------------------------------- #
 # Test doubles                                                                #
@@ -145,14 +146,6 @@ class _SpyCredentialsWriter:
         mullvad_killswitch: bool,
     ) -> None:
         self.calls.append((path, mullvad_account_id_env, mullvad_relay_country, mullvad_killswitch))
-
-
-def _writer(tmp_path: Path) -> PolicyWriter:
-    return PolicyWriter(
-        config_path=tmp_path / "config.yaml",
-        policy_json_path=tmp_path / "mordred" / "policy.json",
-        mordred_dir=tmp_path / "mordred",
-    )
 
 
 # Per-route scripted answer sets, in prompt order. Prompts are gated on the

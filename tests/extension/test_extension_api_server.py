@@ -54,11 +54,6 @@ def test_reported_package_version_falls_back_to_legacy_distribution(monkeypatch)
     assert calls == ["hermes-mordred", "mordred-hermes"]
 
 
-@pytest.fixture(autouse=True)
-def _isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-
 def _free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))

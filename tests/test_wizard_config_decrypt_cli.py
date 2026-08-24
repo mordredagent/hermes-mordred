@@ -20,6 +20,7 @@ from mordred_hermes.keyvault._config_bootstrap import _marker_path
 from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 from mordred_hermes.wizard import _runtime_gate, config_decrypt_cli
 
+from ._helpers import _init_empty_vault
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 
 _PASSPHRASE = "correct horse battery staple"
@@ -34,14 +35,6 @@ def _no_running_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     own class below, and no test may read this host's real process table.
     """
     monkeypatch.setattr(_runtime_gate, "_default_gateway_discovery", lambda *, home: [])
-
-
-def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:
-    key_id = anchor_label = _identity.vault_identity(root)
-    backend.generate_enclave_key(key_id)
-    vault.init_vault(
-        root, key_id=key_id, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=anchor_label
-    ).close()
 
 
 def _read_vault_config(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> bytes | None:

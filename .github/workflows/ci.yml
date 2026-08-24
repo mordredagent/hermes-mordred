@@ -114,10 +114,10 @@ jobs:
 
       - name: pytest
         env:
-          # README.md's documented canonical test invocation always pins
-          # HERMES_HOME to an isolated path — without it, _home.py's
-          # module-level HERMES_BASE resolves against the runner's real
-          # $HOME/.hermes instead of a throwaway directory.
+          # Pinned to a known path on purpose. The root tests/conftest.py
+          # would isolate a bare run anyway (it defaults HERMES_HOME to a
+          # temp dir before _home.py freezes HERMES_BASE), but an explicit
+          # value keeps CI's home deterministic and easy to inspect.
           HERMES_HOME: /tmp/hermes-mordred-ci-home
         run: pytest -q --cov=mordred_hermes --cov-report=xml
 

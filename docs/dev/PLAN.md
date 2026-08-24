@@ -224,9 +224,13 @@ plugin READMEs are not separate documentation authorities.
 
 ### Testing posture
 
-The default suite is hermetic. Live tests require their documented environment
-gate and never run accidentally. Any test that touches CLI state must use a
-temporary `HERMES_HOME`.
+The default suite is hermetic: the root `tests/conftest.py` defaults
+`HERMES_HOME` to a fresh temporary directory (cleaned up at process exit)
+before anything imports `mordred_hermes`, unless the caller already set
+`HERMES_HOME` — an explicit value always wins untouched. Live tests require
+their documented environment gate and never run accidentally. A test that
+needs its own isolated or per-test `HERMES_HOME` still sets/unsets it
+explicitly (e.g. via `monkeypatch`) rather than relying on ambient state.
 
 ### Type/build/lint posture
 
