@@ -224,6 +224,48 @@ operator surface.
 A CLI-produced blob recovers successfully into an isolated fresh profile while
 the source remains usable, and failure paths leave no partial destination.
 
+## Phase 5 — Secure Home (`mordred_wizard`)
+
+### Open decisions
+
+- Phase 2 `init` ceremony: the exact `hdiutil`/`diskutil` volume-creation
+  flow, and enforcing interactive-stdin-only password collection.
+- Phase 4 unlock trust boundary: automatic Keyvault-based unlock is deferred
+  until it is explicit where the unlock key may live without landing inside
+  the encrypted `HERMES_HOME` it unlocks.
+- Phase 4 launchd/Desktop env delivery: `launchctl setenv` vs. a plist
+  `EnvironmentVariables` block for processes that do not inherit the CLI's
+  shell environment.
+- Audit-trail emission for `adopt` and for verification refusals (e.g.
+  `UUID_MISMATCH`) is deliberately deferred: the audit log lives inside a
+  `HERMES_HOME`, so which home should record a pre-mount event needs a SPEC
+  decision before this is wired up.
+
+### 5.1 Phase 1 implementation
+
+- [x] `secure-home` paths/probe modules: the fail-closed verification
+  chain, the `~/.config/hermes-mordred/secure-home.json` config contract,
+  and the `fdesetup`/`diskutil` read-only probes.
+- [x] `secure-home status | adopt | run` CLI commands in `mordred_wizard`.
+- [x] Unit tests mocking `fdesetup`/`diskutil`/exec through an injectable
+  runner, covering the verification chain and both exact fail-closed
+  messages.
+- [x] Gated live macOS integration test
+  (`tests/integration/test_secure_home_macos.py`), manual-only behind
+  `MORDRED_LIVE_SECURE_HOME_TEST=1` plus the `integration` marker.
+- [x] Docs: SPEC/PLAN/TODO/PATHS/USAGE updated in this PR.
+- [ ] Live-device validation run on Apple Silicon, recorded in
+  [`CI.md`](./CI.md) §Manual live-device validation log.
+
+### Acceptance gate (Phase 5, Phase 1 slice)
+
+- Unit suite green.
+- `ruff check` / `ruff format --check` / `mypy --strict` clean, and
+  `shellcheck` clean on any touched shell scripts.
+- The live gated test (`MORDRED_LIVE_SECURE_HOME_TEST=1`) passed on Apple
+  Silicon and the result is logged in [`CI.md`](./CI.md) §Manual
+  live-device validation log.
+
 ## Cross-cutting (ongoing through the operational phase)
 
 - Keep maintained documentation indexed, English-only, free of stale local

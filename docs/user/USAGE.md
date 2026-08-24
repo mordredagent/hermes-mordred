@@ -449,6 +449,86 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 > localhost web app, copy the complete private `Web page:` URL printed at
 > startup, including its `#token=…` fragment.
 
+### `secure-home` — encrypted-APFS HERMES_HOME (macOS only)
+
+Relocates your entire Hermes home into a user-provided encrypted APFS
+volume — an independent second key layer beneath FileVault. Hermes itself is
+never modified; the wrapper only sets `HERMES_HOME` for the process it
+launches.
+```sh
+hermes-mordred secure-home status               # read-only report; --json supported
+hermes-mordred secure-home adopt <mountpoint>    # record an already-mounted encrypted volume
+hermes-mordred secure-home run -- <command...>   # launch <command> with HERMES_HOME inside it
+```
+
+> **Three modes.** `secure-home` supports three usage patterns:
+>
+> - **Standard** — FileVault only, no secure-home volume. This is enough if
+>   your threat model is a lost or stolen **powered-off** Mac: FileVault
+>   already protects that case.
+> - **Balanced** *(recommended if you adopt secure-home)* — unlock once
+>   after login/first launch; the volume stays mounted while Hermes/Gateway
+>   is running and you are not re-prompted. Touch ID / Secure Enclave
+>   unlock ships in a later phase.
+> - **Strict** — unlock explicitly every usage period, with an optional
+>   idle auto-lock once no Hermes process and no open file remain.
+>
+> Phase 1 (this release) implements only the manual workflow below —
+> `adopt` + `run`. Automatic mode selection ships with a later `init`
+> command.
+
+> **Worked example.** Create and mount an encrypted APFS volume yourself
+> first (Disk Utility, or `hdiutil`), then hand it to Mordred:
+>
+> ```sh
+> # 1. Create + mount an encrypted APFS volume (Disk Utility, or manually):
+> hdiutil create -size 4g -type SPARSE -fs APFS -encryption AES-256 \
+>   -volname HermesSecure ~/HermesSecure.sparseimage
+> hdiutil attach -owners on ~/HermesSecure.sparseimage   # prompts for the volume passphrase, mounts it
+>
+> # 2. Tell Mordred to adopt the now-mounted volume:
+> hermes-mordred secure-home adopt /Volumes/HermesSecure
+>
+> # 3. Run Hermes with HERMES_HOME inside the volume:
+> hermes-mordred secure-home run -- hermes
+> ```
+>
+> **`-owners on` is required.** `hdiutil attach` mounts `noowners` by
+> default; without `-owners on` (or a follow-up `sudo diskutil
+> enableOwnership <mountpoint>`), macOS ignores file ownership on the
+> volume, so `secure-home` refuses it — `0700` on `<mount>/hermes-home`
+> would not actually protect anything from other local users.
+>
+> `adopt` never creates, mounts, or unmounts anything itself — it only
+> verifies and records a volume you already mounted, and creates
+> `<mount>/hermes-home` inside it. `run` refuses to start unless the full
+> verification chain passes (FileVault status is read-only informational;
+> `secure-home` never changes it), so an unmounted or wrong volume fails
+> closed with `Secure Hermes home is locked. Unlock it to continue.` The
+> boot disk itself can never be adopted — it is always refused, since it is
+> FileVault-protected and auto-unlocked at every login rather than a
+> separate encrypted volume.
+
+> **Files are readable while mounted.** Once the volume is mounted,
+> `<mount>/hermes-home` is an ordinary directory: any process running as you
+> can read it, exactly like `~/.hermes` today. `secure-home` protects data
+> **at rest** — while the volume is unmounted/locked — not while it is open.
+
+> **Cloud prompts are not covered.** Locking the volume does nothing for a
+> prompt that has already left your machine for a cloud LLM, search, or
+> memory provider — that data is with the provider regardless of where
+> `HERMES_HOME` lives.
+
+> **Split-brain warning.** A Hermes process started **without** going
+> through `secure-home run` (or an equivalent launcher that sets
+> `HERMES_HOME` itself) falls back to your plain `~/.hermes` — silently, and
+> without touching the secure volume at all. This is ordinary Hermes
+> behavior, not a bug: if you rely on secure-home, launch every entry point
+> — CLI, Gateway — through the wrapper, or you risk two divergent homes.
+> Desktop app / launchd / cron launches do not see the wrapper's environment
+> in this release; see [`SPEC.md`](../dev/SPEC.md) for the launch-context
+> matrix.
+
 ---
 
 ## 4. Interactive command walkthroughs

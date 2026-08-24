@@ -213,6 +213,68 @@ canary test runs the memory-encryption hook against the installed upstream
 memory tool, so an upstream seam refactor fails the build instead of
 regressing silently.
 
+## Phase 5 — Secure Home (`mordred_wizard`)
+
+### 5.1 Plugin: `mordred_wizard`
+
+- Own the secure-home paths/probe/CLI modules entirely inside `wizard/`;
+  Hermes core and the other five plugins are untouched.
+- Implement the fail-closed verification chain: config exists → mountpoint
+  path symlink-free → real mount (`os.path.ismount`) → `diskutil info
+  -plist` reports the expected `VolumeUUID`, compared as parsed UUIDs →
+  filesystem is APFS → not the boot/system volume (`/` or
+  `/System/Volumes/...`) → encrypted (`EncryptionThisVolumeProper`, or a
+  backing disk image `hdiutil info -plist` reports `image-encrypted`;
+  unknown state refuses) → ownership honored (`noowners` mounts refuse) →
+  `<mount>/hermes-home` exists, symlink-free, user-owned, not
+  group/other-writable, and on the same device as the verified mountpoint.
+- Read FileVault state through `fdesetup status` only; `secure-home` never
+  changes FileVault state.
+- Store the pointer config at `~/.config/hermes-mordred/secure-home.json`
+  (directory `0700`, file `0600`, symlinks rejected, atomic writes;
+  `MORDRED_SECURE_HOME_CONFIG` overrides the path) with only `version`,
+  `mount_point`, `volume_uuid`, and `home_subdir` — never a secret, and
+  deliberately outside both the secure volume and `HERMES_HOME` to solve the
+  bootstrap problem (the pointer must be readable before the volume
+  mounts). The file itself is refused unless owned by the current user with
+  no group/other permission bits, at most 64KiB, and valid UTF-8;
+  `volume_uuid` is validated as a real UUID.
+- Wrap child processes by setting `HERMES_HOME=<mount>/hermes-home` and
+  exec'ing; this relies on upstream's own documented contract that a
+  subprocess spawner propagates `HERMES_HOME` explicitly, so no upstream
+  code changes.
+
+### 5.2 Wizard additions
+
+`secure-home status | adopt | run` are new top-level wizard commands:
+
+- `status` — read-only: FileVault state, configured/not, mount state,
+  volume identity verification result, effective secure home path, concise
+  informational notes; `--json` supported.
+- `adopt <mountpoint>` — records an already-mounted, user-created encrypted
+  APFS volume: verifies via `diskutil info -plist`, creates
+  `<mount>/hermes-home` (`0700`) inside the verified mounted volume only,
+  writes the config; `--force` required to overwrite an existing config;
+  performs zero volume operations.
+- `run -- <command...>` — fail-closed launcher: refuses unless the full
+  verification chain passes, then execs `<command...>` with
+  `HERMES_HOME=<mount>/hermes-home`.
+
+Mode selection (Standard/Balanced/Strict) and its automation are Phase 2
+(`init`); Phase 1 records no mode.
+
+### 5.3 Tests
+
+Unit tests mock `fdesetup`/`diskutil`/exec through an injectable runner and
+cover the verification chain, the two exact fail-closed messages, config
+file safety (permissions, symlink rejection, atomicity), and each CLI
+command's success/refusal paths. A gated live macOS integration test
+(`tests/integration/test_secure_home_macos.py`) builds a throwaway encrypted
+sparseimage in a temp dir; it runs only behind
+`MORDRED_LIVE_SECURE_HOME_TEST=1` plus the `integration` pytest marker and
+is manual-only — no new CI workflow, matching [`CI.md`](./CI.md)'s
+deliberately untouched active-workflow policy for Phase 1.
+
 ## Cross-cutting concerns
 
 ### Documentation

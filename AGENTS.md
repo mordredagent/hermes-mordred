@@ -43,7 +43,10 @@ bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
   the real `~/.hermes/` unless isolated:
   `env HERMES_HOME=/tmp/mordred-test-home .venv/bin/hermes-mordred configure`
   (fish needs the `env` prefix). Read-only commands (`status`, `audit tail`)
-  are safe.
+  are safe. `secure-home adopt` writes outside `HERMES_HOME` entirely, to
+  `~/.config/hermes-mordred/secure-home.json` — isolate it separately by also
+  setting `MORDRED_SECURE_HOME_CONFIG` to an isolated path (a resolved
+  `/private/...` path on macOS, not `/tmp/...`).
 - **Port 7788 belongs to the production extension gateway.** For local runs use
   `.venv/bin/hermes-mordred extension serve --port 7799`; check holders with
   `lsof -nP -iTCP:7788 -sTCP:LISTEN`.
