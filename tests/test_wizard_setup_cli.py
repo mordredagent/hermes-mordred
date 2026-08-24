@@ -252,6 +252,31 @@ class TestRunSetupOrchestration:
         # The final status dashboard prints too (run wasn't stopped early).
         assert "Mordred status:" in out
 
+    def test_off_macos_clean_skip_warns_that_runtime_data_remains_plaintext(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _force_steps_done(
+            monkeypatch,
+            _STEP_HERMES,
+            _STEP_CONFIGURE,
+            _STEP_NETWORK,
+            _STEP_HARDWARE_HELPER,
+            _STEP_KEYVAULT,
+        )
+
+        rc = _run_setup(
+            tmp_path,
+            platform="linux",
+            prompt_io=_RefusingPromptIO(),
+            options=setup_cli.SetupOptions(),
+        )
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "env-encryption" in captured.out and "skipped" in captured.out
+        assert "memory-encryption" in captured.out and "skipped" in captured.out
+        assert "plaintext" in captured.err
+
     def test_fresh_darwin_system_runs_steps_in_fixed_order(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

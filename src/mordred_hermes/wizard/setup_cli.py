@@ -137,7 +137,7 @@ from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_pat
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import resolve_prompt_io
-from ._file_vault_support import production_file_vault_eligibility
+from ._file_vault_support import file_vault_plaintext_warning, production_file_vault_eligibility
 from ._prompt_io import NonInteractiveAbort, PromptIO, _RefusingPromptIO
 from .configure import SetupRunner, SubprocessSetupRunner
 from .encryption_cli import (
@@ -1123,6 +1123,14 @@ def run_setup(
             break
 
     print(render_report(results))
+
+    platform_eligible, _reason = production_file_vault_eligibility(platform)
+    skipped_file_vault_step = any(
+        result.name in {_STEP_ENV_ENCRYPTION, _STEP_MEMORY_ENCRYPTION} and result.action == "skipped"
+        for result in results
+    )
+    if not platform_eligible and skipped_file_vault_step:
+        _term.emit_warn(file_vault_plaintext_warning(platform))
 
     if not stopped:
         from . import status_cli

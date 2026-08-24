@@ -1019,12 +1019,14 @@ class TestCliDispatchAll:
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (True, ""))
         self._spy_engines(monkeypatch, "enable")  # silent spies → output is only the summary
         encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
-        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        captured = capsys.readouterr()
+        lines = [ln for ln in captured.out.splitlines() if ln.strip()]
         # Header + one line per target + a trailing, indented totals line — together.
         assert "encryption enable all:" in lines
         assert any("workspace" in ln and "skipped" in ln for ln in lines)
         assert any("memory" in ln and "skipped" in ln and "macOS only" in ln for ln in lines)
         assert "  0 ok, 0 failed, 4 skipped" in lines
+        assert "plaintext" in captured.err
 
     def test_enable_all_via_cli_accepts_all_choice(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import cli

@@ -20,3 +20,11 @@ def production_file_vault_eligibility(platform: str | None = None) -> tuple[bool
         False,
         f"macOS only — no supported production file-vault device-anchor store is available on {platform}",
     )
+
+
+def file_vault_plaintext_warning(platform: str) -> str:
+    """Explain the confidentiality consequence of an unsupported-platform skip."""
+    return (
+        f"Production file-vault protection is unavailable on {platform}; "
+        "env, config, and memory runtime data remains plaintext when present."
+    )

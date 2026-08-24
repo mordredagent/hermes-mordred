@@ -54,7 +54,7 @@ from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_pat
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import is_missing_keyvault_stack
-from ._file_vault_support import production_file_vault_eligibility
+from ._file_vault_support import file_vault_plaintext_warning, production_file_vault_eligibility
 from ._workspace_paths import WorkspacePaths, resolve_workspace_env
 from ._workspace_paths import is_mountpoint as _is_mountpoint
 
@@ -883,6 +883,9 @@ def _dispatch_all(
         skipped += 1
 
     _print_all_summary(verb, outcomes, failed=failed, skipped=skipped)
+    platform_eligible, _reason = production_file_vault_eligibility(platform)
+    if verb == "enable" and not platform_eligible:
+        _term.emit_warn(file_vault_plaintext_warning(platform))
     return 1 if failed else 0
 
 
