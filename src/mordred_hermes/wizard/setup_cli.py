@@ -1,10 +1,10 @@
 """``hermes-mordred setup`` -- the one-command orchestrator for a fresh install.
 
 Before this module, getting Mordred fully protected on a new machine meant
-running seven separate commands in the right order (``configure``, ``network
-init``, ``keyvault enable-se``/``enable-tpm``, ``keyvault init``, ``encryption
-enable env``, ``encryption enable memory``) and knowing which ones were
-optional. ``setup`` walks that same
+checking or running ``hermes setup``, then running six Mordred commands in the
+right order (``configure``, ``network init``, ``keyvault enable-se``/
+``enable-tpm``, ``keyvault init``, ``encryption enable env``, ``encryption
+enable memory``) and knowing which ones were optional. ``setup`` walks that same
 sequence for the operator, one step at a time, and is safe to re-run: it never
 repeats work that is already done and it never destroys existing state.
 
@@ -33,9 +33,9 @@ A step's ``action`` is one of:
   it now.
 - ``"skipped"``      -- nothing to do here, by the operator's choice or by
   platform: the ``hermes`` step's ``--skip-hermes-setup`` / a declined prompt,
-  and the ``memory-encryption`` step off macOS (its sealing shims are
-  macOS-only, and unlike the hardware helper that is no reason to stop a
-  perfectly good Linux run).
+  and the ``env-encryption`` / ``memory-encryption`` steps off macOS (the
+  production file vault has no non-macOS device-anchor store, and unlike the
+  hardware helper that is no reason to stop a perfectly good Linux run).
 - ``"manual"``       -- it needs interaction that ``--non-interactive`` cannot
   supply, the operator was told to run a specific command themselves, or a
   build/prerequisite step failed in a way that still leaves the rest of the
@@ -137,6 +137,7 @@ from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_pat
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import resolve_prompt_io
+from ._file_vault_support import production_file_vault_eligibility
 from ._prompt_io import NonInteractiveAbort, PromptIO, _RefusingPromptIO
 from .configure import SetupRunner, SubprocessSetupRunner
 from .encryption_cli import (
@@ -169,6 +170,18 @@ _STEP_HARDWARE_HELPER = "hardware-helper"
 _STEP_KEYVAULT = "keyvault"
 _STEP_ENV_ENCRYPTION = "env-encryption"
 _STEP_MEMORY_ENCRYPTION = "memory-encryption"
+
+#: Canonical setup order, shared with documentation regression tests.  The
+#: orchestration test also pins the resolver call order to this tuple.
+_SETUP_STEP_ORDER: tuple[str, ...] = (
+    _STEP_HERMES,
+    _STEP_CONFIGURE,
+    _STEP_NETWORK,
+    _STEP_HARDWARE_HELPER,
+    _STEP_KEYVAULT,
+    _STEP_ENV_ENCRYPTION,
+    _STEP_MEMORY_ENCRYPTION,
+)
 
 #: Actions that always stop the run immediately (see the module docstring).
 _STOPPING_ACTIONS: frozenset[StepAction] = frozenset({"blocked", "failed", "unsupported"})
@@ -882,6 +895,17 @@ def _resolve_step_env_encryption(
     prompt_io: PromptIO,
     options: SetupOptions,
 ) -> StepResult:
+    eligible, reason = production_file_vault_eligibility(platform)
+    if not eligible:
+        # The production file vault uses a macOS Keychain anchor.  Do not
+        # enter its passphrase ceremony on a host that cannot persist or reopen
+        # that anchor; Linux setup still completes its supported keyvault path.
+        return StepResult(
+            _STEP_ENV_ENCRYPTION,
+            "skipped",
+            reason,
+        )
+
     complete, detail = _probe_env_encryption(home=home, root=root, platform=platform)
     if complete:
         return StepResult(_STEP_ENV_ENCRYPTION, "done", detail)
@@ -998,20 +1022,13 @@ def _resolve_step_memory_encryption(
     prompt_io: PromptIO,
     options: SetupOptions,
 ) -> StepResult:
+    eligible, reason = production_file_vault_eligibility(platform)
+    if not eligible:
+        return StepResult(_STEP_MEMORY_ENCRYPTION, "skipped", reason)
+
     complete, detail = _probe_memory_encryption(home=home, platform=platform)
     if complete:
         return StepResult(_STEP_MEMORY_ENCRYPTION, "done", detail)
-
-    if platform != "darwin":
-        # `enable memory` refuses off macOS (the hook's shims are macOS-only), so
-        # attempting it would report a "failure" that is really just the OS. A
-        # skip keeps a Linux run clean instead of stopping it, which
-        # "unsupported" would do -- this is the last step, not a prerequisite.
-        return StepResult(
-            _STEP_MEMORY_ENCRYPTION,
-            "skipped",
-            f"macOS only — the memory sealing runtime is not available on {platform}",
-        )
 
     # Checked on the *state* (env enrolled and not opted out; see
     # `encryption_cli._env_target_ready`, shared with `memory_cli`'s own

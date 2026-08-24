@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from ..keyvault import _identity
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
+from ._file_vault_support import production_file_vault_eligibility
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -158,11 +159,16 @@ def _build_device_auth(
 ) -> tuple[NativeBackend | None, AnchorStore | None]:
     """Construct the SE backend + keychain store for the device rotation path.
 
-    Tolerant by design: off-macOS the SE backend / keychain modules don't import,
-    so a failure returns ``(None, None)`` and the caller falls through to the
-    passphrase (cold) path instead of crashing before it. Injected values
-    (tests / callers that already have them) are returned unchanged.
+    Tolerant by design: when the shipped device-anchor store is unavailable on
+    this platform, or an optional native module cannot import, the helper
+    returns ``(None, None)`` and the caller falls through to the passphrase
+    (cold) path instead of crashing. Injected values (tests / callers that
+    already have them) remain portable.
     """
+    if store is None:
+        eligible, _reason = production_file_vault_eligibility()
+        if not eligible:
+            return None, None
     try:
         backend = resolve_backend(backend)
         store = resolve_store(store)

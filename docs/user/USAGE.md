@@ -68,19 +68,21 @@ prompts) lives in **[`QUICKSTART.md`](./QUICKSTART.md)**. In brief, `setup`
 runs these in order (every step is idempotent and safe to re-run):
 
 ```sh
+hermes setup                          # only when upstream Hermes is not ready
 hermes-mordred configure              # interactive setup → writes config.yaml + policy.json
 hermes-mordred network init           # OPTIONAL — Tor / VPN / clearnet privacy path
 hermes-mordred keyvault enable-se     # build the platform key helper (Linux: enable-tpm)
 hermes-mordred keyvault init          # create the hardware-backed keyvault
 hermes-mordred encryption enable env  # macOS only: turn on transparent at-rest encryption
 hermes-mordred encryption enable memory  # macOS only: seal agent-memory files
-hermes-mordred status                 # verify the result at a glance
 ```
+
+After those seven steps, `setup` prints the `hermes-mordred status` dashboard.
 
 On Linux, the supported operator path stops after keyvault setup and status.
 The TPM-backed keyvault is supported, but transparent env/config runtime
-loading is inactive, `vault recover` lacks a Linux device-anchor store, and
-plaintext remains the runtime source.
+loading and production file-vault enrollment are unavailable, `vault recover`
+lacks a Linux device-anchor store, and plaintext remains the runtime source.
 
 `status` prints a single-screen summary (`policy` / `network` / `keyvault` /
 per-target `encryption`); see
@@ -181,9 +183,11 @@ hermes-mordred audit purge --before YYYY-MM-DD --yes  # delete dated rotated log
 ### `encryption` — the recommended on/off switch
 At-rest encryption per target: `env`, `config`, `memory`, `workspace` — or `all`
 to apply the verb to every target at once. The transparent runtime lifecycle is
-currently macOS-only. Off macOS, enrollment can exist but `status` reports the
-target inactive and plaintext remains authoritative; `workspace` is skipped
-when its macOS tooling is unavailable and never fails an `all` batch.
+currently macOS-only, as is production file-vault enrollment. Off macOS, a
+direct file-vault enable refuses while `setup` and `enable all` skip it. A
+copied or test-injected enrollment is reported inactive and plaintext remains
+authoritative; `workspace` is also skipped when its macOS tooling is
+unavailable and never fails an `all` batch.
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
@@ -200,8 +204,8 @@ leave the working copy until the next managed start and exit. The concise
 target-by-target plaintext and restart matrix is in
 [`QUICKSTART.md` §What the protected states mean](./QUICKSTART.md#what-the-protected-states-mean).
 
-> **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
-> encrypts `~/.hermes/memories/*.md`, so Mordred owns this one end to end: a
+> **Memory target.** Hermes persists `~/.hermes/memories/*.md` as plaintext, so
+> Mordred owns this protection end to end: a
 > runtime hook seals every memory write and opens every sealed read, keyed by
 > `HERMES_MEMORY_KEY` from the vault `.env`.
 >
@@ -410,8 +414,8 @@ it only reads the on-disk manifest — but enrolling does not).
 
 Do not run `vault recover` on Linux. The TPM helper supplies the wrapping
 backend, but the current production path still resolves the device anchor
-through the macOS Keychain store. Linux recovery requires a native anchor-store
-implementation first and can otherwise fail after staging recovery files.
+through the macOS Keychain store. The CLI refuses before prompting; Linux
+recovery requires a native anchor-store implementation first.
 
 ### `plugins`
 ```sh

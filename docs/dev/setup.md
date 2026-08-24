@@ -62,6 +62,15 @@ During development, **two independent Python environments** coexist. Mixing up w
 
 **If you want to run local code, use the repo `.venv/`.** Since it's an editable install, editing `src/` takes effect immediately without reinstalling.
 
+One exception is distribution metadata after a version bump. Source imports
+and `hermes-mordred --version` see the edited `__about__.py` immediately, while
+`importlib.metadata.version("hermes-mordred")` can still read the old editable
+`.dist-info`. Refresh only that package when metadata itself is under test:
+
+```sh
+uv sync --all-extras --reinstall-package hermes-mordred
+```
+
 > **⚠️ You can't tell them apart by version number**: `__version__` in `__about__.py` only bumps at release time, so between releases the local dev-branch code and the published PyPI wheel **claim the same version string** while their contents differ — every merge to `dev` widens that gap until the next bump. `--version` therefore cannot answer "which one is running." The only reliable signal is `__file__` (see §"Verifying the local build").
 
 An in-place Hermes update that keeps `~/.hermes/hermes-agent/venv` normally
@@ -257,6 +266,9 @@ Mordred also intentionally manages selected Hermes-owned targets such as
 path/ownership inventory; package-local plugin READMEs are not maintained.
 
 ## Offline verification digest (`keyvault init` step 4)
+
+Here, “step 4” names the digest stage inside the `keyvault init` ceremony; it
+is not the fifth step of the outer `hermes-mordred setup` orchestrator.
 
 Partway through `hermes-mordred keyvault init`, the operator needs to independently recompute the 32-byte verification digest on an **air-gapped second device** and re-enter it on the primary machine (see [`SPEC.md`](./SPEC.md) §`keyvault init` flow). `scripts/keyvault_offline_digest.py` provides a standalone tool for this.
 

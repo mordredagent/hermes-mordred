@@ -158,7 +158,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{current} -> {new_str}  ({changed} file(s) {label})")
     if not args.dry_run:
         print(
-            "\nNext: add a changelog entry, then verify with\n"
+            "\nNext: add a Changes/Fixes entry to the PR description.\n"
+            "If inspecting importlib.metadata in this editable venv, refresh it with\n"
+            "  uv sync --all-extras --reinstall-package hermes-mordred\n"
+            "Then verify with\n"
             "  uv run pytest tests/test_packaging_versions.py\n"
             "  uv build   # confirm sdist + wheel still build"
         )

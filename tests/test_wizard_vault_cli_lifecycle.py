@@ -8,13 +8,46 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.keyvault import vault
-from mordred_hermes.wizard import vault_cli
+from mordred_hermes.keyvault._exceptions import WrapNativeUnavailable
+from mordred_hermes.wizard import _vault_lifecycle, vault_cli
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend, FixedPassphrasePromptIO
 from ._wizard_vault_cli_helpers import _PASSPHRASE, _PromptIO, _ReadRaisesStore
 
 
+class _ReadRaisesNativeUnavailableStore(FakeAnchorStore):
+    def read(self, label: str) -> bytes | None:
+        raise WrapNativeUnavailable("no native device-anchor store on this platform")
+
+
 class TestInit:
+    def test_unsupported_production_platform_refuses_before_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            _vault_lifecycle,
+            "production_file_vault_eligibility",
+            lambda: (False, "no production anchor on test-platform"),
+        )
+
+        rc = vault_cli.init(root=tmp_path, prompt_io=_PromptIO(passwords=[]), backend=FakeBackend())
+
+        assert rc == 1
+        assert "no production anchor" in capsys.readouterr().err
+
+    def test_native_anchor_unavailable_returns_clean_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = vault_cli.init(
+            root=tmp_path,
+            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
+            backend=FakeBackend(),
+            store=_ReadRaisesNativeUnavailableStore(),
+        )
+
+        assert rc == 1
+        assert "determine vault state" in capsys.readouterr().err.lower()
+
     def test_creates_a_recoverable_vault(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         backend = FakeBackend()
         store = FakeAnchorStore()
@@ -116,6 +149,24 @@ class TestInit:
 class TestEnsureInitialised:
     """`ensure_initialised` — the create-the-vault-on-first-`encryption enable` path."""
 
+    def test_unsupported_production_platform_refuses_before_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            _vault_lifecycle,
+            "production_file_vault_eligibility",
+            lambda: (False, "no production anchor on test-platform"),
+        )
+
+        rc = vault_cli.ensure_initialised(
+            root=tmp_path / "v",
+            prompt_io=_PromptIO(passwords=[]),
+            backend=FakeBackend(),
+        )
+
+        assert rc == 1
+        assert "no production anchor" in capsys.readouterr().err
+
     def test_noop_when_vault_already_exists(self, tmp_path: Path) -> None:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
@@ -169,6 +220,19 @@ class TestEnsureInitialised:
             backend=FakeBackend(),
             store=_ReadRaisesStore(),
         )
+        assert rc == 1
+        assert "determine vault state" in capsys.readouterr().err.lower()
+
+    def test_native_anchor_unavailable_returns_clean_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rc = vault_cli.ensure_initialised(
+            root=tmp_path / "v",
+            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
+            backend=FakeBackend(),
+            store=_ReadRaisesNativeUnavailableStore(),
+        )
+
         assert rc == 1
         assert "determine vault state" in capsys.readouterr().err.lower()
 

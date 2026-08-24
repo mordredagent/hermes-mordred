@@ -1,8 +1,9 @@
 name: Upstream drift check
 
 # Detects hook-name and payload drift in both the current hermes-agent PyPI
-# package and the latest upstream main checkout. The AST scanner imports
-# neither target, so main can be checked before it is packaged or installable.
+# package and the latest upstream main checkout. It also runs Mordred's
+# agent-memory seam canary against main, so upstream call-shape drift is caught
+# before that checkout is packaged.
 
 on:
   schedule:
@@ -23,10 +24,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install current hermes-agent from PyPI
+      - name: Install current Hermes and Mordred canary dependencies
         run: |
           python -m pip install --upgrade pip
           pip install hermes-agent
+          pip install -e ".[dev,keyvault]"
 
       - name: Clone latest Hermes main
         run: git clone --depth 1 --branch main https://github.com/NousResearch/hermes-agent.git hermes-upstream
@@ -45,9 +47,21 @@ jobs:
           else
             echo "main_status=drift" >> "$GITHUB_OUTPUT"
           fi
+          mkdir -p "$RUNNER_TEMP/mordred-memory-canary-home"
+          if env \
+            PYTHONPATH="$GITHUB_WORKSPACE/hermes-upstream:$GITHUB_WORKSPACE/src" \
+            HERMES_HOME="$RUNNER_TEMP/mordred-memory-canary-home" \
+            python -m pytest -q tests/test_keyvault_memory_hook_canary.py > main_memory_canary.txt 2>&1; then
+            echo "main_memory_status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "main_memory_status=drift" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Find existing upstream-drift issue
-        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
+        if: >-
+          steps.drift.outputs.pypi_status != 'ok' ||
+          steps.drift.outputs.main_status != 'ok' ||
+          steps.drift.outputs.main_memory_status != 'ok'
         id: existing
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -61,15 +75,19 @@ jobs:
             core.setOutput("number", data.length > 0 ? data[0].number : "");
 
       - name: Build drift report
-        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
+        if: >-
+          steps.drift.outputs.pypi_status != 'ok' ||
+          steps.drift.outputs.main_status != 'ok' ||
+          steps.drift.outputs.main_memory_status != 'ok'
         id: report
         env:
           PYPI_STATUS: ${{ steps.drift.outputs.pypi_status }}
           MAIN_STATUS: ${{ steps.drift.outputs.main_status }}
+          MAIN_MEMORY_STATUS: ${{ steps.drift.outputs.main_memory_status }}
         run: |
           {
             echo "body<<REPORT_EOF"
-            echo "Weekly upstream drift check found a Hermes hook-contract mismatch. This report is informational; Mordred does not send upstream PRs."
+            echo "Weekly upstream drift check found a Hermes compatibility mismatch. This report is informational; Mordred does not send upstream PRs."
             echo
             if [ "$PYPI_STATUS" = "drift" ]; then
               echo "Current PyPI \`hermes-agent\`:"
@@ -84,11 +102,21 @@ jobs:
               cat main_drift.txt
               echo '```'
             fi
+            if [ "$MAIN_MEMORY_STATUS" = "drift" ]; then
+              echo
+              echo "Agent-memory seam canary against latest \`NousResearch/hermes-agent\` main:"
+              echo '```'
+              cat main_memory_canary.txt
+              echo '```'
+            fi
             echo "REPORT_EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: File or update drift issue
-        if: steps.drift.outputs.pypi_status != 'ok' || steps.drift.outputs.main_status != 'ok'
+        if: >-
+          steps.drift.outputs.pypi_status != 'ok' ||
+          steps.drift.outputs.main_status != 'ok' ||
+          steps.drift.outputs.main_memory_status != 'ok'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           DRIFT_BODY: ${{ steps.report.outputs.body }}

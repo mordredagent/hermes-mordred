@@ -36,15 +36,7 @@ _STEP_KEYVAULT = setup_cli._STEP_KEYVAULT
 _STEP_ENV_ENCRYPTION = setup_cli._STEP_ENV_ENCRYPTION
 _STEP_MEMORY_ENCRYPTION = setup_cli._STEP_MEMORY_ENCRYPTION
 
-_ALL_STEPS = (
-    _STEP_HERMES,
-    _STEP_CONFIGURE,
-    _STEP_NETWORK,
-    _STEP_HARDWARE_HELPER,
-    _STEP_KEYVAULT,
-    _STEP_ENV_ENCRYPTION,
-    _STEP_MEMORY_ENCRYPTION,
-)
+_ALL_STEPS = setup_cli._SETUP_STEP_ORDER
 
 _RESOLVER_BY_STEP = {
     _STEP_HERMES: "_resolve_step_hermes",
@@ -1045,6 +1037,30 @@ class TestKeyvaultStep:
 
 
 class TestEnvEncryptionStep:
+    def test_off_macos_skips_before_probe_or_run(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(
+            setup_cli,
+            "_probe_env_encryption",
+            _raiser("the platform gate must run before probing vault state"),
+        )
+        monkeypatch.setattr(
+            setup_cli,
+            "_run_env_encryption",
+            _raiser("the file-vault engine must not run off macOS"),
+        )
+
+        result = setup_cli._resolve_step_env_encryption(
+            home=tmp_path,
+            root=_vault_root(tmp_path),
+            platform="linux",
+            prompt_io=_RefusingPromptIO(),
+            options=setup_cli.SetupOptions(),
+        )
+
+        assert result.action == "skipped"
+        assert "macOS only" in result.detail
+        assert "device-anchor store" in result.detail
+
     def test_fresh_system_with_no_plaintext_env_is_benign_not_failed(self, tmp_path: Path) -> None:
         root = _vault_root(tmp_path)
         result = setup_cli._resolve_step_env_encryption(
@@ -1282,11 +1298,17 @@ class TestMemoryEncryptionStep:
         assert memory_optout_marker_path(tmp_path).exists()
 
     def test_off_macos_is_skipped_and_never_runs(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """The sealing shims are macOS-only; skipping keeps a Linux run clean."""
+        """The production file vault is macOS-only; Linux setup stays clean."""
+        monkeypatch.setattr(
+            setup_cli,
+            "_probe_memory_encryption",
+            _raiser("the platform gate must run before probing memory state"),
+        )
         monkeypatch.setattr(setup_cli, "_run_memory_encryption", _raiser("enable() is macOS-only"))
         result = self._resolve(tmp_path, platform="linux")
         assert result.action == "skipped"
         assert "macos" in result.detail.lower()
+        assert "device-anchor store" in result.detail
 
     def test_manual_when_the_env_target_is_not_ready(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """The key rides on the .env shim, so env must be sealed first."""

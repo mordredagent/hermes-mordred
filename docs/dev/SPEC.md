@@ -50,8 +50,11 @@ compatibility policy.
   closed if it is absent or unusable. There is no Linux software-key fallback.
 - Transparent `.env` injection, `config.yaml` materialize/reseal, agent-memory
   at-rest encryption, and the encrypted workspace integration are active only
-  on macOS. Off macOS they may be enrolled, but status reports them inactive
-  and plaintext remains the runtime source.
+  on macOS. Production file-vault enrollment (`env`, `config`, and `memory`) is
+  also macOS-only because its device anchor is stored in the login Keychain:
+  direct off-macOS enables refuse, while `setup` and `enable all` skip them.
+  Status can still report a copied or test-injected enrollment as inactive;
+  plaintext remains the runtime source there.
 - Arming those macOS seals is fail-closed on the runtime: before removing a
   plaintext, the CLI probes the interpreter that should run `hermes` and also
   the interpreter of each `hermes gateway run` process it can identify in the
@@ -624,12 +627,13 @@ cached:
 | present | missing or invalid | armed, fails closed for memory I/O — every write refuses, and reading a *sealed* file refuses; plaintext files still read |
 | present | valid, but ciphertext fails to authenticate | refuses loudly — the read raises, so the affected load or mutation aborts and nothing is overwritten |
 
-`HERMES_SAFE_MODE` disarms the hook outright. An undecryptable sealed file
-always refuses loudly rather than reporting an empty memory. The hook never
-blocks interpreter start-up; when sealed files exist and the key is missing,
-the first memory load fails with the remedy in the message (so agent start-up
-stops there) instead of presenting an empty memory, and every memory write
-refuses — Mordred never silently writes plaintext while armed.
+`HERMES_SAFE_MODE` disarms the hook outright. An undecryptable sealed-file read
+always raises from the hook. The hook itself never blocks interpreter start-up,
+and current Hermes agent initialization catches an initial load exception, so
+the session may continue with an empty in-memory view. Mordred emits one
+stderr warning with the recovery remedy, and every hooked memory write still
+refuses, so the failed load cannot silently overwrite the sealed file or write
+plaintext while armed.
 
 Seam coverage depends on which shape of the upstream memory tool is
 installed. Mordred wraps three call sites per seam shape shipped by

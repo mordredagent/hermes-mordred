@@ -138,10 +138,14 @@ and provider messages) is written to the Hermes log instead of the reply.
 | `encrypt` / `decrypt` | Encrypts or decrypts extension message payloads. |
 | `channel_key_set` | Stores an encrypted per-channel gateway key from the paired extension. |
 | `slack_setup` | Validates and stores Slack bot/app tokens for the next Hermes restart. |
+| `discord_channel_resolve` | Resolves authenticated Discord channel/thread metadata through the configured bot without exposing its token; replies with `discord_channel_resolve_result`. |
 | `accounts_request` | Returns the selected wallet address and chain ID, resolved at most once per minute (repeat requests are served from that snapshot, so a burst cannot drive repeated Touch ID prompts). |
 | `sign_request` | Produces a frozen approval prompt before any keyvault signing. |
 | `sign_approve` | Signs only the request captured by the matching prompt. |
 | `history_get` / `history_clear` | Reads or clears encrypted-at-rest conversation history. |
+
+An authenticated extension advertises this resolver as the
+`discord_channel_resolve_v1` capability.
 
 Large history reads return the newest complete suffix with `truncated: true`;
 stored history is not modified. `history_result` also carries `status`

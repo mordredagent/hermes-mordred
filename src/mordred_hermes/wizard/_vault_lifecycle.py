@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
+from ._file_vault_support import production_file_vault_eligibility
 from ._vault_open import _build_device_auth, _vault_identity
 
 if TYPE_CHECKING:
@@ -53,6 +54,12 @@ def init(
     a passphrase mismatch / empty passphrase, or a Secure-Enclave / Keychain
     error.
     """
+    if store is None:
+        eligible, reason = production_file_vault_eligibility()
+        if not eligible:
+            _term.emit_error(f"Cannot initialise the file vault at {root}: {reason}.")
+            return 1
+
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -66,7 +73,7 @@ def init(
     # absent, so we must not risk clobbering one).
     try:
         already_initialised = store.read(anchor_label) is not None
-    except (anchor.AnchorError, OSError) as exc:
+    except (anchor.AnchorError, WrapError, OSError) as exc:
         _term.emit_error(f"Cannot determine vault state at {root}: {exc}")
         return 1
     if already_initialised:
@@ -141,7 +148,14 @@ def ensure_initialised(
     (passphrase mismatch / empty, Secure-Enclave / Keychain error) or when the
     vault state cannot be determined (fail-closed, mirroring :func:`init`).
     """
+    if store is None:
+        eligible, reason = production_file_vault_eligibility()
+        if not eligible:
+            _term.emit_error(f"Cannot initialise the file vault at {root}: {reason}.")
+            return 1
+
     from ..keyvault import anchor
+    from ..keyvault._exceptions import WrapError
 
     store = resolve_store(store)
 
@@ -149,7 +163,7 @@ def ensure_initialised(
     try:
         if store.read(anchor_label) is not None:
             return 0  # vault already initialised — nothing to do
-    except (anchor.AnchorError, OSError) as exc:
+    except (anchor.AnchorError, WrapError, OSError) as exc:
         # Fail-closed: we cannot prove the vault is absent, so do not risk
         # clobbering one with a fresh init (matches the guard in `init`).
         _term.emit_error(f"Cannot determine vault state at {root}: {exc}")
@@ -289,13 +303,13 @@ def recover(
 
     key_id = anchor_label = _vault_identity(root)
 
-    # Re-keying needs a usable device backend + anchor store to bind onto. Off
-    # macOS these don't import; _build_device_auth returns (None, None) then, and
-    # we fail closed (there is no device to re-key onto).
+    # Re-keying needs a usable device backend + anchor store to bind onto.
+    # _build_device_auth returns (None, None) when the shipped platform pair is
+    # unavailable, and we fail before asking for the recovery passphrase.
     device_backend, device_store = _build_device_auth(backend, store)
     if device_backend is None or device_store is None:
         _term.emit_error(
-            f"Cannot re-key the vault at {root}: no usable device key on this host (Secure Enclave / TPM unavailable)."
+            f"Cannot re-key the vault at {root}: no usable production device key / anchor store on this host."
         )
         return 1
 

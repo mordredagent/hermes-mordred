@@ -803,6 +803,7 @@ class TestCliDispatch:
         from mordred_hermes.wizard import cli, env_decrypt_cli
 
         self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli.sys, "platform", "darwin")
         seen: dict[str, object] = {}
 
         def _spy(*, home: Path, root: Path, platform: str, **_: object) -> int:
@@ -812,6 +813,34 @@ class TestCliDispatch:
         monkeypatch.setattr(env_decrypt_cli, "enable", _spy)
         assert cli.main(["encryption", "enable", "env"]) == 0
         assert seen["home"] == tmp_path / "home"
+
+    @pytest.mark.parametrize("target", encryption_cli._ALL_CORE_TARGETS)
+    def test_enable_file_vault_refuses_cleanly_without_a_production_anchor_store(
+        self,
+        target: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.wizard import cli, config_decrypt_cli, env_decrypt_cli, memory_cli
+
+        self._patch_home(monkeypatch, tmp_path / "home")
+        monkeypatch.setattr(encryption_cli.sys, "platform", "linux")
+        engines = {
+            "env": env_decrypt_cli,
+            "config": config_decrypt_cli,
+            "memory": memory_cli,
+        }
+        monkeypatch.setattr(
+            engines[target],
+            "enable",
+            lambda **_: (_ for _ in ()).throw(AssertionError("the engine must not run off macOS")),
+        )
+
+        assert cli.main(["encryption", "enable", target]) == 1
+        err = capsys.readouterr().err
+        assert "macOS only" in err
+        assert "device-anchor store" in err
 
     def test_disable_config_dispatches(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import cli, config_decrypt_cli
@@ -897,7 +926,9 @@ class TestCliDispatchAll:
         assert rc == 0
         assert calls == {"env": 1, "config": 1, "memory": 1, "workspace": 1}
 
-    def test_enable_all_skips_workspace_off_macos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_enable_all_skips_file_vault_and_workspace_off_macos(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self._patch_home(monkeypatch, tmp_path / "home")
         # A wrappable seam does not matter here -- off macOS `memory` is skipped
         # on the platform check alone, before the seam is ever consulted (W1).
@@ -905,7 +936,7 @@ class TestCliDispatchAll:
         calls = self._spy_engines(monkeypatch, "enable")
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
         assert rc == 0
-        assert calls == {"env": 1, "config": 1}  # workspace AND memory skipped, not failed
+        assert calls == {}  # every production at-rest target is macOS-only
 
     def test_enable_all_skips_memory_without_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -913,8 +944,8 @@ class TestCliDispatchAll:
         # A Hermes whose memory tool this build cannot wrap: the engine would
         # only refuse, so the fan-out records a skip instead of a failure. Kept
         # on darwin (with workspace tooling absent) so this specifically
-        # exercises the seam-availability skip, not the platform skip (W1) that
-        # `test_enable_all_skips_workspace_off_macos` already covers.
+        # exercises the seam-availability skip, not the platform skip that the
+        # off-macOS fan-out test already covers.
         monkeypatch.setattr(encryption_cli, "memory_runtime_available", lambda: (False, "no wrappable seam"))
         self._patch_home(monkeypatch, tmp_path / "home")
         calls = self._spy_engines(monkeypatch, "enable")
@@ -928,10 +959,10 @@ class TestCliDispatchAll:
     def test_enable_all_skips_memory_off_macos_before_the_seam_check(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """W1: off macOS `memory` is skipped on the platform alone -- the fan-out
-        used to resolve platform independently inside the per-target dispatch
-        (always `sys.platform`), so a Linux `enable all` reported `memory FAILED`
-        instead of a skip even though `setup`'s own step skips it cleanly."""
+        """Off macOS, all core targets skip on the platform alone. The fan-out
+        must use its resolved platform consistently and never consult the
+        memory seam after the production anchor has already made it ineligible.
+        """
 
         def _never(*_a: object, **_k: object) -> tuple[bool, str]:
             raise AssertionError("the platform gate must short-circuit before the seam check")
@@ -943,7 +974,7 @@ class TestCliDispatchAll:
         rc = encryption_cli._dispatch_all("enable", platform="linux", on_path=lambda _n: True)
 
         assert rc == 0
-        assert "memory" not in calls  # _dispatch (and therefore memory_cli.enable) is never reached
+        assert calls == {}  # no file-vault engine is reached
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
         assert any("memory" in ln and "skipped" in ln and "macOS only" in ln and "linux" in ln for ln in lines)
 
@@ -993,7 +1024,7 @@ class TestCliDispatchAll:
         assert "encryption enable all:" in lines
         assert any("workspace" in ln and "skipped" in ln for ln in lines)
         assert any("memory" in ln and "skipped" in ln and "macOS only" in ln for ln in lines)
-        assert "  2 ok, 0 failed, 2 skipped" in lines  # env+config ok; memory+workspace skipped off macOS
+        assert "  0 ok, 0 failed, 4 skipped" in lines
 
     def test_enable_all_via_cli_accepts_all_choice(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from mordred_hermes.wizard import cli

@@ -525,6 +525,14 @@ class TestPolicyExitCodeDocumented:
         assert "exit code 2" in helps
 
 
+class TestEncryptionHelp:
+    def test_force_runtime_unverified_names_every_affected_target(self) -> None:
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        helps = " ".join(_iter_help_strings(parser))
+        assert "env/config/memory" in helps
+
+
 class TestConfigureFlags:
     """Phase 4: configure --non-interactive is flag-driven (like network init)."""
 
