@@ -867,7 +867,12 @@ volume is attached with ownership enabled.
   full verification chain and detaches/locks the volume again on failure,
   so a volume that cannot be trusted is never left mounted — the refusal
   says whether that put-back actually succeeded, and names the manual
-  command when it did not.
+  command when it did not. Note that `diskutil apfs unlockVolume` re-mounts
+  a native volume on an external or image-backed disk `noowners` (observed
+  on macOS 26.5), so such a volume fails step 8 with `OWNERSHIP_DISABLED`
+  and is locked again until the operator enables ownership once with `sudo
+  diskutil enableOwnership <mountpoint>` — a per-volume setting macOS then
+  remembers; internal-disk volumes honour ownership by default.
 - `secure-home unmount [--force]` — runs steps 1–4 of the verification
   chain only (identity, not the acceptance/home-dir checks) *before*
   detaching, so a foreign volume mounted at the configured path is refused

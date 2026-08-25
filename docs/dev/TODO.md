@@ -291,7 +291,7 @@ the source remains usable, and failure paths leave no partial destination.
   (`test_init_mount_unmount_round_trip_against_a_real_image`) added to
   `tests/integration/test_secure_home_macos.py`.
 - [x] Docs: SPEC/PLAN/TODO/PATHS/USAGE/AGENTS updated in this PR.
-- [ ] Live-device validation run on Apple Silicon, recorded in
+- [x] Live-device validation run on Apple Silicon (2026-08-25), recorded in
   [`CI.md`](./CI.md) §Manual live-device validation log.
 
 ### Acceptance gate (Phase 5, Phase 2 slice)

@@ -516,16 +516,29 @@ hermes-mordred secure-home run -- <command...>  # launch <command> with HERMES_H
 > written. Your existing `~/.hermes` is **not** migrated into the new volume
 > (a later phase); Hermes starts fresh inside the secure home.
 >
-> **Lock / unlock.** `mount` re-attaches and re-verifies the volume; if
-> verification fails it puts the volume back and tells you whether that
-> actually worked (naming the manual `hdiutil detach` / `diskutil apfs
-> lockVolume` command when it did not). `unmount` checks the mounted
-> volume's identity *before* ejecting anything, so a different volume
-> sitting at the configured path is refused. If nothing is mounted there,
-> `unmount` still looks for the volume elsewhere — an image you attached by
-> double-clicking it in Finder auto-mounts under `/Volumes/` — and locks it
-> there rather than reporting a "locked" secure home that is in fact wide
-> open.
+> **Lock / unlock.** `secure-home mount` unlocks the configured volume
+> (prompting once for its passphrase) and re-verifies it end to end; if it
+> is already mounted and verified, it does nothing and just reports that —
+> safe to run any time. If verification fails after the unlock, it puts the
+> volume back and tells you whether that actually worked (naming the manual
+> `hdiutil detach` / `diskutil apfs lockVolume` command when it did not).
+> `secure-home unmount` checks the mounted volume's identity *before*
+> ejecting anything, so a different volume sitting at the configured path is
+> refused rather than ejected; a busy volume (something still has a file
+> open on it) is refused unless you pass `--force`. If nothing is mounted at
+> the configured path, `unmount` still looks for the volume elsewhere — an
+> image you attached by double-clicking it in Finder auto-mounts under
+> `/Volumes/` — and locks it there rather than reporting a "locked" secure
+> home that is in fact wide open.
+>
+> **Native volumes and ownership.** A natively encrypted APFS volume on an
+> external or image-backed disk is typically re-mounted *without* file
+> ownership by `diskutil apfs unlockVolume` (observed on macOS 26.5), so
+> `mount` will refuse it with `OWNERSHIP_DISABLED` and lock it again. Enable
+> ownership once, while the volume is mounted, with `sudo diskutil
+> enableOwnership <mountpoint>` — macOS remembers that per volume, and
+> `mount` succeeds from then on. Volumes on the internal disk honour
+> ownership by default.
 >
 > **Bring your own volume.** If you'd rather create the volume by hand
 > (Disk Utility, a native APFS volume, or `hdiutil`), use `adopt` instead
@@ -559,14 +572,6 @@ hermes-mordred secure-home run -- <command...>  # launch <command> with HERMES_H
 > boot disk itself can never be adopted — it is always refused, since it is
 > FileVault-protected and auto-unlocked at every login rather than a
 > separate encrypted volume.
-
-> **Lock / unlock.** `secure-home mount` unlocks the configured volume
-> (prompting once for its passphrase) and re-verifies it end to end; if it
-> is already mounted and verified, it does nothing and just reports that —
-> safe to run any time. `secure-home unmount` verifies the mounted volume's
-> identity *before* locking it, so a different volume mounted at the same
-> path is refused rather than ejected; a busy volume (something still has a
-> file open on it) is refused unless you pass `--force`.
 
 > **Rollback & safety.** `init` never overwrites an existing disk image —
 > only `--force` on an existing *config* is supported, and even then the
