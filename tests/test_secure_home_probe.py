@@ -50,10 +50,14 @@ from mordred_hermes.wizard._secure_home_probe import (
     SecureHomeVerificationError,
     VerifiedHome,
     VolumeInfo,
+    attached_image_device,
+    backing_image_path,
     ensure_volume_acceptable,
     filevault_status,
     inspect_mounted_volume,
+    native_volume_state,
     verify_home,
+    verify_mounted_identity,
     volume_info,
 )
 
@@ -174,11 +178,15 @@ def _volume_plist(
     return plist
 
 
-def _hdiutil_image(dev_entries: Sequence[str], *, encrypted: bool | None) -> dict[str, Any]:
+def _hdiutil_image(
+    dev_entries: Sequence[str], *, encrypted: bool | None, image_path: str | None = None
+) -> dict[str, Any]:
     entities: list[dict[str, Any]] = [{"dev-entry": entry} for entry in dev_entries]
     image: dict[str, Any] = {"system-entities": entities}
     if encrypted is not None:
         image["image-encrypted"] = encrypted
+    if image_path is not None:
+        image["image-path"] = image_path
     return image
 
 
@@ -762,3 +770,240 @@ class TestVerifyHomeFailures:
             verify_home(config, run=run, ismount=lambda p: True)
         assert exc_info.value.code == UNSAFE_HOME
         assert "not on the verified volume" in exc_info.value.message
+
+
+# -----------------------------------------------------------------------------
+# backing_image_path
+# -----------------------------------------------------------------------------
+class TestBackingImagePath:
+    def test_found_by_exact_dev_entry(self) -> None:
+        run = _DispatchRunner(
+            hdiutil_result=_hdiutil_plist_result(
+                {"images": [_hdiutil_image(["/dev/disk3s2"], encrypted=True, image_path="/tmp/vault.sparseimage")]}
+            )
+        )
+        assert backing_image_path("/dev/disk3s2", run=run) == Path("/tmp/vault.sparseimage")
+
+    def test_found_by_whole_disk_match(self) -> None:
+        run = _DispatchRunner(
+            hdiutil_result=_hdiutil_plist_result(
+                {"images": [_hdiutil_image(["/dev/disk9"], encrypted=True, image_path="/tmp/vault.sparseimage")]}
+            )
+        )
+        assert backing_image_path("/dev/disk9s1", run=run) == Path("/tmp/vault.sparseimage")
+
+    def test_not_image_backed_returns_none(self) -> None:
+        run = _DispatchRunner(hdiutil_result=_hdiutil_plist_result({"images": []}))
+        assert backing_image_path("/dev/disk3s2", run=run) is None
+
+    def test_matched_image_without_image_path_returns_none(self) -> None:
+        run = _DispatchRunner(
+            hdiutil_result=_hdiutil_plist_result({"images": [_hdiutil_image(["/dev/disk3s2"], encrypted=True)]})
+        )
+        assert backing_image_path("/dev/disk3s2", run=run) is None
+
+    def test_hdiutil_failure_raises(self) -> None:
+        run = _DispatchRunner(hdiutil_exc=OSError("hdiutil not found"))
+        with pytest.raises(SecureHomeProbeError):
+            backing_image_path("/dev/disk3s2", run=run)
+
+    def test_hdiutil_nonzero_exit_raises(self) -> None:
+        run = _DispatchRunner(hdiutil_result=_completed(("hdiutil", "info", "-plist"), returncode=1, stderr="boom"))
+        with pytest.raises(SecureHomeProbeError):
+            backing_image_path("/dev/disk3s2", run=run)
+
+
+# -----------------------------------------------------------------------------
+# verify_mounted_identity — chain steps 1-4 only
+# -----------------------------------------------------------------------------
+class TestAttachedImageDevice:
+    """MEDIUM-3: is the secure volume live *somewhere*, not just at our path?"""
+
+    @staticmethod
+    def _entities(entries: Sequence[tuple[str, str | None]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for dev_entry, mount_point in entries:
+            entity: dict[str, Any] = {"dev-entry": dev_entry}
+            if mount_point is not None:
+                entity["mount-point"] = mount_point
+            out.append(entity)
+        return out
+
+    def _runner(self, images: list[dict[str, Any]]) -> _DispatchRunner:
+        return _DispatchRunner(hdiutil_result=_hdiutil_plist_result({"images": images}))
+
+    def test_finds_the_whole_disk_node_and_the_mount_points(self) -> None:
+        run = self._runner(
+            [
+                {
+                    "image-path": "/img/secure.sparseimage",
+                    "system-entities": self._entities(
+                        [("/dev/disk9", None), ("/dev/disk9s1", "/Volumes/HermesSecure")]
+                    ),
+                }
+            ]
+        )
+        found = attached_image_device(Path("/img/secure.sparseimage"), run=run)
+        assert found is not None
+        assert found.device_node == "/dev/disk9"
+        assert found.mount_points == ("/Volumes/HermesSecure",)
+
+    def test_falls_back_to_the_first_entity_when_all_are_mounted(self) -> None:
+        run = self._runner(
+            [{"image-path": "/img/s.sparseimage", "system-entities": self._entities([("/dev/disk9s1", "/Volumes/X")])}]
+        )
+        found = attached_image_device(Path("/img/s.sparseimage"), run=run)
+        assert found is not None
+        assert found.device_node == "/dev/disk9s1"
+
+    def test_matches_across_a_symlinked_path_spelling(self, tmp_path: Path) -> None:
+        """``/tmp/x`` and ``/private/tmp/x`` are one file under two names."""
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        image = real_dir / "s.sparseimage"
+        image.write_bytes(b"x")
+        link_dir = tmp_path / "link"
+        link_dir.symlink_to(real_dir)
+
+        run = self._runner([{"image-path": str(image), "system-entities": self._entities([("/dev/disk9", None)])}])
+        found = attached_image_device(link_dir / "s.sparseimage", run=run)
+        assert found is not None
+        assert found.device_node == "/dev/disk9"
+
+    def test_attached_but_not_mounted_has_no_mount_points(self) -> None:
+        run = self._runner(
+            [{"image-path": "/img/s.sparseimage", "system-entities": self._entities([("/dev/disk9", None)])}]
+        )
+        found = attached_image_device(Path("/img/s.sparseimage"), run=run)
+        assert found is not None
+        assert found.mount_points == ()
+
+    def test_not_attached_is_none(self) -> None:
+        run = self._runner(
+            [{"image-path": "/other.sparseimage", "system-entities": self._entities([("/dev/disk9", None)])}]
+        )
+        assert attached_image_device(Path("/img/s.sparseimage"), run=run) is None
+
+    @pytest.mark.parametrize(
+        "images",
+        [
+            [],
+            ["not a dict"],
+            [{"image-path": "/img/s.sparseimage"}],  # no system-entities
+            [{"image-path": "/img/s.sparseimage", "system-entities": "nope"}],
+            [{"image-path": "/img/s.sparseimage", "system-entities": [{"no-dev-entry": 1}]}],
+            [{"system-entities": [{"dev-entry": "/dev/disk9"}]}],  # no image-path
+        ],
+    )
+    def test_malformed_shapes_are_none_not_a_crash(self, images: list[Any]) -> None:
+        assert attached_image_device(Path("/img/s.sparseimage"), run=self._runner(images)) is None
+
+    def test_images_key_absent_is_none(self) -> None:
+        run = _DispatchRunner(hdiutil_result=_hdiutil_plist_result({}))
+        assert attached_image_device(Path("/img/s.sparseimage"), run=run) is None
+
+    def test_hdiutil_failure_raises(self) -> None:
+        run = _DispatchRunner(hdiutil_result=_completed(("hdiutil", "info", "-plist"), returncode=1, stderr="boom"))
+        with pytest.raises(SecureHomeProbeError):
+            attached_image_device(Path("/img/s.sparseimage"), run=run)
+
+    def test_hdiutil_missing_raises(self) -> None:
+        run = _DispatchRunner(hdiutil_exc=OSError("hdiutil not found"))
+        with pytest.raises(SecureHomeProbeError):
+            attached_image_device(Path("/img/s.sparseimage"), run=run)
+
+
+class TestNativeVolumeState:
+    def test_unlocked_volume_reports_its_mount_point(self) -> None:
+        run = _DispatchRunner(
+            diskutil_result=_diskutil_plist_result({"Locked": False, "MountPoint": "/Volumes/Elsewhere"})
+        )
+        assert native_volume_state(_UUID, run=run) == (False, "/Volumes/Elsewhere")
+        assert run.calls == [("diskutil", "info", "-plist", _UUID)]
+
+    def test_locked_volume(self) -> None:
+        run = _DispatchRunner(diskutil_result=_diskutil_plist_result({"Locked": True, "MountPoint": ""}))
+        assert native_volume_state(_UUID, run=run) == (True, None)
+
+    def test_missing_keys_are_none(self) -> None:
+        run = _DispatchRunner(diskutil_result=_diskutil_plist_result({}))
+        assert native_volume_state(_UUID, run=run) == (None, None)
+
+    def test_non_boolean_locked_is_none(self) -> None:
+        run = _DispatchRunner(diskutil_result=_diskutil_plist_result({"Locked": "yes"}))
+        assert native_volume_state(_UUID, run=run) == (None, None)
+
+    def test_volume_not_present_is_an_answer_not_an_error(self) -> None:
+        """``diskutil info <unknown uuid>`` exits non-zero; that means "no such volume"."""
+        run = _DispatchRunner(diskutil_result=_completed(("diskutil",), returncode=1, stderr="Could not find disk"))
+        assert native_volume_state(_UUID, run=run) == (None, None)
+
+    def test_invocation_failure_still_raises(self) -> None:
+        run = _DispatchRunner(diskutil_exc=OSError("diskutil not found"))
+        with pytest.raises(SecureHomeProbeError):
+            native_volume_state(_UUID, run=run)
+
+    def test_unparsable_output_raises(self) -> None:
+        run = _DispatchRunner(diskutil_result=_completed(("diskutil",), stdout="not a plist"))
+        with pytest.raises(SecureHomeProbeError):
+            native_volume_state(_UUID, run=run)
+
+
+class TestVerifyMountedIdentity:
+    def test_success_returns_volume_info(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_VERIFY_UUID)
+        run = _good_run()
+        info = verify_mounted_identity(config, run=run, ismount=lambda p: True)
+        assert isinstance(info, VolumeInfo)
+        assert info.volume_uuid == _VERIFY_UUID
+
+    def test_symlinked_mountpoint_component_is_unsafe(self, tmp_path: Path) -> None:
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link_mount = tmp_path / "link_mount"
+        link_mount.symlink_to(real_dir)
+        config = SecureHomeConfig(version=1, mount_point=link_mount, volume_uuid=_VERIFY_UUID)
+        with pytest.raises(SecureHomeVerificationError) as exc_info:
+            verify_mounted_identity(config, run=_unused_runner, ismount=lambda p: True)
+        assert exc_info.value.code == UNSAFE_HOME
+
+    def test_not_mounted_propagates(self, tmp_path: Path) -> None:
+        mount_point = tmp_path / "Volumes" / "SecureHermes"
+        mount_point.mkdir(parents=True)
+        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_VERIFY_UUID)
+        with pytest.raises(SecureHomeVerificationError) as exc_info:
+            verify_mounted_identity(config, run=_unused_runner, ismount=lambda p: False)
+        assert exc_info.value.code == NOT_MOUNTED
+
+    def test_uuid_mismatch_propagates(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_VERIFY_UUID)
+        run = _good_run(uuid=_OTHER_UUID)
+        with pytest.raises(SecureHomeVerificationError) as exc_info:
+            verify_mounted_identity(config, run=run, ismount=lambda p: True)
+        assert exc_info.value.code == UUID_MISMATCH
+
+    def test_probe_failure_propagates(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_VERIFY_UUID)
+        run = _ScriptedRunner(exc=OSError("diskutil not found"))
+        with pytest.raises(SecureHomeVerificationError) as exc_info:
+            verify_mounted_identity(config, run=run, ismount=lambda p: True)
+        assert exc_info.value.code == PROBE_FAILED
+
+    def test_does_not_call_ensure_volume_acceptable(self, tmp_path: Path) -> None:
+        """Identity-only: a non-APFS, unencrypted, noowners volume with the right UUID still passes.
+
+        ``ensure_volume_acceptable`` (steps 5-8) is a separate call the
+        ``unmount`` CLI path must never make — it would refuse to unmount a
+        volume that fails acceptance for reasons unrelated to "is this really
+        the configured volume".
+        """
+        mount_point = _make_mount(tmp_path)
+        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_VERIFY_UUID)
+        run = _good_run(filesystem="hfs", proper=False, ownership=False)
+        info = verify_mounted_identity(config, run=run, ismount=lambda p: True)
+        assert info.filesystem == "hfs"
+        assert info.encryption_this_volume_proper is False
+        assert info.ownership_enabled is False

@@ -116,7 +116,14 @@ class TestSubcommandTree:
             ["mordred", "secure-home", "status", "--json"],
             ["mordred", "secure-home", "adopt", "/tmp/x"],
             ["mordred", "secure-home", "adopt", "/tmp/x", "--force"],
+            ["mordred", "secure-home", "adopt", "/tmp/x", "--mode", "strict"],
             ["mordred", "secure-home", "run", "--", "hermes", "--version"],
+            ["mordred", "secure-home", "init"],
+            ["mordred", "secure-home", "init", "--image", "/tmp/i.sparseimage", "--mount-point", "/tmp/m"],
+            ["mordred", "secure-home", "init", "--size", "8g", "--volname", "Vol", "--mode", "balanced", "--force"],
+            ["mordred", "secure-home", "mount"],
+            ["mordred", "secure-home", "unmount"],
+            ["mordred", "secure-home", "unmount", "--force"],
         ],
     )
     def test_argv_parses_and_wires_a_handler(self, argv: list[str]) -> None:
@@ -126,7 +133,7 @@ class TestSubcommandTree:
 
 
 class TestSecureHomeWiring:
-    """``secure-home {status,adopt,run}`` wires to its own handler module."""
+    """``secure-home {status,adopt,run,init,mount,unmount}`` wires to its own handler module."""
 
     def test_status_wires_handler_and_json_flag(self) -> None:
         parser = _build_parser()
@@ -150,6 +157,70 @@ class TestSecureHomeWiring:
         parser = _build_parser()
         ns = parser.parse_args(["mordred", "secure-home", "adopt", "/tmp/x", "--force"])
         assert ns.force is True
+
+    def test_adopt_mode_defaults_to_none_and_accepts_the_two_modes(self) -> None:
+        parser = _build_parser()
+        assert parser.parse_args(["mordred", "secure-home", "adopt", "/tmp/x"]).mode is None
+        assert parser.parse_args(["mordred", "secure-home", "adopt", "/tmp/x", "--mode", "strict"]).mode == "strict"
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mordred", "secure-home", "adopt", "/tmp/x", "--mode", "paranoid"])
+
+    def test_init_wires_handler_and_defaults(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "init"])
+        assert ns.func is _secure_home_parsers._handle_secure_home_init
+        assert ns.image is None
+        assert ns.mount_point is None
+        assert ns.size == "4g"
+        assert ns.volname == "HermesSecure"
+        assert ns.mode is None
+        assert ns.force is False
+
+    def test_init_accepts_every_option(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(
+            [
+                "mordred",
+                "secure-home",
+                "init",
+                "--image",
+                "/tmp/i.sparseimage",
+                "--mount-point",
+                "/tmp/m",
+                "--size",
+                "8g",
+                "--volname",
+                "Vol",
+                "--mode",
+                "balanced",
+                "--force",
+            ]
+        )
+        assert ns.image == "/tmp/i.sparseimage"
+        assert ns.mount_point == "/tmp/m"
+        assert ns.size == "8g"
+        assert ns.volname == "Vol"
+        assert ns.mode == "balanced"
+        assert ns.force is True
+
+    def test_init_has_no_passphrase_flag(self) -> None:
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mordred", "secure-home", "init", "--passphrase", "hunter2"])
+
+    def test_mount_wires_handler_and_takes_no_options(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "mount"])
+        assert ns.func is _secure_home_parsers._handle_secure_home_mount
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mordred", "secure-home", "mount", "--force"])
+
+    def test_unmount_wires_handler_and_force_flag(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "unmount"])
+        assert ns.func is _secure_home_parsers._handle_secure_home_unmount
+        assert ns.force is False
+        assert parser.parse_args(["mordred", "secure-home", "unmount", "--force"]).force is True
 
     def test_run_wires_handler_and_remainder(self) -> None:
         parser = _build_parser()

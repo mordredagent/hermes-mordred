@@ -21,6 +21,13 @@ filesystem.
 ``status`` renders on every platform (reporting the limitation);
 ``adopt``/``run`` refuse outright off macOS because the identity chain is
 built on ``diskutil``/``fdesetup``, which do not exist elsewhere.
+
+Phase 2 added the volume ceremonies (``init``/``mount``/``unmount``) in
+:mod:`.secure_home_lifecycle_cli`, which is the only module allowed to mutate
+a volume. The "verify, then record this mounted volume as the secure home"
+step is shared: :func:`record_volume` holds it once, so ``adopt`` (operator
+mounted it) and ``init`` (we just created and attached it) can never diverge
+on what gets written or on the rollback rules.
 """
 
 from __future__ import annotations
@@ -38,7 +45,10 @@ from typing import Final, NoReturn
 
 from . import _term
 from ._secure_home_paths import (
+    BACKING_APFS_VOLUME,
+    BACKING_DISK_IMAGE,
     CONFIG_VERSION,
+    Backing,
     SecureHomeConfig,
     SecureHomeConfigError,
     load_config,
@@ -48,9 +58,14 @@ from ._secure_home_paths import (
 from ._secure_home_probe import (
     DEFAULT_RUNNER,
     NOT_MOUNTED,
+    PROBE_FAILED,
     FileVaultState,
+    SecureHomeProbeError,
     SecureHomeVerificationError,
     SubprocessRunner,
+    VerifiedHome,
+    VolumeInfo,
+    backing_image_path,
     ensure_volume_acceptable,
     filevault_status,
     inspect_mounted_volume,
@@ -60,10 +75,12 @@ from ._secure_home_probe import (
 __all__ = [
     "SecureHomeStatusReport",
     "adopt",
+    "backing_text",
     "cli_adopt",
     "cli_run",
     "cli_status",
     "collect",
+    "record_volume",
     "render_json",
     "render_text",
     "run_command",
@@ -127,6 +144,14 @@ class SecureHomeStatusReport:
     verified: bool | None
     verification_code: str | None
     verification_error: str | None
+    # Schema-v2 additions. ``None`` means "not applicable / not known here"
+    # (not configured, or an unsupported platform where no probe ran) — a
+    # recorded-but-absent field is reported as its own rendered wording
+    # instead, so "v1 config" never looks like "not configured".
+    config_version: int | None = None
+    backing_kind: str | None = None
+    image_path: str | None = None
+    mode: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -142,6 +167,10 @@ class SecureHomeStatusReport:
             "verified": self.verified,
             "verification_code": self.verification_code,
             "verification_error": self.verification_error,
+            "config_version": self.config_version,
+            "backing_kind": self.backing_kind,
+            "image_path": self.image_path,
+            "mode": self.mode,
         }
 
 
@@ -223,6 +252,7 @@ def collect(
         return _report_not_configured(config_path=config_path, config_error=config_error, filevault=filevault)
 
     verified, code, message = _verify_for_status(config, run=run, ismount=ismount)
+    backing = config.backing
     return SecureHomeStatusReport(
         platform_supported=True,
         configured=True,
@@ -236,7 +266,31 @@ def collect(
         verified=verified,
         verification_code=code,
         verification_error=message,
+        config_version=config.version,
+        backing_kind=backing.kind if backing is not None else None,
+        image_path=str(backing.image_path) if backing is not None and backing.image_path is not None else None,
+        mode=config.mode,
     )
+
+
+def backing_text(backing_kind: str | None, image_path: str | None, *, config_version: int | None) -> str:
+    """Render a backing for humans — the single mapping used by ``status`` and ``adopt``.
+
+    "unknown" needs its *reason*: a v1 config predates the field entirely,
+    while a v2 config with no backing means ``adopt`` ran but could not
+    identify the volume. Calling the second one "v1 config" would send the
+    operator looking for a migration that does not exist.
+    """
+    if backing_kind == BACKING_DISK_IMAGE:
+        return f"disk image {image_path}"
+    if backing_kind == BACKING_APFS_VOLUME:
+        return "apfs volume (native)"
+    origin = "v1 config" if config_version == 1 else "not recorded"
+    return f"unknown ({origin} — re-run adopt --force while mounted to record it)"
+
+
+def _render_backing(report: SecureHomeStatusReport) -> str:
+    return backing_text(report.backing_kind, report.image_path, config_version=report.config_version)
 
 
 def _render_configured_lines(report: SecureHomeStatusReport) -> list[str]:
@@ -254,6 +308,8 @@ def _render_configured_lines(report: SecureHomeStatusReport) -> list[str]:
         lines.append("  identity     : verified")
     else:
         lines.append(f"  identity     : FAILED ({report.verification_code}) - {report.verification_error}")
+    lines.append(f"  backing      : {_render_backing(report)}")
+    lines.append(f"  mode         : {report.mode if report.mode is not None else 'not recorded'}")
     lines.append(f"  secure home  : {report.home_path}")
     return lines
 
@@ -275,6 +331,8 @@ def _render_hints(report: SecureHomeStatusReport, *, color: bool) -> list[str]:
                 enabled=color,
             )
         ]
+    if report.verification_code == NOT_MOUNTED:
+        return [_term.hint("  hint: run `hermes-mordred secure-home mount` to unlock it.", enabled=color)]
     return []
 
 
@@ -377,6 +435,98 @@ def _ensure_home_dir(mount_point: Path, home_subdir: str, *, ismount: Callable[[
         os.close(fd)
 
 
+def _detect_backing(info: VolumeInfo, run: SubprocessRunner) -> Backing | None:
+    """Identify how the verified volume is provided, or ``None`` when we cannot tell.
+
+    ``None`` is recorded as "unknown" rather than guessed: a wrong backing
+    kind would send a later ``mount``/``unmount`` at the wrong tool
+    (``hdiutil`` vs. ``diskutil apfs``), which is strictly worse than an
+    honest "re-run adopt while mounted to record it".
+    """
+    if info.encryption_this_volume_proper is True:
+        return Backing(BACKING_APFS_VOLUME)
+    if info.device_node is None:
+        return None
+    try:
+        image_path = backing_image_path(info.device_node, run=run)
+    except SecureHomeProbeError as exc:
+        raise SecureHomeVerificationError(
+            PROBE_FAILED, f"Could not identify the disk image backing the volume: {exc}"
+        ) from exc
+    if image_path is None:
+        return None
+    try:
+        return Backing(BACKING_DISK_IMAGE, image_path)
+    except SecureHomeConfigError:
+        # hdiutil named a path we cannot persist (relative, or carrying
+        # control characters): "unknown" beats refusing an otherwise
+        # verified volume over a cosmetic field.
+        return None
+
+
+def record_volume(
+    mount_point: Path,
+    *,
+    config_path: Path,
+    run: SubprocessRunner = DEFAULT_RUNNER,
+    ismount: Callable[[str], bool] = os.path.ismount,
+    mode: str | None = None,
+    backing: Backing | None = None,
+) -> VerifiedHome:
+    """Verify the volume mounted at *mount_point* and persist it as the secure home.
+
+    The printing-free core shared by ``adopt`` and ``secure-home init``: probe
+    → acceptance policy → build the config (recording *backing*, or detecting
+    it when the caller does not already know) → create ``<mount>/hermes-home``
+    → re-verify the built config end to end → save. Performs zero volume
+    operations of its own.
+
+    Every check runs *before* the only write to the volume, and if anything
+    after the home directory was created fails, that directory is removed
+    again (``rmdir``, so it can only ever remove the empty one this call made)
+    before the exception propagates. Raises
+    :class:`SecureHomeVerificationError`, :class:`SecureHomeConfigError`, or
+    ``OSError``.
+    """
+    info = inspect_mounted_volume(mount_point, run=run, ismount=ismount)
+    ensure_volume_acceptable(info, mount_point, run=run)
+    if not info.volume_uuid:
+        raise SecureHomeVerificationError(
+            PROBE_FAILED, f"the volume mounted at {mount_point} did not report a VolumeUUID."
+        )
+
+    config = SecureHomeConfig(
+        version=CONFIG_VERSION,
+        mount_point=mount_point,
+        volume_uuid=info.volume_uuid,
+        backing=backing if backing is not None else _detect_backing(info, run),
+        mode=mode,
+    )
+    created_home = False
+    try:
+        created_home = _ensure_home_dir(mount_point, config.home_subdir, ismount=ismount)
+        verified = verify_home(config, run=run, ismount=ismount)
+        save_config(config, config_path)
+    except BaseException:
+        if created_home:
+            with contextlib.suppress(OSError):
+                os.rmdir(config.home_path)  # rmdir only removes an empty dir — safe rollback
+        raise
+    return verified
+
+
+def _is_never_mounted(exc: SecureHomeVerificationError) -> bool:
+    """Distinguish "you pointed adopt at something that isn't a mount" from the eject race.
+
+    Both raise :data:`NOT_MOUNTED`, but they need different advice: the first
+    is "mount it yourself first", while ``_ensure_home_dir``'s race ("the
+    volume was unmounted *while* adopting; nothing was created") is already
+    the more precise message and must reach the operator verbatim. Only the
+    chain's own first-step refusal carries this prefix.
+    """
+    return exc.code == NOT_MOUNTED and exc.message.startswith("Secure Hermes home is locked")
+
+
 def adopt(
     mount_point: Path,
     *,
@@ -385,13 +535,14 @@ def adopt(
     run: SubprocessRunner = DEFAULT_RUNNER,
     ismount: Callable[[str], bool] = os.path.ismount,
     force: bool = False,
+    mode: str | None = None,
 ) -> int:
     """Record an already-mounted, user-created encrypted APFS volume as the secure home.
 
-    Performs zero volume operations — never mounts or unmounts anything.
-    Every identity check fails closed and runs *before* the only write to
-    the volume; the config is only written once :func:`verify_home` confirms
-    the freshly built config actually holds.
+    Performs zero volume operations — never mounts or unmounts anything. The
+    verify-and-persist work lives in :func:`record_volume`; this wrapper owns
+    only the CLI concerns (platform gate, existing-config gate, the
+    ``adopt``-specific "not mounted" wording, and the success report).
     """
     if platform != _DARWIN:
         _refuse_not_macos("adopt")
@@ -404,10 +555,9 @@ def adopt(
             return refusal
 
     try:
-        info = inspect_mounted_volume(mount_point, run=run, ismount=ismount)
-        ensure_volume_acceptable(info, mount_point, run=run)
+        verified = record_volume(mount_point, config_path=config_path, run=run, ismount=ismount, mode=mode)
     except SecureHomeVerificationError as exc:
-        if exc.code == NOT_MOUNTED:
+        if _is_never_mounted(exc):
             _term.emit_error(
                 f"{mount_point} is not a mounted volume. secure-home adopt never mounts a volume — "
                 "mount the encrypted volume yourself first, then retry."
@@ -415,40 +565,42 @@ def adopt(
         else:
             _term.emit_error(exc.message)
         return 1
-    if not info.volume_uuid:
-        _term.emit_error(f"the volume mounted at {mount_point} did not report a VolumeUUID.")
+    except (SecureHomeConfigError, OSError) as exc:
+        _term.emit_error(str(exc))
         return 1
 
-    config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=info.volume_uuid)
-    created_home = False
-    try:
-        created_home = _ensure_home_dir(mount_point, config.home_subdir, ismount=ismount)
-        verified = verify_home(config, run=run, ismount=ismount)
-        save_config(config, config_path)
-    except (SecureHomeVerificationError, SecureHomeConfigError, OSError) as exc:
-        message = exc.message if isinstance(exc, SecureHomeVerificationError) else str(exc)
-        _term.emit_error(message)
-        if created_home:
-            with contextlib.suppress(OSError):
-                os.rmdir(config.home_path)  # rmdir only removes an empty dir — safe rollback
-        return 1
+    _print_adopt_success(verified, config_path=config_path, mode=mode)
+    return 0
 
+
+def _print_adopt_success(verified: VerifiedHome, *, config_path: Path, mode: str | None) -> None:
+    # Read the backing back off the just-saved config rather than re-deriving
+    # it: what the report shows is then, by construction, what was persisted.
+    saved, _ = _load_config_safe(config_path)
+    backing = saved.backing if saved is not None else None
     color = _term.should_color(sys.stdout)
     print("Secure home adopted.")
     print(f"  mount point : {verified.mount_point}")
     print(f"  volume uuid : {verified.volume_uuid}")
     print(f"  secure home : {verified.home}")
+    rendered = backing_text(
+        backing.kind if backing is not None else None,
+        str(backing.image_path) if backing is not None and backing.image_path is not None else None,
+        config_version=saved.version if saved is not None else None,
+    )
+    print(f"  backing     : {rendered}")
+    print(f"  mode        : {mode if mode is not None else 'not recorded'}")
     print(_term.hint("Next: hermes-mordred secure-home run -- hermes", enabled=color))
-    return 0
 
 
 def cli_adopt(args: argparse.Namespace) -> int:
-    """argparse handler for ``secure-home adopt <mountpoint> [--force]``."""
+    """argparse handler for ``secure-home adopt <mountpoint> [--force] [--mode ...]``."""
     return adopt(
         Path(args.mountpoint),
         config_path=resolve_config_path(),
         platform=sys.platform,
         force=bool(getattr(args, "force", False)),
+        mode=getattr(args, "mode", None),
     )
 
 
@@ -465,6 +617,25 @@ def _strip_leading_separator(command: Sequence[str]) -> list[str]:
 
 def _poisoned_env_vars(environ: Mapping[str, str]) -> list[str]:
     return [name for name in _REFUSED_ENV_VARS if environ.get(name, "").strip()]
+
+
+def _verify_for_run(
+    config: SecureHomeConfig, *, run: SubprocessRunner, ismount: Callable[[str], bool]
+) -> VerifiedHome | None:
+    """Verify before exec; on refusal print the reason (plus the unlock hint) and return ``None``."""
+    try:
+        return verify_home(config, run=run, ismount=ismount)
+    except SecureHomeVerificationError as exc:
+        _term.emit_error(exc.message)
+        if exc.code == NOT_MOUNTED:
+            # The refusal itself stays byte-for-byte what it always was; the
+            # actionable next step is a separate line, so it can be added
+            # without changing a message operators may already match on.
+            print(
+                _term.hint("hint: hermes-mordred secure-home mount", enabled=_term.should_color(sys.stderr)),
+                file=sys.stderr,
+            )
+        return None
 
 
 def run_command(
@@ -510,10 +681,8 @@ def run_command(
         _term.emit_error("Secure home is not configured. Run 'hermes-mordred secure-home adopt <mountpoint>' first.")
         return 1
 
-    try:
-        verified = verify_home(config, run=run, ismount=ismount)
-    except SecureHomeVerificationError as exc:
-        _term.emit_error(exc.message)
+    verified = _verify_for_run(config, run=run, ismount=ismount)
+    if verified is None:
         return 1
 
     child_env = dict(environ)

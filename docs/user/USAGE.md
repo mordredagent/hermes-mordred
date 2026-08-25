@@ -457,8 +457,11 @@ never modified; the wrapper only sets `HERMES_HOME` for the process it
 launches.
 ```sh
 hermes-mordred secure-home status               # read-only report; --json supported
-hermes-mordred secure-home adopt <mountpoint>    # record an already-mounted encrypted volume
-hermes-mordred secure-home run -- <command...>   # launch <command> with HERMES_HOME inside it
+hermes-mordred secure-home init                 # create + attach an encrypted disk image, then record it
+hermes-mordred secure-home mount                # unlock/attach it again (idempotent)
+hermes-mordred secure-home unmount              # lock it again
+hermes-mordred secure-home adopt <mountpoint>   # record an already-mounted encrypted volume you created yourself
+hermes-mordred secure-home run -- <command...>  # launch <command> with HERMES_HOME inside it
 ```
 
 > **Three modes.** `secure-home` supports three usage patterns:
@@ -473,12 +476,60 @@ hermes-mordred secure-home run -- <command...>   # launch <command> with HERMES_
 > - **Strict** — unlock explicitly every usage period, with an optional
 >   idle auto-lock once no Hermes process and no open file remain.
 >
-> Phase 1 (this release) implements only the manual workflow below —
-> `adopt` + `run`. Automatic mode selection ships with a later `init`
-> command.
+> `init` creates the encrypted volume for you and records the mode you
+> choose (`balanced` default, or `strict`); `adopt --mode` records it for a
+> volume you created yourself. Mode *automation* — idle auto-lock,
+> launch-context integration — is still a later phase; today the mode is
+> informational and only changes the hints `init` prints afterward.
 
-> **Worked example.** Create and mount an encrypted APFS volume yourself
-> first (Disk Utility, or `hdiutil`), then hand it to Mordred:
+> **Worked example.** The fastest path creates and records the volume in
+> one step:
+>
+> ```sh
+> hermes-mordred secure-home init                 # prompts for a passphrase (twice) and a mode
+> hermes-mordred secure-home run -- hermes         # launch Hermes with HERMES_HOME inside it
+> ...
+> hermes-mordred secure-home unmount               # lock it again when you're done
+> ```
+>
+> `init` creates a 4 GiB sparse, AES-256-encrypted APFS disk image under
+> `~/Library/Application Support/hermes-mordred/` by default (override with
+> `--image`/`--mount-point`/`--size`/`--volname`), attaches it, chmods it to
+> `0600`, and records it exactly like `adopt` would. `--image` must name a
+> `*.sparseimage` file or leave the extension off entirely — `hdiutil` adds
+> that extension itself and chooses the image format from it, so any other
+> suffix is refused rather than quietly creating a file under a different
+> name.
+>
+> There is deliberately no `--passphrase` flag or environment variable: the
+> passphrase is read from an interactive prompt only, piped to `hdiutil`
+> over stdin as UTF-8 (so it works the same from a terminal, `ssh`, or
+> `launchd`), and never appears in `argv`, a log, or an error message. It
+> must be at least 12 characters and contain no newline or NUL: the image
+> file can be copied and attacked offline at leisure, so the passphrase is
+> the only thing still protecting it.
+>
+> `init` never overwrites an existing image, even with `--force` (which only
+> replaces an existing *config*), and any failure rolls back exactly what
+> that run created — the mount directory, the image, the attachment — never
+> anything from an earlier run, and nothing at all once the config has been
+> written. Your existing `~/.hermes` is **not** migrated into the new volume
+> (a later phase); Hermes starts fresh inside the secure home.
+>
+> **Lock / unlock.** `mount` re-attaches and re-verifies the volume; if
+> verification fails it puts the volume back and tells you whether that
+> actually worked (naming the manual `hdiutil detach` / `diskutil apfs
+> lockVolume` command when it did not). `unmount` checks the mounted
+> volume's identity *before* ejecting anything, so a different volume
+> sitting at the configured path is refused. If nothing is mounted there,
+> `unmount` still looks for the volume elsewhere — an image you attached by
+> double-clicking it in Finder auto-mounts under `/Volumes/` — and locks it
+> there rather than reporting a "locked" secure home that is in fact wide
+> open.
+>
+> **Bring your own volume.** If you'd rather create the volume by hand
+> (Disk Utility, a native APFS volume, or `hdiutil`), use `adopt` instead
+> of `init`:
 >
 > ```sh
 > # 1. Create + mount an encrypted APFS volume (Disk Utility, or manually):
@@ -508,6 +559,21 @@ hermes-mordred secure-home run -- <command...>   # launch <command> with HERMES_
 > boot disk itself can never be adopted — it is always refused, since it is
 > FileVault-protected and auto-unlocked at every login rather than a
 > separate encrypted volume.
+
+> **Lock / unlock.** `secure-home mount` unlocks the configured volume
+> (prompting once for its passphrase) and re-verifies it end to end; if it
+> is already mounted and verified, it does nothing and just reports that —
+> safe to run any time. `secure-home unmount` verifies the mounted volume's
+> identity *before* locking it, so a different volume mounted at the same
+> path is refused rather than ejected; a busy volume (something still has a
+> file open on it) is refused unless you pass `--force`.
+
+> **Rollback & safety.** `init` never overwrites an existing disk image —
+> only `--force` on an existing *config* is supported, and even then the
+> previous volume/image is left untouched. No `init`/`mount`/`unmount` step
+> ever deletes anything it did not create in that same run: a failed `init`
+> cleans up only the mount directory, image, and attachment it just made,
+> never a volume or image from an earlier run.
 
 > **Files are readable while mounted.** Once the volume is mounted,
 > `<mount>/hermes-home` is an ordinary directory: any process running as you

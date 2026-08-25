@@ -35,6 +35,7 @@ be able to lie to this chain.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import os
 import plistlib
@@ -46,6 +47,7 @@ import xml.parsers.expat
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import CompletedProcess
 from typing import Any, Final, Protocol
 
 from ._secure_home_paths import SecureHomeConfig
@@ -61,16 +63,21 @@ __all__ = [
     "PROBE_FAILED",
     "UNSAFE_HOME",
     "UUID_MISMATCH",
+    "AttachedImage",
     "FileVaultState",
     "SecureHomeProbeError",
     "SecureHomeVerificationError",
     "SubprocessRunner",
     "VerifiedHome",
     "VolumeInfo",
+    "attached_image_device",
+    "backing_image_path",
     "ensure_volume_acceptable",
     "filevault_status",
     "inspect_mounted_volume",
+    "native_volume_state",
     "verify_home",
+    "verify_mounted_identity",
     "volume_info",
 ]
 
@@ -175,23 +182,37 @@ class VolumeInfo:
     ownership_enabled: bool | None
 
 
-def _run_plist_tool(argv: tuple[str, ...], *, run: SubprocessRunner, timeout: float) -> dict[str, Any]:
-    """Invoke a plist-emitting system tool, failing closed into :class:`SecureHomeProbeError`."""
+def _invoke_plist_tool(argv: tuple[str, ...], *, run: SubprocessRunner, timeout: float) -> CompletedProcess[str]:
+    """Run a plist-emitting tool, turning an invocation failure into :class:`SecureHomeProbeError`.
+
+    Split out from :func:`_run_plist_tool` because a *non-zero exit* is not
+    always a failure: ``diskutil info <uuid>`` exits non-zero to say "no such
+    volume", which :func:`native_volume_state` must report as an answer rather
+    than raise on.
+    """
     try:
-        result = run(argv, timeout=timeout)
+        return run(argv, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise SecureHomeProbeError(f"{' '.join(argv)!r} failed or timed out: {exc}") from exc
-    if result.returncode != 0:
-        detail = _trim(result.stderr or result.stdout or "")
-        raise SecureHomeProbeError(f"{' '.join(argv)!r} failed (rc={result.returncode}): {detail!r}")
 
+
+def _parse_plist_output(argv: tuple[str, ...], stdout: str) -> dict[str, Any]:
     try:
-        parsed = plistlib.loads((result.stdout or "").encode())
+        parsed = plistlib.loads(stdout.encode())
     except _PLIST_PARSE_ERRORS as exc:
         raise SecureHomeProbeError(f"{' '.join(argv)!r} produced unparsable plist output: {exc}") from exc
     if not isinstance(parsed, dict):
         raise SecureHomeProbeError(f"{' '.join(argv)!r} plist output is not a dictionary")
     return parsed
+
+
+def _run_plist_tool(argv: tuple[str, ...], *, run: SubprocessRunner, timeout: float) -> dict[str, Any]:
+    """Invoke a plist-emitting system tool, failing closed into :class:`SecureHomeProbeError`."""
+    result = _invoke_plist_tool(argv, run=run, timeout=timeout)
+    if result.returncode != 0:
+        detail = _trim(result.stderr or result.stdout or "")
+        raise SecureHomeProbeError(f"{' '.join(argv)!r} failed (rc={result.returncode}): {detail!r}")
+    return _parse_plist_output(argv, result.stdout or "")
 
 
 def volume_info(mount_point: Path, *, run: SubprocessRunner = DEFAULT_RUNNER) -> VolumeInfo:
@@ -239,13 +260,13 @@ def _whole_disk(device_node: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _image_backed_encrypted(device_node: str, *, run: SubprocessRunner) -> bool | None:
-    """Whether the attached disk image backing *device_node* is encrypted.
+def _find_backing_image(device_node: str, *, run: SubprocessRunner) -> dict[str, Any] | None:
+    """Return the attached ``hdiutil info -plist`` image dict backing *device_node*, or ``None``.
 
-    Returns ``None`` when no attached image owns the device (the volume is
-    not image-backed at all); ``False`` when an image owns it but does not
-    report ``image-encrypted`` true — an image found without the flag is
-    treated as unencrypted, never as unknown. Raises
+    Shared by :func:`_image_backed_encrypted` and :func:`backing_image_path`
+    so "which image owns this device" is matched exactly once — an exact
+    ``dev-entry`` match, or a match on the image's whole-disk node when
+    *device_node* names one of its partitions. Raises
     :class:`SecureHomeProbeError` when ``hdiutil`` itself fails.
     """
     plist = _run_plist_tool(("hdiutil", "info", "-plist"), run=run, timeout=_HDIUTIL_INFO_TIMEOUT)
@@ -261,8 +282,147 @@ def _image_backed_encrypted(device_node: str, *, run: SubprocessRunner) -> bool 
             continue
         dev_entries = {entity.get("dev-entry") for entity in entities if isinstance(entity, dict)}
         if device_node in dev_entries or (whole_disk is not None and whole_disk in dev_entries):
-            return _parse_bool(image, "image-encrypted") is True
+            return image
     return None
+
+
+def _image_backed_encrypted(device_node: str, *, run: SubprocessRunner) -> bool | None:
+    """Whether the attached disk image backing *device_node* is encrypted.
+
+    Returns ``None`` when no attached image owns the device (the volume is
+    not image-backed at all); ``False`` when an image owns it but does not
+    report ``image-encrypted`` true — an image found without the flag is
+    treated as unencrypted, never as unknown. Raises
+    :class:`SecureHomeProbeError` when ``hdiutil`` itself fails.
+    """
+    image = _find_backing_image(device_node, run=run)
+    if image is None:
+        return None
+    return _parse_bool(image, "image-encrypted") is True
+
+
+def backing_image_path(device_node: str, *, run: SubprocessRunner = DEFAULT_RUNNER) -> Path | None:
+    """Path of the attached disk image backing *device_node*.
+
+    ``None`` when the volume is not image-backed at all, or when a matching
+    image is found but its ``image-path`` key is absent or not a string —
+    both are "we can't name the file", never a guess. Raises
+    :class:`SecureHomeProbeError` when ``hdiutil`` fails (propagates from
+    :func:`_run_plist_tool` via :func:`_find_backing_image`).
+    """
+    image = _find_backing_image(device_node, run=run)
+    if image is None:
+        return None
+    image_path = _parse_str(image, "image-path")
+    return Path(image_path) if image_path is not None else None
+
+
+@dataclass(frozen=True)
+class AttachedImage:
+    """An attached disk image located by scanning ``hdiutil info -plist``.
+
+    ``device_node`` is the *whole-disk* node (``/dev/disk9``), which is what
+    ``hdiutil detach`` wants when the image is not mounted where we expected —
+    detaching by mount point cannot work if there is no mount point of ours.
+    ``mount_points`` is whatever the image is actually mounted at right now
+    (possibly empty: attached but not mounted), and exists so the CLI can tell
+    the operator *where* it found the volume instead of silently acting on a
+    path they never mentioned.
+    """
+
+    device_node: str
+    mount_points: tuple[str, ...]
+
+
+def _path_aliases(value: str) -> frozenset[str]:
+    """The spellings of *value* that should be considered the same file.
+
+    ``hdiutil`` echoes the path it was given, so an image attached as
+    ``/tmp/x.sparseimage`` and a config recording
+    ``/private/tmp/x.sparseimage`` name one file under two names. Comparing
+    the alias *sets* (rather than resolving only one side) also matches when
+    the file has since been deleted and ``realpath`` can no longer follow it.
+    """
+    aliases = {value, os.path.normpath(value)}
+    with contextlib.suppress(OSError, ValueError):  # pragma: no cover - realpath is near-total
+        aliases.add(os.path.realpath(value))
+    return frozenset(aliases)
+
+
+def _image_mount_points(image: dict[str, Any]) -> tuple[str, ...]:
+    entities = image.get("system-entities")
+    if not isinstance(entities, list):
+        return ()
+    found = [
+        entity.get("mount-point")
+        for entity in entities
+        if isinstance(entity, dict) and isinstance(entity.get("mount-point"), str)
+    ]
+    return tuple(point for point in found if point)
+
+
+def _whole_disk_dev_entry(image: dict[str, Any]) -> str | None:
+    """The image's whole-disk node: the entity with no mount point, else the first."""
+    entities = image.get("system-entities")
+    if not isinstance(entities, list):
+        return None
+    dicts = [entity for entity in entities if isinstance(entity, dict)]
+    for entity in dicts:
+        dev_entry = entity.get("dev-entry")
+        if isinstance(dev_entry, str) and entity.get("mount-point") is None:
+            return dev_entry
+    for entity in dicts:
+        dev_entry = entity.get("dev-entry")
+        if isinstance(dev_entry, str):
+            return dev_entry
+    return None
+
+
+def attached_image_device(image_path: Path, *, run: SubprocessRunner = DEFAULT_RUNNER) -> AttachedImage | None:
+    """Find *image_path* among the currently attached disk images, or ``None``.
+
+    Answers "is the secure volume live *somewhere*?" — the question
+    ``os.path.ismount(<configured mount point>)`` cannot answer. An image
+    attached by Finder, or by a bare ``hdiutil attach`` with no
+    ``-mountpoint``, auto-mounts under ``/Volumes/<volname>``; treating that
+    as "locked" because nothing is at the configured path would be exactly the
+    false assurance this feature exists to avoid. Raises
+    :class:`SecureHomeProbeError` when ``hdiutil`` itself fails — the caller
+    must refuse rather than assume "not attached".
+    """
+    plist = _run_plist_tool(("hdiutil", "info", "-plist"), run=run, timeout=_HDIUTIL_INFO_TIMEOUT)
+    images = plist.get("images")
+    if not isinstance(images, list):
+        return None
+    wanted = _path_aliases(str(image_path))
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        candidate = _parse_str(image, "image-path")
+        if candidate is None or not (wanted & _path_aliases(candidate)):
+            continue
+        device_node = _whole_disk_dev_entry(image)
+        if device_node is not None:
+            return AttachedImage(device_node=device_node, mount_points=_image_mount_points(image))
+    return None
+
+
+def native_volume_state(volume_uuid: str, *, run: SubprocessRunner = DEFAULT_RUNNER) -> tuple[bool | None, str | None]:
+    """``(locked, mount_point)`` for a native APFS volume, by UUID.
+
+    ``(None, None)`` when ``diskutil`` exits non-zero — the volume is not
+    present on this Mac (an external disk that was unplugged, say), which is
+    an answer, not a failure. ``locked`` is ``None`` when the key is absent,
+    so callers must fail closed on the distinction rather than read a missing
+    key as "unlocked". An invocation failure or unparsable output still raises
+    :class:`SecureHomeProbeError`.
+    """
+    argv = ("diskutil", "info", "-plist", volume_uuid)
+    result = _invoke_plist_tool(argv, run=run, timeout=_VOLUME_INFO_TIMEOUT)
+    if result.returncode != 0:
+        return None, None
+    plist = _parse_plist_output(argv, result.stdout or "")
+    return _parse_bool(plist, "Locked"), (_parse_str(plist, "MountPoint") or None)
 
 
 BOOT_VOLUME: Final[str] = "BOOT_VOLUME"
@@ -331,6 +491,27 @@ def ensure_volume_acceptable(info: VolumeInfo, mount_point: Path, *, run: Subpro
     _verify_ownership(info)
 
 
+def verify_mounted_identity(
+    config: SecureHomeConfig,
+    *,
+    run: SubprocessRunner = DEFAULT_RUNNER,
+    ismount: Callable[[str], bool] = os.path.ismount,
+) -> VolumeInfo:
+    """Chain steps 1-4 only: symlink-free mountpoint, really mounted, diskutil-probed, UUID matches.
+
+    Deliberately stops short of :func:`ensure_volume_acceptable` and the
+    home-dir checks — callers that only need to confirm "is the volume I'm
+    about to act on genuinely the one this config describes" (notably an
+    ``unmount`` path, which must never detach a foreign volume just because
+    something is mounted at the configured path) must not also be refused
+    over an acceptance concern like a noowners mount, which has nothing to
+    do with volume identity.
+    """
+    info = inspect_mounted_volume(config.mount_point, run=run, ismount=ismount)
+    _verify_uuid(config.volume_uuid, info.volume_uuid)
+    return info
+
+
 def verify_home(
     config: SecureHomeConfig,
     *,
@@ -346,10 +527,11 @@ def verify_home(
     ownership honored), then (unless ``require_home=False``) a safe existing
     home directory. Later steps assume everything before them held, so the
     order is load-bearing: e.g. we never inspect ``home_path`` on a volume
-    we haven't yet confirmed is the right one.
+    we haven't yet confirmed is the right one. The first two steps are
+    shared with :func:`verify_mounted_identity` so both judge "is this the
+    right volume" by exactly the same rule.
     """
-    info = inspect_mounted_volume(config.mount_point, run=run, ismount=ismount)
-    _verify_uuid(config.volume_uuid, info.volume_uuid)
+    info = verify_mounted_identity(config, run=run, ismount=ismount)
     ensure_volume_acceptable(info, config.mount_point, run=run)
     if require_home:
         _verify_home_dir(config.mount_point, config.home_path)

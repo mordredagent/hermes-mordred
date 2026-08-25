@@ -228,8 +228,6 @@ the source remains usable, and failure paths leave no partial destination.
 
 ### Open decisions
 
-- Phase 2 `init` ceremony: the exact `hdiutil`/`diskutil` volume-creation
-  flow, and enforcing interactive-stdin-only password collection.
 - Phase 4 unlock trust boundary: automatic Keyvault-based unlock is deferred
   until it is explicit where the unlock key may live without landing inside
   the encrypted `HERMES_HOME` it unlocks.
@@ -246,7 +244,8 @@ the source remains usable, and failure paths leave no partial destination.
 - [x] `secure-home` paths/probe modules: the fail-closed verification
   chain, the `~/.config/hermes-mordred/secure-home.json` config contract,
   and the `fdesetup`/`diskutil` read-only probes.
-- [x] `secure-home status | adopt | run` CLI commands in `mordred_wizard`.
+- [x] `secure-home status`, `adopt`, and `run` CLI commands in
+  `mordred_wizard`.
 - [x] Unit tests mocking `fdesetup`/`diskutil`/exec through an injectable
   runner, covering the verification chain and both exact fail-closed
   messages.
@@ -265,6 +264,44 @@ the source remains usable, and failure paths leave no partial destination.
 - The live gated test (`MORDRED_LIVE_SECURE_HOME_TEST=1`) passed on Apple
   Silicon and the result is logged in [`CI.md`](./CI.md) §Manual
   live-device validation log.
+
+### 5.2 Phase 2 implementation
+
+- [x] Config schema v2 (`backing`, `mode`) in `_secure_home_paths.py`,
+  additive and v1-compatible; `save_config` always writes v2.
+- [x] `_secure_home_probe.py`: `backing_image_path` (which disk image backs
+  a device node) and `verify_mounted_identity` (steps 1–4 only, shared by
+  `verify_home` and `unmount`).
+- [x] NEW `_secure_home_volume.py`: injectable `hdiutil`/`diskutil` wrappers
+  for create/attach/detach/unlock/lock — the only module that mutates a
+  volume; passphrase reaches the tool via stdin only, never `argv`/env.
+- [x] `secure_home_cli.py`: `adopt` refactored onto a shared, printing-free
+  `record_volume` (verify → detect/record backing → create home dir →
+  save); status report/render/JSON gain `backing`/`mode`/`config_version`.
+- [x] NEW `secure_home_lifecycle_cli.py`: `init`/`mount`/`unmount`
+  ceremonies with full rollback-on-failure and re-verify-after-attach.
+- [x] Parsers (`_secure_home_parsers.py`) and CLI-tree docstrings updated
+  for `adopt --mode` and the new `init`/`mount`/`unmount` verbs.
+- [x] Unit tests: `tests/test_secure_home_volume.py`,
+  `tests/test_wizard_secure_home_lifecycle_cli.py` (+ new
+  `tests/_secure_home_fakes.py`), and updated
+  `tests/test_wizard_secure_home_cli.py` / `tests/test_wizard_cli.py` /
+  `tests/test_secure_home_paths.py` / `tests/test_secure_home_probe.py`.
+- [x] Second gated live test
+  (`test_init_mount_unmount_round_trip_against_a_real_image`) added to
+  `tests/integration/test_secure_home_macos.py`.
+- [x] Docs: SPEC/PLAN/TODO/PATHS/USAGE/AGENTS updated in this PR.
+- [ ] Live-device validation run on Apple Silicon, recorded in
+  [`CI.md`](./CI.md) §Manual live-device validation log.
+
+### Acceptance gate (Phase 5, Phase 2 slice)
+
+- Unit suite green.
+- `ruff check` / `ruff format --check` / `mypy --strict` clean.
+- The live gated test (`MORDRED_LIVE_SECURE_HOME_TEST=1`) — specifically
+  the new `init` → `unmount` → `mount` → `run` → `unmount` round trip —
+  passed on Apple Silicon and the result is logged in [`CI.md`](./CI.md)
+  §Manual live-device validation log.
 
 ## Cross-cutting (ongoing through the operational phase)
 
