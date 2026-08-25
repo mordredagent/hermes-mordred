@@ -22,6 +22,7 @@ The suite is organised around the three properties Phase 2 must never lose:
 from __future__ import annotations
 
 import argparse
+import os
 import plistlib
 import stat
 import subprocess
@@ -601,10 +602,15 @@ class TestInit:
         assert not image.exists()
         assert not config_path.exists()
 
-    def test_interrupt_during_create_removes_the_partially_written_image(
+    def test_interrupt_during_create_leaves_the_partial_image_with_a_warning(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """``hdiutil create`` is slow; a Ctrl-C mid-call can leave a partial image."""
+        """``hdiutil create`` is slow; a Ctrl-C mid-call can leave a partial image.
+
+        Without a post-create identity there is no proof the file is ours, so
+        the rollback leaves it and says so — deleting a concurrent run's
+        image would be the far worse outcome.
+        """
         state = MountState()
         volume_run = FakeVolumeRunner(
             mount_state=state,
@@ -625,7 +631,8 @@ class TestInit:
                 ismount=state.ismount,
                 home_dir=tmp_path,
             )
-        assert not image.exists()
+        assert image.read_bytes() == b"partial image"
+        assert "interrupted before this run could confirm the file is its own" in capsys.readouterr().err
         assert not mount_point.exists()
         assert not config_path.exists()
         assert volume_run.actions == ["hdiutil create"]
@@ -729,8 +736,14 @@ class TestInit:
         state = MountState()
 
         def replace_image(argv: Any) -> None:
-            image.unlink()
-            image.write_bytes(b"someone else's image")
+            # Allocate the replacement while the original still exists, then
+            # take over the path atomically: ext4 hands a freshly unlinked
+            # inode number straight back to the next create (APFS does not),
+            # so an unlink-then-write swap would keep the same (st_dev,
+            # st_ino) on Linux CI and make this test vacuous there.
+            replacement = image.with_name(image.name + ".swap")
+            replacement.write_bytes(b"someone else's image")
+            os.replace(replacement, image)
 
         volume_run = FakeVolumeRunner(
             mount_state=state,
@@ -1358,8 +1371,11 @@ class TestMount:
 
         class _SwappingPromptIO(ScriptedPromptIO):
             def ask_password(self, label: str, default: str = "", *, description: str | None = None) -> str:
-                image.unlink()
-                image.write_bytes(b"a different image")
+                # Replacement allocated before the original goes away, so it
+                # gets a distinct inode even on ext4 (see the init swap test).
+                replacement = image.with_name(image.name + ".swap")
+                replacement.write_bytes(b"a different image")
+                os.replace(replacement, image)
                 return super().ask_password(label, default, description=description)
 
         rc = secure_home_lifecycle_cli.mount(

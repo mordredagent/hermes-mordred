@@ -856,7 +856,9 @@ volume is attached with ownership enabled.
   `--force` (which only replaces an existing *config*, never the
   volume/image), and any failure rolls back exactly what that run created —
   the mount directory, the image (matched by inode, so a racing process's
-  file is never deleted), the attachment — and nothing from an earlier run;
+  file is never deleted; an image whose `hdiutil create` was interrupted
+  before it could be identified is left in place with a warning rather than
+  deleted without proof), the attachment — and nothing from an earlier run;
   once the config is written the rollback disarms entirely. `~/.hermes` is
   not migrated (Phase 3): Hermes starts fresh inside the secure home.
 - `secure-home mount` — idempotent: an already-mounted, already-verified

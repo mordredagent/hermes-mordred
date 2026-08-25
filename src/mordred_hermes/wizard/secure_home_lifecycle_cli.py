@@ -305,21 +305,28 @@ def _image_is_ours(artifacts: _InitArtifacts) -> bool:
     "File exists". Unlinking on that path would delete the other run's image.
     Comparing inode identity is what makes the rollback provably ours.
 
-    ``image_identity is None`` means ``hdiutil create`` was interrupted before
-    it returned, so we never got to stat the result. That window is
-    milliseconds wide and opens immediately after a ``lexists`` that found
-    nothing, so anything there now is overwhelmingly our own partial image —
-    the single documented place this rollback acts without identity proof,
-    because leaving a half-written encrypted image behind is the worse
-    outcome.
+    ``image_identity is None`` means ``hdiutil create`` was interrupted (or
+    failed) before this run could stat its result, so there is no proof that
+    whatever sits at the path is ours. Without proof, nothing is deleted: a
+    half-written image left behind costs the operator an ``rm``, while
+    deleting a concurrent run's freshly created image would cost them the
+    encrypted Hermes home — so the rollback never acts on this path without
+    identity, not even in that millisecond window.
     """
     if artifacts.image_identity is None:
-        return True
+        return False
     return _image_identity(artifacts.image) == artifacts.image_identity
 
 
 def _unlink_our_image(artifacts: _InitArtifacts) -> None:
     if not artifacts.created_image:
+        return
+    if artifacts.image_identity is None:
+        if os.path.lexists(artifacts.image):
+            _term.emit_warn(
+                f"leaving {artifacts.image} in place during rollback: hdiutil create was interrupted before "
+                "this run could confirm the file is its own; remove it yourself if it is a partial image."
+            )
         return
     if not _image_is_ours(artifacts):
         _term.emit_warn(
