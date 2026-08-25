@@ -36,7 +36,18 @@ from typing import Any, NoReturn
 import pytest
 
 from mordred_hermes.wizard import _secure_home_parsers, secure_home_cli
-from mordred_hermes.wizard._secure_home_paths import SecureHomeConfig, load_config, save_config
+from mordred_hermes.wizard._secure_home_paths import (
+    BACKING_APFS_VOLUME,
+    BACKING_DISK_IMAGE,
+    CONFIG_VERSION,
+    MODE_BALANCED,
+    MODE_STRICT,
+    Backing,
+    SecureHomeConfig,
+    SecureHomeConfigError,
+    load_config,
+    save_config,
+)
 from mordred_hermes.wizard._secure_home_probe import NOT_MOUNTED, UNSAFE_HOME
 
 _UUID = "ABCD1234-0000-0000-0000-000000000000"
@@ -106,11 +117,15 @@ def _diskutil_result(
     )
 
 
-def _hdiutil_image(dev_entries: Sequence[str], *, encrypted: bool | None) -> dict[str, Any]:
+def _hdiutil_image(
+    dev_entries: Sequence[str], *, encrypted: bool | None, image_path: str | None = None
+) -> dict[str, Any]:
     entities: list[dict[str, Any]] = [{"dev-entry": entry} for entry in dev_entries]
     image: dict[str, Any] = {"system-entities": entities}
     if encrypted is not None:
         image["image-encrypted"] = encrypted
+    if image_path is not None:
+        image["image-path"] = image_path
     return image
 
 
@@ -218,7 +233,7 @@ class TestStatus:
         home.mkdir()
         home.chmod(0o700)
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID)
         _write_config(config_path, config)
         run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
 
@@ -247,7 +262,7 @@ class TestStatus:
     def test_configured_but_locked(self, tmp_path: Path) -> None:
         mount_point = tmp_path / "mnt"  # never created -> definitely "not mounted"
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID)
         _write_config(config_path, config)
         run = _FakeRunner()
 
@@ -271,7 +286,7 @@ class TestStatus:
         link_mount = tmp_path / "link_mount"
         link_mount.symlink_to(real_dir)
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=link_mount, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=link_mount, volume_uuid=_UUID)
         _write_config(config_path, config)
         run = _FakeRunner()
 
@@ -351,7 +366,7 @@ class TestStatus:
     def test_non_darwin_skips_probes(self, tmp_path: Path) -> None:
         mount_point = tmp_path / "mnt"
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID)
         _write_config(config_path, config)
 
         report = secure_home_cli.collect(
@@ -365,13 +380,122 @@ class TestStatus:
         assert report.mount_point == str(mount_point)
         assert report.volume_uuid == _UUID
 
+    def test_reports_and_renders_the_v2_backing_and_mode_fields(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        home = mount_point / "hermes-home"
+        home.mkdir()
+        home.chmod(0o700)
+        image = tmp_path / "secure.sparseimage"
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        _write_config(
+            config_path,
+            SecureHomeConfig(
+                version=CONFIG_VERSION,
+                mount_point=mount_point,
+                volume_uuid=_UUID,
+                backing=Backing(BACKING_DISK_IMAGE, image),
+                mode=MODE_STRICT,
+            ),
+        )
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        report = secure_home_cli.collect(
+            config_path=config_path, platform="darwin", run=run, ismount=lambda p: p == str(mount_point)
+        )
+        assert report.config_version == CONFIG_VERSION
+        assert report.backing_kind == BACKING_DISK_IMAGE
+        assert report.image_path == str(image)
+        assert report.mode == MODE_STRICT
+
+        text = secure_home_cli.render_text(report)
+        assert f"  backing      : disk image {image}" in text
+        assert f"  mode         : {MODE_STRICT}" in text
+        assert json.loads(secure_home_cli.render_json(report)) == report.to_dict()
+
+    def test_renders_native_apfs_backing(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        home = mount_point / "hermes-home"
+        home.mkdir()
+        home.chmod(0o700)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        _write_config(
+            config_path,
+            SecureHomeConfig(
+                version=CONFIG_VERSION,
+                mount_point=mount_point,
+                volume_uuid=_UUID,
+                backing=Backing(BACKING_APFS_VOLUME),
+                mode=MODE_BALANCED,
+            ),
+        )
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+        report = secure_home_cli.collect(
+            config_path=config_path, platform="darwin", run=run, ismount=lambda p: p == str(mount_point)
+        )
+        assert report.backing_kind == BACKING_APFS_VOLUME
+        assert report.image_path is None
+        assert "  backing      : apfs volume (native)" in secure_home_cli.render_text(report)
+
+    def test_v1_config_renders_unknown_backing_and_no_mode(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        home = mount_point / "hermes-home"
+        home.mkdir()
+        home.chmod(0o700)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({"version": 1, "mount_point": str(mount_point), "volume_uuid": _UUID}), encoding="utf-8"
+        )
+        config_path.chmod(0o600)
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        report = secure_home_cli.collect(
+            config_path=config_path, platform="darwin", run=run, ismount=lambda p: p == str(mount_point)
+        )
+        assert report.config_version == 1
+        assert report.backing_kind is None
+        assert report.mode is None
+        text = secure_home_cli.render_text(report)
+        assert "unknown (v1 config — re-run adopt --force while mounted to record it)" in text
+        assert "  mode         : not recorded" in text
+
+    def test_locked_status_hints_at_the_mount_command(self, tmp_path: Path) -> None:
+        mount_point = tmp_path / "mnt"
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        _write_config(config_path, SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID))
+        run = _FakeRunner()
+        report = secure_home_cli.collect(config_path=config_path, platform="darwin", run=run, ismount=lambda p: False)
+        assert report.verification_code == NOT_MOUNTED
+        assert "hint: run `hermes-mordred secure-home mount` to unlock it." in secure_home_cli.render_text(report)
+
+    def test_unsupported_platform_leaves_the_v2_fields_unknown(self, tmp_path: Path) -> None:
+        mount_point = tmp_path / "mnt"
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        _write_config(
+            config_path,
+            SecureHomeConfig(
+                version=CONFIG_VERSION,
+                mount_point=mount_point,
+                volume_uuid=_UUID,
+                backing=Backing(BACKING_APFS_VOLUME),
+                mode=MODE_BALANCED,
+            ),
+        )
+        report = secure_home_cli.collect(
+            config_path=config_path, platform="linux", run=_unused_runner, ismount=_unused_ismount
+        )
+        assert report.config_version is None
+        assert report.backing_kind is None
+        assert report.image_path is None
+        assert report.mode is None
+
     def test_status_as_json_round_trip(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         mount_point = _make_mount(tmp_path)
         home = mount_point / "hermes-home"
         home.mkdir()
         home.chmod(0o700)
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID)
         _write_config(config_path, config)
         run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
 
@@ -519,7 +643,7 @@ class TestAdopt:
         mount_point = _make_mount(tmp_path)
         other_mount = _make_mount(tmp_path, name="other")
         config_path = tmp_path / "cfg" / "secure-home.json"
-        original = SecureHomeConfig(version=1, mount_point=other_mount, volume_uuid=_OTHER_UUID)
+        original = SecureHomeConfig(version=CONFIG_VERSION, mount_point=other_mount, volume_uuid=_OTHER_UUID)
         _write_config(config_path, original)
         run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
 
@@ -533,7 +657,7 @@ class TestAdopt:
         mount_point = _make_mount(tmp_path)
         other_mount = _make_mount(tmp_path, name="other")
         config_path = tmp_path / "cfg" / "secure-home.json"
-        original = SecureHomeConfig(version=1, mount_point=other_mount, volume_uuid=_OTHER_UUID)
+        original = SecureHomeConfig(version=CONFIG_VERSION, mount_point=other_mount, volume_uuid=_OTHER_UUID)
         _write_config(config_path, original)
         run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
 
@@ -628,6 +752,290 @@ class TestAdopt:
         assert "symlink" in err
         assert "Traceback" not in err
 
+    def test_eject_race_keeps_its_own_precise_wording(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """The volume disappears *between* the probe and the ``hermes-home`` mkdir.
+
+        ``_ensure_home_dir`` raises NOT_MOUNTED too, but with the far more
+        precise "was unmounted while adopting; nothing was created" — that must
+        reach stderr verbatim rather than being flattened into the generic
+        "mount the encrypted volume yourself first" advice, which only applies
+        when the path was never a mount to begin with.
+        """
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+        calls: list[str] = []
+
+        def flip_flopping_ismount(path: str) -> bool:
+            # True for the chain's mounted-check, False by the time
+            # `_ensure_home_dir` re-checks through the held directory fd.
+            calls.append(path)
+            return len(calls) == 1
+
+        rc = secure_home_cli.adopt(
+            mount_point, config_path=config_path, platform="darwin", run=run, ismount=flip_flopping_ismount
+        )
+        assert rc == 1
+        assert len(calls) == 2
+        err = capsys.readouterr().err
+        assert "was unmounted while adopting; nothing was created." in err
+        assert "never mounts a volume" not in err
+        assert not config_path.exists()
+        assert not (mount_point / "hermes-home").exists()
+
+    def test_records_native_apfs_backing(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point, proper=True)))
+
+        rc = secure_home_cli.adopt(
+            mount_point, config_path=config_path, platform="darwin", run=run, ismount=lambda p: True
+        )
+        assert rc == 0
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.backing == Backing(BACKING_APFS_VOLUME)
+        assert "  backing     : apfs volume (native)" in capsys.readouterr().out
+
+    def test_records_disk_image_backing_with_the_hdiutil_image_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        mount_point = _make_mount(tmp_path)
+        image = tmp_path / "secure.sparseimage"
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(
+            diskutil_result=_diskutil_result(_good_plist(mount_point, proper=None)),
+            hdiutil_result=_hdiutil_result([_hdiutil_image(["/dev/disk3s2"], encrypted=True, image_path=str(image))]),
+        )
+
+        rc = secure_home_cli.adopt(
+            mount_point, config_path=config_path, platform="darwin", run=run, ismount=lambda p: True
+        )
+        assert rc == 0
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.backing == Backing(BACKING_DISK_IMAGE, image)
+        assert f"  backing     : disk image {image}" in capsys.readouterr().out
+
+    def test_records_unknown_backing_when_the_image_has_no_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The volume verifies (an encrypted backing image exists) but ``hdiutil``
+        never named the file — recorded as unknown rather than guessed."""
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(
+            diskutil_result=_diskutil_result(_good_plist(mount_point, proper=None)),
+            hdiutil_result=_hdiutil_result([_hdiutil_image(["/dev/disk3s2"], encrypted=True)]),
+        )
+
+        rc = secure_home_cli.adopt(
+            mount_point, config_path=config_path, platform="darwin", run=run, ismount=lambda p: True
+        )
+        assert rc == 0
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.backing is None
+        assert "  backing     : unknown" in capsys.readouterr().out
+
+    def test_records_the_requested_mode(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        rc = secure_home_cli.adopt(
+            mount_point,
+            config_path=config_path,
+            platform="darwin",
+            run=run,
+            ismount=lambda p: True,
+            mode=MODE_STRICT,
+        )
+        assert rc == 0
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.mode == MODE_STRICT
+        assert f"  mode        : {MODE_STRICT}" in capsys.readouterr().out
+
+    def test_mode_defaults_to_not_recorded(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        rc = secure_home_cli.adopt(
+            mount_point, config_path=config_path, platform="darwin", run=run, ismount=lambda p: True
+        )
+        assert rc == 0
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.mode is None
+        assert "  mode        : not recorded" in capsys.readouterr().out
+
+
+# -----------------------------------------------------------------------------
+# record_volume (the printing-free core shared with `secure-home init`)
+# -----------------------------------------------------------------------------
+class TestBackingText:
+    """LOW-3: "unknown" must name the right reason, and only one mapping may exist."""
+
+    def test_v1_config_says_v1(self) -> None:
+        assert "v1 config" in secure_home_cli.backing_text(None, None, config_version=1)
+
+    def test_v2_config_says_not_recorded(self) -> None:
+        rendered = secure_home_cli.backing_text(None, None, config_version=CONFIG_VERSION)
+        assert "not recorded" in rendered
+        assert "v1" not in rendered
+
+    def test_unknown_config_version_says_not_recorded(self) -> None:
+        assert "not recorded" in secure_home_cli.backing_text(None, None, config_version=None)
+
+    def test_kinds(self) -> None:
+        assert secure_home_cli.backing_text(BACKING_DISK_IMAGE, "/i.sparseimage", config_version=2) == (
+            "disk image /i.sparseimage"
+        )
+        assert secure_home_cli.backing_text(BACKING_APFS_VOLUME, None, config_version=2) == "apfs volume (native)"
+
+    def test_adopt_of_an_unidentifiable_volume_does_not_blame_a_v1_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(
+            diskutil_result=_diskutil_result(_good_plist(mount_point, proper=None)),
+            hdiutil_result=_hdiutil_result([_hdiutil_image(["/dev/disk3s2"], encrypted=True)]),
+        )
+        assert (
+            secure_home_cli.adopt(
+                mount_point, config_path=config_path, platform="darwin", run=run, ismount=lambda p: True
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert "not recorded" in out
+        assert "v1 config" not in out
+
+
+class TestDetectBacking:
+    """LOW-4: the two ``_detect_backing`` branches the reviewer found untested."""
+
+    def test_probe_failure_becomes_a_verification_error(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard._secure_home_probe import PROBE_FAILED, SecureHomeVerificationError
+
+        mount_point = _make_mount(tmp_path)
+        run = _FakeRunner(
+            diskutil_result=_diskutil_result(_good_plist(mount_point, proper=None)),
+            hdiutil_result=_hdiutil_result([_hdiutil_image(["/dev/disk3s2"], encrypted=True)]),
+        )
+        # The encryption gate consumes the first hdiutil call; make the second
+        # (the backing-path probe) fail by swapping in an exploding runner.
+        calls = {"n": 0}
+        original = run.__call__
+
+        def flaky(argv: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "hdiutil":
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise OSError("hdiutil vanished")
+            return original(argv, timeout=timeout)
+
+        with pytest.raises(SecureHomeVerificationError) as exc_info:
+            secure_home_cli.record_volume(
+                mount_point, config_path=tmp_path / "cfg" / "c.json", run=flaky, ismount=lambda p: True
+            )
+        assert exc_info.value.code == PROBE_FAILED
+        assert "backing the volume" in exc_info.value.message
+
+    def test_unpersistable_image_path_records_unknown_rather_than_failing(self, tmp_path: Path) -> None:
+        """hdiutil named a relative path: a cosmetic field must not sink a verified volume."""
+        mount_point = _make_mount(tmp_path)
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(
+            diskutil_result=_diskutil_result(_good_plist(mount_point, proper=None)),
+            hdiutil_result=_hdiutil_result(
+                [_hdiutil_image(["/dev/disk3s2"], encrypted=True, image_path="relative/img.sparseimage")]
+            ),
+        )
+        rc = secure_home_cli.adopt(
+            mount_point, config_path=config_path, platform="darwin", run=run, ismount=lambda p: True
+        )
+        assert rc == 0
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.backing is None
+
+
+class TestRecordVolume:
+    def test_returns_the_verified_home_and_honours_an_explicit_backing(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        image = tmp_path / "explicit.sparseimage"
+        config_path = tmp_path / "cfg" / "secure-home.json"
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        verified = secure_home_cli.record_volume(
+            mount_point,
+            config_path=config_path,
+            run=run,
+            ismount=lambda p: True,
+            mode=MODE_BALANCED,
+            backing=Backing(BACKING_DISK_IMAGE, image),
+        )
+        assert verified.home == mount_point / "hermes-home"
+        loaded = load_config(config_path)
+        assert loaded is not None
+        assert loaded.backing == Backing(BACKING_DISK_IMAGE, image)
+        assert loaded.mode == MODE_BALANCED
+        # The explicit backing wins: no hdiutil probe was needed to detect one.
+        assert all(call[0] != "hdiutil" for call in run.calls)
+
+    def test_rollback_reraises_after_removing_the_home_dir_it_created(self, tmp_path: Path) -> None:
+        mount_point = _make_mount(tmp_path)
+        real_cfg_dir = tmp_path / "real_cfg"
+        real_cfg_dir.mkdir()
+        link_cfg_dir = tmp_path / "link_cfg"
+        link_cfg_dir.symlink_to(real_cfg_dir)
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        with pytest.raises(SecureHomeConfigError):
+            secure_home_cli.record_volume(
+                mount_point,
+                config_path=link_cfg_dir / "secure-home.json",
+                run=run,
+                ismount=lambda p: p == str(mount_point),
+            )
+        assert not (mount_point / "hermes-home").exists()
+
+    def test_missing_volume_uuid_raises_probe_failed(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard._secure_home_probe import PROBE_FAILED, SecureHomeVerificationError
+
+        mount_point = _make_mount(tmp_path)
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point, uuid=None)))
+        with pytest.raises(SecureHomeVerificationError) as exc_info:
+            secure_home_cli.record_volume(
+                mount_point, config_path=tmp_path / "cfg" / "secure-home.json", run=run, ismount=lambda p: True
+            )
+        assert exc_info.value.code == PROBE_FAILED
+
+    def test_pre_existing_home_dir_is_not_rolled_back(self, tmp_path: Path) -> None:
+        """Rollback removes only what *this* call created."""
+        mount_point = _make_mount(tmp_path)
+        home = mount_point / "hermes-home"
+        home.mkdir()
+        home.chmod(0o700)
+        real_cfg_dir = tmp_path / "real_cfg"
+        real_cfg_dir.mkdir()
+        link_cfg_dir = tmp_path / "link_cfg"
+        link_cfg_dir.symlink_to(real_cfg_dir)
+        run = _FakeRunner(diskutil_result=_diskutil_result(_good_plist(mount_point)))
+
+        with pytest.raises(SecureHomeConfigError):
+            secure_home_cli.record_volume(
+                mount_point,
+                config_path=link_cfg_dir / "secure-home.json",
+                run=run,
+                ismount=lambda p: p == str(mount_point),
+            )
+        assert home.is_dir()
+
 
 # -----------------------------------------------------------------------------
 # run
@@ -639,7 +1047,7 @@ class TestRun:
         home.mkdir()
         home.chmod(0o700)
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID)
         _write_config(config_path, config)
         return mount_point, config_path
 
@@ -648,7 +1056,7 @@ class TestRun:
         proving ``run_command`` never creates it on a locked/unmounted volume."""
         mount_point = tmp_path / "mnt"  # not even created: definitely "not mounted"
         config_path = tmp_path / "cfg" / "secure-home.json"
-        config = SecureHomeConfig(version=1, mount_point=mount_point, volume_uuid=_UUID)
+        config = SecureHomeConfig(version=CONFIG_VERSION, mount_point=mount_point, volume_uuid=_UUID)
         _write_config(config_path, config)
         return mount_point, config_path
 
@@ -734,6 +1142,7 @@ class TestRun:
         assert rc == 1
         err = capsys.readouterr().err
         assert "Secure Hermes home is locked. Unlock it to continue." in err
+        assert "hint: hermes-mordred secure-home mount" in err
         assert not (mount_point / "hermes-home").exists()
 
     def test_uuid_mismatch(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -948,12 +1357,27 @@ class TestCliDefaultsResolution:
         monkeypatch.setattr(secure_home_cli, "adopt", fake_adopt)
         monkeypatch.setattr(secure_home_cli, "resolve_config_path", lambda: config_path)
 
-        rc = secure_home_cli.cli_adopt(argparse.Namespace(mountpoint=str(mountpoint), force=True))
+        rc = secure_home_cli.cli_adopt(argparse.Namespace(mountpoint=str(mountpoint), force=True, mode=MODE_STRICT))
         assert rc == 7
         assert captured["mount_point"] == mountpoint
         assert captured["config_path"] == config_path
         assert captured["platform"] == sys.platform
         assert captured["force"] is True
+        assert captured["mode"] == MODE_STRICT
+
+    def test_cli_adopt_mode_defaults_to_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_adopt(mount_point: Path, **kwargs: object) -> int:
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(secure_home_cli, "adopt", fake_adopt)
+        monkeypatch.setattr(secure_home_cli, "resolve_config_path", lambda: tmp_path / "cfg.json")
+
+        secure_home_cli.cli_adopt(argparse.Namespace(mountpoint=str(tmp_path / "mnt")))
+        assert captured["mode"] is None
+        assert captured["force"] is False
 
     def test_cli_run_maps_namespace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, object] = {}

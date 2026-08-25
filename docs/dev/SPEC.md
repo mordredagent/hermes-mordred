@@ -702,7 +702,7 @@ vault       init | change-passphrase | recover | add | status | cat |
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list
 extension   pair | serve
-secure-home status | adopt | run
+secure-home status | adopt | run | init | mount | unmount
 ```
 
 `status`, `policy show`, keyvault listing, vault status, and encryption status
@@ -722,7 +722,7 @@ prints status. It never resets or overwrites a blocked/corrupt keyvault.
 Non-interactive mode runs only the automatable subset and reports the
 interactive commands still needed.
 
-#### Secure home — encrypted-APFS HERMES_HOME (Phase 5 PR1, 2026-08-24)
+#### Secure home — encrypted-APFS HERMES_HOME (Phase 5 PR1, 2026-08-24; PR2, 2026-08-25)
 
 `secure-home` is an opt-in, macOS-only relocation of the complete active
 Hermes home into a user-provided encrypted APFS volume. It adds a second key
@@ -744,18 +744,27 @@ spawner (context override → `HERMES_HOME` env var → platform default).
 - **Strict** — explicit unlock per usage period, with an optional idle
   auto-lock that fires only once no Hermes process and no open file remain.
 
-Mode selection and automation ship with `init` (Phase 2). Phase 1 records no
-mode; it implements only the manual `adopt`/`run` workflow below.
+`init` (and `adopt --mode`) record the chosen mode (`balanced` default, or
+`strict`) in the config. Mode *automation* — idle auto-lock, launch-context
+integration — remains Phase 4; in Phase 2 the mode is informational and
+drives only the post-`init` guidance (which lock reminder is printed, and
+nothing else).
 
 ##### Config file and the bootstrap problem
 
 `~/.config/hermes-mordred/secure-home.json` (directory `0700`, file `0600`,
 symlinks rejected, atomic writes; `MORDRED_SECURE_HOME_CONFIG` overrides the
-path) records only `version`, `mount_point`, `volume_uuid`, and
-`home_subdir` (default `hermes-home`) — never a secret. It lives outside the
-secure volume and outside `HERMES_HOME` on purpose: the pointer to the
-secure home cannot itself live inside the thing it points to, because it
-must be readable before that volume is mounted. For the same reason, the
+path) records `version`, `mount_point`, `volume_uuid`, and `home_subdir`
+(default `hermes-home`) — never a secret. Schema v2 (Phase 2) adds two
+optional fields: `backing` (`{"kind": "disk-image", "image_path": "..."}` or
+`{"kind": "apfs-volume"}`, identifying which tool — `hdiutil` or `diskutil
+apfs` — can unlock the volume) and `mode` (`"balanced"` or `"strict"`). A v1
+file (missing either field) still loads; `backing`/`mode` simply read back as
+`None` ("unknown"/"not recorded"), and saving any loaded config always
+rewrites it as v2. It lives outside the secure volume and outside
+`HERMES_HOME` on purpose: the pointer to the secure home cannot itself live
+inside the thing it points to, because it must be readable before that
+volume is mounted. For the same reason, the
 only key that unlocks the volume must never be stored inside the encrypted
 `HERMES_HOME` — automatic Keyvault-based unlocking is deferred to Phase 4
 until that trust boundary is explicitly resolved.
@@ -821,6 +830,70 @@ volume is attached with ownership enabled.
   environment — each would relocate key material or disable sealing outside
   the secure home.
 
+##### Commands (Phase 2)
+
+- `secure-home init [--image PATH] [--mount-point PATH] [--size 4g]
+  [--volname HermesSecure] [--mode balanced|strict] [--force]` — creates a
+  new sparse, natively-encrypted-APFS disk image (`hdiutil create -size ...
+  -type SPARSE -fs APFS -encryption AES-256 -stdinpass ...`), attaches it
+  (`hdiutil attach ... -stdinpass -mountpoint ... -nobrowse -owners on
+  -plist`), and records it through the same verify-and-persist path `adopt`
+  uses. Default paths are `~/Library/Application
+  Support/hermes-mordred/secure-home.sparseimage` and the sibling
+  `secure-home` directory as the mount point. The passphrase is collected
+  twice through the interactive prompt only — there is no `--passphrase`
+  flag, no environment variable, and no `--non-interactive`; it reaches
+  `hdiutil` solely via stdin, UTF-8-encoded regardless of the caller's
+  locale, and is never logged or included in an error message. It must be at
+  least 12 characters (the image is copyable, so the passphrase is its only
+  remaining defence) and may contain neither a newline nor a NUL, because
+  both tools read a *terminated* passphrase and would silently accept a
+  truncated prefix. `--image` must name a `*.sparseimage` file or omit the
+  extension entirely (`hdiutil` appends it, and picks its format from it, so
+  any other suffix is refused rather than silently creating a differently
+  named — or, for `.sparsebundle`, differently shaped — image). The new image
+  is chmod-ed to `0600`. `init` never overwrites an existing image, even with
+  `--force` (which only replaces an existing *config*, never the
+  volume/image), and any failure rolls back exactly what that run created —
+  the mount directory, the image (matched by inode, so a racing process's
+  file is never deleted; an image whose `hdiutil create` was interrupted
+  before it could be identified is left in place with a warning rather than
+  deleted without proof), the attachment — and nothing from an earlier run;
+  once the config is written the rollback disarms entirely. `~/.hermes` is
+  not migrated (Phase 3): Hermes starts fresh inside the secure home.
+- `secure-home mount` — idempotent: an already-mounted, already-verified
+  secure home is reported without touching the volume or prompting.
+  Otherwise it unlocks the volume with a freshly prompted passphrase —
+  `hdiutil attach` for a disk-image backing, `diskutil apfs unlockVolume
+  -stdinpassphrase` for a natively encrypted APFS volume — then re-runs the
+  full verification chain and detaches/locks the volume again on failure,
+  so a volume that cannot be trusted is never left mounted — the refusal
+  says whether that put-back actually succeeded, and names the manual
+  command when it did not. Note that `diskutil apfs unlockVolume` re-mounts
+  a native volume on an external or image-backed disk `noowners` (observed
+  on macOS 26.5), so such a volume fails step 8 with `OWNERSHIP_DISABLED`
+  and is locked again until the operator enables ownership once with `sudo
+  diskutil enableOwnership <mountpoint>` — a per-volume setting macOS then
+  remembers; internal-disk volumes honour ownership by default.
+- `secure-home unmount [--force]` — runs steps 1–4 of the verification
+  chain only (identity, not the acceptance/home-dir checks) *before*
+  detaching, so a foreign volume mounted at the configured path is refused
+  instead of ejected. Detaches the image (`hdiutil detach`) or locks the
+  native volume (`diskutil apfs lockVolume`); a busy volume is refused
+  unless `--force`, which force-unmounts (`diskutil unmount force`) a stuck
+  native volume before retrying the lock. When nothing is mounted at the
+  configured path the volume is *probed* rather than assumed locked
+  (`hdiutil info` for the image, `diskutil info <uuid>` for a native
+  volume): an image auto-mounted under `/Volumes` — attached by Finder, or by
+  a bare `hdiutil attach` with no `-mountpoint` — is detached by its device
+  node and reported as found elsewhere, and a probe that fails is a refusal,
+  never a false "locked".
+
+Native APFS *volume creation* (`diskutil apfs addVolume ... -mountpoint`,
+which requires root) is out of scope for `init` — Phase 2 only creates
+disk-image-backed volumes. An operator-created native APFS volume can still
+be recorded with `adopt --mode`.
+
 ##### Launch-context matrix
 
 | Context | Sees `HERMES_HOME` from the wrapper? |
@@ -852,16 +925,23 @@ mounted (files are readable by any process running as the same user);
 prompts already sent to a cloud LLM/search/memory provider; process memory;
 a root attacker; or forensic recovery of `~/.hermes` blocks written to SSD
 before secure-home was adopted (TRIM defeats reliable erasure there —
-FileVault remains the mitigation for that residue).
+FileVault remains the mitigation for that residue). `init`/`mount` add one
+more instance of the "process memory" caveat above: the volume passphrase
+briefly lives in the process memory of `hermes-mordred` and of the tool it
+pipes it to (`hdiutil`/`diskutil`) between the prompt and the subprocess
+call returning. Python's `str` cannot be zeroized, so the code drops its
+reference as soon as possible on a best-effort basis — this is not a
+guarantee against a process-memory attacker, consistent with the rest of
+this threat model.
 
 ##### Phase 1 scope vs. deferred phases
 
-Phase 1 (this PR) ships `status`, `adopt`, and `run` in `mordred_wizard`
-only, with zero volume-creation code. Deferred, each behind separate
-approval:
+Phase 1 (PR1, 2026-08-24) shipped `status`, `adopt`, and `run` in
+`mordred_wizard`, with zero volume-creation code. Phase 2 (PR2, 2026-08-25)
+shipped `init`/`mount`/`unmount` — see "Commands (Phase 2)" above — via
+`hdiutil`/`diskutil`, password collected through interactive stdin only.
+Still deferred, each behind separate approval:
 
-- **Phase 2** — `init`/`mount`/`unmount` via `hdiutil`/`diskutil`, password
-  collected through interactive stdin only.
 - **Phase 3** — a non-destructive migration assistant: dry-run by default,
   Hermes/Gateway stopped first, SQLite copied after a clean shutdown
   including its WAL/SHM files, integrity and hash verification, the
@@ -971,9 +1051,8 @@ and interactive unless a narrowly scoped confirmation flag exists.
 - audit hash chains, external anchoring, or same-UID tamper resistance;
 - isolated signer/payment authorization;
 - automatic migration of native-key protection tiers;
-- secure-home volume creation/mount/unmount ceremonies, its migration
-  assistant, hardware-backed auto-unlock, and Desktop/launchd lifecycle
-  integration (Phases 2–4).
+- secure-home's non-destructive migration assistant, hardware-backed
+  auto-unlock, and Desktop/launchd lifecycle integration (Phases 3–4).
 
 Future candidates and their release gates live in
 [`ROADMAP.md`](./ROADMAP.md); actionable unfinished work lives in

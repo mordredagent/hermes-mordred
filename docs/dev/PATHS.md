@@ -34,8 +34,10 @@ the optional workspace target has user-home paths of its own.
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
 | `<home>/memories/*.md` | Hermes memory tool | sealed by Mordred's memory hook when armed, otherwise plaintext |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
-| `~/.config/hermes-mordred/secure-home.json` | `hermes-mordred secure-home adopt` | `secure-home status` / `secure-home run` |
-| secure-home mountpoint (`<mount>/hermes-home`) | `hermes-mordred secure-home adopt` | effective `HERMES_HOME` for processes launched via `secure-home run` |
+| `~/.config/hermes-mordred/secure-home.json` | `hermes-mordred secure-home adopt` / `secure-home init` | `secure-home status` / `mount` / `unmount` / `run` |
+| secure-home mountpoint (`<mount>/hermes-home`) | `hermes-mordred secure-home adopt` / `secure-home init` | effective `HERMES_HOME` for processes launched via `secure-home run` |
+| `~/Library/Application Support/hermes-mordred/secure-home.sparseimage` | `hermes-mordred secure-home init` (default `--image`) | attached by `secure-home mount` |
+| `~/Library/Application Support/hermes-mordred/secure-home/` | `hermes-mordred secure-home init` (default `--mount-point`) | mount point unlocked by `secure-home mount` |
 
 Unless a section says otherwise, private Mordred directories are mode `0700`
 and private files are mode `0600`. Implementations additionally reject unsafe
@@ -352,26 +354,44 @@ refused (see below).
 - Contains no secret. There is no key, passphrase, or credential in this
   file — only enough metadata to identify and re-verify a volume that is
   already mounted by some other means.
-- Written only by `hermes-mordred secure-home adopt`; `--force` is required
-  to overwrite an existing config. `secure-home status` and `secure-home
-  run` read it but never write it.
+- Written by `hermes-mordred secure-home adopt` and `secure-home init`;
+  `--force` is required to overwrite an existing *config* (never required
+  to overwrite an existing disk image — `init` refuses that outright,
+  leaving the previous volume/image untouched). `secure-home status`,
+  `mount`, `unmount`, and `run` read it but never write it.
 
-### Schema (v1)
+### Schema (v2)
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "mount_point": "/Volumes/HermesSecure",
   "volume_uuid": "5C2C6F2A-....-....-....-............",
-  "home_subdir": "hermes-home"
+  "home_subdir": "hermes-home",
+  "backing": {
+    "kind": "disk-image",
+    "image_path": "<home>/Library/Application Support/hermes-mordred/secure-home.sparseimage"
+  },
+  "mode": "balanced"
 }
 ```
 
-`volume_uuid` is the `diskutil`-reported `VolumeUUID` captured at `adopt`
-time; the config validates it as a real UUID, and every later verification
-compares it against the mounted volume's reported UUID as parsed UUIDs, not
-by string or casefold comparison. `home_subdir` defaults to `hermes-home`
-and names the directory created inside the mounted volume.
+`volume_uuid` is the `diskutil`-reported `VolumeUUID` captured at `adopt`/
+`init` time; the config validates it as a real UUID, and every later
+verification compares it against the mounted volume's reported UUID as
+parsed UUIDs, not by string or casefold comparison. `home_subdir` defaults
+to `hermes-home` and names the directory created inside the mounted volume.
+
+`backing` and `mode` are schema-v2 additions (Phase 2), both optional.
+`backing.kind` is `"disk-image"` (with a required, absolute `image_path`) or
+`"apfs-volume"` (no `image_path`) — it records which tool, `hdiutil` or
+`diskutil apfs`, can unlock the volume, so `mount`/`unmount` never have to
+guess. `mode` is `"balanced"` or `"strict"`, recorded by `init` or `adopt
+--mode`; it is informational in Phase 2 (drives only the hints `init`
+prints), not yet automated. A v1 file (no `backing`/`mode` keys) still loads
+— both fields simply read back as `None` — and `save_config` always writes
+the current version, so re-saving a loaded v1 config upgrades it to v2 on
+disk.
 
 ### The secure home itself (`<mount>/hermes-home`)
 

@@ -25,7 +25,13 @@ import pytest
 
 from mordred_hermes.wizard import _secure_home_paths
 from mordred_hermes.wizard._secure_home_paths import (
+    BACKING_APFS_VOLUME,
+    BACKING_DISK_IMAGE,
     CONFIG_VERSION,
+    MODE_BALANCED,
+    MODE_STRICT,
+    SUPPORTED_CONFIG_VERSIONS,
+    Backing,
     SecureHomeConfig,
     SecureHomeConfigError,
     load_config,
@@ -452,3 +458,260 @@ class TestSaveConfig:
         monkeypatch.setattr(_secure_home_paths, "_first_symlink_component", lambda path: Path("/etc"))
         with pytest.raises(SecureHomeConfigError, match="macOS note"):
             save_config(_config(tmp_path), tmp_path / "secure-home.json")
+
+
+# -----------------------------------------------------------------------------
+# Backing.__post_init__
+# -----------------------------------------------------------------------------
+class TestBackingValidation:
+    def test_disk_image_requires_absolute_image_path(self, tmp_path: Path) -> None:
+        backing = Backing(kind=BACKING_DISK_IMAGE, image_path=tmp_path / "vault.sparseimage")
+        assert backing.image_path == tmp_path / "vault.sparseimage"
+
+    def test_apfs_volume_needs_no_image_path(self) -> None:
+        backing = Backing(kind=BACKING_APFS_VOLUME)
+        assert backing.image_path is None
+
+    def test_invalid_kind_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(SecureHomeConfigError, match="kind"):
+            Backing(kind="usb-stick", image_path=tmp_path / "vault.sparseimage")
+
+    def test_disk_image_missing_image_path_rejected(self) -> None:
+        with pytest.raises(SecureHomeConfigError, match="image_path"):
+            Backing(kind=BACKING_DISK_IMAGE)
+
+    def test_disk_image_relative_image_path_rejected(self) -> None:
+        with pytest.raises(SecureHomeConfigError, match="absolute"):
+            Backing(kind=BACKING_DISK_IMAGE, image_path=Path("relative/vault.sparseimage"))
+
+    def test_apfs_volume_with_image_path_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(SecureHomeConfigError, match="image_path"):
+            Backing(kind=BACKING_APFS_VOLUME, image_path=tmp_path / "vault.sparseimage")
+
+
+# -----------------------------------------------------------------------------
+# SecureHomeConfig — schema v2: version / backing / mode
+# -----------------------------------------------------------------------------
+class TestSecureHomeConfigV2:
+    def test_unsupported_version_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(SecureHomeConfigError, match="version"):
+            _config(tmp_path, version=3)
+
+    def test_supported_versions_include_one_and_two(self) -> None:
+        assert frozenset({1, 2}) == SUPPORTED_CONFIG_VERSIONS
+
+    def test_v1_construction_still_allowed(self, tmp_path: Path) -> None:
+        config = _config(tmp_path, version=1)
+        assert config.version == 1
+        assert config.backing is None
+        assert config.mode is None
+
+    def test_backing_defaults_to_none(self, tmp_path: Path) -> None:
+        assert _config(tmp_path).backing is None
+
+    def test_mode_defaults_to_none(self, tmp_path: Path) -> None:
+        assert _config(tmp_path).mode is None
+
+    def test_mode_balanced_accepted(self, tmp_path: Path) -> None:
+        assert _config(tmp_path, mode=MODE_BALANCED).mode == MODE_BALANCED
+
+    def test_mode_strict_accepted(self, tmp_path: Path) -> None:
+        assert _config(tmp_path, mode=MODE_STRICT).mode == MODE_STRICT
+
+    def test_bad_mode_rejected_at_construction(self, tmp_path: Path) -> None:
+        with pytest.raises(SecureHomeConfigError, match="mode"):
+            _config(tmp_path, mode="lax")
+
+    def test_disk_image_backing_accepted(self, tmp_path: Path) -> None:
+        backing = Backing(kind=BACKING_DISK_IMAGE, image_path=tmp_path / "vault.sparseimage")
+        config = _config(tmp_path, backing=backing)
+        assert config.backing == backing
+
+    def test_apfs_volume_backing_accepted(self, tmp_path: Path) -> None:
+        backing = Backing(kind=BACKING_APFS_VOLUME)
+        config = _config(tmp_path, backing=backing)
+        assert config.backing == backing
+
+
+# -----------------------------------------------------------------------------
+# _parse_config — schema v2 (backing / mode, on-disk JSON shapes)
+# -----------------------------------------------------------------------------
+class TestParseConfigV2:
+    def _write(self, tmp_path: Path, payload: dict[str, object]) -> Path:
+        path = tmp_path / "secure-home.json"
+        path.write_text(json.dumps(payload))
+        path.chmod(0o600)
+        return path
+
+    def test_v2_round_trip_with_disk_image_backing_and_mode(self, tmp_path: Path) -> None:
+        config = _config(
+            tmp_path,
+            version=CONFIG_VERSION,
+            backing=Backing(kind=BACKING_DISK_IMAGE, image_path=tmp_path / "vault.sparseimage"),
+            mode=MODE_STRICT,
+        )
+        path = tmp_path / "config" / "secure-home.json"
+        save_config(config, path)
+        loaded = load_config(path)
+        assert loaded == config
+
+    def test_v2_round_trip_with_apfs_volume_backing(self, tmp_path: Path) -> None:
+        config = _config(
+            tmp_path,
+            version=CONFIG_VERSION,
+            backing=Backing(kind=BACKING_APFS_VOLUME),
+            mode=MODE_BALANCED,
+        )
+        path = tmp_path / "config" / "secure-home.json"
+        save_config(config, path)
+        loaded = load_config(path)
+        assert loaded == config
+
+    def test_v1_file_loads_with_backing_and_mode_none(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 1, "mount_point": "/mnt", "volume_uuid": _UUID})
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.version == 1
+        assert loaded.backing is None
+        assert loaded.mode is None
+
+    def test_unsupported_version_3_refused(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 3, "mount_point": "/mnt", "volume_uuid": _UUID})
+        with pytest.raises(SecureHomeConfigError, match="version"):
+            load_config(path)
+
+    def test_invalid_backing_kind_refused(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {
+                "version": 2,
+                "mount_point": "/mnt",
+                "volume_uuid": _UUID,
+                "backing": {"kind": "usb-stick"},
+            },
+        )
+        with pytest.raises(SecureHomeConfigError, match="kind"):
+            load_config(path)
+
+    def test_relative_image_path_refused(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {
+                "version": 2,
+                "mount_point": "/mnt",
+                "volume_uuid": _UUID,
+                "backing": {"kind": BACKING_DISK_IMAGE, "image_path": "relative/vault.sparseimage"},
+            },
+        )
+        with pytest.raises(SecureHomeConfigError, match="absolute"):
+            load_config(path)
+
+    def test_image_path_with_apfs_volume_refused(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {
+                "version": 2,
+                "mount_point": "/mnt",
+                "volume_uuid": _UUID,
+                "backing": {"kind": BACKING_APFS_VOLUME, "image_path": "/mnt/vault.sparseimage"},
+            },
+        )
+        with pytest.raises(SecureHomeConfigError, match="image_path"):
+            load_config(path)
+
+    def test_missing_image_path_with_disk_image_refused(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {
+                "version": 2,
+                "mount_point": "/mnt",
+                "volume_uuid": _UUID,
+                "backing": {"kind": BACKING_DISK_IMAGE},
+            },
+        )
+        with pytest.raises(SecureHomeConfigError, match="image_path"):
+            load_config(path)
+
+    def test_non_object_backing_refused(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path, {"version": 2, "mount_point": "/mnt", "volume_uuid": _UUID, "backing": "disk-image"}
+        )
+        with pytest.raises(SecureHomeConfigError, match="backing"):
+            load_config(path)
+
+    def test_non_string_kind_refused(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {"version": 2, "mount_point": "/mnt", "volume_uuid": _UUID, "backing": {"kind": 1}},
+        )
+        with pytest.raises(SecureHomeConfigError, match="kind"):
+            load_config(path)
+
+    def test_bad_mode_in_file_refused(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 2, "mount_point": "/mnt", "volume_uuid": _UUID, "mode": "lax"})
+        with pytest.raises(SecureHomeConfigError, match="mode"):
+            load_config(path)
+
+    def test_non_string_mode_refused(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, {"version": 2, "mount_point": "/mnt", "volume_uuid": _UUID, "mode": 1})
+        with pytest.raises(SecureHomeConfigError, match="mode"):
+            load_config(path)
+
+    def test_null_image_path_accepted_for_apfs_volume(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            {
+                "version": 2,
+                "mount_point": "/mnt",
+                "volume_uuid": _UUID,
+                "backing": {"kind": BACKING_APFS_VOLUME, "image_path": None},
+            },
+        )
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.backing == Backing(kind=BACKING_APFS_VOLUME)
+
+
+# -----------------------------------------------------------------------------
+# _serialize — schema v2 (omitted keys, always-current version)
+# -----------------------------------------------------------------------------
+class TestSerializeV2:
+    def test_serialize_omits_absent_backing_and_mode(self, tmp_path: Path) -> None:
+        config = _config(tmp_path)
+        path = tmp_path / "config" / "secure-home.json"
+        save_config(config, path)
+        payload = json.loads(path.read_text())
+        assert "backing" not in payload
+        assert "mode" not in payload
+
+    def test_serialize_includes_backing_and_mode_when_set(self, tmp_path: Path) -> None:
+        config = _config(
+            tmp_path,
+            backing=Backing(kind=BACKING_DISK_IMAGE, image_path=tmp_path / "vault.sparseimage"),
+            mode=MODE_STRICT,
+        )
+        path = tmp_path / "config" / "secure-home.json"
+        save_config(config, path)
+        payload = json.loads(path.read_text())
+        assert payload["backing"] == {"kind": BACKING_DISK_IMAGE, "image_path": str(tmp_path / "vault.sparseimage")}
+        assert payload["mode"] == MODE_STRICT
+
+    def test_serialize_apfs_volume_backing_has_null_image_path(self, tmp_path: Path) -> None:
+        config = _config(tmp_path, backing=Backing(kind=BACKING_APFS_VOLUME))
+        path = tmp_path / "config" / "secure-home.json"
+        save_config(config, path)
+        payload = json.loads(path.read_text())
+        assert payload["backing"] == {"kind": BACKING_APFS_VOLUME, "image_path": None}
+
+    def test_serialize_always_writes_current_config_version(self, tmp_path: Path) -> None:
+        """A loaded v1 config re-saved must be upgraded to CONFIG_VERSION on write."""
+        path = tmp_path / "config" / "secure-home.json"
+        path.parent.mkdir()
+        path.write_text(json.dumps({"version": 1, "mount_point": "/mnt", "volume_uuid": _UUID}))
+        path.chmod(0o600)
+        loaded = load_config(path)
+        assert loaded is not None
+        assert loaded.version == 1
+        save_config(loaded, path)
+        payload = json.loads(path.read_text())
+        assert payload["version"] == CONFIG_VERSION

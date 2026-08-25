@@ -246,7 +246,8 @@ regressing silently.
 
 ### 5.2 Wizard additions
 
-`secure-home status | adopt | run` are new top-level wizard commands:
+`secure-home` gained six top-level wizard commands, added across two
+phases:
 
 - `status` — read-only: FileVault state, configured/not, mount state,
   volume identity verification result, effective secure home path, concise
@@ -259,9 +260,23 @@ regressing silently.
 - `run -- <command...>` — fail-closed launcher: refuses unless the full
   verification chain passes, then execs `<command...>` with
   `HERMES_HOME=<mount>/hermes-home`.
+- `init [--image ...] [--mount-point ...] [--size 4g] [--volname
+  HermesSecure] [--mode ...] [--force]` (Phase 2) — creates and attaches a
+  new encrypted disk image via `hdiutil create`/`hdiutil attach`, then
+  records it through the same path `adopt` uses; passphrase collected
+  twice, interactive-stdin only; never overwrites an existing image; full
+  rollback of whatever that run created on any failure.
+- `mount` (Phase 2) — idempotent unlock: `hdiutil attach` (disk image) or
+  `diskutil apfs unlockVolume -stdinpassphrase` (native volume), then
+  re-verifies and detaches/locks again on failure.
+- `unmount [--force]` (Phase 2) — verifies the mounted volume's identity
+  before detaching (never ejects a foreign volume), then `hdiutil detach`
+  or `diskutil apfs lockVolume`; a busy volume is refused unless `--force`.
 
-Mode selection (Standard/Balanced/Strict) and its automation are Phase 2
-(`init`); Phase 1 records no mode.
+Mode selection (Standard/Balanced/Strict) is recorded by `init` (and `adopt
+--mode`) starting in Phase 2 (`balanced` default, or `strict`); Phase 1
+recorded no mode. Mode *automation* — idle auto-lock, launch-context
+integration — remains Phase 4.
 
 ### 5.3 Tests
 
@@ -274,6 +289,16 @@ sparseimage in a temp dir; it runs only behind
 `MORDRED_LIVE_SECURE_HOME_TEST=1` plus the `integration` pytest marker and
 is manual-only — no new CI workflow, matching [`CI.md`](./CI.md)'s
 deliberately untouched active-workflow policy for Phase 1.
+
+Phase 2 adds `tests/test_secure_home_volume.py` (the injectable
+`hdiutil`/`diskutil` argv, stdin-only passphrase handling, and
+error-mapping contract for `_secure_home_volume.py`) and
+`tests/test_wizard_secure_home_lifecycle_cli.py` (the `init`/`mount`/
+`unmount` ceremonies — happy paths, refusals, and rollback — via the new
+`tests/_secure_home_fakes.py`). `tests/integration/test_secure_home_macos.py`
+gains a second gated test driving `init` → `unmount` → `mount` → `run` →
+`unmount` against a real throwaway image; it stays manual-only behind
+`MORDRED_LIVE_SECURE_HOME_TEST=1`.
 
 ## Cross-cutting concerns
 

@@ -23,7 +23,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — list discovered Mordred plugins
-- ``secure-home {status,adopt,run}``             — run Hermes from an encrypted APFS volume
+- ``secure-home {status,adopt,run,init,mount,unmount}`` — run Hermes from an encrypted APFS volume
 """
 
 from __future__ import annotations

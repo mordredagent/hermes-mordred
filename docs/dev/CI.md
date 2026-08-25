@@ -124,6 +124,31 @@ uses a paid account and mutates runner network state.
   false), confirming the two-signal judgment on real macOS; no mount leaked
   after the `finally` detach, and `~/.hermes` plus the real config path were
   never touched.
+- **2026-08-25 — secure-home Phase 2 `init`/`mount`/`unmount` passed on Apple
+  Silicon (macOS 26.5.2, arm64), 3 passed in 9.2 s.**
+  `MORDRED_LIVE_SECURE_HOME_TEST=1 pytest -m integration tests/integration/test_secure_home_macos.py`
+  (all three gated tests, everything under `tmp_path`): the product code
+  created a 32 MB AES-256 sparseimage through `hdiutil create -stdinpass`,
+  attached it `-owners on -nobrowse` at a user-owned mount point and recorded
+  it (`backing` = disk image, `mode` = balanced); `unmount` detached it;
+  `mount` with a wrong passphrase failed closed (`hdiutil: attach failed -
+  Authentication error — wrong passphrase?`, nothing mounted, config
+  untouched); `mount` with the right passphrase re-attached and re-verified
+  it after exactly one prompt; `run` reached the exec seam with
+  `HERMES_HOME` inside the volume; and a final `unmount` locked it. The
+  native path was exercised against a throwaway image's single APFS volume
+  encrypted in place with `diskutil apfs encryptVolume -user disk
+  -stdinpassphrase`: `lock_native_volume`/`unlock_native_volume` succeeded
+  **by VolumeUUID**, the `\n`-terminated stdin framing unlocked the volume,
+  a user-owned `-mountpoint` worked unprivileged, a wrong passphrase was a
+  clean `UNLOCK_FAILED`, and the re-mounted volume reported
+  `EncryptionThisVolumeProper` true but `GlobalPermissionsEnabled` false
+  (noowners — documented in SPEC/USAGE as the `enableOwnership` caveat).
+  Setup finding: an `hdiutil`-created APFS image container is capped at one
+  volume (`diskutil apfs addVolume` → `-69493`), hence the encrypt-in-place
+  test design. No mount or attached image leaked after the `finally`
+  cleanup; `~/.hermes`, `~/.config/hermes-mordred`, and
+  `~/Library/Application Support` were never touched.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

@@ -36,7 +36,15 @@ from pathlib import Path
 from typing import Any, Final
 
 __all__ = [
+    "BACKING_APFS_VOLUME",
+    "BACKING_DISK_IMAGE",
+    "BACKING_KINDS",
     "CONFIG_VERSION",
+    "MODES",
+    "MODE_BALANCED",
+    "MODE_STRICT",
+    "SUPPORTED_CONFIG_VERSIONS",
+    "Backing",
     "SecureHomeConfig",
     "SecureHomeConfigError",
     "load_config",
@@ -44,7 +52,16 @@ __all__ = [
     "save_config",
 ]
 
-CONFIG_VERSION: Final = 1
+CONFIG_VERSION: Final = 2
+SUPPORTED_CONFIG_VERSIONS: Final[frozenset[int]] = frozenset({1, 2})
+
+BACKING_DISK_IMAGE: Final[str] = "disk-image"
+BACKING_APFS_VOLUME: Final[str] = "apfs-volume"
+BACKING_KINDS: Final[tuple[str, ...]] = (BACKING_DISK_IMAGE, BACKING_APFS_VOLUME)
+
+MODE_BALANCED: Final[str] = "balanced"
+MODE_STRICT: Final[str] = "strict"
+MODES: Final[tuple[str, ...]] = (MODE_BALANCED, MODE_STRICT)
 
 _ENV_VAR: Final[str] = "MORDRED_SECURE_HOME_CONFIG"
 _FILE_MODE: Final[int] = 0o600
@@ -65,18 +82,56 @@ class SecureHomeConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class Backing:
+    """How the secure volume is provided: an encrypted disk image, or a natively encrypted APFS volume.
+
+    Recorded so a later phase can tell, without re-probing the volume, which
+    tooling created it (``hdiutil`` vs. ``diskutil apfs``) — the two need
+    different commands to attach/unlock/detach. ``image_path`` is meaningful
+    only for :data:`BACKING_DISK_IMAGE`; a natively encrypted APFS volume has
+    no backing file to point at, so carrying one there would be a value with
+    no consistent meaning rather than a convenience.
+    """
+
+    kind: str
+    image_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in BACKING_KINDS:
+            raise SecureHomeConfigError(f"secure-home backing kind must be one of {BACKING_KINDS}: {self.kind!r}")
+        if self.kind == BACKING_DISK_IMAGE:
+            if self.image_path is None:
+                raise SecureHomeConfigError("secure-home backing image_path is required when kind is 'disk-image'")
+            _validate_clean_text(str(self.image_path), "backing.image_path")
+            if not self.image_path.is_absolute():
+                raise SecureHomeConfigError(
+                    f"secure-home backing image_path must be an absolute path: {self.image_path}"
+                )
+        elif self.image_path is not None:
+            raise SecureHomeConfigError("secure-home backing image_path must not be set when kind is 'apfs-volume'")
+
+
+@dataclass(frozen=True)
 class SecureHomeConfig:
     """The full identity of a configured secure Hermes home.
 
     Validated at construction time (``__post_init__``) so a bad value can
     never reach a caller through any path — not just :func:`load_config`,
     but also a value built directly by the CLI layer.
+
+    ``backing`` and ``mode`` are schema-v2 additions, both optional so a v1
+    config (or a config built before Phase 2) loads with ``None`` in each —
+    ``None`` means "unknown"/"not recorded", never a guessed default, so
+    downstream code can tell "this config predates the field" from "this
+    config chose apfs-volume/balanced".
     """
 
     version: int
     mount_point: Path
     volume_uuid: str
     home_subdir: str = "hermes-home"
+    backing: Backing | None = None
+    mode: str | None = None
 
     def __post_init__(self) -> None:
         _validate_clean_text(str(self.mount_point), "mount_point")
@@ -85,6 +140,13 @@ class SecureHomeConfig:
         _validate_volume_uuid(self.volume_uuid)
         _validate_clean_text(self.home_subdir, "home_subdir")
         _validate_home_subdir(self.home_subdir)
+        if self.version not in SUPPORTED_CONFIG_VERSIONS:
+            raise SecureHomeConfigError(
+                f"secure-home config version {self.version!r} is not supported "
+                f"(expected one of {sorted(SUPPORTED_CONFIG_VERSIONS)})"
+            )
+        if self.mode is not None and self.mode not in MODES:
+            raise SecureHomeConfigError(f"secure-home mode must be one of {MODES}: {self.mode!r}")
 
     @property
     def home_path(self) -> Path:
@@ -250,9 +312,10 @@ def _parse_config(raw: str, path: Path) -> SecureHomeConfig:
         raise SecureHomeConfigError(f"secure-home config must be a JSON object: {path}")
 
     version = payload.get("version")
-    if version != CONFIG_VERSION:
+    if version not in SUPPORTED_CONFIG_VERSIONS:
         raise SecureHomeConfigError(
-            f"secure-home config version {version!r} is not supported (expected {CONFIG_VERSION}): {path}"
+            f"secure-home config version {version!r} is not supported "
+            f"(expected one of {sorted(SUPPORTED_CONFIG_VERSIONS)}): {path}"
         )
 
     try:
@@ -266,12 +329,19 @@ def _parse_config(raw: str, path: Path) -> SecureHomeConfig:
     _require_str(volume_uuid, "volume_uuid", path)
     _require_str(home_subdir_raw, "home_subdir", path)
 
+    backing = _parse_backing(payload.get("backing"), path)
+    mode_raw = payload.get("mode")
+    if mode_raw is not None:
+        _require_str(mode_raw, "mode", path)
+
     try:
         return SecureHomeConfig(
             version=version,
             mount_point=Path(mount_point_raw),
             volume_uuid=volume_uuid,
             home_subdir=home_subdir_raw,
+            backing=backing,
+            mode=mode_raw,
         )
     except SecureHomeConfigError as exc:
         raise SecureHomeConfigError(f"secure-home config at {path} is invalid: {exc}") from exc
@@ -280,6 +350,25 @@ def _parse_config(raw: str, path: Path) -> SecureHomeConfig:
 def _require_str(value: Any, field: str, path: Path) -> None:
     if not isinstance(value, str):
         raise SecureHomeConfigError(f"secure-home config field {field!r} must be a string: {path}")
+
+
+def _parse_backing(value: Any, path: Path) -> Backing | None:
+    """Parse the optional ``backing`` field, lenient about absence (v1 files have none)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SecureHomeConfigError(f"secure-home config field 'backing' must be a JSON object: {path}")
+    kind = value.get("kind")
+    if not isinstance(kind, str):
+        raise SecureHomeConfigError(f"secure-home config field 'backing.kind' must be a string: {path}")
+    image_path_raw = value.get("image_path")
+    if image_path_raw is not None and not isinstance(image_path_raw, str):
+        raise SecureHomeConfigError(f"secure-home config field 'backing.image_path' must be a string or null: {path}")
+    image_path = Path(image_path_raw) if image_path_raw is not None else None
+    try:
+        return Backing(kind=kind, image_path=image_path)
+    except SecureHomeConfigError as exc:
+        raise SecureHomeConfigError(f"secure-home config at {path} is invalid: {exc}") from exc
 
 
 def save_config(config: SecureHomeConfig, path: Path) -> None:
@@ -322,12 +411,23 @@ def save_config(config: SecureHomeConfig, path: Path) -> None:
 
 
 def _serialize(config: SecureHomeConfig) -> bytes:
-    payload = {
-        "version": config.version,
+    # Always CONFIG_VERSION (never config.version): re-saving a loaded v1
+    # config upgrades the on-disk schema, so a config we ourselves last wrote
+    # is never mistaken for one that predates the fields this module knows
+    # how to write.
+    payload: dict[str, Any] = {
+        "version": CONFIG_VERSION,
         "mount_point": str(config.mount_point),
         "volume_uuid": config.volume_uuid,
         "home_subdir": config.home_subdir,
     }
+    if config.backing is not None:
+        payload["backing"] = {
+            "kind": config.backing.kind,
+            "image_path": str(config.backing.image_path) if config.backing.image_path is not None else None,
+        }
+    if config.mode is not None:
+        payload["mode"] = config.mode
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 

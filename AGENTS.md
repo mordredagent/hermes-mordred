@@ -46,7 +46,13 @@ bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
   are safe. `secure-home adopt` writes outside `HERMES_HOME` entirely, to
   `~/.config/hermes-mordred/secure-home.json` — isolate it separately by also
   setting `MORDRED_SECURE_HOME_CONFIG` to an isolated path (a resolved
-  `/private/...` path on macOS, not `/tmp/...`).
+  `/private/...` path on macOS, not `/tmp/...`). `secure-home init|mount|
+  unmount` go further: they create/attach a real encrypted disk image on
+  top of that same pointer-config write, so isolate `MORDRED_SECURE_HOME_CONFIG`
+  *and* pass `init --image`/`--mount-point` pointing at a resolved
+  `/private/tmp/...` directory — otherwise `init` creates
+  `~/Library/Application Support/hermes-mordred/secure-home.sparseimage` for
+  real.
 - **Port 7788 belongs to the production extension gateway.** For local runs use
   `.venv/bin/hermes-mordred extension serve --port 7799`; check holders with
   `lsof -nP -iTCP:7788 -sTCP:LISTEN`.
