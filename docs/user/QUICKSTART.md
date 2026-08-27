@@ -239,6 +239,14 @@ hermes-mordred encryption enable all
 hermes-mordred encryption status
 ```
 
+Immediately after the first `encryption enable config`, the current plaintext
+`config.yaml` remains on disk: that command writes the opt-in marker after its
+startup hook has already made the decision for that process. Run
+`hermes-mordred encryption status` once. When the status command exits cleanly,
+the hook reseals the current config and removes the plaintext. Do not re-run
+`encryption enable config` to perform this first seal, and do not delete
+`config.yaml` manually.
+
 `disable` is reversible and retains the encrypted copy. `purge` deletes it and
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is
 encrypted and unmounted. See [`USAGE.md` §3](./USAGE.md#encryption--the-recommended-onoff-switch).

@@ -200,6 +200,14 @@ leave the working copy until the next managed start and exit. The concise
 target-by-target plaintext and restart matrix is in
 [`QUICKSTART.md` §What the protected states mean](./QUICKSTART.md#what-the-protected-states-mean).
 
+Immediately after the first `encryption enable config`, the current plaintext
+`config.yaml` remains on disk because the command creates the opt-in marker
+after its startup hook has already made the decision for that process. Run
+`hermes-mordred encryption status` once. When the status command exits cleanly,
+the hook reseals the current config and removes the plaintext. Do not re-run
+`encryption enable config` to perform this first seal, and do not delete
+`config.yaml` manually.
+
 > **Memory target.** No Hermes release to date (verified through hermes-agent 0.20.0 and GitHub HEAD)
 > encrypts `~/.hermes/memories/*.md`, so Mordred owns this one end to end: a
 > runtime hook seals every memory write and opens every sealed read, keyed by
@@ -661,7 +669,7 @@ VPN provider** to use *first*, and only then that provider's prompts:
 |---|---|---|
 | `mullvad` *(default)* | Mullvad — the only provider allowed in **strict** mode. | The 3 Mullvad prompts below. |
 | `wireguard` | Any VPN that exports a WireGuard `.conf` (Proton VPN, IVPN, Windscribe, self-hosted). | **WireGuard config path** — the `.conf` file. Mordred runs `wg-quick up/down` on it. |
-| `custom` | Any VPN with only its own CLI (ExpressVPN, NordVPN, Surfshark). | **up / down / health** commands, e.g. `expressvpnctl connect` / `expressvpnctl disconnect` / `nordvpn status`. |
+| `custom` | Any VPN with only its own CLI (ExpressVPN, NordVPN, Surfshark). | **up / down / health** commands. The health command must exit `0` only while the tunnel is connected; see the guidance below. |
 
 The **Mullvad prompts** appear *only if you keep the `mullvad` provider* — pick
 `wireguard` or `custom` and you're never asked for a Mullvad account number:
@@ -692,18 +700,52 @@ are skipped entirely when you don't pick Mullvad. So **Proton VPN** →
 `wireguard_config_path`, and `custom_up_cmd` / `custom_down_cmd` /
 `custom_health_cmd` (each a YAML list, e.g. `[expressvpnctl, connect]`).
 
+Choosing a custom health command requires checking the behavior of the VPN CLI
+version installed on your machine. Mordred ignores the command's printed output:
+exit status `0` means healthy, and any non-zero status means unhealthy. A command
+that prints `Disconnected` but still exits `0` is therefore not a valid probe. If
+you leave the health command blank, setup can continue, but Mordred cannot detect
+a dropped tunnel and always reports this provider as healthy.
+
+For example, on a Mac where `command -v expressvpnctl` prints
+`/usr/local/bin/expressvpnctl`, enter:
+
+```text
+VPN up command: expressvpnctl connect
+VPN down command: expressvpnctl disconnect
+VPN health command: /bin/sh -c 'test "$(/usr/local/bin/expressvpnctl get connectionstate)" = Connected'
+```
+
+Replace `/usr/local/bin/expressvpnctl` with the path reported on your machine.
+The explicit `/bin/sh -c` wrapper converts ExpressVPN's `Connected` /
+`Disconnected` output into the exit status Mordred needs. A plain
+`expressvpnctl status` is unsuitable if that version exits `0` in both states.
+
+If these commands are difficult to determine or enter, keep the wizard open and
+consult a local coding assistant such as Claude Code or Codex. Ask it to inspect
+the installed CLI rather than guess. This prompt is suitable to copy and paste:
+
+> Inspect the VPN CLI installed on this machine. Tell me exactly what to enter for
+> Mordred's VPN up, down, and health prompts. The health command must return exit
+> status 0 only while connected and non-zero while disconnected; Mordred ignores
+> printed status. Use `command -v` to find the exact executable path. Do not
+> change the VPN connection state or expose credentials without asking me.
+
 > **Strict mode is Mullvad-only.** Mordred can verify a kill-switch / DNS-leak
 > protection only for Mullvad (it drives `mullvad lockdown-mode` directly), so
 > under **strict** policy a `wireguard` / `custom` provider is **refused**
 > (fail-closed). Use them under **lenient** / **off** policy — fine for everyday
-> IP privacy. Custom commands run as argv (no shell) and are read only from your
-> config. Platform: macOS + Linux.
+> IP privacy. Mordred runs custom commands directly as argv; a shell is involved
+> only when you explicitly configure one, as in the `/bin/sh -c` example above.
+> Commands are read only from your config. Platform: macOS + Linux.
 
 ### 4.5 `configure` — policy mode and the agent harness in detail
 
 `hermes-mordred configure` walks through a short list of Mordred questions. It
 does not run upstream `hermes setup` unless you pass `--with-hermes-setup`.
 **If in doubt, press Enter through the Mordred prompts** to keep their defaults.
+After you select `lenient`, the wizard also explains that the remaining settings
+only affect strict mode and that accepting their defaults is safe.
 
 | # | Question | Default | What it means | Do |
 |---|---|---|---|---|

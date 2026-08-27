@@ -163,7 +163,10 @@ def enable(
         print(
             "  The decrypt hook is installed here: each Hermes run materializes config.yaml\n"
             "  and reseals it (removes the plaintext) on exit. The marker is now set, so the\n"
-            "  next `hermes` / `hermes-mordred` run seals the current plaintext on exit."
+            "  next `hermes` / `hermes-mordred` run seals the current plaintext on exit.\n"
+            "  Next: run `hermes-mordred encryption status` once. When it exits, the current\n"
+            "  plaintext config.yaml will be resealed and removed. Do not re-run\n"
+            "  `encryption enable config` for this first seal or delete config.yaml manually."
         )
     else:
         print(
