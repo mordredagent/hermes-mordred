@@ -37,7 +37,8 @@ need to create a virtual environment or install Python separately for Mordred.
 
 ## Install Mordred
 
-Run the Mordred installer:
+Choose one of the following two install paths. For the standard installation,
+run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
@@ -54,26 +55,35 @@ distribution and installing the new one. Configuration, keys, and state are
 preserved. Do not manually install the two real distributions on top of each
 other; use the installer or uninstall the legacy name first.
 
-By default, only the platform keyvault extra is installed. To include the
-browser-extension server and Ethereum wallet support from the start, run:
+To include the browser-extension server and Ethereum wallet support from the
+start, use the extension bundle instead:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
   bash -s -- --with-extension
 ```
 
+`--with-extension` is the convenience option for the `extension` and
+`ethereum` dependency groups. The `messaging` extra is not required to use the
+browser extension. Without it, `hermes-mordred extension pair` prints the
+`MORT-...` pairing code as text; adding it also renders the code as a terminal
+QR.
+
 Add `--version VERSION` after replacing `VERSION` with a release number when
 you need an exact PyPI version. For example, the two options can be combined as
-`bash -s -- --with-extension --version VERSION`. Deep Tor liveness checks and
-terminal QR rendering remain separate optional extras.
+`bash -s -- --with-extension --version VERSION`.
 
-Use `--extras` when you want a custom feature set, or `--all-extras` to include
-all user-facing extras, including deep Tor liveness checks:
+<details>
+<summary>Advanced: choose individual dependency groups</summary>
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
-  bash -s -- --extras extension,ethereum,messaging
-```
+Most users should use one of the two install paths above. Use `--extras LIST`
+only when you want a custom, comma-separated feature set. To add the optional
+terminal QR to the extension bundle, append `--extras messaging`, producing
+`bash -s -- --with-extension --extras messaging`. `--all-extras` includes all
+user-facing extras, including deep Tor liveness checks. Extras can also be
+added later by rerunning the installer.
+
+</details>
 
 If you prefer to inspect a downloaded script before running it:
 
@@ -228,6 +238,14 @@ hermes-mordred encryption enable memory
 hermes-mordred encryption enable all
 hermes-mordred encryption status
 ```
+
+Immediately after the first `encryption enable config`, the current plaintext
+`config.yaml` remains on disk: that command writes the opt-in marker after its
+startup hook has already made the decision for that process. Run
+`hermes-mordred encryption status` once. When the status command exits cleanly,
+the hook reseals the current config and removes the plaintext. Do not re-run
+`encryption enable config` to perform this first seal, and do not delete
+`config.yaml` manually.
 
 `disable` is reversible and retains the encrypted copy. `purge` deletes it and
 requires `--yes`. The macOS-only `workspace` target reports `sealed` when it is

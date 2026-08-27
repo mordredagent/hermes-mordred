@@ -125,6 +125,16 @@ _CLOUD_LLM_PROMPT_DESCRIPTION: Final[str] = (
     "Yes to also permit cloud models — you'll pick which providers at the next prompt."
 )
 
+#: Shown once after the recommended policy is selected. The remaining answers
+#: are persisted so a later switch to strict already has explicit settings, but
+#: they do not block ordinary use while lenient remains active. Calling this
+#: out before Q2 keeps users from treating every following prompt as a required
+#: up-front decision.
+_LENIENT_MODE_NOTE: Final[str] = (
+    "Lenient mode selected. The remaining settings only affect strict mode, "
+    "so you can press Enter to accept the defaults if unsure."
+)
+
 
 # -----------------------------------------------------------------------------
 # Protocols -- production wraps subprocess / prompt_toolkit, tests script.
@@ -325,6 +335,8 @@ def collect_answers(prompt_io: PromptIO) -> ConfigureResult:
         default="lenient",
         descriptions=_POLICY_MODE_DESCRIPTIONS,
     )
+    if policy == "lenient":
+        _emit_prompt_help(_LENIENT_MODE_NOTE)
     allow_cloud_llm = prompt_io.ask_bool(
         label="Allow cloud LLM providers?",
         default=False,

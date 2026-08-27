@@ -8,7 +8,7 @@ Privacy-preserving plugins for the
 keys, Tor/VPN routing, local-LLM policy enforcement, end-to-end gateway
 messages, and macOS-integrated at-rest secret encryption.
 
-**Status: active alpha** — current release `0.1.0a19`.
+**Status: active alpha** — current release `0.1.0a20`.
 
 New here? Follow the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**
@@ -43,19 +43,27 @@ The package exposes six `hermes_agent.plugins` entry points:
 
 Start with an installed
 [Hermes Agent](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/getting-started/installation.md),
-then run the Mordred installer:
+then choose one of these two install paths.
+
+For the standard installation:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
 ```
 
-To include the browser-extension server and Ethereum wallet support, pass the
-installer option through `bash`:
+For the browser-extension server and Ethereum wallet support, use the extension
+bundle:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
   bash -s -- --with-extension
 ```
+
+`--with-extension` is the convenience option for the `extension` and
+`ethereum` dependency groups. The `messaging` extra is not required to use the
+browser extension. Without it, `hermes-mordred extension pair` prints the
+`MORT-...` pairing code as text; adding it also renders the code as a terminal
+QR.
 
 Add `--version VERSION` (replacing `VERSION` with the release to install) to
 pin either form to an exact PyPI release. The options can be combined:
@@ -84,25 +92,38 @@ before `bash mordred-install.sh`. The equivalent manual commands are:
 ```sh
 # macOS
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos]==0.1.0a19"
+  "hermes-mordred[macos]==0.1.0a20"
 
 # Linux
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[keyvault]==0.1.0a19"
+  "hermes-mordred[keyvault]==0.1.0a20"
 ```
 
 See the [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)
 for the inspect-before-running sequence and first-time setup.
 
-Optional extras are dependency groups, not Hermes plugins. Install any
-combination in one step, or add them later by rerunning the installer:
+<details>
+<summary>Advanced: choose individual dependency groups</summary>
+
+Most users should use one of the two install paths above. Optional extras are
+dependency groups, not Hermes plugins. `--extras LIST` accepts any
+comma-separated combination from the table below. For example, append
+`--extras messaging` to the recommended `--with-extension` command only when
+you want a terminal pairing QR. You can add an extra later by rerunning the
+installer.
+
+For the extension bundle plus the terminal pairing QR, the equivalent fully
+explicit form is:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --extras extension,ethereum,messaging
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --extras extension,ethereum,messaging
 ```
 
-The installer selects `macos` or `keyvault` automatically. Use `--all-extras`
-for all four feature extras, or set `MORDRED_INSTALL_EXTRAS` to the same
+This selects those three extras only; it does not include `tor-control`.
+
+The installer selects `macos` or `keyvault` automatically. `--all-extras` adds
+all four user-facing extras, and `MORDRED_INSTALL_EXTRAS` accepts the same
 comma-separated list in automation.
 
 | Extra | Use it for |
@@ -111,6 +132,8 @@ comma-separated list in automation.
 | `ethereum` | HD-wallet derivation and signing |
 | `messaging` | Terminal QR codes for extension pairing |
 | `tor-control` | Deep Tor liveness checks |
+
+</details>
 
 ### Enable the plugins
 
@@ -250,23 +273,26 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
   bash -s -- --with-extension
 ```
 
-For a custom feature set, use `--extras`; `--all-extras` adds every
-user-facing feature extra:
+The `messaging` extra is not required to use the browser extension. Pairing
+works without it because `extension pair` prints the pairing code as text. If
+you also want a terminal QR, rerun the same command with `--extras messaging`
+after `--with-extension`. For other custom combinations, see the advanced
+installer options above.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
-  bash -s -- --extras extension,ethereum,messaging
-```
+<details>
+<summary>Advanced: version-pinned manual install</summary>
 
 The equivalent version-pinned manual command on macOS is:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  "hermes-mordred[macos,extension,ethereum]==0.1.0a19"
+  "hermes-mordred[macos,extension,ethereum]==0.1.0a20"
 ```
 
 Replace `macos` with `keyvault` on Linux, and add `messaging` only when you want
 a terminal pairing QR.
+
+</details>
 
 The browser client is distributed separately as a
 [prebuilt Chromium extension](https://github.com/mordredagent/mordred-extension-dist).

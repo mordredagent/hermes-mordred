@@ -71,6 +71,9 @@ class TestEnable:
         assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
         out = capsys.readouterr().out
         assert "decrypt hook is installed" in out
+        assert "Next: run `hermes-mordred encryption status` once." in out
+        assert "plaintext config.yaml will be resealed and removed" in out
+        assert "`encryption enable config` for this first seal" in out
         assert "NOT installed" not in out
 
     def test_enable_message_warns_when_hook_absent(
@@ -87,6 +90,7 @@ class TestEnable:
         out = capsys.readouterr().out
         assert "NOT installed" in out
         assert "(re)installing the hermes-mordred" in out
+        assert "hermes-mordred encryption status" not in out
 
     def test_missing_config_is_error_and_no_marker(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
