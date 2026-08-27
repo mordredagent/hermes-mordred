@@ -260,6 +260,48 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > unseals every `.bak` snapshot alongside the live files) before following
 > that advice.
 
+> **Workspace target.** This one is a *container*, not a file set. `enable`
+> drives the external `claude-private` tool to create an encrypted APFS
+> sparsebundle (`~/Private/claude-private.sparsebundle`) whose passphrase is
+> Secure Enclave-wrapped (`~/.config/claude-private/passphrase.wrapped`), and
+> whatever you write under the mountpoint (`~/.claude-private-mnt`) lives
+> inside it. `CLAUDE_PRIVATE_IMAGE` / `CLAUDE_PRIVATE_KEYDIR` /
+> `CLAUDE_PRIVATE_MOUNT` relocate those three paths. Mordred creates, seals,
+> and destroys that container and reports its state; it never moves a file
+> into it and never reads what is inside. Putting files in is not what
+> encrypts them — the volume is encrypted from the moment it is created.
+>
+> **When the protection is actually on.** `sealed` (detached) is the protected
+> state and `open` (mounted) is not: while the volume is mounted its contents
+> are plaintext to every process running as you, so protection begins when you
+> detach, not when you write. Mount it yourself by running `claude-private` —
+> `enable` creates the volume but deliberately never mounts it, which keeps the
+> lifecycle and destructive paths free of an untestable auto-unlock. The Secure
+> Enclave wrapping binds the volume to this machine: a copied sparsebundle plus
+> its wrapped passphrase is useless on another Mac, and unrecoverable if this
+> one is lost.
+>
+> **Putting a Claude Code session inside it.** Claude Code writes transcripts to
+> `<config home>/projects/<slug>/*.jsonl`, and `CLAUDE_CONFIG_DIR` names that
+> home — an absolute path, set in the shell rather than in a settings file, and
+> read at start-up. Do not point your everyday `~/.claude` into the volume:
+> sealing it then takes the config home away too, and Claude Code starts
+> without your settings, plugins, or history. Use a second config home inside
+> the volume and reach for it only while the volume is mounted:
+>
+> ```sh
+> hermes-mordred encryption enable workspace     # create the volume (once)
+> claude-private                                 # mount it — Mordred never does this
+> CLAUDE_CONFIG_DIR="$HOME/.claude-private-mnt/claude" claude
+> hermes-mordred encryption disable workspace    # detach = sealed = protected
+> ```
+>
+> Nothing is migrated by any of this: transcripts already under
+> `~/.claude/projects/` stay plaintext where they are. The target covers only
+> the volume's contents, so it does not reach Hermes's own session storage
+> (`<home>/state.db`, `<home>/sessions/*.jsonl`), which no encryption target
+> covers.
+
 > **Runtime guard before a seal (macOS).** `enable env` and `enable config`
 > remove the plaintext, so both first prove the file can be unsealed again at
 > startup. Two interpreters are probed. The first is the one that *should* run
