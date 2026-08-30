@@ -68,8 +68,9 @@ readers.
 
 - Python floor: 3.11; Hermes floor: 0.13.0.
 - Version source: `src/mordred_hermes/__about__.py`, read by Hatch.
-- Human marker, plugin manifests, README pins, and setup pins are synchronized
-  by `python tools/bump_version.py <version>`.
+- Human marker, plugin manifests, the development-setup pin, and compatibility
+  shim pins are synchronized by `python tools/bump_version.py <version>`; the
+  top-level README remains version-agnostic and relies on its PyPI badge.
 - Base install stays small. Platform and feature dependencies remain in the
   `keyvault`, `macos`, `extension`, `ethereum`, `messaging`, `tor-control`, and
   integration extras.

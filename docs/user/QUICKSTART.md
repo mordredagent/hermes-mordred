@@ -83,6 +83,13 @@ terminal QR to the extension bundle, append `--extras messaging`, producing
 user-facing extras, including deep Tor liveness checks. Extras can also be
 added later by rerunning the installer.
 
+| Extra | Use it for |
+|---|---|
+| `extension` | Browser-extension WebSocket server and wallet RPC transport |
+| `ethereum` | HD-wallet derivation and signing |
+| `messaging` | Terminal QR codes for extension pairing |
+| `tor-control` | Deep Tor liveness checks |
+
 </details>
 
 If you prefer to inspect a downloaded script before running it:
@@ -379,4 +386,4 @@ for provider authentication, interactive use, and gateway operation.
 - [`USAGE.md`](./USAGE.md) — complete command reference and ceremonies.
 - [`EXTENSION.md`](./EXTENSION.md) — browser extension and E2E messaging.
 - [`setup.md`](../dev/setup.md) — development checkout and safe test isolation.
-- [README troubleshooting](https://github.com/mordredagent/hermes-mordred/blob/main/README.md#troubleshooting) — common failures and recovery.
+- [`USAGE.md` troubleshooting](./USAGE.md#8-troubleshooting) — common failures and recovery.
