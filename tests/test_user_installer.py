@@ -252,10 +252,10 @@ def test_mordred_floor_excludes_the_canonical_name_reservation() -> None:
 
 
 def test_user_optional_extras_do_not_drift_from_pyproject_or_docs(tmp_path: Path) -> None:
-    """``USER_OPTIONAL_EXTRAS``, the usage text, the case whitelist, and the README table must agree.
+    """``USER_OPTIONAL_EXTRAS``, installer validation, and the Quickstart table agree.
 
     The extras list is hard-coded 3x in install.sh (the readonly declaration,
-    the usage heredoc, and the case whitelist arm) and again in the README
+    the usage heredoc, and the case whitelist arm) and again in the Quickstart
     extras table. The usage heredoc is interpolated from the readonly
     declaration so those two cannot drift; this test pins the remaining two.
     """
@@ -287,14 +287,13 @@ def test_user_optional_extras_do_not_drift_from_pyproject_or_docs(tmp_path: Path
     assert feature_line is not None, "--help output lost its 'Feature extras:' line"
     assert feature_line == "Feature extras: " + ", ".join(extras_in_order)
 
-    # Scope the README check to the extras table block; the same names appear
-    # in prose elsewhere (including the Upgrading section), which must not
-    # satisfy a stale-table assertion.
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "| Extra | Use it for |" in readme, "README.md extras table header changed"
-    table = readme.split("| Extra | Use it for |", 1)[1].split("\n\n", 1)[0]
+    # Scope the Quickstart check to the extras table block; the same names
+    # appear in prose elsewhere and must not satisfy a stale-table assertion.
+    quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
+    assert "| Extra | Use it for |" in quickstart, "QUICKSTART.md extras table header changed"
+    table = quickstart.split("| Extra | Use it for |", 1)[1].split("\n\n", 1)[0]
     for extra in user_extras:
-        assert f"| `{extra}` |" in table, f"README.md extras table omits {extra!r}"
+        assert f"| `{extra}` |" in table, f"QUICKSTART.md extras table omits {extra!r}"
 
 
 def test_user_docs_lead_with_the_installer_and_path_command() -> None:
@@ -304,14 +303,14 @@ def test_user_docs_lead_with_the_installer_and_path_command() -> None:
         "curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash"
     )
 
-    for document in (quickstart, readme):
-        assert install_command in document
-        assert "hermes-mordred configure" in document
+    assert install_command in quickstart
+    assert "hermes-mordred configure" in quickstart
+    assert install_command in readme
+    assert "hermes-mordred setup" in readme
 
 
 def test_user_docs_describe_installer_options() -> None:
     paths = (
-        ROOT / "README.md",
         ROOT / "docs" / "user" / "QUICKSTART.md",
         ROOT / "docs" / "user" / "EXTENSION.md",
     )
@@ -325,25 +324,24 @@ def test_user_docs_describe_installer_options() -> None:
         )
         assert "terminal QR" in document, f"{path.relative_to(ROOT)} does not explain what messaging adds"
 
-    # Keep the common path focused on --with-extension. The README's advanced
-    # section retains one fully explicit three-extra example, while the
-    # extension guide shows the shorter additive form for users who want a QR.
-    readme = paths[0].read_text(encoding="utf-8")
-    extension_guide = paths[2].read_text(encoding="utf-8")
-    assert "--extras LIST" in readme
-    assert readme.count("--extras extension,ethereum,messaging") == 1
-    assert "--all-extras" in readme
+    # Keep the common path focused on --with-extension. Quickstart owns the
+    # advanced installer options; the Extension guide shows the shorter
+    # additive form for users who want a QR.
+    quickstart = paths[0].read_text(encoding="utf-8")
+    extension_guide = paths[1].read_text(encoding="utf-8")
+    assert "--extras LIST" in quickstart
+    assert "--all-extras" in quickstart
     assert "--with-extension --extras messaging" in extension_guide
 
     # A `hermes` self-update recreates ~/.hermes/hermes-agent/venv, so a bare
     # re-run of the installer only gets what that re-run itself asks for; the
-    # Upgrading section must tell the reader to repeat the same --extras /
+    # package-upgrade section must tell the reader to repeat the same --extras /
     # --all-extras / --with-extension flags, not just "re-run the installer".
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    upgrading_section = readme.split("## Upgrading", 1)[1].split("\n## ", 1)[0]
-    assert "--extras" in upgrading_section, "README.md Upgrading section omits --extras"
+    usage = (ROOT / "docs" / "user" / "USAGE.md").read_text(encoding="utf-8")
+    upgrading_section = usage.split("## 9. Package upgrades and removal", 1)[1]
+    assert "--extras" in upgrading_section, "USAGE.md package-upgrade section omits --extras"
     assert "recreate" in upgrading_section, (
-        "README.md Upgrading section does not explain that a recreated venv only gets what the re-run asks for"
+        "USAGE.md package-upgrade section does not explain that a recreated venv only gets what the re-run asks for"
     )
 
 

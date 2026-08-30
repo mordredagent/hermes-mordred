@@ -955,3 +955,97 @@ including under strict mode).
 - **Fallback behavior**: macOS can use a software P-256 key in the login
   Keychain when Secure Enclave access is unavailable. Linux deliberately has no
   software fallback and fails closed without the TPM helper.
+
+---
+
+## 8. Troubleshooting
+
+- For keyvault, Touch ID, and recovery issues, start with
+  [§4](#4-interactive-command-walkthroughs). File-vault recovery is currently
+  macOS-only; encrypted data cannot be recovered if both its device key and
+  recovery passphrase are lost. Keep Keyvault snapshots, the init passphrase,
+  and the Seed Phrase separate.
+- For browser-extension, gateway, pairing, or port 7788 issues, use the
+  [`EXTENSION.md` troubleshooting table](./EXTENSION.md#troubleshooting).
+- For Tor or VPN issues, run `hermes-mordred network status`, select the
+  intended route with `hermes-mordred network use tor` (or `vpn` / `clearnet`),
+  and restart Hermes if the route changed.
+- If the audit log falls back to plaintext with
+  `mordred.degraded.audit_encryption_unavailable`, restart from a context that
+  can access the device key. Recovery is automatic.
+- Audit entries are plaintext until `keyvault init` creates the material needed
+  by the encrypted writer. `hermes-mordred status` reports the active audit-log
+  state.
+
+---
+
+## 9. Package upgrades and removal
+
+### Upgrade the installed package
+
+Re-run the installer with the same `--extras`, `--all-extras`, or
+`--with-extension` flags used for the original installation, then restart the
+Hermes gateway or standalone Extension server:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash
+```
+
+A Hermes self-update can recreate `~/.hermes/hermes-agent/venv`. Repeat the
+same feature flags whenever you reinstall or upgrade so optional dependencies
+such as `extension`, `ethereum`, `messaging`, and `tor-control` are installed
+and re-resolved in the new environment.
+
+To install an exact release, replace `VERSION` with its PEP 440 version and
+retain any required feature flags:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --version VERSION
+```
+
+For an Extension installation, add `--with-extension` before `--version`.
+Custom installations should likewise repeat their original `--extras ...` or
+`--all-extras` selection.
+
+### Migrate existing configuration
+
+`hermes-mordred upgrade` migrates an existing Hermes or OpenClaw configuration;
+it does not install a newer package:
+
+```sh
+hermes-mordred upgrade
+```
+
+The migration is safe to repeat. Fresh installations should use `configure`
+instead.
+
+### Uninstall safely
+
+Decrypt protected data before removing the package or native keys:
+
+```sh
+hermes-mordred encryption disable all
+hermes-mordred vault disable-config-decrypt
+hermes-mordred encryption status          # verify every target is off
+```
+
+After verifying the plaintext data, you may explicitly destroy profile-owned
+keys. This command is irreversible:
+
+```sh
+hermes-mordred keyvault reset --yes
+```
+
+Remove the six `mordred_*` entries from `plugins.enabled`, then uninstall both
+the canonical distribution and the legacy compatibility name:
+
+```sh
+uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 \
+  mordred-hermes hermes-mordred
+rm -f "$(dirname "$(command -v hermes)")/hermes-mordred"
+```
+
+State under `~/.hermes/mordred/` and installed native helpers are intentionally
+left behind. Remove them manually only after confirming that no encrypted data
+or backup still depends on them.
