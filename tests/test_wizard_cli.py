@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.wizard import keyvault_native_cli, register, status_cli
+from mordred_hermes.wizard import _secure_home_parsers, keyvault_native_cli, register, status_cli
 from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 
 
@@ -112,12 +112,55 @@ class TestSubcommandTree:
             ["mordred", "vault", "migrate", "/tmp/.env", "/tmp/config.yaml"],
             ["mordred", "vault", "migrate", "--root", "/tmp/vault"],
             ["mordred", "plugins", "list"],
+            ["mordred", "secure-home", "status"],
+            ["mordred", "secure-home", "status", "--json"],
+            ["mordred", "secure-home", "adopt", "/tmp/x"],
+            ["mordred", "secure-home", "adopt", "/tmp/x", "--force"],
+            ["mordred", "secure-home", "run", "--", "hermes", "--version"],
         ],
     )
     def test_argv_parses_and_wires_a_handler(self, argv: list[str]) -> None:
         parser = _build_parser()
         ns = parser.parse_args(argv)
         assert hasattr(ns, "func"), f"set_defaults(func=...) missing for {argv!r}"
+
+
+class TestSecureHomeWiring:
+    """``secure-home {status,adopt,run}`` wires to its own handler module."""
+
+    def test_status_wires_handler_and_json_flag(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "status", "--json"])
+        assert ns.func is _secure_home_parsers._handle_secure_home_status
+        assert ns.json is True
+
+    def test_status_json_defaults_false(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "status"])
+        assert ns.json is False
+
+    def test_adopt_wires_handler_and_positional(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "adopt", "/tmp/x"])
+        assert ns.func is _secure_home_parsers._handle_secure_home_adopt
+        assert ns.mountpoint == "/tmp/x"
+        assert ns.force is False
+
+    def test_adopt_force_flag(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "adopt", "/tmp/x", "--force"])
+        assert ns.force is True
+
+    def test_run_wires_handler_and_remainder(self) -> None:
+        parser = _build_parser()
+        ns = parser.parse_args(["mordred", "secure-home", "run", "--", "hermes", "--version"])
+        assert ns.func is _secure_home_parsers._handle_secure_home_run
+        assert ns.command == ["--", "hermes", "--version"]
+
+    def test_secure_home_requires_a_subcommand(self) -> None:
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["mordred", "secure-home"])
 
     def test_keyvault_init_defaults_to_encrypted_seed_storage(self) -> None:
         parser = _build_parser()

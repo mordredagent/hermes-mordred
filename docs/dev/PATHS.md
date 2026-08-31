@@ -34,6 +34,8 @@ the optional workspace target has user-home paths of its own.
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
 | `<home>/memories/*.md` | Hermes memory tool | sealed by Mordred's memory hook when armed, otherwise plaintext |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
+| `~/.config/hermes-mordred/secure-home.json` | `hermes-mordred secure-home adopt` | `secure-home status` / `secure-home run` |
+| secure-home mountpoint (`<mount>/hermes-home`) | `hermes-mordred secure-home adopt` | effective `HERMES_HOME` for processes launched via `secure-home run` |
 
 Unless a section says otherwise, private Mordred directories are mode `0700`
 and private files are mode `0600`. Implementations additionally reject unsafe
@@ -324,6 +326,69 @@ The extension owns:
 These are private mode-`0600` files beneath a real mode-`0700` directory.
 Pairing state and the software attestation private key are security-sensitive;
 do not publish them as diagnostics.
+
+## `~/.config/hermes-mordred/secure-home.json`
+
+### Purpose
+
+Records which mounted encrypted APFS volume is the active secure Hermes
+home. It solves a bootstrap problem: the pointer to the secure home cannot
+live inside the secure home itself, because it must be readable before that
+volume is mounted. For the same reason it lives outside `<home>` entirely —
+`~/.config/hermes-mordred/`, not `<home>/mordred/` — so a fresh, unconfigured
+profile can still be probed by `secure-home status` before anything is
+mounted. `MORDRED_SECURE_HOME_CONFIG` overrides the path for isolated
+testing or a non-default location — on macOS, point it at the resolved
+`/private/...` path, not `/tmp/...` or `/var/...`: both are OS symlinks
+into `/private`, and a component of the config path being a symlink is
+refused (see below).
+
+### File contract
+
+- Directory `0700`; file `0600`; atomic replacement; symlinks rejected at
+  both the directory and file position.
+- Refused unless owned by the current user, with no group or other
+  permission bits set, at most 64KiB, and valid UTF-8.
+- Contains no secret. There is no key, passphrase, or credential in this
+  file — only enough metadata to identify and re-verify a volume that is
+  already mounted by some other means.
+- Written only by `hermes-mordred secure-home adopt`; `--force` is required
+  to overwrite an existing config. `secure-home status` and `secure-home
+  run` read it but never write it.
+
+### Schema (v1)
+
+```json
+{
+  "version": 1,
+  "mount_point": "/Volumes/HermesSecure",
+  "volume_uuid": "5C2C6F2A-....-....-....-............",
+  "home_subdir": "hermes-home"
+}
+```
+
+`volume_uuid` is the `diskutil`-reported `VolumeUUID` captured at `adopt`
+time; the config validates it as a real UUID, and every later verification
+compares it against the mounted volume's reported UUID as parsed UUIDs, not
+by string or casefold comparison. `home_subdir` defaults to `hermes-home`
+and names the directory created inside the mounted volume.
+
+### The secure home itself (`<mount>/hermes-home`)
+
+`<mount_point>/<home_subdir>` (created `0700` by `adopt`, inside the
+verified mounted volume only) becomes the complete `HERMES_HOME` for a
+process launched through `secure-home run`. Its internal layout is opaque to
+Mordred: once `HERMES_HOME` points there, upstream Hermes and every Mordred
+plugin own its contents exactly as they would `~/.hermes` — nothing in this
+document changes. This is a distinct concept from the externally-owned
+`claude-private` workspace bullet below: `claude-private` encrypts a
+separate opt-in workspace outside `HERMES_HOME`, while secure-home relocates
+`HERMES_HOME` itself.
+
+### Cross-references
+
+- [`SPEC.md`](./SPEC.md) §Secure home — encrypted-APFS HERMES_HOME
+- [`PLAN.md`](./PLAN.md) §5.1 Plugin: `mordred_wizard`
 
 ## Hermes-owned and external targets
 

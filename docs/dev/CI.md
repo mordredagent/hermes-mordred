@@ -111,6 +111,19 @@ uses a paid account and mutates runner network state.
   Disabling memory encryption restored the whole file to plaintext, the same
   two entries remained readable through Hermes, and the temporary fact was
   absent. The pre-test gateway and encryption states were restored afterward.
+- **2026-08-25 — secure-home `adopt`/`status`/`run` passed on Apple Silicon
+  (macOS 26.5.2, arm64) against a real encrypted APFS disk image.**
+  `MORDRED_LIVE_SECURE_HOME_TEST=1 pytest -m integration tests/integration/test_secure_home_macos.py`:
+  a throwaway `hdiutil -encryption AES-256` APFS sparseimage attached with
+  `-owners on` in a temp directory was adopted (`VolumeUUID` captured,
+  `<mount>/hermes-home` created mode `0700`), `status` reported the identity
+  verified, `run` reached the exec seam with `HERMES_HOME` pointed inside the
+  volume, and a doctored config carrying a different UUID was refused with
+  `UUID_MISMATCH`. The encryption gate passed through the `hdiutil info`
+  image-encrypted path (the volume itself reports `EncryptionThisVolumeProper`
+  false), confirming the two-signal judgment on real macOS; no mount leaked
+  after the `finally` detach, and `~/.hermes` plus the real config path were
+  never touched.
 
 After changing a live-gated path, rerun the relevant command and append a dated
 result here. Do not replace the previous result without recording the new date.

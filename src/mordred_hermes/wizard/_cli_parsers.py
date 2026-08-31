@@ -17,6 +17,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — list discovered Mordred plugins
+- ``secure-home {status,adopt,run}``              — run Hermes from an encrypted APFS volume
 """
 
 from __future__ import annotations
@@ -52,6 +53,14 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_encryption(sub)
     _add_plugins(sub)
     _add_extension(sub)
+    _add_secure_home(sub)
+
+
+def _add_secure_home(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """``secure-home {status,adopt,run}`` — wiring lives in its own module (size guideline)."""
+    from . import _secure_home_parsers
+
+    _secure_home_parsers.add_secure_home(sub)
 
 
 # -----------------------------------------------------------------------------

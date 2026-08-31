@@ -69,6 +69,10 @@ compatibility policy.
 - File-vault `vault recover` is supported only on macOS. The Linux TPM helper
   implements native wrapping, but the file vault has no Linux device-anchor
   store and must not claim a working recovery hot path there.
+- `secure-home` (Phase 5) is macOS-only: it relocates the active Hermes home
+  into a user-provided encrypted APFS volume and verifies it through
+  `fdesetup`/`diskutil`. There is no Linux or Windows path; the commands are
+  simply unavailable off macOS rather than enrolled-but-inactive.
 - Windows and mobile support are deferred. Pure cryptographic and storage
   modules remain testable with injected backends on other platforms.
 
@@ -698,6 +702,7 @@ vault       init | change-passphrase | recover | add | status | cat |
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list
 extension   pair | serve
+secure-home status | adopt | run
 ```
 
 `status`, `policy show`, keyvault listing, vault status, and encryption status
@@ -716,6 +721,162 @@ macOS env and agent-memory encryption, then runs only incomplete steps and
 prints status. It never resets or overwrites a blocked/corrupt keyvault.
 Non-interactive mode runs only the automatable subset and reports the
 interactive commands still needed.
+
+#### Secure home — encrypted-APFS HERMES_HOME (Phase 5 PR1, 2026-08-24)
+
+`secure-home` is an opt-in, macOS-only relocation of the complete active
+Hermes home into a user-provided encrypted APFS volume. It adds a second key
+layer beneath FileVault: even on a Mac that is unlocked and logged in,
+Hermes state stays inaccessible until the volume is separately mounted.
+Hermes core is never modified; the wrapper only sets `HERMES_HOME` for the
+child process it launches, which is exactly the propagation upstream's own
+`hermes_constants.get_hermes_home()` docstring expects of a subprocess
+spawner (context override → `HERMES_HOME` env var → platform default).
+
+##### Three UX modes
+
+- **Standard** — FileVault only, no secure-home volume. Right when the
+  threat model is a lost or stolen powered-off Mac.
+- **Balanced** *(recommended secure-home mode)* — unlock once after login or
+  first launch; the volume stays mounted while Hermes/Gateway is active and
+  is not re-prompted while mounted. Touch ID / Secure Enclave unlock ships
+  in a later phase.
+- **Strict** — explicit unlock per usage period, with an optional idle
+  auto-lock that fires only once no Hermes process and no open file remain.
+
+Mode selection and automation ship with `init` (Phase 2). Phase 1 records no
+mode; it implements only the manual `adopt`/`run` workflow below.
+
+##### Config file and the bootstrap problem
+
+`~/.config/hermes-mordred/secure-home.json` (directory `0700`, file `0600`,
+symlinks rejected, atomic writes; `MORDRED_SECURE_HOME_CONFIG` overrides the
+path) records only `version`, `mount_point`, `volume_uuid`, and
+`home_subdir` (default `hermes-home`) — never a secret. It lives outside the
+secure volume and outside `HERMES_HOME` on purpose: the pointer to the
+secure home cannot itself live inside the thing it points to, because it
+must be readable before that volume is mounted. For the same reason, the
+only key that unlocks the volume must never be stored inside the encrypted
+`HERMES_HOME` — automatic Keyvault-based unlocking is deferred to Phase 4
+until that trust boundary is explicitly resolved.
+
+##### Verification chain (fail closed, in order)
+
+1. Config exists.
+2. The mountpoint path is symlink-free.
+3. The mountpoint is a real mount (`os.path.ismount`).
+4. `diskutil info -plist` reports the expected `VolumeUUID`, compared as
+   parsed UUIDs (not a string/casefold comparison).
+5. The filesystem is APFS.
+6. The volume is not the boot/system volume (mount point `/` or anything
+   under `/System/Volumes/`).
+7. The volume is encrypted: `EncryptionThisVolumeProper` is true, or the
+   backing disk image (matched to the volume's device node via `hdiutil info
+   -plist`) reports `image-encrypted` true. An unknown encryption state
+   refuses.
+8. Ownership is honored: the volume must not be mounted `noowners`.
+9. `<mount>/hermes-home` exists, is symlink-free, is user-owned, is not
+   group- or other-writable, and is on the same device as the verified
+   mountpoint.
+
+Any failure refuses before touching `HERMES_HOME`. The not-mounted case
+reports exactly `Secure Hermes home is locked. Unlock it to continue.`; a
+`VolumeUUID` mismatch reports exactly `A different volume is mounted at the
+configured path.`
+
+Steps 7 and 8 exist because a security review found the original
+volume-level `diskutil` check wrong in both directions on real macOS: a
+FileVault boot volume reports `Encryption`/`FileVault` true, which would
+have falsely "verified" a home that is merely on the auto-unlocked boot
+disk, while an `hdiutil`-encrypted disk image reports every volume-level
+encryption key false because the encryption lives at the image layer, not
+the volume layer. The chain now trusts only `EncryptionThisVolumeProper`
+(a natively encrypted APFS volume) or an `hdiutil`-reported encrypted
+backing image, and separately refuses boot/system volumes outright (step
+6) since they can never provide the independent second key layer this
+feature promises. Ownership matters for the same reason: `hdiutil attach`
+defaults to mounting `noowners`, under which macOS treats every local user
+as the file owner and `0700` protects nothing, so step 8 refuses until the
+volume is attached with ownership enabled.
+
+##### Commands (Phase 1)
+
+- `secure-home status` — read-only report: FileVault state via `fdesetup
+  status` (never changed), configured/not-configured, mount state, volume
+  identity verification result, and the effective secure home path.
+  Includes concise informational notes; `--json` is supported.
+- `secure-home adopt <mountpoint>` — records an already-mounted,
+  user-created encrypted APFS volume as the secure home. Verifies the
+  volume through `diskutil info -plist` (encrypted APFS, capturing
+  `VolumeUUID`), creates `<mount>/hermes-home` (`0700`) inside the verified
+  mounted volume only, and writes the config. `--force` is required to
+  overwrite an existing config. Performs zero volume operations — it never
+  creates, mounts, or unmounts a volume.
+- `secure-home run -- <command...>` — fail-closed launcher. Refuses unless
+  the full verification chain above passes, then execs `<command...>` with
+  `HERMES_HOME=<mount>/hermes-home`; child processes inherit it through the
+  ordinary environment. Never creates directories at an unmounted
+  mountpoint. Also refuses to launch if `MORDRED_SEKEY_STORE`,
+  `MORDRED_TPMKEY_STORE`, or `HERMES_SAFE_MODE` is set (non-empty) in the
+  environment — each would relocate key material or disable sealing outside
+  the secure home.
+
+##### Launch-context matrix
+
+| Context | Sees `HERMES_HOME` from the wrapper? |
+|---|---|
+| CLI | Yes — inherits the shell environment the wrapper set. |
+| Gateway (`extension serve` / gateway process), started under `secure-home run` | Yes — inherits like any other child process. |
+| Desktop app | No — Phase 4, a documented Phase 1 limitation. |
+| launchd | No — needs `launchctl setenv` or a plist `EnvironmentVariables` block; Phase 4. |
+| cron | No — same Phase 4 gap. |
+
+##### Split-brain caveat
+
+A Hermes process launched **without** the wrapper falls back to the plain
+`~/.hermes` home. This is standard Hermes behavior, not a fail-open in
+Mordred: `secure-home` never patches `get_hermes_home()` itself, so a launch
+path that does not go through `secure-home run` simply never sees the
+secure-home `HERMES_HOME` value and reads/writes the ordinary home instead.
+Operators relying on secure-home must launch every Hermes/Gateway entry
+point through the wrapper or an integration that sets `HERMES_HOME`
+equivalently.
+
+##### Threat model deltas
+
+Secure-home protects data at rest beyond FileVault: it is an independent
+second key layer, so Hermes state stays sealed while the login session is
+active but the volume is locked, and it also protects encrypted backups of
+the volume image. It does **not** protect: anything while the volume is
+mounted (files are readable by any process running as the same user);
+prompts already sent to a cloud LLM/search/memory provider; process memory;
+a root attacker; or forensic recovery of `~/.hermes` blocks written to SSD
+before secure-home was adopted (TRIM defeats reliable erasure there —
+FileVault remains the mitigation for that residue).
+
+##### Phase 1 scope vs. deferred phases
+
+Phase 1 (this PR) ships `status`, `adopt`, and `run` in `mordred_wizard`
+only, with zero volume-creation code. Deferred, each behind separate
+approval:
+
+- **Phase 2** — `init`/`mount`/`unmount` via `hdiutil`/`diskutil`, password
+  collected through interactive stdin only.
+- **Phase 3** — a non-destructive migration assistant: dry-run by default,
+  Hermes/Gateway stopped first, SQLite copied after a clean shutdown
+  including its WAL/SHM files, integrity and hash verification, the
+  original `~/.hermes` never auto-deleted, rollback possible, with an
+  explicit SSD-erase caveat.
+- **Phase 4** — hardware-backed auto-unlock, Balanced/Strict lifecycle
+  automation, and Desktop/launchd/Gateway integration.
+
+##### Upstream contract note
+
+Mordred never modifies `hermes_constants.get_hermes_home()` or any other
+upstream resolution code. Upstream's own docstring already states that a
+subprocess spawner is expected to propagate `HERMES_HOME` explicitly to the
+processes it launches; `secure-home run` is exactly that kind of spawner,
+not a new integration point Mordred invents.
 
 ## Operational Guarantees & Caveats
 
@@ -809,7 +970,10 @@ and interactive unless a narrowly scoped confirmation flag exists.
 - transparent env/config/memory/workspace lifecycle outside macOS;
 - audit hash chains, external anchoring, or same-UID tamper resistance;
 - isolated signer/payment authorization;
-- automatic migration of native-key protection tiers.
+- automatic migration of native-key protection tiers;
+- secure-home volume creation/mount/unmount ceremonies, its migration
+  assistant, hardware-backed auto-unlock, and Desktop/launchd lifecycle
+  integration (Phases 2–4).
 
 Future candidates and their release gates live in
 [`ROADMAP.md`](./ROADMAP.md); actionable unfinished work lives in
