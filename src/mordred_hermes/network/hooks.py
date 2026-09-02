@@ -354,6 +354,78 @@ def on_session_end(**_kwargs: Any) -> None:
     """
 
 
+class _RouteGateState:
+    """Mutable progress record shared by the strict-mode route gates.
+
+    :func:`_require_active_route` raises out of the shared checks, so the
+    stage it reached and the paths it resolved are recorded here for the
+    caller's ``except`` clause to hand to :func:`_handle_transport_gate_error`.
+
+    Both paths default to Tor until config resolution succeeds. If a
+    disk/runtime read itself fails under strict policy, the error path must
+    assume the protected route was Tor rather than silently allowing possible
+    clearnet egress; damaged strict config must never be misclassified as an
+    intentional clearnet route.
+    """
+
+    __slots__ = ("active_path", "configured_path", "stage")
+
+    def __init__(self) -> None:
+        self.stage: str = "configured_path"
+        self.configured_path: ActivePath = "tor"
+        self.active_path: ActivePath = "tor"
+
+
+def _require_active_route(
+    *,
+    policy_json_path: Path,
+    config_path: Path,
+    state: _RouteGateState,
+) -> bool:
+    """Run the route checks shared by ``pre_api_request`` and ``pre_tool_call``.
+
+    Re-reads the configured path, revalidates the activation config against the
+    frozen route, and checks the runtime's reported active path and readiness,
+    recording each stage in ``state`` so a failure is audited against the stage
+    that produced it. The configured path is checked here because continuation
+    turns do not fire ``on_session_start``; under strict policy, configured Tor
+    and VPN paths must both be active and ready before any provider evaluation.
+
+    Returns ``True`` when the active path is protected and the caller must still
+    run its own liveness-drop check -- the two gates diverge on how a drop is
+    refused, so that branch stays with each caller.
+    """
+    configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
+    state.configured_path = configured_path
+    state.stage = "activation_config"
+    from . import _load_runtime_config
+
+    current_config = _load_runtime_config(
+        policy_json_path=policy_json_path,
+        config_path=config_path,
+    )
+    api.assert_route_config(current_config)
+    state.stage = "status"
+    runtime_status = api.status()
+    raw_active_path = runtime_status.active_path
+    if raw_active_path not in VALID_ACTIVE_PATHS:
+        raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
+    active_path = cast(ActivePath, raw_active_path)
+    state.active_path = active_path
+    if configured_path in _PROTECTED_NETWORK_PATHS and active_path != configured_path:
+        state.stage = "required_path"
+        raise RuntimeError(
+            f"configured protected path {configured_path!r} is not active (runtime active_path={active_path!r})"
+        )
+    if active_path in _PROTECTED_NETWORK_PATHS and not runtime_status.ready:
+        state.stage = "path_readiness"
+        raise RuntimeError(f"active protected path {active_path!r} is not ready")
+    if active_path not in _PROTECTED_NETWORK_PATHS:
+        return False
+    state.stage = "path_readiness"
+    return True
+
+
 def pre_api_request(
     *,
     policy_json_path: Path,
@@ -388,50 +460,25 @@ def pre_api_request(
     runtime_provider = (
         provider.strip().lower() if isinstance(provider, str) and provider.strip() else _UNRESOLVED_PROVIDER
     )
-    # Default to Tor until config resolution succeeds. If the reader itself
-    # fails under strict policy, the error path must assume the protected route
-    # was Tor rather than silently allowing possible clearnet egress.
-    configured_path: ActivePath = "tor"
-    active_path: ActivePath = "tor"
-    stage = "configured_path"
+    state = _RouteGateState()
     try:
-        configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
-        stage = "activation_config"
-        from . import _load_runtime_config
-
-        current_config = _load_runtime_config(
+        needs_drop_check = _require_active_route(
             policy_json_path=policy_json_path,
             config_path=config_path,
+            state=state,
         )
-        api.assert_route_config(current_config)
-        stage = "status"
-        runtime_status = api.status()
-        raw_active_path = runtime_status.active_path
-        if raw_active_path not in VALID_ACTIVE_PATHS:
-            raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
-        active_path = cast(ActivePath, raw_active_path)
-        if configured_path in _PROTECTED_NETWORK_PATHS and active_path != configured_path:
-            stage = "required_path"
-            raise RuntimeError(
-                f"configured protected path {configured_path!r} is not active (runtime active_path={active_path!r})"
-            )
-        if active_path in _PROTECTED_NETWORK_PATHS and not runtime_status.ready:
-            stage = "path_readiness"
-            raise RuntimeError(f"active protected path {active_path!r} is not ready")
-        if active_path in _PROTECTED_NETWORK_PATHS:
-            stage = "path_readiness"
-            if api.is_dropped():
-                raise RuntimeError(f"active protected path {active_path!r} was dropped")
-        if active_path != "tor":
+        if needs_drop_check and api.is_dropped():
+            raise RuntimeError(f"active protected path {state.active_path!r} was dropped")
+        if state.active_path != "tor":
             return
 
-        stage = "provider_overrides"
+        state.stage = "provider_overrides"
         overrides = _read_provider_overrides(policy_json_path)
-        stage = "policy_config"
+        state.stage = "policy_config"
         disable_ipv6 = _read_disable_ipv6(policy_json_path, policy_mode)
-        stage = "evaluate"
+        state.stage = "evaluate"
         _flag_transport_compat(
-            active_path=active_path,
+            active_path=state.active_path,
             providers=[runtime_provider],
             policy_mode=policy_mode,
             disable_ipv6=disable_ipv6,
@@ -445,9 +492,9 @@ def pre_api_request(
         # that the request is outside a configured protected route.
         _handle_transport_gate_error(
             error=gate_error,
-            stage=stage,
-            target_path=configured_path,
-            active_path=active_path,
+            stage=state.stage,
+            target_path=state.configured_path,
+            active_path=state.active_path,
             providers=[runtime_provider],
             policy_mode=policy_mode,
             audit=audit,
@@ -477,46 +524,21 @@ def pre_tool_call(
     if policy_mode != "strict":
         return None
 
-    # Assume a protected route until each disk/runtime read proves otherwise.
-    # That mirrors ``pre_api_request`` and prevents damaged strict config from
-    # being misclassified as an intentional clearnet route.
-    configured_path: ActivePath = "tor"
-    active_path: ActivePath = "tor"
-    stage = "configured_path"
+    state = _RouteGateState()
     try:
-        configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
-        stage = "activation_config"
-        from . import _load_runtime_config
-
-        current_config = _load_runtime_config(
+        needs_drop_check = _require_active_route(
             policy_json_path=policy_json_path,
             config_path=config_path,
+            state=state,
         )
-        api.assert_route_config(current_config)
-        stage = "status"
-        runtime_status = api.status()
-        raw_active_path = runtime_status.active_path
-        if raw_active_path not in VALID_ACTIVE_PATHS:
-            raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
-        active_path = cast(ActivePath, raw_active_path)
-        if configured_path in _PROTECTED_NETWORK_PATHS and active_path != configured_path:
-            stage = "required_path"
-            raise RuntimeError(
-                f"configured protected path {configured_path!r} is not active (runtime active_path={active_path!r})"
-            )
-        if active_path in _PROTECTED_NETWORK_PATHS and not runtime_status.ready:
-            stage = "path_readiness"
-            raise RuntimeError(f"active protected path {active_path!r} is not ready")
-        if active_path in _PROTECTED_NETWORK_PATHS:
-            stage = "path_readiness"
-            if api.is_dropped():
-                _raise_dropped_tool_refusal(tool_name=tool_name, audit=audit)
+        if needs_drop_check and api.is_dropped():
+            _raise_dropped_tool_refusal(tool_name=tool_name, audit=audit)
     except Exception as gate_error:
         _handle_transport_gate_error(
             error=gate_error,
-            stage=stage,
-            target_path=configured_path,
-            active_path=active_path,
+            stage=state.stage,
+            target_path=state.configured_path,
+            active_path=state.active_path,
             providers=[_UNRESOLVED_PROVIDER],
             policy_mode=policy_mode,
             audit=audit,
