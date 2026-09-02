@@ -52,7 +52,7 @@ from .discord_context import (
     resolve_discord_channel,
 )
 from .errors import wire_error_code
-from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
+from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, _PreparedSign, analyze_sign
 from .webauthn import InvalidWebAuthnPublicKey, _parse_extension_origin
 
 # K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
@@ -222,6 +222,30 @@ def _request_is_loopback(request: web.Request) -> bool:
     except ValueError:
         return False
     return hostname is not None and _is_loopback_host(hostname)
+
+
+def _sign_prompt_payload(
+    method: Any,
+    params: list[Any],
+    prepared: _PreparedSign,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the ``analysis``/``decoded`` pair shown in a ``sign_prompt`` frame."""
+    analysis, decoded = analyze_sign(method, params)
+    if method == "eth_sendTransaction" and params and isinstance(params[0], dict):
+        decoded = {
+            **decoded,
+            "transaction": params[0],
+            "chain_id": prepared.chain_id,
+        }
+    if prepared.expected_signer is not None:
+        decoded = {**decoded, "signer": prepared.expected_signer}
+    if prepared.rpc_endpoint is not None:
+        analysis = {
+            **analysis,
+            "warnings": [*analysis.get("warnings", []), f"RPC 接続先: {prepared.rpc_endpoint}"],
+        }
+        decoded = {**decoded, "rpc_endpoint": prepared.rpc_endpoint}
+    return analysis, decoded
 
 
 def _loopback_origin(host: str, port: int) -> str:
@@ -907,6 +931,12 @@ class _Connection:
             }
         )
 
+    def _remember_pending_sign(self, request_id: str, entry: _PendingSign) -> None:
+        # Bound the pending table (see _MAX_PENDING_SIGN); evict the oldest.
+        while len(self._pending_sign) >= _MAX_PENDING_SIGN:
+            self._pending_sign.pop(next(iter(self._pending_sign)))
+        self._pending_sign[request_id] = entry
+
     async def _on_sign_request(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")
         request_id = str(msg.get("request_id") or "")
@@ -951,36 +981,18 @@ class _Connection:
             )
             return
         params = prepared.params
-        chain_id = prepared.chain_id
-        rpc_url = prepared.rpc_url
-        rpc_endpoint = prepared.rpc_endpoint
-        expected_signer = prepared.expected_signer
-        # Bound the pending table (see _MAX_PENDING_SIGN); evict the oldest.
-        while len(self._pending_sign) >= _MAX_PENDING_SIGN:
-            self._pending_sign.pop(next(iter(self._pending_sign)))
-        self._pending_sign[request_id] = _PendingSign(
-            method=method,
-            params=params,
-            origin=origin,
-            chain_id=chain_id,
-            rpc_url=rpc_url,
-            expected_signer=expected_signer,
+        self._remember_pending_sign(
+            request_id,
+            _PendingSign(
+                method=method,
+                params=params,
+                origin=origin,
+                chain_id=prepared.chain_id,
+                rpc_url=prepared.rpc_url,
+                expected_signer=prepared.expected_signer,
+            ),
         )
-        analysis, decoded = analyze_sign(method, params)
-        if method == "eth_sendTransaction" and params and isinstance(params[0], dict):
-            decoded = {
-                **decoded,
-                "transaction": params[0],
-                "chain_id": chain_id,
-            }
-        if expected_signer is not None:
-            decoded = {**decoded, "signer": expected_signer}
-        if rpc_endpoint is not None:
-            analysis = {
-                **analysis,
-                "warnings": [*analysis.get("warnings", []), f"RPC 接続先: {rpc_endpoint}"],
-            }
-            decoded = {**decoded, "rpc_endpoint": rpc_endpoint}
+        analysis, decoded = _sign_prompt_payload(method, params, prepared)
         await self._send(
             {
                 "id": mid,
