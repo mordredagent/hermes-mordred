@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
@@ -92,7 +93,7 @@ def _guard_inputs(policy_json_path: Path) -> tuple[str, str]:
             return cached[1], cached[2]
 
     mode = _policy_mode(policy_json_path)
-    local_endpoint = _policy_cloud_settings(policy_json_path)[2]
+    local_endpoint = _policy_cloud_settings(policy_json_path).local_endpoint
     if identity is not None and identity == _policy_identity(policy_json_path):
         # Only memoize when the file did not change under us mid-read.
         with _GUARD_INPUT_LOCK:
@@ -420,7 +421,16 @@ def _refuse_auxiliary(
     raise MordredSessionRefused(msg)
 
 
-def _policy_cloud_settings(policy_json_path: Path) -> tuple[bool, frozenset[str], str]:
+@dataclass(frozen=True, slots=True)
+class _CloudRouteSettings:
+    """The ``policy.json`` knobs a declared auxiliary route is judged against."""
+
+    allow_cloud: bool
+    allowlist: frozenset[str]
+    local_endpoint: str
+
+
+def _policy_cloud_settings(policy_json_path: Path) -> _CloudRouteSettings:
     data = load_policy_mapping(policy_json_path, log=_LOG)
     allow_cloud = data.get("allow_cloud_llm") is True
     raw_allowlist = data.get("cloud_provider_allowlist")
@@ -434,12 +444,14 @@ def _policy_cloud_settings(policy_json_path: Path) -> tuple[bool, frozenset[str]
         else frozenset()
     )
     local_endpoint = data.get("local_llm_endpoint")
-    return (
-        allow_cloud,
-        allowlist,
-        local_endpoint.strip()
-        if isinstance(local_endpoint, str) and local_endpoint.strip()
-        else "http://localhost:1234/v1",
+    return _CloudRouteSettings(
+        allow_cloud=allow_cloud,
+        allowlist=allowlist,
+        local_endpoint=(
+            local_endpoint.strip()
+            if isinstance(local_endpoint, str) and local_endpoint.strip()
+            else "http://localhost:1234/v1"
+        ),
     )
 
 
@@ -447,9 +459,7 @@ def _validate_declared_route(
     *,
     task: str,
     candidate: Mapping[str, Any],
-    allow_cloud: bool,
-    allowlist: frozenset[str],
-    local_endpoint: str,
+    settings: _CloudRouteSettings,
     audit: AuditWriter,
 ) -> None:
     raw_provider = str(candidate.get("provider") or "auto").strip()
@@ -457,7 +467,7 @@ def _validate_declared_route(
     provider = enforce.policy_provider_id(raw_provider)
     if provider == "auto" and base_url is None:
         return  # the concrete result is guarded by the resolver wrapper
-    if _same_configured_endpoint(base_url, local_endpoint):
+    if _same_configured_endpoint(base_url, settings.local_endpoint):
         return
     if provider == LOCAL_PROVIDER_NAME:
         if base_url is None:
@@ -480,7 +490,7 @@ def _validate_declared_route(
                 cause="custom/auto endpoint is not owned by a known provider",
             )
         provider = inferred
-    if not allow_cloud or provider not in allowlist:
+    if not settings.allow_cloud or provider not in settings.allowlist:
         _refuse_auxiliary(
             audit=audit,
             provider_id=provider,
@@ -520,13 +530,11 @@ def validate_session(
             ),
         )
 
-    allow_cloud, allowlist, local_endpoint = _policy_cloud_settings(policy_json_path)
+    settings = _policy_cloud_settings(policy_json_path)
     config = load_yaml_mapping(config_path, catch=(Exception,), log=_LOG)
     _validate_root_fallbacks(
         config=config,
-        allow_cloud=allow_cloud,
-        allowlist=allowlist,
-        local_endpoint=local_endpoint,
+        settings=settings,
         audit=audit,
     )
     auxiliary = config.get("auxiliary")
@@ -534,9 +542,7 @@ def validate_session(
         return
     _validate_auxiliary_config(
         auxiliary=auxiliary,
-        allow_cloud=allow_cloud,
-        allowlist=allowlist,
-        local_endpoint=local_endpoint,
+        settings=settings,
         audit=audit,
     )
 
@@ -544,9 +550,7 @@ def validate_session(
 def _validate_root_fallbacks(
     *,
     config: Mapping[str, Any],
-    allow_cloud: bool,
-    allowlist: frozenset[str],
-    local_endpoint: str,
+    settings: _CloudRouteSettings,
     audit: AuditWriter,
 ) -> None:
     """Validate main fallback routes that ``provider: auto`` may inherit."""
@@ -578,9 +582,7 @@ def _validate_root_fallbacks(
             _validate_declared_route(
                 task=f"{key}[{index}]",
                 candidate=entry,
-                allow_cloud=allow_cloud,
-                allowlist=allowlist,
-                local_endpoint=local_endpoint,
+                settings=settings,
                 audit=audit,
             )
 
@@ -588,9 +590,7 @@ def _validate_root_fallbacks(
 def _validate_auxiliary_config(
     *,
     auxiliary: Mapping[object, object],
-    allow_cloud: bool,
-    allowlist: frozenset[str],
-    local_endpoint: str,
+    settings: _CloudRouteSettings,
     audit: AuditWriter,
 ) -> None:
     """Validate every declared task and each configured fallback entry."""
@@ -602,9 +602,7 @@ def _validate_auxiliary_config(
         _validate_declared_route(
             task=task,
             candidate=raw_task,
-            allow_cloud=allow_cloud,
-            allowlist=allowlist,
-            local_endpoint=local_endpoint,
+            settings=settings,
             audit=audit,
         )
         chain = raw_task.get("fallback_chain")
@@ -630,9 +628,7 @@ def _validate_auxiliary_config(
             _validate_declared_route(
                 task=f"{task}.fallback_chain[{index}]",
                 candidate=entry,
-                allow_cloud=allow_cloud,
-                allowlist=allowlist,
-                local_endpoint=local_endpoint,
+                settings=settings,
                 audit=audit,
             )
 
