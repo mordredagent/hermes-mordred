@@ -29,6 +29,7 @@ import logging
 import re
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -88,6 +89,23 @@ _EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1"]
 # bound. Cap it and evict the oldest (dicts keep insertion order) — a stale
 # prompt the user never answered is the right thing to drop.
 _MAX_PENDING_SIGN = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSign:
+    """The prompt-time snapshot a later ``sign_approve`` is signed against.
+
+    Frozen so an entry already shown to the user cannot be mutated in place
+    between the ``sign_prompt`` and the approval it authorises.
+    """
+
+    method: Any
+    params: list[Any]
+    origin: Any
+    chain_id: str | None
+    rpc_url: str | None
+    expected_signer: str | None
+
 
 _log = logging.getLogger(__name__)
 
@@ -362,7 +380,7 @@ class _Connection:
         self._authentication_generation: bytes | None = None
         self._page_authenticated = False
         self._nonce = b""
-        self._pending_sign: dict[str, dict[str, Any]] = {}
+        self._pending_sign: dict[str, _PendingSign] = {}
 
     async def _send(self, payload: dict[str, Any]) -> bool:
         # A client that disconnected mid-turn (e.g. during a slow local-LLM
@@ -940,14 +958,14 @@ class _Connection:
         # Bound the pending table (see _MAX_PENDING_SIGN); evict the oldest.
         while len(self._pending_sign) >= _MAX_PENDING_SIGN:
             self._pending_sign.pop(next(iter(self._pending_sign)))
-        self._pending_sign[request_id] = {
-            "method": method,
-            "params": params,
-            "origin": origin,
-            "chain_id": chain_id,
-            "rpc_url": rpc_url,
-            "expected_signer": expected_signer,
-        }
+        self._pending_sign[request_id] = _PendingSign(
+            method=method,
+            params=params,
+            origin=origin,
+            chain_id=chain_id,
+            rpc_url=rpc_url,
+            expected_signer=expected_signer,
+        )
         analysis, decoded = analyze_sign(method, params)
         if method == "eth_sendTransaction" and params and isinstance(params[0], dict):
             decoded = {
@@ -990,11 +1008,11 @@ class _Connection:
             signature = await asyncio.get_event_loop().run_in_executor(
                 None,
                 _do_sign,
-                pend["method"],
-                pend["params"],
-                pend.get("chain_id"),
-                pend.get("rpc_url"),
-                pend.get("expected_signer"),
+                pend.method,
+                pend.params,
+                pend.chain_id,
+                pend.rpc_url,
+                pend.expected_signer,
             )
         except Exception as exc:
             error = wire_error_code(exc, fallback="sign_failed", context="sign_approve")
