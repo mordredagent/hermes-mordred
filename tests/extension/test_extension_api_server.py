@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from mordred_hermes.extension import extension_api
+from mordred_hermes.extension import _slack_env, extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
 
@@ -808,9 +808,9 @@ def test_upsert_env_vars_rejects_newlines(tmp_path):
     """Last line of defence: the writer itself refuses CR/LF in a key or value."""
     env = tmp_path / ".env"
     with pytest.raises(ValueError):
-        extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-x\nEVIL=pwned"})
+        _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-x\nEVIL=pwned"})
     with pytest.raises(ValueError):
-        extension_api._upsert_env_vars(env, {"SLACK\rBOT": "x"})
+        _slack_env._upsert_env_vars(env, {"SLACK\rBOT": "x"})
     assert not env.exists()
 
 
@@ -819,7 +819,7 @@ def test_upsert_env_vars_new_file_is_0600(tmp_path):
     leave a freshly-created ``.env`` at the umask default (typically 0o644,
     world-readable) rather than the atomic writer's tmp-file mode."""
     env = tmp_path / ".env"
-    extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
+    _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
     assert oct(stat.S_IMODE(os.stat(env).st_mode)) == "0o600"
 
 
@@ -832,7 +832,7 @@ def test_upsert_env_vars_tightens_a_loosely_permissioned_existing_file(tmp_path)
     env.write_text("EXISTING=1\n", encoding="utf-8")
     os.chmod(env, 0o644)
 
-    extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
+    _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
 
     assert oct(stat.S_IMODE(os.stat(env).st_mode)) == "0o600"
 
@@ -843,7 +843,7 @@ def test_upsert_env_vars_preserves_unrelated_existing_vars(tmp_path):
     env = tmp_path / ".env"
     env.write_text("KEEP_ME=untouched\nSLACK_BOT_TOKEN=old\n", encoding="utf-8")
 
-    extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-new"})
+    _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-new"})
 
     text = env.read_text(encoding="utf-8")
     assert "KEEP_ME=untouched" in text
@@ -858,7 +858,7 @@ def test_upsert_env_vars_replaces_export_assignments_without_leaving_old_tokens(
         encoding="utf-8",
     )
 
-    extension_api._upsert_env_vars(
+    _slack_env._upsert_env_vars(
         env,
         {
             "SLACK_BOT_TOKEN": "xoxb-new",
