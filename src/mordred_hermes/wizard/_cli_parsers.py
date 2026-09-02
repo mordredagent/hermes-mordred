@@ -374,6 +374,13 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     keyvault_eth_cli.add_eth_subparsers(ksub)
 
 
+def _add_root_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+
+
 def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("vault", help="At-rest secrets/env vault")
     vsub = p.add_subparsers(dest="vault_command", required=True, metavar="COMMAND")
@@ -382,30 +389,21 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "init",
         help="Create a new encrypted vault sealed under a recovery passphrase",
     )
-    p_init.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_init)
     p_init.set_defaults(func=_handle_vault_init)
 
     p_change_pp = vsub.add_parser(
         "change-passphrase",
         help="Change the vault's recovery passphrase (master key and enrolled files unchanged)",
     )
-    p_change_pp.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_change_pp)
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
     p_recover = vsub.add_parser(
         "recover",
         help="Re-key a vault copied to this machine onto its Secure Enclave (restores the writable hot path)",
     )
-    p_recover.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_recover)
     p_recover.set_defaults(func=_handle_vault_recover)
 
     p_add = vsub.add_parser(
@@ -414,20 +412,14 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_add.add_argument("name", help="Logical name to store the file under (e.g. .env)")
     p_add.add_argument("source", help="Path to the plaintext file to encrypt into the vault")
-    p_add.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_add)
     p_add.set_defaults(func=_handle_vault_add)
 
     p_status = vsub.add_parser(
         "status",
         help="Show a vault's generation and enrolled file names (never prompts; reads the manifest unverified)",
     )
-    p_status.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_status)
     p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_status.set_defaults(func=_handle_vault_status)
 
@@ -436,10 +428,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Print one enrolled file's decrypted bytes to stdout (opens read-only via passphrase recovery)",
     )
     p_cat.add_argument("name", help="Enrolled file name to decrypt and print")
-    p_cat.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_cat)
     p_cat.set_defaults(func=_handle_vault_cat)
 
     p_migrate = vsub.add_parser(
@@ -452,10 +441,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Plaintext file(s) to import, each enrolled under its basename "
         "(default: .env and config.yaml under the Hermes home)",
     )
-    p_migrate.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_migrate)
     p_migrate.set_defaults(func=_handle_vault_migrate)
 
     p_set_memory_key = vsub.add_parser(
@@ -463,10 +449,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Store/rotate HERMES_MEMORY_KEY in the vault .env (the agent-memory encryption key; "
         "`encryption enable memory` is what turns sealing on)",
     )
-    p_set_memory_key.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_set_memory_key)
     p_set_memory_key.add_argument(
         "--rotate",
         action="store_true",
@@ -478,20 +461,14 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "enable-config-decrypt",
         help="Put config.yaml under the at-rest vault (transparent decrypt at Hermes startup)",
     )
-    p_enable_cfg.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_enable_cfg)
     p_enable_cfg.set_defaults(func=_handle_vault_enable_config_decrypt)
 
     p_disable_cfg = vsub.add_parser(
         "disable-config-decrypt",
         help="Stop managing config.yaml in the vault and restore a plaintext copy (recovery)",
     )
-    p_disable_cfg.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_disable_cfg)
     p_disable_cfg.set_defaults(func=_handle_vault_disable_config_decrypt)
 
 
@@ -545,10 +522,7 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "change-passphrase",
         help="Change the vault's recovery passphrase (alias of `vault change-passphrase`)",
     )
-    p_change_pp.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_change_pp)
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
 
