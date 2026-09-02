@@ -17,12 +17,25 @@ own copy).
 those modules now imports this shared copy under its original
 ``_FakeAuditWriter`` local name so call sites are unchanged.
 
+``FakePluginContext`` consolidates the near-identical ``_FakeCtx`` /
+``_FakeContext`` PluginContext stand-ins from ``_network_hooks_helpers.py``,
+``test_keyvault_session_reseal.py``, ``test_llm_guard_register.py``, and
+``test_imports.py``. Three of those four already recorded ``hooks`` as a
+``list[tuple[str, callback]]``; ``test_keyvault_session_reseal.py`` alone
+tracked a separate ``list[str]`` of just the names plus a second
+``registered`` tuple list. This shared version keeps the majority
+``hooks: list[tuple[str, callback]]`` shape as the single source of truth
+and exposes ``hook_names`` / ``callbacks_for`` as views over it, so
+``test_keyvault_session_reseal.py`` reads through those instead of a
+duplicate name-only list — the checks themselves are unchanged, only how
+they reach the data.
+
 Not a ``test_*`` module, so pytest does not collect it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +55,40 @@ class FakeAuditWriter:
 
     def append(self, entry: Mapping[str, Any]) -> None:
         self.entries.append(entry)
+
+
+class FakePluginContext:
+    """Hermes ``PluginContext`` stand-in shared by hook-registration tests.
+
+    ``hooks`` records every ``register_hook`` call as a ``(hook_name,
+    callback)`` pair. ``hook_names`` and ``callbacks_for`` are convenience
+    views derived from ``hooks``. ``raise_on`` simulates a host that
+    rejects specific hook names, so callers can prove ``register()``
+    survives a host rejection. ``register_cli_command`` / ``register_provider``
+    are no-ops some plugins' ``register()`` calls incidentally.
+    """
+
+    def __init__(self, *, raise_on: set[str] | None = None) -> None:
+        self.hooks: list[tuple[str, Callable[..., Any]]] = []
+        self._raise_on = raise_on or set()
+
+    @property
+    def hook_names(self) -> list[str]:
+        return [name for name, _ in self.hooks]
+
+    def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
+        if hook_name in self._raise_on:
+            raise RuntimeError("host rejected hook")
+        self.hooks.append((hook_name, callback))
+
+    def callbacks_for(self, hook_name: str) -> list[Any]:
+        return [callback for name, callback in self.hooks if name == hook_name]
+
+    def register_cli_command(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def register_provider(self, *args: object, **kwargs: object) -> None:
+        return None
 
 
 def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:

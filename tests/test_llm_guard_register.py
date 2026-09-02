@@ -17,10 +17,11 @@ test on the recorded order.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 import pytest
+
+from ._helpers import FakePluginContext as _FakeCtx
 
 
 def _build_real_hermes_http_client(base_url: str) -> Any:
@@ -36,16 +37,6 @@ def _build_real_hermes_http_client(base_url: str) -> Any:
 
         return AIAgent._build_keepalive_http_client(base_url)
     return build_keepalive_http_client(base_url)
-
-
-class _FakeCtx:
-    """Records ``register_hook`` calls so tests can assert wiring."""
-
-    def __init__(self) -> None:
-        self.hooks: list[tuple[str, Callable[..., Any]]] = []
-
-    def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
-        self.hooks.append((hook_name, callback))
 
 
 @pytest.fixture(autouse=True)

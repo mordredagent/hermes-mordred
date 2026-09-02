@@ -11,6 +11,8 @@ from types import ModuleType
 
 import pytest
 
+from ._helpers import FakePluginContext as _FakeContext
+
 PLUGINS = [
     "mordred_hermes.privacy_check",
     "mordred_hermes.wizard",
@@ -18,22 +20,6 @@ PLUGINS = [
     "mordred_hermes.network",
     "mordred_hermes.keyvault",
 ]
-
-
-class _FakeContext:
-    """Capture plugin registration without spinning up a real Hermes session."""
-
-    def __init__(self) -> None:
-        self.hooks: list[tuple[str, object]] = []
-
-    def register_hook(self, hook_name: str, callback: object) -> None:
-        self.hooks.append((hook_name, callback))
-
-    def register_cli_command(self, *args: object, **kwargs: object) -> None:
-        return None
-
-    def register_provider(self, *args: object, **kwargs: object) -> None:
-        return None
 
 
 @pytest.mark.parametrize("module_path", PLUGINS)
