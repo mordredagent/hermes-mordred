@@ -652,30 +652,71 @@ def check_runtime_provider(
         return  # unreachable — _refuse_degraded raises
     active_provider = policy_provider_id(active_provider)
     if active_provider == _LOCAL_PROVIDER_NAME:
-        # Codex review P2 round 7: probe the runtime ``base_url`` (the URL
-        # the request will actually use), not the policy.json mirror —
-        # AIAgent's resolved profile can be stale in long-lived processes
-        # after a ``configure`` rerun. Fall back to policy.json only when
-        # the hook payload doesn't supply a usable base_url (e.g.
-        # synthetic test payloads or future hook payload changes).
-        runtime_endpoint = runtime_base_url if isinstance(runtime_base_url, str) and runtime_base_url.strip() else None
-        if runtime_endpoint is not None and not _local_endpoint_matches_configured(
-            runtime_endpoint,
-            settings.local_endpoint,
-        ):
-            _refuse_local_endpoint_mismatch(
-                audit=audit,
-                runtime_endpoint=runtime_endpoint,
-                configured_endpoint=settings.local_endpoint,
-            )
-        probe_endpoint = runtime_endpoint or settings.local_endpoint
-        _probe_local(
-            audit=_RefuseOnlyAuditWriter(audit),
+        _check_runtime_local(
             settings=settings,
-            health_probe=health_probe or _default_health_probe,
-            probe_endpoint=probe_endpoint,
+            audit=audit,
+            health_probe=health_probe,
+            runtime_base_url=runtime_base_url,
         )
         return
+    _check_runtime_cloud(
+        settings=settings,
+        active_provider=active_provider,
+        audit=audit,
+        runtime_base_url=runtime_base_url,
+        prompt_fn=prompt_fn,
+    )
+
+
+def _check_runtime_local(
+    *,
+    settings: _PolicySettings,
+    audit: _AuditWriter,
+    health_probe: Callable[[str], None] | None,
+    runtime_base_url: str | None,
+) -> None:
+    """``pre_api_request`` phase for a runtime-resolved ``mordred-local``.
+
+    Codex review P2 round 7: probe the runtime ``base_url`` (the URL
+    the request will actually use), not the policy.json mirror —
+    AIAgent's resolved profile can be stale in long-lived processes
+    after a ``configure`` rerun. Fall back to policy.json only when
+    the hook payload doesn't supply a usable base_url (e.g.
+    synthetic test payloads or future hook payload changes).
+    """
+    runtime_endpoint = runtime_base_url if isinstance(runtime_base_url, str) and runtime_base_url.strip() else None
+    if runtime_endpoint is not None and not _local_endpoint_matches_configured(
+        runtime_endpoint,
+        settings.local_endpoint,
+    ):
+        _refuse_local_endpoint_mismatch(
+            audit=audit,
+            runtime_endpoint=runtime_endpoint,
+            configured_endpoint=settings.local_endpoint,
+        )
+    probe_endpoint = runtime_endpoint or settings.local_endpoint
+    _probe_local(
+        audit=_RefuseOnlyAuditWriter(audit),
+        settings=settings,
+        health_probe=health_probe or _default_health_probe,
+        probe_endpoint=probe_endpoint,
+    )
+
+
+def _check_runtime_cloud(
+    *,
+    settings: _PolicySettings,
+    active_provider: str,
+    audit: _AuditWriter,
+    runtime_base_url: str | None,
+    prompt_fn: PromptFn | None,
+) -> None:
+    """``pre_api_request`` phase for a runtime-resolved cloud provider.
+
+    Endpoint binding is validated before the allow-list short-circuit, so an
+    allow-listed provider pointed at a destination it does not own is still
+    refused.
+    """
     provider_allowlisted = active_provider in settings.cloud_allowlist and settings.allow_cloud_llm
     endpoint_bound, runtime_base_url, overridden = _resolve_cloud_endpoint_binding(
         active_provider,
