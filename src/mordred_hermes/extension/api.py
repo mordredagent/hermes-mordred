@@ -507,6 +507,15 @@ class _Connection:
         self._invalidate_authentication()
         await self._send({"id": mid, "type": "pair_complete", **result})
 
+    def _assertion_verifies(self, assertion: object) -> bool:
+        """Whether ``assertion`` is a dict carrying a valid WebAuthn assertion
+        over this connection's nonce and origin (fail-closed on anything else)."""
+        return isinstance(assertion, dict) and pairing.verify_webauthn_assertion(
+            self._nonce,
+            assertion,
+            expected_origin=self.client_origin,
+        )
+
     async def _on_auth(self, msg: dict[str, Any]) -> None:
         token = msg.get("ext_token", "")
         self._invalidate_authentication()
@@ -535,14 +544,7 @@ class _Connection:
         # valid assertion over this connection's nonce.
         webauthn_required = pairing.has_webauthn_credential()
         assertion = msg.get("webauthn_assertion")
-        if webauthn_required and (
-            not isinstance(assertion, dict)
-            or not pairing.verify_webauthn_assertion(
-                self._nonce,
-                assertion,
-                expected_origin=self.client_origin,
-            )
-        ):
+        if webauthn_required and not self._assertion_verifies(assertion):
             await self._send({"type": "auth_fail", "reason": "webauthn_required"})
             return
         final_generation = pairing.authentication_generation_fingerprint(token)
@@ -554,15 +556,7 @@ class _Connection:
             # origin/RP-hash binding. Accept that one in-band migration only
             # after the same signed assertion verifies again against the new
             # stored binding and the resulting auth generation stays stable.
-            if (
-                not webauthn_required
-                or not isinstance(assertion, dict)
-                or not pairing.verify_webauthn_assertion(
-                    self._nonce,
-                    assertion,
-                    expected_origin=self.client_origin,
-                )
-            ):
+            if not webauthn_required or not self._assertion_verifies(assertion):
                 await self._send({"type": "auth_fail", "reason": "pairing_changed"})
                 return
             stable_generation = pairing.authentication_generation_fingerprint(token)
