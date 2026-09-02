@@ -147,6 +147,86 @@ def _vpn_settings_from_existing(existing: Mapping[str, Any]) -> _VpnSettings:
     )
 
 
+def _collect_mullvad_settings(
+    prompt_io: PromptIO, *, existing: Mapping[str, Any], prompt_secret: bool
+) -> tuple[str, str, bool]:
+    """Ask the Mullvad-provider prompts: account secret, relay country, killswitch.
+
+    Split out of :func:`_collect_vpn_settings` (which gates the ``vpn_provider
+    == "mullvad"`` branch); returns the ``(mullvad_account_secret,
+    mullvad_relay_country, mullvad_killswitch)`` slice.
+    """
+    mullvad_account_secret = ""
+    # Blank = keep the current secret (re-run safe). The label says so. When
+    # the caller has already decided to clear the secret (``--clear-mullvad``),
+    # skip the prompt entirely.
+    if prompt_secret:
+        mullvad_account_secret = prompt_io.ask_password(
+            label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
+            default="",
+            description=_MULLVAD_ACCOUNT_DESCRIPTION,
+        )
+    mullvad_relay_country = _coerce_mullvad_relay_country(
+        prompt_io.ask_text(
+            label="Mullvad relay country (`auto` or 2-letter code)",
+            default=str(existing.get("mullvad_relay_country") or "auto"),
+            description=_MULLVAD_RELAY_DESCRIPTION,
+        )
+    )
+    mullvad_killswitch = prompt_io.ask_bool(
+        label="Mullvad killswitch (lockdown-mode)",
+        default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
+        description=_MULLVAD_KILLSWITCH_DESCRIPTION,
+    )
+    return mullvad_account_secret, mullvad_relay_country, mullvad_killswitch
+
+
+def _collect_wireguard_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any]) -> str:
+    """Ask the sole WireGuard-provider prompt: the ``.conf`` path.
+
+    Split out of :func:`_collect_vpn_settings` (which gates the
+    ``vpn_provider == "wireguard"`` branch).
+    """
+    return prompt_io.ask_text(
+        label="WireGuard config path",
+        default=str(existing.get("wireguard_config_path") or ""),
+        description=_WIREGUARD_CONFIG_DESCRIPTION,
+    ).strip()
+
+
+def _collect_custom_settings(
+    prompt_io: PromptIO, *, existing: Mapping[str, Any]
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Ask the custom-provider prompts: up / down / health commands.
+
+    Split out of :func:`_collect_vpn_settings` (which gates the
+    ``vpn_provider == "custom"`` branch); returns the ``(custom_up,
+    custom_down, custom_health)`` slice.
+    """
+    custom_up = _split_cmd(
+        prompt_io.ask_text(
+            label="VPN up command",
+            default=_join_cmd(existing.get("custom_up_cmd")),
+            description=_CUSTOM_UP_DESCRIPTION,
+        )
+    )
+    custom_down = _split_cmd(
+        prompt_io.ask_text(
+            label="VPN down command",
+            default=_join_cmd(existing.get("custom_down_cmd")),
+            description=_CUSTOM_DOWN_DESCRIPTION,
+        )
+    )
+    custom_health = _split_cmd(
+        prompt_io.ask_text(
+            label="VPN health command",
+            default=_join_cmd(existing.get("custom_health_cmd")),
+            description=_CUSTOM_HEALTH_DESCRIPTION,
+        )
+    )
+    return custom_up, custom_down, custom_health
+
+
 def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], prompt_secret: bool) -> _VpnSettings:
     """Ask which VPN provider to use, then only that provider's settings.
 
@@ -183,55 +263,13 @@ def _collect_vpn_settings(prompt_io: PromptIO, *, existing: Mapping[str, Any], p
     custom_health: tuple[str, ...] = ()
 
     if vpn_provider == "mullvad":
-        # Blank = keep the current secret (re-run safe). The label says so. When
-        # the caller has already decided to clear the secret (``--clear-mullvad``),
-        # skip the prompt entirely.
-        if prompt_secret:
-            mullvad_account_secret = prompt_io.ask_password(
-                label="Mullvad account number (blank = keep current; stored in ~/.hermes/.env)",
-                default="",
-                description=_MULLVAD_ACCOUNT_DESCRIPTION,
-            )
-        mullvad_relay_country = _coerce_mullvad_relay_country(
-            prompt_io.ask_text(
-                label="Mullvad relay country (`auto` or 2-letter code)",
-                default=str(existing.get("mullvad_relay_country") or "auto"),
-                description=_MULLVAD_RELAY_DESCRIPTION,
-            )
-        )
-        mullvad_killswitch = prompt_io.ask_bool(
-            label="Mullvad killswitch (lockdown-mode)",
-            default=_coerce_seed_bool(existing.get("mullvad_killswitch", False)),
-            description=_MULLVAD_KILLSWITCH_DESCRIPTION,
+        mullvad_account_secret, mullvad_relay_country, mullvad_killswitch = _collect_mullvad_settings(
+            prompt_io, existing=existing, prompt_secret=prompt_secret
         )
     elif vpn_provider == "wireguard":
-        wireguard_config_path = prompt_io.ask_text(
-            label="WireGuard config path",
-            default=str(existing.get("wireguard_config_path") or ""),
-            description=_WIREGUARD_CONFIG_DESCRIPTION,
-        ).strip()
+        wireguard_config_path = _collect_wireguard_settings(prompt_io, existing=existing)
     elif vpn_provider == "custom":
-        custom_up = _split_cmd(
-            prompt_io.ask_text(
-                label="VPN up command",
-                default=_join_cmd(existing.get("custom_up_cmd")),
-                description=_CUSTOM_UP_DESCRIPTION,
-            )
-        )
-        custom_down = _split_cmd(
-            prompt_io.ask_text(
-                label="VPN down command",
-                default=_join_cmd(existing.get("custom_down_cmd")),
-                description=_CUSTOM_DOWN_DESCRIPTION,
-            )
-        )
-        custom_health = _split_cmd(
-            prompt_io.ask_text(
-                label="VPN health command",
-                default=_join_cmd(existing.get("custom_health_cmd")),
-                description=_CUSTOM_HEALTH_DESCRIPTION,
-            )
-        )
+        custom_up, custom_down, custom_health = _collect_custom_settings(prompt_io, existing=existing)
 
     return _VpnSettings(
         vpn_provider=vpn_provider,
