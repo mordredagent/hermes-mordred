@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +28,7 @@ from mordred_hermes.llm_guard._exceptions import (
     MordredLocalUnreachable,
     MordredSessionRefused,
 )
+from tests._helpers import FakeAuditWriter as _FakeAuditWriter
 
 _LIVE_GATE_ENV = "MORDRED_LIVE_LLM_TEST"
 _LIVE_ENDPOINT_ENV = "MORDRED_LIVE_LLM_ENDPOINT"
@@ -40,14 +40,6 @@ def _live_gated() -> str:
     if os.environ.get(_LIVE_GATE_ENV) != "1":
         pytest.skip(f"set {_LIVE_GATE_ENV}=1 to run live LM Studio / Ollama integration tests")
     return os.environ.get(_LIVE_ENDPOINT_ENV, _DEFAULT_LIVE_ENDPOINT)
-
-
-class _FakeAuditWriter:
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def append(self, entry: Mapping[str, Any]) -> None:
-        self.entries.append(entry)
 
 
 def _write_policy_json(tmp_path: Path, endpoint: str) -> Path:

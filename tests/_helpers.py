@@ -11,12 +11,20 @@ from multiple test modules (test-infrastructure refactor).
 ``_writer`` namespaces paths under a ``hermes/`` subdirectory — and keeps its
 own copy).
 
+``FakeAuditWriter`` was duplicated verbatim (as ``_FakeAuditWriter``) across
+``test_enforce.py``, ``test_enforce_audit.py``, ``test_enforce_prompt.py``,
+``test_harness_detect.py``, and ``integration/test_llm_local.py``; each of
+those modules now imports this shared copy under its original
+``_FakeAuditWriter`` local name so call sites are unchanged.
+
 Not a ``test_*`` module, so pytest does not collect it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from mordred_hermes.keyvault import _identity, vault
 from mordred_hermes.wizard.policy_writer import PolicyWriter
@@ -24,6 +32,16 @@ from mordred_hermes.wizard.policy_writer import PolicyWriter
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 
 _PASSPHRASE = "correct horse battery staple"
+
+
+class FakeAuditWriter:
+    """Captures audit appends so tests can assert reason / decision / fields."""
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+
+    def append(self, entry: Mapping[str, Any]) -> None:
+        self.entries.append(entry)
 
 
 def _init_empty_vault(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> None:

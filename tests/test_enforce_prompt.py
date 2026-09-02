@@ -17,14 +17,15 @@ Patterns mirror ``test_enforce.py``:
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from mordred_hermes.llm_guard import enforce
 from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
+
+from ._helpers import FakeAuditWriter as _FakeAuditWriter
 
 
 @pytest.fixture(autouse=True)
@@ -32,14 +33,6 @@ def _reset() -> Iterator[None]:
     enforce._reset_state()
     yield
     enforce._reset_state()
-
-
-class _FakeAuditWriter:
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def append(self, entry: Mapping[str, Any]) -> None:
-        self.entries.append(entry)
 
 
 class _PromptSpy:

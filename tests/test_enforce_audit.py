@@ -13,7 +13,6 @@ shared fixtures — it focuses solely on the audit-shape contract.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,13 +21,7 @@ import pytest
 from mordred_hermes.llm_guard import enforce
 from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
 
-
-class _FakeAuditWriter:
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def append(self, entry: Mapping[str, Any]) -> None:
-        self.entries.append(entry)
+from ._helpers import FakeAuditWriter as _FakeAuditWriter
 
 
 def _noop_probe(_endpoint: str) -> None:

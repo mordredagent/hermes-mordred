@@ -38,15 +38,7 @@ from mordred_hermes.llm_guard._exceptions import (
     MordredSessionRefused,
 )
 
-
-class _FakeAuditWriter:
-    """Captures audit appends so tests can assert reason / decision / fields."""
-
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def append(self, entry: Mapping[str, Any]) -> None:
-        self.entries.append(entry)
+from ._helpers import FakeAuditWriter as _FakeAuditWriter
 
 
 def _noop_probe(_endpoint: str) -> None:
