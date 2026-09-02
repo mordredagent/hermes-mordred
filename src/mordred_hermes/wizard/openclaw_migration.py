@@ -41,12 +41,10 @@ from .._audit_io import audit_lock_path, audit_path_stat, exclusive_audit_lock, 
 from .._log_rotation import utcnow_iso as _utcnow_iso
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section
+from ._atomic_io import _atomic_write_text, _fsync_durable, _fsync_parent
 from .policy_writer import (
     PolicySnapshot,
     PolicyWriter,
-    _atomic_write_text,
-    _fsync_durable,
-    _fsync_parent,
     _policy_write_lock,
     _preserve_provider_overrides,
     _section_matches_dict,

@@ -13,7 +13,7 @@ Contract (mirrors PATHS.md §193 "credentials directory"):
   prompt removes the stale secret instead of leaving ``KEY=`` empty).
 - Refuses non-POSIX env-var names + values containing newlines (defence
   in depth against shell-injection from a maliciously edited config).
-- Atomic write via :func:`mordred_hermes.wizard.policy_writer._atomic_write_text`
+- Atomic write via :func:`mordred_hermes.wizard._atomic_io._atomic_write_text`
   so a crash mid-write leaves the previous file intact.
 """
 
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import NoReturn, Protocol, runtime_checkable
 
 from .._file_lock import private_flock
-from .policy_writer import _atomic_write_text, _ensure_real_directory, _read_regular_text
+from ._atomic_io import _atomic_write_text, _ensure_real_directory, _read_regular_text
 
 # POSIX env-var name: start with letter/underscore, followed by alnum/underscore.
 # We also require at least one uppercase letter -- Mordred owns the
