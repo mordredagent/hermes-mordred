@@ -201,6 +201,31 @@ def _guard_resolved_client(
     )
 
 
+def _prepare_rebind(module: Any, name: str, bound_paths: tuple[Path, Path]) -> Callable[..., Any] | None:
+    """Return the callable to wrap, or ``None`` when the seam is already guarded.
+
+    ``None`` means ``module.name`` is our own wrapper bound to these exact
+    policy/audit paths, so rebinding it would be a no-op. A wrapper bound to
+    different paths is unwrapped via ``__wrapped__`` so guards never stack.
+    """
+    current = getattr(module, name)
+    if bool(getattr(current, _WRAPPED_MARKER, False)) and getattr(current, _BOUND_PATHS_MARKER, None) == bound_paths:
+        return None
+    original: Callable[..., Any] | None = (
+        getattr(current, "__wrapped__", None) if bool(getattr(current, _WRAPPED_MARKER, False)) else current
+    )
+    if not callable(original):
+        raise RuntimeError(f"Hermes auxiliary resolver {name!r} cannot be rebound")
+    return original
+
+
+def _finish_rebind(module: Any, name: str, guarded: Callable[..., Any], bound_paths: tuple[Path, Path]) -> None:
+    """Stamp the guard markers onto ``guarded`` and bind it onto the module."""
+    setattr(guarded, _WRAPPED_MARKER, True)
+    setattr(guarded, _BOUND_PATHS_MARKER, bound_paths)
+    setattr(module, name, guarded)
+
+
 def _wrap_pair_resolver(
     module: Any,
     name: str,
@@ -209,12 +234,9 @@ def _wrap_pair_resolver(
     audit_path: Path,
 ) -> None:
     bound_paths = (policy_json_path, audit_path)
-    current = getattr(module, name)
-    if bool(getattr(current, _WRAPPED_MARKER, False)) and getattr(current, _BOUND_PATHS_MARKER, None) == bound_paths:
+    original = _prepare_rebind(module, name, bound_paths)
+    if original is None:
         return
-    original = getattr(current, "__wrapped__", None) if bool(getattr(current, _WRAPPED_MARKER, False)) else current
-    if not callable(original):
-        raise RuntimeError(f"Hermes auxiliary resolver {name!r} cannot be rebound")
 
     @functools.wraps(original)
     def guarded(provider: object, *args: Any, **kwargs: Any) -> Any:
@@ -228,9 +250,7 @@ def _wrap_pair_resolver(
             )
         return result
 
-    setattr(guarded, _WRAPPED_MARKER, True)
-    setattr(guarded, _BOUND_PATHS_MARKER, bound_paths)
-    setattr(module, name, guarded)
+    _finish_rebind(module, name, guarded, bound_paths)
 
 
 def _wrap_vision_resolver(
@@ -241,12 +261,9 @@ def _wrap_vision_resolver(
 ) -> None:
     name = "resolve_vision_provider_client"
     bound_paths = (policy_json_path, audit_path)
-    current = getattr(module, name)
-    if bool(getattr(current, _WRAPPED_MARKER, False)) and getattr(current, _BOUND_PATHS_MARKER, None) == bound_paths:
+    original = _prepare_rebind(module, name, bound_paths)
+    if original is None:
         return
-    original = getattr(current, "__wrapped__", None) if bool(getattr(current, _WRAPPED_MARKER, False)) else current
-    if not callable(original):
-        raise RuntimeError(f"Hermes auxiliary resolver {name!r} cannot be rebound")
 
     @functools.wraps(original)
     def guarded(*args: Any, **kwargs: Any) -> Any:
@@ -260,9 +277,7 @@ def _wrap_vision_resolver(
             )
         return result
 
-    setattr(guarded, _WRAPPED_MARKER, True)
-    setattr(guarded, _BOUND_PATHS_MARKER, bound_paths)
-    setattr(module, name, guarded)
+    _finish_rebind(module, name, guarded, bound_paths)
 
 
 def _wrap_provider_chain(
@@ -273,12 +288,9 @@ def _wrap_provider_chain(
 ) -> None:
     name = "_get_provider_chain"
     bound_paths = (policy_json_path, audit_path)
-    current = getattr(module, name)
-    if bool(getattr(current, _WRAPPED_MARKER, False)) and getattr(current, _BOUND_PATHS_MARKER, None) == bound_paths:
+    original = _prepare_rebind(module, name, bound_paths)
+    if original is None:
         return
-    original = getattr(current, "__wrapped__", None) if bool(getattr(current, _WRAPPED_MARKER, False)) else current
-    if not callable(original):
-        raise RuntimeError(f"Hermes auxiliary resolver {name!r} cannot be rebound")
 
     @functools.wraps(original)
     def guarded() -> list[tuple[str, Callable[..., Any]]]:
@@ -305,9 +317,7 @@ def _wrap_provider_chain(
             result.append((label, guarded_candidate))
         return result
 
-    setattr(guarded, _WRAPPED_MARKER, True)
-    setattr(guarded, _BOUND_PATHS_MARKER, bound_paths)
-    setattr(module, name, guarded)
+    _finish_rebind(module, name, guarded, bound_paths)
 
 
 def install(*, policy_json_path: Path, audit_path: Path) -> bool:
