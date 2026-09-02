@@ -52,7 +52,7 @@ from .discord_context import (
 )
 from .errors import wire_error_code
 from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
-from .webauthn import InvalidWebAuthnPublicKey
+from .webauthn import InvalidWebAuthnPublicKey, _parse_extension_origin
 
 # K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
 _EXTCHAT_SALT = "mordred-extchat-v1"
@@ -180,20 +180,7 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 def _is_extension_origin(origin: str | None) -> bool:
     if origin is None:
         return False
-    try:
-        parsed = urlsplit(origin)
-        return bool(
-            parsed.scheme in {"chrome-extension", "moz-extension"}
-            and parsed.hostname
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port is None
-            and not parsed.path
-            and not parsed.query
-            and not parsed.fragment
-        )
-    except ValueError:
-        return False
+    return _parse_extension_origin(origin) is not None
 
 
 def _is_loopback_host(host: str) -> bool:
