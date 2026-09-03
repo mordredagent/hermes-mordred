@@ -30,6 +30,7 @@ from mordred_hermes.keyvault import digest as kvdigest
 from mordred_hermes.keyvault import pow as kvpow
 from mordred_hermes.keyvault.network_fallback import BlackoutNotAsserted
 from mordred_hermes.wizard import keyvault_cli
+from tests._helpers import assert_json_flag_wired
 from tests._keyvault_fakes import FakeBackend
 
 
@@ -1480,12 +1481,7 @@ class TestListJson:
         assert json.loads(capsys.readouterr().out) == []
 
     def test_list_json_flag_is_wired(self) -> None:
-        from mordred_hermes.wizard import cli
-
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        cli._setup_subparser(parser)
-        ns = parser.parse_args(["keyvault", "list", "--json"])
-        assert ns.json is True
+        assert_json_flag_wired(["keyvault", "list", "--json"])
 
 
 class TestTerminalSeedSurface:

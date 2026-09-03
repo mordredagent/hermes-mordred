@@ -27,6 +27,8 @@ import pytest
 
 from mordred_hermes.network._exceptions import BringupFailed, PathSwitchRequiresRestart, UnknownPath
 
+from ._helpers import assert_json_flag_wired
+
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
 # --------------------------------------------------------------------------- #
@@ -713,12 +715,7 @@ class TestStatusJson:
         assert body["configured_path"] == "clearnet"
 
     def test_status_json_flag_is_wired(self) -> None:
-        from mordred_hermes.wizard import cli
-
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        cli._setup_subparser(parser)
-        ns = parser.parse_args(["network", "status", "--json"])
-        assert ns.json is True
+        assert_json_flag_wired(["network", "status", "--json"])
 
 
 class TestErrorColour:

@@ -12,6 +12,7 @@ from mordred_hermes.keyvault import kek, manifest, vault
 from mordred_hermes.wizard import vault_cli
 from mordred_hermes.wizard._prompt_io import _RefusingPromptIO
 
+from ._helpers import assert_json_flag_wired
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
 from ._wizard_vault_cli_helpers import _KEY_ID, _LABEL, _PASSPHRASE, _build_vault, _PromptIO
 
@@ -274,9 +275,4 @@ class TestStatusJson:
         assert body["read_only"] is True
 
     def test_status_json_flag_is_wired(self) -> None:
-        from mordred_hermes.wizard import cli
-
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        cli._setup_subparser(parser)
-        ns = parser.parse_args(["vault", "status", "--json"])
-        assert ns.json is True
+        assert_json_flag_wired(["vault", "status", "--json"])

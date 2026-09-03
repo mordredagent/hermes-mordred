@@ -30,12 +30,16 @@ and exposes ``hook_names`` / ``callbacks_for`` as views over it, so
 duplicate name-only list — the checks themselves are unchanged, only how
 they reach the data.
 
+``assert_json_flag_wired`` was duplicated verbatim (as
+``test_*_json_flag_is_wired``) across ``test_wizard_vault_cli_inspection.py``,
+``test_wizard_keyvault_cli.py``, and ``test_wizard_network_cli.py``.
+
 Not a ``test_*`` module, so pytest does not collect it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -105,3 +109,17 @@ def _writer(tmp_path: Path) -> PolicyWriter:
         policy_json_path=tmp_path / "mordred" / "policy.json",
         mordred_dir=tmp_path / "mordred",
     )
+
+
+def assert_json_flag_wired(argv: Sequence[str]) -> None:
+    """Assert that parsing ``argv`` (e.g. ``["vault", "status", "--json"]``)
+    through the real top-level parser yields ``ns.json is True`` — i.e. the
+    subcommand's ``--json`` flag is correctly wired up."""
+    import argparse
+
+    from mordred_hermes.wizard import cli
+
+    parser = argparse.ArgumentParser(prog="hermes-mordred")
+    cli._setup_subparser(parser)
+    ns = parser.parse_args(list(argv))
+    assert ns.json is True
