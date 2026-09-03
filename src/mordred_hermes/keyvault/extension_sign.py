@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import ethereum
+from ._canonical_json import canonical_json_bytes
 
 # Facade re-exports. The redundant ``as`` alias is the form mypy's
 # ``no_implicit_reexport`` (implied by ``--strict``) recognizes as an explicit
@@ -264,7 +265,7 @@ def _load_wallet_cfg() -> dict[str, Any]:
 def set_wallet(cfg: dict[str, Any]) -> None:
     """Validate and durably persist the extension wallet config."""
     validated = _normalize_wallet_cfg(cfg)
-    payload = json.dumps(validated, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = canonical_json_bytes(validated)
     if len(payload) > _WALLET_CONFIG_MAX_BYTES:
         _raise_wallet_config_error()
     with _WALLET_THREAD_LOCK:

@@ -54,6 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from ._canonical_json import canonical_json_bytes
 from .kek import MasterKey
 
 MAGIC: Final = "MVMF"
@@ -112,7 +113,7 @@ def _body_bytes(manifest: VaultManifest) -> bytes:
         "files": dict(manifest.files),
         "generation": manifest.generation,
     }
-    return json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return canonical_json_bytes(body)
 
 
 def encode(manifest: VaultManifest, master: MasterKey) -> bytes:

@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from .._home import hermes_home as _hermes_home
+from ._canonical_json import canonical_json_bytes
 
 _META_VERSION = 1
 _FILE_MODE = 0o600
@@ -846,7 +847,7 @@ def keyvault_lock(root: Path) -> Iterator[None]:
 
 def _write_meta_atomic(path: Path, meta: dict[str, Any]) -> None:
     """Internal: serialize ``meta`` as canonical JSON and atomic-write to ``path``."""
-    data = json.dumps(meta, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    data = canonical_json_bytes(meta)
     atomic_write(path, data)
 
 

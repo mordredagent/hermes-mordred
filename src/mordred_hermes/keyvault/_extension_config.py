@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .._file_lock import private_flock
+from ._canonical_json import canonical_json_text
 
 _WALLET_FILE = "wallet.json"
 _WALLET_LOCK_FILE = ".wallet.lock"
@@ -318,7 +319,7 @@ def _normalize_wallet_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     mutate the already-approved object.
     """
     try:
-        encoded = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+        encoded = canonical_json_text(cfg)
         data = json.loads(encoded, object_pairs_hook=_wallet_json_object)
     except (TypeError, ValueError, RuntimeError):
         _raise_wallet_config_error()

@@ -519,6 +519,64 @@ def recover_to_device(
         return opened
 
 
+def _change_passphrase_via_device(
+    root: Path,
+    *,
+    new_passphrase: str,
+    key_id: str,
+    backend: NativeBackend | None,
+    store: AnchorStore | None,
+    anchor_label: str,
+) -> None:
+    """Device-key branch of :func:`change_passphrase` (``old_passphrase is None``).
+
+    Authorization, locking order and failure modes are documented on
+    :func:`change_passphrase`; this is the branch body only.
+    """
+    # Device-key path: pin-check the anchor, then trust the manifest wmk.
+    if backend is None or store is None:
+        raise VaultError("device-key rotation requires a backend and an anchor store")
+    _read_recovery_blob(root, action="not a vault, or it is corrupt")
+    # The unwrap inside rewrap_from_device is the interactive (Touch ID)
+    # step — run it outside the lock; see the docstring's locking note.
+    _blob, untrusted = _load_pinned_unverified(
+        root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
+    )
+    new_recovery = vault_master.rewrap_from_device(
+        key_id=key_id, new_passphrase=new_passphrase, backend=backend, wmk=untrusted.wmk
+    )
+    with keyvault_lock(root):
+        # Re-pin under the lock: a re-key that landed during the prompt
+        # minted a new wmk, and our sidecar certifies only the old one.
+        _blob, current = _load_pinned_unverified(
+            root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
+        )
+        if current.wmk != untrusted.wmk:
+            raise VaultError(
+                "the vault was re-keyed while the rotation was awaiting device "
+                "authorization; rerun change-passphrase against the new state"
+            )
+        atomic_write(root / _RECOVERY_NAME, new_recovery)
+
+
+def _change_passphrase_via_old(root: Path, *, new_passphrase: str, old_passphrase: str) -> None:
+    """Cold-passphrase branch of :func:`change_passphrase` (``old_passphrase`` given).
+
+    Authorization, locking order and failure modes are documented on
+    :func:`change_passphrase`; this is the branch body only.
+    """
+    with keyvault_lock(root):
+        recovery_blob = _read_recovery_blob(root, action="not a vault, or it is corrupt")
+        # Cold path: the sidecar's SHA-256(wmk) digest binds it to the real
+        # wmk, so pick the newest manifest the sidecar certifies (tolerant of
+        # a crash mid recover_to_device; no anchor to name it here).
+        _generation, _blob, untrusted = _load_recovery_matched_unverified(root, recovery_blob, action="cannot rotate")
+        new_recovery = vault_master.rewrap_from_passphrase(
+            recovery_blob, old_passphrase, new_passphrase, wmk=untrusted.wmk
+        )
+        atomic_write(root / _RECOVERY_NAME, new_recovery)
+
+
 def change_passphrase(
     root: Path,
     *,
@@ -580,43 +638,16 @@ def change_passphrase(
     _ensure_lock(root)
 
     if old_passphrase is None:
-        # Device-key path: pin-check the anchor, then trust the manifest wmk.
-        if backend is None or store is None:
-            raise VaultError("device-key rotation requires a backend and an anchor store")
-        _read_recovery_blob(root, action="not a vault, or it is corrupt")
-        # The unwrap inside rewrap_from_device is the interactive (Touch ID)
-        # step — run it outside the lock; see the docstring's locking note.
-        _blob, untrusted = _load_pinned_unverified(
-            root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
+        _change_passphrase_via_device(
+            root,
+            new_passphrase=new_passphrase,
+            key_id=key_id,
+            backend=backend,
+            store=store,
+            anchor_label=anchor_label,
         )
-        new_recovery = vault_master.rewrap_from_device(
-            key_id=key_id, new_passphrase=new_passphrase, backend=backend, wmk=untrusted.wmk
-        )
-        with keyvault_lock(root):
-            # Re-pin under the lock: a re-key that landed during the prompt
-            # minted a new wmk, and our sidecar certifies only the old one.
-            _blob, current = _load_pinned_unverified(
-                root, store=store, anchor_label=anchor_label, missing_detail="vault is corrupt"
-            )
-            if current.wmk != untrusted.wmk:
-                raise VaultError(
-                    "the vault was re-keyed while the rotation was awaiting device "
-                    "authorization; rerun change-passphrase against the new state"
-                )
-            atomic_write(root / _RECOVERY_NAME, new_recovery)
     else:
-        with keyvault_lock(root):
-            recovery_blob = _read_recovery_blob(root, action="not a vault, or it is corrupt")
-            # Cold path: the sidecar's SHA-256(wmk) digest binds it to the real
-            # wmk, so pick the newest manifest the sidecar certifies (tolerant of
-            # a crash mid recover_to_device; no anchor to name it here).
-            _generation, _blob, untrusted = _load_recovery_matched_unverified(
-                root, recovery_blob, action="cannot rotate"
-            )
-            new_recovery = vault_master.rewrap_from_passphrase(
-                recovery_blob, old_passphrase, new_passphrase, wmk=untrusted.wmk
-            )
-            atomic_write(root / _RECOVERY_NAME, new_recovery)
+        _change_passphrase_via_old(root, new_passphrase=new_passphrase, old_passphrase=old_passphrase)
 
 
 class OpenVault:
