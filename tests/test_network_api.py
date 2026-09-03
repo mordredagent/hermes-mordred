@@ -43,26 +43,13 @@ class _FakeRuntime:
 
 
 class TestUse:
-    def test_clearnet_dispatches(self) -> None:
+    @pytest.mark.parametrize("path", ["clearnet", "tor", "vpn"])
+    def test_dispatches(self, path: str) -> None:
         from mordred_hermes.network import api
 
         rt = _FakeRuntime()
-        api.use("clearnet", runtime=rt)
-        assert rt.use_calls == ["clearnet"]
-
-    def test_tor_dispatches(self) -> None:
-        from mordred_hermes.network import api
-
-        rt = _FakeRuntime()
-        api.use("tor", runtime=rt)
-        assert rt.use_calls == ["tor"]
-
-    def test_vpn_dispatches(self) -> None:
-        from mordred_hermes.network import api
-
-        rt = _FakeRuntime()
-        api.use("vpn", runtime=rt)
-        assert rt.use_calls == ["vpn"]
+        api.use(path, runtime=rt)  # type: ignore[arg-type]
+        assert rt.use_calls == [path]
 
     def test_unknown_path_raises(self) -> None:
         from mordred_hermes.network import api

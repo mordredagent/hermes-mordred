@@ -5,11 +5,11 @@ the wrap / AES-KW / AES-GCM paths run with real crypto on any platform
 (``enclave_ecdh`` performs a real ECDH; ``denied_reason`` simulates an
 authorization-prompt denial).
 
-Mirrors the per-module ``FakeBackend`` in ``test_keyvault_wrap.py`` /
-``test_keyvault_log_encryption.py`` — PR10 introduces this shared copy
-rather than duplicating it a sixth time for the new CLI tests. The
-existing per-module copies are intentionally left untouched;
-consolidating them is a separate cleanup.
+Mirrors the per-module ``FakeBackend`` previously duplicated in
+``test_keyvault_wrap.py`` / ``test_keyvault_log_encryption.py`` — PR10
+introduced this shared copy rather than duplicating it a sixth time for
+the new CLI tests, and both of those modules now import it directly
+instead of keeping their own copies.
 
 Not a ``test_*`` module, so pytest does not collect it.
 """

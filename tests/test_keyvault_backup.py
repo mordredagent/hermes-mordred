@@ -314,47 +314,31 @@ class TestStructuralValidation:
         with pytest.raises(backup.BackupCorrupt, match="kdf"):
             backup.parse_header(bytes(blob))
 
-    def test_excessive_m_cost_raises_backup_corrupt(self) -> None:
-        """DOS guard: a tampered ``m_cost`` MSB → 16+ GiB Argon2
-        allocation request would hang/OOM the host. parse_header must
-        reject before the KDF runs."""
+    @pytest.mark.parametrize(
+        ("field_slice", "tampered_value", "match"),
+        [
+            # Tampered m_cost MSB -> 16+ GiB Argon2 allocation request
+            # would hang/OOM the host.
+            pytest.param(slice(6, 10), 2 * 1024 * 1024, "m_cost", id="excessive_m_cost"),
+            # Tampered t_cost MSB -> 16M iterations would run for years.
+            pytest.param(slice(10, 14), 1_000_000, "t_cost", id="excessive_t_cost"),
+            # Tampered p_cost MSB -> millions of threads would exhaust
+            # the system.
+            pytest.param(slice(14, 18), 100, "p_cost", id="excessive_p_cost"),
+            # m_cost=0 would let an attacker bypass the KDF entirely
+            # (free brute-force on the passphrase).
+            pytest.param(slice(6, 10), 0, "m_cost", id="zero_m_cost"),
+        ],
+    )
+    def test_cost_field_raises_backup_corrupt(self, field_slice: slice, tampered_value: int, match: str) -> None:
+        """DOS guards: parse_header must reject a tampered/zeroed cost
+        field before any KDF work runs — see the per-case comments above
+        for what each tampered value would otherwise let an attacker do."""
         from mordred_hermes.keyvault import backup
 
         blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        # Rewrite m_cost field (offset 6, 4 bytes BE) to 2 GiB worth of
-        # KiB — well above the 1 GiB cap.
-        blob[6:10] = (2 * 1024 * 1024).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match="m_cost"):
-            backup.parse_header(bytes(blob))
-
-    def test_excessive_t_cost_raises_backup_corrupt(self) -> None:
-        """DOS guard: tampered ``t_cost`` MSB → 16M iterations would
-        run for years. parse_header rejects."""
-        from mordred_hermes.keyvault import backup
-
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        blob[10:14] = (1_000_000).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match="t_cost"):
-            backup.parse_header(bytes(blob))
-
-    def test_excessive_p_cost_raises_backup_corrupt(self) -> None:
-        """DOS guard: tampered ``p_cost`` MSB → millions of threads
-        would exhaust the system."""
-        from mordred_hermes.keyvault import backup
-
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        blob[14:18] = (100).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match="p_cost"):
-            backup.parse_header(bytes(blob))
-
-    def test_zero_m_cost_raises_backup_corrupt(self) -> None:
-        """``m_cost=0`` would let an attacker bypass the KDF entirely
-        (free brute-force on the passphrase). Reject."""
-        from mordred_hermes.keyvault import backup
-
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        blob[6:10] = (0).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match="m_cost"):
+        blob[field_slice] = tampered_value.to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match=match):
             backup.parse_header(bytes(blob))
 
 
@@ -373,34 +357,27 @@ class TestCanonicalKdfProfileV1:
     check dispatches on version.
     """
 
-    def test_within_cap_but_non_canonical_m_cost_raises(self) -> None:
-        """``m_cost=512 MiB`` is well within the 1 GiB DOS cap and a
-        plausible "stronger profile" attacker substitution, but it's
-        not the v1 canonical value. Must reject at parse_header."""
+    @pytest.mark.parametrize(
+        ("field_slice", "tampered_value", "match"),
+        [
+            # 512 MiB in KiB = 524288, within cap (1 GiB = 1048576 KiB),
+            # a plausible "stronger profile" attacker substitution, but
+            # not the v1 canonical value.
+            pytest.param(slice(6, 10), 512 * 1024, r"canonical|m_cost", id="non_canonical_m_cost"),
+            # t_cost=4 is within the cap of 64 but != canonical 1.
+            pytest.param(slice(10, 14), 4, r"canonical|t_cost", id="non_canonical_t_cost"),
+            # p_cost=2 is within the cap of 16 but != canonical 1.
+            pytest.param(slice(14, 18), 2, r"canonical|p_cost", id="non_canonical_p_cost"),
+        ],
+    )
+    def test_within_cap_but_non_canonical_raises(self, field_slice: slice, tampered_value: int, match: str) -> None:
+        """Each tampered value is well within the DOS cap but not the v1
+        canonical profile. Must reject at parse_header."""
         from mordred_hermes.keyvault import backup
 
         blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        # 512 MiB in KiB = 524288, within cap (1 GiB = 1048576 KiB).
-        blob[6:10] = (512 * 1024).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match=r"canonical|m_cost"):
-            backup.parse_header(bytes(blob))
-
-    def test_within_cap_but_non_canonical_t_cost_raises(self) -> None:
-        """t_cost=4 is within the cap of 64 but != canonical 1."""
-        from mordred_hermes.keyvault import backup
-
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        blob[10:14] = (4).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match=r"canonical|t_cost"):
-            backup.parse_header(bytes(blob))
-
-    def test_within_cap_but_non_canonical_p_cost_raises(self) -> None:
-        """p_cost=2 is within the cap of 16 but != canonical 1."""
-        from mordred_hermes.keyvault import backup
-
-        blob = bytearray(backup.export(SECRET, PASSPHRASE, verification_digest=DIGEST_FIXTURE))
-        blob[14:18] = (2).to_bytes(4, "big")
-        with pytest.raises(backup.BackupCorrupt, match=r"canonical|p_cost"):
+        blob[field_slice] = tampered_value.to_bytes(4, "big")
+        with pytest.raises(backup.BackupCorrupt, match=match):
             backup.parse_header(bytes(blob))
 
     def test_canonical_profile_roundtrips_unchanged(self) -> None:

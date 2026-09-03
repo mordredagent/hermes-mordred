@@ -572,41 +572,29 @@ class TestCircuitStatusHealth:
 
         assert tor.circuit_status_health(handle, controller_factory=factory) is False
 
-    def test_built_among_malformed_lines_returns_true(self, tmp_path: Path) -> None:
-        """A proven BUILT circuit must not be vetoed by an unparseable
-        sibling line (review 2026-07-29: one out-of-grammar line from an
-        older/forked Tor must not sticky-drop a path that is routing)."""
+    @pytest.mark.parametrize(
+        "response",
+        [
+            # A proven BUILT circuit must not be vetoed by an unparseable
+            # sibling line (review 2026-07-29: one out-of-grammar line
+            # from an older/forked Tor must not sticky-drop a path that
+            # is routing).
+            pytest.param("!!garbage!!\n43 BUILT $def", id="built_among_malformed_lines"),
+            # Older Tor may echo the key attached to the first data line
+            # (``circuit-status=8 BUILT …``), not only as a standalone line.
+            pytest.param("circuit-status=8 BUILT $abc", id="attached_echo_prefix"),
+            # A whitespace-indented standalone echo (`` circuit-status=``)
+            # must read as the tolerated echo, not as a malformed line
+            # (review 2026-07-29: the strip-based pre-rewrite check
+            # accepted it).
+            pytest.param(" circuit-status=\n42 BUILT $abc", id="echo_line_with_leading_whitespace"),
+        ],
+    )
+    def test_built_circuit_among_tolerated_noise_returns_true(self, tmp_path: Path, response: str) -> None:
         from mordred_hermes.network.paths import tor
 
         handle = self._make_handle(tmp_path)
-        fake = _FakeController(get_info_response="!!garbage!!\n43 BUILT $def")
-
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
-
-    def test_attached_echo_prefix_is_tolerated(self, tmp_path: Path) -> None:
-        """Older Tor may echo the key attached to the first data line
-        (``circuit-status=8 BUILT …``), not only as a standalone line."""
-        from mordred_hermes.network.paths import tor
-
-        handle = self._make_handle(tmp_path)
-        fake = _FakeController(get_info_response="circuit-status=8 BUILT $abc")
-
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
-
-    def test_echo_line_with_leading_whitespace_is_tolerated(self, tmp_path: Path) -> None:
-        """A whitespace-indented standalone echo (`` circuit-status=``) must
-        read as the tolerated echo, not as a malformed line (review
-        2026-07-29: the strip-based pre-rewrite check accepted it)."""
-        from mordred_hermes.network.paths import tor
-
-        handle = self._make_handle(tmp_path)
-        fake = _FakeController(get_info_response=" circuit-status=\n42 BUILT $abc")
+        fake = _FakeController(get_info_response=response)
 
         def factory(*, host: str, port: int) -> _FakeController:
             return fake
@@ -632,23 +620,19 @@ class TestCircuitStatusHealth:
 
         assert tor.circuit_status_health(handle, controller_factory=factory) is False
 
-    def test_terminal_and_healthy_circuits_return_true(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param("42 FAILED $abc REASON=TIMEOUT\n43 BUILT $def", id="terminal_and_healthy_circuits"),
+            # A newer Tor status must not create a sticky false drop.
+            pytest.param("42 PATH_BIAS_RECOVERY $abc", id="future_well_formed_status"),
+        ],
+    )
+    def test_non_terminal_or_future_status_returns_true(self, tmp_path: Path, response: str) -> None:
         from mordred_hermes.network.paths import tor
 
         handle = self._make_handle(tmp_path)
-        fake = _FakeController(get_info_response="42 FAILED $abc REASON=TIMEOUT\n43 BUILT $def")
-
-        def factory(*, host: str, port: int) -> _FakeController:
-            return fake
-
-        assert tor.circuit_status_health(handle, controller_factory=factory) is True
-
-    def test_future_well_formed_status_returns_true(self, tmp_path: Path) -> None:
-        """A newer Tor status must not create a sticky false drop."""
-        from mordred_hermes.network.paths import tor
-
-        handle = self._make_handle(tmp_path)
-        fake = _FakeController(get_info_response="42 PATH_BIAS_RECOVERY $abc")
+        fake = _FakeController(get_info_response=response)
 
         def factory(*, host: str, port: int) -> _FakeController:
             return fake

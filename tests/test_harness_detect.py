@@ -27,14 +27,7 @@ from typing import Any
 
 import pytest
 
-
-# Tiny audit writer double — captures appended dicts for assertions.
-class _FakeAuditWriter:
-    def __init__(self) -> None:
-        self.entries: list[dict[str, Any]] = []
-
-    def append(self, entry: Mapping[str, Any]) -> None:
-        self.entries.append(entry)
+from ._helpers import FakeAuditWriter as _FakeAuditWriter
 
 
 def _write_config(tmp_path: Path, harness_primary: str | None) -> Path:

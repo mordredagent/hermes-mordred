@@ -761,58 +761,25 @@ class TestPolicyReadFailClosed:
         rt.dropped = True
         api.set_runtime(rt)
 
-    def test_corrupt_json_dropped_refuses(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("{not json", id="corrupt_json"),
+            # A directory at the policy path raises OSError on open().
+            pytest.param(None, id="unreadable_policy_path"),
+            pytest.param('["strict"]', id="non_dict_root"),
+            pytest.param('{"policy": "bogus"}', id="invalid_mode_value"),
+        ],
+    )
+    def test_policy_read_failure_dropped_refuses(self, tmp_path: Path, content: str | None) -> None:
         from mordred_hermes.network import hooks
 
         self._dropped_runtime()
         policy = tmp_path / "policy.json"
-        policy.write_text("{not json", encoding="utf-8")
-        config = _write_config(tmp_path, "tor")
-        with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
-
-    def test_unreadable_policy_path_dropped_refuses(self, tmp_path: Path) -> None:
-        """A directory at the policy path raises OSError on open()."""
-        from mordred_hermes.network import hooks
-
-        self._dropped_runtime()
-        policy = tmp_path / "policy.json"
-        policy.mkdir()
-        config = _write_config(tmp_path, "tor")
-        with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
-
-    def test_non_dict_root_dropped_refuses(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import hooks
-
-        self._dropped_runtime()
-        policy = tmp_path / "policy.json"
-        policy.write_text('["strict"]', encoding="utf-8")
-        config = _write_config(tmp_path, "tor")
-        with pytest.raises(MordredPathDropped):
-            hooks.pre_tool_call(
-                tool_name="web_fetch",
-                policy_json_path=policy,
-                config_path=config,
-                audit=_FakeAudit(),
-            )
-
-    def test_invalid_mode_value_dropped_refuses(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import hooks
-
-        self._dropped_runtime()
-        policy = tmp_path / "policy.json"
-        policy.write_text('{"policy": "bogus"}', encoding="utf-8")
+        if content is None:
+            policy.mkdir()
+        else:
+            policy.write_text(content, encoding="utf-8")
         config = _write_config(tmp_path, "tor")
         with pytest.raises(MordredPathDropped):
             hooks.pre_tool_call(

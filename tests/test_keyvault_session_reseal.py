@@ -23,6 +23,8 @@ import pytest
 from mordred_hermes.keyvault import _env_write_guard
 from mordred_hermes.keyvault._runtime_env import _env_optout_marker_path
 
+from ._helpers import FakePluginContext as _FakeCtx
+
 
 def _make_home(tmp_path: Path, *, with_env: bool, with_optout: bool) -> Path:
     """A fake ``~/.hermes`` home, optionally seeded with a plaintext ``.env`` and/or
@@ -154,25 +156,6 @@ class TestReseelQuietlyDelegates:
         assert seen == ["called"]
 
 
-class _FakeCtx:
-    """Hermes PluginContext stand-in. Records ``register_hook`` names; can be told
-    to reject a given hook to prove ``register()`` survives a host rejection."""
-
-    def __init__(self, *, raise_on: set[str] | None = None) -> None:
-        self.hooks: list[str] = []
-        self.registered: list[tuple[str, Any]] = []
-        self._raise_on = raise_on or set()
-
-    def register_hook(self, hook_name: str, callback: Any) -> None:
-        if hook_name in self._raise_on:
-            raise RuntimeError("host rejected hook")
-        self.hooks.append(hook_name)
-        self.registered.append((hook_name, callback))
-
-    def callbacks_for(self, hook_name: str) -> list[Any]:
-        return [callback for name, callback in self.registered if name == hook_name]
-
-
 def _isolate_register(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the installers ``register()`` calls so the wiring test never reads the
     real vault, patches the host writer, or wraps the upstream memory seam."""
@@ -193,8 +176,8 @@ class TestRegisterWiring:
         ctx = _FakeCtx()
         keyvault.register(ctx)
 
-        assert ctx.hooks.count("on_session_start") == 3
-        assert "on_session_end" in ctx.hooks
+        assert ctx.hook_names.count("on_session_start") == 3
+        assert "on_session_end" in ctx.hook_names
 
     def test_register_wires_the_memory_check_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A count only proves *three* callbacks arrived. The sealed-but-locked
@@ -260,8 +243,8 @@ class TestRegisterWiring:
         ctx = _FakeCtx(raise_on={"on_session_end"})
         keyvault.register(ctx)  # must not raise
 
-        assert "on_session_start" in ctx.hooks
-        assert "on_session_end" not in ctx.hooks
+        assert "on_session_start" in ctx.hook_names
+        assert "on_session_end" not in ctx.hook_names
 
 
 class TestOnSessionMemoryCheck:

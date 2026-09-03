@@ -16,8 +16,8 @@ SPEC.md §Audit log policy and §Encrypted audit-log wire format require:
   (PR8) drives; it unwraps the DEK through the Secure Enclave
   authorization boundary (``wrap.unwrap_dek``).
 
-These tests use a software ``FakeBackend`` P-256 keypair store (copied
-from ``test_keyvault_wrap.py``) in place of the Secure Enclave so the
+These tests use a software ``FakeBackend`` P-256 keypair store (shared
+from ``tests/_keyvault_fakes.py``) in place of the Secure Enclave so the
 crypto / wire-format paths are exercised with real AES-GCM + AES-KW.
 """
 
@@ -39,13 +39,12 @@ from typing import Any
 
 import pytest
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from mordred_hermes.keyvault import log_encryption as le
-from mordred_hermes.keyvault._exceptions import WrapError, WrapKeyAlreadyExists, WrapKeyNotFound
-from mordred_hermes.keyvault.wrap import NativeBackendError, NativeErrorCode
+from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.privacy_check.audit import NDJSONWriter
+
+from ._keyvault_fakes import FakeBackend
 
 AuditSink = Callable[[dict[str, Any]], None]
 
@@ -162,46 +161,6 @@ except OSError as exc:
 else:
     raise AssertionError("partial encrypted append unexpectedly succeeded")
 """
-
-
-class FakeBackend:
-    """Software P-256 keypair store standing in for the Secure Enclave.
-
-    Mirrors ``test_keyvault_wrap.FakeBackend`` — ``enclave_ecdh`` performs
-    real ECDH; ``denied_reason`` simulates an authorization-prompt denial.
-    """
-
-    def __init__(self) -> None:
-        self._keys: dict[str, ec.EllipticCurvePrivateKey] = {}
-        self.denied_reason: NativeErrorCode | None = None
-        self.calls: list[tuple[str, str]] = []
-
-    def generate_enclave_key(self, key_id: str, *, unattended: bool | None = None) -> bytes:
-        self.calls.append(("generate", key_id))
-        if key_id in self._keys:
-            raise WrapKeyAlreadyExists(f"key {key_id!r} already exists")
-        priv = ec.generate_private_key(ec.SECP256R1())
-        self._keys[key_id] = priv
-        return priv.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-
-    def get_enclave_public_key(self, key_id: str) -> bytes:
-        self.calls.append(("get_pub", key_id))
-        if key_id not in self._keys:
-            raise WrapKeyNotFound(f"no key for {key_id!r}")
-        return self._keys[key_id].public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-
-    def delete_enclave_key(self, key_id: str) -> None:
-        self.calls.append(("delete", key_id))
-        self._keys.pop(key_id, None)
-
-    def enclave_ecdh(self, key_id: str, peer_pub: bytes) -> bytes:
-        self.calls.append(("ecdh", key_id))
-        if self.denied_reason is not None:
-            raise NativeBackendError(self.denied_reason)
-        if key_id not in self._keys:
-            raise WrapKeyNotFound(f"no key for {key_id!r}")
-        peer = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_pub)
-        return self._keys[key_id].exchange(ec.ECDH(), peer)
 
 
 @pytest.fixture

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,10 @@ import pytest
 from mordred_hermes.network._exceptions import (
     PathSwitchRequiresRestart,
 )
+
+# Re-exported so `test_network_hooks_registration.py` / `test_network_hooks_config.py`
+# can keep importing `_FakeCtx` from this module under its old name.
+from ._helpers import FakePluginContext as _FakeCtx  # noqa: F401
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
@@ -97,16 +101,6 @@ class _FakeRuntime:
 
         if route_config_fingerprint(config) != self.frozen_route_config:
             raise PathSwitchRequiresRestart("activation configuration changed; restart Hermes")
-
-
-class _FakeCtx:
-    """Hermes PluginContext stand-in. Records register_hook calls."""
-
-    def __init__(self) -> None:
-        self.hooks: list[tuple[str, Callable[..., Any]]] = []
-
-    def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
-        self.hooks.append((hook_name, callback))
 
 
 # --------------------------------------------------------------------------- #
