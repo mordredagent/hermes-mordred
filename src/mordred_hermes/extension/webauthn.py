@@ -13,7 +13,7 @@ import json
 import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -121,6 +121,38 @@ def authentication_generation_fingerprint(
         return None
 
 
+def _parse_extension_origin(origin: str, *, scheme: str | None = None) -> SplitResult | None:
+    """Parse ``origin`` and return it only if it is a bare extension origin.
+
+    A bare origin is ``chrome-extension://`` or ``moz-extension://`` (or exactly
+    ``scheme`` when given) followed by a host and nothing else: no userinfo, no
+    port, no path/query/fragment. Those extras are the lookalike shapes an
+    attacker would use to smuggle a foreign origin past a prefix check, so the
+    extension-origin gates in this package (``api._is_extension_origin``,
+    :func:`_rp_id_for_origin`, :func:`_serialized_extension_origin`) funnel
+    through here. Returns ``None`` for anything else, including a value
+    ``urlsplit`` (or ``.port``) rejects.
+    """
+    try:
+        parsed = urlsplit(origin)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.scheme not in {"chrome-extension", "moz-extension"}
+        or (scheme is not None and parsed.scheme != scheme)
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return parsed
+
+
 def _rp_id_for_origin(origin: str) -> str | None:
     """Derive Chromium's effective RP ID for its default extension ceremony.
 
@@ -136,21 +168,8 @@ def _rp_id_for_origin(origin: str) -> str | None:
     registration must remain unsupported rather than persisting a binding that
     can never verify.
     """
-    try:
-        parsed = urlsplit(origin)
-        port = parsed.port
-    except ValueError:
-        return None
-    if (
-        parsed.scheme != "chrome-extension"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or port is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-    ):
+    parsed = _parse_extension_origin(origin, scheme="chrome-extension")
+    if parsed is None:
         return None
     return f"chrome-extension://{parsed.hostname}"
 
@@ -271,22 +290,8 @@ def _signature_valid(pub_b64: str, auth_data: bytes, client_data_raw: bytes, sig
 
 def _serialized_extension_origin(origin: str, *, scheme: str | None = None) -> str | None:
     """Return an exact canonical extension origin, or ``None``."""
-    try:
-        parsed = urlsplit(origin)
-        port = parsed.port
-    except (TypeError, ValueError):
-        return None
-    if (
-        parsed.scheme not in {"chrome-extension", "moz-extension"}
-        or (scheme is not None and parsed.scheme != scheme)
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or port is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-    ):
+    parsed = _parse_extension_origin(origin, scheme=scheme)
+    if parsed is None:
         return None
     canonical = f"{parsed.scheme}://{parsed.hostname}"
     return canonical if origin == canonical else None

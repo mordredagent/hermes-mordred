@@ -254,7 +254,7 @@ class TestDotEnvFileWriter:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from mordred_hermes.extension import api as extension_api
+        from mordred_hermes.extension import _slack_env
         from mordred_hermes.wizard import env_file_writer
 
         env_path = tmp_path / ".env"
@@ -274,7 +274,7 @@ class TestDotEnvFileWriter:
 
         def write_slack() -> None:
             try:
-                extension_api._upsert_env_vars(env_path, {"SLACK_BOT_TOKEN": "xoxb-new"})
+                _slack_env._upsert_env_vars(env_path, {"SLACK_BOT_TOKEN": "xoxb-new"})
             except BaseException as exc:  # pragma: no cover - asserted below
                 failures.append(exc)
 

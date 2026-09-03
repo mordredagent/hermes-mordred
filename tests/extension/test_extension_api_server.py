@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from mordred_hermes.extension import extension_api
+from mordred_hermes.extension import _slack_env, extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
 
@@ -465,7 +465,14 @@ def test_open_extension_socket_is_revoked_when_pairing_changes(state_change):
     conn = extension_api._Connection(_FakeWS(), _chat_handler)
     asyncio.run(conn._on_auth({"type": "auth", "ext_token": old_token}))
     assert conn.ws.sent[-1]["type"] == "auth_ok"
-    conn._pending_sign["approved-under-old-pairing"] = {"method": "personal_sign"}
+    conn._pending_sign["approved-under-old-pairing"] = extension_api._PendingSign(
+        method="personal_sign",
+        params=[],
+        origin="",
+        chain_id=None,
+        rpc_url=None,
+        expected_signer=None,
+    )
 
     if state_change == "replace":
         pairing._save_pairing(
@@ -801,9 +808,9 @@ def test_upsert_env_vars_rejects_newlines(tmp_path):
     """Last line of defence: the writer itself refuses CR/LF in a key or value."""
     env = tmp_path / ".env"
     with pytest.raises(ValueError):
-        extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-x\nEVIL=pwned"})
+        _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-x\nEVIL=pwned"})
     with pytest.raises(ValueError):
-        extension_api._upsert_env_vars(env, {"SLACK\rBOT": "x"})
+        _slack_env._upsert_env_vars(env, {"SLACK\rBOT": "x"})
     assert not env.exists()
 
 
@@ -812,7 +819,7 @@ def test_upsert_env_vars_new_file_is_0600(tmp_path):
     leave a freshly-created ``.env`` at the umask default (typically 0o644,
     world-readable) rather than the atomic writer's tmp-file mode."""
     env = tmp_path / ".env"
-    extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
+    _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
     assert oct(stat.S_IMODE(os.stat(env).st_mode)) == "0o600"
 
 
@@ -825,7 +832,7 @@ def test_upsert_env_vars_tightens_a_loosely_permissioned_existing_file(tmp_path)
     env.write_text("EXISTING=1\n", encoding="utf-8")
     os.chmod(env, 0o644)
 
-    extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
+    _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-a"})
 
     assert oct(stat.S_IMODE(os.stat(env).st_mode)) == "0o600"
 
@@ -836,7 +843,7 @@ def test_upsert_env_vars_preserves_unrelated_existing_vars(tmp_path):
     env = tmp_path / ".env"
     env.write_text("KEEP_ME=untouched\nSLACK_BOT_TOKEN=old\n", encoding="utf-8")
 
-    extension_api._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-new"})
+    _slack_env._upsert_env_vars(env, {"SLACK_BOT_TOKEN": "xoxb-new"})
 
     text = env.read_text(encoding="utf-8")
     assert "KEEP_ME=untouched" in text
@@ -851,7 +858,7 @@ def test_upsert_env_vars_replaces_export_assignments_without_leaving_old_tokens(
         encoding="utf-8",
     )
 
-    extension_api._upsert_env_vars(
+    _slack_env._upsert_env_vars(
         env,
         {
             "SLACK_BOT_TOKEN": "xoxb-new",
@@ -1215,13 +1222,14 @@ def test_sign_request_without_request_id_is_rejected():
 @pytest.mark.parametrize("approved", ["false", 1, {}, [True], None])
 def test_sign_approve_accepts_only_boolean_true(approved, monkeypatch):
     conn = _authed_conn()
-    conn._pending_sign["r1"] = {
-        "method": "personal_sign",
-        "params": ["0x1"],
-        "chain_id": None,
-        "rpc_url": None,
-        "expected_signer": None,
-    }
+    conn._pending_sign["r1"] = extension_api._PendingSign(
+        method="personal_sign",
+        params=["0x1"],
+        origin="",
+        chain_id=None,
+        rpc_url=None,
+        expected_signer=None,
+    )
     monkeypatch.setattr(extension_api, "_do_sign", lambda *_args: pytest.fail("unapproved request was signed"))
 
     asyncio.run(
@@ -1286,7 +1294,7 @@ def test_sign_request_duplicate_request_id_is_rejected(monkeypatch):
 
     assert conn.ws.sent[-1] == {"id": "s2", "type": "sign_result", "request_id": "dup", "error": "duplicate_request_id"}
     # The first request's frozen params must survive untouched.
-    assert conn._pending_sign["dup"]["params"] == first_params
+    assert conn._pending_sign["dup"].params == first_params
 
 
 def test_transaction_sign_request_rejects_unsafe_rpc_before_prompt():
@@ -1382,8 +1390,8 @@ def test_transaction_sign_prompt_freezes_rpc_fields_and_signs_exact_snapshot(mon
     assert "RPC 接続先: https://rpc.example.com:8443" in prompt["analysis"]["warnings"]
     assert "secret-api-key" not in json.dumps(prompt)
     assert "token=hidden" not in json.dumps(prompt)
-    assert conn._pending_sign["tx1"]["rpc_url"] == rpc_url
-    assert conn._pending_sign["tx1"]["expected_signer"] == "0x" + "aa" * 20
+    assert conn._pending_sign["tx1"].rpc_url == rpc_url
+    assert conn._pending_sign["tx1"].expected_signer == "0x" + "aa" * 20
 
     asyncio.run(
         conn.dispatch(
@@ -1459,7 +1467,7 @@ def test_message_approval_rejects_wallet_switch_before_signing(monkeypatch, meth
     assert prompt["type"] == "sign_prompt"
     assert prompt["decoded"]["signer"] == approved_signer
     assert prompt["params"][account_index] == approved_signer
-    assert conn._pending_sign[f"{method}-switch"]["expected_signer"] == approved_signer
+    assert conn._pending_sign[f"{method}-switch"].expected_signer == approved_signer
 
     asyncio.run(
         conn.dispatch(

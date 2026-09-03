@@ -29,6 +29,7 @@ import logging
 import re
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -36,6 +37,7 @@ from urllib.parse import quote, urlsplit
 from aiohttp import WSMsgType, web
 
 from . import page_headers, pairing
+from ._slack_env import _update_slack_env
 from .crypto import (
     DecryptError,
     decrypt_message,
@@ -51,8 +53,8 @@ from .discord_context import (
     resolve_discord_channel,
 )
 from .errors import wire_error_code
-from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
-from .webauthn import InvalidWebAuthnPublicKey
+from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, _PreparedSign, analyze_sign
+from .webauthn import InvalidWebAuthnPublicKey, _parse_extension_origin
 
 # K_extchat derivation label (SPEC-v2 §1.1) — must match the extension.
 _EXTCHAT_SALT = "mordred-extchat-v1"
@@ -88,6 +90,24 @@ _EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1"]
 # bound. Cap it and evict the oldest (dicts keep insertion order) — a stale
 # prompt the user never answered is the right thing to drop.
 _MAX_PENDING_SIGN = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSign:
+    """The prompt-time snapshot a later ``sign_approve`` is signed against.
+
+    Frozen so no field can be rebound between the ``sign_prompt`` and the
+    approval it authorises. ``params`` is the same list object the prompt frame
+    carried (freezing is shallow), so it must be treated as read-only.
+    """
+
+    method: Any
+    params: list[Any]
+    origin: Any
+    chain_id: str | None
+    rpc_url: str | None
+    expected_signer: str | None
+
 
 _log = logging.getLogger(__name__)
 
@@ -180,20 +200,7 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 def _is_extension_origin(origin: str | None) -> bool:
     if origin is None:
         return False
-    try:
-        parsed = urlsplit(origin)
-        return bool(
-            parsed.scheme in {"chrome-extension", "moz-extension"}
-            and parsed.hostname
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port is None
-            and not parsed.path
-            and not parsed.query
-            and not parsed.fragment
-        )
-    except ValueError:
-        return False
+    return _parse_extension_origin(origin) is not None
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -217,6 +224,30 @@ def _request_is_loopback(request: web.Request) -> bool:
     except ValueError:
         return False
     return hostname is not None and _is_loopback_host(hostname)
+
+
+def _sign_prompt_payload(
+    method: Any,
+    params: list[Any],
+    prepared: _PreparedSign,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the ``analysis``/``decoded`` pair shown in a ``sign_prompt`` frame."""
+    analysis, decoded = analyze_sign(method, params)
+    if method == "eth_sendTransaction" and params and isinstance(params[0], dict):
+        decoded = {
+            **decoded,
+            "transaction": params[0],
+            "chain_id": prepared.chain_id,
+        }
+    if prepared.expected_signer is not None:
+        decoded = {**decoded, "signer": prepared.expected_signer}
+    if prepared.rpc_endpoint is not None:
+        analysis = {
+            **analysis,
+            "warnings": [*analysis.get("warnings", []), f"RPC 接続先: {prepared.rpc_endpoint}"],
+        }
+        decoded = {**decoded, "rpc_endpoint": prepared.rpc_endpoint}
+    return analysis, decoded
 
 
 def _loopback_origin(host: str, port: int) -> str:
@@ -375,7 +406,7 @@ class _Connection:
         self._authentication_generation: bytes | None = None
         self._page_authenticated = False
         self._nonce = b""
-        self._pending_sign: dict[str, dict[str, Any]] = {}
+        self._pending_sign: dict[str, _PendingSign] = {}
 
     async def _send(self, payload: dict[str, Any]) -> bool:
         # A client that disconnected mid-turn (e.g. during a slow local-LLM
@@ -520,6 +551,15 @@ class _Connection:
         self._invalidate_authentication()
         await self._send({"id": mid, "type": "pair_complete", **result})
 
+    def _assertion_verifies(self, assertion: object) -> bool:
+        """Whether ``assertion`` is a dict carrying a valid WebAuthn assertion
+        over this connection's nonce and origin (fail-closed on anything else)."""
+        return isinstance(assertion, dict) and pairing.verify_webauthn_assertion(
+            self._nonce,
+            assertion,
+            expected_origin=self.client_origin,
+        )
+
     async def _on_auth(self, msg: dict[str, Any]) -> None:
         token = msg.get("ext_token", "")
         self._invalidate_authentication()
@@ -548,14 +588,7 @@ class _Connection:
         # valid assertion over this connection's nonce.
         webauthn_required = pairing.has_webauthn_credential()
         assertion = msg.get("webauthn_assertion")
-        if webauthn_required and (
-            not isinstance(assertion, dict)
-            or not pairing.verify_webauthn_assertion(
-                self._nonce,
-                assertion,
-                expected_origin=self.client_origin,
-            )
-        ):
+        if webauthn_required and not self._assertion_verifies(assertion):
             await self._send({"type": "auth_fail", "reason": "webauthn_required"})
             return
         final_generation = pairing.authentication_generation_fingerprint(token)
@@ -567,15 +600,7 @@ class _Connection:
             # origin/RP-hash binding. Accept that one in-band migration only
             # after the same signed assertion verifies again against the new
             # stored binding and the resulting auth generation stays stable.
-            if (
-                not webauthn_required
-                or not isinstance(assertion, dict)
-                or not pairing.verify_webauthn_assertion(
-                    self._nonce,
-                    assertion,
-                    expected_origin=self.client_origin,
-                )
-            ):
+            if not webauthn_required or not self._assertion_verifies(assertion):
                 await self._send({"type": "auth_fail", "reason": "pairing_changed"})
                 return
             stable_generation = pairing.authentication_generation_fingerprint(token)
@@ -908,6 +933,12 @@ class _Connection:
             }
         )
 
+    def _remember_pending_sign(self, request_id: str, entry: _PendingSign) -> None:
+        # Bound the pending table (see _MAX_PENDING_SIGN); evict the oldest.
+        while len(self._pending_sign) >= _MAX_PENDING_SIGN:
+            self._pending_sign.pop(next(iter(self._pending_sign)))
+        self._pending_sign[request_id] = entry
+
     async def _on_sign_request(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")
         request_id = str(msg.get("request_id") or "")
@@ -952,36 +983,18 @@ class _Connection:
             )
             return
         params = prepared.params
-        chain_id = prepared.chain_id
-        rpc_url = prepared.rpc_url
-        rpc_endpoint = prepared.rpc_endpoint
-        expected_signer = prepared.expected_signer
-        # Bound the pending table (see _MAX_PENDING_SIGN); evict the oldest.
-        while len(self._pending_sign) >= _MAX_PENDING_SIGN:
-            self._pending_sign.pop(next(iter(self._pending_sign)))
-        self._pending_sign[request_id] = {
-            "method": method,
-            "params": params,
-            "origin": origin,
-            "chain_id": chain_id,
-            "rpc_url": rpc_url,
-            "expected_signer": expected_signer,
-        }
-        analysis, decoded = analyze_sign(method, params)
-        if method == "eth_sendTransaction" and params and isinstance(params[0], dict):
-            decoded = {
-                **decoded,
-                "transaction": params[0],
-                "chain_id": chain_id,
-            }
-        if expected_signer is not None:
-            decoded = {**decoded, "signer": expected_signer}
-        if rpc_endpoint is not None:
-            analysis = {
-                **analysis,
-                "warnings": [*analysis.get("warnings", []), f"RPC 接続先: {rpc_endpoint}"],
-            }
-            decoded = {**decoded, "rpc_endpoint": rpc_endpoint}
+        self._remember_pending_sign(
+            request_id,
+            _PendingSign(
+                method=method,
+                params=params,
+                origin=origin,
+                chain_id=prepared.chain_id,
+                rpc_url=prepared.rpc_url,
+                expected_signer=prepared.expected_signer,
+            ),
+        )
+        analysis, decoded = _sign_prompt_payload(method, params, prepared)
         await self._send(
             {
                 "id": mid,
@@ -1009,11 +1022,11 @@ class _Connection:
             signature = await asyncio.get_event_loop().run_in_executor(
                 None,
                 _do_sign,
-                pend["method"],
-                pend["params"],
-                pend.get("chain_id"),
-                pend.get("rpc_url"),
-                pend.get("expected_signer"),
+                pend.method,
+                pend.params,
+                pend.chain_id,
+                pend.rpc_url,
+                pend.expected_signer,
             )
         except Exception as exc:
             error = wire_error_code(exc, fallback="sign_failed", context="sign_approve")
@@ -1039,93 +1052,3 @@ def _hermes_version() -> str:
         except Exception:
             return "0.0.0"
     return "0.0.0"
-
-
-def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:
-    """Return ``(name, exported, value)`` for one simple dotenv assignment."""
-    line = raw_line.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        return None
-    name, value = line.split("=", 1)
-    name = name.strip()
-    exported = name.startswith("export ")
-    if exported:
-        name = name.removeprefix("export ").strip()
-    return name, exported, value
-
-
-def _dotenv_has_nonempty_key(existing: str, keys: set[str]) -> bool:
-    """Whether dotenv text contains one of *keys* with a non-empty value."""
-    for raw_line in existing.splitlines():
-        assignment = _dotenv_assignment(raw_line)
-        if assignment is None:
-            continue
-        name, _exported, value = assignment
-        if name in keys and value.strip():
-            return True
-    return False
-
-
-def _updated_env_text(existing: str, updates: dict[str, str]) -> str:
-    """Return dotenv text with ``updates`` merged, preserving other lines."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for ln in existing.splitlines():
-        assignment = _dotenv_assignment(ln)
-        key, exported, _old_value = assignment if assignment is not None else ("", False, "")
-        if key in updates:
-            out.append(f"{'export ' if exported else ''}{key}={updates[key]}")
-            seen.add(key)
-        else:
-            out.append(ln)
-    out.extend(f"{key}={val}" for key, val in updates.items() if key not in seen)
-    return "\n".join(out) + "\n"
-
-
-def _validate_env_updates(updates: dict[str, str]) -> None:
-    for key, val in updates.items():
-        if any(c in key or c in val for c in ("\n", "\r")):
-            raise ValueError("refusing to write a dotenv entry containing a newline")
-
-
-def _upsert_env_vars(env_path: Path, updates: dict[str, str]) -> None:
-    """Lock and atomically upsert dotenv entries while preserving other lines.
-
-    Raises ``ValueError`` on a key/value carrying CR or LF: entries are emitted
-    as raw ``KEY=value`` lines joined by "\\n", so such a value would inject
-    arbitrary extra dotenv entries. Callers validate their own inputs (see
-    ``_SLACK_BOT_TOKEN_RE``); this is the last line of defence for future ones.
-
-    The shared sibling lock is also used by ``DotEnvFileWriter`` so concurrent
-    Slack and wizard updates cannot both read the same old file and lose one
-    another's unrelated entries.
-    """
-    from ..wizard.env_file_writer import update_dotenv_file
-
-    _validate_env_updates(updates)
-    update_dotenv_file(env_path, lambda existing: _updated_env_text(existing, updates))
-
-
-class _SlackAlreadyConfigured(Exception):
-    """Internal transaction-abort signal; never includes credential text."""
-
-
-def _update_slack_env(env_path: Path, updates: dict[str, str], overwrite: bool) -> bool:
-    """Check-and-upsert Slack credentials in one locked dotenv transaction."""
-    from ..wizard.env_file_writer import update_dotenv_file
-
-    _validate_env_updates(updates)
-
-    def transform(existing: str) -> str:
-        if not overwrite and _dotenv_has_nonempty_key(
-            existing,
-            {"SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"},
-        ):
-            raise _SlackAlreadyConfigured
-        return _updated_env_text(existing, updates)
-
-    try:
-        update_dotenv_file(env_path, transform)
-    except _SlackAlreadyConfigured:
-        return False
-    return True

@@ -305,3 +305,55 @@ def test_clear_credential():
     _register(priv, "cred-1")
     pairing.clear_webauthn_credential()
     assert pairing.has_webauthn_credential() is False
+
+
+# ---------------------------------------------------------------------------
+# _parse_extension_origin: the single gate behind api._is_extension_origin,
+# _rp_id_for_origin and _serialized_extension_origin. Pin its acceptance set
+# directly so the three callers cannot drift apart again.
+# ---------------------------------------------------------------------------
+
+_LOOKALIKE_ORIGINS = [
+    pytest.param(f"{_ORIGIN}/", id="trailing_slash"),
+    pytest.param(f"chrome-extension://user@{_EXTENSION_ID}", id="userinfo"),
+    pytest.param(f"chrome-extension://user:pw@{_EXTENSION_ID}", id="userinfo_with_password"),
+    pytest.param(f"{_ORIGIN}:80", id="port"),
+    pytest.param(f"{_ORIGIN}:99999", id="out_of_range_port"),
+    pytest.param(f"{_ORIGIN}?x=1", id="query"),
+    pytest.param(f"{_ORIGIN}#frag", id="fragment"),
+    pytest.param(f"{_ORIGIN}/path", id="path"),
+    pytest.param("chrome-extension://", id="empty_host"),
+    pytest.param(f"chrome-extension:{_EXTENSION_ID}", id="no_authority"),
+    pytest.param(f"https://{_EXTENSION_ID}", id="wrong_scheme"),
+    pytest.param(f"chrome-extension://{_EXTENSION_ID}.evil.example", id="foreign_host_suffix_is_a_host"),
+    pytest.param("", id="empty"),
+]
+
+
+@pytest.mark.parametrize("origin", _LOOKALIKE_ORIGINS[:11] + _LOOKALIKE_ORIGINS[12:])
+def test_parse_extension_origin_rejects_lookalikes(origin):
+    from mordred_hermes.extension import webauthn
+
+    assert webauthn._parse_extension_origin(origin) is None
+    assert webauthn._parse_extension_origin(origin, scheme="chrome-extension") is None
+
+
+def test_parse_extension_origin_accepts_bare_origins_and_pins_scheme():
+    from mordred_hermes.extension import webauthn
+
+    parsed = webauthn._parse_extension_origin(_ORIGIN)
+    assert parsed is not None
+    assert (parsed.scheme, parsed.hostname) == ("chrome-extension", _EXTENSION_ID)
+
+    moz = webauthn._parse_extension_origin("moz-extension://random-document-uuid")
+    assert moz is not None
+    assert moz.scheme == "moz-extension"
+
+    # The scheme pin is what keeps _rp_id_for_origin Chromium-only.
+    assert webauthn._parse_extension_origin(_ORIGIN, scheme="chrome-extension") is not None
+    assert webauthn._parse_extension_origin("moz-extension://random-document-uuid", scheme="chrome-extension") is None
+
+    # A suffix that merely looks like an extension id is still just a host: the
+    # parser accepts it, and it is the *callers* (canonical-equality / pairing
+    # comparison) that reject it. Pinned here so that division of labour is explicit.
+    assert webauthn._parse_extension_origin(f"chrome-extension://{_EXTENSION_ID}.evil.example") is not None
