@@ -277,15 +277,17 @@ class TestCandidateAcceptance:
         _install_ps(monkeypatch, _FakePs(scan=self._scan_for(d)))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
-    def test_non_executable_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            pytest.param(0o644, id="non_executable"),
+            pytest.param(0o775, id="group_writable"),
+            pytest.param(0o777, id="world_writable"),
+        ],
+    )
+    def test_file_mode_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None, mode: int) -> None:
         py = _make_python(tmp_path / "bin", "python3")
-        py.chmod(0o644)
-        _install_ps(monkeypatch, _FakePs(scan=self._scan_for(py)))
-        assert discover_running_gateway_pythons(home=tmp_path / "home") == []
-
-    def test_group_writable_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
-        py = _make_python(tmp_path / "bin", "python3")
-        py.chmod(0o775)
+        py.chmod(mode)
         _install_ps(monkeypatch, _FakePs(scan=self._scan_for(py)))
         assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
@@ -299,12 +301,6 @@ class TestCandidateAcceptance:
             assert discover_running_gateway_pythons(home=tmp_path / "home") == []
         finally:
             py.parent.chmod(0o755)
-
-    def test_world_writable_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None) -> None:
-        py = _make_python(tmp_path / "bin", "python3")
-        py.chmod(0o777)
-        _install_ps(monkeypatch, _FakePs(scan=self._scan_for(py)))
-        assert discover_running_gateway_pythons(home=tmp_path / "home") == []
 
 
 class TestLauncherPathHardening:

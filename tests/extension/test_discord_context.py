@@ -153,32 +153,24 @@ def test_configured_token_falls_back_to_the_standard_hermes_dotenv(tmp_path, mon
     assert _configured_bot_token() == "from-dotenv"
 
 
-def test_configured_token_prefers_hermes_dotenv_over_stale_export(tmp_path, monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "stale-export")
+@pytest.mark.parametrize(
+    ("export_value", "dotenv_content", "expected"),
+    [
+        pytest.param(
+            "stale-export", "DISCORD_BOT_TOKEN=rotated-dotenv\n", "rotated-dotenv", id="dotenv_overrides_stale_export"
+        ),
+        pytest.param("stale-export", "DISCORD_BOT_TOKEN=\n", "", id="empty_dotenv_overrides_stale_export"),
+        pytest.param("current-export", "OTHER=value\n", "current-export", id="export_used_when_dotenv_key_absent"),
+        pytest.param(
+            "current-export", "DISCORD_BOT_TOKEN\n", "current-export", id="bare_dotenv_token_does_not_override_export"
+        ),
+    ],
+)
+def test_configured_token_precedence(tmp_path, monkeypatch, export_value, dotenv_content, expected):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", export_value)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / ".env").write_text("DISCORD_BOT_TOKEN=rotated-dotenv\n", encoding="utf-8")
-    assert _configured_bot_token() == "rotated-dotenv"
-
-
-def test_empty_dotenv_token_overrides_stale_export(tmp_path, monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "stale-export")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / ".env").write_text("DISCORD_BOT_TOKEN=\n", encoding="utf-8")
-    assert _configured_bot_token() == ""
-
-
-def test_configured_token_uses_export_when_dotenv_key_is_absent(tmp_path, monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "current-export")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / ".env").write_text("OTHER=value\n", encoding="utf-8")
-    assert _configured_bot_token() == "current-export"
-
-
-def test_bare_dotenv_token_does_not_override_export(tmp_path, monkeypatch):
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "current-export")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / ".env").write_text("DISCORD_BOT_TOKEN\n", encoding="utf-8")
-    assert _configured_bot_token() == "current-export"
+    (tmp_path / ".env").write_text(dotenv_content, encoding="utf-8")
+    assert _configured_bot_token() == expected
 
 
 def test_tor_route_without_a_proxy_fails_closed(monkeypatch):

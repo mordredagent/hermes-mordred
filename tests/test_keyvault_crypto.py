@@ -29,35 +29,23 @@ class TestAesGcmRoundtrip:
 
         assert crypto.decrypt(key, blob, aad=b"v1") == plaintext
 
-    def test_roundtrip_with_empty_aad_default(self) -> None:
-        """``aad`` defaults to empty bytes — must roundtrip when omitted."""
+    @pytest.mark.parametrize(
+        ("key", "plaintext"),
+        [
+            # ``aad`` defaults to empty bytes — must roundtrip when omitted.
+            pytest.param(b"\x11" * 32, b"no aad here", id="empty_aad_default"),
+            # AES-128 (16-byte key) must work — DEKs are 256-bit but the
+            # primitive itself supports the smaller sizes per FIPS 197.
+            pytest.param(b"\xab" * 16, b"x", id="aes128_key"),
+            # AES-192 (24-byte key) — closes the gap between the AES-128
+            # and AES-256 coverage so the docstring claim of "128 / 192 /
+            # 256 bit" is exercised end-to-end.
+            pytest.param(b"\xcc" * 24, b"phase4 review L1", id="aes192_key"),
+        ],
+    )
+    def test_roundtrip_without_aad(self, key: bytes, plaintext: bytes) -> None:
         from mordred_hermes.keyvault import crypto
 
-        key = b"\x11" * 32
-        plaintext = b"no aad here"
-        blob = crypto.encrypt(key, plaintext)
-
-        assert crypto.decrypt(key, blob) == plaintext
-
-    def test_roundtrip_with_aes128_key(self) -> None:
-        """AES-128 (16-byte key) must work — DEKs are 256-bit but the
-        primitive itself supports the smaller sizes per FIPS 197."""
-        from mordred_hermes.keyvault import crypto
-
-        key = b"\xab" * 16
-        plaintext = b"x"
-        blob = crypto.encrypt(key, plaintext)
-
-        assert crypto.decrypt(key, blob) == plaintext
-
-    def test_roundtrip_with_aes192_key(self) -> None:
-        """AES-192 (24-byte key) — closes the gap between the AES-128
-        and AES-256 coverage so the docstring claim of "128 / 192 / 256
-        bit" is exercised end-to-end."""
-        from mordred_hermes.keyvault import crypto
-
-        key = b"\xcc" * 24
-        plaintext = b"phase4 review L1"
         blob = crypto.encrypt(key, plaintext)
 
         assert crypto.decrypt(key, blob) == plaintext

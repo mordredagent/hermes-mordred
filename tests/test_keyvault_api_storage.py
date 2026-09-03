@@ -742,10 +742,15 @@ class TestLoadMeta:
         meta = _storage.load_meta(root)
         assert meta == {"version": 1, "keys": {"k1": {"foo": "bar"}}}
 
-    def test_invalid_json_raises_corrupt(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "meta_json",
+        ["not json{{", '{"keys": {}}', '{"version": 2, "keys": {}}'],
+        ids=["invalid_json", "missing_version_field", "version_mismatch"],
+    )
+    def test_raises_corrupt(self, tmp_path: Path, meta_json: str) -> None:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
-        (root / "meta.json").write_text("not json{{")
+        (root / "meta.json").write_text(meta_json)
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
 
@@ -760,20 +765,6 @@ class TestLoadMeta:
 
         assert "SECRET_NON_UTF8_MARKER" not in str(raised.value)
         assert raised.value.__cause__ is None
-
-    def test_missing_version_field_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"keys": {}}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_version_mismatch_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"version": 2, "keys": {}}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
 
     def test_corrupt_error_does_not_include_file_contents(self, tmp_path: Path) -> None:
         # Audit-safety: KeyvaultCorruptError's str() must not include the
@@ -887,31 +878,20 @@ class TestLoadMetaKeysFieldValidation:
     ``{"version": 1, "keys": [...]}`` (wrong type). Both shapes break the
     read-modify-write pattern downstream. Fix: reject in load_meta."""
 
-    def test_missing_keys_field_raises_corrupt(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "meta_json",
+        [
+            '{"version": 1}',
+            '{"version": 1, "keys": []}',
+            '{"version": 1, "keys": "oops"}',
+            '{"version": 1, "keys": null}',
+        ],
+        ids=["missing_keys_field", "keys_field_as_list", "keys_field_as_string", "keys_field_as_null"],
+    )
+    def test_raises_corrupt(self, tmp_path: Path, meta_json: str) -> None:
         root = tmp_path / "kv"
         _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"version": 1}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_keys_field_as_list_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"version": 1, "keys": []}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_keys_field_as_string_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"version": 1, "keys": "oops"}')
-        with pytest.raises(_storage.KeyvaultCorruptError):
-            _storage.load_meta(root)
-
-    def test_keys_field_as_null_raises_corrupt(self, tmp_path: Path) -> None:
-        root = tmp_path / "kv"
-        _storage.ensure_layout(root)
-        (root / "meta.json").write_text('{"version": 1, "keys": null}')
+        (root / "meta.json").write_text(meta_json)
         with pytest.raises(_storage.KeyvaultCorruptError):
             _storage.load_meta(root)
 
