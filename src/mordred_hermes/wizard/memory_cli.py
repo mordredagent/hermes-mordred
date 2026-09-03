@@ -78,7 +78,7 @@ def _set_encryption_flag(home: Path, *, enabled: bool) -> int:
     """
     from ruamel.yaml.comments import CommentedMap
 
-    from .policy_writer import _atomic_write_text, _round_trip_yaml
+    from ._atomic_io import _atomic_write_text, _round_trip_yaml
 
     path = home / _CONFIG_NAME
     # Share PolicyWriter's ruamel instance (indent 2/4/2, preserve_quotes,
@@ -304,7 +304,7 @@ def _ensure_key(
 
 def _arm(home: Path) -> None:
     """Write the opt-in marker (0o600 in a 0o700 dir) and clear the opt-out one."""
-    from .policy_writer import _atomic_write_text
+    from ._atomic_io import _atomic_write_text
 
     _atomic_write_text(memory_marker_path(home), "memory-encryption enabled\n", mode=0o600)
     memory_optout_marker_path(home).unlink(missing_ok=True)
@@ -541,7 +541,7 @@ def _unseal_files(paths: list[Path], *, key: bytes) -> tuple[int, str | None]:
 
 
 def _write_optout_marker(home: Path) -> None:
-    from .policy_writer import _atomic_write_text
+    from ._atomic_io import _atomic_write_text
 
     _atomic_write_text(memory_optout_marker_path(home), "opt-out\n", mode=0o600)
 

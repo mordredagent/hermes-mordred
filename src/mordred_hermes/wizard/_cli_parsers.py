@@ -1,10 +1,11 @@
-"""argparse subparser tree for ``hermes mordred ...`` + the per-command handlers.
+"""argparse subparser tree for ``hermes mordred ...``.
 
-Builds the full command surface so ``--help`` lists every subcommand, and
-holds the thin ``_handle_*`` handlers that each delegate to their own module
-and return an exit code. Extracted from :mod:`.cli` (which keeps the ``main`` /
-``dispatch`` entry points and re-exports the names below) to keep each module
-under the size guideline. All subcommands below are implemented.
+Builds the full command surface so ``--help`` lists every subcommand, wiring
+each leaf subparser to its ``_handle_*`` handler (defined in
+:mod:`._cli_handlers`) via ``set_defaults(func=...)``. Extracted from
+:mod:`.cli` (which keeps the ``main`` / ``dispatch`` entry points and
+re-exports the names below) to keep each module under the size guideline.
+All subcommands below are implemented.
 
 Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 
@@ -24,6 +25,96 @@ from __future__ import annotations
 import argparse
 
 from .._policy_types import ACTIVE_PATHS, POLICY_MODES
+from ._cli_handlers import (
+    _handle_audit_decrypt,
+    _handle_audit_grep,
+    _handle_audit_purge,
+    _handle_audit_tail,
+    _handle_configure,
+    _handle_encryption_disable,
+    _handle_encryption_enable,
+    _handle_encryption_purge,
+    _handle_encryption_status,
+    _handle_extension_pair,
+    _handle_extension_serve,
+    _handle_install,
+    _handle_keyvault_enable_se,
+    _handle_keyvault_enable_tpm,
+    _handle_keyvault_export,
+    _handle_keyvault_init,
+    _handle_keyvault_list,
+    _handle_keyvault_recover,
+    _handle_keyvault_reset,
+    _handle_keyvault_verify_digest,
+    _handle_network_init,
+    _handle_network_status,
+    _handle_network_use,
+    _handle_plugins_list,
+    _handle_policy_dry_run,
+    _handle_policy_explain,
+    _handle_policy_reload,
+    _handle_policy_show,
+    _handle_setup,
+    _handle_status,
+    _handle_upgrade,
+    _handle_vault_add,
+    _handle_vault_cat,
+    _handle_vault_change_passphrase,
+    _handle_vault_disable_config_decrypt,
+    _handle_vault_enable_config_decrypt,
+    _handle_vault_init,
+    _handle_vault_migrate,
+    _handle_vault_recover,
+    _handle_vault_set_memory_key,
+    _handle_vault_status,
+)
+
+# ``__all__`` makes the ``_handle_*`` names above (imported, not defined here)
+# explicit re-exports under strict mypy's no_implicit_reexport, since
+# ``cli.py`` imports them onward from this module (see its own docstring).
+__all__ = [
+    "_handle_audit_decrypt",
+    "_handle_audit_grep",
+    "_handle_audit_purge",
+    "_handle_audit_tail",
+    "_handle_configure",
+    "_handle_encryption_disable",
+    "_handle_encryption_enable",
+    "_handle_encryption_purge",
+    "_handle_encryption_status",
+    "_handle_extension_pair",
+    "_handle_extension_serve",
+    "_handle_install",
+    "_handle_keyvault_enable_se",
+    "_handle_keyvault_enable_tpm",
+    "_handle_keyvault_export",
+    "_handle_keyvault_init",
+    "_handle_keyvault_list",
+    "_handle_keyvault_recover",
+    "_handle_keyvault_reset",
+    "_handle_keyvault_verify_digest",
+    "_handle_network_init",
+    "_handle_network_status",
+    "_handle_network_use",
+    "_handle_plugins_list",
+    "_handle_policy_dry_run",
+    "_handle_policy_explain",
+    "_handle_policy_reload",
+    "_handle_policy_show",
+    "_handle_setup",
+    "_handle_status",
+    "_handle_upgrade",
+    "_handle_vault_add",
+    "_handle_vault_cat",
+    "_handle_vault_change_passphrase",
+    "_handle_vault_disable_config_decrypt",
+    "_handle_vault_enable_config_decrypt",
+    "_handle_vault_init",
+    "_handle_vault_migrate",
+    "_handle_vault_recover",
+    "_handle_vault_set_memory_key",
+    "_handle_vault_status",
+]
 
 
 def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
@@ -374,6 +465,13 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     keyvault_eth_cli.add_eth_subparsers(ksub)
 
 
+def _add_root_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+
+
 def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("vault", help="At-rest secrets/env vault")
     vsub = p.add_subparsers(dest="vault_command", required=True, metavar="COMMAND")
@@ -382,30 +480,21 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "init",
         help="Create a new encrypted vault sealed under a recovery passphrase",
     )
-    p_init.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_init)
     p_init.set_defaults(func=_handle_vault_init)
 
     p_change_pp = vsub.add_parser(
         "change-passphrase",
         help="Change the vault's recovery passphrase (master key and enrolled files unchanged)",
     )
-    p_change_pp.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_change_pp)
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
     p_recover = vsub.add_parser(
         "recover",
         help="Re-key a vault copied to this machine onto its Secure Enclave (restores the writable hot path)",
     )
-    p_recover.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_recover)
     p_recover.set_defaults(func=_handle_vault_recover)
 
     p_add = vsub.add_parser(
@@ -414,20 +503,14 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_add.add_argument("name", help="Logical name to store the file under (e.g. .env)")
     p_add.add_argument("source", help="Path to the plaintext file to encrypt into the vault")
-    p_add.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_add)
     p_add.set_defaults(func=_handle_vault_add)
 
     p_status = vsub.add_parser(
         "status",
         help="Show a vault's generation and enrolled file names (never prompts; reads the manifest unverified)",
     )
-    p_status.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_status)
     p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_status.set_defaults(func=_handle_vault_status)
 
@@ -436,10 +519,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Print one enrolled file's decrypted bytes to stdout (opens read-only via passphrase recovery)",
     )
     p_cat.add_argument("name", help="Enrolled file name to decrypt and print")
-    p_cat.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_cat)
     p_cat.set_defaults(func=_handle_vault_cat)
 
     p_migrate = vsub.add_parser(
@@ -452,10 +532,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Plaintext file(s) to import, each enrolled under its basename "
         "(default: .env and config.yaml under the Hermes home)",
     )
-    p_migrate.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_migrate)
     p_migrate.set_defaults(func=_handle_vault_migrate)
 
     p_set_memory_key = vsub.add_parser(
@@ -463,10 +540,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Store/rotate HERMES_MEMORY_KEY in the vault .env (the agent-memory encryption key; "
         "`encryption enable memory` is what turns sealing on)",
     )
-    p_set_memory_key.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_set_memory_key)
     p_set_memory_key.add_argument(
         "--rotate",
         action="store_true",
@@ -478,20 +552,14 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "enable-config-decrypt",
         help="Put config.yaml under the at-rest vault (transparent decrypt at Hermes startup)",
     )
-    p_enable_cfg.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_enable_cfg)
     p_enable_cfg.set_defaults(func=_handle_vault_enable_config_decrypt)
 
     p_disable_cfg = vsub.add_parser(
         "disable-config-decrypt",
         help="Stop managing config.yaml in the vault and restore a plaintext copy (recovery)",
     )
-    p_disable_cfg.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_disable_cfg)
     p_disable_cfg.set_defaults(func=_handle_vault_disable_config_decrypt)
 
 
@@ -545,10 +613,7 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "change-passphrase",
         help="Change the vault's recovery passphrase (alias of `vault change-passphrase`)",
     )
-    p_change_pp.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_root_option(p_change_pp)
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
 
@@ -559,267 +624,3 @@ def _add_plugins(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     )
     psub = p.add_subparsers(dest="plugins_command", required=True, metavar="COMMAND")
     psub.add_parser("list", help="List discovered Mordred plugins").set_defaults(func=_handle_plugins_list)
-
-
-# -----------------------------------------------------------------------------
-# Handlers — each delegates to its module (lazy-imported to keep CLI start fast).
-# Each handler accepts ``argparse.Namespace`` and returns an exit code (int).
-# -----------------------------------------------------------------------------
-
-
-def _handle_status(args: argparse.Namespace) -> int:
-    from . import status_cli
-
-    return status_cli.cli_status(args)
-
-
-def _handle_setup(args: argparse.Namespace) -> int:
-    from . import setup_cli
-
-    return setup_cli.cli_setup(args)
-
-
-def _handle_configure(args: argparse.Namespace) -> int:
-    from . import configure
-
-    return configure.cli_handler(args)
-
-
-def _handle_upgrade(args: argparse.Namespace) -> int:
-    from . import upgrade
-    from .policy_writer import PolicyWriter
-
-    options = upgrade.UpgradeOptions(
-        reset=bool(getattr(args, "reset", False)),
-        non_interactive=bool(getattr(args, "non_interactive", False)),
-        audit_merge=getattr(args, "audit_merge", None),
-        policy_conflict=getattr(args, "policy_conflict", None),
-    )
-    report = upgrade.run(options=options, policy_writer=PolicyWriter())
-    print(upgrade.render_report(report))
-    return 0
-
-
-def _handle_install(args: argparse.Namespace) -> int:
-    from . import install_dispatch
-
-    return install_dispatch.cli_handler(args)
-
-
-def _handle_network_use(args: argparse.Namespace) -> int:
-    from . import network_cli
-
-    return network_cli.handle_use(args)
-
-
-def _handle_network_status(args: argparse.Namespace) -> int:
-    from . import network_cli
-
-    return network_cli.handle_status(args)
-
-
-def _handle_network_init(args: argparse.Namespace) -> int:
-    from . import network_cli
-
-    return network_cli.handle_init(args)
-
-
-def _handle_policy_show(args: argparse.Namespace) -> int:
-    from . import policy_explainer
-
-    return policy_explainer.cli_show(args)
-
-
-def _handle_policy_explain(args: argparse.Namespace) -> int:
-    from . import policy_explainer
-
-    return policy_explainer.cli_explain(args)
-
-
-def _handle_policy_dry_run(args: argparse.Namespace) -> int:
-    from . import policy_explainer
-
-    return policy_explainer.cli_dry_run(args)
-
-
-def _handle_policy_reload(args: argparse.Namespace) -> int:
-    from . import policy_explainer
-
-    return policy_explainer.cli_reload(args)
-
-
-def _handle_audit_tail(args: argparse.Namespace) -> int:
-    from . import audit_cli
-
-    return audit_cli.cli_tail(args)
-
-
-def _handle_audit_grep(args: argparse.Namespace) -> int:
-    from . import audit_cli
-
-    return audit_cli.cli_grep(args)
-
-
-def _handle_audit_decrypt(args: argparse.Namespace) -> int:
-    from . import audit_cli
-
-    return audit_cli.cli_decrypt(args)
-
-
-def _handle_audit_purge(args: argparse.Namespace) -> int:
-    from . import audit_cli
-
-    return audit_cli.cli_purge(args)
-
-
-def _handle_keyvault_init(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
-
-    return keyvault_cli.cli_init(args)
-
-
-def _handle_keyvault_list(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
-
-    return keyvault_cli.cli_list(args)
-
-
-def _handle_keyvault_verify_digest(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
-
-    return keyvault_cli.cli_verify_digest(args)
-
-
-def _handle_keyvault_export(args: argparse.Namespace) -> int:
-    from . import keyvault_export_cli
-
-    return keyvault_export_cli.cli_export(args)
-
-
-def _handle_keyvault_recover(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
-
-    return keyvault_cli.cli_recover(args)
-
-
-def _handle_keyvault_reset(args: argparse.Namespace) -> int:
-    from . import keyvault_cli
-
-    return keyvault_cli.cli_reset(args)
-
-
-def _handle_keyvault_enable_se(args: argparse.Namespace) -> int:
-    from . import keyvault_native_cli
-
-    return keyvault_native_cli.cli_enable_se(args)
-
-
-def _handle_keyvault_enable_tpm(args: argparse.Namespace) -> int:
-    from . import keyvault_native_cli
-
-    return keyvault_native_cli.cli_enable_tpm(args)
-
-
-def _handle_vault_init(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_init(args)
-
-
-def _handle_vault_change_passphrase(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_change_passphrase(args)
-
-
-def _handle_vault_recover(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_recover(args)
-
-
-def _handle_vault_add(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_add(args)
-
-
-def _handle_vault_status(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_status(args)
-
-
-def _handle_vault_cat(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_cat(args)
-
-
-def _handle_vault_migrate(args: argparse.Namespace) -> int:
-    from . import vault_cli
-
-    return vault_cli.cli_migrate(args)
-
-
-def _handle_vault_set_memory_key(args: argparse.Namespace) -> int:
-    from . import vault_memory_key
-
-    return vault_memory_key.cli_set_memory_key(args)
-
-
-def _handle_vault_enable_config_decrypt(args: argparse.Namespace) -> int:
-    from . import config_decrypt_cli
-
-    return config_decrypt_cli.cli_enable(args)
-
-
-def _handle_vault_disable_config_decrypt(args: argparse.Namespace) -> int:
-    from . import config_decrypt_cli
-
-    return config_decrypt_cli.cli_disable(args)
-
-
-def _handle_encryption_status(args: argparse.Namespace) -> int:
-    from . import encryption_cli
-
-    return encryption_cli.cli_status(args)
-
-
-def _handle_encryption_enable(args: argparse.Namespace) -> int:
-    from . import encryption_cli
-
-    return encryption_cli.cli_enable(args)
-
-
-def _handle_encryption_disable(args: argparse.Namespace) -> int:
-    from . import encryption_cli
-
-    return encryption_cli.cli_disable(args)
-
-
-def _handle_encryption_purge(args: argparse.Namespace) -> int:
-    from . import encryption_cli
-
-    return encryption_cli.cli_purge(args)
-
-
-def _handle_plugins_list(args: argparse.Namespace) -> int:
-    from . import plugins_list
-
-    return plugins_list.cli_handler(args)
-
-
-def _handle_extension_pair(args: argparse.Namespace) -> int:
-    from . import extension_pair_cli
-
-    return extension_pair_cli.cli_extension_pair(args)
-
-
-def _handle_extension_serve(args: argparse.Namespace) -> int:
-    # The extension package and launcher are dependency-light. ``serve`` owns
-    # the optional aiohttp check so unrelated import bugs are never relabelled
-    # as a missing ``extension`` extra here.
-    from mordred_hermes.extension.__main__ import serve
-
-    return serve(host=args.host, port=args.port)

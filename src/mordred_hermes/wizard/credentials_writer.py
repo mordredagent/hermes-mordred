@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .policy_writer import _atomic_write_text
+from ._atomic_io import _atomic_write_text
 
 # Same env-name shape rule as env_file_writer -- uppercase, alnum + underscore.
 _VALID_ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")

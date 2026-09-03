@@ -94,7 +94,7 @@ class TestEnrolledNames:
             from mordred_hermes.wizard import encryption_cli
             assert encryption_cli._enrolled_names(Path("/nonexistent/vault")) == set()
 
-            from mordred_hermes.wizard._cli_parsers import _handle_status
+            from mordred_hermes.wizard._cli_handlers import _handle_status
             rc = _handle_status(argparse.Namespace(json=False))
             assert rc == 0, f"status must degrade cleanly, got rc={rc}"
             print("OK")

@@ -129,7 +129,7 @@ def test_package_pairing_and_help_import_without_aiohttp() -> None:
 def test_wizard_extension_serve_missing_extra(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mordred_hermes.wizard._cli_parsers import _handle_extension_serve
+    from mordred_hermes.wizard._cli_handlers import _handle_extension_serve
 
     real_import_module = importlib.import_module
 
@@ -149,7 +149,7 @@ def test_wizard_extension_serve_missing_extra(
 def test_wizard_extension_serve_does_not_misclassify_launcher_import_bug(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from mordred_hermes.wizard._cli_parsers import _handle_extension_serve
+    from mordred_hermes.wizard._cli_handlers import _handle_extension_serve
 
     monkeypatch.setitem(sys.modules, "mordred_hermes.extension.__main__", None)
     with pytest.raises(ModuleNotFoundError):

@@ -1,10 +1,11 @@
 """Console-script entry points for ``hermes mordred ...`` / ``hermes-mordred ...``.
 
-The argparse subcommand tree and its per-command handlers live in
-:mod:`._cli_parsers` (extracted to keep this module small). This module holds
-the two entry points — :func:`main` (the ``hermes-mordred`` console script,
-wired in ``pyproject.toml`` ``[project.scripts]``) and :func:`dispatch` (the
-handler-invocation helper Hermes / tests call) — and re-exports
+The argparse subcommand tree lives in :mod:`._cli_parsers`, which in turn
+wires each leaf subparser to its per-command handler from
+:mod:`._cli_handlers` (both extracted to keep this module small). This module
+holds the two entry points — :func:`main` (the ``hermes-mordred`` console
+script, wired in ``pyproject.toml`` ``[project.scripts]``) and :func:`dispatch`
+(the handler-invocation helper Hermes / tests call) — and re-exports
 ``_setup_subparser`` plus the ``_handle_*`` handlers so existing import paths
 are unchanged (``wizard/__init__.py`` registers ``cli._setup_subparser`` with
 Hermes; tests import ``cli._setup_subparser`` / ``cli.dispatch`` / ``cli.main``
@@ -34,7 +35,8 @@ from typing import Any
 
 from . import _term
 
-# The subcommand tree + handlers live in ``_cli_parsers``; re-export them so
+# The subcommand tree lives in ``_cli_parsers`` (which re-exports the handlers
+# it wires from ``_cli_handlers``); re-export them all so
 # ``cli._setup_subparser`` (Hermes registration in ``wizard/__init__.py``) and
 # ``cli._handle_*`` (tests) keep resolving here. See ``__all__``.
 from ._cli_parsers import (

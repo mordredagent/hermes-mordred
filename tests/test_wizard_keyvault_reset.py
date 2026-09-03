@@ -21,7 +21,7 @@ from mordred_hermes.keyvault import _native_key_id, _storage
 from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault.api import _DEFAULT_KEY_ID
 from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
-from mordred_hermes.wizard import keyvault_cli
+from mordred_hermes.wizard import _keyvault_reset, keyvault_cli
 from tests._keyvault_fakes import FakeBackend
 
 
@@ -93,9 +93,9 @@ def _write_current_reset_journal(
 ) -> None:
     """Publish the same durable retry target set as a confirmed reset."""
 
-    key_ids, collected_retained, metadata_incomplete = keyvault_cli._collect_reset_key_ids(root)
+    key_ids, collected_retained, metadata_incomplete = _keyvault_reset._collect_reset_key_ids(root)
     retained = collected_retained if retained_legacy is None else retained_legacy
-    _journal, encoded = keyvault_cli._encode_reset_journal(
+    _journal, encoded = _keyvault_reset._encode_reset_journal(
         root,
         key_ids,
         retained,
@@ -111,7 +111,7 @@ class TestResetYes:
         backend = FakeBackend()
         _seed_enclave(backend, [_DEFAULT_KEY_ID, AUDIT_LOG_KEY_ID])
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         assert not root.exists()
@@ -123,7 +123,7 @@ class TestResetYes:
         root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         assert {_physical(root, "default"), _physical(root, "payments")} <= _deleted(backend)
@@ -134,7 +134,7 @@ class TestResetYes:
         (root / "meta.json").write_text("{ this is not valid json", encoding="utf-8")
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         assert not root.exists()
@@ -147,7 +147,7 @@ class TestResetYes:
         (root / "meta.json").write_bytes(b"\xffnot-utf8")
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         assert not root.exists()
@@ -165,7 +165,7 @@ class TestResetYes:
         _storage.save_meta(root, meta)
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         assert _physical(root, "payments") in _deleted(backend)
@@ -191,7 +191,7 @@ class TestResetYes:
         _storage.save_meta(root, meta)
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         assert not root.exists()
@@ -216,7 +216,7 @@ class TestResetYes:
         del meta["keys"][_key_id_hash(key_id)][_native_key_id.NATIVE_KEY_ID_FIELD]
         _storage.save_meta(root, meta)
 
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 0
+        assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 0
 
         out = capsys.readouterr().out
         assert "\x1b" not in out
@@ -263,7 +263,7 @@ class TestResetDegradedPaths:
         root = _build_keyvault(tmp_path, ["default"])
         backend = _DeleteFailsBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         # A partial native cleanup must not erase the only durable list of
         # custom ids, nor claim that every kind of key material was destroyed.
@@ -279,7 +279,7 @@ class TestResetDegradedPaths:
         root = _build_keyvault(tmp_path, ["default"])
         backend = _UnexpectedDeleteFailsBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 1
         assert root.is_dir()
@@ -297,8 +297,8 @@ class TestResetDegradedPaths:
             del backend
             raise RuntimeError("backend unavailable")
 
-        monkeypatch.setattr(keyvault_cli, "resolve_backend", fail_resolution)
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=None, assume_yes=True)
+        monkeypatch.setattr(_keyvault_reset, "resolve_backend", fail_resolution)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=None, assume_yes=True)
 
         assert rc == 1
         assert root.is_dir()
@@ -318,7 +318,7 @@ class TestResetDegradedPaths:
             raise OSError("simulated journal durability failure")
 
         monkeypatch.setattr(_storage, "write_reset_journal", _fail_journal)
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 1
         assert root.is_dir()
@@ -330,13 +330,13 @@ class TestResetDegradedPaths:
         root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = _FailsOneDeleteOnceBackend(_physical(root, "payments"))
 
-        first_rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        first_rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert first_rc == 1
         assert root.is_dir()
         assert _storage.load_meta(root)["keys"]
 
-        second_rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        second_rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert second_rc == 0
         assert not root.exists()
@@ -375,8 +375,8 @@ class TestResetDegradedPaths:
             raise OSError("simulated rmtree failure")
 
         monkeypatch.setattr(backend, "delete_enclave_key", _delete_after_journal)
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", _boom)
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        monkeypatch.setattr(_keyvault_reset.shutil, "rmtree", _boom)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         # The SE keys were already deleted; a directory-removal failure must
         # report a clean error and return non-zero, never a traceback. The
@@ -400,14 +400,14 @@ class TestResetDegradedPaths:
     ) -> None:
         root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = FakeBackend()
-        real_rmtree = keyvault_cli.shutil.rmtree
+        real_rmtree = _keyvault_reset.shutil.rmtree
 
         def _remove_then_report_failure(path: Path) -> None:
             real_rmtree(path)
             raise OSError("simulated crash after directory removal")
 
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", _remove_then_report_failure)
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+        monkeypatch.setattr(_keyvault_reset.shutil, "rmtree", _remove_then_report_failure)
+        assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
         assert not root.exists()
         assert _storage.reset_journal_path(root).is_file()
 
@@ -415,8 +415,8 @@ class TestResetDegradedPaths:
         # stable journal. Native deletion is idempotently retried, then the
         # journal is unlinked and its parent directory is flushed.
         backend.calls.clear()
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", real_rmtree)
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+        monkeypatch.setattr(_keyvault_reset.shutil, "rmtree", real_rmtree)
+        assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
         assert ("delete", _physical(root, "payments")) in backend.calls
         assert not _storage.reset_journal_path(root).exists()
 
@@ -438,18 +438,18 @@ class TestResetDegradedPaths:
             real_flush(root_arg)
 
         monkeypatch.setattr(_storage, "fsync_keyvault_parent", fail_once)
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+        assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
         assert not root.exists()
         assert _storage.reset_journal_path(root).is_file()
 
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+        assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
         assert not _storage.reset_journal_path(root).exists()
 
     def test_pending_parent_journal_blocks_absent_root_recreation(self, tmp_path: Path) -> None:
         root = _build_keyvault(tmp_path, ["default"])
         with _storage.keyvault_lifecycle_lock(root):
             _storage.write_reset_journal(root, b"pending reset")
-        keyvault_cli.shutil.rmtree(root)
+        _keyvault_reset.shutil.rmtree(root)
 
         with pytest.raises(_storage.KeyvaultResetInProgressError, match="reset"):
             _storage.ensure_layout(root)
@@ -462,7 +462,7 @@ class TestResetDegradedPaths:
     ) -> None:
         (tmp_path / "mordred").write_text("not a directory", encoding="utf-8")
 
-        assert keyvault_cli.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 1
+        assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=FakeBackend(), assume_yes=True) == 1
         assert "cannot inspect keyvault root" in capsys.readouterr().err.lower()
 
     def test_symlinked_root_is_refused_before_any_native_delete(
@@ -475,7 +475,7 @@ class TestResetDegradedPaths:
         root.symlink_to(external, target_is_directory=True)
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 1
         assert root.is_symlink()
@@ -494,7 +494,7 @@ class TestResetDegradedPaths:
         lifecycle.symlink_to(victim)
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 1
         assert root.is_dir()
@@ -516,7 +516,7 @@ class TestResetDegradedPaths:
                 assert release_writer.wait(timeout=5)
 
         def resetter() -> None:
-            result.append(keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True))
+            result.append(_keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True))
             reset_finished.set()
 
         writer_thread = threading.Thread(target=writer)
@@ -547,7 +547,7 @@ class TestResetDegradedPaths:
         creator_finished = threading.Event()
         reset_result: list[int] = []
         creator_errors: list[BaseException] = []
-        real_rmtree = keyvault_cli.shutil.rmtree
+        real_rmtree = _keyvault_reset.shutil.rmtree
 
         def paused_rmtree(path: Path) -> None:
             removal_entered.set()
@@ -555,7 +555,7 @@ class TestResetDegradedPaths:
             real_rmtree(path)
 
         def resetter() -> None:
-            reset_result.append(keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True))
+            reset_result.append(_keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True))
             reset_finished.set()
 
         def creator() -> None:
@@ -566,7 +566,7 @@ class TestResetDegradedPaths:
             finally:
                 creator_finished.set()
 
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", paused_rmtree)
+        monkeypatch.setattr(_keyvault_reset.shutil, "rmtree", paused_rmtree)
         reset_thread = threading.Thread(target=resetter)
         creator_thread = threading.Thread(target=creator)
         reset_thread.start()
@@ -593,7 +593,7 @@ class TestResetAbsent:
     def test_absent_keyvault_is_noop(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         assert rc == 0
         # Outcome lines land on stdout (UX review 2026-07-07); stderr stays
@@ -610,7 +610,7 @@ class TestResetConfirmation:
         backend = FakeBackend()
         _seed_enclave(backend, [_DEFAULT_KEY_ID])
 
-        rc = keyvault_cli.reset_keyvault(
+        rc = _keyvault_reset.reset_keyvault(
             home=tmp_path, backend=backend, prompt_io=_ScriptedPrompt("no"), assume_yes=False
         )
 
@@ -624,7 +624,7 @@ class TestResetConfirmation:
         backend = FakeBackend()
         prompt = _ScriptedPrompt("reset")
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, prompt_io=prompt, assume_yes=False)
+        rc = _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, prompt_io=prompt, assume_yes=False)
 
         assert rc == 0
         assert not root.exists()
@@ -634,7 +634,7 @@ class TestResetConfirmation:
         root = _build_keyvault(tmp_path, ["default"])
         backend = FakeBackend()
 
-        rc = keyvault_cli.reset_keyvault(
+        rc = _keyvault_reset.reset_keyvault(
             home=tmp_path, backend=backend, prompt_io=_ScriptedPrompt("  reset  "), assume_yes=False
         )
 
@@ -654,7 +654,7 @@ class TestResetConfirmation:
         backend = FakeBackend()
         prompt = _ScriptedPrompt("no")
 
-        rc = keyvault_cli.reset_keyvault(
+        rc = _keyvault_reset.reset_keyvault(
             home=tmp_path,
             backend=backend,
             prompt_io=prompt,
@@ -680,11 +680,11 @@ class TestResetConfirmation:
     ) -> None:
         root = _build_keyvault(tmp_path, ["default"])
         _write_current_reset_journal(root)
-        keyvault_cli.shutil.rmtree(root)
+        _keyvault_reset.shutil.rmtree(root)
         backend = FakeBackend()
         prompt = _ScriptedPrompt("no")
 
-        rc = keyvault_cli.reset_keyvault(
+        rc = _keyvault_reset.reset_keyvault(
             home=tmp_path,
             backend=backend,
             prompt_io=prompt,
@@ -702,7 +702,7 @@ class TestResetConfirmation:
         _write_current_reset_journal(root)
         prompt = _ScriptedPrompt("no")
 
-        rc = keyvault_cli.reset_keyvault(
+        rc = _keyvault_reset.reset_keyvault(
             home=tmp_path,
             backend=FakeBackend(),
             prompt_io=prompt,
