@@ -457,9 +457,9 @@ def circuit_status_health(
         return health(handle)
 
     factory = controller_factory or _default_controller_factory
-    controller = _open_controller(handle, factory=factory, host=host)
-    if isinstance(controller, bool):
-        return controller
+    controller, verdict = _open_controller(handle, factory=factory, host=host)
+    if controller is None:
+        return verdict
 
     try:
         try:
@@ -476,16 +476,20 @@ def circuit_status_health(
             controller.close()
 
 
-def _open_controller(handle: TorHandle, *, factory: ControllerFactory, host: str) -> _ControllerLike | bool:
-    """Open the ControlPort controller, or return the caller's final verdict.
+def _open_controller(
+    handle: TorHandle, *, factory: ControllerFactory, host: str
+) -> tuple[_ControllerLike | None, bool]:
+    """Open the ControlPort controller as a ``(controller, verdict)`` pair.
 
-    A ``_ControllerLike`` result is a live controller the caller owns (and must
-    close). A ``bool`` result is the finished :func:`circuit_status_health`
-    answer for a construction failure: the shallow ``health(handle)`` verdict
-    when the optional ``[tor-control]`` extra is missing, ``False`` otherwise.
+    On success the controller is a live object the caller owns (and must
+    close) and ``verdict`` is unused. On a construction failure the controller
+    is ``None`` and ``verdict`` is the finished :func:`circuit_status_health`
+    answer: the shallow ``health(handle)`` result when the optional
+    ``[tor-control]`` extra is missing, ``False`` otherwise. Keeping the two
+    channels separate means a factory can never be mistaken for a verdict.
     """
     try:
-        return factory(host=host, port=handle.control_port)
+        return factory(host=host, port=handle.control_port), False
     except ImportError:
         # Optional [tor-control] extra not installed; fall back gracefully
         # to the shallow process.poll() check. Strict-mode operators need
@@ -500,11 +504,11 @@ def _open_controller(handle: TorHandle, *, factory: ControllerFactory, host: str
                 "pip install 'hermes-mordred[tor-control]'."
             )
             _STEM_FALLBACK_WARNED = True
-        return health(handle)
+        return None, health(handle)
     except Exception:
         # Anything else at construction time (port unreachable, refused, ...)
         # is treated as drop rather than crash.
-        return False
+        return None, False
 
 
 def _probe_circuit_and_liveness(controller: _ControllerLike) -> bool:
