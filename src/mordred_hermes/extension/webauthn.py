@@ -127,9 +127,11 @@ def _parse_extension_origin(origin: str, *, scheme: str | None = None) -> SplitR
     A bare origin is ``chrome-extension://`` or ``moz-extension://`` (or exactly
     ``scheme`` when given) followed by a host and nothing else: no userinfo, no
     port, no path/query/fragment. Those extras are the lookalike shapes an
-    attacker would use to smuggle a foreign origin past a prefix check, so every
-    extension-origin gate in this package funnels through here. Returns ``None``
-    for anything else, including a value ``urlsplit`` (or ``.port``) rejects.
+    attacker would use to smuggle a foreign origin past a prefix check, so the
+    extension-origin gates in this package (``api._is_extension_origin``,
+    :func:`_rp_id_for_origin`, :func:`_serialized_extension_origin`) funnel
+    through here. Returns ``None`` for anything else, including a value
+    ``urlsplit`` (or ``.port``) rejects.
     """
     try:
         parsed = urlsplit(origin)

@@ -96,8 +96,9 @@ _MAX_PENDING_SIGN = 32
 class _PendingSign:
     """The prompt-time snapshot a later ``sign_approve`` is signed against.
 
-    Frozen so an entry already shown to the user cannot be mutated in place
-    between the ``sign_prompt`` and the approval it authorises.
+    Frozen so no field can be rebound between the ``sign_prompt`` and the
+    approval it authorises. ``params`` is the same list object the prompt frame
+    carried (freezing is shallow), so it must be treated as read-only.
     """
 
     method: Any
