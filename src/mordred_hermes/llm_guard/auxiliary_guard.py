@@ -202,7 +202,7 @@ def _guard_resolved_client(
     )
 
 
-def _prepare_rebind(module: Any, name: str, bound_paths: tuple[Path, Path]) -> Callable[..., Any] | None:
+def _prepare_rebind(*, module: Any, name: str, bound_paths: tuple[Path, Path]) -> Callable[..., Any] | None:
     """Return the callable to wrap, or ``None`` when the seam is already guarded.
 
     ``None`` means ``module.name`` is our own wrapper bound to these exact
@@ -220,8 +220,13 @@ def _prepare_rebind(module: Any, name: str, bound_paths: tuple[Path, Path]) -> C
     return original
 
 
-def _finish_rebind(module: Any, name: str, guarded: Callable[..., Any], bound_paths: tuple[Path, Path]) -> None:
-    """Stamp the guard markers onto ``guarded`` and bind it onto the module."""
+def _finish_rebind(*, module: Any, name: str, guarded: Callable[..., Any], bound_paths: tuple[Path, Path]) -> None:
+    """Stamp the guard markers onto ``guarded`` and bind it onto the module.
+
+    Keyword-only (like :func:`_prepare_rebind`): ``module`` and ``guarded``
+    are both untyped-ish objects, so a transposed positional call would bind
+    the guard onto the wrong object without any type error.
+    """
     setattr(guarded, _WRAPPED_MARKER, True)
     setattr(guarded, _BOUND_PATHS_MARKER, bound_paths)
     setattr(module, name, guarded)
@@ -235,7 +240,7 @@ def _wrap_pair_resolver(
     audit_path: Path,
 ) -> None:
     bound_paths = (policy_json_path, audit_path)
-    original = _prepare_rebind(module, name, bound_paths)
+    original = _prepare_rebind(module=module, name=name, bound_paths=bound_paths)
     if original is None:
         return
 
@@ -251,7 +256,7 @@ def _wrap_pair_resolver(
             )
         return result
 
-    _finish_rebind(module, name, guarded, bound_paths)
+    _finish_rebind(module=module, name=name, guarded=guarded, bound_paths=bound_paths)
 
 
 def _wrap_vision_resolver(
@@ -262,7 +267,7 @@ def _wrap_vision_resolver(
 ) -> None:
     name = "resolve_vision_provider_client"
     bound_paths = (policy_json_path, audit_path)
-    original = _prepare_rebind(module, name, bound_paths)
+    original = _prepare_rebind(module=module, name=name, bound_paths=bound_paths)
     if original is None:
         return
 
@@ -278,7 +283,7 @@ def _wrap_vision_resolver(
             )
         return result
 
-    _finish_rebind(module, name, guarded, bound_paths)
+    _finish_rebind(module=module, name=name, guarded=guarded, bound_paths=bound_paths)
 
 
 def _wrap_provider_chain(
@@ -289,7 +294,7 @@ def _wrap_provider_chain(
 ) -> None:
     name = "_get_provider_chain"
     bound_paths = (policy_json_path, audit_path)
-    original = _prepare_rebind(module, name, bound_paths)
+    original = _prepare_rebind(module=module, name=name, bound_paths=bound_paths)
     if original is None:
         return
 
@@ -318,7 +323,7 @@ def _wrap_provider_chain(
             result.append((label, guarded_candidate))
         return result
 
-    _finish_rebind(module, name, guarded, bound_paths)
+    _finish_rebind(module=module, name=name, guarded=guarded, bound_paths=bound_paths)
 
 
 def install(*, policy_json_path: Path, audit_path: Path) -> bool:

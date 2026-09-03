@@ -463,3 +463,82 @@ def test_validate_session_rejects_guard_bound_to_different_paths(
             config_path=config,
             audit_path=audit_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# _prepare_rebind / _finish_rebind: the single choke point every resolver
+# wrapper goes through. Pin the two fail-safe branches directly.
+# ---------------------------------------------------------------------------
+
+
+def _bound_paths(tmp_path: Path) -> tuple[Path, Path]:
+    return (tmp_path / "policy.json", tmp_path / "audit.log")
+
+
+def test_prepare_rebind_returns_the_plain_seam(tmp_path: Path) -> None:
+    def resolver() -> str:
+        return "plain"
+
+    module = SimpleNamespace(resolve=resolver)
+    assert (
+        auxiliary_guard._prepare_rebind(module=module, name="resolve", bound_paths=_bound_paths(tmp_path)) is resolver
+    )
+
+
+def test_prepare_rebind_is_a_noop_when_already_guarded_for_the_same_paths(tmp_path: Path) -> None:
+    def original() -> str:
+        return "original"
+
+    def guarded() -> str:
+        return "guarded"
+
+    module = SimpleNamespace(resolve=original)
+    auxiliary_guard._finish_rebind(module=module, name="resolve", guarded=guarded, bound_paths=_bound_paths(tmp_path))
+    assert module.resolve is guarded
+    assert getattr(guarded, auxiliary_guard._WRAPPED_MARKER) is True
+    assert getattr(guarded, auxiliary_guard._BOUND_PATHS_MARKER) == _bound_paths(tmp_path)
+
+    assert auxiliary_guard._prepare_rebind(module=module, name="resolve", bound_paths=_bound_paths(tmp_path)) is None
+
+
+def test_prepare_rebind_unwraps_a_guard_bound_to_different_paths(tmp_path: Path) -> None:
+    def original() -> str:
+        return "original"
+
+    def guarded() -> str:
+        return "guarded"
+
+    guarded.__wrapped__ = original  # type: ignore[attr-defined]
+    module = SimpleNamespace(resolve=original)
+    auxiliary_guard._finish_rebind(module=module, name="resolve", guarded=guarded, bound_paths=_bound_paths(tmp_path))
+
+    other = (tmp_path / "other-policy.json", tmp_path / "other-audit.log")
+    # Guards never stack: the *original* is handed back for re-wrapping.
+    assert auxiliary_guard._prepare_rebind(module=module, name="resolve", bound_paths=other) is original
+
+
+@pytest.mark.parametrize(
+    "seam",
+    [
+        pytest.param("not callable", id="plain_non_callable"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_prepare_rebind_refuses_a_non_callable_seam(tmp_path: Path, seam: object) -> None:
+    module = SimpleNamespace(resolve=seam)
+    with pytest.raises(RuntimeError, match="'resolve' cannot be rebound"):
+        auxiliary_guard._prepare_rebind(module=module, name="resolve", bound_paths=_bound_paths(tmp_path))
+
+
+def test_prepare_rebind_refuses_a_marked_guard_without_wrapped(tmp_path: Path) -> None:
+    """A marker without ``__wrapped__`` must fail closed, not hand back ``None``
+    as if the seam were already guarded."""
+
+    def stale_guard() -> str:
+        return "stale"
+
+    setattr(stale_guard, auxiliary_guard._WRAPPED_MARKER, True)
+    module = SimpleNamespace(resolve=stale_guard)
+    other = (tmp_path / "other-policy.json", tmp_path / "other-audit.log")
+    with pytest.raises(RuntimeError, match="'resolve' cannot be rebound"):
+        auxiliary_guard._prepare_rebind(module=module, name="resolve", bound_paths=other)
