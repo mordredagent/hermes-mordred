@@ -15,7 +15,7 @@ from mordred_hermes.keyvault._exceptions import WrapError, WrapKeyNotFound
 from mordred_hermes.keyvault._seckey_backend import _SecKeyBackend
 from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
 from mordred_hermes.privacy_check.audit import NDJSONWriter, make_audit_writer
-from mordred_hermes.wizard import keyvault_cli
+from mordred_hermes.wizard import _keyvault_reset
 from mordred_hermes.wizard._keyvault_init import _provision_audit_log_key
 from tests._keyvault_fakes import FakeBackend
 
@@ -398,7 +398,7 @@ def test_two_profiles_can_use_same_logical_id_without_native_collision(tmp_path:
     )
 
     backend.calls.clear()
-    assert keyvault_cli.reset_keyvault(home=home_a, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=home_a, backend=backend, assume_yes=True) == 0
     deleted = {key_id for operation, key_id in backend.calls if operation == "delete"}
     assert native_a in deleted
     assert native_b not in deleted
@@ -461,7 +461,7 @@ def test_legacy_row_stays_readable_but_reset_never_deletes_global_id(tmp_path: P
     )
 
     backend.calls.clear()
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     deleted = {key_id for operation, key_id in backend.calls if operation == "delete"}
     assert "default" not in deleted
     assert log_encryption.AUDIT_LOG_KEY_ID not in deleted
@@ -482,7 +482,7 @@ def test_present_invalid_native_id_resets_only_deterministic_scoped_target(
     _storage.save_meta(root, meta)
     backend.calls.clear()
 
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     deleted = {key_id for operation, key_id in backend.calls if operation == "delete"}
     assert _native_key_id.scoped_native_key_id(root, "default") in deleted
     assert "default" not in deleted
@@ -507,7 +507,7 @@ def test_surrogate_key_id_metadata_resets_cleanly_without_using_it_as_a_selector
     _storage.save_meta(root, meta)
     backend = FakeBackend()
 
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
 
     selected = {key_id for _operation, key_id in backend.calls}
     assert "untrusted-selector" not in selected
@@ -569,7 +569,7 @@ def test_generation_error_leaves_owned_pending_journal_for_reset(tmp_path: Path)
     assert pending is not None
     _logical, physical = pending
 
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     assert ("delete", physical) in backend.calls
 
 
@@ -616,7 +616,7 @@ def test_failed_rollback_retains_pending_ownership_until_reset(
     assert pending[0] == "custom"
 
     monkeypatch.setattr(_storage, "atomic_write", real_atomic_write)
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     assert ("delete", pending[1]) in backend.calls
 
 
@@ -627,7 +627,7 @@ def test_audit_key_provision_does_not_recreate_key_after_reset_wins(tmp_path: Pa
 
     # Model reset winning the lifecycle order before the best-effort
     # post-commit auxiliary provisioning step begins.
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert _keyvault_reset.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     backend.calls.clear()
     _provision_audit_log_key(backend, home=tmp_path)
 
