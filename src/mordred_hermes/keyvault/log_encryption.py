@@ -82,7 +82,7 @@ from .._log_rotation import rotate_and_compress as _rotate_and_compress
 from .._log_rotation import today_utc_date as _today_utc_date
 from .._log_rotation import utcnow_iso as _utcnow_iso
 from . import _native_key_id, _storage
-from ._canonical_json import canonical_json_bytes
+from ._canonical_json import canonical_json_bytes, canonical_json_bytes_unescaped
 from ._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
 from .crypto import decrypt as _aes_decrypt
 from .crypto import encrypt as _aes_encrypt
@@ -145,7 +145,7 @@ def _serialize(entry: Mapping[str, Any]) -> bytes:
     test fixtures' fixed expectations stable. Raises :class:`ValueError`
     if the entry exceeds :data:`MAX_ENTRY_BYTES`.
     """
-    data = canonical_json_bytes(entry, ensure_ascii=False)
+    data = canonical_json_bytes_unescaped(entry)
     if len(data) > MAX_ENTRY_BYTES:
         raise ValueError(f"audit entry exceeds {MAX_ENTRY_BYTES} bytes (got {len(data)})")
     return data

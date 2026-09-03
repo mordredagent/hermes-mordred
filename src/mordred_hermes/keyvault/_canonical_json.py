@@ -14,6 +14,14 @@ here must stay byte-for-byte identical to
 ``json.dumps(obj, sort_keys=True, separators=(",", ":"))`` — this module is
 pinned by :mod:`tests.test_keyvault_canonical_json`.
 
+There are deliberately two named byte forms rather than one function with an
+``ensure_ascii`` switch: :func:`canonical_json_bytes` (ASCII-escaped, what
+every authenticated header/manifest uses) and
+:func:`canonical_json_bytes_unescaped` (non-ASCII emitted as itself, used only
+for the human-readable audit-log *entries*). A call site picks the form by
+name, so an authenticated format cannot silently get the wrong bytes by
+flipping a flag.
+
 Stdlib-only leaf module: it imports :mod:`json` and nothing from the package,
 so any keyvault module can depend on it without risking an import cycle.
 """
@@ -24,24 +32,33 @@ import json
 from typing import Any
 
 # Compact separators: no space after "," or ":". Pinned as a constant so the
-# two entry points below cannot drift apart.
+# entry points below cannot drift apart.
 _SEPARATORS = (",", ":")
 
 
-def canonical_json_text(obj: Any, *, ensure_ascii: bool = True) -> str:
-    """Serialize *obj* to compact, key-sorted JSON text.
+def canonical_json_text(obj: Any) -> str:
+    """Serialize *obj* to compact, key-sorted, ASCII-escaped JSON text.
 
-    ``ensure_ascii`` mirrors :func:`json.dumps`: the default escapes non-ASCII
-    characters as ``\\uXXXX``; ``False`` emits them as themselves (what the
-    audit log does, since its entries carry human-readable text).
+    Non-ASCII characters are escaped as ``\\uXXXX`` (``json.dumps``' default),
+    so the text is identical on every platform and locale.
     """
-    return json.dumps(obj, sort_keys=True, separators=_SEPARATORS, ensure_ascii=ensure_ascii)
+    return json.dumps(obj, sort_keys=True, separators=_SEPARATORS)
 
 
-def canonical_json_bytes(obj: Any, *, ensure_ascii: bool = True) -> bytes:
-    """Serialize *obj* to compact, key-sorted UTF-8 JSON bytes.
+def canonical_json_bytes(obj: Any) -> bytes:
+    """Serialize *obj* to compact, key-sorted, ASCII-escaped UTF-8 JSON bytes.
 
-    The byte form every hashed / MAC'd / signed keyvault artifact is built
-    from; see :func:`canonical_json_text` for ``ensure_ascii``.
+    The byte form every hashed / MAC'd / signed keyvault artifact is built from.
     """
-    return canonical_json_text(obj, ensure_ascii=ensure_ascii).encode("utf-8")
+    return canonical_json_text(obj).encode("utf-8")
+
+
+def canonical_json_bytes_unescaped(obj: Any) -> bytes:
+    """Like :func:`canonical_json_bytes` but with non-ASCII emitted as itself.
+
+    Used only for audit-log entries, whose plaintext carries human-readable
+    text and is read back by people; the escaped form stays the default for
+    every authenticated header. Still compact and key-sorted, so it is just as
+    deterministic.
+    """
+    return json.dumps(obj, sort_keys=True, separators=_SEPARATORS, ensure_ascii=False).encode("utf-8")
