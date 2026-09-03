@@ -457,8 +457,39 @@ def circuit_status_health(
         return health(handle)
 
     factory = controller_factory or _default_controller_factory
+    controller, verdict = _open_controller(handle, factory=factory, host=host)
+    if controller is None:
+        return verdict
+
     try:
-        controller = factory(host=host, port=handle.control_port)
+        try:
+            # Codex P1 (2026-05-14): stem's real
+            # ``Controller.authenticate`` does PROTOCOLINFO discovery and
+            # reads the cookie file itself. The previous ``cookie=`` kwarg
+            # raised TypeError on every probe.
+            controller.authenticate()
+        except Exception:
+            return False
+        return _probe_circuit_and_liveness(controller)
+    finally:
+        with contextlib.suppress(Exception):
+            controller.close()
+
+
+def _open_controller(
+    handle: TorHandle, *, factory: ControllerFactory, host: str
+) -> tuple[_ControllerLike | None, bool]:
+    """Open the ControlPort controller as a ``(controller, verdict)`` pair.
+
+    On success the controller is a live object the caller owns (and must
+    close) and ``verdict`` is unused. On a construction failure the controller
+    is ``None`` and ``verdict`` is the finished :func:`circuit_status_health`
+    answer: the shallow ``health(handle)`` result when the optional
+    ``[tor-control]`` extra is missing, ``False`` otherwise. Keeping the two
+    channels separate means a factory can never be mistaken for a verdict.
+    """
+    try:
+        return factory(host=host, port=handle.control_port), False
     except ImportError:
         # Optional [tor-control] extra not installed; fall back gracefully
         # to the shallow process.poll() check. Strict-mode operators need
@@ -473,40 +504,35 @@ def circuit_status_health(
                 "pip install 'hermes-mordred[tor-control]'."
             )
             _STEM_FALLBACK_WARNED = True
-        return health(handle)
+        return None, health(handle)
     except Exception:
         # Anything else at construction time (port unreachable, refused, ...)
         # is treated as drop rather than crash.
-        return False
+        return None, False
 
+
+def _probe_circuit_and_liveness(controller: _ControllerLike) -> bool:
+    """Classify ``GETINFO circuit-status``, falling back to network-liveness.
+
+    A failed or malformed ``GETINFO`` is a drop (``False``). Logging is
+    deferred to the runtime so this stays a pure boolean signal.
+    """
     try:
-        try:
-            # Codex P1 (2026-05-14): stem's real
-            # ``Controller.authenticate`` does PROTOCOLINFO discovery and
-            # reads the cookie file itself. The previous ``cookie=`` kwarg
-            # raised TypeError on every probe.
-            controller.authenticate()
-        except Exception:
-            return False
-        try:
-            response = controller.get_info("circuit-status")
-        except Exception:
-            return False
-        verdict = _classify_circuit_status(response)
-        if verdict is not None:
-            return verdict
-        # Inconclusive circuit list: an idle Tor legitimately has no
-        # circuits, and a dead-but-alive Tor shows none either because
-        # FAILED/CLOSED entries are pruned from GETINFO output almost
-        # immediately. Tor's own reachability verdict tells them apart.
-        try:
-            liveness = controller.get_info("network-liveness")
-        except Exception:
-            return False
-        return liveness.strip() == "up"
-    finally:
-        with contextlib.suppress(Exception):
-            controller.close()
+        response = controller.get_info("circuit-status")
+    except Exception:
+        return False
+    verdict = _classify_circuit_status(response)
+    if verdict is not None:
+        return verdict
+    # Inconclusive circuit list: an idle Tor legitimately has no
+    # circuits, and a dead-but-alive Tor shows none either because
+    # FAILED/CLOSED entries are pruned from GETINFO output almost
+    # immediately. Tor's own reachability verdict tells them apart.
+    try:
+        liveness = controller.get_info("network-liveness")
+    except Exception:
+        return False
+    return liveness.strip() == "up"
 
 
 _TERMINAL_CIRCUIT_STATUSES: Final[frozenset[str]] = frozenset({"FAILED", "CLOSED"})
