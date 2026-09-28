@@ -93,6 +93,18 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         metavar="N",
         help="Only chats active in the last N days, and only their last N days of messages",
     )
+    p_sync.add_argument(
+        "--include-large-groups",
+        action="store_true",
+        help="Also import groups with more than --large-group-size members (skipped by default)",
+    )
+    p_sync.add_argument(
+        "--large-group-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Member count above which a group is skipped (default: 100)",
+    )
     p_sync.add_argument("--skip-channels", action="store_true", help="Skip broadcast channels")
     p_sync.add_argument("--skip-archived", action="store_true", help="Skip the Archived Chats folder")
     p_sync.add_argument(

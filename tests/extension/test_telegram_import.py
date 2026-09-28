@@ -404,7 +404,10 @@ def test_sync_imports_all_dialogs_then_only_new_messages(tmp_path, monkeypatch):
     )
     archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
     seen = []
-    result = asyncio.run(client.sync_archive(fake, archive, progress=lambda p: seen.append(p.dialogs_done)))
+    everything = client.SyncOptions(max_group_size=None)  # the fake group has no member count
+    result = asyncio.run(
+        client.sync_archive(fake, archive, options=everything, progress=lambda p: seen.append(p.dialogs_done))
+    )
     assert (result.dialogs_total, result.dialogs_done, result.messages_imported) == (3, 3, 9)
     index = archive.load_index()
     assert index.dialogs[-33].archived is True
@@ -414,7 +417,7 @@ def test_sync_imports_all_dialogs_then_only_new_messages(tmp_path, monkeypatch):
 
     fake.history["bob"].append(_FakeMessage(4, "new", dt.datetime(2026, 9, 2, tzinfo=dt.UTC)))
     fake.calls.clear()
-    result = asyncio.run(client.sync_archive(fake, archive))
+    result = asyncio.run(client.sync_archive(fake, archive, options=everything))
     assert result.messages_imported == 1
     assert {c["min_id"] for c in fake.calls} == {3, 2, 4}
     assert len(archive.load_messages(11)) == 4

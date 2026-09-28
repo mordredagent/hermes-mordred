@@ -321,7 +321,100 @@ def test_cli_sync_remembers_the_options_it_was_given(monkeypatch):
 
     monkeypatch.setattr(telegram_cli, "_run_sync", fake_run)
     assert telegram_cli.telegram_sync(service=_Svc(), since_days=3, include_archived=False) == 0
-    assert saved[-1] == {"include_channels": True, "include_archived": False, "limit_per_dialog": None, "since_days": 3}
+    assert saved[-1] == {
+        "include_channels": True,
+        "include_archived": False,
+        "limit_per_dialog": None,
+        "since_days": 3,
+        "max_group_size": 100,
+    }
     count = len(saved)
     assert telegram_cli.telegram_sync(service=_Svc()) == 0  # plain sync reuses it and saves nothing new
     assert len(saved) == count
+
+
+# -- large groups are opt-in ------------------------------------------------------------
+
+
+class Channel:  # name matters: _group_size looks the full count up only for channels
+    def __init__(self, count: int | None) -> None:
+        self.participants_count = count
+
+
+class _GroupDialog(_Dialog):
+    def __init__(self, did: int, entity_name: str, last: dt.datetime, entity: Any) -> None:
+        super().__init__(did, entity_name, last)
+        self.entity = entity
+        self.is_user = False
+        self.is_group = True
+
+
+class _GroupClient(_Client):
+    def __init__(self, *args: Any, full_count: int | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.full_count = full_count
+        self.full_requests = 0
+
+    async def __call__(self, request: Any) -> Any:
+        self.full_requests += 1
+        return SimpleNamespace(full_chat=SimpleNamespace(participants_count=self.full_count))
+
+    async def iter_messages(self, entity: Any, **kwargs: Any):
+        key = entity if isinstance(entity, str) else next(d.name for d in self.dialogs if d.entity is entity)
+        async for m in super().iter_messages(key, **kwargs):
+            yield m
+
+
+def _group_fixture(full_count: int | None = None) -> _GroupClient:
+    now = dt.datetime(2026, 9, 28, 12, tzinfo=dt.UTC)
+    recent = now - dt.timedelta(hours=1)
+    return _GroupClient(
+        [
+            _GroupDialog(-1, "small", recent, Channel(12)),
+            _GroupDialog(-2, "huge", recent, Channel(5000)),
+            _GroupDialog(-3, "unknown", recent, Channel(None)),
+        ],
+        {"small": [_Msg(1, recent)], "huge": [_Msg(1, recent)], "unknown": [_Msg(1, recent)]},
+        full_count=full_count,
+    )
+
+
+def _sync(fake: Any, tmp_path, **opts: Any) -> list[int]:
+    from mordred_hermes.extension.telegram import client as tg
+
+    archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
+    now = dt.datetime(2026, 9, 28, 12, tzinfo=dt.UTC).timestamp()
+    asyncio.run(tg.sync_archive(fake, archive, options=tg.SyncOptions(**opts), clock=lambda: now))
+    return sorted(archive.load_index().dialogs)
+
+
+def test_large_groups_are_skipped_by_default(tmp_path):
+    fake = _group_fixture(full_count=None)
+    assert _sync(fake, tmp_path) == [-1]  # huge skipped; unknown size counts as large
+    assert fake.full_requests == 1  # only the group whose size was not listed
+
+
+def test_unknown_size_resolved_by_read_only_lookup(tmp_path):
+    assert _sync(_group_fixture(full_count=40), tmp_path) == [-3, -1]
+
+
+def test_large_groups_on_request(tmp_path):
+    assert _sync(_group_fixture(), tmp_path, max_group_size=None) == [-3, -2, -1]
+    assert _sync(_group_fixture(full_count=None), tmp_path / "b", max_group_size=10000) == [-2, -1]
+
+
+def test_full_channel_lookup_is_allow_listed():
+    from mordred_hermes.extension.telegram import readonly
+
+    assert "channels.GetFullChannelRequest" in readonly.READ_REQUESTS
+
+
+def test_group_size_scope_defaults_and_opt_in(tmp_path):
+    vault = tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: None, audit_sink=lambda _e: None)
+    svc = service.TelegramService(secret_store=vault, archive_root=tmp_path / "tg")
+    assert svc.sync_options().max_group_size == 100  # nothing saved: large groups skipped
+    assert svc.sync_options({"max_group_size": 0}).max_group_size is None  # --include-large-groups
+    vault.save_sync_scope({"max_group_size": 0})
+    assert svc.sync_options().max_group_size is None  # remembered
+    vault.save_sync_scope({"max_group_size": 300})
+    assert svc.sync_options().max_group_size == 300

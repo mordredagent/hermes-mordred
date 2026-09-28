@@ -34,6 +34,7 @@ from .ask import (
     validate_question,
 )
 from .client import (
+    DEFAULT_MAX_GROUP_SIZE,
     SyncOptions,
     SyncProgress,
     TelegramClientError,
@@ -332,6 +333,10 @@ class TelegramService:
             include_archived=scope.get("include_archived") is not False,
             limit_per_dialog=count(scope.get("limit_per_dialog")),
             since_days=count(scope.get("since_days")),
+            # Absent = the default limit; 0 = no limit (large groups included).
+            max_group_size=(
+                DEFAULT_MAX_GROUP_SIZE if "max_group_size" not in scope else count(scope.get("max_group_size"))
+            ),
         )
 
     async def start_sync(self, options: SyncOptions | None = None) -> None:

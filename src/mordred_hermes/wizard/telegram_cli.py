@@ -256,6 +256,7 @@ def telegram_sync(
     include_archived: bool | None = None,
     limit_per_dialog: int | None = None,
     since_days: int | None = None,
+    max_group_size: int | None = None,
     everything: bool = False,
     service: Any = None,
 ) -> int:
@@ -269,8 +270,13 @@ def telegram_sync(
         "include_archived": include_archived,
         "limit_per_dialog": limit_per_dialog,
         "since_days": since_days,
+        "max_group_size": max_group_size,
     }
-    options = SyncOptions(include_channels=True, include_archived=True) if everything else svc.sync_options(given)
+    options = (
+        SyncOptions(include_channels=True, include_archived=True, max_group_size=None)
+        if everything
+        else svc.sync_options(given)
+    )
     explicit = everything or any(v is not None for v in given.values())
     save = getattr(getattr(svc, "_secrets", None), "save_sync_scope", None)
     if explicit and save is not None:
@@ -281,6 +287,7 @@ def telegram_sync(
                     "include_archived": options.include_archived,
                     "limit_per_dialog": options.limit_per_dialog,
                     "since_days": options.since_days,
+                    "max_group_size": options.max_group_size or 0,
                 }
             )
     skipped = [
@@ -290,6 +297,8 @@ def telegram_sync(
     ]
     limit = f"; at most {options.limit_per_dialog} per new chat" if options.limit_per_dialog else ""
     window = f"; last {options.since_days} days only" if options.since_days else ""
+    if options.max_group_size:
+        window += f"; groups over {options.max_group_size} members skipped"
     print(f"Scope: pinned first, all chats{' except ' + ' and '.join(skipped) if skipped else ''}{window}{limit}.")
     try:
         return asyncio.run(_run_sync(svc, options))
@@ -474,6 +483,9 @@ def cli_telegram(args: argparse.Namespace) -> int:
             include_archived=False if args.skip_archived else None,
             limit_per_dialog=args.limit_per_dialog,
             since_days=getattr(args, "days", None),
+            max_group_size=0
+            if getattr(args, "include_large_groups", False)
+            else getattr(args, "large_group_size", None),
             everything=bool(getattr(args, "all", False)),
         )
     if command == "status":

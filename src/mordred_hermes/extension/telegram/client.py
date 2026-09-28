@@ -43,6 +43,9 @@ _FLUSH_EVERY = 500
 _MAX_TEXT_CHARS = 16_000
 
 
+DEFAULT_MAX_GROUP_SIZE = 100
+
+
 class TelegramClientError(RuntimeError):
     """Stable, content-free failure code."""
 
@@ -57,6 +60,8 @@ class SyncOptions:
     include_archived: bool = True
     limit_per_dialog: int | None = None  # first import only: newest N messages
     since_days: int | None = None  # only chats active, and messages sent, in the last N days
+    # Groups with more members than this are skipped (None = no limit).
+    max_group_size: int | None = DEFAULT_MAX_GROUP_SIZE
 
 
 @dataclass
@@ -243,6 +248,32 @@ def _last_activity(dialog: Any) -> float | None:
     return date.timestamp() if date is not None else None
 
 
+async def _group_size(client: Any, dialog: Any) -> int | None:
+    """Member count of a group, or None when Telegram will not say."""
+    entity = dialog.entity
+    count = getattr(entity, "participants_count", None)
+    if isinstance(count, int):
+        return count
+    if type(entity).__name__ != "Channel":
+        return None
+    try:
+        from telethon.tl.functions.channels import GetFullChannelRequest
+
+        full = await client(GetFullChannelRequest(entity))  # read-only, allow-listed
+        value = getattr(getattr(full, "full_chat", None), "participants_count", None)
+        return value if isinstance(value, int) else None
+    except Exception:
+        return None
+
+
+async def _too_large(client: Any, dialog: Any, options: SyncOptions) -> bool:
+    if options.max_group_size is None or dialog_kind(dialog) != "group":
+        return False
+    size = await _group_size(client, dialog)
+    # Unknown size counts as large: skipping is the conservative default.
+    return size is None or size > options.max_group_size
+
+
 async def _collect_dialogs(client: Any, options: SyncOptions, cutoff: float | None) -> list[tuple[Any, bool]]:
     """Chats to import: pinned first, then most recently active."""
     seen: set[int] = set()
@@ -258,6 +289,8 @@ async def _collect_dialogs(client: Any, options: SyncOptions, cutoff: float | No
             last = _last_activity(dialog)
             if cutoff is not None and last is not None and last < cutoff:
                 continue  # nothing in the window; do not even open it
+            if await _too_large(client, dialog, options):
+                continue  # large groups only on request (--include-large-groups)
             dialogs.append((dialog, archived))
     # Stable: Telegram already lists by recency, so this only lifts pinned chats.
     dialogs.sort(key=lambda pair: not getattr(pair[0], "pinned", False))

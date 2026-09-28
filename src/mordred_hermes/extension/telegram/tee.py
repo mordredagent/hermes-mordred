@@ -260,6 +260,7 @@ class TeeSecretStore:
             "include_archived": scope.get("include_archived") is not False,
             "limit_per_dialog": scope.get("limit_per_dialog"),
             "since_days": scope.get("since_days"),
+            "max_group_size": scope.get("max_group_size", 100),
         }
         atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
 
