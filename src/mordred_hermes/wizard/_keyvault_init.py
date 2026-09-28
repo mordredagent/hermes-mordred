@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ..keyvault.api import GenerateResult, SeedDisplayHandle
     from ..keyvault.seed_display import SeedDisplaySurface
     from ..keyvault.wrap import AuditSink, NativeBackend
+    from ._flow_session import FlowSession
     from .configure import PromptIO
 
 
@@ -265,10 +266,18 @@ def _intro_banner() -> str:
     )
 
 
-def _read_passphrase(prompt_io: PromptIO) -> str | None:
+def _read_passphrase(prompt_io: PromptIO, session: FlowSession | None = None) -> str | None:
     """Prompt for the passphrase twice. Returns it, or None (after printing) on a
     mismatch or an empty entry.
+
+    With a ``session`` (``hermes-mordred setup``), a passphrase already chosen
+    and confirmed earlier in the same run is reused without prompting, and a
+    newly chosen one is remembered so a later step of the run (the at-rest
+    vault's recovery passphrase) does not prompt again.
     """
+    if session is not None and session.passphrase:
+        print("Using the passphrase you already chose in this setup run.", file=sys.stderr)
+        return session.passphrase
     passphrase = prompt_io.ask_password("Choose a Passphrase")
     if passphrase != prompt_io.ask_password("Re-enter the Passphrase"):
         _term.emit_error("Passphrases do not match — nothing was written.")
@@ -276,7 +285,18 @@ def _read_passphrase(prompt_io: PromptIO) -> str | None:
     if not passphrase:
         _term.emit_error("Passphrase must not be empty.")
         return None
+    if session is not None:
+        session.remember_passphrase(passphrase)
     return passphrase
+
+
+#: Printed under the intro banner when the ceremony runs inside
+#: ``hermes-mordred setup``: the one Passphrase is reused for the at-rest vault.
+_SETUP_SHARED_PASSPHRASE_NOTE = (
+    "  Setup asks for a passphrase only once: this Passphrase also\n"
+    "  becomes the recovery passphrase of the encryption vault that\n"
+    "  setup creates next (used only if this device is lost).\n"
+)
 
 
 def _generate_seed_material(passphrase: str, *, store_seed_for_hd: bool) -> tuple[SeedDisplayHandle, bytes, str | None]:
@@ -786,6 +806,7 @@ def init_keyvault(
     blackout_assert: Callable[..., None] | None = None,
     store_seed_for_hd: bool = True,
     unattended: bool | None = None,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
 
@@ -825,6 +846,11 @@ def init_keyvault(
     prior behaviour exactly, falling back to the ``MORDRED_SEKEY_UNATTENDED``
     env var deep in ``keyvault._seckey_backend``. Forwarded verbatim to
     :func:`..keyvault.api.confirm_generate`.
+
+    ``flow_session`` is set only by ``hermes-mordred setup``: the
+    Passphrase chosen here is remembered in memory so the vault created later in
+    the same run reuses it instead of prompting again (see
+    :mod:`._flow_session`). Standalone ``keyvault init`` passes ``None``.
     """
     refusal = _preflight_or_refuse(home=home, blackout_assert=blackout_assert, surface=surface)
     if refusal is not None:
@@ -834,7 +860,9 @@ def init_keyvault(
     # Orient the operator before the bare passphrase prompt: what this
     # command does and what the Passphrase protects (UX review 2026-06-15).
     print(_intro_banner(), file=sys.stderr)
-    passphrase = _read_passphrase(prompt_io)
+    if flow_session is not None:
+        print(_SETUP_SHARED_PASSPHRASE_NOTE, file=sys.stderr)
+    passphrase = _read_passphrase(prompt_io, flow_session)
     if passphrase is None:
         return 1
 

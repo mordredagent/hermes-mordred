@@ -197,11 +197,15 @@ def _ensure_memory_encryption(input_fn: InputFn) -> bool:
     )
     if not _yes(input_fn, "Turn on memory encryption now?"):
         return False
+    from ._flow_session import FlowSession
     from .encryption_cli import _dispatch
 
-    for target in ("env", "memory"):
-        if _dispatch("enable", target) != 0:
-            return False
+    # One flow: a new vault's passphrase is asked once, and the vault is
+    # unlocked at most once (one Touch ID) for both targets.
+    with FlowSession() as flow:
+        for target in ("env", "memory"):
+            if _dispatch("enable", target, flow_session=flow) != 0:
+                return False
     ok = memory_encryption_active()
     if ok:
         print("Memory encryption is on. Restart Hermes Desktop so it picks up the key.")

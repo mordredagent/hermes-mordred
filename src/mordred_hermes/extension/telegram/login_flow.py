@@ -143,10 +143,11 @@ class LoginFlows:
         try:
             session = self._saver()(flow.client)
             sealed = replace(flow.base, session=session)
-            if await asyncio.to_thread(self._store.load) is None:
-                await asyncio.to_thread(self._store.store, sealed)
-            else:
-                await asyncio.to_thread(self._store.update, lambda _old: sealed)
+            # ``flow.base`` already carries everything read at start(); the old
+            # load()-then-update(lambda _old: sealed) discarded both unsealed
+            # values, costing two extra Enclave unwraps (two Touch ID / password
+            # dialogs) for nothing. Sealing only needs the public key.
+            await asyncio.to_thread(self._store.store, sealed)
         except BaseException:
             # Telegram accepted the login; do not leave an unrevocable session.
             with contextlib.suppress(Exception):

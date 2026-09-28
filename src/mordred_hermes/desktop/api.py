@@ -250,35 +250,49 @@ class _FixedPassphrase:
 
 
 @router.post("/memory/enable")
-async def memory_enable() -> Any:
+async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     """Turn on sealed .env + sealed memory; create the vault if needed.
 
     If a vault is created here, its recovery passphrase is generated and
     returned ONCE so the UI can show it. It is not stored anywhere else.
+
+    Optional body ``{"unattended": true|false}`` sets the policy of the vault's
+    device key if this call creates it. Absent, it matches ``hermes-mordred
+    setup``'s default: ``MORDRED_SEKEY_UNATTENDED=1`` makes it unattended,
+    otherwise it is attended (Touch ID / password on each use). Both steps run
+    in one flow, so the vault is unlocked at most once (not at all when it is
+    created here).
     """
     from ..extension.telegram.memory_guard import memory_encryption_active
     from ..wizard import env_decrypt_cli, memory_cli
+    from ..wizard._flow_session import FlowSession
     from ..wizard.vault_cli import _resolve_root
 
     if await asyncio.to_thread(memory_encryption_active):
         return {"ok": True, "already": True}
+    requested = (body or {}).get("unattended")
+    unattended = requested if isinstance(requested, bool) else None
     prompt = _FixedPassphrase(generate_recovery_passphrase())
     home, root, platform = _home(), _resolve_root(None), sys.platform
 
     def enable() -> int:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt)
+        with (
+            FlowSession(unattended=unattended) as flow,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            rc = env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
             if rc == 0:
-                rc = memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt)
+                rc = memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
         return rc
 
     rc = await asyncio.to_thread(enable)
     if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
         return _error("memory_encryption_failed", 500)
-    body: dict[str, Any] = {"ok": True, "restart_required": True}
+    result: dict[str, Any] = {"ok": True, "restart_required": True}
     if prompt.used:
-        body["recovery_passphrase"] = prompt._passphrase  # shown once; never persisted by Mordred
-    return body
+        result["recovery_passphrase"] = prompt._passphrase  # shown once; never persisted by Mordred
+    return result
 
 
 # -- step 3/4: Telegram API credentials and login -----------------------------------------------

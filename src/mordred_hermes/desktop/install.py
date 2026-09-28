@@ -3,15 +3,21 @@
 Hermes loads a desktop page and its local API only from a plugin *folder*
 (``<home>/plugins/<id>/{desktop,dashboard}``), not from a pip entry point.
 This writes a thin folder whose API module imports :mod:`.api` from the
-installed package, and enables ``mordred`` in ``plugins.enabled``. The folder
-has no ``plugin.yaml``, so Hermes' agent-plugin scanner skips it and the
-entry-point plugins are not duplicated.
+installed package, and enables ``mordred`` in ``plugins.enabled``.
+
+``mordred`` is also the name of Mordred's single entry-point plugin
+(:mod:`mordred_hermes.plugin`), so one ``plugins.enabled`` entry turns on both
+halves and Hermes Desktop shows them as one plugin row (its hub matches the
+dashboard manifest's ``name`` to the agent plugin). The folder has no
+``plugin.yaml``, so Hermes' agent-plugin scanner finds no directory plugin
+there that could shadow the entry point. For the same reason ``uninstall``
+removes only the folder and leaves ``plugins.enabled`` alone: dropping
+``mordred`` there would turn every Mordred protection off.
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import shutil
 from importlib import resources
 from pathlib import Path
@@ -32,28 +38,13 @@ def plugin_dir(home: Path | None = None) -> Path:
     return (home or _home()) / "plugins" / PLUGIN_ID
 
 
-def _set_enabled(config: Path, enabled: bool) -> None:
-    """Add/remove ``mordred`` in ``plugins.enabled`` only (round-trip, locked)."""
-    from ..wizard.policy_writer import _atomic_write_text, _policy_write_lock, _read_regular_text, _round_trip_yaml
+def _enable(home: Path) -> None:
+    """Add ``mordred`` to ``plugins.enabled`` (round-trip, locked), migrating legacy names."""
+    from ..wizard.policy_writer import PolicyWriter
 
-    with _policy_write_lock(config.parent):
-        yaml = _round_trip_yaml()
-        text = _read_regular_text(config)
-        root = yaml.load(text) if text else None
-        if root is None:
-            root = {}
-        plugins = root.setdefault("plugins", {})
-        names = plugins.get("enabled")
-        if not isinstance(names, list):
-            names = []
-            plugins["enabled"] = names
-        if enabled and PLUGIN_ID not in names:
-            names.append(PLUGIN_ID)
-        if not enabled and PLUGIN_ID in names:
-            names.remove(PLUGIN_ID)
-        buffer = io.StringIO()
-        yaml.dump(root, buffer)
-        _atomic_write_text(config, buffer.getvalue())
+    writer = PolicyWriter(config_path=home / "config.yaml", policy_json_path=home / "mordred" / "policy.json")
+    for note in writer.migrate_plugin_identity(create_missing=True).notes():
+        _term.emit_warn(note)
 
 
 def install(home: Path | None = None) -> int:
@@ -64,20 +55,31 @@ def install(home: Path | None = None) -> int:
         destination = target / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(assets.joinpath(rel).read_bytes())
-    _set_enabled(base / "config.yaml", True)
+    _enable(base)
     print(f"Installed the Mordred desktop page at {target}.")
-    print("Next: restart Hermes Desktop, turn Mordred on in Capabilities → Plugins (Desktop),")
-    print("then open “Mordred” in the sidebar (or ⌘K → “Mordred: Set up private Telegram”).")
+    print("Next: restart Hermes Desktop, then open “Mordred” in the sidebar")
+    print("(or ⌘K → “Mordred: Set up private Telegram”).")
     return 0
 
 
-def uninstall(home: Path | None = None) -> int:
-    base = home or _home()
-    target = plugin_dir(base)
+def remove_page(home: Path | None = None) -> bool:
+    """Remove the page folder; return whether one was removed.
+
+    A symlink at the folder path is left alone (this command never writes one).
+    Shared by :func:`uninstall` and ``hermes-mordred uninstall``.
+    """
+    target = plugin_dir(home or _home())
     if target.is_dir() and not target.is_symlink():
         shutil.rmtree(target)
-    _set_enabled(base / "config.yaml", False)
+        return True
+    return False
+
+
+def uninstall(home: Path | None = None) -> int:
+    remove_page(home)
     print("Removed the Mordred desktop page. Restart Hermes Desktop.")
+    print("The Mordred plugin itself stays enabled; turn it off with `hermes plugins disable mordred`.")
+    print("To remove Mordred completely, run `hermes-mordred uninstall`.")
     return 0
 
 

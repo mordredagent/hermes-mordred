@@ -33,24 +33,32 @@ Mordred verifies that every literal `register_hook` name exists in Hermes's
 `VALID_HOOKS`. Callback order is registration order; Hermes exposes no priority
 argument that Mordred can rely on.
 
-Each plugin therefore registers its own integrity callback before its
-feature-specific callbacks. Cross-plugin correctness must not depend on package
-entry-point enumeration order. Network startup uses explicit readiness and
-process-freeze behavior rather than assuming another plugin ran first.
+Mordred is one plugin, `mordred` (`mordred_hermes.plugin`). Its `register()`
+registers the integrity callback first, then the components in a fixed order
+(keyvault, llm_guard, network, privacy_check, e2e, wizard), so component
+callbacks run in that order within each hook. A callback registered by more
+than one component (the shared `check_plugin_integrity`) is registered once.
+The `.pth` runtime bootstrap additionally keeps a mandatory integrity bridge at
+the front of `on_session_start`. Network startup still uses explicit readiness
+and process-freeze behavior rather than assuming another component ran first.
 
 ## 2. Plugin disable detection (`hermes plugins list --disabled` equivalent API)
 
 At session start, the shared integrity code resolves the enabled/disabled state
-from Hermes configuration and checks the fixed six-entry Mordred sibling list.
+of the `mordred` plugin from Hermes configuration and, with the plugin manager
+in hand, checks that it loaded, holds the union of its components' required
+hooks, and that no component failed (a failed component is reported as
+`mordred/<component>`).
 
 - `strict`: audit, poison the process, and raise
-  `MordredIntegrityRefused(BaseException)` so Hermes cannot continue without a
-  required sibling.
+  `MordredIntegrityRefused(BaseException)` so Hermes cannot continue without
+  every component.
 - `lenient` / `off`: audit and warn, then continue.
 
-The fixed list is intentional. The five `privacy_lock: true` manifest markers
-are declarative and do not auto-discover the manifest-less `mordred_e2e` entry
-point.
+When `mordred` is missing but `config.yaml` still lists the pre-0.1.0a21
+per-component names (`mordred_network`, ...), the message points at
+`hermes-mordred plugins migrate`. Those names are no longer a unit of
+enablement: the components cannot be disabled one by one.
 
 ## 3. Dynamic plugin disable in running session (TODO §0.8 L105)
 
@@ -68,9 +76,9 @@ intercept the configuration edit itself.
 Mordred reads only `tool_name`. Hermes does not provide `origin_skill`, so the
 runtime guard cannot apply per-skill metadata.
 
-- `mordred_privacy_check` applies a generic strict-mode tool blocklist and
+- The privacy_check component applies a generic strict-mode tool blocklist and
   returns an `action: block` response when required.
-- `mordred_network` blocks calls when a strict route has dropped or the process
+- The network component blocks calls when a strict route has dropped or the process
   is poisoned.
 - Per-skill `metadata.mordred.*` decisions happen at install time through
   `hermes-mordred install`.
@@ -100,7 +108,7 @@ a pre-client-construction integration point or an optional vendored layer.
 
 ## 6. `pre_gateway_dispatch` payload and return action shape
 
-`mordred_e2e` reads `event` and `gateway` to authenticate `ENC:v3`, bind channel
+The e2e component reads `event` and `gateway` to authenticate `ENC:v3`, bind channel
 keys to the routed destination, install reply-in-kind protection, and skip
 plaintext or invalid mandatory-platform events before agent dispatch.
 

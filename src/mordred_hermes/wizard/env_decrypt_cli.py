@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
+    from ._flow_session import FlowSession
     from .configure import PromptIO
 
 __all__ = ["disable", "enable", "purge", "reseal"]
@@ -139,6 +140,7 @@ def _restore_plaintext(
     root: Path,
     backend: NativeBackend | None,
     store: AnchorStore | None,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Guarantee a readable plaintext ``<home>/.env`` without losing operator edits.
 
@@ -159,7 +161,7 @@ def _restore_plaintext(
     if not _vault_present(root):
         return 0
 
-    opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
+    opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
     if opened is None:
         return 0 if env_path.exists() else 1
     with opened:
@@ -271,6 +273,7 @@ def enable(
     prompt_io: PromptIO | None = None,
     runtime_probe: RuntimeProbe | None = None,
     force_runtime_unverified: bool = False,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Enroll ``<home>/.env`` into the vault and turn runtime injection on.
 
@@ -291,6 +294,11 @@ def enable(
     the process which must unseal the file in practice. ``runtime_probe`` is
     injectable for tests; ``force_runtime_unverified`` bypasses both checks
     (advanced; seals anyway).
+
+    ``flow_session`` (a guided flow: ``setup``, ``encryption enable all``, the
+    Telegram / Desktop setup) shares the flow's passphrase, open vault and key
+    policy with its other steps, so the flow asks for a passphrase once and
+    unlocks the vault at most once (see :mod:`._flow_session`).
     """
     from . import vault_cli
 
@@ -323,14 +331,18 @@ def enable(
     if _should_reseal_instead(platform=platform, home=home, root=root):
         return reseal(home=home, root=root, backend=backend, store=store)
 
-    rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    rc = vault_cli.ensure_initialised(
+        root=root, prompt_io=prompt_io, backend=backend, store=store, flow_session=flow_session
+    )
     if rc != 0:
         return rc  # could not create the vault (reason already printed)
 
     # Enroll and read the enrolled copy back through the *same* vault open, so the
     # device key (Secure Enclave / Touch ID) is unlocked once for both — the
     # pre-delete verify below no longer costs a second prompt.
-    rc, enrolled = vault_cli.add_and_verify(root=root, name=_ENV_NAME, source=env_path, backend=backend, store=store)
+    rc, enrolled = vault_cli.add_and_verify(
+        root=root, name=_ENV_NAME, source=env_path, backend=backend, store=store, flow_session=flow_session
+    )
     if rc != 0:
         return rc  # vault_cli.add_and_verify already printed the reason
 
@@ -356,14 +368,16 @@ def disable(
     root: Path,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Restore a readable plaintext ``.env`` and stop runtime injection (reversible).
 
     The vault copy is left intact so re-enabling is immediate. Returns 0 on
     success, 1 only when a sealed-away plaintext cannot be recovered from the
-    vault (fail-closed).
+    vault (fail-closed). ``flow_session`` (``uninstall``) lends the flow's
+    already open vault, so restoring several targets unlocks it once.
     """
-    rc = _restore_plaintext(home=home, root=root, backend=backend, store=store)
+    rc = _restore_plaintext(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
     if rc != 0:
         return rc
     _write_optout_marker(home)

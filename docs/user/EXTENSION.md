@@ -99,7 +99,8 @@ For wallet requests, the browser cannot select an arbitrary chain or RPC URL.
 Both must match the operator-selected values in
 `~/.hermes/extension/wallet.json` or the built-in endpoint for that chain. RPC
 transport rejects local/private targets and redirects, pins validated direct
-DNS answers, and follows the route selected by `mordred_network`.
+DNS answers, and follows the route selected by Mordred's network component
+(`plugins.mordred_network`).
 
 Before returning a message signature or broadcasting a transaction, Hermes
 recovers the actual signer and verifies that it still matches the address shown

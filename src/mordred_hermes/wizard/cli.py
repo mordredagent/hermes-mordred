@@ -10,7 +10,7 @@ are unchanged (``wizard/__init__.py`` registers ``cli._setup_subparser`` with
 Hermes; tests import ``cli._setup_subparser`` / ``cli.dispatch`` / ``cli.main``
 and reference ``cli._handle_*`` directly).
 
-Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
+Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugin's wizard component):
 
 - ``setup``                                      — one-command orchestrator: runs every step below in
   order, resuming where it left off (never destroys state; never auto-resets the keyvault)
@@ -22,7 +22,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
 - ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
-- ``plugins list``                               — list discovered Mordred plugins
+- ``plugins list``                               — show the Mordred plugin and its components
+- ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from ._cli_parsers import (
     _add_setup,
     _add_status,
     _add_telegram,
+    _add_uninstall,
     _add_upgrade,
     _add_vault,
     _handle_audit_decrypt,
@@ -80,6 +82,7 @@ from ._cli_parsers import (
     _handle_network_status,
     _handle_network_use,
     _handle_plugins_list,
+    _handle_plugins_migrate,
     _handle_policy_dry_run,
     _handle_policy_explain,
     _handle_policy_reload,
@@ -87,6 +90,7 @@ from ._cli_parsers import (
     _handle_setup,
     _handle_status,
     _handle_telegram,
+    _handle_uninstall,
     _handle_upgrade,
     _handle_vault_add,
     _handle_vault_cat,
@@ -118,6 +122,7 @@ __all__ = [
     "_add_setup",
     "_add_status",
     "_add_telegram",
+    "_add_uninstall",
     "_add_upgrade",
     "_add_vault",
     "_handle_audit_decrypt",
@@ -146,6 +151,7 @@ __all__ = [
     "_handle_network_status",
     "_handle_network_use",
     "_handle_plugins_list",
+    "_handle_plugins_migrate",
     "_handle_policy_dry_run",
     "_handle_policy_explain",
     "_handle_policy_reload",
@@ -153,6 +159,7 @@ __all__ = [
     "_handle_setup",
     "_handle_status",
     "_handle_telegram",
+    "_handle_uninstall",
     "_handle_upgrade",
     "_handle_vault_add",
     "_handle_vault_cat",
@@ -225,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     """Standalone ``hermes-mordred`` console-script entry.
 
     This is the dependable bootstrap and recovery CLI. Hermes 0.19 exposes the
-    registered ``hermes mordred`` tree only after ``mordred_wizard`` is
+    registered ``hermes mordred`` tree only after the ``mordred`` plugin is
     enabled; ``hermes-mordred`` invokes the same handlers directly before or
     after plugin configuration and remains compatible with the supported
     Hermes version floor.
@@ -261,7 +268,11 @@ def main(argv: list[str] | None = None) -> int:
             "Storage command families:\n"
             "  encryption  recommended facade over the Vault for env / config / memory / workspace\n"
             "  vault       underlying encrypted file store (advanced; separate recovery passphrase)\n"
-            "  keyvault    separate wallet / API envelope store (portable backup recovery)"
+            "  keyvault    separate wallet / API envelope store (portable backup recovery)\n"
+            "\n"
+            "Remove Mordred (restores plaintext .env / config.yaml / memories first):\n"
+            "  hermes-mordred uninstall --dry-run    show the plan\n"
+            "  hermes-mordred uninstall              run it (data is kept unless --purge-data)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

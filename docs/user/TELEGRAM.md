@@ -28,8 +28,8 @@ messages ever reaching a model you did not choose.
 ## Set up (once, about 5 minutes)
 
 **In Hermes Desktop (recommended).** The installer places a Mordred setup
-page (`hermes-mordred desktop install` does the same). Restart Hermes Desktop,
-turn Mordred on in Capabilities → Plugins (Desktop column), and open
+page (`hermes-mordred desktop install` does the same). The page is enabled
+automatically; restart Hermes Desktop and open
 **Mordred** in the sidebar (or ⌘K → "Mordred: Set up private Telegram"). The
 page walks through the same steps with buttons and masked fields; what you
 type goes straight to Mordred on this Mac — never into the chat, the model,
@@ -140,3 +140,9 @@ hermes-mordred telegram logout --forget   # also delete the archive, the sealed 
 ```
 
 You can also end the session from any Telegram app: Settings → Devices.
+
+Removing Mordred with `hermes-mordred uninstall` keeps the Telegram archive and
+sealed credentials (and the session stays logged in) unless you add
+`--purge-data`, which first revokes the session at Telegram and then deletes
+the archive, the credentials and the Enclave key. See
+[`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).

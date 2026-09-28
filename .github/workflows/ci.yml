@@ -265,14 +265,7 @@ jobs:
               for ep in dist.entry_points
               if ep.group == "hermes_agent.plugins"
           }
-          expected_plugins = {
-              "mordred_e2e",
-              "mordred_keyvault",
-              "mordred_llm_guard",
-              "mordred_network",
-              "mordred_privacy_check",
-              "mordred_wizard",
-          }
+          expected_plugins = {"mordred"}
           assert set(plugin_eps) == expected_plugins
           for name, entry_point in plugin_eps.items():
               module = entry_point.load()

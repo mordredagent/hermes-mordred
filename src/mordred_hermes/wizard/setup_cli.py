@@ -107,6 +107,29 @@ internally once the ceremony actually starts; that duplication is
 intentional defense in depth (a TOCTOU race between the two checks still
 fails closed at the second one), not redundant plumbing to remove.
 
+One passphrase, one vault unlock, one key policy per run
+--------------------------------------------------------
+:func:`run_setup` owns one in-memory :class:`._flow_session.FlowSession` for
+the whole run and hands it to the keyvault, env-encryption and
+memory-encryption steps:
+
+- **Passphrase.** A fresh run can create two stores that each need a
+  passphrase: the keyvault (its ceremony's Passphrase) and the at-rest vault
+  behind env / memory encryption (its recovery passphrase). Whichever step
+  creates something first asks the operator to choose and confirm a
+  passphrase; every later creation in the same run reuses it without
+  prompting. It is never written anywhere except as the Argon2id-wrapped
+  material each store already keeps, and it is dropped when the run ends.
+- **Vault unlock.** The env and memory steps share one open vault handle, so
+  the run unwraps the vault master at most once (one Touch ID / password
+  dialog with an attended device key) -- and not at all when the run just
+  created the vault. The handle is closed (master zeroed) when the run ends.
+- **Key policy.** The answer to "allow background services ..." (or
+  ``--unattended-keys`` / ``--attended-keys``) applies to every device key the
+  run creates: the keyvault key AND the at-rest vault's key. When the keyvault
+  already existed, the question is asked (same precedence) right before the
+  vault is created instead.
+
 Probe contract
 ---------------
 Every ``_probe_*`` function in this module:
@@ -137,7 +160,9 @@ from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_pat
 from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._defaults import resolve_prompt_io
+from ._flow_session import FlowSession
 from ._prompt_io import NonInteractiveAbort, PromptIO, _RefusingPromptIO
+from ._vault_open import _vault_present
 from .configure import SetupRunner, SubprocessSetupRunner
 from .encryption_cli import (
     WorkspacePaths,
@@ -365,15 +390,15 @@ def _probe_configure(*, policy_writer: PolicyWriter) -> tuple[bool, str]:
     ``config.yaml`` sections together, and (3) -- via
     ``PolicyWriter._ensure_plugins_enabled``, which every wizard write path
     triggers (``configure``, ``upgrade``, even a bare ``network use``) --
-    ensures every ``SIBLING_PLUGINS`` name is registered in
+    ensures the ``mordred`` plugin (``SIBLING_PLUGINS``) is listed in
     ``plugins.enabled``. Because other wizard commands share that last
     guarantee too, ``plugins.enabled`` membership alone can't tell "configure
     ran" apart from "some other wizard write ran first"; ``policy.json`` and
     the two config.yaml sections are written ONLY by ``configure`` (or
     ``upgrade``), so those three are the real "configure ran" signal. The
-    all-six ``plugins.enabled`` check is kept as an extra completeness guard
-    on top (a hand-edited config.yaml that dropped a plugin name still reads
-    as incomplete).
+    ``plugins.enabled`` check is kept as an extra completeness guard on top
+    (a hand-edited config.yaml that dropped ``mordred``, or one still listing
+    only the pre-0.1.0a21 per-component names, reads as incomplete).
     """
     if not policy_writer.config_path.exists():
         return False, "config.yaml does not exist yet"
@@ -716,8 +741,8 @@ def _resolve_unattended_keys(*, options: SetupOptions, prompt_io: PromptIO) -> b
         return False
 
     return prompt_io.ask_bool(
-        "Allow background services (e.g. the extension Gateway) to use keyvault "
-        "keys without a per-use Touch ID / passcode prompt?",
+        "Allow background services (e.g. the extension Gateway) to use Mordred's device "
+        "keys (keyvault and encryption vault) without a per-use Touch ID / passcode prompt?",
         default=False,
         description=(
             "Unattended keys let automated callers sign without interrupting you every "
@@ -733,11 +758,18 @@ def _run_keyvault_init(
     prompt_io: PromptIO,
     store_seed_for_hd: bool,
     unattended: bool | None,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Run the keyvault ceremony. Thin seam over ``_keyvault_init.init_keyvault``."""
     from ._keyvault_init import init_keyvault
 
-    return init_keyvault(home=home, prompt_io=prompt_io, store_seed_for_hd=store_seed_for_hd, unattended=unattended)
+    return init_keyvault(
+        home=home,
+        prompt_io=prompt_io,
+        store_seed_for_hd=store_seed_for_hd,
+        unattended=unattended,
+        flow_session=flow_session,
+    )
 
 
 def _keyvault_preflight(*, home: Path) -> int | None:
@@ -763,7 +795,13 @@ def _keyvault_preflight(*, home: Path) -> int | None:
     return _preflight_or_refuse(home=home, blackout_assert=None, surface=None)
 
 
-def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOptions) -> StepResult:
+def _resolve_step_keyvault(
+    *,
+    home: Path,
+    prompt_io: PromptIO,
+    options: SetupOptions,
+    flow_session: FlowSession | None = None,
+) -> StepResult:
     state, detail = _probe_keyvault(home=home)
     if state == "initialised":
         return StepResult(_STEP_KEYVAULT, "done", detail)
@@ -801,6 +839,9 @@ def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOpt
 
     try:
         resolved_unattended = _resolve_unattended_keys(options=options, prompt_io=prompt_io)
+        if flow_session is not None:
+            # The same answer governs the at-rest vault's device key, created later.
+            flow_session.unattended = resolved_unattended
     except NonInteractiveAbort:
         # See _resolve_step_hermes's matching catch: PromptToolkitIO fails
         # closed on a non-TTY stdin even here, where --non-interactive was
@@ -815,6 +856,7 @@ def _resolve_step_keyvault(*, home: Path, prompt_io: PromptIO, options: SetupOpt
         prompt_io=prompt_io,
         store_seed_for_hd=options.store_seed_for_hd,
         unattended=resolved_unattended,
+        flow_session=flow_session,
     )
     if rc != 0:
         return StepResult(_STEP_KEYVAULT, "failed", "keyvault init failed (see errors above)")
@@ -912,7 +954,14 @@ def _probe_env_encryption(*, home: Path, root: Path, platform: str) -> tuple[boo
     return complete, st.detail
 
 
-def _run_env_encryption(*, home: Path, root: Path, platform: str, prompt_io: PromptIO) -> int:
+def _run_env_encryption(
+    *,
+    home: Path,
+    root: Path,
+    platform: str,
+    prompt_io: PromptIO,
+    flow_session: FlowSession | None = None,
+) -> int:
     """Enroll+seal ``.env``. Thin seam over ``env_decrypt_cli.enable``.
 
     Deliberately does not expose ``--force-runtime-unverified``: that flag
@@ -922,7 +971,9 @@ def _run_env_encryption(*, home: Path, root: Path, platform: str, prompt_io: Pro
     """
     from . import env_decrypt_cli
 
-    return env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt_io)
+    return env_decrypt_cli.enable(
+        home=home, root=root, platform=platform, prompt_io=prompt_io, flow_session=flow_session
+    )
 
 
 def _resolve_step_env_encryption(
@@ -932,6 +983,7 @@ def _resolve_step_env_encryption(
     platform: str,
     prompt_io: PromptIO,
     options: SetupOptions,
+    flow_session: FlowSession | None = None,
 ) -> StepResult:
     complete, detail = _probe_env_encryption(home=home, root=root, platform=platform)
     if complete:
@@ -962,10 +1014,19 @@ def _resolve_step_env_encryption(
     # entirely. See _run_gated_encryption_step for the shared gate/dispatch
     # logic (mirrors the keyvault step's hardcoded non-interactive gate, see
     # _resolve_step_keyvault).
+    def run() -> int:
+        if flow_session is not None and flow_session.unattended is None and not _vault_present(root):
+            # The keyvault step did not ask (it was already done): resolve the
+            # unattended-keys policy now, before this step creates the vault's key.
+            flow_session.unattended = _resolve_unattended_keys(options=options, prompt_io=prompt_io)
+        return _run_env_encryption(
+            home=home, root=root, platform=platform, prompt_io=prompt_io, flow_session=flow_session
+        )
+
     return _run_gated_encryption_step(
         step=_STEP_ENV_ENCRYPTION,
         target="env",
-        run=lambda: _run_env_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io),
+        run=run,
         non_interactive=options.non_interactive,
         non_interactive_detail=(
             "`.env` encryption may need interactive confirmation (a vault recovery passphrase and/or an "
@@ -1013,7 +1074,14 @@ def _probe_memory_encryption(*, home: Path, platform: str) -> tuple[bool, str]:
     return True, "enabled" if platform == "darwin" else "enabled; the sealing runtime is macOS-only"
 
 
-def _run_memory_encryption(*, home: Path, root: Path, platform: str, prompt_io: PromptIO) -> int:
+def _run_memory_encryption(
+    *,
+    home: Path,
+    root: Path,
+    platform: str,
+    prompt_io: PromptIO,
+    flow_session: FlowSession | None = None,
+) -> int:
     """Arm memory encryption. Thin seam over ``memory_cli.enable``.
 
     Like the env step, it deliberately does not expose
@@ -1022,7 +1090,7 @@ def _run_memory_encryption(*, home: Path, root: Path, platform: str, prompt_io: 
     """
     from . import memory_cli
 
-    return memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt_io)
+    return memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt_io, flow_session=flow_session)
 
 
 def _resolve_step_memory_encryption(
@@ -1032,6 +1100,7 @@ def _resolve_step_memory_encryption(
     platform: str,
     prompt_io: PromptIO,
     options: SetupOptions,
+    flow_session: FlowSession | None = None,
 ) -> StepResult:
     complete, detail = _probe_memory_encryption(home=home, platform=platform)
     if complete:
@@ -1068,7 +1137,9 @@ def _resolve_step_memory_encryption(
     return _run_gated_encryption_step(
         step=_STEP_MEMORY_ENCRYPTION,
         target="memory",
-        run=lambda: _run_memory_encryption(home=home, root=root, platform=platform, prompt_io=prompt_io),
+        run=lambda: _run_memory_encryption(
+            home=home, root=root, platform=platform, prompt_io=prompt_io, flow_session=flow_session
+        ),
         non_interactive=options.non_interactive,
         non_interactive_detail=(
             "agent-memory encryption may need interactive confirmation (a vault recovery passphrase and/or an "
@@ -1106,7 +1177,39 @@ def run_setup(
     step left ``"manual"``. Always prints :func:`render_report`; only prints
     the final ``status`` dashboard when no step stopped the run early (a
     partial run has nothing coherent to summarize yet).
+
+    One :class:`FlowSession` spans the run, so a passphrase is chosen (and
+    confirmed) at most once, the vault is unlocked at most once, and one
+    unattended-keys answer covers every device key the run creates (see the
+    module docstring). It is closed before this function returns.
     """
+    with FlowSession(unattended=options.unattended_keys) as session:
+        return _run_steps(
+            home=home,
+            root=root,
+            platform=platform,
+            workspace=workspace,
+            prompt_io=prompt_io,
+            policy_writer=policy_writer,
+            setup_runner=setup_runner,
+            options=options,
+            session=session,
+        )
+
+
+def _run_steps(
+    *,
+    home: Path,
+    root: Path,
+    platform: str,
+    workspace: WorkspacePaths,
+    prompt_io: PromptIO,
+    policy_writer: PolicyWriter,
+    setup_runner: SetupRunner,
+    options: SetupOptions,
+    session: FlowSession,
+) -> int:
+    """Body of :func:`run_setup`, with the run's shared passphrase holder."""
     results: list[StepResult] = []
     steps: tuple[Callable[[], StepResult], ...] = (
         lambda: _resolve_step_hermes(home=home, prompt_io=prompt_io, setup_runner=setup_runner, options=options),
@@ -1115,12 +1218,12 @@ def run_setup(
         ),
         lambda: _resolve_step_network(home=home, prompt_io=prompt_io, policy_writer=policy_writer),
         lambda: _resolve_step_hardware_helper(home=home, platform=platform),
-        lambda: _resolve_step_keyvault(home=home, prompt_io=prompt_io, options=options),
+        lambda: _resolve_step_keyvault(home=home, prompt_io=prompt_io, options=options, flow_session=session),
         lambda: _resolve_step_env_encryption(
-            home=home, root=root, platform=platform, prompt_io=prompt_io, options=options
+            home=home, root=root, platform=platform, prompt_io=prompt_io, options=options, flow_session=session
         ),
         lambda: _resolve_step_memory_encryption(
-            home=home, root=root, platform=platform, prompt_io=prompt_io, options=options
+            home=home, root=root, platform=platform, prompt_io=prompt_io, options=options, flow_session=session
         ),
     )
 

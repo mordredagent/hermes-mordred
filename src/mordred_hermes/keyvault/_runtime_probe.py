@@ -100,13 +100,17 @@ _PROBE_SRC = """
 import sys
 try:
     from importlib.metadata import entry_points
-    eps = [e for e in entry_points(group="hermes_agent.plugins") if e.name == "mordred_keyvault"]
+    eps = [e for e in entry_points(group="hermes_agent.plugins") if e.name == "mordred"]
     if not eps:
-        sys.stderr.write("mordred_keyvault plugin not registered in this runtime")
+        sys.stderr.write("mordred plugin not registered in this runtime")
         sys.exit(11)
     plugin = eps[0].load()
     if not callable(getattr(plugin, "register", None)):
-        sys.stderr.write("mordred_keyvault plugin exposes no register()")
+        sys.stderr.write("mordred plugin exposes no register()")
+        sys.exit(12)
+    # The single plugin registers the keyvault component (the env shim) itself.
+    if not any(module == "mordred_hermes.keyvault" for _c, module in getattr(plugin, "COMPONENTS", ())):
+        sys.stderr.write("mordred plugin does not register the keyvault component")
         sys.exit(12)
     # The exact hot-path imports install_vault_env_decrypt -> inject_vault_env do
     # at startup (see keyvault._runtime_env). Importing them here catches a partial
@@ -799,7 +803,7 @@ def runtime_env_injection_available(
     """Whether the Hermes runtime can decrypt a sealed ``.env`` at startup.
 
     ``ok`` is ``True`` only when the runtime interpreter has the
-    ``mordred_keyvault`` plugin registered *and* the shim's hot-path imports
+    ``mordred`` plugin (with its keyvault component) registered *and* the shim's hot-path imports
     resolve there. Shared semantics: :func:`_probe_capability`.
     """
     return _probe_capability(

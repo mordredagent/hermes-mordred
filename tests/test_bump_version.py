@@ -61,12 +61,9 @@ def bump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, P
         encoding="utf-8",
     )
 
+    # Mordred ships no plugin.yaml manifests (one entry-point plugin whose
+    # version Hermes reads from the distribution), so there is none to bump.
     manifests: list[Path] = []
-    for name in ("keyvault", "wizard"):
-        manifest = pkg / "src" / "mordred_hermes" / name / "plugin.yaml"
-        manifest.parent.mkdir(parents=True)
-        manifest.write_text(f"name: mordred_{name}\nversion: 0.1.0a0\ndescription: x\n", encoding="utf-8")
-        manifests.append(manifest)
 
     monkeypatch.setattr(mod, "_PKG_ROOT", pkg)
     monkeypatch.setattr(mod, "_ABOUT", about)
@@ -123,8 +120,8 @@ def test_version_is_canonicalized(bump: tuple[ModuleType, Path, Path, list[Path]
 
 
 def test_allow_non_increasing_resyncs_drifted_files(bump: tuple[ModuleType, Path, Path, list[Path]]) -> None:
-    mod, _about, _doc, manifests = bump
-    # Simulate a hand-edit that left one manifest behind.
-    manifests[0].write_text("name: drifted\nversion: 0.0.1\ndescription: y\n", encoding="utf-8")
+    mod, _about, doc, _manifests = bump
+    # Simulate a hand-edit that left the docs marker behind.
+    doc.write_text("0.0.1\n", encoding="utf-8")
     assert mod.main(["0.1.0a0", "--allow-non-increasing"]) == 0
-    assert "version: 0.1.0a0" in manifests[0].read_text(encoding="utf-8")
+    assert doc.read_text(encoding="utf-8").strip() == "0.1.0a0"

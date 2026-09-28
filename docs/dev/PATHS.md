@@ -30,9 +30,11 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
+| `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
+| `<home>/config.yaml.mordred-uninstall-<ts>.bak` | `uninstall` | copy of `config.yaml` taken before Mordred's entries are removed |
 | `<home>/memories/*.md` | Hermes memory tool | sealed by Mordred's memory hook when armed, otherwise plaintext |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
 
@@ -360,7 +362,9 @@ working tree.
 Written by `hermes-mordred desktop install`: `desktop/plugin.js` (the
 Hermes Desktop setup page) and `dashboard/{manifest.json,plugin_api.py}` (a
 shim importing `mordred_hermes.desktop.api`). No `plugin.yaml`, so Hermes'
-agent-plugin scanner skips the folder. Holds no secrets.
+agent-plugin scanner finds no directory plugin there and the `mordred`
+entry-point plugin is not shadowed; Hermes Desktop pairs the page with that
+plugin by name. Holds no secrets.
 
 ## Hermes-owned and external targets
 

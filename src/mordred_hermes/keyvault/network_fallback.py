@@ -152,7 +152,7 @@ def _query_reachability_flags(host: bytes = _PROBE_HOST_V4) -> int:
     if sys.platform != "darwin":
         raise NetworkFallbackUnavailable(
             "OS reachability probe requires macOS; current platform is "
-            f"{sys.platform!r}. On Linux, enable mordred_network for the "
+            f"{sys.platform!r}. On Linux, enable the mordred plugin (its network runtime) for the "
             "keyvault blackout check."
         )
 

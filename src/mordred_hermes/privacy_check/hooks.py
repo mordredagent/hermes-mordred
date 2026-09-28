@@ -25,6 +25,7 @@ import sys
 from typing import Any, cast
 
 from .._audit_support import safe_audit_append
+from .._plugin_identity import MIGRATE_COMMAND, PLUGIN_NAME
 from .._policy_types import VALID_ACTIVE_PATHS, ActivePath
 from . import _runtime
 from ._exceptions import MordredIntegrityRefused
@@ -54,15 +55,17 @@ def _resolve_active_network_path() -> ActivePath | None:
 
 
 def check_plugin_integrity(**kwargs: Any) -> None:
-    """Detect an explicitly disabled Mordred plugin from any live sibling.
+    """Detect a disabled, unloaded, or partially registered Mordred plugin.
 
-    Strict + sibling-disable → audit + poison + integrity refusal.
-    Lenient/off + sibling-disable → audit (warn) + log warning, continue.
+    Strict + disabled/incomplete → audit + poison + integrity refusal.
+    Lenient/off + disabled/incomplete → audit (warn) + log warning, continue.
 
-    Every runtime plugin registers this same callback. That is deliberate:
-    relying on ``mordred_privacy_check`` alone would make disabling that plugin
-    disable the detector too. As long as at least one runtime sibling remains
-    active, strict mode therefore fails closed.
+    The ``mordred`` plugin registers this callback first, before its
+    components, and the ``.pth`` runtime bootstrap puts a mandatory copy at the
+    front of ``on_session_start`` that runs even when the plugin is disabled or
+    not enabled at all (``mordred_hermes._runtime_bootstrap``). With the
+    manager in hand it also reports each failed component as
+    ``mordred/<component>``.
     """
     state = _runtime.ensure_state()
     disabled = _runtime.find_disabled_siblings(config_path=state.config_path)
@@ -71,6 +74,7 @@ def check_plugin_integrity(**kwargs: Any) -> None:
         disabled.update(_runtime.find_unloaded_siblings(plugin_manager))
 
     if disabled:
+        hint = _legacy_names_hint(state.config_path) if PLUGIN_NAME in disabled else ""
         decision = "block" if state.policy_mode == "strict" else "warn"
         # safe_audit_append, not a bare append: Hermes wraps every hook callback
         # in ``except Exception`` and logs-and-continues. A plain Exception from
@@ -91,8 +95,8 @@ def check_plugin_integrity(**kwargs: Any) -> None:
         )
         if state.policy_mode == "strict":
             msg = (
-                f"Mordred strict mode: sibling plugins disabled: {sorted(disabled)}. "
-                "Re-enable them or switch to lenient/off mode."
+                f"Mordred strict mode: Mordred plugin not loaded or incomplete: {sorted(disabled)}. "
+                f"Enable the '{PLUGIN_NAME}' plugin and fix the failure, or switch to lenient/off mode.{hint}"
             )
             _runtime.poison(msg)
             _LOG.error(msg)
@@ -109,7 +113,23 @@ def check_plugin_integrity(**kwargs: Any) -> None:
             with contextlib.suppress(Exception):
                 print(f"mordred: {msg}", file=sys.stderr)
             raise MordredIntegrityRefused(msg)
-        _LOG.warning("Mordred siblings disabled in %s mode: %s", state.policy_mode, sorted(disabled))
+        _LOG.warning(
+            "Mordred plugin not loaded or incomplete in %s mode: %s.%s", state.policy_mode, sorted(disabled), hint
+        )
+
+
+def _legacy_names_hint(config_path: Any) -> str:
+    """Point an unmigrated config (old per-component plugin names) at the fix."""
+    try:
+        legacy = _runtime.find_legacy_plugin_names(config_path=config_path)
+    except Exception:
+        return ""
+    if not legacy:
+        return ""
+    return (
+        f" config.yaml still lists the old plugin names {sorted(legacy)}, which Hermes no longer loads; "
+        f"run `{MIGRATE_COMMAND}` to switch to '{PLUGIN_NAME}'."
+    )
 
 
 def on_session_start(**kwargs: Any) -> None:

@@ -360,7 +360,7 @@ entered by the user in their terminal (`hermes-mordred telegram setup`).
 files or kanban: it must stay out of plaintext storage. Do not create your \
 own Telegram skills.
 - For error codes and procedures, load the skill with skill_view using the \
-exact name `mordred_e2e:mordred-telegram` (no other Telegram skill exists)."""
+exact name `mordred:mordred-telegram` (no other Telegram skill exists)."""
 
 
 def system_prompt_section(_info: Any = None) -> str:

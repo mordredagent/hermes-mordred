@@ -7,7 +7,6 @@ release version also appears in surfaces that are not auto-derived from it:
 
   - src/mordred_hermes/__about__.py    (__version__ — the canonical source)
   - docs/dev/VERSION                 (docs-tree marker; a human mirror)
-  - src/mordred_hermes/*/plugin.yaml    (each plugin manifest's ``version:``)
   - docs/dev/setup.md                (the ``--reinstall`` install pin)
   - packaging/mordred-hermes-compat/pyproject.toml
                                       (shim version + exact forwarded deps)
@@ -42,15 +41,10 @@ _COMPAT_PYPROJECT = _PKG_ROOT / "packaging" / "mordred-hermes-compat" / "pyproje
 
 _ABOUT_VALUE_RE = re.compile(r"""(?m)^__version__\s*=\s*["']([^"']+)["']\s*$""")
 _ABOUT_LINE_RE = re.compile(r"""(?m)^__version__\s*=\s*["'][^"']+["'][^\n]*$""")
-_MANIFEST_LINE_RE = re.compile(r"(?m)^version:[^\n]*$")
 #: `hermes-mordred[extra1,extra2]==<version>` copy-paste install pins.
 _INSTALL_PIN_RE = re.compile(r"(hermes-mordred\[[^\]]*\]==)[0-9][^\s\"']*")
 _COMPAT_VERSION_RE = re.compile(r"""(?m)^version\s*=\s*["'][^"']+["']\s*$""")
 _COMPAT_REQUIREMENT_RE = re.compile(r"(hermes-mordred(?:\[[^\]]+\])?==)[0-9][^\s\"']*")
-
-
-def _plugin_manifests() -> list[Path]:
-    return sorted(_PKG_ROOT.glob("src/mordred_hermes/*/plugin.yaml"))
 
 
 def _current_version() -> str:
@@ -122,8 +116,6 @@ def main(argv: list[str] | None = None) -> int:
         targets.append((_DOC_VERSION, re.compile(r"(?s).*"), f"{new_str}\n", 1))
     else:
         print(f"warning: docs marker {_DOC_VERSION} absent — skipping", file=sys.stderr)
-    for manifest in _plugin_manifests():
-        targets.append((manifest, _MANIFEST_LINE_RE, f"version: {new_str}", 1))
     if _SETUP_MD.exists():
         targets.append((_SETUP_MD, _INSTALL_PIN_RE, lambda m: f"{m.group(1)}{new_str}", 0))
     else:

@@ -41,6 +41,28 @@ API_ID_ENV = "TELEGRAM_MORDRED_APP_ID"
 API_HASH_ENV = "TELEGRAM_MORDRED_APP_HASH"
 
 
+def _load_for_update(secrets_store: Any) -> tuple[Any, Any]:
+    """Unseal once and return ``(value, snapshot)`` for :func:`_write_back`.
+
+    With the Enclave store the snapshot lets the later write skip a second
+    unseal (a second Touch ID / password dialog); other stores just return the
+    loaded value and are written back through a plain ``update``.
+    """
+    load_snapshot = getattr(secrets_store, "load_snapshot", None)
+    if load_snapshot is not None:
+        snapshot = load_snapshot()
+        return snapshot[0], snapshot
+    return secrets_store.load(fresh=True), None
+
+
+def _write_back(secrets_store: Any, snapshot: Any, mutate: Callable[[Any], Any]) -> None:
+    """Apply ``mutate`` to the value :func:`_load_for_update` read, without unsealing again."""
+    if snapshot is not None:
+        secrets_store.update_from_snapshot(snapshot, mutate)
+    else:
+        secrets_store.update(mutate)
+
+
 def _secret_store() -> Any:
     from ..extension.telegram.tee import TeeSecretStore
 
@@ -131,7 +153,7 @@ def telegram_login(
         return _report(problem)
     secrets_store = store if store is not None else _secret_store()
     try:
-        current = secrets_store.load(fresh=True)
+        current, snapshot = _load_for_update(secrets_store)
     except TelegramSecretsError as exc:
         return _report(exc.code)
     if current is not None and current.session is not None:
@@ -160,7 +182,7 @@ def telegram_login(
     if me is None:
         return _report("telegram_login_failed")
     try:
-        _persist(secrets_store, replace(base, session=session), fresh=current is None)
+        _persist(secrets_store, replace(base, session=session), fresh=current is None, snapshot=snapshot)
     except TelegramSecretsError as exc:
         return _report(exc.code)
     print("Logged in. The session is sealed by the Secure Enclave (credentials.sealed).")
@@ -198,11 +220,12 @@ def _new_credentials(secrets_store: Any, input_fn: InputFn, secret_fn: InputFn, 
     return TelegramSecrets(api_id=api_id, api_hash=api_hash, store_key=new_store_key())
 
 
-def _persist(secrets_store: Any, value: Any, *, fresh: bool) -> None:
+def _persist(secrets_store: Any, value: Any, *, fresh: bool, snapshot: Any = None) -> None:
     if fresh and hasattr(secrets_store, "store"):
         secrets_store.store(value)  # nothing to unseal yet
     else:
-        secrets_store.update(lambda _old: value)
+        # Reuse the unseal done at the start of the login: no second Touch ID.
+        _write_back(secrets_store, snapshot, lambda _old: value)
 
 
 async def _login_and_disconnect(
@@ -361,7 +384,7 @@ def telegram_logout(
 
     secrets_store = store if store is not None else _secret_store()
     try:
-        current = secrets_store.load(fresh=True)
+        current, snapshot = _load_for_update(secrets_store)
     except TelegramSecretsError as exc:
         return _report(exc.code)
     if current is None:
@@ -384,10 +407,11 @@ def telegram_logout(
                 "Also terminate it in Telegram → Settings → Devices."
             )
     try:
+        # One unseal for the whole command: the write reuses the value read above.
         if forget:
-            secrets_store.update(lambda _old: None)
+            _write_back(secrets_store, snapshot, lambda _old: None)
         else:
-            secrets_store.update(lambda old: replace(old, session=None) if old is not None else None)
+            _write_back(secrets_store, snapshot, lambda old: replace(old, session=None) if old is not None else None)
     except TelegramSecretsError as exc:
         return _report(exc.code)
     if forget:
@@ -407,24 +431,32 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
 
     secrets_store = store if store is not None else _secret_store()
     key = secret_fn("Venice API key (hidden; Enter keeps the stored key): ").strip()
+
+    class _NoKey(Exception):
+        pass
+
+    def mutate(old: Any) -> Any:
+        # Decided on the value update() already unsealed, so the whole command
+        # costs one Enclave unwrap (one Touch ID), not a load() plus an update().
+        if not key and (old is None or old.venice_api_key is None):
+            raise _NoKey
+        return replace(
+            old if old is not None else empty_secrets(),
+            venice_api_key=key or (old.venice_api_key if old else None),
+            venice_model=model if model else (old.venice_model if old else None),
+            backend="venice",
+        )
+
     try:
         from ..extension.telegram.secrets import empty_secrets
 
-        current = secrets_store.load(fresh=True)
-        if not key and (current is None or current.venice_api_key is None):
-            _term.emit_error("no Venice API key given.")
-            return 1
         ensure = getattr(secrets_store, "ensure_key", None)
         if ensure is not None:
-            ensure()
-        secrets_store.update(
-            lambda old: replace(
-                old if old is not None else empty_secrets(),
-                venice_api_key=key or (old.venice_api_key if old else None),
-                venice_model=model if model else (old.venice_model if old else None),
-                backend="venice",
-            )
-        )
+            ensure()  # public-key lookup / key creation only: no unseal
+        secrets_store.update(mutate)
+    except _NoKey:
+        _term.emit_error("no Venice API key given.")
+        return 1
     except TelegramSecretsError as exc:
         return _report(exc.code)
     print("Sealed the Venice settings with the Secure Enclave. Only models Venice labels 'private' are used.")

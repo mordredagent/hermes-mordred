@@ -73,6 +73,12 @@ Add `--version VERSION` after replacing `VERSION` with a release number when
 you need an exact PyPI version. For example, the two options can be combined as
 `bash -s -- --with-extension --version VERSION`.
 
+To test unreleased changes, install from a local checkout instead of PyPI:
+`bash scripts/install.sh --from-source ~/repos/hermes-mordred --with-telegram`.
+Add `--editable` to link the checkout so later edits take effect on the next
+Hermes restart. The installer finds Hermes Desktop's managed environment and
+its bundled `uv` even when neither `hermes` nor `uv` is on PATH.
+
 <details>
 <summary>Advanced: choose individual dependency groups</summary>
 
@@ -197,12 +203,16 @@ shell.
 order, probing each one first and skipping whatever is already complete — so
 re-running it after an interruption picks up where it left off. Two moments
 still need you at the keyboard: the keyvault Passphrase and 24-word Seed
-Phrase backup at step 4 (have pen and paper ready), and the vault recovery
-passphrase the first time step 5 enables encryption.
+Phrase backup at step 4 (have pen and paper ready), and any device-key unlock
+(Touch ID) while steps 5–6 enable encryption. A setup run asks you to choose a
+passphrase only once (plus one confirmation): when the same run also creates
+the at-rest vault at step 5, the keyvault Passphrase becomes that vault's
+recovery passphrase too. If the keyvault already existed, step 5 asks for the
+vault recovery passphrase instead — still once, plus one confirmation.
 
 | # | Command | Result |
 |---|---|---|
-| 1 | `hermes-mordred configure` | Writes Mordred policy and enables all six plugins. |
+| 1 | `hermes-mordred configure` | Writes Mordred policy and enables the `mordred` plugin. |
 | 2 | `hermes-mordred network init` | Optionally selects Tor, VPN, or clearnet. |
 | 3 | `hermes-mordred keyvault enable-se` or `enable-tpm` | Builds and installs the platform key helper. |
 | 4 | `hermes-mordred keyvault init` | Creates the main keyvault key and its seed/digest commitment. |
@@ -338,6 +348,27 @@ Phrase. Verify recovery against an isolated fresh profile before relying on it.
 Do not reset while encrypted secrets or wallets still depend on the source.
 The reset command prints the exact key IDs before interactive confirmation.
 
+## Uninstall
+
+```sh
+hermes-mordred uninstall --dry-run   # see exactly what will happen
+hermes-mordred uninstall             # confirm once; Hermes gets its plaintext files back
+```
+
+Or through the installer: `curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --uninstall`.
+
+Quit Hermes Desktop and stop any `hermes gateway` first. The command decrypts
+`.env`, `config.yaml` and your memories back to plaintext (it stops before
+removing anything if it cannot), removes Mordred's entries from `config.yaml`
+(keeping a backup) and `.env`, the Hermes Desktop page and the installer's
+launcher, and finally uninstalls the package from Hermes's environment.
+
+Your Mordred data — vault, keyvault, Telegram archive, audit log, device keys —
+is **kept** and listed with its location. `--purge-data` deletes it too, after
+you type `delete my data`; keep your keyvault Seed Phrase / Passphrase and the
+vault recovery passphrase if you may want any of it back. Details:
+[`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).
+
 ## Common checks
 
 | Check | Command |
@@ -348,7 +379,7 @@ The reset command prints the exact key IDs before interactive confirmation.
 | Key IDs | `hermes-mordred keyvault list` |
 | Recovery digest | `hermes-mordred keyvault verify-digest` |
 | Recent audit entries | `hermes-mordred audit tail` |
-| Discovered Mordred plugins | `hermes-mordred plugins list` |
+| Mordred plugin and component status | `hermes-mordred plugins list` |
 
 ## Ethereum keys (HD wallet)
 

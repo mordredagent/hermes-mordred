@@ -20,8 +20,8 @@ Four invariants are pinned here:
    longer hardcodes its version in pyproject. It is sourced dynamically from
    ``src/mordred_hermes/__about__.py`` (Hatch ``[tool.hatch.version] path``),
    which lives inside the importable package so sdist->wheel builds resolve it
-   without the docs tree. The docs marker (``docs/dev/VERSION``), every
-   ``plugin.yaml``, and the copy-paste ``--reinstall`` pin in
+   without the docs tree. The docs marker (``docs/dev/VERSION``) and the
+   copy-paste ``--reinstall`` pin in
    ``docs/dev/setup.md`` must all match that single source — otherwise a release
    bump that touches only some of them ships an inconsistent version.
    ``tools/bump_version.py`` rewrites all of them in lockstep; these tests are
@@ -101,20 +101,8 @@ def _real_version() -> str:
 
 
 def _plugin_manifests() -> list[Path]:
-    """Every plugin manifest shipped in the package."""
-    return sorted(_PKG_ROOT.glob("src/mordred_hermes/*/plugin.yaml"))
-
-
-def _manifest_version(manifest: Path) -> str:
-    """Read the ``version:`` field from a plugin.yaml without a YAML dep.
-
-    Captures the first bare token after ``version:``, tolerating optional
-    quoting and a trailing inline comment so the consistency check keeps
-    working if a manifest later gains either.
-    """
-    match = re.search(r"""(?m)^version:\s*['"]?([^\s'"#]+)""", manifest.read_text(encoding="utf-8"))
-    assert match is not None, f"no `version:` field in {manifest}"
-    return match.group(1)
+    """Every plugin manifest shipped in the package (expected: none)."""
+    return sorted(_PKG_ROOT.glob("src/mordred_hermes/**/plugin.yaml"))
 
 
 def test_distribution_names_follow_the_cutover_contract() -> None:
@@ -224,16 +212,13 @@ def test_doc_version_marker_matches_package_version() -> None:
     )
 
 
-def test_plugin_manifest_versions_match_package_version() -> None:
-    """Every plugin.yaml version must match the package's single source."""
-    manifests = _plugin_manifests()
-    assert manifests, "expected plugin.yaml manifests under src/mordred_hermes/*/"
-    version = _real_version()
-    mismatched = {m.parent.name: v for m in manifests if (v := _manifest_version(m)) != version}
-    assert not mismatched, (
-        f"plugin manifests out of sync with package version {version!r}: {mismatched}; "
-        "run tools/bump_version.py to sync"
-    )
+def test_no_plugin_yaml_manifests_ship() -> None:
+    """Mordred is one entry-point plugin; Hermes never reads plugin.yaml for it.
+
+    Per-component manifests used to carry a hand-synced ``version:`` that
+    nothing consumed. A new one would drift silently, so none may return.
+    """
+    assert _plugin_manifests() == []
 
 
 def test_setup_install_pin_matches_package_version() -> None:

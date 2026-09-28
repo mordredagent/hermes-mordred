@@ -211,20 +211,32 @@ def test_sync_validates_days(env):
     assert _post(env, "/sync", {"days": True}) == {"ok": False, "error": "invalid_request"}
 
 
-def test_install_writes_folder_and_only_enables_mordred(tmp_path):
+def test_install_writes_folder_and_enables_the_single_mordred_plugin(tmp_path):
     config = tmp_path / "config.yaml"
-    config.write_text("# keep\nplugins:\n  enabled:\n    - mordred_e2e\n  disabled:\n    - mordred_keyvault\n")
+    config.write_text(
+        "# keep\nplugins:\n  enabled:\n    - other\n    - mordred_e2e\n  disabled:\n    - mordred_keyvault\n"
+    )
     assert install.install(tmp_path) == 0
     folder = tmp_path / "plugins" / "mordred"
     assert (folder / "desktop" / "plugin.js").read_text().startswith("// Mordred setup for Hermes Desktop.")
     assert json.loads((folder / "dashboard" / "manifest.json").read_text())["name"] == "mordred"
     assert "from mordred_hermes.desktop.api import router" in (folder / "dashboard" / "plugin_api.py").read_text()
-    assert not (folder / "plugin.yaml").exists()  # agent-plugin scanner must skip it
+    # No plugin.yaml: the folder must not become a directory plugin that
+    # shadows the `mordred` entry point (Hermes prefers a directory plugin).
+    assert not (folder / "plugin.yaml").exists()
     text = config.read_text()
-    assert "# keep" in text and "mordred_keyvault" in text and "- mordred\n" in text
+    # Legacy per-component names are migrated to the single plugin; other entries survive.
+    assert "# keep" in text and "- other\n" in text and "- mordred\n" in text
+    assert "mordred_e2e" not in text and "mordred_keyvault" not in text
     assert install.status(tmp_path) == 0
     assert install.uninstall(tmp_path) == 0
-    assert not folder.exists() and "- mordred\n" not in config.read_text()
+    # The page goes; the plugin (every Mordred protection) stays enabled.
+    assert not folder.exists() and "- mordred\n" in config.read_text()
+
+
+def test_install_creates_a_missing_config(tmp_path):
+    assert install.install(tmp_path) == 0
+    assert "- mordred\n" in (tmp_path / "config.yaml").read_text()
 
 
 def test_login_refused_until_hermes_itself_uses_a_private_model(env, monkeypatch):

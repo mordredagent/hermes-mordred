@@ -32,6 +32,8 @@ Non-secret flags for the status screen (logged in? which LLM?) live in
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import secrets as _secrets
 import struct
@@ -48,6 +50,9 @@ _NONCE_LEN = 12
 _AAD = b"mordred-telegram-credentials-v1"
 _SEALED_NAME = "credentials.sealed"
 _META_NAME = "credentials.meta.json"
+
+#: ``(value, token)`` from :meth:`TeeSecretStore.load_snapshot`.
+Snapshot = tuple[TelegramSecrets | None, bytes | None]
 
 
 def _home() -> Path:
@@ -192,23 +197,60 @@ class TeeSecretStore:
 
     # -- public API -------------------------------------------------------------
 
-    def load(self, *, fresh: bool = True) -> TelegramSecrets | None:
-        """Unseal through the Enclave. Never cached (``fresh`` is ignored)."""
-        del fresh
+    def _read_sealed(self) -> bytes | None:
         path = self.sealed_path
         if path.is_symlink():
             raise TelegramSecretsError("secrets_corrupt")
         try:
-            sealed = path.read_bytes()
+            return path.read_bytes()
         except FileNotFoundError:
             return None
-        return decode(self._unseal(sealed))
+
+    def load(self, *, fresh: bool = True) -> TelegramSecrets | None:
+        """Unseal through the Enclave. Never cached (``fresh`` is ignored)."""
+        del fresh
+        return self.load_snapshot()[0]
+
+    def load_snapshot(self) -> Snapshot:
+        """:meth:`load` plus a token for :meth:`update_from_snapshot`.
+
+        One Enclave unwrap (none when nothing is sealed yet). The token is the
+        SHA-256 of the sealed file that was unsealed (``None`` when absent); it
+        is not secret and holds nothing derived from the plaintext.
+        """
+        sealed = self._read_sealed()
+        if sealed is None:
+            return None, None
+        return decode(self._unseal(sealed)), hashlib.sha256(sealed).digest()
 
     def update(self, mutate: Callable[[TelegramSecrets | None], TelegramSecrets | None]) -> TelegramSecrets | None:
+        """Unseal (one Enclave unwrap), apply ``mutate``, and seal the result."""
+        return self._write(mutate(self.load()))
+
+    def update_from_snapshot(
+        self, snapshot: Snapshot, mutate: Callable[[TelegramSecrets | None], TelegramSecrets | None]
+    ) -> TelegramSecrets | None:
+        """:meth:`update` for a value just read with :meth:`load_snapshot`,
+        without unsealing it a second time (no second Touch ID).
+
+        The sealed file must be byte-identical to the one the snapshot came from;
+        if another writer changed (or removed / created) it in between, this
+        falls back to a plain :meth:`update` (one unwrap) so that write is never
+        lost. Sealing itself only uses the Enclave public key -- no prompt.
+        """
+        current, token = snapshot
+        sealed = self._read_sealed()
+        now = None if sealed is None else hashlib.sha256(sealed).digest()
+        unchanged = (now is None and token is None) or (
+            now is not None and token is not None and hmac.compare_digest(now, token)
+        )
+        if not unchanged:
+            return self.update(mutate)
+        return self._write(mutate(current))
+
+    def _write(self, updated: TelegramSecrets | None) -> TelegramSecrets | None:
         from ...keyvault._storage import atomic_write
 
-        current = self.load()
-        updated = mutate(current)
         if updated is None:
             for path in (self.sealed_path, self.meta_path):
                 path.unlink(missing_ok=True)
