@@ -549,6 +549,14 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 > trigger actions. Under llm_guard `strict` mode, set `allow_cloud_llm` to true
 > and add `"venice"` to `cloud_provider_allowlist` in `policy.json`.
 >
+> **From Hermes itself.** The `mordred_e2e` plugin adds two agent tools,
+> `telegram_chats` and `telegram_ask`. They are offered only when the Hermes
+> model is Venice (`https://api.venice.ai`) or a loopback server, and every
+> call re-checks the running model — a Venice model must be labelled
+> `private` — before the archive is opened. `telegram_ask` returns only the
+> privacy LLM's answer, marked as untrusted third-party-derived text. Each
+> call may ask for Touch ID.
+>
 > **Only Venice or a local model.** Imported text is never sent anywhere else:
 > the Venice URL is fixed in code, and `local-llm` accepts only a loopback
 > address (`127.0.0.1` / `[::1]`, reached without any proxy). Redirects are

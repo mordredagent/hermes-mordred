@@ -180,6 +180,12 @@ browser extension, using a Venice.ai private model.
   dates travel unsealed over the loopback socket. Each question runs as its
   own task (at most two per socket) and `telegram_ask_cancel` or a closed
   socket stops it. Page sessions cannot reach the Telegram handlers.
+- **Hermes tools.** `mordred_e2e` registers `telegram_chats` / `telegram_ask`
+  (toolset `mordred_telegram`). `check_fn` offers them only when the
+  configured Hermes model is Venice or loopback; each call re-checks the
+  running agent's `model`/`base_url` and, for Venice, requires
+  `model_spec.privacy == "private"` from the public catalog before unsealing
+  anything. Results carry an untrusted-content note.
 - **Not covered.** Secret chats (device-bound E2EE), media contents, and
   sending messages. Venice E2EE (TEE-attested) models are a planned follow-up.
 
