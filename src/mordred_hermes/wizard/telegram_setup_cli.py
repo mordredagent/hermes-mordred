@@ -216,8 +216,11 @@ def telegram_setup(
         f"Recommended: personal chats and groups only, the newest {RECOMMENDED_LIMIT} messages per chat. "
         "Later imports fetch only new messages."
     )
-    if _yes(input_fn, "Import now with the recommended settings?"):
-        rc = telegram_sync(include_channels=False, include_archived=False, limit_per_dialog=RECOMMENDED_LIMIT)
+    recommended = {"include_channels": False, "include_archived": False, "limit_per_dialog": RECOMMENDED_LIMIT}
+    if _yes(input_fn, "Use this scope for imports (saved for later `telegram sync` runs)?"):
+        TeeSecretStore().save_sync_scope(recommended)
+    if _yes(input_fn, "Import now?"):
+        rc = telegram_sync()
         if rc != 0:
             return rc
     else:

@@ -81,6 +81,11 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     p_login.set_defaults(func=_handle_telegram)
     p_sync = tsub.add_parser("sync", help="Import new messages from every dialog into the encrypted archive")
+    p_sync.add_argument(
+        "--all",
+        action="store_true",
+        help="Ignore the scope saved by setup and import every chat, channel and archived chat",
+    )
     p_sync.add_argument("--skip-channels", action="store_true", help="Skip broadcast channels")
     p_sync.add_argument("--skip-archived", action="store_true", help="Skip the Archived Chats folder")
     p_sync.add_argument(

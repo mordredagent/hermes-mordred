@@ -566,6 +566,8 @@ def test_venice_request_has_no_tools_and_no_web_search():
         "enable_web_scraping": False,
         "enable_web_citations": False,
         "enable_x_search": False,
+        "disable_thinking": True,
+        "strip_thinking_response": True,
     }
     assert body["stream"] is True
 

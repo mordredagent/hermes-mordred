@@ -328,6 +328,20 @@ def _nonblocking_flock(path: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def archive_busy(root: Path | None = None) -> bool:
+    """True while another process holds the sync lock (checked without waiting)."""
+    base = root if root is not None else telegram_dir()
+    if not (base / ".lock").exists():
+        return False
+    try:
+        with _nonblocking_flock(base / ".lock"):
+            return False
+    except StoreError as exc:
+        if exc.code == "sync_in_progress":
+            return True
+        raise
+
+
 def wipe_archive(root: Path | None = None) -> None:
     """Delete every archive file, refusing while a sync holds the lock."""
     base = root if root is not None else telegram_dir()

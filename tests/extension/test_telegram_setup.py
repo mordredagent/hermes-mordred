@@ -95,13 +95,15 @@ def test_setup_skips_done_steps_and_runs_recommended_sync(monkeypatch):
     monkeypatch.setattr(
         "mordred_hermes.wizard.telegram_cli.telegram_sync", lambda **kw: calls.append(("sync", kw)) or 0
     )
+    saved: list[Any] = []
+    monkeypatch.setattr(
+        "mordred_hermes.extension.telegram.tee.TeeSecretStore.save_sync_scope", lambda self, scope: saved.append(scope)
+    )
     assert setup_cli.telegram_setup(input_fn=lambda _p: "", secret_fn=lambda _p: "") == 0
-    assert calls == [
-        (
-            "sync",
-            {"include_channels": False, "include_archived": False, "limit_per_dialog": setup_cli.RECOMMENDED_LIMIT},
-        )
+    assert saved == [
+        {"include_channels": False, "include_archived": False, "limit_per_dialog": setup_cli.RECOMMENDED_LIMIT}
     ]
+    assert calls == [("sync", {})]  # sync then uses the saved scope
 
 
 def test_setup_stops_without_enclave(monkeypatch):

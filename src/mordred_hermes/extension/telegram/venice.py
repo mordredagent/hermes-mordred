@@ -183,6 +183,10 @@ def build_request(
             "enable_web_scraping": False,
             "enable_web_citations": False,
             "enable_x_search": False,
+            # Reasoning models (e.g. deepseek-v4-flash) can spend the whole
+            # token budget on hidden reasoning and return an empty answer.
+            "disable_thinking": True,
+            "strip_thinking_response": True,
         },
     }
     if not venice_parameters:

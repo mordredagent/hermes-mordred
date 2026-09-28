@@ -233,6 +233,33 @@ class TeeSecretStore:
             "llm_backend": value.llm_backend(),
             "llm_model": value.llm_model(),
         }
+        previous = self._read_meta()
+        if previous and isinstance(previous.get("sync_scope"), dict):
+            meta["sync_scope"] = previous["sync_scope"]
+        atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
+
+    def _read_meta(self) -> dict[str, Any] | None:
+        try:
+            meta = json.loads(self.meta_path.read_text("utf-8"))
+        except (FileNotFoundError, ValueError):
+            return None
+        return meta if isinstance(meta, dict) else None
+
+    def sync_scope(self) -> dict[str, Any]:
+        """The import scope chosen at setup (non-secret); empty = everything."""
+        meta = self._read_meta() or {}
+        scope = meta.get("sync_scope")
+        return dict(scope) if isinstance(scope, dict) else {}
+
+    def save_sync_scope(self, scope: dict[str, Any]) -> None:
+        from ...keyvault._storage import atomic_write
+
+        meta = self._read_meta() or {"version": 1, "logged_in": False, "llm_backend": None, "llm_model": None}
+        meta["sync_scope"] = {
+            "include_channels": scope.get("include_channels") is not False,
+            "include_archived": scope.get("include_archived") is not False,
+            "limit_per_dialog": scope.get("limit_per_dialog"),
+        }
         atomic_write(self.meta_path, json.dumps(meta).encode("utf-8"))
 
     def flags(self) -> dict[str, Any] | None:

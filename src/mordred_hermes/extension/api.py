@@ -969,7 +969,7 @@ class _Connection:
 
         mid = msg.get("id")
         raw = msg.get("options")
-        options = SyncOptions()
+        options: SyncOptions | None = None
         if raw is not None:
             if not isinstance(raw, dict):
                 await self._send({"id": mid, "type": "telegram_sync_result", "ok": False, "error": "invalid_request"})
@@ -980,11 +980,13 @@ class _Connection:
             ):
                 await self._send({"id": mid, "type": "telegram_sync_result", "ok": False, "error": "invalid_request"})
                 return
-            options = SyncOptions(
-                include_channels=raw.get("include_channels") is not False,
-                include_archived=raw.get("include_archived") is not False,
-                limit_per_dialog=limit,
-            )
+            # Fields the client sent override the scope saved at setup.
+            overrides = {
+                "include_channels": raw["include_channels"] if isinstance(raw.get("include_channels"), bool) else None,
+                "include_archived": raw["include_archived"] if isinstance(raw.get("include_archived"), bool) else None,
+                "limit_per_dialog": limit,
+            }
+            options = self._telegram_ready().sync_options(overrides)
         try:
             await self._telegram_ready().start_sync(options)
         except Exception as exc:

@@ -22,6 +22,7 @@ from typing import Any
 from ..egress import EgressError, EgressRoute, resolve_route
 from . import venice
 from .ask import (
+    ANSWER_TOKENS,
     Aliases,
     AskError,
     AskRequest,
@@ -29,6 +30,7 @@ from .ask import (
     build_messages,
     dealias_stream,
     select_context,
+    strip_thinking,
     validate_question,
 )
 from .client import (
@@ -148,6 +150,26 @@ def check_llm_policy(backend: str, base_url: str) -> None:
         )
     except MordredSessionRefused as exc:
         raise TelegramServiceError("llm_policy_refused") from exc
+
+
+async def _without_thinking(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Stream text with any ``<think>…</think>`` block removed (local reasoning models)."""
+    pending = ""
+    async for chunk in chunks:
+        pending += chunk
+        if "<think>" in pending and "</think>" not in pending.split("<think>", 1)[1]:
+            continue  # inside a reasoning block: hold until it closes
+        cleaned = strip_thinking(pending)
+        cut = cleaned.rfind("<")
+        if cut != -1 and "<think>".startswith(cleaned[cut:]):
+            pending, cleaned = cleaned[cut:], cleaned[:cut]  # maybe the start of "<think>"
+        else:
+            pending = ""
+        if cleaned:
+            yield cleaned
+    rest = strip_thinking(pending).split("<think>", 1)[0]
+    if rest:
+        yield rest
 
 
 def _default_http_session(route: EgressRoute, timeout: float) -> Any:
@@ -296,6 +318,18 @@ class TelegramService:
 
     # -- sync -----------------------------------------------------------------
 
+    def sync_options(self, overrides: dict[str, Any] | None = None) -> SyncOptions:
+        """The saved scope (from setup), with any explicitly given fields on top."""
+        scope_fn = getattr(self._secrets, "sync_scope", None)
+        scope: dict[str, Any] = dict(scope_fn()) if scope_fn is not None else {}
+        scope.update({k: v for k, v in (overrides or {}).items() if v is not None})
+        limit = scope.get("limit_per_dialog")
+        return SyncOptions(
+            include_channels=scope.get("include_channels") is not False,
+            include_archived=scope.get("include_archived") is not False,
+            limit_per_dialog=limit if isinstance(limit, int) and not isinstance(limit, bool) else None,
+        )
+
     async def start_sync(self, options: SyncOptions | None = None) -> None:
         """Start a background sync; raise ``sync_in_progress`` if one runs.
 
@@ -320,7 +354,8 @@ class TelegramService:
             lock.__enter__()
             self._last_error = None
             self._progress = SyncProgress(started_at=int(time.time()))
-            self._sync_task = asyncio.create_task(self._run_sync(value, store, lock, options or SyncOptions()))
+            chosen = options if options is not None else self.sync_options()
+            self._sync_task = asyncio.create_task(self._run_sync(value, store, lock, chosen))
         finally:
             self._sync_starting = False
 
@@ -438,10 +473,16 @@ class TelegramService:
                 dialogs=selection.dialog_count,
                 pseudonymized=request.pseudonymize,
             )
-            chunks = venice.stream_chat(session, cfg, build_messages(question, selection), backend=target.backend)
+            prompt = build_messages(question, selection, request=request, last_sync=index.last_sync)
+            chunks = venice.stream_chat(session, cfg, prompt, max_tokens=ANSWER_TOKENS, backend=target.backend)
+            produced = False
             async with contextlib.aclosing(chunks), contextlib.aclosing(dealias_stream(chunks, aliases)) as answer:
-                async for text in answer:
+                async for text in _without_thinking(answer):
+                    produced = produced or bool(text.strip())
                     yield text
+            if not produced:
+                # Never hand back a silent empty answer as if it were one.
+                raise AskError("llm_empty_answer")
         finally:
             with contextlib.suppress(Exception):
                 await raw_session.close()

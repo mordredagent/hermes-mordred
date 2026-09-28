@@ -23,6 +23,12 @@ me the contract?", "which chats talked about the budget?".
 |------|------|
 | Which chats exist (title, kind, id, message count) | `telegram_chats` |
 | Anything about message content | `telegram_ask` with `question` (and optional `chat_ids` from `telegram_chats`) |
+| Anything about a period ("last week", "until the 15th") | `telegram_ask` with `start_date` / `end_date` (`YYYY-MM-DD`, the user's local dates, inclusive) |
+
+**Dates:** always convert relative periods to concrete `start_date` /
+`end_date` before calling. Without them the importer searches by keywords
+and may pick messages from any time. The result's `coverage.archive_updated`
+says how fresh the archive is; say so if the period extends past it.
 
 Both are plugin tools. If they are not in your tool list, find them with
 `tool_search` (query: `telegram`) and call them through the bridge.
@@ -61,6 +67,8 @@ terminal (`hermes-mordred` may need its full venv path):
 |------------|---------|---------------|
 | `telegram_not_configured`, `telegram_not_logged_in` | Not set up | Run `hermes-mordred telegram setup` |
 | `archive_empty` | Nothing imported yet | Run `hermes-mordred telegram sync` |
+| `llm_empty_answer` | The privacy LLM returned no text | Retry once with a narrower period or fewer chats; if it repeats, suggest another model (`telegram venice --model <id>`) |
+| `invalid_date` | Bad `start_date` / `end_date` | Use `YYYY-MM-DD`; start must not be after end |
 | `no_matching_messages` | No hit | Rephrase, or pass `chat_ids` |
 | `llm_not_configured` | No privacy LLM | Run `hermes-mordred telegram venice` (or `telegram local-llm`) |
 | `tee_unavailable` | Secure Enclave helper missing | Run `hermes-mordred keyvault enable-se` |
@@ -73,6 +81,14 @@ terminal (`hermes-mordred` may need its full venv path):
 
 For a health check you MAY run `hermes-mordred telegram doctor` (metadata
 only: no content, no account name, no Touch ID).
+
+## Syncing
+
+`hermes-mordred telegram sync` imports new messages using the scope the user
+chose at setup. You may run it **only after the user agrees**, never with
+`--all` unless they ask for everything, and never ask questions while it runs
+(`coverage.sync_running` is true): wait for it to finish, then ask once.
+Do not retry a failing question in a loop — report the error code instead.
 
 ## Things that are NOT needed
 

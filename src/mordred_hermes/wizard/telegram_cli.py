@@ -252,20 +252,34 @@ async def _run_sync(service: Any, options: Any, *, poll: float = 1.0) -> int:
 
 def telegram_sync(
     *,
-    include_channels: bool = True,
-    include_archived: bool = True,
+    include_channels: bool | None = None,
+    include_archived: bool | None = None,
     limit_per_dialog: int | None = None,
+    everything: bool = False,
     service: Any = None,
 ) -> int:
+    """Import new messages. Unset options fall back to the scope saved by setup."""
     from ..extension.telegram.client import SyncOptions
     from ..extension.telegram.service import TelegramService, error_code
 
     svc = service if service is not None else TelegramService()
-    options = SyncOptions(
-        include_channels=include_channels,
-        include_archived=include_archived,
-        limit_per_dialog=limit_per_dialog,
-    )
+    if everything:
+        options = SyncOptions(include_channels=True, include_archived=True, limit_per_dialog=None)
+    else:
+        options = svc.sync_options(
+            {
+                "include_channels": include_channels,
+                "include_archived": include_archived,
+                "limit_per_dialog": limit_per_dialog,
+            }
+        )
+    skipped = [
+        name
+        for name, keep in (("channels", options.include_channels), ("archived", options.include_archived))
+        if not keep
+    ]
+    limit = f"; newest {options.limit_per_dialog} per newly seen chat" if options.limit_per_dialog else ""
+    print(f"Scope: all chats{' except ' + ' and '.join(skipped) if skipped else ''}{limit}.")
     try:
         return asyncio.run(_run_sync(svc, options))
     except Exception as exc:
@@ -445,9 +459,10 @@ def cli_telegram(args: argparse.Namespace) -> int:
         return telegram_login(require_presence=not getattr(args, "no_touch_id", False))
     if command == "sync":
         return telegram_sync(
-            include_channels=not args.skip_channels,
-            include_archived=not args.skip_archived,
+            include_channels=False if args.skip_channels else None,
+            include_archived=False if args.skip_archived else None,
             limit_per_dialog=args.limit_per_dialog,
+            everything=bool(getattr(args, "all", False)),
         )
     if command == "status":
         return telegram_status(show_account=bool(getattr(args, "show_account", False)))
