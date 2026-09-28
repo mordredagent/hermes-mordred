@@ -266,6 +266,18 @@ async def _no_chat(_content: str, _context: dict[str, Any]) -> Any:
         yield ""
 
 
+@pytest.fixture(autouse=True)
+def _no_api_env(monkeypatch):
+    monkeypatch.delenv(telegram_cli.API_ID_ENV, raising=False)
+    monkeypatch.delenv(telegram_cli.API_HASH_ENV, raising=False)
+
+
+def test_cli_login_reads_api_credentials_from_env(monkeypatch):
+    monkeypatch.setenv(telegram_cli.API_ID_ENV, "777")
+    monkeypatch.setenv(telegram_cli.API_HASH_ENV, "ef" * 16)
+    assert telegram_cli._read_api_credentials(lambda _p: "unused", lambda _p: "unused") == (777, "ef" * 16)
+
+
 def _conn(svc: Any, *, page: bool = False) -> Any:
     token = "telegram-test-token"
     pairing._save_pairing(
