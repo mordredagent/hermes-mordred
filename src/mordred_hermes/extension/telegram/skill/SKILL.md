@@ -31,7 +31,10 @@ and may pick messages from any time. The result's `coverage.archive_updated`
 says how fresh the archive is; say so if the period extends past it.
 
 Both are plugin tools. If they are not in your tool list, find them with
-`tool_search` (query: `telegram`) and call them through the bridge.
+`tool_search` (query: `telegram`) and call them through the bridge, always
+with the tool name, e.g. `tool_call` with
+`{"calls": [{"name": "telegram_ask", "arguments": {"question": "…", "start_date": "2026-09-26", "end_date": "2026-09-28"}}]}`.
+A call without `"name"` is rejected by Hermes.
 
 `telegram_ask` does not give you the messages. The user's privacy LLM (a Venice
 `private` model or a model on this machine) reads the relevant messages and you

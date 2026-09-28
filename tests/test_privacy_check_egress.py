@@ -262,3 +262,15 @@ def test_bridge_call_taints_a_clean_session_and_malformed_bridges_stay_blocked()
     assert not egress.decide("tool_call", {"calls": "not json"}, "bridge-clean", policy).allow
     nested = {"calls": [{"name": "tool_call", "arguments": ask}]}
     assert not egress.decide("tool_call", nested, "bridge-clean", policy).allow
+
+
+def test_bridge_call_without_any_tool_name_is_left_to_hermes():
+    # The model sometimes omits `name`; Hermes rejects such a call itself, so
+    # Mordred must not answer with a misleading egress block.
+    policy = egress.EgressPolicy(level="search")
+    nameless = {"calls": [{"arguments": {"question": "x", "start_date": "2026-09-26"}}]}
+    assert egress.decide("tool_call", nameless, "bridge-nameless", policy).allow
+    assert not egress.decide("tool_call", nameless, "bridge-nameless", policy).taints
+    # Anything that does name a tool but cannot be parsed stays blocked.
+    named_bad = {"calls": [{"name": "web_extract", "arguments": "{not json"}]}
+    assert not egress.decide("tool_call", named_bad, "bridge-nameless", policy).allow

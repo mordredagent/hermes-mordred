@@ -384,6 +384,17 @@ def _bridge_entries(args: dict[str, Any]) -> list[tuple[str, dict[str, Any]]] | 
     return None if any(entry is None for entry in entries) else [e for e in entries if e is not None]
 
 
+def _names_any_tool(args: dict[str, Any]) -> bool:
+    """Whether a ``tool_call`` payload mentions a tool name anywhere (conservative)."""
+    if str(args.get("name") or "").strip():
+        return True
+    raw = _loads(args.get("calls"))
+    if raw is None and args.get("calls") is not None:
+        return True  # unparsable: cannot prove it names nothing
+    items = raw if isinstance(raw, list) else [raw]
+    return any(not isinstance(item, dict) or str(item.get("name") or "").strip() for item in items if item is not None)
+
+
 def _loads(value: Any) -> Any:
     """Parse a JSON string (``None`` on bad JSON, ``{}`` for blank); other values pass through."""
     if not isinstance(value, str):
@@ -409,7 +420,10 @@ def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressP
     """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed."""
     entries = _bridge_entries(args)
     if entries is None:
-        return None
+        # A bridge call that names no tool at all cannot run anything: Hermes
+        # rejects it ("calls[0] requires a 'name'"). Let that error reach the
+        # model so it can fix the call, instead of a misleading egress block.
+        return Decision(allow=True) if not _names_any_tool(args) else None
     taints = False
     for name, arguments in entries:
         inner = decide(name, arguments, session_id, policy)
