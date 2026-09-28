@@ -499,6 +499,32 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 > localhost web app, copy the complete private `Web page:` URL printed at
 > startup, including its `#token=…` fragment.
 
+### `egress` — limit what the agent's tools may send out
+```sh
+hermes-mordred egress status                 # level, taint setting, blocklists
+hermes-mordred egress set search             # lockdown | search (default) | blocklist | off
+hermes-mordred egress block evil.example     # add a domain to the blocklist (level "blocklist")
+hermes-mordred egress block-tool image_generate
+hermes-mordred egress taint on               # lock a session down after it reads private data
+```
+> Even a private or local LLM can leak data by *calling tools* that reach the
+> internet. Mordred checks every tool call before it runs:
+>
+> | Level | Tools may reach the internet |
+> |---|---|
+> | `lockdown` | Never. Local tools and Mordred's own Telegram tools only. |
+> | `search` (default) | Web search only. No URL fetching, browsing, remote APIs, scheduling, or arbitrary commands. |
+> | `blocklist` | Everything except blocklisted domains/tools (paste sites, webhooks and tunnels are built in). |
+> | `off` | No restriction from Mordred. |
+>
+> `terminal`, `execute_code` and browser scripting run free-form code whose
+> destination cannot be checked, so under `lockdown`/`search` only exact
+> read-only Mordred commands (`hermes-mordred telegram doctor`, `status`, …)
+> may run. Unknown tools count as internet-capable. With taint on (default),
+> a session that has read private data (the Telegram tools) is locked down for
+> the rest of its life, and cannot delegate. Blocked calls are audited as
+> `policy.egress.tool_blocked`. Changes apply on the next tool call.
+
 ### `telegram` — read-only import of your own Telegram account (preview)
 
 Start with the [Telegram guide](./TELEGRAM.md); `telegram setup` does

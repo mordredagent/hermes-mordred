@@ -97,9 +97,19 @@ Current defenses include:
 - purpose-bound envelope encryption and native-key authorization;
 - encrypted audit records when a keyvault-backed writer is available; and
 - loopback-only, paired, encrypted browser-extension transport; and
-- a read-only Telegram importer (see [Telegram import](#telegram-import)).
+- a read-only Telegram importer (see [Telegram import](#telegram-import)); and
+- tool-egress levels (`lockdown` / `search` default / `blocklist` / `off`)
+  enforced in `privacy_check`'s `pre_tool_call`: free-form code tools are
+  refused below `blocklist` except exact first-party read-only commands,
+  unknown tools count as internet-capable, and a session that read private
+  data is locked down (taint).
 
 Accepted limitations include:
+
+- tool-egress control acts on tool calls, not sockets: under `blocklist` a
+  `terminal` command can still reach any host not named in the blocklist, and
+  a Hermes feature that sends data without a tool call (cron `no_agent`
+  scripts, platform delivery, external ACP delegates) is outside the hook;
 
 - a skill can open a direct socket or invoke an unwrapped executable;
 - Hermes does not provide trusted `origin_skill` provenance to
@@ -770,6 +780,8 @@ vault       init | change-passphrase | recover | add | status | cat |
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list
 extension   pair | serve
+egress      status | set | block | unblock | block-tool | unblock-tool |
+            taint
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee
 ```

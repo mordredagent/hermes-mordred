@@ -17,6 +17,15 @@ from mordred_hermes.privacy_check import _runtime, hooks
 from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 
+@pytest.fixture(autouse=True)
+def _tool_egress_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests cover the legacy strict tool-name gate only; the tool-egress
+    levels have their own suite (test_privacy_check_egress.py)."""
+    from mordred_hermes.privacy_check import egress
+
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="off"))
+
+
 def _audit_entries(log_path: Path) -> list[dict[str, object]]:
     if not log_path.exists():
         return []

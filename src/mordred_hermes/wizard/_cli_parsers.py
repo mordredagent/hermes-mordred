@@ -53,11 +53,33 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_plugins(sub)
     _add_extension(sub)
     _add_telegram(sub)
+    _add_egress(sub)
 
 
 # -----------------------------------------------------------------------------
 # Subcommand parsers — each calls set_defaults(func=...) wiring its handler.
 # -----------------------------------------------------------------------------
+
+
+def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("egress", help="Tool-egress level: stop the agent's tools from sending data out")
+    esub = p.add_subparsers(dest="egress_command", required=True, metavar="COMMAND")
+    esub.add_parser("status", help="Show the level, taint setting and blocklists").set_defaults(func=_handle_egress)
+    p_set = esub.add_parser("set", help="Set the level: lockdown | search | blocklist | off")
+    p_set.add_argument("level", choices=["lockdown", "search", "blocklist", "off"])
+    p_set.set_defaults(func=_handle_egress)
+    for name, arg, text in (
+        ("block", "domain", "Add a domain to the blocklist"),
+        ("unblock", "domain", "Remove a domain from the blocklist"),
+        ("block-tool", "tool", "Block a tool at every level except off"),
+        ("unblock-tool", "tool", "Unblock a tool"),
+    ):
+        p_item = esub.add_parser(name, help=text)
+        p_item.add_argument(arg)
+        p_item.set_defaults(func=_handle_egress)
+    p_taint = esub.add_parser("taint", help="Lock a session down after it reads private data (on|off)")
+    p_taint.add_argument("state", choices=["on", "off"])
+    p_taint.set_defaults(func=_handle_egress)
 
 
 def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -896,6 +918,12 @@ def _handle_extension_pair(args: argparse.Namespace) -> int:
     from . import extension_pair_cli
 
     return extension_pair_cli.cli_extension_pair(args)
+
+
+def _handle_egress(args: argparse.Namespace) -> int:
+    from . import egress_cli
+
+    return egress_cli.cli_egress(args)
 
 
 def _handle_telegram(args: argparse.Namespace) -> int:

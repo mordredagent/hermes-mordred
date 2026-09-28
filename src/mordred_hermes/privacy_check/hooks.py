@@ -132,6 +132,37 @@ def on_session_start(**kwargs: Any) -> None:
         )
 
 
+def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """Apply the tool-egress level (see :mod:`.egress`); fail closed on errors."""
+    from . import egress
+
+    session_id = str(kwargs.get("session_id") or "") or None
+    try:
+        policy = egress.load_policy()
+        decision = egress.decide(tool_name, kwargs.get("args"), session_id, policy)
+    except Exception:
+        _LOG.exception("tool-egress evaluation failed; blocking %s", tool_name)
+        policy = egress.EgressPolicy(level="lockdown")
+        decision = egress._block("lockdown", "egress.evaluation_failed", "the egress check itself failed.")
+    if decision.allow:
+        if decision.taints and policy.taint:
+            egress.mark_tainted(session_id)
+        return None
+    safe_audit_append(
+        state.audit,
+        {
+            "event": "pre_tool_call",
+            "decision": "block",
+            "reason": "policy.egress.tool_blocked",
+            "rule": decision.reason,
+            "level": policy.level,
+            "tool_name": tool_name,
+        },
+        logger=_LOG,
+    )
+    return {"action": "block", "message": decision.message}
+
+
 def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """Evaluate the generic strict-mode tool-name allowlist.
 
@@ -159,6 +190,10 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             "action": "block",
             "message": _runtime.get_poison_reason() or "Mordred strict mode: process poisoned",
         }
+
+    egress_block = _check_tool_egress(state, tool_name, kwargs)
+    if egress_block is not None:
+        return egress_block
 
     outcome = evaluate_pre_tool_call(
         policy_mode=state.policy_mode,
