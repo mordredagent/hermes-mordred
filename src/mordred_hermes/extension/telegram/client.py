@@ -48,6 +48,8 @@ _MAX_TEXT_CHARS = 16_000
 
 
 DEFAULT_MAX_GROUP_SIZE = 100
+# Default import window: chats active, and messages sent, in the last N days.
+DEFAULT_SINCE_DAYS = 3
 
 
 class TelegramClientError(RuntimeError):
@@ -61,9 +63,10 @@ class TelegramClientError(RuntimeError):
 @dataclass(frozen=True)
 class SyncOptions:
     include_channels: bool = True  # broadcast channels (often very large)
-    include_archived: bool = True
+    include_archived: bool = False  # the Archived Chats folder is skipped by default
     limit_per_dialog: int | None = None  # first import only: newest N messages
-    since_days: int | None = None  # only chats active, and messages sent, in the last N days
+    # Only chats active, and messages sent, in the last N days (None = all history).
+    since_days: int | None = DEFAULT_SINCE_DAYS
     # Groups with more members than this are skipped (None = no limit).
     max_group_size: int | None = DEFAULT_MAX_GROUP_SIZE
 

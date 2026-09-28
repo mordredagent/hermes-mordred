@@ -35,6 +35,7 @@ from .ask import (
 )
 from .client import (
     DEFAULT_MAX_GROUP_SIZE,
+    DEFAULT_SINCE_DAYS,
     SyncOptions,
     SyncProgress,
     TelegramClientError,
@@ -342,9 +343,11 @@ class TelegramService:
 
         return SyncOptions(
             include_channels=scope.get("include_channels") is not False,
-            include_archived=scope.get("include_archived") is not False,
+            # Archived chats only when explicitly asked for.
+            include_archived=scope.get("include_archived") is True,
             limit_per_dialog=count(scope.get("limit_per_dialog")),
-            since_days=count(scope.get("since_days")),
+            # Absent/None = the default window; 0 = all history.
+            since_days=(DEFAULT_SINCE_DAYS if scope.get("since_days") is None else count(scope.get("since_days"))),
             # Absent = the default limit; 0 = no limit (large groups included).
             max_group_size=(
                 DEFAULT_MAX_GROUP_SIZE if "max_group_size" not in scope else count(scope.get("max_group_size"))

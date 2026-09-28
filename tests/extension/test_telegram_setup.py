@@ -102,7 +102,12 @@ def test_setup_skips_done_steps_and_runs_recommended_sync(monkeypatch):
     )
     assert setup_cli.telegram_setup(input_fn=lambda _p: "", secret_fn=lambda _p: "") == 0
     assert saved == [
-        {"include_channels": False, "include_archived": False, "limit_per_dialog": setup_cli.RECOMMENDED_LIMIT}
+        {
+            "include_channels": False,
+            "include_archived": False,
+            "since_days": setup_cli.DEFAULT_SINCE_DAYS,
+            "limit_per_dialog": setup_cli.RECOMMENDED_LIMIT,
+        }
     ]
     assert calls == [("sync", {})]  # sync then uses the saved scope
 

@@ -300,7 +300,7 @@ class TeeSecretStore:
         meta = self._read_meta() or {"version": 1, "logged_in": False, "llm_backend": None, "llm_model": None}
         meta["sync_scope"] = {
             "include_channels": scope.get("include_channels") is not False,
-            "include_archived": scope.get("include_archived") is not False,
+            "include_archived": scope.get("include_archived") is True,
             "limit_per_dialog": scope.get("limit_per_dialog"),
             "since_days": scope.get("since_days"),
             "max_group_size": scope.get("max_group_size", 100),

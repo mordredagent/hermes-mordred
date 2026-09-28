@@ -406,7 +406,7 @@ def test_sync_imports_all_dialogs_then_only_new_messages(tmp_path, monkeypatch):
     )
     archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
     seen = []
-    everything = client.SyncOptions(max_group_size=None)  # the fake group has no member count
+    everything = client.SyncOptions(include_archived=True, since_days=None, max_group_size=None)
     result = asyncio.run(
         client.sync_archive(fake, archive, options=everything, progress=lambda p: seen.append(p.dialogs_done))
     )
@@ -431,7 +431,7 @@ def test_sync_options_skip_channels_and_limit(tmp_path):
         history={"a": _fake_messages(10), "n": _fake_messages(5)},
     )
     archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
-    opts = client.SyncOptions(include_channels=False, limit_per_dialog=4)
+    opts = client.SyncOptions(include_channels=False, limit_per_dialog=4, since_days=None)
     asyncio.run(client.sync_archive(fake, archive, options=opts))
     assert [m.id for m in archive.load_messages(1)] == [7, 8, 9, 10]
     assert -2 not in archive.load_index().dialogs
@@ -756,3 +756,34 @@ def test_question_validation():
         ask.validate_question("  ")
     with pytest.raises(ask.AskError, match="question_too_long"):
         ask.validate_question("x" * 5000)
+
+
+def test_default_sync_scope_is_recent_days_without_archived_or_large_groups():
+    defaults = client.SyncOptions()
+    assert defaults.since_days == client.DEFAULT_SINCE_DAYS == 3
+    assert defaults.include_archived is False
+    assert defaults.max_group_size == client.DEFAULT_MAX_GROUP_SIZE
+
+
+def test_service_scope_defaults_and_explicit_all_history():
+    from mordred_hermes.extension.telegram.service import TelegramService
+
+    class _Secrets:
+        def __init__(self, scope):
+            self.scope = scope
+
+        def sync_scope(self):
+            return dict(self.scope)
+
+    def options(scope, overrides=None):
+        svc = TelegramService.__new__(TelegramService)
+        svc._secrets = _Secrets(scope)
+        return svc.sync_options(overrides)
+
+    fresh = options({})
+    assert (fresh.since_days, fresh.include_archived, fresh.max_group_size) == (3, False, 100)
+    # An older saved scope without a window still gets the default window.
+    assert options({"since_days": None, "include_archived": None}).since_days == 3
+    everything = options({"since_days": 0, "include_archived": True, "max_group_size": 0})
+    assert (everything.since_days, everything.include_archived, everything.max_group_size) == (None, True, None)
+    assert options({}, {"since_days": 30}).since_days == 30

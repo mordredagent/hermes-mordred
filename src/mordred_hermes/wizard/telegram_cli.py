@@ -311,7 +311,7 @@ def telegram_sync(
         "max_group_size": max_group_size,
     }
     options = (
-        SyncOptions(include_channels=True, include_archived=True, max_group_size=None)
+        SyncOptions(include_channels=True, include_archived=True, since_days=None, max_group_size=None)
         if everything
         else svc.sync_options(given)
     )
@@ -324,7 +324,7 @@ def telegram_sync(
                     "include_channels": options.include_channels,
                     "include_archived": options.include_archived,
                     "limit_per_dialog": options.limit_per_dialog,
-                    "since_days": options.since_days,
+                    "since_days": options.since_days or 0,  # 0 = all history
                     "max_group_size": options.max_group_size or 0,
                 }
             )
@@ -538,7 +538,9 @@ def cli_telegram(args: argparse.Namespace) -> int:
     if command == "sync":
         return telegram_sync(
             include_channels=False if args.skip_channels else None,
-            include_archived=False if args.skip_archived else None,
+            include_archived=True
+            if getattr(args, "include_archived", False)
+            else (False if args.skip_archived else None),
             limit_per_dialog=args.limit_per_dialog,
             since_days=getattr(args, "days", None),
             max_group_size=0

@@ -24,6 +24,7 @@ from . import _term
 InputFn = Callable[[str], str]
 
 RECOMMENDED_LIMIT = 500
+DEFAULT_SINCE_DAYS = 3  # mirrors extension.telegram.client.DEFAULT_SINCE_DAYS (no Telethon import here)
 
 
 # -- doctor ------------------------------------------------------------------------
@@ -263,10 +264,15 @@ def telegram_setup(
 
     print("\nStep 5/5  First import")
     print(
-        f"Recommended: personal chats and groups only, the newest {RECOMMENDED_LIMIT} messages per chat. "
-        "Later imports fetch only new messages."
+        f"Recommended: the last {DEFAULT_SINCE_DAYS} days of personal chats and groups; archived chats and "
+        "groups over 100 members skipped; pinned chats first. Later imports fetch only new messages."
     )
-    recommended = {"include_channels": False, "include_archived": False, "limit_per_dialog": RECOMMENDED_LIMIT}
+    recommended = {
+        "include_channels": False,
+        "include_archived": False,
+        "since_days": DEFAULT_SINCE_DAYS,
+        "limit_per_dialog": RECOMMENDED_LIMIT,
+    }
     if _yes(input_fn, "Use this scope for imports (saved for later `telegram sync` runs)?"):
         TeeSecretStore().save_sync_scope(recommended)
     if _yes(input_fn, "Import now?"):

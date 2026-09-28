@@ -72,9 +72,10 @@ any other model they are hidden and refused.
 **Keep it up to date.**
 
 ```sh
-hermes-mordred telegram sync --days 3 --skip-archived   # just the last 3 days; pinned chats first
-hermes-mordred telegram sync                            # same options as last time
-hermes-mordred telegram sync --all                      # everything (slow)
+hermes-mordred telegram sync                    # default: last 3 days, pinned first, no archived / large groups
+hermes-mordred telegram sync --days 30          # a longer window (remembered for next time)
+hermes-mordred telegram sync --include-archived # also the Archived Chats folder
+hermes-mordred telegram sync --all              # everything, all history (slow)
 ```
 
 Nothing is downloaded twice: each chat remembers the newest message already

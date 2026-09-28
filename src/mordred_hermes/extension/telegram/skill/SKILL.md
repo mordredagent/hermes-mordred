@@ -107,11 +107,13 @@ only: no content, no account name, no Touch ID).
 
 ## Syncing
 
-`hermes-mordred telegram sync` imports new messages with the options used last
-time (pinned chats first). **Ask the user to run it in their own terminal**
-(it needs network access and Touch ID; Mordred's tool-egress policy does not
-let you run it). For "just catch up", suggest
-`hermes-mordred telegram sync --days 3 --skip-archived`. Never ask questions
+To import new messages, **ask the user to open "Mordred" in the Hermes Desktop
+sidebar and press Import** (it needs network access and Touch ID; Mordred's
+tool-egress policy does not let you run it). The default imports the last 3
+days, pinned chats first, skips archived chats and groups over 100 members,
+and never downloads a message twice. Never suggest importing everything or all
+history unless the user explicitly asks for older messages. (Terminal users:
+`hermes-mordred telegram sync`.) Never ask questions
 while it runs (`coverage.sync_running` is true), and never retry a failing
 question in a loop — report the error code instead.
 

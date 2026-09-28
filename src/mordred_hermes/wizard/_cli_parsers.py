@@ -147,14 +147,15 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_sync.add_argument(
         "--all",
         action="store_true",
-        help="Ignore the scope saved by setup and import every chat, channel and archived chat",
+        help="Import everything: all history, channels, archived chats and large groups (slow)",
     )
     p_sync.add_argument(
         "--days",
         type=int,
         default=None,
         metavar="N",
-        help="Only chats active in the last N days, and only their last N days of messages",
+        help="Only chats active in the last N days, and only their last N days of messages "
+        "(default: 3; 0 = all history)",
     )
     p_sync.add_argument(
         "--include-large-groups",
@@ -169,7 +170,8 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         help="Member count above which a group is skipped (default: 100)",
     )
     p_sync.add_argument("--skip-channels", action="store_true", help="Skip broadcast channels")
-    p_sync.add_argument("--skip-archived", action="store_true", help="Skip the Archived Chats folder")
+    p_sync.add_argument("--include-archived", action="store_true", help="Also import the Archived Chats folder")
+    p_sync.add_argument("--skip-archived", action="store_true", help="Skip the Archived Chats folder (the default)")
     p_sync.add_argument(
         "--limit-per-dialog",
         type=int,
