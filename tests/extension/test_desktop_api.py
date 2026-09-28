@@ -83,6 +83,11 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: True
     )
+
+    async def model_ok() -> dict[str, Any]:
+        return {"model": "m", "kind": "venice", "private": True, "ok": True}
+
+    monkeypatch.setattr(api, "hermes_model_check", model_ok)
     app = FastAPI()
     app.include_router(api.router, prefix="/api/plugins/mordred")
     return SimpleNamespace(http=TestClient(app), store=store, client=client, tmp=tmp_path)
@@ -220,3 +225,66 @@ def test_install_writes_folder_and_only_enables_mordred(tmp_path):
     assert install.status(tmp_path) == 0
     assert install.uninstall(tmp_path) == 0
     assert not folder.exists() and "- mordred\n" not in config.read_text()
+
+
+def test_login_refused_until_hermes_itself_uses_a_private_model(env, monkeypatch):
+    async def not_private() -> dict[str, Any]:
+        return {"model": "gpt", "kind": "other", "private": None, "ok": False}
+
+    monkeypatch.setattr(api, "hermes_model_check", not_private)
+    result = _post(env, "/telegram/login/start", {"phone": "+1000000", "api_id": "1", "api_hash": SECRET_HASH})
+    assert result == {"ok": False, "error": "hermes_model_not_private"}
+
+
+def test_question_model_can_be_set_before_telegram_and_survives_login(env):
+    assert env.store.value is None
+    assert _post(env, "/llm/venice", {"api_key": SECRET_VENICE}) == {"ok": True}
+    assert env.store.value.has_api is False and env.store.value.venice_api_key == SECRET_VENICE
+    started = _post(env, "/telegram/login/start", {"phone": "+1000000", "api_id": "12345", "api_hash": SECRET_HASH})
+    _post(env, f"/telegram/login/{started['flow_id']}/code", {"code": SECRET_CODE})
+    _post(env, f"/telegram/login/{started['flow_id']}/password", {"password": SECRET_PASSWORD})
+    value = env.store.value
+    assert (value.api_id, value.venice_api_key, value.session) == (12345, SECRET_VENICE, "SESSION-STRING")
+
+
+def test_empty_secrets_roundtrip_and_reject_half_configured():
+    empty = secrets.empty_secrets()
+    assert secrets.decode(secrets.encode(empty)) == empty and not empty.has_api
+    bad = json.loads(secrets.encode(empty))
+    bad["session"] = "s"
+    with pytest.raises(secrets.TelegramSecretsError):
+        secrets.decode(json.dumps(bad).encode())
+
+
+@pytest.mark.parametrize(
+    ("base_url", "model", "catalog", "ok"),
+    [
+        ("http://127.0.0.1:11434/v1", "qwen3", None, True),
+        ("https://api.openai.com/v1", "gpt", None, False),
+        ("https://api.venice.ai/api/v1", "e2ee-deepseek-v4-flash", "private", True),
+        ("https://api.venice.ai/api/v1", "claude-opus-5", "anonymized", False),
+    ],
+)
+def test_hermes_model_check(monkeypatch, base_url, model, catalog, ok):
+    import asyncio
+
+    from mordred_hermes.extension.egress import EgressRoute
+    from mordred_hermes.extension.telegram import venice
+
+    api._MODEL_CACHE.clear()
+    monkeypatch.setattr("mordred_hermes.extension.telegram.hermes_tools._configured_model", lambda: (model, base_url))
+    monkeypatch.setattr("mordred_hermes.extension.egress.resolve_route", lambda _h: EgressRoute(None, None))
+
+    class _Raw:
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("mordred_hermes.extension.telegram.service._default_http_session", lambda _r, _t: _Raw())
+
+    async def catalog_check(_session: Any, cfg: Any) -> Any:
+        if catalog != "private":
+            raise venice.VeniceError("venice_model_not_private")
+        return None
+
+    monkeypatch.setattr(venice, "require_private_model", catalog_check)
+    assert asyncio.run(api.hermes_model_check())["ok"] is ok

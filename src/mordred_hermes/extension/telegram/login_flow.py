@@ -83,7 +83,7 @@ class LoginFlows:
         current = await asyncio.to_thread(self._store.load)
         if current is not None and current.session is not None:
             raise LoginError("telegram_already_logged_in")
-        if current is not None:
+        if current is not None and current.has_api:
             base = current
         else:
             try:
@@ -91,7 +91,11 @@ class LoginFlows:
             except TelegramSecretsError as exc:
                 raise LoginError(exc.code) from exc
             await asyncio.to_thread(self._store.ensure_key)
-            base = TelegramSecrets(api_id=valid_id, api_hash=valid_hash, store_key=new_store_key())
+            base = (
+                replace(current, api_id=valid_id, api_hash=valid_hash)
+                if current is not None
+                else TelegramSecrets(api_id=valid_id, api_hash=valid_hash, store_key=new_store_key())
+            )
         policy = RequestPolicy(login=True)
         client = self._factory()(base.api_id, base.api_hash, None, policy=policy)
         number = phone.strip().replace(" ", "")

@@ -111,6 +111,60 @@ def _job_view(job: _Job) -> dict[str, Any]:
     return {"job_id": job.job_id, "kind": job.kind, "state": job.state, "error": job.error, "progress": job.progress}
 
 
+# -- Hermes' own chat model ------------------------------------------------------------
+
+_MODEL_CACHE: dict[str, Any] = {}
+_MODEL_TTL = 600.0
+
+
+async def hermes_model_check() -> dict[str, Any]:
+    """Is the model Hermes chats with private (Venice ``private``) or local?
+
+    Everything the agent reads goes to this model, so Telegram stays locked
+    until it is. Venice privacy comes from its public model catalog (no key).
+    """
+    from ..extension.telegram import venice
+    from ..extension.telegram.hermes_tools import _classify_endpoint, _configured_model
+
+    model, base_url = await asyncio.to_thread(_configured_model)
+    kind = _classify_endpoint(base_url)
+    result: dict[str, Any] = {"model": model, "kind": kind or "other", "private": None, "ok": False}
+    if kind == "local" and model:
+        result.update(private=True, ok=True)
+        return result
+    if kind != "venice" or not model:
+        return result
+    cached = _MODEL_CACHE.get(model)
+    if cached is not None and time.monotonic() - cached[0] < _MODEL_TTL:
+        result.update(private=cached[1], ok=cached[1] is True)
+        return result
+    try:
+        from ..extension.egress import resolve_route
+        from ..extension.telegram.service import _default_http_session, _ProxiedSession
+
+        route = await asyncio.to_thread(resolve_route, "api.venice.ai")
+        raw = _default_http_session(route, 20.0)
+        try:
+            cfg = venice.VeniceConfig(api_key="", model=model)
+            await venice.require_private_model(_ProxiedSession(raw, route.http_proxy_url), cfg)
+            private: bool | None = True
+        except venice.VeniceError as exc:
+            private = False if exc.code in {"venice_model_not_private", "venice_model_unknown"} else None
+        finally:
+            await raw.close()
+    except Exception:
+        private = None  # could not verify (offline?): stay locked, let the UI retry
+    if private is not None:
+        _MODEL_CACHE[model] = (time.monotonic(), private)
+    result.update(private=private, ok=private is True)
+    return result
+
+
+async def _require_hermes_model() -> JSONResponse | None:
+    check = await hermes_model_check()
+    return None if check["ok"] else _error("hermes_model_not_private")
+
+
 # -- status -------------------------------------------------------------------------
 
 
@@ -122,8 +176,10 @@ async def status() -> dict[str, Any]:
     checks = await asyncio.to_thread(run_checks)
     return {
         "ok": True,
+        "hermes_model": await hermes_model_check(),
         "checks": {c.name: {"ok": c.ok, "detail": c.detail} for c in checks},
         "hermes_venice_key": _hermes_venice_key() is not None,
+        "telegram_api": bool((await asyncio.to_thread(_store().flags) or {}).get("api_configured")),
         "jobs": [_job_view(j) for j in _JOBS.values() if j.state == "running"],
     }
 
@@ -249,7 +305,7 @@ async def _require_memory() -> JSONResponse | None:
 @router.post("/telegram/login/start")
 async def telegram_login_start(body: dict[str, Any]) -> Any:
     """Body: {"phone", and on first setup "api_id", "api_hash"}."""
-    blocked = await _require_memory()
+    blocked = await _require_memory() or await _require_hermes_model()
     if blocked is not None:
         return blocked
     from ..extension.telegram.login_flow import LoginError
@@ -329,12 +385,14 @@ def _hermes_venice_key() -> str | None:
 def _set_venice(api_key: str, model: str | None) -> None:
     from dataclasses import replace
 
+    from ..extension.telegram.secrets import empty_secrets
+
     store = _store()
+    store.ensure_key()
 
     def mutate(old: Any) -> Any:
-        if old is None:
-            raise _Fail("telegram_not_configured")
-        return replace(old, venice_api_key=api_key, venice_model=model or old.venice_model, backend="venice")
+        base = old if old is not None else empty_secrets()
+        return replace(base, venice_api_key=api_key, venice_model=model or base.venice_model, backend="venice")
 
     store.update(mutate)
 
@@ -374,13 +432,19 @@ async def llm_local(body: dict[str, Any]) -> Any:
         return _error(exc.code)
     from dataclasses import replace
 
+    from ..extension.telegram.secrets import empty_secrets
+
     def mutate(old: Any) -> Any:
-        if old is None:
-            raise _Fail("telegram_not_configured")
-        return replace(old, backend="local", local_endpoint=canonical, local_model=model.strip())
+        base = old if old is not None else empty_secrets()
+        return replace(base, backend="local", local_endpoint=canonical, local_model=model.strip())
+
+    def save() -> None:
+        store = _store()
+        store.ensure_key()
+        store.update(mutate)
 
     try:
-        await asyncio.to_thread(_store().update, mutate)
+        await asyncio.to_thread(save)
     except Exception as exc:
         return _error(_code(exc, "llm_config_failed"), 500)
     return {"ok": True, "endpoint": canonical}

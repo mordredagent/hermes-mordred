@@ -70,6 +70,11 @@ class TelegramSecrets:
             f"llm_backend={self.llm_backend()!r})"
         )
 
+    @property
+    def has_api(self) -> bool:
+        """False until the user's my.telegram.org app is entered."""
+        return self.api_id > 0 and bool(self.api_hash)
+
     def llm_backend(self) -> str | None:
         """The configured destination, or None when neither is usable."""
         if self.backend == "local":
@@ -91,6 +96,11 @@ class TelegramSecrets:
 
 def new_store_key() -> bytes:
     return _secrets.token_bytes(32)
+
+
+def empty_secrets() -> TelegramSecrets:
+    """A record with no Telegram app yet (settings such as the LLM can be saved first)."""
+    return TelegramSecrets(api_id=0, api_hash="", store_key=new_store_key())
 
 
 def _b64e(raw: bytes) -> str:
@@ -150,10 +160,13 @@ def decode(blob: bytes) -> TelegramSecrets:
         raise TelegramSecretsError("secrets_corrupt") from exc
     if not isinstance(payload, dict) or payload.get("version") != _SCHEMA_VERSION:
         raise TelegramSecretsError("secrets_corrupt")
-    try:
-        api_id, api_hash = validate_api_credentials(payload.get("api_id"), payload.get("api_hash"))
-    except TelegramSecretsError as exc:
-        raise TelegramSecretsError("secrets_corrupt") from exc
+    if payload.get("api_id") == 0 and payload.get("api_hash") == "" and payload.get("session") is None:
+        api_id, api_hash = 0, ""  # set up in order: LLM first, Telegram app later
+    else:
+        try:
+            api_id, api_hash = validate_api_credentials(payload.get("api_id"), payload.get("api_hash"))
+        except TelegramSecretsError as exc:
+            raise TelegramSecretsError("secrets_corrupt") from exc
     raw_key = payload.get("store_key")
     try:
         store_key = _b64d(raw_key) if isinstance(raw_key, str) else b""

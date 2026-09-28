@@ -35,7 +35,8 @@ const MESSAGES = {
   tee_auth_cancelled: 'Touch ID was cancelled.',
   enclave_build_failed: 'Building the Secure Enclave helper failed. Install the Xcode command-line tools and retry.',
   sync_in_progress: 'An import is already running.',
-  telegram_not_configured: 'Connect Telegram first (step 3).',
+  telegram_not_configured: 'Set the question model first (step 3).',
+  hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (step 0).',
 }
 
 function explain(code) {
@@ -65,6 +66,39 @@ function Step({ n, title, done, children }) {
 
 function Row({ children }) {
   return jsx('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }, children })
+}
+
+function HermesModelStep({ check, refresh }) {
+  const ok = Boolean(check && check.ok)
+  const verifying = check && check.kind === 'venice' && check.private === null
+  return jsxs('section', {
+    style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
+    children: [
+      jsx('h3', { style: { margin: '0 0 8px' }, children: `${ok ? '✓' : '0'}  Hermes chat model` }),
+      ok
+        ? jsx('p', { children: `${check.model} (${check.kind === 'local' ? 'local, this Mac only' : 'Venice private, no retention'})` })
+        : jsxs(Fragment, {
+            children: [
+              jsx('p', {
+                children: verifying
+                  ? `Could not verify ${check.model} with Venice right now (offline?).`
+                  : `Everything Hermes reads goes to its chat model${check && check.model ? ` (now: ${check.model})` : ''}. For Telegram it must be a Venice private model or a model on this Mac.`,
+              }),
+              verifying
+                ? null
+                : jsx('ol', {
+                    children: [
+                      jsx('li', { key: 1, children: 'Open Settings → Providers → “Local / custom endpoint”.' }),
+                      jsx('li', { key: 2, children: 'Venice: base URL https://api.venice.ai/api/v1, your Venice API key, and a private model such as e2ee-deepseek-v4-flash or deepseek-v4-flash.' }),
+                      jsx('li', { key: 3, children: 'Or a local server (Ollama / LM Studio) at http://127.0.0.1:<port>/v1.' }),
+                      jsx('li', { key: 4, children: 'Select that model for chats, then press Check again.' }),
+                    ],
+                  }),
+              jsx(Button, { onClick: refresh, children: 'Check again' }),
+            ],
+          }),
+    ],
+  })
 }
 
 function EnclaveStep({ done, refresh }) {
@@ -195,7 +229,7 @@ function TelegramStep({ done, needsApi, refresh }) {
   }
   const field = (props) => jsx(Input, { autoComplete: 'off', ...props })
   return jsx(Step, {
-    n: 3,
+    n: 4,
     title: 'Connect Telegram (read-only)',
     done,
     children: jsxs(Fragment, {
@@ -253,7 +287,7 @@ function LlmStep({ done, hermesKey, refresh }) {
     }
   }
   return jsx(Step, {
-    n: 4,
+    n: 3,
     title: 'Question model (Venice private or local)',
     done,
     children: jsxs(Fragment, {
@@ -351,6 +385,7 @@ function SetupPage() {
   const c = (status && status.checks) || {}
   const ok = (name) => Boolean(c[name] && c[name].ok)
   const loggedIn = ok('login')
+  const modelOk = Boolean(status && status.hermes_model && status.hermes_model.ok)
   return jsxs('div', {
     style: { maxWidth: 720, margin: '24px auto', padding: '0 16px' },
     children: [
@@ -359,11 +394,20 @@ function SetupPage() {
       status
         ? jsxs(Fragment, {
             children: [
-              jsx(EnclaveStep, { done: c.secure_enclave && /helper ready/.test(c.secure_enclave.detail || ''), refresh }),
-              jsx(MemoryStep, { done: ok('memory_encryption'), refresh }),
-              jsx(TelegramStep, { done: loggedIn, needsApi: !(c.login && c.login.detail !== 'not configured'), refresh }),
-              jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
-              jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
+              jsx(HermesModelStep, { check: status.hermes_model, refresh }),
+              modelOk
+                ? jsxs(Fragment, {
+                    children: [
+                      jsx(EnclaveStep, { done: c.secure_enclave && /helper ready/.test(c.secure_enclave.detail || ''), refresh }),
+                      jsx(MemoryStep, { done: ok('memory_encryption'), refresh }),
+                      jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
+                      ok('privacy_llm')
+                        ? jsx(TelegramStep, { done: loggedIn, needsApi: !status.telegram_api, refresh })
+                        : jsx(Step, { n: 4, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 3).' }) }),
+                      jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
+                    ],
+                  })
+                : jsx('p', { children: 'The remaining steps unlock once Hermes uses a private or local model.' }),
             ],
           })
         : jsx('p', { children: 'Loading…' }),

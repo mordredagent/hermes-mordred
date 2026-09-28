@@ -137,8 +137,9 @@ def telegram_login(
     if current is not None and current.session is not None:
         return _report("telegram_already_logged_in")
     try:
-        if current is None:
-            base = _new_credentials(secrets_store, input_fn, secret_fn, require_presence)
+        if current is None or not current.has_api:
+            fresh = _new_credentials(secrets_store, input_fn, secret_fn, require_presence)
+            base = fresh if current is None else replace(current, api_id=fresh.api_id, api_hash=fresh.api_hash)
         else:
             base = current
             print(f"Using the stored API application (api_id {base.api_id}).")
@@ -407,17 +408,20 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
     secrets_store = store if store is not None else _secret_store()
     key = secret_fn("Venice API key (hidden; Enter keeps the stored key): ").strip()
     try:
+        from ..extension.telegram.secrets import empty_secrets
+
         current = secrets_store.load(fresh=True)
-        if current is None:
-            return _report("telegram_not_configured")
-        if not key and current.venice_api_key is None:
+        if not key and (current is None or current.venice_api_key is None):
             _term.emit_error("no Venice API key given.")
             return 1
+        ensure = getattr(secrets_store, "ensure_key", None)
+        if ensure is not None:
+            ensure()
         secrets_store.update(
             lambda old: replace(
-                old,
-                venice_api_key=key or old.venice_api_key,
-                venice_model=model if model else old.venice_model,
+                old if old is not None else empty_secrets(),
+                venice_api_key=key or (old.venice_api_key if old else None),
+                venice_model=model if model else (old.venice_model if old else None),
                 backend="venice",
             )
         )
@@ -443,12 +447,20 @@ def telegram_local_llm(*, endpoint: str, model: str, store: Any = None) -> int:
     if not model.strip():
         _term.emit_error("a model name is required.")
         return 1
+    from ..extension.telegram.secrets import empty_secrets
+
     secrets_store = store if store is not None else _secret_store()
     try:
-        if secrets_store.load() is None:
-            return _report("telegram_not_configured")
+        ensure = getattr(secrets_store, "ensure_key", None)
+        if ensure is not None:
+            ensure()
         secrets_store.update(
-            lambda old: replace(old, backend="local", local_endpoint=canonical, local_model=model.strip())
+            lambda old: replace(
+                old if old is not None else empty_secrets(),
+                backend="local",
+                local_endpoint=canonical,
+                local_model=model.strip(),
+            )
         )
     except TelegramSecretsError as exc:
         return _report(exc.code)

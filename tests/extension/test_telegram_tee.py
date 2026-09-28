@@ -95,7 +95,13 @@ def test_every_load_is_a_fresh_enclave_unwrap_and_status_uses_none(tmp_path):
     assert enclave.ecdh_calls == before + 2  # nothing cached
     flags = vault.flags()
     assert enclave.ecdh_calls == before + 2  # status never unseals
-    assert flags == {"version": 1, "logged_in": True, "llm_backend": "venice", "llm_model": venice.DEFAULT_MODEL}
+    assert flags == {
+        "version": 1,
+        "logged_in": True,
+        "api_configured": True,
+        "llm_backend": "venice",
+        "llm_model": venice.DEFAULT_MODEL,
+    }
     assert "SESSION" not in json.dumps(flags)
 
 

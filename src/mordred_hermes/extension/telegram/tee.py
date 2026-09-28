@@ -230,6 +230,7 @@ class TeeSecretStore:
         meta = {
             "version": 1,
             "logged_in": value.session is not None,
+            "api_configured": value.has_api,
             "llm_backend": value.llm_backend(),
             "llm_model": value.llm_model(),
         }
