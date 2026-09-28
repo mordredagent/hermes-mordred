@@ -52,11 +52,42 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_encryption(sub)
     _add_plugins(sub)
     _add_extension(sub)
+    _add_telegram(sub)
 
 
 # -----------------------------------------------------------------------------
 # Subcommand parsers — each calls set_defaults(func=...) wiring its handler.
 # -----------------------------------------------------------------------------
+
+
+def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("telegram", help="Read-only import of your own Telegram account (optional extra)")
+    tsub = p.add_subparsers(dest="telegram_command", required=True, metavar="COMMAND")
+    p_login = tsub.add_parser("login", help="Store API credentials and create a session (sealed in the vault)")
+    p_login.set_defaults(func=_handle_telegram)
+    p_sync = tsub.add_parser("sync", help="Import new messages from every dialog into the encrypted archive")
+    p_sync.add_argument("--skip-channels", action="store_true", help="Skip broadcast channels")
+    p_sync.add_argument("--skip-archived", action="store_true", help="Skip the Archived Chats folder")
+    p_sync.add_argument(
+        "--limit-per-dialog",
+        type=int,
+        default=None,
+        metavar="N",
+        help="First import only: keep the newest N messages per dialog (default: all)",
+    )
+    p_sync.set_defaults(func=_handle_telegram)
+    p_status = tsub.add_parser("status", help="Show login state and archive counts")
+    p_status.set_defaults(func=_handle_telegram)
+    p_logout = tsub.add_parser("logout", help="Revoke the session at Telegram and remove it from the vault")
+    p_logout.add_argument(
+        "--forget",
+        action="store_true",
+        help="Also delete the API credentials, the archive key and the local archive",
+    )
+    p_logout.set_defaults(func=_handle_telegram)
+    p_venice = tsub.add_parser("venice", help="Store the Venice.ai API key and model used for questions")
+    p_venice.add_argument("--model", default=None, help="Venice model id (must be labelled 'private')")
+    p_venice.set_defaults(func=_handle_telegram)
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -814,6 +845,12 @@ def _handle_extension_pair(args: argparse.Namespace) -> int:
     from . import extension_pair_cli
 
     return extension_pair_cli.cli_extension_pair(args)
+
+
+def _handle_telegram(args: argparse.Namespace) -> int:
+    from . import telegram_cli
+
+    return telegram_cli.cli_telegram(args)
 
 
 def _handle_extension_serve(args: argparse.Namespace) -> int:

@@ -102,6 +102,15 @@ messaging = [
 tor-control = [
   "stem>=1.8.0,<2",
 ]
+# Read-only Telegram import for the extension server
+# (mordred_hermes.extension.telegram). Telethon speaks MTProto as a user
+# client; python-socks gives it the explicit Tor/proxy route. Optional because
+# only operators who import their own Telegram account need it.
+telegram = [
+  "hermes-mordred[extension]",
+  "telethon>=1.40,<2",
+  "python-socks[asyncio]>=2.4",
+]
 # Real-traffic SOCKS5h library and provider-transport verification dependencies.
 # Heavy and optional — only the `integration-tor` CI job
 # and operators running `pytest -m integration` need it. The SOCKS
@@ -370,6 +379,10 @@ module = [
     # locally and in CI without an environment-dependent ignore at the call site.
     "stem",
     "stem.*",
+    # telethon lives in the optional `telegram` extra and ships no py.typed;
+    # extension/telegram/client.py imports it lazily.
+    "telethon",
+    "telethon.*",
 ]
 ignore_missing_imports = true
 

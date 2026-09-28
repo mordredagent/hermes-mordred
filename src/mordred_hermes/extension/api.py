@@ -14,6 +14,9 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``discord_channel_resolve`` → Discord channel/thread metadata via the configured bot token
 - ``accounts_request`` → keyvault address (``accounts_result``)
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
+- ``telegram_status`` / ``telegram_sync`` / ``telegram_dialogs`` → read-only Telegram importer
+- ``telegram_ask`` → Venice private-model answer streamed as ``telegram_ask_meta`` +
+  ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``)
 
 Server-initiated frames: ``ping`` (app-level keepalive, see
 ``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
@@ -81,7 +84,7 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # ``test_page_allowlist_entries_are_all_used_by_the_shipped_page`` pins each
 # entry to a call site in the shipped bundle.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
-_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1"]
+_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1", "telegram_import_v1"]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
 # socket dies), so an authed client that never approves would grow it without
@@ -107,6 +110,10 @@ DEFAULT_KEEPALIVE_INTERVAL = 20.0
 # A chat handler streams response chunks for a user message.
 ChatHandler = Callable[[str, dict[str, Any]], AsyncIterator[str]]
 DiscordResolver = Callable[[str, str], Awaitable[DiscordChannelContext]]
+
+# Telegram requests carry at most this many selected dialog ids.
+_MAX_TELEGRAM_DIALOG_IDS = 50
+_TELEGRAM_DIALOG_ID_RE = re.compile(r"-?[0-9]{1,20}")
 
 
 def _serialize_frame(payload: dict[str, Any]) -> str:
@@ -234,6 +241,7 @@ class ExtensionAPIServer:
         port: int = DEFAULT_PORT,
         chat_handler: ChatHandler | None = None,
         discord_resolver: DiscordResolver | None = None,
+        telegram_service: Any = None,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
     ) -> None:
         if not _is_loopback_host(host):
@@ -242,6 +250,9 @@ class ExtensionAPIServer:
         self.port = port
         self.chat_handler: ChatHandler = chat_handler or _default_chat_handler
         self.discord_resolver: DiscordResolver = discord_resolver or resolve_discord_channel
+        # One importer per server process (it owns the single running sync).
+        # Built lazily so a server without the Telegram extra never imports it.
+        self._telegram_service = telegram_service
         self.keepalive_interval = keepalive_interval
         self._runner: web.AppRunner | None = None
         # Per-process page principal. It is printed only as a URL fragment by
@@ -253,6 +264,14 @@ class ExtensionAPIServer:
             f"http://[::1]:{port}",
             _loopback_origin(host, port),
         }
+
+    @property
+    def telegram_service(self) -> Any:
+        if self._telegram_service is None:
+            from .telegram.service import TelegramService
+
+            self._telegram_service = TelegramService()
+        return self._telegram_service
 
     @property
     def page_url(self) -> str:
@@ -334,6 +353,7 @@ class ExtensionAPIServer:
             ws,
             self.chat_handler,
             discord_resolver=self.discord_resolver,
+            telegram_service=self.telegram_service,
             page_token=page_token,
             client_origin=origin,
         )
@@ -359,12 +379,14 @@ class _Connection:
         chat_handler: ChatHandler,
         *,
         discord_resolver: DiscordResolver = resolve_discord_channel,
+        telegram_service: Any = None,
         page_token: str | None = None,
         client_origin: str | None = None,
     ) -> None:
         self.ws = ws
         self.chat_handler = chat_handler
         self.discord_resolver = discord_resolver
+        self.telegram_service = telegram_service
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
         self.authed = False
@@ -444,6 +466,10 @@ class _Connection:
             "webauthn_register": self._on_webauthn_register,
             "history_get": self._on_history_get,
             "history_clear": self._on_history_clear,
+            "telegram_status": self._on_telegram_status,
+            "telegram_sync": self._on_telegram_sync,
+            "telegram_dialogs": self._on_telegram_dialogs,
+            "telegram_ask": self._on_telegram_ask,
         }
         try:
             if mtype in pre_auth:
@@ -884,6 +910,162 @@ class _Connection:
 
         extension_history.clear()
         await self._send({"id": msg.get("id"), "type": "history_cleared", "ok": True})
+
+    # -- Telegram import (read-only) -----------------------------------------
+    #
+    # Personal content (account label, chat titles, answers) is sealed with
+    # K_extchat on the wire, like chat. The question must arrive sealed too: a
+    # plaintext question is refused rather than downgraded. Page sessions never
+    # reach these handlers (not in _PAGE_ALLOWED).
+
+    def _telegram_seal(self, ek: bytes, text: str) -> str:
+        return encrypt_message_v2(ek, text, key_id(ek))
+
+    def _telegram_key(self) -> bytes | None:
+        try:
+            return self._extchat_key()
+        except Exception:
+            _log.exception("extension telegram key could not be loaded")
+            return None
+
+    def _telegram_ready(self) -> Any:
+        return self.telegram_service
+
+    async def _on_telegram_status(self, msg: dict[str, Any]) -> None:
+        from .telegram.service import error_code
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "telegram_status_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        try:
+            status = await self._telegram_ready().status()
+        except Exception as exc:
+            code = error_code(exc, "telegram_unavailable")
+            await self._send({"id": mid, "type": "telegram_status_result", "ok": False, "error": code})
+            return
+        status["account_label"] = self._telegram_seal(ek, status.get("account_label") or "")
+        await self._send({"id": mid, "type": "telegram_status_result", "ok": True, "status": status})
+
+    async def _on_telegram_sync(self, msg: dict[str, Any]) -> None:
+        from .telegram.client import SyncOptions
+        from .telegram.service import error_code
+
+        mid = msg.get("id")
+        raw = msg.get("options")
+        options = SyncOptions()
+        if raw is not None:
+            if not isinstance(raw, dict):
+                await self._send({"id": mid, "type": "telegram_sync_result", "ok": False, "error": "invalid_request"})
+                return
+            limit = raw.get("limit_per_dialog")
+            if limit is not None and (
+                not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1_000_000
+            ):
+                await self._send({"id": mid, "type": "telegram_sync_result", "ok": False, "error": "invalid_request"})
+                return
+            options = SyncOptions(
+                include_channels=raw.get("include_channels") is not False,
+                include_archived=raw.get("include_archived") is not False,
+                limit_per_dialog=limit,
+            )
+        try:
+            await self._telegram_ready().start_sync(options)
+        except Exception as exc:
+            code = error_code(exc, "telegram_sync_failed")
+            await self._send({"id": mid, "type": "telegram_sync_result", "ok": False, "error": code})
+            return
+        await self._send({"id": mid, "type": "telegram_sync_result", "ok": True})
+
+    async def _on_telegram_dialogs(self, msg: dict[str, Any]) -> None:
+        from .telegram.service import error_code
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "telegram_dialogs_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        try:
+            dialogs = await self._telegram_ready().dialogs()
+        except Exception as exc:
+            code = error_code(exc, "telegram_unavailable")
+            await self._send({"id": mid, "type": "telegram_dialogs_result", "ok": False, "error": code})
+            return
+        for dialog in dialogs:
+            dialog["title"] = self._telegram_seal(ek, dialog["title"])
+        await self._send({"id": mid, "type": "telegram_dialogs_result", "ok": True, "dialogs": dialogs})
+
+    def _parse_telegram_ask(self, msg: dict[str, Any], ek: bytes) -> Any:
+        """Return an AskRequest, or a wire error code string."""
+        from .telegram.ask import AskRequest
+
+        question = msg.get("question")
+        if not isinstance(question, str) or not is_encrypted(question):
+            return "invalid_request"
+        try:
+            question = decrypt_message(ek, question)
+        except DecryptError:
+            return "undecryptable"
+        raw_ids = msg.get("dialog_ids", [])
+        if not isinstance(raw_ids, list) or len(raw_ids) > _MAX_TELEGRAM_DIALOG_IDS:
+            return "invalid_request"
+        if not all(isinstance(d, str) and _TELEGRAM_DIALOG_ID_RE.fullmatch(d) for d in raw_ids):
+            return "invalid_request"
+        since = msg.get("since")
+        if since is not None and (not isinstance(since, int) or isinstance(since, bool) or since < 0):
+            return "invalid_request"
+        return AskRequest(
+            question=question,
+            dialog_ids=tuple(int(d) for d in raw_ids),
+            since=since,
+            pseudonymize=msg.get("pseudonymize") is not False,
+        )
+
+    async def _on_telegram_ask(self, msg: dict[str, Any]) -> None:
+        from .telegram.service import AskResult, error_code
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send({"id": mid, "type": "telegram_ask_error", "reason": "encryption_key_unavailable"})
+            return
+        request = self._parse_telegram_ask(msg, ek)
+        if isinstance(request, str):
+            await self._send({"id": mid, "type": "telegram_ask_error", "reason": request})
+            return
+        meta: list[AskResult] = []
+        gen = self._telegram_ready().ask(request, meta.append)
+        sent_meta = False
+        try:
+            async for chunk in gen:
+                if not sent_meta and meta:
+                    sent_meta = True
+                    await self._send(
+                        {
+                            "id": mid,
+                            "type": "telegram_ask_meta",
+                            "model": meta[0].model,
+                            "message_count": meta[0].message_count,
+                            "dialog_count": meta[0].dialog_count,
+                            "truncated": meta[0].truncated,
+                        }
+                    )
+                if not await self._send(
+                    {"id": mid, "type": "telegram_ask_chunk", "content": self._telegram_seal(ek, chunk)}
+                ):
+                    return
+            await self._send({"id": mid, "type": "telegram_ask_end"})
+        except Exception as exc:
+            await self._send(
+                {"id": mid, "type": "telegram_ask_error", "reason": error_code(exc, "telegram_ask_failed")}
+            )
+        finally:
+            await gen.aclose()
 
     # -- Web3 ---------------------------------------------------------------
 
