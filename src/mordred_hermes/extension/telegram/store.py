@@ -88,6 +88,9 @@ def telegram_dir() -> Path:
     return hermes_home() / "mordred" / "telegram"
 
 
+_GITIGNORE = b"# Mordred Telegram archive: encrypted, never version-controlled.\n*\n"
+
+
 def _ensure_private_dir(path: Path) -> Path:
     if path.is_symlink():
         raise StoreError("store_path_unsafe")
@@ -95,7 +98,30 @@ def _ensure_private_dir(path: Path) -> Path:
     if not path.is_dir():
         raise StoreError("store_path_unsafe")
     os.chmod(path, 0o700)
+    _ensure_gitignored(path)
     return path
+
+
+def _ensure_gitignored(path: Path) -> None:
+    """Drop a ``*`` .gitignore so nothing here is ever committed.
+
+    Everything written here is already encrypted; this stops even the
+    ciphertext (and file names/sizes) from reaching a repository if
+    ``HERMES_HOME`` is ever placed inside a git working tree.
+    """
+    marker = path / ".gitignore"
+    if marker.is_symlink():
+        raise StoreError("store_path_unsafe")
+    try:
+        if marker.read_bytes() == _GITIGNORE:
+            return
+    except FileNotFoundError:
+        pass
+    from ...keyvault._storage import atomic_write
+
+    if marker.exists():
+        os.chmod(marker, 0o600)
+    atomic_write(marker, _GITIGNORE)
 
 
 def _subkey(key: bytes, info: bytes) -> bytes:

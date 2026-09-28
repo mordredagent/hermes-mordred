@@ -351,6 +351,9 @@ credentials and the LLM API key — in:
 
 `telegram logout --forget` deletes these files, the archive and the Enclave
 key. The directory is mode `0700`; files are mode `0600`.
+Every directory here carries a `.gitignore` of `*` (rewritten if changed), so
+not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
+working tree.
 
 ## Hermes-owned and external targets
 

@@ -291,7 +291,27 @@ def test_store_segments_rewrite_only_the_tail(tmp_path, monkeypatch):
     archive.append_messages(9, [_msg(8, "m8"), _msg(9, "m9"), _msg(10, "m10")])
     assert first.read_bytes() == before  # full segments are never rewritten
     assert [m.id for m in archive.load_messages(9)] == list(range(1, 11))
-    assert len(list((tmp_path / "dialogs").iterdir())) == 4
+    assert len(list((tmp_path / "dialogs").glob("*.enc"))) == 4
+
+
+def test_archive_is_never_committed_even_inside_a_git_repo(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    archive = store.ArchiveStore(b"\x07" * 32, repo / "mordred" / "telegram")
+    archive.append_messages(1, [_msg(1, "private text")])
+    archive.save_index(store.ArchiveIndex())
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
+    for directory in (repo / "mordred" / "telegram", repo / "mordred" / "telegram" / "dialogs"):
+        assert (directory / ".gitignore").read_text().splitlines()[-1] == "*"
 
 
 def test_store_lock_is_non_blocking(tmp_path):
