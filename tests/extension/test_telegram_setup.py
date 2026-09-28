@@ -59,6 +59,7 @@ def test_doctor_reports_metadata_only(monkeypatch, capsys):
     assert {c["name"] for c in report} == {
         "telethon",
         "secure_enclave",
+        "memory_encryption",
         "login",
         "privacy_llm",
         "archive",

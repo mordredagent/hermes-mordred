@@ -123,6 +123,18 @@ def _check_hermes() -> Check:
     return Check("hermes_integration", True, f"Hermes model {model} ({kind}): telegram_ask is offered")
 
 
+def _check_memory() -> Check:
+    from ..extension.telegram.memory_guard import memory_encryption_active
+
+    ok = memory_encryption_active()
+    return Check(
+        "memory_encryption",
+        ok,
+        "agent memory sealed" if ok else "agent memory is plaintext (required for Telegram)",
+        "" if ok else "hermes-mordred encryption enable env && hermes-mordred encryption enable memory",
+    )
+
+
 def run_checks() -> list[Check]:
     from ..extension.telegram.tee import TeeSecretStore
 
@@ -130,7 +142,14 @@ def run_checks() -> list[Check]:
         flags = TeeSecretStore().flags()
     except Exception:
         flags = None
-    return [_check_telethon(), _check_enclave(), *_check_credentials(flags), _check_archive(), _check_hermes()]
+    return [
+        _check_telethon(),
+        _check_enclave(),
+        _check_memory(),
+        *_check_credentials(flags),
+        _check_archive(),
+        _check_hermes(),
+    ]
 
 
 def telegram_doctor(*, as_json: bool = False) -> int:
@@ -167,6 +186,28 @@ def _ensure_enclave(input_fn: InputFn) -> bool:
     return enable_se() == 0
 
 
+def _ensure_memory_encryption(input_fn: InputFn) -> bool:
+    from ..extension.telegram.memory_guard import memory_encryption_active
+
+    if memory_encryption_active():
+        return True
+    print(
+        "Telegram requires agent-memory encryption, so nothing Hermes remembers about your chats is stored "
+        "in plaintext. This turns on the sealed .env and sealed memory (Touch ID may be requested)."
+    )
+    if not _yes(input_fn, "Turn on memory encryption now?"):
+        return False
+    from .encryption_cli import _dispatch
+
+    for target in ("env", "memory"):
+        if _dispatch("enable", target) != 0:
+            return False
+    ok = memory_encryption_active()
+    if ok:
+        print("Memory encryption is on. Restart Hermes Desktop so it picks up the key.")
+    return ok
+
+
 def _choose_llm(input_fn: InputFn, secret_fn: InputFn) -> int:
     from .telegram_cli import telegram_local_llm, telegram_venice
 
@@ -190,28 +231,33 @@ def telegram_setup(
     from .telegram_cli import telegram_login, telegram_sync
 
     print("Mordred Telegram setup — read-only, Secure-Enclave-sealed, Venice/local only.\n")
-    print("Step 1/4  Secure Enclave")
+    print("Step 1/5  Secure Enclave")
     if not _ensure_enclave(input_fn):
         _term.emit_error("the Secure Enclave helper is required; setup stopped.")
+        return 1
+
+    print("\nStep 2/5  Memory encryption")
+    if not _ensure_memory_encryption(input_fn):
+        _term.emit_error("memory encryption is required for Telegram; setup stopped.")
         return 1
 
     from ..extension.telegram.tee import TeeSecretStore
 
     flags = TeeSecretStore().flags()
-    print("\nStep 2/4  Telegram login")
+    print("\nStep 3/5  Telegram login")
     if flags and flags.get("logged_in"):
         print("Already logged in.")
     elif telegram_login(input_fn=input_fn, secret_fn=secret_fn, require_presence=require_presence) != 0:
         return 1
 
     flags = TeeSecretStore().flags() or {}
-    print("\nStep 3/4  Privacy LLM")
+    print("\nStep 4/5  Privacy LLM")
     if flags.get("llm_backend") in ("venice", "local"):
         print(f"Already configured: {flags.get('llm_backend')} ({flags.get('llm_model')}).")
     elif _choose_llm(input_fn, secret_fn) != 0:
         return 1
 
-    print("\nStep 4/4  First import")
+    print("\nStep 5/5  First import")
     print(
         f"Recommended: personal chats and groups only, the newest {RECOMMENDED_LIMIT} messages per chat. "
         "Later imports fetch only new messages."

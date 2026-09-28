@@ -69,6 +69,10 @@ def _report(code: str) -> int:
         "tee_auth_cancelled": "Touch ID / passcode was cancelled, so the credentials stayed sealed.",
         "local_endpoint_invalid": "the local model endpoint must be http(s)://127.0.0.1:<port>/... or "
         "http(s)://[::1]:<port>/... (loopback only, with an explicit port).",
+        "memory_encryption_required": "Telegram needs agent-memory encryption on, so nothing Hermes remembers "
+        "about your chats is stored in plaintext. Run `hermes-mordred encryption enable env` and "
+        "`hermes-mordred encryption enable memory`, restart Hermes, then try again "
+        "(`hermes-mordred telegram setup` does this for you).",
         "no_legacy_credentials": "there are no vault-stored Telegram credentials to migrate.",
         "telegram_already_logged_in": "a Telegram session is already stored. Run `hermes-mordred telegram logout` "
         "first so the old session is revoked instead of being left behind.",
@@ -122,8 +126,9 @@ def telegram_login(
     from ..extension.telegram.service import error_code
 
     factory = client_factory or build_client
-    if client_factory is None and not telethon_available():
-        return _report("telegram_not_installed")
+    problem = None if client_factory is not None else _login_preflight(telethon_available)
+    if problem is not None:
+        return _report(problem)
     secrets_store = store if store is not None else _secret_store()
     try:
         current = secrets_store.load(fresh=True)
@@ -163,6 +168,15 @@ def telegram_login(
         "revoke this session any time with `hermes-mordred telegram logout` or Settings → Devices."
     )
     return 0
+
+
+def _login_preflight(telethon_available: Callable[[], bool]) -> str | None:
+    """Refuse before any code is sent: Telethon missing, or memory not encrypted."""
+    if not telethon_available():
+        return "telegram_not_installed"
+    from ..extension.telegram.memory_guard import memory_encryption_active
+
+    return None if memory_encryption_active() else "memory_encryption_required"
 
 
 def _new_credentials(secrets_store: Any, input_fn: InputFn, secret_fn: InputFn, require_presence: bool) -> Any:

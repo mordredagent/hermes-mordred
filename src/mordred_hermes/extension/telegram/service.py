@@ -43,6 +43,7 @@ from .client import (
     telethon_available,
 )
 from .llm import DEFAULT_LOCAL_CONTEXT_TOKENS, LlmConfigError, LlmTarget, resolve_target
+from .memory_guard import MemoryEncryptionRequired
 from .readonly import ReadOnlyViolation, RequestPolicy
 from .secrets import TelegramSecrets, TelegramSecretsError
 from .store import ArchiveStore, StoreError
@@ -84,6 +85,7 @@ def error_code(exc: BaseException, fallback: str) -> str:
         TelegramSecretsError,
         StoreError,
         LlmConfigError,
+        MemoryEncryptionRequired,
         AskError,
         venice.VeniceError,
         EgressError,
@@ -223,6 +225,7 @@ class TelegramService:
         route_resolver: Callable[[str], EgressRoute] = resolve_route,
         policy_check: Callable[[str, str], None] = check_llm_policy,
         installed: Callable[[], bool] = telethon_available,
+        memory_guard: Callable[[], None] | None = None,
     ) -> None:
         # Enclave-sealed; every load() is a fresh Secure Enclave unwrap.
         self._secrets = secret_store if secret_store is not None else TeeSecretStore()
@@ -236,6 +239,11 @@ class TelegramService:
         self._route_resolver = route_resolver
         self._policy_check = policy_check
         self._installed = installed
+        if memory_guard is None:
+            from .memory_guard import require_memory_encryption
+
+            memory_guard = require_memory_encryption
+        self._memory_guard = memory_guard
         self._sync_task: asyncio.Task[None] | None = None
         self._sync_starting = False
         self._progress = SyncProgress()
@@ -301,6 +309,7 @@ class TelegramService:
         }
 
     async def dialogs(self) -> list[dict[str, Any]]:
+        await asyncio.to_thread(self._memory_guard)
         value = await self._load_secrets()
         if value is None:
             raise TelegramServiceError("telegram_not_configured")
@@ -356,6 +365,7 @@ class TelegramService:
         try:
             if not self._installed():
                 raise TelegramServiceError("telegram_not_installed")
+            await asyncio.to_thread(self._memory_guard)
             value = await self._load_secrets(fresh=True)
             if value is None:
                 raise TelegramServiceError("telegram_not_configured")
@@ -438,6 +448,7 @@ class TelegramService:
     async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:
         """Stream the answer; *on_meta* is called once before the first chunk."""
         question = validate_question(request.question)
+        await asyncio.to_thread(self._memory_guard)
         # A fresh Enclave unwrap for every question; nothing is cached.
         value = await self._load_secrets(fresh=True)
         if value is None:

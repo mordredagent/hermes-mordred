@@ -260,6 +260,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers -m 'not integration'"
 markers = [
     "integration: requires external services, live network, or device hardware; excluded from default runs",
+    "memory_plain: run without the autouse 'agent memory is encrypted' stub (Telegram guard tests)",
 ]
 xfail_strict = true
 
