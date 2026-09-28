@@ -1260,12 +1260,19 @@ def test_source_hermes_version_comes_from_the_launcher(tmp_path: Path) -> None:
     assert "Hermes Agent 0.21.5" in result.stdout + result.stderr
 
 
-def test_install_pins_every_package_hermes_already_has(tmp_path: Path) -> None:
+def test_install_never_resolves_hermes_and_pins_what_hermes_has(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
+    # The fake Hermes python answers the requirements query with two packages.
+    _write_executable(fixture.hermes_python, "#!/bin/sh\nprintf 'telethon>=1.36\\nruamel.yaml>=0.18\\n'\n")
 
     result = _run(fixture, UV_FREEZE="ruamel.yaml==0.18.16 hermes-mordred==0.1.0a19 cryptography==46.0.7")
 
     assert result.returncode == 0, result.stderr
-    assert "--constraint" in fixture.uv_calls()
+    calls = [
+        line for line in fixture.uv_calls().splitlines() if line.startswith("pip install") and "--dry-run" not in line
+    ]
+    package_install, deps_install = calls[0], calls[1]
+    assert "--no-deps" in package_install and "hermes-mordred[macos]" in package_install
+    assert "--constraint" in deps_install and "telethon>=1.36" in deps_install and "hermes-mordred" not in deps_install
     constraints = (tmp_path / "state" / "constraints").read_text(encoding="utf-8").split()
     assert constraints == ["ruamel.yaml==0.18.16", "cryptography==46.0.7"]

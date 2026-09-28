@@ -481,6 +481,26 @@ version_at_least() {
   ((have_major > want_major || (have_major == want_major && have_minor >= want_minor)))
 }
 
+mordred_requirements() {
+  # Print the installed hermes-mordred's requirements for the given extras,
+  # markers evaluated, without hermes-agent itself.
+  local hermes_python="$1" extras="$2"
+  "$hermes_python" - "$DISTRIBUTION_NAME" "$extras" <<'PY' 2>/dev/null || true
+import sys
+from importlib.metadata import requires
+from packaging.requirements import Requirement
+
+extras = {e for e in sys.argv[2].split(",") if e}
+for line in requires(sys.argv[1]) or []:
+    req = Requirement(line)
+    if req.name.lower().replace("_", "-") == "hermes-agent":
+        continue
+    if req.marker is None or any(req.marker.evaluate({"extra": e}) for e in extras | {""}):
+        req.marker = None
+        print(req)
+PY
+}
+
 write_hermes_constraints() {
   # Pin every package already in Hermes's environment to its installed
   # version, so installing Mordred can add packages but never upgrade or
@@ -719,7 +739,7 @@ main() {
       --python "$hermes_python" \
       --no-python-downloads \
       --upgrade-package "$DISTRIBUTION_NAME" \
-      --constraint "$constraints_file" \
+      --no-deps \
       --dry-run \
       "$package_spec"
   fi
@@ -750,7 +770,7 @@ main() {
     --python "$hermes_python" \
     --no-python-downloads \
     --upgrade-package "$DISTRIBUTION_NAME" \
-    --constraint "$constraints_file" \
+    --no-deps \
     "${install_target[@]}"; then
     if [[ -n "$legacy_version" ]]; then
       warn "canonical install failed; attempting to restore ${LEGACY_DISTRIBUTION_NAME} ${legacy_version}"
@@ -762,6 +782,26 @@ main() {
       fi
     fi
     fail "could not install ${DISTRIBUTION_NAME}"
+  fi
+
+  # Mordred itself went in with --no-deps: resolving its `hermes-agent`
+  # requirement would re-resolve Hermes (whose published metadata can disagree
+  # with the lock Hermes actually runs) and move Hermes's own packages. Install
+  # only Mordred's other requirements, with every package Hermes already has
+  # pinned to its installed version.
+  local -a mordred_requirements=()
+  local requirement
+  while IFS= read -r requirement; do
+    [[ -n "$requirement" ]] && mordred_requirements+=("$requirement")
+  done < <(mordred_requirements "$hermes_python" "$package_extras")
+  if ((${#mordred_requirements[@]})); then
+    if ! "$uv_bin" pip install \
+      --python "$hermes_python" \
+      --no-python-downloads \
+      --constraint "$constraints_file" \
+      "${mordred_requirements[@]}"; then
+      fail "could not install Mordred's dependencies without changing a package Hermes uses"
+    fi
   fi
 
   if ((deps_were_consistent)) && ! deps_are_consistent "$uv_bin" "$hermes_python"; then
