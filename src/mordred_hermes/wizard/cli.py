@@ -40,6 +40,7 @@ from . import _term
 from ._cli_parsers import (
     _add_audit,
     _add_configure,
+    _add_desktop,
     _add_egress,
     _add_encryption,
     _add_extension,
@@ -58,6 +59,7 @@ from ._cli_parsers import (
     _handle_audit_purge,
     _handle_audit_tail,
     _handle_configure,
+    _handle_desktop,
     _handle_egress,
     _handle_encryption_disable,
     _handle_encryption_enable,
@@ -104,6 +106,7 @@ from ._prompt_io import NonInteractiveAbort
 __all__ = [
     "_add_audit",
     "_add_configure",
+    "_add_desktop",
     "_add_egress",
     "_add_encryption",
     "_add_extension",
@@ -122,6 +125,7 @@ __all__ = [
     "_handle_audit_purge",
     "_handle_audit_tail",
     "_handle_configure",
+    "_handle_desktop",
     "_handle_egress",
     "_handle_encryption_disable",
     "_handle_encryption_enable",

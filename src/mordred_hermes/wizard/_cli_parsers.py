@@ -54,11 +54,23 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_extension(sub)
     _add_telegram(sub)
     _add_egress(sub)
+    _add_desktop(sub)
 
 
 # -----------------------------------------------------------------------------
 # Subcommand parsers — each calls set_defaults(func=...) wiring its handler.
 # -----------------------------------------------------------------------------
+
+
+def _add_desktop(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("desktop", help="Hermes Desktop setup page (install / uninstall / status)")
+    dsub = p.add_subparsers(dest="desktop_command", required=True, metavar="COMMAND")
+    for name, text in (
+        ("install", "Place the Mordred setup page and its local API in Hermes"),
+        ("uninstall", "Remove the Mordred setup page"),
+        ("status", "Show whether the setup page is installed"),
+    ):
+        dsub.add_parser(name, help=text).set_defaults(func=_handle_desktop)
 
 
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -918,6 +930,12 @@ def _handle_extension_pair(args: argparse.Namespace) -> int:
     from . import extension_pair_cli
 
     return extension_pair_cli.cli_extension_pair(args)
+
+
+def _handle_desktop(args: argparse.Namespace) -> int:
+    from ..desktop import install
+
+    return install.cli_desktop(args)
 
 
 def _handle_egress(args: argparse.Namespace) -> int:

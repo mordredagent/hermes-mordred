@@ -27,6 +27,17 @@ messages ever reaching a model you did not choose.
 
 ## Set up (once, about 5 minutes)
 
+**In Hermes Desktop (recommended).** The installer places a Mordred setup
+page (`hermes-mordred desktop install` does the same). Restart Hermes Desktop,
+turn Mordred on in Capabilities → Plugins (Desktop column), and open
+**Mordred** in the sidebar (or ⌘K → "Mordred: Set up private Telegram"). The
+page walks through the same steps with buttons and masked fields; what you
+type goes straight to Mordred on this Mac — never into the chat, the model,
+logs or plugin storage. It shows the vault recovery passphrase once: write it
+down.
+
+**In a terminal.**
+
 ```sh
 hermes-mordred telegram setup
 ```

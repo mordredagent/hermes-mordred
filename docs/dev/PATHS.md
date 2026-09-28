@@ -355,6 +355,13 @@ Every directory here carries a `.gitignore` of `*` (rewritten if changed), so
 not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
 working tree.
 
+## `<home>/plugins/mordred/`
+
+Written by `hermes-mordred desktop install`: `desktop/plugin.js` (the
+Hermes Desktop setup page) and `dashboard/{manifest.json,plugin_api.py}` (a
+shim importing `mordred_hermes.desktop.api`). No `plugin.yaml`, so Hermes'
+agent-plugin scanner skips the folder. Holds no secrets.
+
 ## Hermes-owned and external targets
 
 - `<home>/.env`: Hermes runtime secrets and the Mullvad account. Mordred's

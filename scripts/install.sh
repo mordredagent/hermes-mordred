@@ -575,7 +575,21 @@ main() {
   fi
   exposed_cli="$(install_launcher "$installed_cli" "$hermes_launcher")"
 
+  # Hermes Desktop: place the Mordred setup page (no keys are created here).
+  local desktop_page=0
+  if [[ -d "${HERMES_HOME:-$HOME/.hermes}/desktop-plugins" ]]; then
+    if "$installed_cli" desktop install >/dev/null 2>&1; then
+      desktop_page=1
+    else
+      warn "could not place the Mordred setup page for Hermes Desktop; run: ${exposed_cli} desktop install"
+    fi
+  fi
+
   printf '\nMordred is installed. Configuration and keys were not changed.\n'
+  if ((desktop_page)); then
+    printf 'Hermes Desktop: restart it, turn Mordred on in Capabilities -> Plugins (Desktop),\n'
+    printf 'then open "Mordred" in the sidebar to finish setup there.\n'
+  fi
   printf 'Next, start the interactive setup:\n  %s configure\n' "$exposed_cli"
   exposed_dir="$(dirname "$exposed_cli")"
   case ":${PATH}:" in

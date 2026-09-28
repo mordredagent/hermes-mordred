@@ -499,6 +499,20 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 > localhost web app, copy the complete private `Web page:` URL printed at
 > startup, including its `#token=…` fragment.
 
+### `desktop` — Mordred setup page in Hermes Desktop
+```sh
+hermes-mordred desktop install     # place the setup page + its local API in <home>/plugins/mordred
+hermes-mordred desktop status
+hermes-mordred desktop uninstall
+```
+> Hermes loads desktop pages and their local APIs only from plugin folders,
+> so this writes a thin `<home>/plugins/mordred` (a `desktop/plugin.js` page
+> and a `dashboard/plugin_api.py` shim that imports this package) and adds
+> `mordred` to `plugins.enabled` — nothing else in `config.yaml` changes. The
+> page sends secrets with the Desktop plugin REST bridge
+> (`/api/plugins/mordred/…`, session-token protected, loopback only) straight
+> to Mordred; they are sealed by the Secure Enclave and never returned.
+
 ### `egress` — limit what the agent's tools may send out
 ```sh
 hermes-mordred egress status                 # level, taint setting, blocklists
