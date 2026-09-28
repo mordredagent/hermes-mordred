@@ -23,6 +23,7 @@ message box from ``GetState`` alone and runs no update loop.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -40,6 +41,9 @@ _ROUTE_HOST = "telegram.org"
 _FLOOD_SLEEP_SECONDS = 300
 # Persist progress this often so an interrupted import resumes, not restarts.
 _FLUSH_EVERY = 500
+# Persist "already checked up to" positions this often even when no message
+# was stored, so an interrupted run does not re-request those chats.
+_INDEX_SAVE_EVERY = 25
 _MAX_TEXT_CHARS = 16_000
 
 
@@ -297,21 +301,16 @@ async def _collect_dialogs(client: Any, options: SyncOptions, cutoff: float | No
     return dialogs
 
 
-async def _newest(
-    client: Any, entity: Any, after_id: int, limit: int | None, cutoff: float | None
-) -> list[StoredMessage]:
-    """Newest-first messages above *after_id*, until *cutoff* or *limit*; returned ascending."""
+async def _newest(client: Any, entity: Any, limit: int) -> tuple[list[StoredMessage], int]:
+    """The newest *limit* messages (ascending) and the highest message id seen."""
     found: list[StoredMessage] = []
-    async for message in client.iter_messages(entity, min_id=after_id):
+    seen = 0
+    async for message in client.iter_messages(entity, limit=limit):
+        seen = max(seen, int(message.id))
         converted = convert_message(message)
-        if converted is None:
-            continue
-        if cutoff is not None and converted.date < cutoff:
-            break
-        found.append(converted)
-        if limit is not None and len(found) >= limit:
-            break
-    return sorted(found, key=lambda m: m.id)
+        if converted is not None:
+            found.append(converted)
+    return sorted(found, key=lambda m: m.id), seen
 
 
 async def _sync_dialog(
@@ -323,29 +322,39 @@ async def _sync_dialog(
     on_batch: Callable[[int], Awaitable[None]],
     cutoff: float | None = None,
 ) -> None:
-    """Import one dialog's new messages. Store I/O runs off the event loop."""
+    """Import only messages newer than what was already fetched for this chat.
+
+    ``info.last_message_id`` records the highest message id ever *seen* — also
+    service messages and empty windows — so nothing is requested twice.
+    Messages are fetched oldest-first and saved every ``_FLUSH_EVERY``, so an
+    interrupted run resumes where it stopped instead of starting over.
+    """
 
     async def flush(batch: list[StoredMessage]) -> None:
         if not batch:
             return
         added = await asyncio.to_thread(store.append_messages, info.dialog_id, batch)
+        info.last_message_id = max(info.last_message_id, batch[-1].id)
         if added:
             info.message_count += added
-            info.last_message_id = max(info.last_message_id, batch[-1].id)
             info.last_date = max(info.last_date, batch[-1].date)
             await on_batch(added)
 
-    if cutoff is not None:
-        # Newest-first back to the cutoff; older gaps are left for a wider sync.
-        await flush(await _newest(client, entity, info.last_message_id, options.limit_per_dialog, cutoff))
-        return
-    if info.last_message_id == 0 and options.limit_per_dialog is not None:
-        # Bounded first import, stored in one go so an interruption leaves no gap.
-        await flush(await _newest(client, entity, 0, options.limit_per_dialog, None))
+    if cutoff is None and info.last_message_id == 0 and options.limit_per_dialog is not None:
+        # Bounded first import (newest N), stored in one go.
+        newest, seen = await _newest(client, entity, options.limit_per_dialog)
+        await flush(newest)
+        info.last_message_id = max(info.last_message_id, seen)
         return
 
+    kwargs: dict[str, Any] = {"min_id": info.last_message_id, "reverse": True}
+    if cutoff is not None:
+        # Oldest-first from the window start; older gaps stay for a wider sync.
+        kwargs["offset_date"] = datetime.datetime.fromtimestamp(cutoff, tz=datetime.UTC)
+    seen = info.last_message_id
     batch: list[StoredMessage] = []
-    async for message in client.iter_messages(entity, min_id=info.last_message_id, reverse=True):
+    async for message in client.iter_messages(entity, **kwargs):
+        seen = max(seen, int(message.id))
         converted = convert_message(message)
         if converted is None:
             continue
@@ -354,6 +363,12 @@ async def _sync_dialog(
             await flush(batch)
             batch = []
     await flush(batch)
+    info.last_message_id = max(info.last_message_id, seen)
+
+
+def _top_message_id(dialog: Any) -> int | None:
+    top = getattr(getattr(dialog, "message", None), "id", None)
+    return top if isinstance(top, int) else None
 
 
 async def sync_archive(
@@ -382,6 +397,7 @@ async def sync_archive(
     cutoff = clock() - opts.since_days * 86400 if opts.since_days else None
     dialogs = await _collect_dialogs(client, opts, cutoff)
     state.dialogs_total = len(dialogs)
+    unsaved = 0
     if progress is not None:
         progress(state)
 
@@ -398,7 +414,18 @@ async def sync_archive(
             if progress is not None:
                 progress(state)
 
+        top = _top_message_id(dialog)
+        if top is not None and top <= info.last_message_id:
+            # Up to date: the dialog list already told us there is nothing new.
+            state.dialogs_done += 1
+            continue
+        before = info.last_message_id
         await _sync_dialog(client, store, info, dialog.entity, opts, on_batch, cutoff)
+        if info.last_message_id != before:
+            unsaved += 1
+            if unsaved >= _INDEX_SAVE_EVERY:
+                await asyncio.to_thread(store.save_index, index)
+                unsaved = 0
         state.dialogs_done += 1
         if progress is not None:
             progress(state)

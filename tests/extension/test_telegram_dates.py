@@ -271,11 +271,24 @@ class _Client:
             for d in self.dialogs:
                 yield d
 
-    async def iter_messages(self, entity: str, *, min_id: int = 0, limit: int | None = None, reverse: bool = False):
+    async def iter_messages(
+        self,
+        entity: str,
+        *,
+        min_id: int = 0,
+        limit: int | None = None,
+        reverse: bool = False,
+        offset_date: dt.datetime | None = None,
+    ):
         self.opened.append(entity)
+        count = 0
         for m in sorted(self.history[entity], key=lambda m: m.id, reverse=not reverse):
-            if m.id > min_id:
-                yield m
+            if m.id <= min_id or (offset_date is not None and reverse and m.date < offset_date):
+                continue
+            yield m
+            count += 1
+            if limit is not None and count >= limit:
+                return
 
 
 def test_recent_days_skips_idle_chats_and_old_messages_and_puts_pinned_first(tmp_path):
@@ -433,3 +446,81 @@ def test_selection_reports_mode_and_candidates(tmp_path):
         archive, index, ask.AskRequest(question="q", dialog_ids=(1,)), ask.Aliases(), budget_tokens=40
     )
     assert sel.mode == "chats" and sel.truncated and sel.candidates == 4
+
+
+# -- never request the same messages twice ------------------------------------------------
+
+
+def _counting_client(now: dt.datetime) -> _Client:
+    hour = dt.timedelta(hours=1)
+    fake = _Client(
+        [_Dialog(1, "busy", now - hour), _Dialog(2, "service-only", now - hour)],
+        {"busy": [_Msg(1, now - 3 * hour), _Msg(2, now - 2 * hour)], "service-only": [SimpleNamespace(id=9, date=now)]},
+    )
+    for d in fake.dialogs:
+        d.message = SimpleNamespace(id=max(m.id for m in fake.history[d.name]))
+    return fake
+
+
+def test_second_sync_requests_nothing_for_unchanged_chats(tmp_path):
+    from mordred_hermes.extension.telegram import client as tg
+
+    now = dt.datetime(2026, 9, 28, 12, tzinfo=dt.UTC)
+    fake = _counting_client(now)
+    archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
+    opts = tg.SyncOptions(max_group_size=None)
+    asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
+    assert sorted(fake.opened) == ["busy", "service-only"]
+    index = archive.load_index()
+    assert index.dialogs[2].last_message_id == 9  # a chat with only service messages is still "seen"
+
+    fake.opened.clear()
+    result = asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
+    assert fake.opened == [] and result.messages_imported == 0
+
+    fake.history["busy"].append(_Msg(3, now))
+    fake.dialogs[0].message = SimpleNamespace(id=3)
+    fake.opened.clear()
+    result = asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
+    assert fake.opened == ["busy"] and result.messages_imported == 1
+    assert [m.id for m in archive.load_messages(1)] == [1, 2, 3]
+
+
+def test_interrupted_window_sync_resumes_without_refetching(tmp_path, monkeypatch):
+    from mordred_hermes.extension.telegram import client as tg
+
+    monkeypatch.setattr(tg, "_FLUSH_EVERY", 2)
+    now = dt.datetime(2026, 9, 28, 12, tzinfo=dt.UTC)
+    minute = dt.timedelta(minutes=1)
+    msgs = [_Msg(i, now - (10 - i) * minute) for i in range(1, 6)]
+    fake = _Client([_Dialog(1, "chat", now)], {"chat": msgs})
+    archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
+    opts = tg.SyncOptions(since_days=1, max_group_size=None)
+
+    class Stop(Exception):
+        pass
+
+    original = fake.iter_messages
+
+    async def dying(entity: str, **kw: Any):
+        async for m in original(entity, **kw):
+            if m.id == 4:
+                raise Stop()
+            yield m
+
+    fake.iter_messages = dying
+    with pytest.raises(Stop):
+        asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
+    assert [m.id for m in archive.load_messages(1)] == [1, 2]  # saved before the interruption
+
+    seen: list[int] = []
+
+    async def recording(entity: str, **kw: Any):
+        async for m in original(entity, **kw):
+            seen.append(m.id)
+            yield m
+
+    fake.iter_messages = recording
+    asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
+    assert seen == [3, 4, 5]  # resumed after 2: nothing fetched twice
+    assert [m.id for m in archive.load_messages(1)] == [1, 2, 3, 4, 5]

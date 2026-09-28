@@ -374,7 +374,9 @@ class _FakeClient:
             if is_archived == archived:
                 yield dialog
 
-    async def iter_messages(self, entity: Any, *, limit: int | None = None, min_id: int = 0, reverse: bool = False):
+    async def iter_messages(
+        self, entity: Any, *, limit: int | None = None, min_id: int = 0, reverse: bool = False, **_: Any
+    ):
         self.calls.append({"entity": entity, "limit": limit, "min_id": min_id, "reverse": reverse})
         messages = [m for m in self.history[entity] if m.id > min_id]
         messages.sort(key=lambda m: m.id, reverse=not reverse)

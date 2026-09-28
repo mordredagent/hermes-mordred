@@ -66,7 +66,10 @@ hermes-mordred telegram sync                            # same options as last t
 hermes-mordred telegram sync --all                      # everything (slow)
 ```
 
-Options you pass are remembered, so a plain `sync` repeats them. With
+Nothing is downloaded twice: each chat remembers the newest message already
+checked, chats with nothing new are skipped without a single request, and an
+interrupted sync resumes where it stopped. Options you pass are remembered, so
+a plain `sync` repeats them. With
 `--days N`, chats idle for longer than N days are not even opened. Groups with
 more than 100 members are skipped unless you pass `--include-large-groups`
 (or set the threshold with `--large-group-size N`).
