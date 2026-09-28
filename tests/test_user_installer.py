@@ -525,7 +525,7 @@ def test_all_extras_are_deduplicated_in_stable_order(tmp_path: Path) -> None:
     result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "messaging,extension")
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control]>=0.1.0a16"
+    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
     calls = fixture.uv_calls()
     assert calls.count(expected) == 2
     assert "extension,extension" not in calls
@@ -538,7 +538,7 @@ def test_extras_all_matches_the_all_extras_flag(tmp_path: Path, args: tuple[str,
     result = _run(fixture, *args)
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control]>=0.1.0a16"
+    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
 
 
@@ -1023,7 +1023,7 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
     specs = (
         f"hermes-mordred[{platform_extra}]>=0.1.0a16",
         f"hermes-mordred[{platform_extra},extension,ethereum]==0.1.0a16,>=0.1.0a16",
-        f"hermes-mordred[{platform_extra},extension,ethereum,messaging,tor-control]>=0.1.0a16",
+        f"hermes-mordred[{platform_extra},extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16",
     )
     for spec in specs:
         install = subprocess.run(

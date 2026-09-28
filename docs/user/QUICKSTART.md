@@ -89,6 +89,7 @@ added later by rerunning the installer.
 | `ethereum` | HD-wallet derivation and signing |
 | `messaging` | Terminal QR codes for extension pairing |
 | `tor-control` | Deep Tor liveness checks |
+| `telegram` | Read-only import of your own Telegram account for private questions (Telethon) |
 
 </details>
 

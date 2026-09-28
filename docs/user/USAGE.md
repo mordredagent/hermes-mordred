@@ -499,6 +499,48 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 > localhost web app, copy the complete private `Web page:` URL printed at
 > startup, including its `#token=…` fragment.
 
+### `telegram` — read-only import of your own Telegram account (preview)
+```sh
+hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); session sealed in the vault
+hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive
+hermes-mordred telegram sync --skip-channels --limit-per-dialog 5000
+hermes-mordred telegram status              # login state and archive counts
+hermes-mordred telegram venice              # store the Venice.ai API key (hidden prompt); --model to pick a model
+hermes-mordred telegram logout              # revoke the session at Telegram; keep the archive
+hermes-mordred telegram logout --forget     # also delete the API credentials, archive key and archive
+```
+> Requires the `telegram` extra and an initialized file vault
+> (`hermes-mordred vault init`). Create your own application at
+> <https://my.telegram.org> → *API development tools* for `api_id` / `api_hash`.
+>
+> **What is stored where.** The session (a full account credential), the API
+> credentials, the archive key and the Venice key live in one vault-enrolled
+> file, `telegram.json`. Unlike the vault `.env`, that file is never injected
+> into the Hermes process environment, so the agent's own tools cannot read
+> it. Messages are stored in `<home>/mordred/telegram/`, AES-256-GCM encrypted
+> per chat under hashed file names. The 2FA password is never stored.
+>
+> **Read-only by construction.** Every MTProto request passes an allowlist
+> before it is sent: the importer can list chats and read history, but cannot
+> send, edit, delete, react, mark chats as read, set you online, or download
+> media. Secret chats are end-to-end encrypted to the device that created them
+> and are never visible to other sessions, including this one.
+>
+> **Network.** Telegram and Venice traffic follow the selected network route.
+> With Tor selected, a loopback SOCKS proxy is mandatory and hostnames resolve
+> remotely; with VPN selected in a standalone process, the command refuses
+> rather than assume the tunnel is up.
+>
+> **Questions (Venice.ai).** The browser extension's Telegram screen asks
+> questions over the archive. Only models Venice labels `private` (Venice-run,
+> zero retention) are used; `anonymized` models are refused. Only the selected
+> chats, or the messages matching the question, are sent — never the whole
+> archive — and by default names, chat titles, e-mail addresses and phone
+> numbers are replaced with aliases that are mapped back locally. The model
+> gets no tools and no web search, so instructions planted in a message cannot
+> trigger actions. Under llm_guard `strict` mode, set `allow_cloud_llm` to true
+> and add `"venice"` to `cloud_provider_allowlist` in `policy.json`.
+
 ---
 
 ## 4. Interactive command walkthroughs
@@ -993,7 +1035,7 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 
 A Hermes self-update can recreate `~/.hermes/hermes-agent/venv`. Repeat the
 same feature flags whenever you reinstall or upgrade so optional dependencies
-such as `extension`, `ethereum`, `messaging`, and `tor-control` are installed
+such as `extension`, `ethereum`, `messaging`, `tor-control`, and `telegram` are installed
 and re-resolved in the new environment.
 
 To install an exact release, replace `VERSION` with its PEP 440 version and

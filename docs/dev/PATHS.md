@@ -29,6 +29,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/config-vault.marker` | encryption CLI | enables config materialize/reseal lifecycle |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
+| `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
@@ -324,6 +325,22 @@ The extension owns:
 These are private mode-`0600` files beneath a real mode-`0700` directory.
 Pairing state and the software attestation private key are security-sensitive;
 do not publish them as diagnostics.
+
+## `<home>/mordred/telegram/`
+
+The optional Telegram importer (`mordred_hermes.extension.telegram`) owns:
+
+- `index.enc` — encrypted dialog list, sync cursors and account label;
+- `dialogs/<hmac>.enc` — one encrypted file per chat; the name is
+  `HMAC-SHA256(store_key, "dialog:" + chat_id)` truncated to 40 hex chars; and
+- `.lock` — cross-process `flock` so the CLI and the server never sync at once.
+
+Each `.enc` file is `MTG1 || nonce(12) || AES-256-GCM(ciphertext)` with the
+AAD bound to its logical name. The key is `store_key` in the vault-enrolled
+file `telegram.json` (in `<home>/mordred/vault/`, next to `.env`), which also
+holds the Telethon session, the API credentials and the Venice API key.
+`telegram logout --forget` unenrolls `telegram.json` and deletes these files.
+The directory is mode `0700`; files are mode `0600`.
 
 ## Hermes-owned and external targets
 

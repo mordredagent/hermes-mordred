@@ -96,7 +96,8 @@ Current defenses include:
 - strict startup refusal when a required Mordred sibling plugin is disabled;
 - purpose-bound envelope encryption and native-key authorization;
 - encrypted audit records when a keyvault-backed writer is available; and
-- loopback-only, paired, encrypted browser-extension transport.
+- loopback-only, paired, encrypted browser-extension transport; and
+- a read-only Telegram importer (see [Telegram import](#telegram-import)).
 
 Accepted limitations include:
 
@@ -115,7 +116,50 @@ Accepted limitations include:
 - helper discovery through writable PATH locations is not equivalent to
   signed-distribution attestation; and
 - wallet signing and payment authorization are not isolated into a separate
-  privilege domain.
+  privilege domain; and
+- the Telegram session is a full MTProto account credential (Telegram has no
+  scoped or read-only token). Read-only behavior is enforced by the client,
+  not by Telegram, and same-UID malware that can open the vault hot path can
+  use the session.
+
+### Telegram import
+
+The optional `telegram` extra lets the operator import their **own** Telegram
+account (MTProto user session via Telethon) and ask questions over it from the
+browser extension, using a Venice.ai private model.
+
+- **Custody.** API credentials, the Telethon `StringSession`, the archive key
+  and the Venice API key live in the vault-enrolled file `telegram.json`. It is
+  not the vault `.env`, so the runtime shim never injects it into a Hermes
+  process environment where agent tools could read it. There is no plaintext
+  fallback: without an initialized file vault, login is refused. The 2FA
+  password is read with `getpass` and never stored.
+- **Read-only.** Every request is checked against an allowlist of reads before
+  Telethon resolves or queues it, both at `TelegramClient._call` and at the
+  MTProto sender's `send`. Sending, editing, deleting, reacting,
+  `messages.ReadHistory`, `account.UpdateStatus`, media download (`upload.*`)
+  and cross-DC exported senders are refused. Auth requests are unlocked only
+  inside the interactive `telegram login`; `auth.LogOut` only inside
+  `telegram logout`.
+- **At rest.** `<home>/mordred/telegram/` holds one AES-256-GCM file per chat
+  plus an index; the AAD binds each blob to its logical name and chat file
+  names are an HMAC of the chat id. Message counts and sizes remain observable.
+- **Egress.** Telegram and Venice resolve one explicit route through
+  `extension.egress` (shared with Discord): Tor requires a loopback SOCKS proxy
+  with remote DNS; VPN without a live runtime is refused.
+- **Questions.** Only Venice models whose live catalog entry has
+  `model_spec.privacy == "private"` are used; `anonymized` models, unknown
+  models and an unreadable catalog fail closed. The request carries no tools,
+  disables web search and Venice's system prompt, and runs the llm_guard
+  `check_runtime_provider(active_provider="venice")` gate first. Only a
+  bounded selection is sent, pseudonymized by default (names, chat titles,
+  e-mail addresses, phone numbers become aliases mapped back locally), inside
+  a delimiter message text cannot close.
+- **Wire.** Account label, chat titles and answer chunks are sealed with
+  `K_extchat`; the question must arrive sealed. Page sessions cannot reach the
+  Telegram handlers.
+- **Not covered.** Secret chats (device-bound E2EE), media contents, and
+  sending messages. Venice E2EE (TEE-attested) models are a planned follow-up.
 
 The remaining hardening work is tracked as release gates in
 [`ROADMAP.md`](./ROADMAP.md), especially OS1 and P1. Documentation must not
@@ -698,6 +742,7 @@ vault       init | change-passphrase | recover | add | status | cat |
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list
 extension   pair | serve
+telegram    login | sync | status | logout | venice
 ```
 
 `status`, `policy show`, keyvault listing, vault status, and encryption status
