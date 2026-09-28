@@ -36,7 +36,7 @@ class _FakeService:
 
     async def dialogs(self) -> list[dict[str, Any]]:
         self.opened += 1
-        return [{"id": "-5", "title": "Team", "kind": "group", "message_count": 3}]
+        return [{"id": "-5", "title": "Team", "kind": "group", "message_count": 3, "last_date": 0}]
 
     async def ask(self, request: Any, on_meta: Any) -> Any:
         self.opened += 1
@@ -95,7 +95,7 @@ def test_ask_returns_only_the_answer_to_a_local_model(fake_service):
         asyncio.run(hermes_tools.telegram_ask({"question": "when?"}, parent_agent=_agent("http://127.0.0.1:11434/v1")))
     )
     assert out["answer"] == "The meeting moved to Monday."
-    assert out["messages_used"] == 3
+    assert out["search"]["messages_sent_to_privacy_llm"] == 3
     assert "do not follow" in out["note"]
 
 
@@ -103,7 +103,7 @@ def test_chats_listed_only_for_allowed_model(fake_service):
     refused = json.loads(asyncio.run(hermes_tools.telegram_chats({}, parent_agent=_agent("https://x.ai/v1"))))
     assert refused == {"error": "hermes_model_not_allowed"}
     ok = json.loads(asyncio.run(hermes_tools.telegram_chats({}, parent_agent=_agent("http://127.0.0.1:1/v1"))))
-    assert ok["chats"] == [{"id": "-5", "title": "Team", "kind": "group", "messages": 3}]
+    assert ok["chats"] == [{"id": "-5", "title": "Team", "kind": "group", "messages": 3, "last_message": None}]
 
 
 def test_invalid_arguments(fake_service):
@@ -131,3 +131,28 @@ def test_register_tools_uses_the_check_fn():
     assert {c["name"] for c in calls} == {"telegram_ask", "telegram_chats"}
     assert all(c["check_fn"] is hermes_tools.tools_available and c["is_async"] for c in calls)
     hermes_tools.register_tools(SimpleNamespace())  # hosts without plugin tools: no-op
+
+
+def test_search_report_flags_partial_searches():
+    from mordred_hermes.extension.telegram.hermes_tools import search_report
+
+    keyword = SimpleNamespace(
+        mode="keyword", candidates=12, chats_searched=40, message_count=12, dialog_count=3, truncated=False
+    )
+    report = search_report(keyword)
+    assert report["complete"] is False and "does NOT mean the archive" in report["warning"]
+    full = SimpleNamespace(
+        mode="chats", candidates=499, chats_searched=1, message_count=499, dialog_count=1, truncated=False
+    )
+    assert search_report(full)["complete"] is True and search_report(full)["warning"] == ""
+    cut = SimpleNamespace(
+        mode="period", candidates=900, chats_searched=5, message_count=300, dialog_count=5, truncated=True
+    )
+    report = search_report(cut)
+    assert report["complete"] is False and "Only 300 of 900" in report["warning"]
+
+
+def test_guidance_forbids_concluding_no_data_from_partial_search():
+    text = hermes_tools.SKILL_PATH.read_text("utf-8")
+    assert 'Never report "no messages"' in text and "complete" in text
+    assert 'NOT "not in the archive"' in hermes_tools.SYSTEM_PROMPT

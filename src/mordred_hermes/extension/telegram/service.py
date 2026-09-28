@@ -107,6 +107,9 @@ class AskResult:
     message_count: int
     dialog_count: int
     truncated: bool
+    mode: str = "keyword"
+    candidates: int = 0
+    chats_searched: int = 0
 
 
 def _audit(event: str, decision: str, **fields: Any) -> None:
@@ -471,6 +474,9 @@ class TelegramService:
                     message_count=selection.message_count,
                     dialog_count=selection.dialog_count,
                     truncated=selection.truncated,
+                    mode=selection.mode,
+                    candidates=selection.candidates,
+                    chats_searched=selection.chats_searched,
                 )
             )
             _audit(

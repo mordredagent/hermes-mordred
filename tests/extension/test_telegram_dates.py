@@ -418,3 +418,18 @@ def test_group_size_scope_defaults_and_opt_in(tmp_path):
     assert svc.sync_options().max_group_size is None  # remembered
     vault.save_sync_scope({"max_group_size": 300})
     assert svc.sync_options().max_group_size == 300
+
+
+def test_selection_reports_mode_and_candidates(tmp_path):
+    archive, index = _archive(tmp_path)
+    sel = ask.select_context(archive, index, ask.AskRequest(question="hello"), ask.Aliases(), budget_tokens=10_000)
+    assert sel.mode == "keyword" and sel.chats_searched == 1
+    since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
+    sel = ask.select_context(
+        archive, index, ask.AskRequest(question="q", since=since, until=until), ask.Aliases(), budget_tokens=10_000
+    )
+    assert (sel.mode, sel.candidates, sel.message_count) == ("period", 2, 2)
+    sel = ask.select_context(
+        archive, index, ask.AskRequest(question="q", dialog_ids=(1,)), ask.Aliases(), budget_tokens=40
+    )
+    assert sel.mode == "chats" and sel.truncated and sel.candidates == 4

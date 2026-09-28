@@ -131,6 +131,18 @@ class Selection:
     message_count: int
     dialog_count: int
     truncated: bool
+    # How the candidates were found, and how many there were before the budget.
+    mode: str = "keyword"  # "keyword" | "period" | "chats" | "recent"
+    candidates: int = 0
+    chats_searched: int = 0
+
+
+def search_mode(request: AskRequest) -> str:
+    if request.since is not None or request.until is not None:
+        return "period"
+    if request.dialog_ids:
+        return "chats"
+    return "keyword" if _terms(request.question) else "recent"
 
 
 def _terms(question: str) -> list[str]:
@@ -259,6 +271,7 @@ def select_context(
     budget_tokens: int,
 ) -> Selection:
     ranked = sorted(_candidate_messages(store, index, request), key=lambda item: item[0], reverse=True)
+    candidates = len({(info.dialog_id, message.id) for _p, info, message in ranked})
     chosen: dict[tuple[int, int], tuple[DialogInfo, StoredMessage, str]] = {}
     used = 0
     truncated = False
@@ -279,6 +292,9 @@ def select_context(
         message_count=len(ordered),
         dialog_count=len({info.dialog_id for info, _m, _l in ordered}),
         truncated=truncated,
+        mode=search_mode(request),
+        candidates=candidates,
+        chats_searched=len(_dialogs_for(index, request)),
     )
 
 

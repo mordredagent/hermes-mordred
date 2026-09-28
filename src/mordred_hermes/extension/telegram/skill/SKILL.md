@@ -52,6 +52,29 @@ credentials sealed by the Secure Enclave (opened with Touch ID), an encrypted
 archive, and that only Venice-private or local models ever read message text.
 Any other path breaks those guarantees.
 
+## Never conclude "no data" from a partial search
+
+Every `telegram_ask` result has a `search` block:
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | `keyword` (only messages sharing words with the question), `recent` (last week only), `period` (every message in the dates), `chats` (every message in `chat_ids`) |
+| `candidate_messages` / `messages_sent_to_privacy_llm` | How many matched, and how many fit |
+| `truncated` | Some candidates did not fit |
+| `complete` | `true` only for a period/chat search that was not truncated |
+
+If `complete` is false and the answer says something was not found or seems
+thin, the data may simply be outside the search window. Do this, in order:
+
+1. Call `telegram_chats` (it shows each chat's `last_message` time) and pick
+   the chats that can contain the answer.
+2. Ask again with those `chat_ids`, plus `start_date`/`end_date` for any
+   period.
+3. If still `truncated`, split: fewer chats or a shorter period per call.
+
+Only tell the user that the archive lacks something after a `complete`
+search. Never report "no messages" or "data missing" from a `keyword` search.
+
 ## Touch ID
 
 Each `telegram_ask` / `telegram_chats` call may show a Touch ID prompt on the
