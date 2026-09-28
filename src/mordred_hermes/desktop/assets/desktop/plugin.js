@@ -17,6 +17,8 @@ import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
 import { useCallback, useEffect, useState } from 'react'
 
 let rest = null
+// Pages listening for background-job events (Enclave build, import).
+const jobListeners = new Set()
 
 const MESSAGES = {
   memory_encryption_required: 'Turn on memory encryption first (step 2).',
@@ -108,6 +110,7 @@ function EnclaveStep({ done, refresh }) {
     try {
       await call('/enclave/build', {})
       host.notify({ kind: 'info', message: 'Building the Secure Enclave helper… this takes a few minutes.' })
+      refresh()
     } catch (e) {
       host.notifyError(e, 'Build failed')
       setBusy(false)
@@ -116,6 +119,12 @@ function EnclaveStep({ done, refresh }) {
   useEffect(() => {
     if (done) setBusy(false)
   }, [done])
+  useEffect(() => {
+    // A failed build ends the job without `done`; let the user retry.
+    const reset = () => setBusy(false)
+    jobListeners.add(reset)
+    return () => jobListeners.delete(reset)
+  }, [])
   return jsx(Step, {
     n: 1,
     title: 'Secure Enclave',
@@ -382,6 +391,18 @@ function SetupPage() {
   useEffect(() => {
     refresh()
   }, [refresh])
+  // Re-read the status when a background job ends, and poll while one runs in
+  // case the event was missed (e.g. the page was reopened mid-job).
+  useEffect(() => {
+    jobListeners.add(refresh)
+    return () => jobListeners.delete(refresh)
+  }, [refresh])
+  const running = Boolean(status && status.jobs && status.jobs.length)
+  useEffect(() => {
+    if (!running) return undefined
+    const t = setInterval(refresh, 3000)
+    return () => clearInterval(t)
+  }, [running, refresh])
   const c = (status && status.checks) || {}
   const ok = (name) => Boolean(c[name] && c[name].ok)
   const loggedIn = ok('login')
@@ -432,6 +453,7 @@ export default {
       if (!p) return
       if (p.state === 'done') host.notify({ kind: 'success', message: `Mordred: ${p.kind} finished.` })
       if (p.state === 'failed') host.notify({ kind: 'error', message: `Mordred: ${explain(p.error)}` })
+      if (p.state === 'done' || p.state === 'failed') jobListeners.forEach((fn) => fn())
     })
   },
 }
