@@ -47,6 +47,7 @@ to ``lockdown``.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from dataclasses import dataclass, field
@@ -112,7 +113,10 @@ URL_ARGS: dict[str, tuple[str, ...]] = {
 }
 # Free-form code: destinations cannot be inspected.
 EXEC_TOOLS = frozenset({"terminal", "execute_code", "browser_console", "browser_exec", "browser_cdp"})
-# `tool_call` bridge and friends resolve to the real tool before hooks run.
+# Hermes's Tool Search bridge: deferred tools (Mordred's Telegram tools among
+# them) are invoked as `tool_call {calls: [{name, arguments}]}`, and the agent
+# loop fires pre_tool_call with the bridge name. Decide on the tools inside.
+BRIDGE_CALL_TOOL = "tool_call"
 _LOCAL_PREFIXES = ("kanban_",)
 _LOCAL_EXCEPTIONS = frozenset({"kanban_attach_url"})
 
@@ -361,9 +365,71 @@ def _session_guard(tool: str, tainted: bool, effective: str) -> Decision | None:
     return None
 
 
+def _bridge_entries(args: dict[str, Any]) -> list[tuple[str, dict[str, Any]]] | None:
+    """The ``(name, arguments)`` calls inside a ``tool_call`` bridge, or ``None`` if malformed.
+
+    Mirrors Hermes's tolerant parsing: the ``calls`` batch (a list, one object
+    or a JSON string) or the legacy single ``{name, arguments}``; ``arguments``
+    may be a JSON string.
+    """
+    raw: Any = args.get("calls")
+    if raw is None:
+        raw = [{"name": args.get("name"), "arguments": args.get("arguments")}]
+    raw = _loads(raw)
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        return None
+    entries = [_bridge_entry(item) for item in raw]
+    return None if any(entry is None for entry in entries) else [e for e in entries if e is not None]
+
+
+def _loads(value: Any) -> Any:
+    """Parse a JSON string (``None`` on bad JSON, ``{}`` for blank); other values pass through."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value) if value.strip() else {}
+    except json.JSONDecodeError:
+        return None
+
+
+def _bridge_entry(item: Any) -> tuple[str, dict[str, Any]] | None:
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("name") or "").strip()
+    arguments = item.get("arguments")
+    arguments = {} if arguments is None else _loads(arguments)
+    if not name or name == BRIDGE_CALL_TOOL or not isinstance(arguments, dict):
+        return None
+    return name, arguments
+
+
+def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision | None:
+    """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed."""
+    entries = _bridge_entries(args)
+    if entries is None:
+        return None
+    taints = False
+    for name, arguments in entries:
+        inner = decide(name, arguments, session_id, policy)
+        if not inner.allow:
+            return inner
+        taints = taints or inner.taints
+    return Decision(allow=True, taints=taints)
+
+
 def decide(tool: str, args: dict[str, Any] | None, session_id: str | None, policy: EgressPolicy) -> Decision:
     """Allow or block one tool call. Pure apart from reading the taint set."""
     args = args if isinstance(args, dict) else {}
+    if tool == BRIDGE_CALL_TOOL:
+        bridged = _decide_bridge(args, session_id, policy)
+        if bridged is not None:
+            return bridged
+    return _decide_tool(tool, args, session_id, policy)
+
+
+def _decide_tool(tool: str, args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision:
     level = policy.level
     if level == "off":
         return Decision(allow=True)

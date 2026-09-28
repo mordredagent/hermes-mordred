@@ -232,3 +232,33 @@ def test_tainted_session_cannot_write_private_data_to_disk():
         assert egress.decide(tool, {}, "tainted-3", policy).allow, tool
     assert egress.decide("write_file", {}, "clean-3", policy).allow
     assert egress.decide("write_file", {}, "tainted-3", egress.EgressPolicy(level="search", taint=False)).allow
+
+
+# -- Tool Search bridge (`tool_call`) --------------------------------------------------------
+
+
+def test_bridge_call_is_decided_by_the_tools_inside():
+    policy = egress.EgressPolicy(level="search")
+    egress.mark_tainted("bridge-1")
+    ask = {"calls": [{"name": "telegram_ask", "arguments": {"question": "x"}}]}
+    # Mordred's own Telegram tool stays allowed in a tainted (locked-down) session.
+    decision = egress.decide("tool_call", ask, "bridge-1", policy)
+    assert decision.allow and decision.taints
+    # The legacy single shape and JSON-string arguments are understood too.
+    legacy = {"name": "telegram_chats", "arguments": "{}"}
+    assert egress.decide("tool_call", legacy, "bridge-1", policy).allow
+    # An internet tool inside the bridge is still blocked for the tainted session.
+    fetch = {"calls": [{"name": "web_extract", "arguments": {"urls": ["https://x.example"]}}]}
+    assert not egress.decide("tool_call", fetch, "bridge-1", policy).allow
+    # One blocked entry blocks the whole batch.
+    batch = {"calls": [ask["calls"][0], fetch["calls"][0]]}
+    assert not egress.decide("tool_call", batch, "bridge-1", policy).allow
+
+
+def test_bridge_call_taints_a_clean_session_and_malformed_bridges_stay_blocked():
+    policy = egress.EgressPolicy(level="search")
+    ask = {"calls": [{"name": "telegram_ask", "arguments": {}}]}
+    assert egress.decide("tool_call", ask, "bridge-clean", policy).taints
+    assert not egress.decide("tool_call", {"calls": "not json"}, "bridge-clean", policy).allow
+    nested = {"calls": [{"name": "tool_call", "arguments": ask}]}
+    assert not egress.decide("tool_call", nested, "bridge-clean", policy).allow

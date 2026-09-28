@@ -17,6 +17,9 @@ import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
 import { useCallback, useEffect, useState } from 'react'
 
 let rest = null
+// The SDK checkbox's default border is a pale theme colour that disappears on
+// a white card; draw it in the text colour (CanvasText follows light/dark).
+const CHECKBOX_STYLE = { borderColor: 'CanvasText', borderWidth: 1.5, borderStyle: 'solid' }
 // Pages listening for background-job events (Enclave build, import).
 const jobListeners = new Set()
 
@@ -28,7 +31,7 @@ const MESSAGES = {
   invalid_phone: 'Enter the phone number in international format, e.g. +819012345678.',
   login_code_invalid: 'That login code is not correct.',
   login_code_expired: 'The login code expired. Start again.',
-  login_password_invalid: 'That two-step verification password is not correct.',
+  login_password_invalid: 'That Telegram two-step verification password is not correct.',
   login_flow_expired: 'This login attempt expired. Start again.',
   telegram_rate_limited: 'Telegram asked to wait before trying again.',
   hermes_venice_key_missing: 'No Venice key is set in Hermes. Enter one below.',
@@ -165,7 +168,7 @@ function MemoryStep({ done, refresh }) {
           jsx('pre', { style: { fontSize: 18, padding: 12, userSelect: 'all', whiteSpace: 'pre-wrap' }, children: phrase }),
           jsxs('label', {
             style: { display: 'flex', gap: 8, alignItems: 'center' },
-            children: [jsx(Checkbox, { checked: saved, onCheckedChange: (v) => setSaved(v === true) }), 'I have written it down'],
+            children: [jsx(Checkbox, { checked: saved, onCheckedChange: (v) => setSaved(v === true), style: CHECKBOX_STYLE }), 'I have written it down'],
           }),
           jsx(Row, {
             children: jsx(Button, {
@@ -262,8 +265,13 @@ function TelegramStep({ done, needsApi, refresh }) {
           ? jsx(Row, { children: field({ placeholder: 'Phone number, e.g. +819012345678', value: phone, onChange: (e) => setPhone(e.target.value) }) })
           : jsxs(Fragment, {
               children: [
-                jsx('p', { children: step === 'code' ? 'Enter the login code Telegram just sent to your Telegram app.' : 'Enter your two-step verification password (not stored).' }),
-                jsx(Row, { children: field({ type: 'password', placeholder: step === 'code' ? 'Login code' : 'Password', value: secret, onChange: (e) => setSecret(e.target.value) }) }),
+                jsx('p', {
+                  children:
+                    step === 'code'
+                      ? 'Enter the login code Telegram just sent to your Telegram app.'
+                      : 'Enter your Telegram two-step verification password (the "Cloud Password" you set in Telegram → Settings → Privacy and Security). This is not your Mac password or a Mordred passphrase. It is not stored.',
+                }),
+                jsx(Row, { children: field({ type: 'password', placeholder: step === 'code' ? 'Telegram login code' : 'Telegram password', value: secret, onChange: (e) => setSecret(e.target.value) }) }),
               ],
             }),
         jsxs(Row, {
