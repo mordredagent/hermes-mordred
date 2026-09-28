@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import contextlib
 import getpass
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import replace
@@ -33,6 +34,11 @@ from typing import Any
 from . import _term
 
 InputFn = Callable[[str], str]
+
+# Optional one-time source for `telegram login`; the values are then sealed in
+# the vault and the variables are no longer needed.
+API_ID_ENV = "TELEGRAM_MORDRED_APP_ID"
+API_HASH_ENV = "TELEGRAM_MORDRED_APP_HASH"
 
 
 def _secret_store() -> Any:
@@ -71,6 +77,11 @@ def _report(code: str) -> int:
 def _read_api_credentials(input_fn: InputFn, secret_fn: InputFn) -> tuple[int, str]:
     from ..extension.telegram.secrets import validate_api_credentials
 
+    env_id = os.environ.get(API_ID_ENV, "").strip()
+    env_hash = os.environ.get(API_HASH_ENV, "").strip()
+    if env_id and env_hash:
+        print(f"Using api_id / api_hash from {API_ID_ENV} / {API_HASH_ENV}.")
+        return validate_api_credentials(env_id, env_hash)
     print("Create an application at https://my.telegram.org → API development tools.")
     api_id = input_fn("api_id: ").strip()
     api_hash = secret_fn("api_hash (hidden): ").strip()
