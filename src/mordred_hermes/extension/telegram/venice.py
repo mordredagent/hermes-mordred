@@ -90,7 +90,10 @@ _catalog_cache: dict[tuple[str, str], tuple[float, ModelInfo]] = {}
 
 
 def _headers(cfg: VeniceConfig) -> dict[str, str]:
-    return {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    return headers
 
 
 def _parse_model(entry: Any) -> ModelInfo | None:
@@ -111,7 +114,9 @@ def _parse_model(entry: Any) -> ModelInfo | None:
 
 async def _fetch_model(session: HttpSession, cfg: VeniceConfig) -> ModelInfo:
     try:
-        async with session.get(f"{cfg.base_url}/models", params={"type": "text"}, headers=_headers(cfg)) as resp:
+        async with session.get(
+            f"{cfg.base_url}/models", params={"type": "text"}, headers=_headers(cfg), allow_redirects=False
+        ) as resp:
             _raise_for_status(resp.status)
             payload = await resp.json()
     except VeniceError:
@@ -153,14 +158,19 @@ _STATUS_CODES = {
 }
 
 
-def _raise_for_status(status: int) -> None:
+def _raise_for_status(status: int, prefix: str = "venice") -> None:
+    # 3xx is an error too: redirects are never followed, so a server cannot
+    # bounce the request (and the messages in it) to another host.
     if status != 200:
-        raise VeniceError(_STATUS_CODES.get(status, "venice_unavailable"))
+        code = _STATUS_CODES.get(status, "venice_unavailable")
+        raise VeniceError(code.replace("venice_", f"{prefix}_", 1))
 
 
-def build_request(cfg: VeniceConfig, messages: list[dict[str, str]], *, max_tokens: int) -> dict[str, Any]:
+def build_request(
+    cfg: VeniceConfig, messages: list[dict[str, str]], *, max_tokens: int, venice_parameters: bool = True
+) -> dict[str, Any]:
     """Build the chat-completions body. No ``tools`` key, ever."""
-    return {
+    body: dict[str, Any] = {
         "model": cfg.model,
         "messages": messages,
         "stream": True,
@@ -175,6 +185,9 @@ def build_request(cfg: VeniceConfig, messages: list[dict[str, str]], *, max_toke
             "enable_x_search": False,
         },
     }
+    if not venice_parameters:
+        del body["venice_parameters"]
+    return body
 
 
 def _delta_text(line: str) -> str | None:
@@ -216,13 +229,25 @@ async def _sse_lines(content: Any) -> AsyncIterator[str]:
 
 
 async def stream_chat(
-    session: HttpSession, cfg: VeniceConfig, messages: list[dict[str, str]], *, max_tokens: int = 1500
+    session: HttpSession,
+    cfg: VeniceConfig,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 1500,
+    backend: str = "venice",
 ) -> AsyncGenerator[str, None]:
-    """Stream the answer's text deltas from ``POST /chat/completions``."""
-    body = build_request(cfg, messages, max_tokens=max_tokens)
+    """Stream the answer's text deltas from an OpenAI-compatible ``/chat/completions``.
+
+    ``backend`` is ``"venice"`` or ``"local"`` (see :mod:`.llm`); it selects the
+    Venice-only request parameters and the error-code prefix.
+    """
+    prefix = "venice" if backend == "venice" else "local_llm"
+    body = build_request(cfg, messages, max_tokens=max_tokens, venice_parameters=backend == "venice")
     try:
-        async with session.post(f"{cfg.base_url}/chat/completions", json=body, headers=_headers(cfg)) as resp:
-            _raise_for_status(resp.status)
+        async with session.post(
+            f"{cfg.base_url}/chat/completions", json=body, headers=_headers(cfg), allow_redirects=False
+        ) as resp:
+            _raise_for_status(resp.status, prefix)
             async for line in _sse_lines(resp.content):
                 text = _delta_text(line)
                 if text is not None:
@@ -230,4 +255,4 @@ async def stream_chat(
     except VeniceError:
         raise
     except Exception as exc:
-        raise VeniceError("venice_unavailable") from exc
+        raise VeniceError(f"{prefix}_unavailable") from exc

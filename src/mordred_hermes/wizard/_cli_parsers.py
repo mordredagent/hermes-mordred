@@ -63,7 +63,12 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
 def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("telegram", help="Read-only import of your own Telegram account (optional extra)")
     tsub = p.add_subparsers(dest="telegram_command", required=True, metavar="COMMAND")
-    p_login = tsub.add_parser("login", help="Store API credentials and create a session (sealed in the vault)")
+    p_login = tsub.add_parser("login", help="Create a session, sealed by the Secure Enclave")
+    p_login.add_argument(
+        "--no-touch-id",
+        action="store_true",
+        help="Create the Enclave key without a per-use Touch ID / passcode requirement",
+    )
     p_login.set_defaults(func=_handle_telegram)
     p_sync = tsub.add_parser("sync", help="Import new messages from every dialog into the encrypted archive")
     p_sync.add_argument("--skip-channels", action="store_true", help="Skip broadcast channels")
@@ -88,6 +93,17 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_venice = tsub.add_parser("venice", help="Store the Venice.ai API key and model used for questions")
     p_venice.add_argument("--model", default=None, help="Venice model id (must be labelled 'private')")
     p_venice.set_defaults(func=_handle_telegram)
+    p_local = tsub.add_parser("local-llm", help="Send questions to a model on this machine (loopback only)")
+    p_local.add_argument("--endpoint", required=True, help="e.g. http://127.0.0.1:11434/v1")
+    p_local.add_argument("--model", required=True, help="Model name served by that endpoint")
+    p_local.set_defaults(func=_handle_telegram)
+    p_migrate = tsub.add_parser("migrate-tee", help="Move vault-stored credentials into the Secure Enclave seal")
+    p_migrate.add_argument(
+        "--no-touch-id",
+        action="store_true",
+        help="Create the Enclave key without a per-use Touch ID / passcode requirement",
+    )
+    p_migrate.set_defaults(func=_handle_telegram)
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

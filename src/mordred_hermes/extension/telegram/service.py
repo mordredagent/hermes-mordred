@@ -39,9 +39,11 @@ from .client import (
     sync_archive,
     telethon_available,
 )
+from .llm import DEFAULT_LOCAL_CONTEXT_TOKENS, LlmConfigError, LlmTarget, resolve_target
 from .readonly import ReadOnlyViolation, RequestPolicy
-from .secrets import TelegramSecrets, TelegramSecretsError, VaultSecretStore
+from .secrets import TelegramSecrets, TelegramSecretsError
 from .store import ArchiveStore, StoreError
+from .tee import TeeSecretStore
 
 _log = logging.getLogger(__name__)
 
@@ -78,6 +80,7 @@ def error_code(exc: BaseException, fallback: str) -> str:
         TelegramClientError,
         TelegramSecretsError,
         StoreError,
+        LlmConfigError,
         AskError,
         venice.VeniceError,
         EgressError,
@@ -115,7 +118,7 @@ def _audit(event: str, decision: str, **fields: Any) -> None:
         _log.debug("telegram audit append failed", exc_info=True)
 
 
-def check_llm_policy(base_url: str) -> None:
+def check_llm_policy(backend: str, base_url: str) -> None:
     """Apply the llm_guard strict-mode gate to the Venice endpoint.
 
     This client is not a Hermes provider adapter, so the ``pre_api_request``
@@ -138,7 +141,7 @@ def check_llm_policy(base_url: str) -> None:
         enforce.check_runtime_provider(
             policy_mode=mode,
             policy_json_path=path,
-            active_provider="venice",
+            active_provider="venice" if backend == "venice" else "mordred-local",
             audit=writer,
             runtime_base_url=base_url,
             prompt_fn=lambda _provider: False,
@@ -187,15 +190,20 @@ class TelegramService:
     def __init__(
         self,
         *,
-        secret_store: VaultSecretStore | None = None,
+        secret_store: Any = None,
         archive_root: Path | None = None,
         client_factory: Callable[..., Any] = build_client,
         http_session_factory: Callable[[EgressRoute, float], Any] = _default_http_session,
         route_resolver: Callable[[str], EgressRoute] = resolve_route,
-        policy_check: Callable[[str], None] = check_llm_policy,
+        policy_check: Callable[[str, str], None] = check_llm_policy,
         installed: Callable[[], bool] = telethon_available,
     ) -> None:
-        self._secrets = secret_store or VaultSecretStore()
+        # Enclave-sealed; every load() is a fresh Secure Enclave unwrap.
+        self._secrets = secret_store if secret_store is not None else TeeSecretStore()
+        if secret_store is None:
+            from .hardening import harden_process
+
+            harden_process()
         self._archive_root = archive_root
         self._client_factory = client_factory
         self._http_session_factory = http_session_factory
@@ -206,6 +214,7 @@ class TelegramService:
         self._sync_starting = False
         self._progress = SyncProgress()
         self._last_error: str | None = None
+        self._summary: dict[str, Any] | None = None
 
     # -- helpers --------------------------------------------------------------
 
@@ -227,8 +236,8 @@ class TelegramService:
             "installed": self._installed(),
             "configured": False,
             "logged_in": False,
-            "venice_configured": False,
-            "venice_model": None,
+            "llm_backend": None,
+            "llm_model": None,
             "syncing": self.syncing,
             "progress": asdict(self._progress),
             "last_error": self._last_error,
@@ -237,33 +246,41 @@ class TelegramService:
             "message_count": 0,
             "account_label": "",
         }
+        # Flags only: polling must not unseal credentials through the Enclave.
         try:
-            value = await self._load_secrets()
-        except (TelegramSecretsError, StoreError) as exc:
-            result["last_error"] = exc.code
+            flags = await asyncio.to_thread(self._secrets.flags)
+        except (TelegramSecretsError, StoreError, OSError) as exc:
+            result["last_error"] = getattr(exc, "code", "telegram_unavailable")
             return result
-        if value is None:
+        if flags is None:
             return result
         result["configured"] = True
-        result["logged_in"] = value.session is not None
-        result["venice_configured"] = value.venice_api_key is not None
-        result["venice_model"] = self._venice_model(value)
-        try:
-            index = await asyncio.to_thread(self._archive(value).load_index)
-        except StoreError as exc:
-            result["last_error"] = exc.code
-            return result
-        result["last_sync"] = index.last_sync
-        result["dialog_count"] = len(index.dialogs)
-        result["message_count"] = sum(d.message_count for d in index.dialogs.values())
-        result["account_label"] = index.account_label
+        result["logged_in"] = flags.get("logged_in") is True
+        backend = flags.get("llm_backend")
+        model = flags.get("llm_model")
+        result["llm_backend"] = backend if backend in ("venice", "local") else None
+        result["llm_model"] = model if isinstance(model, str) and model else None
+        summary = self._summary
+        if summary is not None:
+            result.update(summary)
         return result
+
+    def _remember_summary(self, index: Any) -> None:
+        """Keep counts (not content) for status, so polls need no Enclave unwrap."""
+        self._summary = {
+            "last_sync": index.last_sync,
+            "dialog_count": len(index.dialogs),
+            "message_count": sum(d.message_count for d in index.dialogs.values()),
+            "account_label": index.account_label,
+        }
 
     async def dialogs(self) -> list[dict[str, Any]]:
         value = await self._load_secrets()
         if value is None:
             raise TelegramServiceError("telegram_not_configured")
         index = await asyncio.to_thread(self._archive(value).load_index)
+        del value
+        self._remember_summary(index)
         ordered = sorted(index.dialogs.values(), key=lambda d: d.last_date, reverse=True)
         return [
             {
@@ -326,6 +343,7 @@ class TelegramService:
 
             result = await sync_archive(client, store, options=options, progress=on_progress)
             self._progress = result
+            self._remember_summary(await asyncio.to_thread(store.load_index))
             _audit(
                 "telegram.sync",
                 "allow",
@@ -339,7 +357,9 @@ class TelegramService:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
             if code == "telegram_sync_failed":
-                _log.warning("telegram sync failed", exc_info=True)
+                # Type name only: an exception message or traceback locals
+                # could carry message text.
+                _log.warning("telegram sync failed (%s)", type(exc).__name__)
             _audit("telegram.sync", "raise", code=code)
         finally:
             if client is not None:
@@ -358,32 +378,46 @@ class TelegramService:
     # -- questions --------------------------------------------------------------
 
     @staticmethod
-    def _venice_model(value: TelegramSecrets) -> str:
-        return value.venice_model or os.environ.get(venice.MODEL_ENV) or venice.DEFAULT_MODEL
+    def _target(value: TelegramSecrets) -> LlmTarget:
+        """Venice (fixed URL, private models) or a loopback model — nothing else."""
+        return resolve_target(
+            value.backend,
+            venice_api_key=value.venice_api_key,
+            venice_model=value.venice_model or os.environ.get(venice.MODEL_ENV) or venice.DEFAULT_MODEL,
+            local_endpoint=value.local_endpoint,
+            local_model=value.local_model,
+        )
 
     async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:
         """Stream the answer; *on_meta* is called once before the first chunk."""
         question = validate_question(request.question)
-        # Fresh: a key or model changed with `telegram venice` applies at once.
+        # A fresh Enclave unwrap for every question; nothing is cached.
         value = await self._load_secrets(fresh=True)
         if value is None:
             raise TelegramServiceError("telegram_not_configured")
-        if value.venice_api_key is None:
-            raise TelegramServiceError("venice_not_configured")
-        cfg = venice.VeniceConfig(api_key=value.venice_api_key, model=self._venice_model(value))
-        await asyncio.to_thread(self._policy_check, cfg.base_url)
-        route = await asyncio.to_thread(self._route_resolver, _VENICE_HOST)
+        target = self._target(value)
+        store = self._archive(value)
+        del value
+        cfg = target.config
+        await asyncio.to_thread(self._policy_check, target.backend, cfg.base_url)
+        if target.backend == "venice":
+            route = await asyncio.to_thread(self._route_resolver, _VENICE_HOST)
+        else:
+            # Loopback only (validated in .llm): never through a proxy.
+            route = EgressRoute(None, None)
         raw_session = self._http_session_factory(route, _ASK_TIMEOUT_SECONDS)
         try:
             session = _ProxiedSession(raw_session, route.http_proxy_url)
-            info = await venice.require_private_model(session, cfg)
-            store = self._archive(value)
+            if target.backend == "venice":
+                context_tokens = (await venice.require_private_model(session, cfg)).context_tokens
+            else:
+                context_tokens = DEFAULT_LOCAL_CONTEXT_TOKENS
             index = await asyncio.to_thread(store.load_index)
             if not index.dialogs:
                 raise TelegramServiceError("archive_empty")
             aliases = Aliases(enabled=request.pseudonymize)
             selection = await asyncio.to_thread(
-                select_context, store, index, request, aliases, budget_tokens=budget_for(info.context_tokens)
+                select_context, store, index, request, aliases, budget_tokens=budget_for(context_tokens)
             )
             if selection.message_count == 0:
                 raise TelegramServiceError("no_matching_messages")
@@ -398,12 +432,13 @@ class TelegramService:
             _audit(
                 "telegram.ask",
                 "allow",
+                backend=target.backend,
                 model=cfg.model,
                 messages=selection.message_count,
                 dialogs=selection.dialog_count,
                 pseudonymized=request.pseudonymize,
             )
-            chunks = venice.stream_chat(session, cfg, build_messages(question, selection))
+            chunks = venice.stream_chat(session, cfg, build_messages(question, selection), backend=target.backend)
             async with contextlib.aclosing(chunks), contextlib.aclosing(dealias_stream(chunks, aliases)) as answer:
                 async for text in answer:
                     yield text

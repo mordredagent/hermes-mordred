@@ -128,12 +128,24 @@ The optional `telegram` extra lets the operator import their **own** Telegram
 account (MTProto user session via Telethon) and ask questions over it from the
 browser extension, using a Venice.ai private model.
 
-- **Custody.** API credentials, the Telethon `StringSession`, the archive key
-  and the Venice API key live in the vault-enrolled file `telegram.json`. It is
-  not the vault `.env`, so the runtime shim never injects it into a Hermes
-  process environment where agent tools could read it. There is no plaintext
-  fallback: without an initialized file vault, login is refused. The 2FA
-  password is read with `getpass` and never stored.
+- **Custody (TEE).** API credentials, the Telethon `StringSession`, the
+  archive key and the LLM API key are sealed in `credentials.sealed` under a
+  data key wrapped (keyvault ECIES, `wrap.wrap_dek`) by a P-256 key inside the
+  Secure Enclave (Linux: TPM). The backend is the signed hardware helper only
+  — no software-key namespace, no legacy fallback — so without
+  `keyvault enable-se` every read and write fails with `tee_unavailable`.
+  Every unseal is a fresh Enclave ECDH (nothing decrypted is cached); the key
+  requires Touch ID / passcode per use unless created with `--no-touch-id`.
+  The sealed file is not the vault `.env`, so nothing is ever injected into a
+  Hermes process environment. The 2FA password is never stored.
+- **Plaintext in memory only.** Messages are AES-256-GCM encrypted on disk;
+  processes that unseal credentials disable core dumps, deny debugger attach
+  (`PT_DENY_ATTACH`), and cap Telethon logging at WARNING. Status polls use a
+  non-secret flags file and never unseal.
+- **Destinations.** Imported text goes only to Venice (fixed
+  `https://api.venice.ai/api/v1`, `private` models) or to a loopback model
+  (`telegram local-llm`, literal `127.0.0.1`/`::1`, no proxy). Redirects are
+  never followed. No other endpoint is configurable.
 - **Read-only.** Every request is checked against an allowlist of reads before
   Telethon resolves or queues it, both at `TelegramClient._call` and at the
   MTProto sender's `send`. Sending, editing, deleting, reacting,
@@ -752,7 +764,8 @@ vault       init | change-passphrase | recover | add | status | cat |
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list
 extension   pair | serve
-telegram    login | sync | status | logout | venice
+telegram    login | sync | status | logout | venice | local-llm |
+            migrate-tee
 ```
 
 `status`, `policy show`, keyvault listing, vault status, and encryption status

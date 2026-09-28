@@ -59,12 +59,34 @@ class TelegramSecrets:
     session: str | None = None
     venice_api_key: str | None = None
     venice_model: str | None = None
+    # Where imported text may be sent: "venice" or "local" (see .llm).
+    backend: str | None = None
+    local_endpoint: str | None = None
+    local_model: str | None = None
 
     def __repr__(self) -> str:  # never let a traceback or log line print secrets
         return (
             f"TelegramSecrets(api_id={self.api_id}, logged_in={self.session is not None}, "
-            f"venice_configured={self.venice_api_key is not None})"
+            f"llm_backend={self.llm_backend()!r})"
         )
+
+    def llm_backend(self) -> str | None:
+        """The configured destination, or None when neither is usable."""
+        if self.backend == "local":
+            return "local" if self.local_endpoint and self.local_model else None
+        if self.backend in (None, "venice"):
+            return "venice" if self.venice_api_key else None
+        return None
+
+    def llm_model(self) -> str | None:
+        backend = self.llm_backend()
+        if backend == "local":
+            return self.local_model
+        if backend == "venice":
+            from .venice import DEFAULT_MODEL
+
+            return self.venice_model or DEFAULT_MODEL
+        return None
 
 
 def new_store_key() -> bytes:
@@ -106,6 +128,9 @@ def encode(value: TelegramSecrets) -> bytes:
         payload["venice_api_key"] = value.venice_api_key
     if value.venice_model is not None:
         payload["venice_model"] = value.venice_model
+    for key in ("backend", "local_endpoint", "local_model"):
+        if getattr(value, key) is not None:
+            payload[key] = getattr(value, key)
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
@@ -143,6 +168,9 @@ def decode(blob: bytes) -> TelegramSecrets:
         session=_optional_str(payload, "session"),
         venice_api_key=_optional_str(payload, "venice_api_key"),
         venice_model=_optional_str(payload, "venice_model"),
+        backend=_optional_str(payload, "backend"),
+        local_endpoint=_optional_str(payload, "local_endpoint"),
+        local_model=_optional_str(payload, "local_model"),
     )
 
 

@@ -501,24 +501,30 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 
 ### `telegram` — read-only import of your own Telegram account (preview)
 ```sh
-hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); session sealed in the vault
+hermes-mordred keyvault enable-se           # once: build the Secure Enclave helper (required)
+hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); sealed by the Secure Enclave
 hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive
 hermes-mordred telegram sync --skip-channels --limit-per-dialog 5000
 hermes-mordred telegram status              # login state and archive counts
 hermes-mordred telegram venice              # store the Venice.ai API key (hidden prompt); --model to pick a model
+hermes-mordred telegram local-llm --endpoint http://127.0.0.1:11434/v1 --model qwen3  # or: a model on this machine
+hermes-mordred telegram migrate-tee         # move credentials stored by an older build into the Enclave seal
 hermes-mordred telegram logout              # revoke the session at Telegram; keep the archive
 hermes-mordred telegram logout --forget     # also delete the API credentials, archive key and archive
 ```
-> Requires the `telegram` extra and an initialized file vault
-> (`hermes-mordred vault init`). Create your own application at
-> <https://my.telegram.org> → *API development tools* for `api_id` / `api_hash`.
+> Requires the `telegram` extra and the Secure Enclave helper
+> (`hermes-mordred keyvault enable-se`). Create your own application at
+> <https://my.telegram.org> → *API development tools* for `api_id` / `api_hash`
+> (or export them as `TELEGRAM_MORDRED_APP_ID` / `TELEGRAM_MORDRED_APP_HASH`).
 >
 > **What is stored where.** The session (a full account credential), the API
-> credentials, the archive key and the Venice key live in one vault-enrolled
-> file, `telegram.json`. Unlike the vault `.env`, that file is never injected
-> into the Hermes process environment, so the agent's own tools cannot read
-> it. Messages are stored in `<home>/mordred/telegram/`, AES-256-GCM encrypted
-> per chat under hashed file names. The 2FA password is never stored.
+> credentials, the archive key and the LLM key are sealed by a key inside the
+> Secure Enclave and opened by the Enclave on every connection — with Touch ID
+> unless you log in with `--no-touch-id`. There is no software-key fallback,
+> and nothing is injected into the Hermes environment. Messages are stored in
+> `<home>/mordred/telegram/`, AES-256-GCM encrypted per chat under hashed file
+> names; plaintext exists only in memory (core dumps and debugger attach are
+> disabled). The 2FA password is never stored.
 >
 > **Read-only by construction.** Every MTProto request passes an allowlist
 > before it is sent: the importer can list chats and read history, but cannot
@@ -542,6 +548,11 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 > gets no tools and no web search, so instructions planted in a message cannot
 > trigger actions. Under llm_guard `strict` mode, set `allow_cloud_llm` to true
 > and add `"venice"` to `cloud_provider_allowlist` in `policy.json`.
+>
+> **Only Venice or a local model.** Imported text is never sent anywhere else:
+> the Venice URL is fixed in code, and `local-llm` accepts only a loopback
+> address (`127.0.0.1` / `[::1]`, reached without any proxy). Redirects are
+> never followed.
 
 ---
 

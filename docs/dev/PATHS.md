@@ -339,11 +339,18 @@ The optional Telegram importer (`mordred_hermes.extension.telegram`) owns:
 
 Each `.enc` file is `MTG1 || nonce(12) || AES-256-GCM(ciphertext)` with the
 AAD bound to its logical name. `name_key` and the encryption key are HKDF-SHA256
-subkeys of `store_key`, held in the vault-enrolled
-file `telegram.json` (in `<home>/mordred/vault/`, next to `.env`), which also
-holds the Telethon session, the API credentials and the Venice API key.
-`telegram logout --forget` unenrolls `telegram.json` and deletes these files.
-The directory is mode `0700`; files are mode `0600`.
+subkeys of `store_key`, which is held — with the Telethon session, the API
+credentials and the LLM API key — in:
+
+- `credentials.sealed` — `MTC1 || u16 len || wrap_blob || nonce || AES-GCM`,
+  where `wrap_blob` wraps the data key under the Secure Enclave key
+  `mordred-hermes.telegram.credentials.v1` (its opaque Enclave blob lives in
+  `<home>/mordred/keyvault/sekey/`); and
+- `credentials.meta.json` — non-secret flags only (logged in, LLM backend and
+  model) so status never unseals.
+
+`telegram logout --forget` deletes these files, the archive and the Enclave
+key. The directory is mode `0700`; files are mode `0600`.
 
 ## Hermes-owned and external targets
 

@@ -42,9 +42,9 @@ API_HASH_ENV = "TELEGRAM_MORDRED_APP_HASH"
 
 
 def _secret_store() -> Any:
-    from ..extension.telegram.secrets import VaultSecretStore
+    from ..extension.telegram.tee import TeeSecretStore
 
-    return VaultSecretStore()
+    return TeeSecretStore()
 
 
 def _report(code: str) -> int:
@@ -64,6 +64,12 @@ def _report(code: str) -> int:
         "invalid_api_credentials": "api_id must be a number and api_hash a 32-character hex string "
         "(from https://my.telegram.org → API development tools).",
         "sync_in_progress": "another sync is already running.",
+        "tee_unavailable": "the Secure Enclave helper is not available. Run `hermes-mordred keyvault enable-se` "
+        "first: Telegram credentials are only ever sealed by the Secure Enclave (no software fallback).",
+        "tee_auth_cancelled": "Touch ID / passcode was cancelled, so the credentials stayed sealed.",
+        "local_endpoint_invalid": "the local model endpoint must be http(s)://127.0.0.1:<port>/... or "
+        "http(s)://[::1]:<port>/... (loopback only, with an explicit port).",
+        "no_legacy_credentials": "there are no vault-stored Telegram credentials to migrate.",
         "telegram_already_logged_in": "a Telegram session is already stored. Run `hermes-mordred telegram logout` "
         "first so the old session is revoked instead of being left behind.",
     }
@@ -108,10 +114,11 @@ def telegram_login(
     secret_fn: InputFn = getpass.getpass,
     store: Any = None,
     client_factory: Callable[..., Any] | None = None,
+    require_presence: bool = True,
 ) -> int:
     from ..extension.telegram.client import TelegramClientError, build_client, save_session, telethon_available
     from ..extension.telegram.readonly import RequestPolicy
-    from ..extension.telegram.secrets import TelegramSecrets, TelegramSecretsError, new_store_key
+    from ..extension.telegram.secrets import TelegramSecretsError
     from ..extension.telegram.service import error_code
 
     factory = client_factory or build_client
@@ -126,15 +133,7 @@ def telegram_login(
         return _report("telegram_already_logged_in")
     try:
         if current is None:
-            if _orphaned_archive_present():
-                # Its key went with the old vault entry, so it can never be
-                # decrypted again; a fresh key would otherwise fail on it.
-                from ..extension.telegram.store import wipe_archive
-
-                wipe_archive()
-                _term.emit_warn("removed an undecryptable archive left by a previous setup.")
-            api_id, api_hash = _read_api_credentials(input_fn, secret_fn)
-            base = TelegramSecrets(api_id=api_id, api_hash=api_hash, store_key=new_store_key())
+            base = _new_credentials(secrets_store, input_fn, secret_fn, require_presence)
         else:
             base = current
             print(f"Using the stored API application (api_id {base.api_id}).")
@@ -155,15 +154,40 @@ def telegram_login(
     if me is None:
         return _report("telegram_login_failed")
     try:
-        secrets_store.update(lambda _old: replace(base, session=session))
+        _persist(secrets_store, replace(base, session=session), fresh=current is None)
     except TelegramSecretsError as exc:
         return _report(exc.code)
-    print("Logged in. The session is sealed in the keyvault file vault (telegram.json).")
+    print("Logged in. The session is sealed by the Secure Enclave (credentials.sealed).")
     print(
         "Telegram will show a new-login notice on your other devices. Keep Two-Step Verification enabled; "
         "revoke this session any time with `hermes-mordred telegram logout` or Settings → Devices."
     )
     return 0
+
+
+def _new_credentials(secrets_store: Any, input_fn: InputFn, secret_fn: InputFn, require_presence: bool) -> Any:
+    from ..extension.telegram.secrets import TelegramSecrets, new_store_key
+
+    if _orphaned_archive_present():
+        # Its key went with the old credentials, so it can never be decrypted
+        # again; a fresh key would otherwise fail on it.
+        from ..extension.telegram.store import wipe_archive
+
+        wipe_archive()
+        _term.emit_warn("removed an undecryptable archive left by a previous setup.")
+    api_id, api_hash = _read_api_credentials(input_fn, secret_fn)
+    # Fail before any login code is sent if the Enclave cannot seal the result.
+    ensure = getattr(secrets_store, "ensure_key", None)
+    if ensure is not None:
+        ensure(require_presence=require_presence)
+    return TelegramSecrets(api_id=api_id, api_hash=api_hash, store_key=new_store_key())
+
+
+def _persist(secrets_store: Any, value: Any, *, fresh: bool) -> None:
+    if fresh and hasattr(secrets_store, "store"):
+        secrets_store.store(value)  # nothing to unseal yet
+    else:
+        secrets_store.update(lambda _old: value)
 
 
 async def _login_and_disconnect(
@@ -260,7 +284,8 @@ def telegram_status(*, service: Any = None) -> int:
     if status["account_label"]:
         print(f"Account: {status['account_label']}")
     print(f"Dialogs: {status['dialog_count']}  Messages: {status['message_count']}")
-    print(f"Venice: {'configured' if status['venice_configured'] else 'not configured'} ({status['venice_model']})")
+    backend = status["llm_backend"]
+    print(f"LLM: {backend} ({status['llm_model']})" if backend else "LLM: not configured")
     return 0
 
 
@@ -318,7 +343,11 @@ def telegram_logout(
         return _report(exc.code)
     if forget:
         wipe_archive()
-        print("Deleted the API credentials, the archive key, and the local archive.")
+        delete_key = getattr(secrets_store, "delete_key", None)
+        if delete_key is not None:
+            with contextlib.suppress(Exception):
+                delete_key()
+        print("Deleted the API credentials, the archive key, the Enclave key, and the local archive.")
     else:
         print("Logged out. The encrypted archive is kept (use --forget to delete it).")
     return 0
@@ -341,11 +370,12 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
                 old,
                 venice_api_key=key or old.venice_api_key,
                 venice_model=model if model else old.venice_model,
+                backend="venice",
             )
         )
     except TelegramSecretsError as exc:
         return _report(exc.code)
-    print("Stored the Venice settings in the keyvault file vault. Only models Venice labels 'private' are used.")
+    print("Sealed the Venice settings with the Secure Enclave. Only models Venice labels 'private' are used.")
     print(
         'Under llm_guard strict mode, allow it: set allow_cloud_llm to true and add "venice" to '
         "cloud_provider_allowlist in <home>/mordred/policy.json."
@@ -353,13 +383,62 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
     return 0
 
 
+def telegram_local_llm(*, endpoint: str, model: str, store: Any = None) -> int:
+    """Send questions to a model on THIS machine instead of Venice."""
+    from ..extension.telegram.llm import LlmConfigError, normalize_local_endpoint
+    from ..extension.telegram.secrets import TelegramSecretsError
+
+    try:
+        canonical = normalize_local_endpoint(endpoint)
+    except LlmConfigError as exc:
+        return _report(exc.code)
+    if not model.strip():
+        _term.emit_error("a model name is required.")
+        return 1
+    secrets_store = store if store is not None else _secret_store()
+    try:
+        if secrets_store.load() is None:
+            return _report("telegram_not_configured")
+        secrets_store.update(
+            lambda old: replace(old, backend="local", local_endpoint=canonical, local_model=model.strip())
+        )
+    except TelegramSecretsError as exc:
+        return _report(exc.code)
+    print(f"Questions now go only to the local model at {canonical} (never through a proxy).")
+    return 0
+
+
+def telegram_migrate_tee(*, require_presence: bool = True, store: Any = None, legacy: Any = None) -> int:
+    """Move credentials from the software-keyed file vault into the Enclave seal."""
+    from ..extension.telegram.secrets import VAULT_FILE, TelegramSecretsError, VaultSecretStore
+
+    target = store if store is not None else _secret_store()
+    source = legacy if legacy is not None else VaultSecretStore()
+    try:
+        value = source.load(fresh=True)
+        if value is None:
+            return _report("no_legacy_credentials")
+        target.ensure_key(require_presence=require_presence)
+        target.store(value)
+        if target.load() != value:  # read back through the Enclave before deleting the old copy
+            return _report("secrets_corrupt")
+        source.update(lambda _old: None)
+    except TelegramSecretsError as exc:
+        return _report(exc.code)
+    print(f"Moved the Telegram credentials into the Secure Enclave seal and removed {VAULT_FILE} from the vault.")
+    return 0
+
+
 # -- argparse ------------------------------------------------------------------------
 
 
 def cli_telegram(args: argparse.Namespace) -> int:
+    from ..extension.telegram.hardening import harden_process
+
+    harden_process()
     command = getattr(args, "telegram_command", None)
     if command == "login":
-        return telegram_login()
+        return telegram_login(require_presence=not getattr(args, "no_touch_id", False))
     if command == "sync":
         return telegram_sync(
             include_channels=not args.skip_channels,
@@ -372,14 +451,20 @@ def cli_telegram(args: argparse.Namespace) -> int:
         return telegram_logout(forget=bool(args.forget))
     if command == "venice":
         return telegram_venice(model=args.model)
-    print("usage: hermes-mordred telegram {login,sync,status,logout,venice}", file=sys.stderr)
+    if command == "local-llm":
+        return telegram_local_llm(endpoint=args.endpoint, model=args.model)
+    if command == "migrate-tee":
+        return telegram_migrate_tee(require_presence=not getattr(args, "no_touch_id", False))
+    print("usage: hermes-mordred telegram {login,sync,status,logout,venice,local-llm,migrate-tee}", file=sys.stderr)
     return 2
 
 
 __all__ = [
     "cli_telegram",
+    "telegram_local_llm",
     "telegram_login",
     "telegram_logout",
+    "telegram_migrate_tee",
     "telegram_status",
     "telegram_sync",
     "telegram_venice",

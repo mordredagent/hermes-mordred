@@ -31,6 +31,15 @@ class _MemorySecrets:
         self.value = mutate(self.value)
         return self.value
 
+    def flags(self) -> dict[str, Any] | None:
+        if self.value is None:
+            return None
+        return {
+            "logged_in": self.value.session is not None,
+            "llm_backend": self.value.llm_backend(),
+            "llm_model": self.value.llm_model(),
+        }
+
 
 def _value(**overrides: Any) -> secrets.TelegramSecrets:
     base: dict[str, Any] = {
@@ -124,7 +133,7 @@ def _service(tmp_path, value=None, *, privacy="private", policy=None, installed=
         archive_root=tmp_path / "tg",
         http_session_factory=lambda _route, _t: session,
         route_resolver=lambda _h: EgressRoute(None, None),
-        policy_check=policy or (lambda _url: None),
+        policy_check=policy or (lambda _backend, _url: None),
         installed=lambda: installed,
     )
     return svc, session
@@ -142,9 +151,14 @@ def test_status_unconfigured(tmp_path):
 def test_status_counts(tmp_path):
     _seed_archive(tmp_path / "tg")
     svc, _ = _service(tmp_path, _value())
-    status = asyncio.run(svc.status())
+
+    async def scenario() -> dict[str, Any]:
+        await svc.dialogs()  # counts are remembered after an Enclave-backed read
+        return await svc.status()
+
+    status = asyncio.run(scenario())
     assert (status["dialog_count"], status["message_count"], status["account_label"]) == (1, 2, "Me")
-    assert status["venice_model"] == "m1"
+    assert (status["llm_backend"], status["llm_model"]) == ("venice", "m1")
 
 
 def test_start_sync_preconditions(tmp_path):
@@ -215,7 +229,7 @@ def test_ask_refuses_anonymized_models(tmp_path):
 def test_ask_respects_llm_policy(tmp_path):
     _seed_archive(tmp_path / "tg")
 
-    def refuse(_url: str) -> None:
+    def refuse(_backend: str, _url: str) -> None:
         raise service.TelegramServiceError("llm_policy_refused")
 
     svc, session = _service(tmp_path, _value(), policy=refuse)
@@ -226,7 +240,7 @@ def test_ask_respects_llm_policy(tmp_path):
 
 def test_ask_requires_venice_key(tmp_path):
     svc, _ = _service(tmp_path, _value(venice_api_key=None))
-    with pytest.raises(service.TelegramServiceError, match="venice_not_configured"):
+    with pytest.raises(Exception, match="llm_not_configured"):
         _collect_ask(svc, AskRequest(question="budget"))
 
 
@@ -235,11 +249,11 @@ def test_strict_policy_refuses_unlisted_venice(tmp_path, monkeypatch):
     policy.parent.mkdir(parents=True)
     policy.write_text(json.dumps({"policy": "strict", "allow_cloud_llm": True, "cloud_provider_allowlist": []}))
     with pytest.raises(service.TelegramServiceError, match="llm_policy_refused"):
-        service.check_llm_policy(venice.DEFAULT_BASE_URL)
+        service.check_llm_policy("venice", venice.DEFAULT_BASE_URL)
     policy.write_text(json.dumps({"policy": "strict", "allow_cloud_llm": True, "cloud_provider_allowlist": ["venice"]}))
-    service.check_llm_policy(venice.DEFAULT_BASE_URL)
+    service.check_llm_policy("venice", venice.DEFAULT_BASE_URL)
     with pytest.raises(service.TelegramServiceError, match="llm_policy_refused"):
-        service.check_llm_policy("https://evil.example/api/v1")
+        service.check_llm_policy("venice", "https://evil.example/api/v1")
 
 
 def test_error_code_mapping():
@@ -311,7 +325,10 @@ def _dispatch(conn: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
 def test_ws_status_seals_account_label(tmp_path):
     _seed_archive(tmp_path / "tg")
     svc, _ = _service(tmp_path, _value())
-    [frame] = _dispatch(_conn(svc), {"id": "s", "type": "telegram_status"})
+    conn = _conn(svc)
+    _dispatch(conn, {"id": "d", "type": "telegram_dialogs"})
+    conn.ws.sent.clear()
+    [frame] = _dispatch(conn, {"id": "s", "type": "telegram_status"})
     assert frame["type"] == "telegram_status_result" and frame["ok"] is True
     label = frame["status"]["account_label"]
     assert label != "Me" and decrypt_message(_EK, label) == "Me"
@@ -395,7 +412,7 @@ def test_ws_ask_error_is_a_code(tmp_path):
     svc, _ = _service(tmp_path, _value(venice_api_key=None))
     question = encrypt_message_v2(_EK, "q", key_id(_EK))
     [frame] = _dispatch(_conn(svc), {"id": "a", "type": "telegram_ask", "question": question})
-    assert frame == {"id": "a", "type": "telegram_ask_error", "reason": "venice_not_configured"}
+    assert frame == {"id": "a", "type": "telegram_ask_error", "reason": "llm_not_configured"}
 
 
 @pytest.mark.parametrize("mtype", ["telegram_status", "telegram_sync", "telegram_dialogs", "telegram_ask"])

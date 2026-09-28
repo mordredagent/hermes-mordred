@@ -100,8 +100,8 @@
       "installed": true,
       "configured": true,
       "logged_in": true,
-      "venice_configured": true,
-      "venice_model": "deepseek-v4-flash",
+      "llm_backend": "venice",
+      "llm_model": "deepseek-v4-flash",
       "syncing": false,
       "progress": {
         "dialogs_total": 3,
