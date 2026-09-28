@@ -481,6 +481,18 @@ version_at_least() {
   ((have_major > want_major || (have_major == want_major && have_minor >= want_minor)))
 }
 
+write_hermes_constraints() {
+  # Pin every package already in Hermes's environment to its installed
+  # version, so installing Mordred can add packages but never upgrade or
+  # downgrade one Hermes depends on (its own lock pins them). Editable and
+  # direct-URL entries (Hermes itself, a Mordred checkout) are left out, as
+  # are Mordred's own distributions.
+  local uv_bin="$1" hermes_python="$2" out="$3"
+  "$uv_bin" pip freeze --python "$hermes_python" 2>/dev/null |
+    grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==[^ ]+$' |
+    grep -viE "^(${DISTRIBUTION_NAME}|${LEGACY_DISTRIBUTION_NAME})==" >"$out" || true
+}
+
 deps_are_consistent() {
   local uv_bin="$1" hermes_python="$2"
   "$uv_bin" pip check --python "$hermes_python" >/dev/null 2>&1
@@ -695,12 +707,19 @@ main() {
   fi
 
   info "Hermes Agent ${hermes_version} at ${hermes_python}"
+  local constraints_file
+  constraints_file="$(mktemp "${TMPDIR:-/tmp}/mordred-constraints.XXXXXX")" || fail "could not create a temporary file"
+  # Global (not `local`): the EXIT trap runs after main() has returned.
+  MORDRED_CONSTRAINTS_FILE="$constraints_file"
+  trap 'rm -f "${MORDRED_CONSTRAINTS_FILE:-}"' EXIT
+  write_hermes_constraints "$uv_bin" "$hermes_python" "$constraints_file"
   if [[ -z "$SOURCE_DIR" ]]; then
     info "checking ${package_spec} on PyPI"
     "$uv_bin" pip install \
       --python "$hermes_python" \
       --no-python-downloads \
       --upgrade-package "$DISTRIBUTION_NAME" \
+      --constraint "$constraints_file" \
       --dry-run \
       "$package_spec"
   fi
@@ -731,6 +750,7 @@ main() {
     --python "$hermes_python" \
     --no-python-downloads \
     --upgrade-package "$DISTRIBUTION_NAME" \
+    --constraint "$constraints_file" \
     "${install_target[@]}"; then
     if [[ -n "$legacy_version" ]]; then
       warn "canonical install failed; attempting to restore ${LEGACY_DISTRIBUTION_NAME} ${legacy_version}"

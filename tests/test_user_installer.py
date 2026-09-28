@@ -57,7 +57,16 @@ if [ "$1" = pip ] && [ "$2" = uninstall ]; then
   : > "$UV_STATE/legacy-removed"
   exit 0
 fi
+if [ "$1" = pip ] && [ "$2" = freeze ]; then
+  printf '%s\n' ${UV_FREEZE:-}
+  exit 0
+fi
 if [ "$1" = pip ] && [ "$2" = install ]; then
+  prev=''
+  for arg in "$@"; do
+    if [ "$prev" = --constraint ]; then cp "$arg" "$UV_STATE/constraints"; fi
+    prev="$arg"
+  done
   case " $* " in
     *' --dry-run '*) exit "${UV_DRY_RUN_FAIL:-0}" ;;
   esac
@@ -1249,3 +1258,14 @@ def test_source_hermes_version_comes_from_the_launcher(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "Hermes Agent 0.21.5" in result.stdout + result.stderr
+
+
+def test_install_pins_every_package_hermes_already_has(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, UV_FREEZE="ruamel.yaml==0.18.16 hermes-mordred==0.1.0a19 cryptography==46.0.7")
+
+    assert result.returncode == 0, result.stderr
+    assert "--constraint" in fixture.uv_calls()
+    constraints = (tmp_path / "state" / "constraints").read_text(encoding="utf-8").split()
+    assert constraints == ["ruamel.yaml==0.18.16", "cryptography==46.0.7"]
