@@ -63,6 +63,16 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
 def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("telegram", help="Read-only import of your own Telegram account (optional extra)")
     tsub = p.add_subparsers(dest="telegram_command", required=True, metavar="COMMAND")
+    p_setup = tsub.add_parser("setup", help="Guided first-time setup (Enclave, login, privacy LLM, first import)")
+    p_setup.add_argument(
+        "--no-touch-id",
+        action="store_true",
+        help="Create the Enclave key without a per-use Touch ID / passcode requirement",
+    )
+    p_setup.set_defaults(func=_handle_telegram)
+    p_doctor = tsub.add_parser("doctor", help="Health check from metadata only (no Touch ID, no content)")
+    p_doctor.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_doctor.set_defaults(func=_handle_telegram)
     p_login = tsub.add_parser("login", help="Create a session, sealed by the Secure Enclave")
     p_login.add_argument(
         "--no-touch-id",
@@ -82,6 +92,7 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     p_sync.set_defaults(func=_handle_telegram)
     p_status = tsub.add_parser("status", help="Show login state and archive counts")
+    p_status.add_argument("--show-account", action="store_true", help="Also print the account display name")
     p_status.set_defaults(func=_handle_telegram)
     p_logout = tsub.add_parser("logout", help="Revoke the session at Telegram and remove it from the vault")
     p_logout.add_argument(

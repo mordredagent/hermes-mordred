@@ -770,8 +770,8 @@ vault       init | change-passphrase | recover | add | status | cat |
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list
 extension   pair | serve
-telegram    login | sync | status | logout | venice | local-llm |
-            migrate-tee
+telegram    setup | doctor | login | sync | status | logout | venice |
+            local-llm | migrate-tee
 ```
 
 `status`, `policy show`, keyvault listing, vault status, and encryption status

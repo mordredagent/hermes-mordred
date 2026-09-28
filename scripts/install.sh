@@ -54,6 +54,7 @@ The platform extra (macos or keyvault) is selected automatically.
 
 Options:
   --with-extension  Add the browser-extension server and Ethereum wallet extras.
+  --with-telegram   Add the read-only Telegram importer (includes the extension server).
   --extras LIST     Add comma-separated feature extras, or "all".
   --all-extras      Add every user-facing feature extra.
   --version VERSION Install an exact PyPI release at or above the supported floor.
@@ -143,6 +144,10 @@ parse_installer_args() {
         ;;
       --with-extension)
         parse_extra_list "extension,ethereum"
+        shift
+        ;;
+      --with-telegram)
+        parse_extra_list "extension,telegram"
         shift
         ;;
       --extras)

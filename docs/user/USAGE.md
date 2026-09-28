@@ -500,7 +500,13 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 > startup, including its `#token=…` fragment.
 
 ### `telegram` — read-only import of your own Telegram account (preview)
+
+Start with the [Telegram guide](./TELEGRAM.md); `telegram setup` does
+everything below in one guided command, and `telegram doctor` checks health.
+
 ```sh
+hermes-mordred telegram setup               # guided: Enclave helper, login, privacy LLM, first import
+hermes-mordred telegram doctor              # health check from metadata only (no Touch ID, no content)
 hermes-mordred keyvault enable-se           # once: build the Secure Enclave helper (required)
 hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); sealed by the Secure Enclave
 hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive

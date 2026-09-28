@@ -272,7 +272,7 @@ def telegram_sync(
         return _report(error_code(exc, "telegram_sync_failed"))
 
 
-def telegram_status(*, service: Any = None) -> int:
+def telegram_status(*, service: Any = None, show_account: bool = False) -> int:
     from ..extension.telegram.service import TelegramService
 
     svc = service if service is not None else TelegramService()
@@ -281,7 +281,7 @@ def telegram_status(*, service: Any = None) -> int:
         return _report(str(status["last_error"]))
     print(f"Telethon installed: {'yes' if status['installed'] else 'no'}")
     print(f"Logged in: {'yes' if status['logged_in'] else 'no'}")
-    if status["account_label"]:
+    if show_account and status["account_label"]:
         print(f"Account: {status['account_label']}")
     print(f"Dialogs: {status['dialog_count']}  Messages: {status['message_count']}")
     backend = status["llm_backend"]
@@ -437,6 +437,10 @@ def cli_telegram(args: argparse.Namespace) -> int:
 
     harden_process()
     command = getattr(args, "telegram_command", None)
+    if command in ("setup", "doctor"):
+        from . import telegram_setup_cli
+
+        return telegram_setup_cli.cli_setup(args) if command == "setup" else telegram_setup_cli.cli_doctor(args)
     if command == "login":
         return telegram_login(require_presence=not getattr(args, "no_touch_id", False))
     if command == "sync":
@@ -446,7 +450,7 @@ def cli_telegram(args: argparse.Namespace) -> int:
             limit_per_dialog=args.limit_per_dialog,
         )
     if command == "status":
-        return telegram_status()
+        return telegram_status(show_account=bool(getattr(args, "show_account", False)))
     if command == "logout":
         return telegram_logout(forget=bool(args.forget))
     if command == "venice":
@@ -455,7 +459,10 @@ def cli_telegram(args: argparse.Namespace) -> int:
         return telegram_local_llm(endpoint=args.endpoint, model=args.model)
     if command == "migrate-tee":
         return telegram_migrate_tee(require_presence=not getattr(args, "no_touch_id", False))
-    print("usage: hermes-mordred telegram {login,sync,status,logout,venice,local-llm,migrate-tee}", file=sys.stderr)
+    print(
+        "usage: hermes-mordred telegram {setup,doctor,login,sync,status,logout,venice,local-llm,migrate-tee}",
+        file=sys.stderr,
+    )
     return 2
 
 
