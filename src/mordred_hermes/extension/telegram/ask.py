@@ -21,21 +21,24 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from dataclasses import dataclass, field
 
 from .store import ArchiveIndex, ArchiveStore, DialogInfo, StoredMessage
 
-# Conservative chars-per-token for mixed CJK / Latin text.
-_CHARS_PER_TOKEN = 2
-_MAX_CONTEXT_CHARS = 240_000
+# Token estimate: ~4 ASCII chars per token, and a full token for every
+# non-ASCII (e.g. CJK) character — deliberately pessimistic.
+_ASCII_CHARS_PER_TOKEN = 4
+_MAX_CONTEXT_TOKENS = 100_000
+_PROMPT_OVERHEAD_TOKENS = 2000
 _ANSWER_TOKENS = 1500
 _DEFAULT_RECENT_DAYS = 7
 _NEIGHBORS = 2
 _MAX_QUESTION_CHARS = 4000
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_PHONE_RE = re.compile(r"(?<![\w])\+?\d[\d\s().-]{7,}\d(?![\w])")
+_PHONE_CANDIDATE_RE = re.compile(r"(?<![\w+])\+?\d[\d\s().-]{7,}\d(?![\w])")
+_DATE_PREFIX_RE = re.compile(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}")
 # Whitespace plus ASCII / CJK punctuation (fullwidth forms written as escapes).
 _SPLIT_RE = re.compile("[\\s、。,.!?\uff01\uff1f「」『』()\uff08\uff09]+")
 _ALIAS_OPEN = "⟦"
@@ -98,7 +101,24 @@ class Aliases:
         if not self.enabled:
             return text
         text = _EMAIL_RE.sub(lambda m: self.alias("E", m.group(0)), text)
-        return _PHONE_RE.sub(lambda m: self.alias("T", m.group(0)), text)
+        return _PHONE_CANDIDATE_RE.sub(self._phone, text)
+
+    def _phone(self, match: re.Match[str]) -> str:
+        value = match.group(0)
+        return self.alias("T", value) if _looks_like_phone(value) else value
+
+
+def _looks_like_phone(value: str) -> bool:
+    """10-15 digits, written with a leading + or with separators, not a date."""
+    digits = sum(c.isdigit() for c in value)
+    if not 10 <= digits <= 15 or _DATE_PREFIX_RE.match(value):
+        return False
+    return value.startswith("+") or any(c in value for c in " -()")
+
+
+def _neutralize(text: str) -> str:
+    """Stop third-party text from forging an alias (e.g. a literal ⟦P1⟧)."""
+    return text.replace(_ALIAS_OPEN, "[[").replace(_ALIAS_CLOSE, "]]")
 
 
 @dataclass(frozen=True)
@@ -130,16 +150,15 @@ def _iso(ts: int) -> str:
     return _dt.datetime.fromtimestamp(ts, tz=_dt.UTC).strftime("%Y-%m-%d %H:%M")
 
 
-def _format_line(info: DialogInfo, message: StoredMessage, aliases: Aliases, account_label: str) -> str:
-    if message.out or (account_label and message.sender == account_label):
-        sender = "me"
-    else:
-        sender = aliases.alias("P", message.sender or "unknown")
-    text = aliases.scrub_text(message.text)
+def _format_line(info: DialogInfo, message: StoredMessage, aliases: Aliases) -> str:
+    # Only the message's own ``out`` flag makes it "me": a contact whose display
+    # name happens to equal the owner's must not be attributed to the owner.
+    sender = "me" if message.out else aliases.alias("P", _neutralize(message.sender) or "unknown")
+    text = aliases.scrub_text(_neutralize(message.text))
     if message.media:
         text = f"{text} [{message.media}]".strip()
     record = {
-        "chat": aliases.alias("C", info.title or str(info.dialog_id)),
+        "chat": aliases.alias("C", _neutralize(info.title) or str(info.dialog_id)),
         "from": sender,
         "date": _iso(message.date),
         "text": text,
@@ -171,13 +190,22 @@ def _candidate_messages(
             for m in messages:
                 yield m.date, info, m
             continue
-        hits = {i for i, m in enumerate(messages) if _score(m.text, terms) > 0}
+        # Local search may look at names (they never leave the machine), so a
+        # question naming a person or chat finds it even when pseudonymized.
+        context = f"{info.title} "
+        scores = [_score(f"{context}{m.sender} {m.text}", terms) for m in messages]
+        hits = {i for i, score in enumerate(scores) if score > 0}
         for i in sorted(hits):
-            score = _score(messages[i].text, terms)
+            score = scores[i]
             for j in range(max(0, i - _NEIGHBORS), min(len(messages), i + _NEIGHBORS + 1)):
                 # Hits outrank their neighbours; recency breaks ties.
                 weight = score if j == i else 0
                 yield weight * 10**10 + messages[j].date, info, messages[j]
+
+
+def estimate_tokens(text: str) -> int:
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    return (ascii_chars + _ASCII_CHARS_PER_TOKEN - 1) // _ASCII_CHARS_PER_TOKEN + (len(text) - ascii_chars)
 
 
 def select_context(
@@ -186,41 +214,42 @@ def select_context(
     request: AskRequest,
     aliases: Aliases,
     *,
-    budget_chars: int,
+    budget_tokens: int,
 ) -> Selection:
     ranked = sorted(_candidate_messages(store, index, request), key=lambda item: item[0], reverse=True)
-    chosen: dict[tuple[int, int], tuple[DialogInfo, StoredMessage]] = {}
+    chosen: dict[tuple[int, int], tuple[DialogInfo, StoredMessage, str]] = {}
     used = 0
     truncated = False
     for _priority, info, message in ranked:
         key = (info.dialog_id, message.id)
         if key in chosen:
             continue
-        cost = len(message.text) + len(message.sender) + len(info.title) + 64
-        if used + cost > budget_chars:
+        line = _format_line(info, message, aliases)
+        cost = estimate_tokens(line) + 1
+        if used + cost > budget_tokens:
             truncated = True
             break
-        chosen[key] = (info, message)
+        chosen[key] = (info, message, line)
         used += cost
-    ordered = sorted(chosen.values(), key=lambda pair: (pair[1].date, pair[0].dialog_id, pair[1].id))
-    lines = [_format_line(info, message, aliases, index.account_label) for info, message in ordered]
+    ordered = sorted(chosen.values(), key=lambda triple: (triple[1].date, triple[0].dialog_id, triple[1].id))
     return Selection(
-        lines=lines,
-        message_count=len(lines),
-        dialog_count=len({info.dialog_id for info, _m in ordered}),
+        lines=[line for _info, _message, line in ordered],
+        message_count=len(ordered),
+        dialog_count=len({info.dialog_id for info, _m, _l in ordered}),
         truncated=truncated,
     )
 
 
 def budget_for(context_tokens: int) -> int:
-    usable = max(context_tokens - _ANSWER_TOKENS - 2000, 2000)
-    return min(usable * _CHARS_PER_TOKEN, _MAX_CONTEXT_CHARS)
+    """Token budget for the selected messages."""
+    usable = context_tokens - _ANSWER_TOKENS - _PROMPT_OVERHEAD_TOKENS - estimate_tokens(SYSTEM_PROMPT)
+    return max(min(usable, _MAX_CONTEXT_TOKENS), 1000)
 
 
 def build_messages(question: str, selection: Selection) -> list[dict[str, str]]:
     body = "\n".join(selection.lines)
     note = "\n(Older or less relevant messages were omitted to fit the size limit.)" if selection.truncated else ""
-    user = f"<telegram_messages>\n{body}\n</telegram_messages>{note}\n\nQuestion: {question}"
+    user = f"<telegram_messages>\n{body}\n</telegram_messages>{note}\n\nQuestion: {_neutralize(question)}"
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}]
 
 
@@ -233,7 +262,7 @@ def validate_question(question: object) -> str:
     return question
 
 
-async def dealias_stream(chunks: AsyncIterator[str], aliases: Aliases) -> AsyncIterator[str]:
+async def dealias_stream(chunks: AsyncIterator[str], aliases: Aliases) -> AsyncGenerator[str, None]:
     """Map aliases in streamed text back to real values.
 
     An alias split across two chunks is held back until its closing bracket

@@ -75,8 +75,12 @@ LOGIN_REQUESTS = frozenset(
 LOGOUT_REQUESTS = frozenset({"auth.LogOutRequest"})
 
 
-class ReadOnlyViolation(PermissionError):
-    """A request outside the read-only allowlist was about to be sent."""
+class ReadOnlyViolation(RuntimeError):
+    """A request outside the read-only allowlist was about to be sent.
+
+    Deliberately NOT an ``OSError``/``PermissionError``: Telethon treats
+    ``OSError`` as "network down" and would retry a blocked request forever.
+    """
 
     def __init__(self, request_name: str) -> None:
         super().__init__(f"telegram_request_blocked: {request_name}")

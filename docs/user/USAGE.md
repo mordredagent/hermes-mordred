@@ -535,8 +535,10 @@ hermes-mordred telegram logout --forget     # also delete the API credentials, a
 > questions over the archive. Only models Venice labels `private` (Venice-run,
 > zero retention) are used; `anonymized` models are refused. Only the selected
 > chats, or the messages matching the question, are sent — never the whole
-> archive — and by default names, chat titles, e-mail addresses and phone
-> numbers are replaced with aliases that are mapped back locally. The model
+> archive — and by default sender names, chat titles, e-mail addresses and
+> phone numbers are replaced with aliases that are mapped back locally. Names
+> mentioned inside message text, and your question itself, are sent as
+> written. The model
 > gets no tools and no web search, so instructions planted in a message cannot
 > trigger actions. Under llm_guard `strict` mode, set `allow_cloud_llm` to true
 > and add `"venice"` to `cloud_provider_allowlist` in `policy.json`.

@@ -2,38 +2,46 @@
 
 Layout under ``<home>/mordred/telegram/`` (directory 0700, files 0600)::
 
-    index.enc              dialog list + sync cursors
-    dialogs/<name>.enc     one file per dialog (all imported messages)
-    .lock                  cross-process flock (CLI sync vs. the server)
+    index.enc                    dialog list + sync cursors
+    dialogs/<name>.enc           one file per SEGMENT of a dialog's messages
+    .lock                        non-blocking flock (one sync at a time)
 
-Every file is ``MTG1 || nonce(12) || AES-256-GCM(ciphertext)`` under the
-``store_key`` held in the vault (see :mod:`.secrets`). The AAD binds each blob
-to its logical name, so swapping two dialog files, or renaming one onto the
-index, fails authentication instead of silently mixing conversations.
+A dialog is split into segments of :data:`SEGMENT_SIZE` messages in ascending
+id order, so an incremental sync rewrites only the last, partially filled
+segment instead of the whole conversation.
 
-Dialog file names are ``HMAC-SHA256(store_key, "dialog:" + dialog_id)`` so the
-directory listing does not reveal which chats exist. Message count and sizes
-are still observable from file lengths; that is an accepted leak.
+Every file is ``MTG1 || nonce(12) || AES-256-GCM(ciphertext)``. The AAD binds
+each blob to its logical name, so swapping two segment files, or renaming one
+onto the index, fails authentication instead of silently mixing chats.
+
+Two subkeys are derived from the vault-held ``store_key`` with HKDF-SHA256:
+one encrypts, the other names files — ``HMAC(name_key, "dialog:<id>:<n>")`` —
+so the directory listing does not reveal which chats exist. File count and
+sizes remain observable; that is an accepted leak.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import hmac
 import json
 import os
 import secrets
+import stat
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 _MAGIC = b"MTG1"
 _NONCE_LEN = 12
 _AAD_PREFIX = b"mordred-telegram-store-v1|"
+_HKDF_SALT = b"mordred-telegram-store-v1"
 _INDEX_NAME = "index"
 _INDEX_VERSION = 1
+SEGMENT_SIZE = 2000
 
 
 class StoreError(RuntimeError):
@@ -90,13 +98,21 @@ def _ensure_private_dir(path: Path) -> Path:
     return path
 
 
+def _subkey(key: bytes, info: bytes) -> bytes:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=_HKDF_SALT, info=info).derive(key)
+
+
 class ArchiveStore:
     """Read/write the encrypted archive with one ``store_key``."""
 
     def __init__(self, key: bytes, root: Path | None = None) -> None:
         if len(key) != 32:
             raise StoreError("store_key_invalid")
-        self._key = key
+        self._enc_key = _subkey(key, b"encrypt")
+        self._name_key = _subkey(key, b"names")
         self._root = root if root is not None else telegram_dir()
 
     # -- low-level blob codec ---------------------------------------------
@@ -105,7 +121,7 @@ class ArchiveStore:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         nonce = secrets.token_bytes(_NONCE_LEN)
-        return _MAGIC + nonce + AESGCM(self._key).encrypt(nonce, plaintext, _AAD_PREFIX + name.encode("ascii"))
+        return _MAGIC + nonce + AESGCM(self._enc_key).encrypt(nonce, plaintext, _AAD_PREFIX + name.encode("ascii"))
 
     def _open(self, name: str, blob: bytes) -> bytes:
         from cryptography.exceptions import InvalidTag
@@ -115,7 +131,7 @@ class ArchiveStore:
             raise StoreError("store_undecryptable")
         nonce = blob[len(_MAGIC) : len(_MAGIC) + _NONCE_LEN]
         try:
-            return AESGCM(self._key).decrypt(
+            return AESGCM(self._enc_key).decrypt(
                 nonce, blob[len(_MAGIC) + _NONCE_LEN :], _AAD_PREFIX + name.encode("ascii")
             )
         except InvalidTag as exc:
@@ -144,9 +160,9 @@ class ArchiveStore:
 
     # -- naming -------------------------------------------------------------
 
-    def dialog_name(self, dialog_id: int) -> str:
-        mac = hmac.new(self._key, f"dialog:{dialog_id}".encode("ascii"), hashlib.sha256).hexdigest()
-        return mac[:40]
+    def segment_name(self, dialog_id: int, segment: int) -> str:
+        message = f"dialog:{dialog_id}:{segment}".encode("ascii")
+        return hmac.new(self._name_key, message, hashlib.sha256).hexdigest()[:40]
 
     # -- index ----------------------------------------------------------------
 
@@ -185,11 +201,11 @@ class ArchiveStore:
 
     # -- dialogs --------------------------------------------------------------
 
-    def load_messages(self, dialog_id: int) -> list[StoredMessage]:
-        name = self.dialog_name(dialog_id)
+    def _load_segment(self, dialog_id: int, segment: int) -> list[StoredMessage] | None:
+        name = self.segment_name(dialog_id, segment)
         payload = self._read(f"dialogs/{name}.enc", name)
         if payload is None:
-            return []
+            return None
         if not isinstance(payload, list):
             raise StoreError("store_undecryptable")
         try:
@@ -197,46 +213,107 @@ class ArchiveStore:
         except TypeError as exc:
             raise StoreError("store_undecryptable") from exc
 
-    def append_messages(self, dialog_id: int, new: list[StoredMessage]) -> list[StoredMessage]:
-        """Merge *new* into the dialog file (dedup by id, ascending); return all."""
-        merged = {m.id: m for m in self.load_messages(dialog_id)}
+    def _write_segment(self, dialog_id: int, segment: int, messages: list[StoredMessage]) -> None:
+        name = self.segment_name(dialog_id, segment)
+        self._write(f"dialogs/{name}.enc", name, [asdict(m) for m in messages])
+
+    def _last_segment(self, dialog_id: int) -> int:
+        """Index of the last existing segment, or -1 when the dialog is empty."""
+        segment = 0
+        while (self._root / "dialogs" / f"{self.segment_name(dialog_id, segment)}.enc").exists():
+            segment += 1
+        return segment - 1
+
+    def load_messages(self, dialog_id: int) -> list[StoredMessage]:
+        messages: list[StoredMessage] = []
+        segment = 0
+        while True:
+            chunk = self._load_segment(dialog_id, segment)
+            if chunk is None:
+                return messages
+            messages.extend(chunk)
+            segment += 1
+
+    def append_messages(self, dialog_id: int, new: list[StoredMessage]) -> int:
+        """Append messages newer than the stored ones; return how many were added.
+
+        Only the last segment is rewritten (plus any new segments it spills
+        into). Messages at or below the newest stored id are ignored, which
+        keeps segments in ascending id order.
+        """
+        last = self._last_segment(dialog_id)
+        tail = (self._load_segment(dialog_id, last) or []) if last >= 0 else []
+        newest = tail[-1].id if tail else 0
+        fresh: dict[int, StoredMessage] = {}
         for message in new:
-            merged[message.id] = message
-        ordered = [merged[k] for k in sorted(merged)]
-        name = self.dialog_name(dialog_id)
-        self._write(f"dialogs/{name}.enc", name, [asdict(m) for m in ordered])
-        return ordered
+            if message.id > newest:
+                fresh[message.id] = message
+        if not fresh:
+            return 0
+        combined = tail + [fresh[k] for k in sorted(fresh)]
+        segment = max(last, 0)
+        for start in range(0, len(combined), SEGMENT_SIZE):
+            self._write_segment(dialog_id, segment, combined[start : start + SEGMENT_SIZE])
+            segment += 1
+        return len(fresh)
 
     # -- lifecycle ------------------------------------------------------------
 
     @contextlib.contextmanager
     def locked(self) -> Iterator[None]:
-        """Exclusive cross-process lock (one sync at a time)."""
-        from ..._file_lock import private_flock
+        """Exclusive, NON-blocking cross-process lock.
 
+        A second sync (CLI vs. server) fails fast with ``sync_in_progress``
+        instead of parking a thread that could outlive a cancelled task and
+        keep the lock forever.
+        """
         _ensure_private_dir(self._root)
-        with private_flock(self._root / ".lock", on_unsafe=_unsafe_lock):
+        with _nonblocking_flock(self._root / ".lock"):
             yield
 
     def wipe(self) -> None:
-        """Delete every archive file (used by ``telegram logout --wipe``)."""
         wipe_archive(self._root)
 
 
-def _unsafe_lock(_path: Path) -> NoReturn:
-    raise StoreError("store_path_unsafe")
+@contextlib.contextmanager
+def _nonblocking_flock(path: Path) -> Iterator[None]:
+    import fcntl
+
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise StoreError("store_path_unsafe") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise StoreError("store_path_unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                raise StoreError("sync_in_progress") from exc
+            raise StoreError("store_path_unsafe") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def wipe_archive(root: Path | None = None) -> None:
+    """Delete every archive file, refusing while a sync holds the lock."""
     base = root if root is not None else telegram_dir()
-    if base.is_symlink() or not base.exists():
+    if base.is_symlink() or not base.is_dir():
         return
-    dialogs = base / "dialogs"
-    if dialogs.is_dir() and not dialogs.is_symlink():
-        for child in dialogs.iterdir():
-            if child.is_file() and not child.is_symlink():
-                child.unlink()
-        dialogs.rmdir()
-    for child in base.iterdir():
-        if child.is_file() and not child.is_symlink() and child.suffix == ".enc":
-            child.unlink()
+    with _nonblocking_flock(base / ".lock"):
+        dialogs = base / "dialogs"
+        for directory in (dialogs, base):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            for child in directory.iterdir():
+                if child.is_file() and not child.is_symlink() and (child.suffix in {".enc", ".tmp"}):
+                    child.unlink()
+        if dialogs.is_dir() and not dialogs.is_symlink() and not any(dialogs.iterdir()):
+            dialogs.rmdir()

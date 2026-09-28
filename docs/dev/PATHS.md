@@ -331,12 +331,15 @@ do not publish them as diagnostics.
 The optional Telegram importer (`mordred_hermes.extension.telegram`) owns:
 
 - `index.enc` — encrypted dialog list, sync cursors and account label;
-- `dialogs/<hmac>.enc` — one encrypted file per chat; the name is
-  `HMAC-SHA256(store_key, "dialog:" + chat_id)` truncated to 40 hex chars; and
-- `.lock` — cross-process `flock` so the CLI and the server never sync at once.
+- `dialogs/<hmac>.enc` — encrypted segments of up to 2000 messages per chat;
+  the name is `HMAC-SHA256(name_key, "dialog:<chat_id>:<segment>")` truncated
+  to 40 hex chars; and
+- `.lock` — non-blocking cross-process `flock`: a second sync (CLI vs. server)
+  or `logout --forget` while a sync runs fails with `sync_in_progress`.
 
 Each `.enc` file is `MTG1 || nonce(12) || AES-256-GCM(ciphertext)` with the
-AAD bound to its logical name. The key is `store_key` in the vault-enrolled
+AAD bound to its logical name. `name_key` and the encryption key are HKDF-SHA256
+subkeys of `store_key`, held in the vault-enrolled
 file `telegram.json` (in `<home>/mordred/vault/`, next to `.env`), which also
 holds the Telethon session, the API credentials and the Venice API key.
 `telegram logout --forget` unenrolls `telegram.json` and deletes these files.

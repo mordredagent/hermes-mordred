@@ -37,7 +37,9 @@ if TYPE_CHECKING:
 
 VAULT_FILE = "telegram.json"
 _SCHEMA_VERSION = 1
-_CACHE_TTL_SECONDS = 300.0
+# Short: status polls reuse it, while login/venice changes from the CLI show
+# up quickly (sync and questions always read fresh).
+_CACHE_TTL_SECONDS = 30.0
 _API_HASH_LEN = 32
 
 

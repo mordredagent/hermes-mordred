@@ -24,9 +24,10 @@ and never contain prompt content, message text, or the API key.
 
 from __future__ import annotations
 
+import codecs
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -143,9 +144,12 @@ async def require_private_model(session: HttpSession, cfg: VeniceConfig, *, now:
 
 
 _STATUS_CODES = {
+    400: "venice_bad_request",  # most often: the selection exceeds the model's context
     401: "venice_unauthorized",
     402: "venice_insufficient_balance",
+    413: "venice_bad_request",
     429: "venice_rate_limited",
+    503: "venice_busy",
 }
 
 
@@ -165,6 +169,10 @@ def build_request(cfg: VeniceConfig, messages: list[dict[str, str]], *, max_toke
         "venice_parameters": {
             "include_venice_system_prompt": False,
             "enable_web_search": "off",
+            # Message text contains URLs; never let the provider fetch them.
+            "enable_web_scraping": False,
+            "enable_web_citations": False,
+            "enable_x_search": False,
         },
     }
 
@@ -191,21 +199,25 @@ def _delta_text(line: str) -> str | None:
 
 
 async def _sse_lines(content: Any) -> AsyncIterator[str]:
+    # Incremental: a multi-byte character (CJK, emoji) split across two network
+    # chunks must be decoded once both halves arrive, not replaced with U+FFFD.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
     async for raw in content.iter_any():
-        buffer += raw.decode("utf-8", errors="replace")
+        buffer += decoder.decode(raw)
         if len(buffer) > _MAX_SSE_LINE_CHARS:
             raise VeniceError("venice_bad_response")
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             yield line.strip()
+    buffer += decoder.decode(b"", final=True)
     if buffer.strip():
         yield buffer.strip()
 
 
 async def stream_chat(
     session: HttpSession, cfg: VeniceConfig, messages: list[dict[str, str]], *, max_tokens: int = 1500
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """Stream the answer's text deltas from ``POST /chat/completions``."""
     body = build_request(cfg, messages, max_tokens=max_tokens)
     try:

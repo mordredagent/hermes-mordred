@@ -203,6 +203,7 @@ class TelegramService:
         self._policy_check = policy_check
         self._installed = installed
         self._sync_task: asyncio.Task[None] | None = None
+        self._sync_starting = False
         self._progress = SyncProgress()
         self._last_error: str | None = None
 
@@ -279,51 +280,58 @@ class TelegramService:
     # -- sync -----------------------------------------------------------------
 
     async def start_sync(self, options: SyncOptions | None = None) -> None:
-        """Start a background sync; raise ``sync_in_progress`` if one runs."""
-        if self.syncing:
+        """Start a background sync; raise ``sync_in_progress`` if one runs.
+
+        The check and the claim happen before the first ``await`` so two
+        sockets cannot both start a sync; the cross-process lock is taken
+        (non-blocking) before the task exists, so a CLI sync holding it is
+        reported immediately instead of leaving a task waiting on it.
+        """
+        if self.syncing or self._sync_starting:
             raise TelegramServiceError("sync_in_progress")
-        if not self._installed():
-            raise TelegramServiceError("telegram_not_installed")
-        value = await self._load_secrets(fresh=True)
-        if value is None:
-            raise TelegramServiceError("telegram_not_configured")
-        if value.session is None:
-            raise TelegramServiceError("telegram_not_logged_in")
-        self._last_error = None
-        self._progress = SyncProgress(started_at=int(time.time()))
-        self._sync_task = asyncio.create_task(self._run_sync(value, options or SyncOptions()))
+        self._sync_starting = True
+        try:
+            if not self._installed():
+                raise TelegramServiceError("telegram_not_installed")
+            value = await self._load_secrets(fresh=True)
+            if value is None:
+                raise TelegramServiceError("telegram_not_configured")
+            if value.session is None:
+                raise TelegramServiceError("telegram_not_logged_in")
+            store = self._archive(value)
+            lock = store.locked()
+            lock.__enter__()
+            self._last_error = None
+            self._progress = SyncProgress(started_at=int(time.time()))
+            self._sync_task = asyncio.create_task(self._run_sync(value, store, lock, options or SyncOptions()))
+        finally:
+            self._sync_starting = False
 
     async def wait_for_sync(self) -> None:
         if self._sync_task is not None:
             with contextlib.suppress(Exception):
                 await self._sync_task
 
-    async def _run_sync(self, value: TelegramSecrets, options: SyncOptions) -> None:
-        store = self._archive(value)
-        lock = store.locked()
+    async def _run_sync(self, value: TelegramSecrets, store: ArchiveStore, lock: Any, options: SyncOptions) -> None:
         client: Any = None
         try:
-            await asyncio.to_thread(lock.__enter__)
-            try:
-                # Built on the loop thread: Telethon binds a client to its loop.
-                client = self._client_factory(value.api_id, value.api_hash, value.session, policy=RequestPolicy())
-                await client.connect()
-                if not await client.is_user_authorized():
-                    raise TelegramServiceError("telegram_session_revoked")
+            # Built on the loop thread: Telethon binds a client to its loop.
+            client = self._client_factory(value.api_id, value.api_hash, value.session, policy=RequestPolicy())
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise TelegramServiceError("telegram_session_revoked")
 
-                def on_progress(state: SyncProgress) -> None:
-                    self._progress = state
+            def on_progress(state: SyncProgress) -> None:
+                self._progress = state
 
-                result = await sync_archive(client, store, options=options, progress=on_progress)
-                self._progress = result
-                _audit(
-                    "telegram.sync",
-                    "allow",
-                    dialogs=result.dialogs_done,
-                    messages=result.messages_imported,
-                )
-            finally:
-                lock.__exit__(None, None, None)
+            result = await sync_archive(client, store, options=options, progress=on_progress)
+            self._progress = result
+            _audit(
+                "telegram.sync",
+                "allow",
+                dialogs=result.dialogs_done,
+                messages=result.messages_imported,
+            )
         except asyncio.CancelledError:
             self._last_error = "sync_cancelled"
             raise
@@ -337,6 +345,7 @@ class TelegramService:
             if client is not None:
                 with contextlib.suppress(Exception):
                     await client.disconnect()
+            lock.__exit__(None, None, None)
             self._progress.finished_at = int(time.time())
 
     async def cancel_sync(self) -> None:
@@ -355,7 +364,8 @@ class TelegramService:
     async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:
         """Stream the answer; *on_meta* is called once before the first chunk."""
         question = validate_question(request.question)
-        value = await self._load_secrets()
+        # Fresh: a key or model changed with `telegram venice` applies at once.
+        value = await self._load_secrets(fresh=True)
         if value is None:
             raise TelegramServiceError("telegram_not_configured")
         if value.venice_api_key is None:
@@ -373,7 +383,7 @@ class TelegramService:
                 raise TelegramServiceError("archive_empty")
             aliases = Aliases(enabled=request.pseudonymize)
             selection = await asyncio.to_thread(
-                select_context, store, index, request, aliases, budget_chars=budget_for(info.context_tokens)
+                select_context, store, index, request, aliases, budget_tokens=budget_for(info.context_tokens)
             )
             if selection.message_count == 0:
                 raise TelegramServiceError("no_matching_messages")
@@ -394,8 +404,9 @@ class TelegramService:
                 pseudonymized=request.pseudonymize,
             )
             chunks = venice.stream_chat(session, cfg, build_messages(question, selection))
-            async for text in dealias_stream(chunks, aliases):
-                yield text
+            async with contextlib.aclosing(chunks), contextlib.aclosing(dealias_stream(chunks, aliases)) as answer:
+                async for text in answer:
+                    yield text
         finally:
             with contextlib.suppress(Exception):
                 await raw_session.close()

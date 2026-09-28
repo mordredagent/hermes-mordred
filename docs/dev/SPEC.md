@@ -140,10 +140,16 @@ browser extension, using a Venice.ai private model.
   `messages.ReadHistory`, `account.UpdateStatus`, media download (`upload.*`)
   and cross-DC exported senders are refused. Auth requests are unlocked only
   inside the interactive `telegram login`; `auth.LogOut` only inside
-  `telegram logout`.
-- **At rest.** `<home>/mordred/telegram/` holds one AES-256-GCM file per chat
-  plus an index; the AAD binds each blob to its logical name and chat file
-  names are an HMAC of the chat id. Message counts and sizes remain observable.
+  `telegram logout`. Telethon's update machinery is disabled (`_on_login`
+  seeds state from `updates.GetState` only; no update loop), so no
+  `updates.GetDifference` traffic is needed. A second `telegram login` is
+  refused while a session exists, and a login that fails after Telegram
+  accepted it revokes the new authorization.
+- **At rest.** `<home>/mordred/telegram/` holds an index plus AES-256-GCM
+  segment files of up to 2000 messages per chat (a sync rewrites only the last
+  segment). Separate HKDF subkeys of `store_key` encrypt and name files; the
+  AAD binds each blob to its logical name and file names are an HMAC of chat id
+  and segment number. File counts and sizes remain observable.
 - **Egress.** Telegram and Venice resolve one explicit route through
   `extension.egress` (shared with Discord): Tor requires a loopback SOCKS proxy
   with remote DNS; VPN without a live runtime is refused.
@@ -152,12 +158,16 @@ browser extension, using a Venice.ai private model.
   models and an unreadable catalog fail closed. The request carries no tools,
   disables web search and Venice's system prompt, and runs the llm_guard
   `check_runtime_provider(active_provider="venice")` gate first. Only a
-  bounded selection is sent, pseudonymized by default (names, chat titles,
-  e-mail addresses, phone numbers become aliases mapped back locally), inside
-  a delimiter message text cannot close.
+  bounded selection is sent, pseudonymized by default (sender names, chat
+  titles, e-mail addresses, phone numbers become aliases mapped back locally;
+  alias brackets in message text are neutralized so text cannot forge one),
+  inside a delimiter message text cannot close. Names mentioned inside message
+  text and the question itself are sent as written.
 - **Wire.** Account label, chat titles and answer chunks are sealed with
-  `K_extchat`; the question must arrive sealed. Page sessions cannot reach the
-  Telegram handlers.
+  `K_extchat`; the question must arrive sealed. Numeric chat ids, counts and
+  dates travel unsealed over the loopback socket. Each question runs as its
+  own task (at most two per socket) and `telegram_ask_cancel` or a closed
+  socket stops it. Page sessions cannot reach the Telegram handlers.
 - **Not covered.** Secret chats (device-bound E2EE), media contents, and
   sending messages. Venice E2EE (TEE-attested) models are a planned follow-up.
 

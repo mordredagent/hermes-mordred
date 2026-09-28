@@ -287,7 +287,12 @@ def _conn(svc: Any, *, page: bool = False) -> Any:
 
 
 def _dispatch(conn: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    asyncio.run(conn.dispatch(json.dumps(payload)))
+    async def run() -> None:
+        await conn.dispatch(json.dumps(payload))
+        # Questions run as background tasks; let them finish.
+        await asyncio.gather(*list(conn._telegram_asks.values()), return_exceptions=True)
+
+    asyncio.run(run())
     return conn.ws.sent
 
 
@@ -339,6 +344,39 @@ def test_ws_ask_rejects_bad_requests(tmp_path, payload, reason):
     [frame] = _dispatch(_conn(svc), body)
     assert frame == {"id": "a", "type": "telegram_ask_error", "reason": reason}
     assert session.bodies == []
+
+
+def test_ws_ask_runs_in_background_and_can_be_cancelled(tmp_path):
+    svc, _ = _service(tmp_path, _value())
+
+    async def slow_ask(_request: Any, _on_meta: Any) -> Any:
+        await asyncio.sleep(3600)
+        yield "never"
+
+    svc.ask = slow_ask
+    conn = _conn(svc)
+    question = encrypt_message_v2(_EK, "q", key_id(_EK))
+
+    async def run() -> None:
+        await conn.dispatch(json.dumps({"id": "a", "type": "telegram_ask", "question": question}))
+        assert "a" in conn._telegram_asks  # dispatch returned while the ask runs
+        # Other frames are not blocked behind it.
+        await conn.dispatch(json.dumps({"id": "s", "type": "telegram_sync"}))
+        await conn.dispatch(json.dumps({"id": "a", "type": "telegram_ask_cancel"}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert conn._telegram_asks == {}
+
+    asyncio.run(run())
+    assert [f["type"] for f in conn.ws.sent] == ["telegram_sync_result"]
+
+
+def test_start_sync_reports_a_held_lock(tmp_path):
+    svc, _ = _service(tmp_path, _value())
+    held = store.ArchiveStore(b"\x05" * 32, tmp_path / "tg")
+    with held.locked(), pytest.raises(store.StoreError, match="sync_in_progress"):
+        asyncio.run(svc.start_sync())
+    assert svc.syncing is False
 
 
 def test_ws_ask_error_is_a_code(tmp_path):
@@ -417,6 +455,33 @@ def test_cli_login_stores_session_in_vault_only(tmp_path, monkeypatch):
     assert fake.sign_ins[-1] == {"password": "2fa-password"}
     assert policies[0].login is True
     assert "2fa-password" not in secrets.encode(mem.value).decode()
+
+
+def test_cli_login_refuses_when_already_logged_in():
+    mem = _MemorySecrets(_value())
+    rc = telegram_cli.telegram_login(
+        input_fn=lambda _p: "", secret_fn=lambda _p: "", store=mem, client_factory=lambda *_a, **_k: None
+    )
+    assert rc == 1 and mem.value.session == "S"
+
+
+def test_cli_login_revokes_when_saving_the_session_fails(monkeypatch):
+    fake = _LoginClient(needs_password=False)
+    fake._authorized = True
+
+    def broken_save(_client: Any) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("mordred_hermes.extension.telegram.client.save_session", broken_save)
+    answers = iter(["12345", "+810000", "11111"])
+    mem = _MemorySecrets(None)
+    rc = telegram_cli.telegram_login(
+        input_fn=lambda _p: next(answers),
+        secret_fn=lambda _p: "cd" * 16,
+        store=mem,
+        client_factory=lambda *_a, **_k: fake,
+    )
+    assert rc == 1 and fake.logged_out and mem.value is None
 
 
 def test_cli_login_rejects_bad_api_hash(tmp_path):

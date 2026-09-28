@@ -113,6 +113,9 @@ DiscordResolver = Callable[[str, str], Awaitable[DiscordChannelContext]]
 
 # Telegram requests carry at most this many selected dialog ids.
 _MAX_TELEGRAM_DIALOG_IDS = 50
+# Questions run as their own tasks (a Venice answer can take minutes and must
+# not stall the socket's other frames); cap how many one socket may run.
+_MAX_TELEGRAM_ASKS_PER_SOCKET = 2
 _TELEGRAM_DIALOG_ID_RE = re.compile(r"-?[0-9]{1,20}")
 
 
@@ -367,6 +370,7 @@ class ExtensionAPIServer:
                     break
         finally:
             keepalive.cancel()
+            conn.cancel_background_tasks()
         return ws
 
 
@@ -398,6 +402,13 @@ class _Connection:
         self._page_authenticated = False
         self._nonce = b""
         self._pending_sign: dict[str, dict[str, Any]] = {}
+        self._telegram_asks: dict[str, asyncio.Task[None]] = {}
+
+    def cancel_background_tasks(self) -> None:
+        """Stop work that would otherwise outlive this socket (and keep billing)."""
+        for task in list(self._telegram_asks.values()):
+            task.cancel()
+        self._telegram_asks.clear()
 
     async def _send(self, payload: dict[str, Any]) -> bool:
         # A client that disconnected mid-turn (e.g. during a slow local-LLM
@@ -470,6 +481,7 @@ class _Connection:
             "telegram_sync": self._on_telegram_sync,
             "telegram_dialogs": self._on_telegram_dialogs,
             "telegram_ask": self._on_telegram_ask,
+            "telegram_ask_cancel": self._on_telegram_ask_cancel,
         }
         try:
             if mtype in pre_auth:
@@ -512,6 +524,7 @@ class _Connection:
         # An approval captured under a revoked principal must not survive a
         # re-authentication with a replacement pairing.
         self._pending_sign.clear()
+        self.cancel_background_tasks()
 
     def _authentication_is_current(self) -> bool:
         """Fail closed unless this socket still names the active principal."""
@@ -1027,8 +1040,6 @@ class _Connection:
         )
 
     async def _on_telegram_ask(self, msg: dict[str, Any]) -> None:
-        from .telegram.service import AskResult, error_code
-
         mid = msg.get("id")
         ek = self._telegram_key()
         if ek is None:
@@ -1038,6 +1049,26 @@ class _Connection:
         if isinstance(request, str):
             await self._send({"id": mid, "type": "telegram_ask_error", "reason": request})
             return
+        if not isinstance(mid, str) or not mid or mid in self._telegram_asks:
+            await self._send({"id": mid, "type": "telegram_ask_error", "reason": "invalid_request"})
+            return
+        if len(self._telegram_asks) >= _MAX_TELEGRAM_ASKS_PER_SOCKET:
+            await self._send({"id": mid, "type": "telegram_ask_error", "reason": "too_many_requests"})
+            return
+        task = asyncio.create_task(self._run_telegram_ask(mid, request, ek))
+        self._telegram_asks[mid] = task
+        task.add_done_callback(lambda _t: self._telegram_asks.pop(mid, None))
+
+    async def _on_telegram_ask_cancel(self, msg: dict[str, Any]) -> None:
+        """Stop a running question (the popup closed). No reply: the id is gone."""
+        mid = msg.get("id")
+        task = self._telegram_asks.get(mid) if isinstance(mid, str) else None
+        if task is not None:
+            task.cancel()
+
+    async def _run_telegram_ask(self, mid: str, request: Any, ek: bytes) -> None:
+        from .telegram.service import AskResult, error_code
+
         meta: list[AskResult] = []
         gen = self._telegram_ready().ask(request, meta.append)
         sent_meta = False
@@ -1055,11 +1086,12 @@ class _Connection:
                             "truncated": meta[0].truncated,
                         }
                     )
-                if not await self._send(
-                    {"id": mid, "type": "telegram_ask_chunk", "content": self._telegram_seal(ek, chunk)}
-                ):
+                sealed = self._telegram_seal(ek, chunk)
+                if not await self._send({"id": mid, "type": "telegram_ask_chunk", "content": sealed}):
                     return
             await self._send({"id": mid, "type": "telegram_ask_end"})
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             await self._send(
                 {"id": mid, "type": "telegram_ask_error", "reason": error_code(exc, "telegram_ask_failed")}

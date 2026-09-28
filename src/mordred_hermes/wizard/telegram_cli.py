@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import getpass
 import sys
 from collections.abc import Callable
@@ -57,6 +58,8 @@ def _report(code: str) -> int:
         "invalid_api_credentials": "api_id must be a number and api_hash a 32-character hex string "
         "(from https://my.telegram.org → API development tools).",
         "sync_in_progress": "another sync is already running.",
+        "telegram_already_logged_in": "a Telegram session is already stored. Run `hermes-mordred telegram logout` "
+        "first so the old session is revoked instead of being left behind.",
     }
     _term.emit_error(messages.get(code, f"telegram operation failed ({code})."))
     return 1
@@ -108,19 +111,30 @@ def telegram_login(
         current = secrets_store.load(fresh=True)
     except TelegramSecretsError as exc:
         return _report(exc.code)
+    if current is not None and current.session is not None:
+        return _report("telegram_already_logged_in")
     try:
         if current is None:
+            if _orphaned_archive_present():
+                # Its key went with the old vault entry, so it can never be
+                # decrypted again; a fresh key would otherwise fail on it.
+                from ..extension.telegram.store import wipe_archive
+
+                wipe_archive()
+                _term.emit_warn("removed an undecryptable archive left by a previous setup.")
             api_id, api_hash = _read_api_credentials(input_fn, secret_fn)
             base = TelegramSecrets(api_id=api_id, api_hash=api_hash, store_key=new_store_key())
         else:
             base = current
             print(f"Using the stored API application (api_id {base.api_id}).")
+        policy = RequestPolicy(login=True)
         me, session = asyncio.run(
             _login_and_disconnect(
-                lambda: factory(base.api_id, base.api_hash, None, policy=RequestPolicy(login=True)),
+                lambda: factory(base.api_id, base.api_hash, None, policy=policy),
                 input_fn,
                 secret_fn,
                 save_session,
+                policy,
             )
         )
     except (TelegramSecretsError, TelegramClientError) as exc:
@@ -142,15 +156,35 @@ def telegram_login(
 
 
 async def _login_and_disconnect(
-    make_client: Callable[[], Any], input_fn: InputFn, secret_fn: InputFn, save: Callable[[Any], str]
+    make_client: Callable[[], Any],
+    input_fn: InputFn,
+    secret_fn: InputFn,
+    save: Callable[[Any], str],
+    policy: Any,
 ) -> tuple[Any, str]:
     # Built inside the running loop: Telethon binds a client to its loop.
     client = make_client()
     try:
         me = await _interactive_sign_in(client, input_fn, secret_fn)
         return me, save(client)
+    except BaseException:
+        # If Telegram already accepted the sign-in, the new authorization would
+        # otherwise stay on the account with no stored session to revoke it.
+        with contextlib.suppress(Exception):
+            if getattr(client, "_authorized", False):
+                policy.logout = True
+                await client.log_out()
+        raise
     finally:
-        await client.disconnect()
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+
+def _orphaned_archive_present() -> bool:
+    from ..extension.telegram.store import telegram_dir
+
+    base = telegram_dir()
+    return base.is_dir() and not base.is_symlink() and any(base.rglob("*.enc"))
 
 
 # -- sync / status ---------------------------------------------------------------

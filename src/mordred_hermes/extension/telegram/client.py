@@ -12,12 +12,19 @@ Two independent guards keep the client read-only:
 
 Cross-DC "exported" senders are refused outright: they exist to download media
 from other data centres, which this importer never does.
+
+Telethon's update machinery is disabled: ``_on_login`` normally follows
+``updates.GetState`` with ``updates.GetDifference`` to catch up on missed
+updates, and the update loop keeps issuing (channel) difference requests. The
+importer pulls history explicitly and never consumes updates, so it seeds the
+message box from ``GetState`` alone and runs no update loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,6 +124,21 @@ def build_client(api_id: int, api_hash: str, session: str | None, *, policy: Req
         ) -> Any:
             check_request(request, policy)
             return await super()._call(sender, request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold)
+
+        async def _on_login(self, user: Any) -> Any:
+            from telethon._updates import SessionState
+            from telethon.tl.functions.updates import GetStateRequest
+
+            self._mb_entity_cache.set_self_user(user.id, user.bot, user.access_hash)
+            self._authorized = True
+            state = await self(GetStateRequest())
+            self._message_box.load(
+                SessionState(0, 0, 0, state.pts, state.qts, int(state.date.timestamp()), state.seq, 0), []
+            )
+            return user
+
+        async def _update_loop(self) -> None:
+            return None
 
         async def _borrow_exported_sender(self, dc_id: int) -> Any:
             raise ReadOnlyViolation("exported_sender")
@@ -236,33 +258,41 @@ async def _sync_dialog(
     info: DialogInfo,
     entity: Any,
     options: SyncOptions,
-    on_batch: Callable[[int], None],
+    on_batch: Callable[[int], Awaitable[None]],
 ) -> None:
-    first_import = info.last_message_id == 0
-    if first_import and options.limit_per_dialog is not None:
-        iterator = client.iter_messages(entity, limit=options.limit_per_dialog)
-    else:
-        iterator = client.iter_messages(entity, min_id=info.last_message_id, reverse=True)
-    batch: list[StoredMessage] = []
+    """Import one dialog's new messages. Store I/O runs off the event loop."""
 
-    def flush() -> None:
+    async def flush(batch: list[StoredMessage]) -> None:
         if not batch:
             return
-        merged = store.append_messages(info.dialog_id, batch)
-        info.message_count = len(merged)
-        info.last_message_id = max(info.last_message_id, merged[-1].id)
-        info.last_date = max(info.last_date, merged[-1].date)
-        on_batch(len(batch))
-        batch.clear()
+        added = await asyncio.to_thread(store.append_messages, info.dialog_id, batch)
+        if added:
+            info.message_count += added
+            info.last_message_id = max(info.last_message_id, batch[-1].id)
+            info.last_date = max(info.last_date, batch[-1].date)
+            await on_batch(added)
 
-    async for message in iterator:
+    if info.last_message_id == 0 and options.limit_per_dialog is not None:
+        # Newest-first, bounded: collect everything, then store in ascending
+        # order in one go, so an interrupted first import leaves no gap.
+        newest: list[StoredMessage] = []
+        async for message in client.iter_messages(entity, limit=options.limit_per_dialog):
+            converted = convert_message(message)
+            if converted is not None:
+                newest.append(converted)
+        await flush(sorted(newest, key=lambda m: m.id))
+        return
+
+    batch: list[StoredMessage] = []
+    async for message in client.iter_messages(entity, min_id=info.last_message_id, reverse=True):
         converted = convert_message(message)
         if converted is None:
             continue
         batch.append(converted)
         if len(batch) >= _FLUSH_EVERY:
-            flush()
-    flush()
+            await flush(batch)
+            batch = []
+    await flush(batch)
 
 
 async def sync_archive(
@@ -281,7 +311,7 @@ async def sync_archive(
     """
     opts = options or SyncOptions()
     state = SyncProgress(started_at=int(clock()))
-    index = store.load_index()
+    index = await asyncio.to_thread(store.load_index)
     me = await client.get_me()
     if me is None:
         raise TelegramClientError("telegram_not_logged_in")
@@ -300,9 +330,9 @@ async def sync_archive(
         info.archived = archived
         index.dialogs[info.dialog_id] = info
 
-        def on_batch(count: int) -> None:
+        async def on_batch(count: int) -> None:
             state.messages_imported += count
-            store.save_index(index)
+            await asyncio.to_thread(store.save_index, index)
             if progress is not None:
                 progress(state)
 
@@ -312,7 +342,7 @@ async def sync_archive(
             progress(state)
 
     index.last_sync = int(clock())
-    store.save_index(index)
+    await asyncio.to_thread(store.save_index, index)
     state.finished_at = index.last_sync
     return state
 
