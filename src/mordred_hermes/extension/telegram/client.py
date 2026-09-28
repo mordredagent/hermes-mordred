@@ -56,6 +56,7 @@ class SyncOptions:
     include_channels: bool = True  # broadcast channels (often very large)
     include_archived: bool = True
     limit_per_dialog: int | None = None  # first import only: newest N messages
+    since_days: int | None = None  # only chats active, and messages sent, in the last N days
 
 
 @dataclass
@@ -237,7 +238,13 @@ def dialog_kind(dialog: Any) -> str:
 # -- sync ----------------------------------------------------------------------
 
 
-async def _collect_dialogs(client: Any, options: SyncOptions) -> list[tuple[Any, bool]]:
+def _last_activity(dialog: Any) -> float | None:
+    date = getattr(dialog, "date", None)
+    return date.timestamp() if date is not None else None
+
+
+async def _collect_dialogs(client: Any, options: SyncOptions, cutoff: float | None) -> list[tuple[Any, bool]]:
+    """Chats to import: pinned first, then most recently active."""
     seen: set[int] = set()
     dialogs: list[tuple[Any, bool]] = []
     folders = [False, True] if options.include_archived else [False]
@@ -248,8 +255,30 @@ async def _collect_dialogs(client: Any, options: SyncOptions) -> list[tuple[Any,
             seen.add(dialog.id)
             if not options.include_channels and dialog_kind(dialog) == "channel":
                 continue
+            last = _last_activity(dialog)
+            if cutoff is not None and last is not None and last < cutoff:
+                continue  # nothing in the window; do not even open it
             dialogs.append((dialog, archived))
+    # Stable: Telegram already lists by recency, so this only lifts pinned chats.
+    dialogs.sort(key=lambda pair: not getattr(pair[0], "pinned", False))
     return dialogs
+
+
+async def _newest(
+    client: Any, entity: Any, after_id: int, limit: int | None, cutoff: float | None
+) -> list[StoredMessage]:
+    """Newest-first messages above *after_id*, until *cutoff* or *limit*; returned ascending."""
+    found: list[StoredMessage] = []
+    async for message in client.iter_messages(entity, min_id=after_id):
+        converted = convert_message(message)
+        if converted is None:
+            continue
+        if cutoff is not None and converted.date < cutoff:
+            break
+        found.append(converted)
+        if limit is not None and len(found) >= limit:
+            break
+    return sorted(found, key=lambda m: m.id)
 
 
 async def _sync_dialog(
@@ -259,6 +288,7 @@ async def _sync_dialog(
     entity: Any,
     options: SyncOptions,
     on_batch: Callable[[int], Awaitable[None]],
+    cutoff: float | None = None,
 ) -> None:
     """Import one dialog's new messages. Store I/O runs off the event loop."""
 
@@ -272,15 +302,13 @@ async def _sync_dialog(
             info.last_date = max(info.last_date, batch[-1].date)
             await on_batch(added)
 
+    if cutoff is not None:
+        # Newest-first back to the cutoff; older gaps are left for a wider sync.
+        await flush(await _newest(client, entity, info.last_message_id, options.limit_per_dialog, cutoff))
+        return
     if info.last_message_id == 0 and options.limit_per_dialog is not None:
-        # Newest-first, bounded: collect everything, then store in ascending
-        # order in one go, so an interrupted first import leaves no gap.
-        newest: list[StoredMessage] = []
-        async for message in client.iter_messages(entity, limit=options.limit_per_dialog):
-            converted = convert_message(message)
-            if converted is not None:
-                newest.append(converted)
-        await flush(sorted(newest, key=lambda m: m.id))
+        # Bounded first import, stored in one go so an interruption leaves no gap.
+        await flush(await _newest(client, entity, 0, options.limit_per_dialog, None))
         return
 
     batch: list[StoredMessage] = []
@@ -318,7 +346,8 @@ async def sync_archive(
     index.account_id = int(me.id)
     index.account_label = _display_name(me)
 
-    dialogs = await _collect_dialogs(client, opts)
+    cutoff = clock() - opts.since_days * 86400 if opts.since_days else None
+    dialogs = await _collect_dialogs(client, opts, cutoff)
     state.dialogs_total = len(dialogs)
     if progress is not None:
         progress(state)
@@ -336,7 +365,7 @@ async def sync_archive(
             if progress is not None:
                 progress(state)
 
-        await _sync_dialog(client, store, info, dialog.entity, opts, on_batch)
+        await _sync_dialog(client, store, info, dialog.entity, opts, on_batch, cutoff)
         state.dialogs_done += 1
         if progress is not None:
             progress(state)

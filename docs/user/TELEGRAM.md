@@ -61,9 +61,13 @@ any other model they are hidden and refused.
 **Keep it up to date.**
 
 ```sh
-hermes-mordred telegram sync                       # new messages since the last import
-hermes-mordred telegram sync --skip-channels       # skip broadcast channels
+hermes-mordred telegram sync --days 3 --skip-archived   # just the last 3 days; pinned chats first
+hermes-mordred telegram sync                            # same options as last time
+hermes-mordred telegram sync --all                      # everything (slow)
 ```
+
+Options you pass are remembered, so a plain `sync` repeats them. With
+`--days N`, chats idle for longer than N days are not even opened.
 
 ## Check health
 

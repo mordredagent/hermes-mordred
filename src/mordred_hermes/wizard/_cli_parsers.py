@@ -86,6 +86,13 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Ignore the scope saved by setup and import every chat, channel and archived chat",
     )
+    p_sync.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Only chats active in the last N days, and only their last N days of messages",
+    )
     p_sync.add_argument("--skip-channels", action="store_true", help="Skip broadcast channels")
     p_sync.add_argument("--skip-archived", action="store_true", help="Skip the Archived Chats folder")
     p_sync.add_argument(

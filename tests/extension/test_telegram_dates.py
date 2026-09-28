@@ -227,3 +227,101 @@ def test_cli_sync_uses_saved_scope_unless_all(monkeypatch):
     assert (used[-1].include_channels, used[-1].limit_per_dialog) == (False, 500)
     assert telegram_cli.telegram_sync(service=_Svc(), everything=True) == 0
     assert (used[-1].include_channels, used[-1].include_archived, used[-1].limit_per_dialog) == (True, True, None)
+
+
+# -- recent-days window and pinned-first sync ------------------------------------------
+
+
+class _Dialog:
+    def __init__(self, did: int, entity: str, last: dt.datetime, *, pinned: bool = False) -> None:
+        self.id = did
+        self.name = entity
+        self.entity = entity
+        self.date = last
+        self.pinned = pinned
+        self.is_user = True
+        self.is_group = False
+
+
+class _Msg:
+    def __init__(self, mid: int, when: dt.datetime) -> None:
+        self.id = mid
+        self.message = f"m{mid}"
+        self.date = when
+        self.sender = None
+        self.out = False
+        self.media = None
+        self.reply_to = None
+
+
+_Msg.__name__ = "Message"
+
+
+class _Client:
+    def __init__(self, dialogs: list[_Dialog], history: dict[str, list[_Msg]]) -> None:
+        self.dialogs = dialogs
+        self.history = history
+        self.opened: list[str] = []
+
+    async def get_me(self) -> Any:
+        return SimpleNamespace(id=1, first_name="Me", last_name=None)
+
+    async def iter_dialogs(self, archived: bool = False) -> Any:
+        if not archived:
+            for d in self.dialogs:
+                yield d
+
+    async def iter_messages(self, entity: str, *, min_id: int = 0, limit: int | None = None, reverse: bool = False):
+        self.opened.append(entity)
+        for m in sorted(self.history[entity], key=lambda m: m.id, reverse=not reverse):
+            if m.id > min_id:
+                yield m
+
+
+def test_recent_days_skips_idle_chats_and_old_messages_and_puts_pinned_first(tmp_path):
+    from mordred_hermes.extension.telegram import client as tg
+
+    now = dt.datetime(2026, 9, 28, 12, tzinfo=dt.UTC)
+    day = dt.timedelta(days=1)
+    fake = _Client(
+        [
+            _Dialog(1, "recent", now - 2 * dt.timedelta(hours=1)),
+            _Dialog(2, "idle", now - 10 * day),
+            _Dialog(3, "pinned", now - 1 * day, pinned=True),
+        ],
+        {
+            "recent": [_Msg(1, now - 5 * day), _Msg(2, now - 1 * day), _Msg(3, now - dt.timedelta(hours=2))],
+            "idle": [_Msg(1, now - 10 * day)],
+            "pinned": [_Msg(7, now - 4 * day), _Msg(8, now - 1 * day)],
+        },
+    )
+    archive = store.ArchiveStore(b"\x01" * 32, tmp_path)
+    opts = tg.SyncOptions(include_archived=False, since_days=3)
+    asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
+    assert fake.opened == ["pinned", "recent"]  # pinned first; the idle chat is never opened
+    assert [m.id for m in archive.load_messages(1)] == [2, 3]
+    assert [m.id for m in archive.load_messages(3)] == [8]
+    assert 2 not in archive.load_index().dialogs
+
+
+def test_cli_sync_remembers_the_options_it_was_given(monkeypatch):
+    saved: list[dict[str, Any]] = []
+    scope: dict[str, Any] = {}
+
+    class _Svc:
+        _secrets = SimpleNamespace(save_sync_scope=lambda s: (saved.append(s), scope.update(s)))
+
+        def sync_options(self, overrides: Any) -> Any:
+            return service.TelegramService.sync_options(
+                SimpleNamespace(_secrets=SimpleNamespace(sync_scope=lambda: dict(scope))), overrides
+            )
+
+    async def fake_run(_svc: Any, options: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(telegram_cli, "_run_sync", fake_run)
+    assert telegram_cli.telegram_sync(service=_Svc(), since_days=3, include_archived=False) == 0
+    assert saved[-1] == {"include_channels": True, "include_archived": False, "limit_per_dialog": None, "since_days": 3}
+    count = len(saved)
+    assert telegram_cli.telegram_sync(service=_Svc()) == 0  # plain sync reuses it and saves nothing new
+    assert len(saved) == count

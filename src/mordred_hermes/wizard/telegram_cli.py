@@ -255,31 +255,42 @@ def telegram_sync(
     include_channels: bool | None = None,
     include_archived: bool | None = None,
     limit_per_dialog: int | None = None,
+    since_days: int | None = None,
     everything: bool = False,
     service: Any = None,
 ) -> int:
-    """Import new messages. Unset options fall back to the scope saved by setup."""
+    """Import new messages. Options given here are remembered for the next plain `sync`."""
     from ..extension.telegram.client import SyncOptions
     from ..extension.telegram.service import TelegramService, error_code
 
     svc = service if service is not None else TelegramService()
-    if everything:
-        options = SyncOptions(include_channels=True, include_archived=True, limit_per_dialog=None)
-    else:
-        options = svc.sync_options(
-            {
-                "include_channels": include_channels,
-                "include_archived": include_archived,
-                "limit_per_dialog": limit_per_dialog,
-            }
-        )
+    given = {
+        "include_channels": include_channels,
+        "include_archived": include_archived,
+        "limit_per_dialog": limit_per_dialog,
+        "since_days": since_days,
+    }
+    options = SyncOptions(include_channels=True, include_archived=True) if everything else svc.sync_options(given)
+    explicit = everything or any(v is not None for v in given.values())
+    save = getattr(getattr(svc, "_secrets", None), "save_sync_scope", None)
+    if explicit and save is not None:
+        with contextlib.suppress(Exception):
+            save(
+                {
+                    "include_channels": options.include_channels,
+                    "include_archived": options.include_archived,
+                    "limit_per_dialog": options.limit_per_dialog,
+                    "since_days": options.since_days,
+                }
+            )
     skipped = [
         name
         for name, keep in (("channels", options.include_channels), ("archived", options.include_archived))
         if not keep
     ]
-    limit = f"; newest {options.limit_per_dialog} per newly seen chat" if options.limit_per_dialog else ""
-    print(f"Scope: all chats{' except ' + ' and '.join(skipped) if skipped else ''}{limit}.")
+    limit = f"; at most {options.limit_per_dialog} per new chat" if options.limit_per_dialog else ""
+    window = f"; last {options.since_days} days only" if options.since_days else ""
+    print(f"Scope: pinned first, all chats{' except ' + ' and '.join(skipped) if skipped else ''}{window}{limit}.")
     try:
         return asyncio.run(_run_sync(svc, options))
     except Exception as exc:
@@ -462,6 +473,7 @@ def cli_telegram(args: argparse.Namespace) -> int:
             include_channels=False if args.skip_channels else None,
             include_archived=False if args.skip_archived else None,
             limit_per_dialog=args.limit_per_dialog,
+            since_days=getattr(args, "days", None),
             everything=bool(getattr(args, "all", False)),
         )
     if command == "status":

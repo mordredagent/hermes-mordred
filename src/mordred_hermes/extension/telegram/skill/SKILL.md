@@ -84,8 +84,9 @@ only: no content, no account name, no Touch ID).
 
 ## Syncing
 
-`hermes-mordred telegram sync` imports new messages using the scope the user
-chose at setup. You may run it **only after the user agrees**, never with
+`hermes-mordred telegram sync` imports new messages with the options used last
+time (pinned chats first). For "just catch up", suggest
+`hermes-mordred telegram sync --days 3 --skip-archived`. You may run it **only after the user agrees**, never with
 `--all` unless they ask for everything, and never ask questions while it runs
 (`coverage.sync_running` is true): wait for it to finish, then ask once.
 Do not retry a failing question in a loop — report the error code instead.

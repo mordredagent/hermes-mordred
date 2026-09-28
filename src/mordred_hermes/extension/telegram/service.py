@@ -323,11 +323,15 @@ class TelegramService:
         scope_fn = getattr(self._secrets, "sync_scope", None)
         scope: dict[str, Any] = dict(scope_fn()) if scope_fn is not None else {}
         scope.update({k: v for k, v in (overrides or {}).items() if v is not None})
-        limit = scope.get("limit_per_dialog")
+
+        def count(value: Any) -> int | None:
+            return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
         return SyncOptions(
             include_channels=scope.get("include_channels") is not False,
             include_archived=scope.get("include_archived") is not False,
-            limit_per_dialog=limit if isinstance(limit, int) and not isinstance(limit, bool) else None,
+            limit_per_dialog=count(scope.get("limit_per_dialog")),
+            since_days=count(scope.get("since_days")),
         )
 
     async def start_sync(self, options: SyncOptions | None = None) -> None:

@@ -510,6 +510,7 @@ hermes-mordred telegram doctor              # health check from metadata only (n
 hermes-mordred keyvault enable-se           # once: build the Secure Enclave helper (required)
 hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); sealed by the Secure Enclave
 hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive
+hermes-mordred telegram sync --days 3 --skip-archived   # recent window, pinned chats first; options are remembered
 hermes-mordred telegram sync --skip-channels --limit-per-dialog 5000
 hermes-mordred telegram status              # login state and archive counts
 hermes-mordred telegram venice              # store the Venice.ai API key (hidden prompt); --model to pick a model
