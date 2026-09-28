@@ -337,6 +337,41 @@ def _managed_runtime_python(home: Path) -> Path | None:
     return None
 
 
+#: ``site`` prints ``sys.path``; the managed launcher's shows the active install venv.
+_SITE_PACKAGES = re.compile(r"'(/[^']+/venv)/lib/python[0-9.]+/site-packages'")
+
+
+def _desktop_runtime_python(home: Path) -> Path | None:
+    """The venv python behind Hermes Desktop's managed launcher, if present.
+
+    Hermes Desktop (and the git/bootstrap install it uses) runs a standalone
+    Python that selects ``<home>/installs/<id>/environments/<id>/venv`` at
+    startup; neither ``<home>/hermes-agent/venv`` nor ``hermes`` on PATH
+    exists. Ask the launcher itself: ``--run-module site`` prints ``sys.path``,
+    which contains that environment's site-packages.
+    """
+    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        return None
+    try:
+        proc = subprocess.run(
+            [str(launcher), "--run-module", "site"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={k: v for k, v in os.environ.items() if k not in _PROBE_ENV_STRIPPED},
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for match in _SITE_PACKAGES.finditer(proc.stdout):
+        for name in ("python3", "python"):
+            candidate = Path(match.group(1)) / "bin" / name
+            if candidate.exists():
+                return candidate
+    return None
+
+
 def discover_runtime_python(home: Path | None = None, explicit: str | Path | None = None) -> Path | None:
     """Resolve the interpreter that actually runs ``hermes``, or ``None``.
 
@@ -345,7 +380,9 @@ def discover_runtime_python(home: Path | None = None, explicit: str | Path | Non
     1. ``explicit`` argument or :data:`RUNTIME_PYTHON_ENV` — operator override.
     2. ``<home>/hermes-agent/venv/bin/python`` — Hermes's managed runtime venv
        (deterministic; not shadowable by an activated dev venv).
-    3. the ``hermes`` launcher on ``$PATH`` — its shebang / ``exec`` target.
+    3. Hermes Desktop's managed launcher (``<home>/hermes-agent/.hermes/bin/hermes``)
+       — the install venv it selects (see :func:`_desktop_runtime_python`).
+    4. the ``hermes`` launcher on ``$PATH`` — its shebang / ``exec`` target.
 
     Step 2 is deliberately tried before step 3 so an activated dev venv whose
     ``hermes`` shadows the host one cannot pose as the runtime.
@@ -360,6 +397,10 @@ def discover_runtime_python(home: Path | None = None, explicit: str | Path | Non
     managed = _managed_runtime_python(home)
     if managed is not None:
         return managed
+
+    desktop = _desktop_runtime_python(home)
+    if desktop is not None:
+        return desktop
 
     import shutil
 
@@ -711,7 +752,7 @@ def _resolve_runtime_python(home: Path | None, runtime_python: Path | None) -> t
     if python is None:
         return None, (
             "could not locate the interpreter that runs `hermes` "
-            "(looked for <home>/hermes-agent/venv and `hermes` on PATH); "
+            "(looked for <home>/hermes-agent/venv, Hermes Desktop's launcher and `hermes` on PATH); "
             f"set {RUNTIME_PYTHON_ENV} to point at it"
         )
     return python, ""
