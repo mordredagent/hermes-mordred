@@ -516,18 +516,21 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 
 ### `desktop` — Mordred setup page in Hermes Desktop
 ```sh
-hermes-mordred desktop install     # place the setup page + its local API in <home>/plugins/mordred
+hermes-mordred desktop install     # place the setup page and its local API
 hermes-mordred desktop status
 hermes-mordred desktop uninstall
 ```
-> Hermes loads desktop pages and their local APIs only from plugin folders,
-> so this writes a thin `<home>/plugins/mordred` (a `desktop/plugin.js` page
-> and a `dashboard/plugin_api.py` shim that imports this package) and adds
+> Hermes loads desktop pages and their local APIs only from folders, so this
+> writes the page to `<home>/desktop-plugins/mordred/plugin.js` (Hermes
+> Desktop's user-plugin folder, which it loads switched on) and a
+> `<home>/plugins/mordred/dashboard/plugin_api.py` shim that imports this
+> package, and adds
 > `mordred` to `plugins.enabled` (migrating any pre-0.1.0a21 `mordred_*`
 > plugin names) — nothing else in `config.yaml` changes. `mordred` is also
 > Mordred's agent plugin, so this enables Mordred itself, and Hermes Desktop
-> shows the page and the plugin as one `mordred` row. `desktop uninstall`
-> removes only the folder; Mordred stays enabled (to remove Mordred
+> shows the page and the plugin as one `mordred` row. The plugin also re-places
+> the page at every start, so any install method gets it. `desktop uninstall`
+> removes only the page and the shim; Mordred stays enabled (to remove Mordred
 > completely, use [`uninstall`](#uninstall-safely)). The
 > page sends secrets with the Desktop plugin REST bridge
 > (`/api/plugins/mordred/…`, session-token protected, loopback only) straight

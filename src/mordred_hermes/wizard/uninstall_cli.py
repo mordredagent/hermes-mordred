@@ -262,12 +262,15 @@ def _default_gateways(home: Path) -> list[str]:
 
 def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
     """Everything ``uninstall`` would do, computed without changing anything."""
-    from ..desktop.install import plugin_dir
+    from ..desktop.install import page_dir, plugin_dir
 
     restores = _restores(ctx)
     config = plan_config_cleanup(ctx.home / "config.yaml")
     env = plan_env_cleanup(ctx.home / ".env")
-    page = plugin_dir(ctx.home)
+    page = next(
+        (d for d in (page_dir(ctx.home), plugin_dir(ctx.home)) if d.is_dir() and not d.is_symlink()),
+        plugin_dir(ctx.home),
+    )
     hermes_env = detect_hermes_env(ctx.home, which=ctx.which, runner=ctx.runner)
     telegram_configured = (ctx.home / "mordred" / "telegram" / "credentials.sealed").exists()
     plan = UninstallPlan(

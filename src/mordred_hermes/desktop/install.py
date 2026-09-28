@@ -1,9 +1,19 @@
 """``hermes-mordred desktop install|uninstall`` — place the Hermes Desktop half.
 
-Hermes loads a desktop page and its local API only from a plugin *folder*
-(``<home>/plugins/<id>/{desktop,dashboard}``), not from a pip entry point.
-This writes a thin folder whose API module imports :mod:`.api` from the
-installed package, and enables ``mordred`` in ``plugins.enabled``.
+Hermes loads a desktop page and its local API only from folders, not from a
+pip entry point:
+
+- the page: ``<home>/desktop-plugins/mordred/plugin.js``. Hermes Desktop's
+  "disk door" for user plugins, which it loads enabled. (A page shipped as
+  ``<home>/plugins/<id>/desktop/`` is copied there by the app but starts
+  switched off until the user finds it under Skills & Tools → Plugins, so
+  it is not used.)
+- the local API: ``<home>/plugins/mordred/dashboard/``, a thin module that
+  imports :mod:`.api` from the installed package.
+
+``install`` writes both and enables ``mordred`` in ``plugins.enabled``;
+:func:`ensure_page` rewrites only changed files and is called by the plugin at
+every start, so any install method (installer, agent, pip) gets the page.
 
 ``mordred`` is also the name of Mordred's single entry-point plugin
 (:mod:`mordred_hermes.plugin`), so one ``plugins.enabled`` entry turns on both
@@ -25,7 +35,9 @@ from pathlib import Path
 from ..wizard import _term
 
 PLUGIN_ID = "mordred"
-_FILES = ("desktop/plugin.js", "dashboard/manifest.json", "dashboard/plugin_api.py")
+_PAGE_FILE = "desktop/plugin.js"
+_API_FILES = ("dashboard/manifest.json", "dashboard/plugin_api.py")
+_FILES = (_PAGE_FILE, *_API_FILES)
 
 
 def _home() -> Path:
@@ -36,6 +48,47 @@ def _home() -> Path:
 
 def plugin_dir(home: Path | None = None) -> Path:
     return (home or _home()) / "plugins" / PLUGIN_ID
+
+
+def page_dir(home: Path | None = None) -> Path:
+    return (home or _home()) / "desktop-plugins" / PLUGIN_ID
+
+
+def _targets(base: Path) -> dict[str, Path]:
+    targets = {rel: plugin_dir(base) / rel for rel in _API_FILES}
+    targets[_PAGE_FILE] = page_dir(base) / "plugin.js"
+    return targets
+
+
+def ensure_page(home: Path | None = None) -> bool:
+    """Write the page and API files that are missing or outdated; return whether any changed.
+
+    Never follows a symlinked folder, and never touches ``config.yaml``.
+    """
+    base = home or _home()
+    assets = resources.files("mordred_hermes.desktop").joinpath("assets")
+    changed = False
+    for rel, destination in _targets(base).items():
+        if any(p.is_symlink() for p in (destination.parent, destination.parent.parent)):
+            continue
+        data = assets.joinpath(rel).read_bytes()
+        try:
+            if destination.read_bytes() == data:
+                continue
+        except OSError:
+            pass
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tmp = destination.with_name(f".{destination.name}.tmp")
+        tmp.write_bytes(data)
+        tmp.replace(destination)
+        changed = True
+    # Earlier builds put the page under plugins/mordred/desktop/, which the app
+    # copies out as a second, switched-off "mordred" row. Drop it.
+    legacy = plugin_dir(base) / "desktop"
+    if legacy.is_dir() and not legacy.is_symlink():
+        shutil.rmtree(legacy)
+        changed = True
+    return changed
 
 
 def _enable(home: Path) -> None:
@@ -49,14 +102,9 @@ def _enable(home: Path) -> None:
 
 def install(home: Path | None = None) -> int:
     base = home or _home()
-    target = plugin_dir(base)
-    assets = resources.files("mordred_hermes.desktop").joinpath("assets")
-    for rel in _FILES:
-        destination = target / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(assets.joinpath(rel).read_bytes())
+    ensure_page(base)
     _enable(base)
-    print(f"Installed the Mordred desktop page at {target}.")
+    print(f"Installed the Mordred desktop page at {page_dir(base)}.")
     print("Next: restart Hermes Desktop, then open “Mordred” in the sidebar")
     print("(or ⌘K → “Mordred: Set up private Telegram”).")
     return 0
@@ -68,11 +116,13 @@ def remove_page(home: Path | None = None) -> bool:
     A symlink at the folder path is left alone (this command never writes one).
     Shared by :func:`uninstall` and ``hermes-mordred uninstall``.
     """
-    target = plugin_dir(home or _home())
-    if target.is_dir() and not target.is_symlink():
-        shutil.rmtree(target)
-        return True
-    return False
+    base = home or _home()
+    removed = False
+    for target in (page_dir(base), plugin_dir(base)):
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+            removed = True
+    return removed
 
 
 def uninstall(home: Path | None = None) -> int:
@@ -84,12 +134,12 @@ def uninstall(home: Path | None = None) -> int:
 
 
 def status(home: Path | None = None) -> int:
-    target = plugin_dir(home)
-    missing = [rel for rel in _FILES if not (target / rel).is_file()]
+    base = home or _home()
+    missing = [str(path) for path in _targets(base).values() if not path.is_file()]
     if missing:
         _term.emit_warn(f"Mordred desktop page not installed (missing: {', '.join(missing)}).")
         return 1
-    print(f"Mordred desktop page installed at {target}.")
+    print(f"Mordred desktop page installed at {page_dir(base)}.")
     return 0
 
 

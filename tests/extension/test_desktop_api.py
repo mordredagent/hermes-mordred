@@ -218,7 +218,10 @@ def test_install_writes_folder_and_enables_the_single_mordred_plugin(tmp_path):
     )
     assert install.install(tmp_path) == 0
     folder = tmp_path / "plugins" / "mordred"
-    assert (folder / "desktop" / "plugin.js").read_text().startswith("// Mordred setup for Hermes Desktop.")
+    page = tmp_path / "desktop-plugins" / "mordred" / "plugin.js"
+    # The page goes through Hermes Desktop's disk door, which loads it enabled.
+    assert page.read_text().startswith("// Mordred setup for Hermes Desktop.")
+    assert not (folder / "desktop").exists()
     assert json.loads((folder / "dashboard" / "manifest.json").read_text())["name"] == "mordred"
     assert "from mordred_hermes.desktop.api import router" in (folder / "dashboard" / "plugin_api.py").read_text()
     # No plugin.yaml: the folder must not become a directory plugin that
@@ -231,7 +234,35 @@ def test_install_writes_folder_and_enables_the_single_mordred_plugin(tmp_path):
     assert install.status(tmp_path) == 0
     assert install.uninstall(tmp_path) == 0
     # The page goes; the plugin (every Mordred protection) stays enabled.
-    assert not folder.exists() and "- mordred\n" in config.read_text()
+    assert not folder.exists() and not page.parent.exists() and "- mordred\n" in config.read_text()
+
+
+def test_ensure_page_is_idempotent_and_drops_the_legacy_desktop_half(tmp_path):
+    legacy = tmp_path / "plugins" / "mordred" / "desktop"
+    legacy.mkdir(parents=True)
+    (legacy / "plugin.js").write_text("old")
+    assert install.ensure_page(tmp_path) is True
+    assert not legacy.exists()
+    assert (tmp_path / "desktop-plugins" / "mordred" / "plugin.js").is_file()
+    assert install.ensure_page(tmp_path) is False  # nothing to rewrite
+    assert not (tmp_path / "config.yaml").exists()  # never touches config
+
+
+def test_plugin_register_places_the_page(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(install, "ensure_page", lambda home=None: calls.append(home) or True)
+    from mordred_hermes import plugin
+
+    class _Ctx:
+        def register_hook(self, *a, **k):
+            pass
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(plugin, "COMPONENTS", ())
+    plugin.register(_Ctx())
+    assert calls == [None]
 
 
 def test_install_creates_a_missing_config(tmp_path):

@@ -357,11 +357,16 @@ Every directory here carries a `.gitignore` of `*` (rewritten if changed), so
 not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
 working tree.
 
-## `<home>/plugins/mordred/`
+## `<home>/desktop-plugins/mordred/` and `<home>/plugins/mordred/`
 
-Written by `hermes-mordred desktop install`: `desktop/plugin.js` (the
-Hermes Desktop setup page) and `dashboard/{manifest.json,plugin_api.py}` (a
-shim importing `mordred_hermes.desktop.api`). No `plugin.yaml`, so Hermes'
+Written by `hermes-mordred desktop install`, and re-placed by the `mordred`
+plugin at every start (`desktop.install.ensure_page`, only changed files):
+`<home>/desktop-plugins/mordred/plugin.js` (the Hermes Desktop setup page,
+through the app's user-plugin folder, which loads enabled) and
+`<home>/plugins/mordred/dashboard/{manifest.json,plugin_api.py}` (a shim
+importing `mordred_hermes.desktop.api`). A page left at the older
+`plugins/mordred/desktop/` location is removed, because the app would copy it
+out as a second, switched-off row. No `plugin.yaml`, so Hermes'
 agent-plugin scanner finds no directory plugin there and the `mordred`
 entry-point plugin is not shadowed; Hermes Desktop pairs the page with that
 plugin by name. Holds no secrets.

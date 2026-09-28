@@ -765,7 +765,9 @@ main() {
 
   # Hermes Desktop: place the Mordred setup page (no keys are created here).
   local desktop_page=0
-  if [[ -d "${HERMES_HOME:-$HOME/.hermes}/desktop-plugins" ]]; then
+  # Placed whenever Hermes Desktop is installed ($HERMES_HOME/hermes-agent/apps/desktop)
+  # or has created its plugin folder; the plugin also re-places it at start.
+  if [[ -d "${HERMES_HOME:-$HOME/.hermes}/desktop-plugins" || -d "${HERMES_HOME:-$HOME/.hermes}/hermes-agent/apps/desktop" ]]; then
     if "$installed_cli" desktop install >/dev/null 2>&1; then
       desktop_page=1
     else

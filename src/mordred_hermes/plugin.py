@@ -186,3 +186,13 @@ def register(ctx: Any) -> None:
             continue
         with _STATE_LOCK:
             _component_hooks[component] = frozenset(view.hooks)
+
+    # Hermes Desktop: keep the setup page in place whatever installed Mordred
+    # (installer, the agent itself, plain pip). Best-effort; a no-op when the
+    # files are current, and never touches config.yaml.
+    try:
+        from .desktop.install import ensure_page
+
+        ensure_page()
+    except Exception as exc:
+        _LOG.warning("Mordred desktop page not placed: %s", type(exc).__name__)
