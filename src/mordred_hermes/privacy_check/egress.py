@@ -27,7 +27,9 @@ Rules that hold at every restricted level:
 - **Taint.** Once a session has read private data (the Telegram tools), that
   session is raised to ``lockdown`` for the rest of its life: a search query
   is an exfiltration channel too. Delegation is refused for a tainted session
-  because a child agent would start untainted.
+  because a child agent would start untainted, and tools that write plaintext
+  to disk (files, skills, memory, kanban) are refused so private data stays in
+  memory only.
 
 Configuration (``config.yaml``)::
 
@@ -92,6 +94,10 @@ FIRST_PARTY_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
 # Reading any of these puts private data into the session (taint source).
 TAINT_SOURCES = FIRST_PARTY_TOOLS
 SEARCH_TOOLS = frozenset({"web_search"})
+# Tools that write to disk in plaintext. A tainted session may not use them:
+# imported private data must exist in plaintext only in memory.
+PERSIST_TOOLS = frozenset({"write_file", "patch", "skill_manage", "memory"})
+_READ_ONLY_KANBAN = frozenset({"kanban_list", "kanban_show", "kanban_attachments"})
 # Tool → argument names holding URLs that the tool will fetch.
 URL_ARGS: dict[str, tuple[str, ...]] = {
     "web_extract": ("urls", "url"),
@@ -342,6 +348,19 @@ def _decide_restricted(level: str, tool: str, args: dict[str, Any]) -> Decision:
     return _block(level, "egress.outbound_tool", f"{tool} can send data outside this machine.")
 
 
+def _session_guard(tool: str, tainted: bool, effective: str) -> Decision | None:
+    """Rules for tools that could carry this session's data somewhere else."""
+    if tainted and (tool in PERSIST_TOOLS or (tool.startswith("kanban_") and tool not in _READ_ONLY_KANBAN)):
+        return _block(
+            "lockdown",
+            "egress.tainted_persist",
+            f"this session has read private data, which may not be written to disk in plaintext ({tool}).",
+        )
+    if tool == "delegate_task" and (tainted or effective == "lockdown"):
+        return _block(effective, "egress.delegate_tainted", "delegation is disabled for this session.")
+    return None
+
+
 def decide(tool: str, args: dict[str, Any] | None, session_id: str | None, policy: EgressPolicy) -> Decision:
     """Allow or block one tool call. Pure apart from reading the taint set."""
     args = args if isinstance(args, dict) else {}
@@ -354,15 +373,12 @@ def decide(tool: str, args: dict[str, Any] | None, session_id: str | None, polic
     effective = "lockdown" if tainted else level
     if tool in FIRST_PARTY_TOOLS:
         return Decision(allow=True, taints=tool in TAINT_SOURCES)
+    guard = _session_guard(tool, tainted, effective)
+    if guard is not None:
+        return guard
     if _is_local(tool):
         return Decision(allow=True)
     if tool == "delegate_task":
-        if tainted or effective == "lockdown":
-            return _block(
-                effective,
-                "egress.delegate_tainted",
-                "delegation is disabled after private data was read in this session.",
-            )
         return Decision(allow=True)  # child agents' tools pass through this hook too
     if tool == "cronjob_manage" and _RANK[effective] >= _RANK["search"]:
         return _block(effective, "egress.schedule", "scheduled jobs can deliver data outside this session.")

@@ -522,7 +522,8 @@ hermes-mordred egress taint on               # lock a session down after it read
 > read-only Mordred commands (`hermes-mordred telegram doctor`, `status`, …)
 > may run. Unknown tools count as internet-capable. With taint on (default),
 > a session that has read private data (the Telegram tools) is locked down for
-> the rest of its life, and cannot delegate. Blocked calls are audited as
+> the rest of its life, cannot delegate, and cannot write files, skills,
+> memory or kanban (private data stays out of plaintext storage). Blocked calls are audited as
 > `policy.egress.tool_blocked`. Changes apply on the next tool call.
 
 ### `telegram` — read-only import of your own Telegram account (preview)

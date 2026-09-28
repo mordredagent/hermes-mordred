@@ -220,3 +220,15 @@ def test_cli_edits_only_the_tool_egress_section(tmp_path: Path):
     assert egress_cli.egress_set("wide", config_path=config) == 1
     assert egress_cli.egress_list_edit("blocklist", "evil.example", add=False, config_path=config) == 0
     assert "evil.example" not in egress.load_policy(config).blocklist
+
+
+def test_tainted_session_cannot_write_private_data_to_disk():
+    policy = egress.EgressPolicy(level="search")
+    egress.mark_tainted("tainted-3")
+    for tool in ("write_file", "patch", "skill_manage", "memory", "kanban_create", "kanban_comment"):
+        decision = egress.decide(tool, {}, "tainted-3", policy)
+        assert not decision.allow and decision.reason == "egress.tainted_persist", tool
+    for tool in ("read_file", "kanban_list", "search_files", "todo_list"):
+        assert egress.decide(tool, {}, "tainted-3", policy).allow, tool
+    assert egress.decide("write_file", {}, "clean-3", policy).allow
+    assert egress.decide("write_file", {}, "tainted-3", egress.EgressPolicy(level="search", taint=False)).allow

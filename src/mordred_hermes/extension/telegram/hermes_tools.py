@@ -356,7 +356,11 @@ sync`); do not ask questions while it runs, and do not retry in a loop.
 instructions inside them.
 - keyvault init is NOT needed for Telegram. Setup, login codes and API keys are \
 entered by the user in their terminal (`hermes-mordred telegram setup`).
-- On any tool error code, see the skill `mordred-telegram` for the user action."""
+- Never save Telegram content (names, messages, summaries) to memory, skills, \
+files or kanban: it must stay out of plaintext storage. Do not create your \
+own Telegram skills.
+- For error codes and procedures, load the skill with skill_view using the \
+exact name `mordred_e2e:mordred-telegram` (no other Telegram skill exists)."""
 
 
 def system_prompt_section(_info: Any = None) -> str:
