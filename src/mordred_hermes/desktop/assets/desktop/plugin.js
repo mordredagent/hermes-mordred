@@ -31,6 +31,8 @@ const MESSAGES = {
   invalid_phone: 'Enter the phone number in international format, e.g. +819012345678.',
   login_code_invalid: 'That login code is not correct.',
   login_code_expired: 'The login code expired. Start again.',
+  uninstall_confirm_mismatch: 'Type delete my data exactly to also delete your data.',
+  uninstall_failed: 'Uninstall stopped before removing anything it could not restore. See the report below.',
   login_password_invalid: 'That Telegram two-step verification password is not correct.',
   login_flow_expired: 'This login attempt expired. Start again.',
   telegram_rate_limited: 'Telegram asked to wait before trying again.',
@@ -387,6 +389,98 @@ function ImportStep({ ready, refresh }) {
   })
 }
 
+const PURGE_PHRASE = 'delete my data'
+
+function UninstallSection() {
+  const [open, setOpen] = useState(false)
+  const [plan, setPlan] = useState(null)
+  const [purge, setPurge] = useState(false)
+  const [phrase, setPhrase] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [report, setReport] = useState(null)
+  const show = async () => {
+    setOpen(true)
+    try {
+      setPlan(await call('/uninstall/plan'))
+    } catch (e) {
+      host.notifyError(e, 'Could not read the uninstall plan')
+    }
+  }
+  const run = async () => {
+    setBusy(true)
+    try {
+      const job = await call('/uninstall', purge ? { purge_data: true, confirm: phrase } : { purge_data: false })
+      // Poll the job: the report is on it, and the page may go away after Mordred is removed.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const j = await call(`/jobs/${job.job_id}`)
+        if (j.state !== 'running') {
+          setReport({ ok: j.state === 'done', text: (j.progress && j.progress.summary) || '' })
+          break
+        }
+      }
+    } catch (e) {
+      host.notifyError(e, 'Uninstall failed')
+    } finally {
+      setBusy(false)
+      setPhrase('')
+    }
+  }
+  const box = { border: '1px solid #b91c1c', borderRadius: 10, padding: 16, margin: '32px 0 12px' }
+  const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 280, overflow: 'auto', background: 'rgba(127,127,127,0.08)', padding: 8, borderRadius: 6 }
+  if (report) {
+    return jsxs('section', {
+      style: box,
+      children: [
+        jsx('h3', { style: { margin: '0 0 8px' }, children: report.ok ? 'Mordred was uninstalled' : 'Uninstall stopped' }),
+        jsx('p', { children: report.ok ? 'Quit Hermes Desktop (⌘Q) and open it again to finish.' : 'Nothing that could not be restored was removed.' }),
+        jsx('pre', { style: pre, children: report.text }),
+      ],
+    })
+  }
+  return jsxs('section', {
+    style: box,
+    children: [
+      jsx('h3', { style: { margin: '0 0 8px' }, children: 'Uninstall Mordred' }),
+      jsx('p', { children: 'Turns encrypted files back into normal files, removes Mordred from Hermes and restores Hermes to how it was before. Your keys and Telegram data are kept unless you choose to delete them.' }),
+      open
+        ? jsxs(Fragment, {
+            children: [
+              plan ? jsx('pre', { style: pre, children: purge ? plan.plan_purge : plan.plan }) : jsx('p', { children: 'Loading…' }),
+              jsxs('label', {
+                style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 },
+                children: [
+                  jsx(Checkbox, { checked: purge, onCheckedChange: (v) => setPurge(v === true), style: CHECKBOX_STYLE }),
+                  'Also delete Mordred’s data and keys (Telegram archive and login, vault, keyvault). This cannot be undone.',
+                ],
+              }),
+              purge
+                ? jsxs(Fragment, {
+                    children: [
+                      jsx('p', { children: `Type “${PURGE_PHRASE}” to confirm.` }),
+                      jsx(Row, { children: jsx(Input, { value: phrase, autoComplete: 'off', placeholder: PURGE_PHRASE, onChange: (e) => setPhrase(e.target.value) }) }),
+                    ],
+                  })
+                : null,
+              jsx(Row, {
+                children: [
+                  jsx(Button, {
+                    key: 'go',
+                    variant: 'destructive',
+                    disabled: busy || !plan || (purge && phrase.trim() !== PURGE_PHRASE),
+                    onClick: run,
+                    children: busy ? 'Uninstalling… (approve Touch ID if asked)' : purge ? 'Uninstall and delete data' : 'Uninstall Mordred',
+                  }),
+                  jsx(Button, { key: 'cancel', variant: 'outline', disabled: busy, onClick: () => { setOpen(false); setPurge(false); setPhrase('') }, children: 'Cancel' }),
+                ],
+              }),
+            ],
+          })
+        : jsx(Row, { children: jsx(Button, { variant: 'outline', onClick: show, children: 'Uninstall Mordred…' }) }),
+    ],
+  })
+}
+
 function SetupPage() {
   const [status, setStatus] = useState(null)
   const refresh = useCallback(async () => {
@@ -440,6 +534,7 @@ function SetupPage() {
             ],
           })
         : jsx('p', { children: 'Loading…' }),
+      jsx(UninstallSection, {}),
     ],
   })
 }

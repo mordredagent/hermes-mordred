@@ -350,6 +350,14 @@ The reset command prints the exact key IDs before interactive confirmation.
 
 ## Uninstall
 
+**Hermes Desktop:** open **Mordred** in the sidebar and use **Uninstall
+Mordred…** at the bottom of the page. It shows exactly what will happen,
+restores Hermes's files to plaintext, removes Mordred, and keeps your keys and
+Telegram data unless you tick "Also delete…" and type `delete my data`.
+Quit and reopen Hermes Desktop afterwards.
+
+**Terminal:**
+
 ```sh
 hermes-mordred uninstall --dry-run   # see exactly what will happen
 hermes-mordred uninstall             # confirm once; Hermes gets its plaintext files back

@@ -512,3 +512,82 @@ async def sync_status() -> Any:
         "dialog_count": status["dialog_count"],
         "message_count": status["message_count"],
     }
+
+
+# -- uninstall ----------------------------------------------------------------------------
+
+
+class _UninstallAnswers(_FixedPassphrase):
+    """Answers ``hermes-mordred uninstall``'s prompts with what the page collected.
+
+    The page's own confirmation replaces the yes/no question; the typed
+    ``delete my data`` phrase (``--purge-data`` only) and the vault recovery
+    passphrase (only if the device key cannot open the vault) come from the
+    request body and are used once, in memory.
+    """
+
+    def __init__(self, recovery_passphrase: str, purge_phrase: str) -> None:
+        super().__init__(recovery_passphrase)
+        self._purge_phrase = purge_phrase
+
+    def ask_bool(self, label: str, default: bool, *, description: str | None = None) -> bool:
+        return True
+
+    def ask_text(self, label: str, default: str = "", *, description: str | None = None) -> str:
+        return self._purge_phrase
+
+
+def _uninstall_context(prompt: Any = None) -> Any:
+    from ..keyvault._identity import resolve_root
+    from ..wizard.uninstall_cli import UninstallContext
+
+    return UninstallContext(
+        home=_home(), vault_root=resolve_root(None), user_home=Path.home(), prompt_io=prompt, interactive=False
+    )
+
+
+@router.get("/uninstall/plan")
+async def uninstall_plan() -> Any:
+    """What uninstalling would do (the dry run), for the page to show before confirming."""
+    from ..wizard.uninstall_cli import UninstallOptions, run_uninstall
+
+    def plan(purge: bool) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            run_uninstall(_uninstall_context(), UninstallOptions(dry_run=True, purge_data=purge))
+        return out.getvalue()
+
+    keep, purge = await asyncio.gather(asyncio.to_thread(plan, False), asyncio.to_thread(plan, True))
+    return {"ok": True, "plan": keep, "plan_purge": purge}
+
+
+@router.post("/uninstall")
+async def uninstall(body: dict[str, Any] | None = None) -> Any:
+    """Body: ``{"purge_data": bool, "confirm": "delete my data" (purge only), "recovery_passphrase"?: str}``.
+
+    Restores every encrypted target to plaintext, removes Mordred from Hermes
+    and uninstalls the package; with ``purge_data`` also deletes Mordred's
+    data and keys. Runs as a job; ``progress.summary`` carries the report.
+    """
+    from ..wizard.uninstall_cli import PURGE_PHRASE, UninstallOptions, run_uninstall
+
+    body = body or {}
+    purge = body.get("purge_data") is True
+    phrase = str(body.get("confirm") or "")
+    if purge and phrase.strip() != PURGE_PHRASE:
+        return _error("uninstall_confirm_mismatch")
+    prompt = _UninstallAnswers(str(body.get("recovery_passphrase") or ""), phrase)
+
+    async def work(job: _Job) -> None:
+        out = io.StringIO()
+
+        def run() -> int:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                return run_uninstall(_uninstall_context(prompt), UninstallOptions(yes=True, purge_data=purge))
+
+        rc = await asyncio.to_thread(run)
+        job.progress = {"summary": out.getvalue()}
+        if rc != 0:
+            raise _Fail("uninstall_failed")
+
+    return {"ok": True, **_job_view(_start_job("uninstall", work))}

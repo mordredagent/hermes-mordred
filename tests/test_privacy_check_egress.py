@@ -264,13 +264,25 @@ def test_bridge_call_taints_a_clean_session_and_malformed_bridges_stay_blocked()
     assert not egress.decide("tool_call", nested, "bridge-clean", policy).allow
 
 
-def test_bridge_call_without_any_tool_name_is_left_to_hermes():
-    # The model sometimes omits `name`; Hermes rejects such a call itself, so
-    # Mordred must not answer with a misleading egress block.
+def test_malformed_bridge_explains_the_call_format():
+    # The model sometimes omits `name`; Hermes would reject the call too, so
+    # the answer must explain the format rather than claim a privacy block.
     policy = egress.EgressPolicy(level="search")
-    nameless = {"calls": [{"arguments": {"question": "x", "start_date": "2026-09-26"}}]}
-    assert egress.decide("tool_call", nameless, "bridge-nameless", policy).allow
-    assert not egress.decide("tool_call", nameless, "bridge-nameless", policy).taints
-    # Anything that does name a tool but cannot be parsed stays blocked.
-    named_bad = {"calls": [{"name": "web_extract", "arguments": "{not json"}]}
-    assert not egress.decide("tool_call", named_bad, "bridge-nameless", policy).allow
+    for payload in (
+        {"calls": [{"arguments": {"question": "x"}}]},
+        {"calls": [{"arguments": {"question": "x"}}, {"name": "telegram_ask"}]},
+        {"calls": [{"name": "web_extract", "arguments": "{not json"}]},
+    ):
+        decision = egress.decide("tool_call", payload, "bridge-bad", policy)
+        assert not decision.allow and decision.reason == "egress.malformed_bridge"
+        assert '"name"' in decision.message and "not a Mordred privacy block" in decision.message
+
+
+def test_blocklist_level_refuses_bare_ip_addresses_but_not_loopback():
+    policy = egress.EgressPolicy(level="blocklist")
+    assert not egress.decide("web_extract", {"urls": ["http://203.0.113.7/x"]}, "ip-1", policy).allow
+    assert not egress.decide("web_extract", {"urls": ["http://[2001:db8::1]/"]}, "ip-1", policy).allow
+    assert egress.decide("web_extract", {"urls": ["http://127.0.0.1:8080/"]}, "ip-1", policy).allow
+    assert egress.decide("web_extract", {"urls": ["https://example.com/"]}, "ip-1", policy).allow
+    assert not egress.decide("terminal", {"command": "curl http://198.51.100.2/u"}, "ip-1", policy).allow
+    assert egress.decide("terminal", {"command": "curl http://localhost:3000"}, "ip-1", policy).allow

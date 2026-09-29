@@ -331,3 +331,43 @@ def test_hermes_model_check(monkeypatch, base_url, model, catalog, ok):
 
     monkeypatch.setattr(venice, "require_private_model", catalog_check)
     assert asyncio.run(api.hermes_model_check())["ok"] is ok
+
+
+def test_uninstall_plan_and_run_as_a_job(env, monkeypatch):
+    import time as _time
+
+    from mordred_hermes.wizard import uninstall_cli
+
+    calls = []
+
+    def fake_run(ctx, opts):
+        calls.append((opts, ctx.prompt_io.ask_bool("?", False) if ctx.prompt_io else None, ctx.interactive))
+        print("plan text" if opts.dry_run else "Done.")
+        return 0
+
+    monkeypatch.setattr(uninstall_cli, "run_uninstall", fake_run)
+    plan = env.http.get("/api/plugins/mordred/uninstall/plan").json()
+    assert plan["ok"] and "plan text" in plan["plan"] and "plan text" in plan["plan_purge"]
+
+    # Purging requires the exact typed phrase; nothing runs otherwise.
+    assert _post(env, "/uninstall", {"purge_data": True, "confirm": "yes"}) == {
+        "ok": False,
+        "error": "uninstall_confirm_mismatch",
+    }
+    started = _post(env, "/uninstall", {"purge_data": True, "confirm": uninstall_cli.PURGE_PHRASE})
+    assert started["ok"] and started["kind"] == "uninstall"
+    for _ in range(50):
+        job = env.http.get(f"/api/plugins/mordred/jobs/{started['job_id']}").json()
+        if job["state"] != "running":
+            break
+        _time.sleep(0.05)
+    assert job["state"] == "done" and "Done." in job["progress"]["summary"]
+    opts, confirmed, interactive = calls[-1]
+    assert opts.yes and opts.purge_data and not opts.dry_run and confirmed and interactive is False
+
+
+def test_uninstall_answers_give_the_phrase_and_passphrase_only():
+    answers = api._UninstallAnswers("recovery words", "delete my data")
+    assert answers.ask_text("Type it") == "delete my data"
+    assert answers.ask_password("Vault recovery passphrase") == "recovery words"
+    assert answers.ask_bool("Uninstall?", False) is True

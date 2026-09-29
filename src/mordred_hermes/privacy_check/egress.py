@@ -47,6 +47,7 @@ to ``lockdown``.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import threading
@@ -259,12 +260,27 @@ def _urls(tool: str, args: dict[str, Any]) -> list[str]:
     return found
 
 
+def _ip_literal(host: str) -> bool:
+    """A bare IP address that is not this machine (loopback)."""
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return not address.is_loopback
+
+
+# ``scheme://<IPv4 or [IPv6]>`` inside free-form command text.
+_URL_IP_IN_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://(\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})", re.IGNORECASE)
+
+
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
     lowered = url.casefold()
     try:
         host = (urlsplit(url if "://" in url else f"https://{url}").hostname or "").casefold()
     except ValueError:
         return "unparseable URL"
+    if _ip_literal(host):
+        return f"bare IP address {host}"
     for entry in blocklist:
         if "/" in entry:
             if entry in lowered:
@@ -326,6 +342,9 @@ def _decide_blocklist(tool: str, args: dict[str, Any], policy: EgressPolicy) -> 
         for entry in policy.blocklist:
             if entry in text:
                 return _block("blocklist", "egress.blocklisted_domain", f"{tool} mentions a blocklisted destination.")
+        for match in _URL_IP_IN_TEXT.finditer(text):
+            if _ip_literal(match.group(1)):
+                return _block("blocklist", "egress.blocklisted_domain", f"{tool} contacts a bare IP address.")
     return Decision(allow=True)
 
 
@@ -384,17 +403,6 @@ def _bridge_entries(args: dict[str, Any]) -> list[tuple[str, dict[str, Any]]] | 
     return None if any(entry is None for entry in entries) else [e for e in entries if e is not None]
 
 
-def _names_any_tool(args: dict[str, Any]) -> bool:
-    """Whether a ``tool_call`` payload mentions a tool name anywhere (conservative)."""
-    if str(args.get("name") or "").strip():
-        return True
-    raw = _loads(args.get("calls"))
-    if raw is None and args.get("calls") is not None:
-        return True  # unparsable: cannot prove it names nothing
-    items = raw if isinstance(raw, list) else [raw]
-    return any(not isinstance(item, dict) or str(item.get("name") or "").strip() for item in items if item is not None)
-
-
 def _loads(value: Any) -> Any:
     """Parse a JSON string (``None`` on bad JSON, ``{}`` for blank); other values pass through."""
     if not isinstance(value, str):
@@ -420,10 +428,18 @@ def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressP
     """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed."""
     entries = _bridge_entries(args)
     if entries is None:
-        # A bridge call that names no tool at all cannot run anything: Hermes
-        # rejects it ("calls[0] requires a 'name'"). Let that error reach the
-        # model so it can fix the call, instead of a misleading egress block.
-        return Decision(allow=True) if not _names_any_tool(args) else None
+        # Hermes cannot run a malformed bridge either. Say what is wrong with
+        # the call, not "egress", so the model fixes it instead of giving up.
+        return Decision(
+            allow=False,
+            reason="egress.malformed_bridge",
+            message=(
+                "tool_call is malformed (this is not a Mordred privacy block): every entry in `calls` "
+                'needs a "name" and an object "arguments", e.g. {"calls": [{"name": "telegram_ask", '
+                '"arguments": {"question": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}]}. '
+                "Fix the call and try again."
+            ),
+        )
     taints = False
     for name, arguments in entries:
         inner = decide(name, arguments, session_id, policy)
