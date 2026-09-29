@@ -35,6 +35,7 @@ Every step is idempotent: a second run finds nothing left and changes nothing.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import shutil
 import sys
 from collections.abc import Callable
@@ -98,6 +99,8 @@ class UninstallOptions:
     yes: bool = False
     purge_data: bool = False
     remove_helper: bool = False
+    #: Delete encrypted data as it is instead of decrypting it back (implies ``purge_data``).
+    erase_encrypted: bool = False
 
 
 @dataclass
@@ -356,10 +359,16 @@ def _package_line(env: HermesEnv) -> str:
 
 def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
     out: list[str] = ["hermes-mordred uninstall plan", ""]
-    restore = [f"{r.target}: {r.detail}" for r in plan.restores]
-    out += _section("1. Restore plaintext for Hermes (encryption disable):", restore) or [
-        "1. Restore plaintext: nothing is encrypted."
-    ]
+    if opts.erase_encrypted:
+        erase = [_erase_line(r, plan) for r in plan.restores]
+        out += _section("1. ERASE encrypted data WITHOUT decrypting it (cannot be undone):", erase) or [
+            "1. Erase encrypted data: nothing is encrypted."
+        ]
+    else:
+        restore = [f"{r.target}: {r.detail}" for r in plan.restores]
+        out += _section("1. Restore plaintext for Hermes (encryption disable):", restore) or [
+            "1. Restore plaintext: nothing is encrypted."
+        ]
     out += _section("2. Hermes configuration:", _hermes_lines(plan)) or [
         "2. Hermes configuration: nothing of Mordred's left."
     ]
@@ -377,6 +386,38 @@ def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
     if plan.notes:
         out += ["", *(f"Note: {note}" for note in plan.notes)]
     return "\n".join(out)
+
+
+def _erase_line(restore: Restore, plan: UninstallPlan) -> str:
+    del plan
+    if restore.target == "memory":
+        return "memory: the sealed memory files are deleted; Hermes starts with empty memory"
+    if restore.target == "env":
+        if restore.needs_vault:
+            return ".env: exists only in the vault and is deleted with it; Hermes loses those API keys"
+        return ".env: the plaintext .env stays; only the vault copy is deleted"
+    if restore.needs_vault:
+        return "config: config.yaml exists only in the vault and is deleted; Hermes starts with a new config"
+    return "config: config.yaml stays; only the vault copy is deleted"
+
+
+def _erase_encrypted(ctx: UninstallContext, restores: list[Restore]) -> int:
+    """Step a in erase mode: remove sealed files without opening the vault.
+
+    Only the sealed memory files live outside Mordred's own directories; the
+    vault (sealed .env / config.yaml copies) and every marker are removed by
+    the purge that erase mode always runs.
+    """
+    from . import memory_cli
+
+    for restore in restores:
+        if restore.target == "memory":
+            for path in memory_cli._sealed_memory_files(ctx.home):
+                path.unlink(missing_ok=True)
+                print(f"Erased sealed memory file {path}.")
+        else:
+            print(f"Erasing the encrypted {restore.target} with the vault (not decrypted).")
+    return 0
 
 
 def _render_kept(plan: UninstallPlan, *, purged: bool = False) -> str:
@@ -604,7 +645,8 @@ def _confirm(ctx: UninstallContext, opts: UninstallOptions) -> bool:
 
 def _execute(ctx: UninstallContext, plan: UninstallPlan, opts: UninstallOptions) -> int:
     """Steps a-e in order, stopping at the first one that must not be passed."""
-    if _restore_all(ctx, plan.restores) != 0:
+    step_a = _erase_encrypted if opts.erase_encrypted else _restore_all
+    if step_a(ctx, plan.restores) != 0:
         return 1
     if _clean_hermes_files(ctx, plan) != 0:
         return 1
@@ -637,6 +679,8 @@ def _execute(ctx: UninstallContext, plan: UninstallPlan, opts: UninstallOptions)
 
 def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     """Plan, confirm, and run the uninstall. Returns the process exit code."""
+    if opts.erase_encrypted and not opts.purge_data:
+        opts = dataclasses.replace(opts, purge_data=True)
     plan = build_plan(ctx, opts)
     print(render_plan(plan, opts))
     print()
@@ -669,6 +713,7 @@ def cli_uninstall(args: argparse.Namespace) -> int:
         dry_run=bool(getattr(args, "dry_run", False)),
         yes=bool(getattr(args, "yes", False)),
         purge_data=bool(getattr(args, "purge_data", False)),
+        erase_encrypted=bool(getattr(args, "erase_encrypted", False)),
         remove_helper=bool(getattr(args, "remove_helper", False)),
     )
     return run_uninstall(_context_from_environment(), opts)

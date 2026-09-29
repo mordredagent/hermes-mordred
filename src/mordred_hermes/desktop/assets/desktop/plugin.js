@@ -394,10 +394,13 @@ const PURGE_PHRASE = 'delete my data'
 function UninstallSection() {
   const [open, setOpen] = useState(false)
   const [plan, setPlan] = useState(null)
+  // decrypt: back to normal files (data kept unless `purge`); erase: delete encrypted data without decrypting.
+  const [mode, setMode] = useState('decrypt')
   const [purge, setPurge] = useState(false)
   const [phrase, setPhrase] = useState('')
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState(null)
+  const deleting = mode === 'erase' || purge
   const show = async () => {
     setOpen(true)
     try {
@@ -406,10 +409,18 @@ function UninstallSection() {
       host.notifyError(e, 'Could not read the uninstall plan')
     }
   }
+  const reset = () => {
+    setOpen(false)
+    setMode('decrypt')
+    setPurge(false)
+    setPhrase('')
+  }
   const run = async () => {
     setBusy(true)
     try {
-      const job = await call('/uninstall', purge ? { purge_data: true, confirm: phrase } : { purge_data: false })
+      const body = { mode, purge_data: mode === 'decrypt' && purge }
+      if (deleting) body.confirm = phrase
+      const job = await call('/uninstall', body)
       // Poll the job: the report is on it, and the page may go away after Mordred is removed.
       for (;;) {
         await new Promise((r) => setTimeout(r, 2000))
@@ -428,6 +439,16 @@ function UninstallSection() {
   }
   const box = { border: '1px solid #b91c1c', borderRadius: 10, padding: 16, margin: '32px 0 12px' }
   const pre = { whiteSpace: 'pre-wrap', fontSize: 12, maxHeight: 280, overflow: 'auto', background: 'rgba(127,127,127,0.08)', padding: 8, borderRadius: 6 }
+  const radio = { accentColor: 'CanvasText', width: 16, height: 16, marginTop: 3, flexShrink: 0 }
+  const choice = (value, title, detail) =>
+    jsxs('label', {
+      key: value,
+      style: { display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10, cursor: 'pointer' },
+      children: [
+        jsx('input', { type: 'radio', name: 'mordred-uninstall-mode', checked: mode === value, onChange: () => setMode(value), style: radio }),
+        jsxs('span', { children: [jsx('strong', { children: title }), jsx('br', {}), detail] }),
+      ],
+    })
   if (report) {
     return jsxs('section', {
       style: box,
@@ -438,26 +459,31 @@ function UninstallSection() {
       ],
     })
   }
+  const shownPlan = plan && (mode === 'erase' ? plan.plan_erase : purge ? plan.plan_purge : plan.plan)
   return jsxs('section', {
     style: box,
     children: [
       jsx('h3', { style: { margin: '0 0 8px' }, children: 'Uninstall Mordred' }),
-      jsx('p', { children: 'Turns encrypted files back into normal files, removes Mordred from Hermes and restores Hermes to how it was before. Your keys and Telegram data are kept unless you choose to delete them.' }),
+      jsx('p', { children: 'Removes Mordred from Hermes and restores Hermes to how it was before. Choose what happens to your encrypted data.' }),
       open
         ? jsxs(Fragment, {
             children: [
-              plan ? jsx('pre', { style: pre, children: purge ? plan.plan_purge : plan.plan }) : jsx('p', { children: 'Loading…' }),
-              jsxs('label', {
-                style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 },
-                children: [
-                  jsx(Checkbox, { checked: purge, onCheckedChange: (v) => setPurge(v === true), style: CHECKBOX_STYLE }),
-                  'Also delete Mordred’s data and keys (Telegram archive and login, vault, keyvault). This cannot be undone.',
-                ],
-              }),
-              purge
+              choice('decrypt', 'Decrypt, then uninstall', 'Encrypted files (Hermes memory, .env, config) become normal files again, so Hermes keeps everything. Touch ID may be requested.'),
+              mode === 'decrypt'
+                ? jsxs('label', {
+                    style: { display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0 0 24px' },
+                    children: [
+                      jsx(Checkbox, { checked: purge, onCheckedChange: (v) => setPurge(v === true), style: CHECKBOX_STYLE }),
+                      'Also delete Mordred’s own data and keys (Telegram archive and login, vault, keyvault).',
+                    ],
+                  })
+                : null,
+              choice('erase', 'Erase encrypted data without decrypting, then uninstall', 'Nothing is decrypted. Encrypted Hermes memory, the vault copies of .env / config and all Mordred data and keys are deleted. Anything that exists only in encrypted form is lost for good.'),
+              shownPlan ? jsx('pre', { style: { ...pre, marginTop: 12 }, children: shownPlan }) : jsx('p', { children: 'Loading…' }),
+              deleting
                 ? jsxs(Fragment, {
                     children: [
-                      jsx('p', { children: `Type “${PURGE_PHRASE}” to confirm.` }),
+                      jsx('p', { children: `This deletes data and cannot be undone. Type “${PURGE_PHRASE}” to confirm.` }),
                       jsx(Row, { children: jsx(Input, { value: phrase, autoComplete: 'off', placeholder: PURGE_PHRASE, onChange: (e) => setPhrase(e.target.value) }) }),
                     ],
                   })
@@ -467,11 +493,17 @@ function UninstallSection() {
                   jsx(Button, {
                     key: 'go',
                     variant: 'destructive',
-                    disabled: busy || !plan || (purge && phrase.trim() !== PURGE_PHRASE),
+                    disabled: busy || !plan || (deleting && phrase.trim() !== PURGE_PHRASE),
                     onClick: run,
-                    children: busy ? 'Uninstalling… (approve Touch ID if asked)' : purge ? 'Uninstall and delete data' : 'Uninstall Mordred',
+                    children: busy
+                      ? 'Uninstalling… (approve Touch ID if asked)'
+                      : mode === 'erase'
+                        ? 'Erase and uninstall'
+                        : purge
+                          ? 'Decrypt, uninstall and delete Mordred data'
+                          : 'Decrypt and uninstall',
                   }),
-                  jsx(Button, { key: 'cancel', variant: 'outline', disabled: busy, onClick: () => { setOpen(false); setPurge(false); setPhrase('') }, children: 'Cancel' }),
+                  jsx(Button, { key: 'cancel', variant: 'outline', disabled: busy, onClick: reset, children: 'Cancel' }),
                 ],
               }),
             ],

@@ -351,16 +351,25 @@ The reset command prints the exact key IDs before interactive confirmation.
 ## Uninstall
 
 **Hermes Desktop:** open **Mordred** in the sidebar and use **Uninstall
-Mordred…** at the bottom of the page. It shows exactly what will happen,
-restores Hermes's files to plaintext, removes Mordred, and keeps your keys and
-Telegram data unless you tick "Also delete…" and type `delete my data`.
-Quit and reopen Hermes Desktop afterwards.
+Mordred…** at the bottom of the page, choose one of two options, check the
+plan it shows, and confirm. Quit and reopen Hermes Desktop afterwards.
+
+- **Decrypt, then uninstall.** Encrypted files (Hermes memory, `.env`,
+  `config.yaml`) become normal files again, so Hermes keeps everything.
+  Mordred's own data and keys are kept unless you tick "Also delete…".
+- **Erase encrypted data without decrypting.** Nothing is decrypted: the
+  encrypted Hermes memory, the vault copies of `.env` / `config.yaml` and all
+  Mordred data and keys are deleted. Whatever exists only in encrypted form is
+  lost for good.
+
+Anything that deletes data asks you to type `delete my data`.
 
 **Terminal:**
 
 ```sh
 hermes-mordred uninstall --dry-run   # see exactly what will happen
 hermes-mordred uninstall             # confirm once; Hermes gets its plaintext files back
+hermes-mordred uninstall --erase-encrypted   # delete encrypted data as it is (no decryption)
 ```
 
 Or through the installer: `curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash -s -- --uninstall`.

@@ -95,6 +95,12 @@ def _add_uninstall(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         help="Also permanently delete Mordred's data and device keys (asks you to type a confirmation)",
     )
     p.add_argument(
+        "--erase-encrypted",
+        action="store_true",
+        help="Do not decrypt: delete encrypted data (sealed memories, vault copies of .env / config.yaml) "
+        "together with all Mordred data. Implies --purge-data; asks you to type a confirmation",
+    )
+    p.add_argument(
         "--remove-helper",
         action="store_true",
         help="Also remove the Mordred-built native helper in ~/.local/bin (mordred-hermes-sekey / -tpmkey)",

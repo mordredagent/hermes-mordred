@@ -551,28 +551,34 @@ async def uninstall_plan() -> Any:
     """What uninstalling would do (the dry run), for the page to show before confirming."""
     from ..wizard.uninstall_cli import UninstallOptions, run_uninstall
 
-    def plan(purge: bool) -> str:
+    def plan(purge: bool, erase: bool = False) -> str:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            run_uninstall(_uninstall_context(), UninstallOptions(dry_run=True, purge_data=purge))
+            run_uninstall(_uninstall_context(), UninstallOptions(dry_run=True, purge_data=purge, erase_encrypted=erase))
         return out.getvalue()
 
-    keep, purge = await asyncio.gather(asyncio.to_thread(plan, False), asyncio.to_thread(plan, True))
-    return {"ok": True, "plan": keep, "plan_purge": purge}
+    keep, purge, erase = await asyncio.gather(
+        asyncio.to_thread(plan, False), asyncio.to_thread(plan, True), asyncio.to_thread(plan, True, True)
+    )
+    return {"ok": True, "plan": keep, "plan_purge": purge, "plan_erase": erase}
 
 
 @router.post("/uninstall")
 async def uninstall(body: dict[str, Any] | None = None) -> Any:
-    """Body: ``{"purge_data": bool, "confirm": "delete my data" (purge only), "recovery_passphrase"?: str}``.
+    """Body: ``{"mode": "decrypt" | "erase", "purge_data": bool, "confirm": str, "recovery_passphrase"?: str}``.
 
-    Restores every encrypted target to plaintext, removes Mordred from Hermes
-    and uninstalls the package; with ``purge_data`` also deletes Mordred's
-    data and keys. Runs as a job; ``progress.summary`` carries the report.
+    ``decrypt`` (default) restores every encrypted target to plaintext, removes
+    Mordred from Hermes and uninstalls the package; ``purge_data`` also
+    deletes Mordred's data and keys. ``erase`` does not decrypt anything: the
+    encrypted data is deleted as it is, together with all Mordred data.
+    Deleting anything needs ``confirm`` = ``delete my data``. Runs as a job;
+    ``progress.summary`` carries the report.
     """
     from ..wizard.uninstall_cli import PURGE_PHRASE, UninstallOptions, run_uninstall
 
     body = body or {}
-    purge = body.get("purge_data") is True
+    erase = body.get("mode") == "erase"
+    purge = erase or body.get("purge_data") is True
     phrase = str(body.get("confirm") or "")
     if purge and phrase.strip() != PURGE_PHRASE:
         return _error("uninstall_confirm_mismatch")
@@ -583,7 +589,9 @@ async def uninstall(body: dict[str, Any] | None = None) -> Any:
 
         def run() -> int:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                return run_uninstall(_uninstall_context(prompt), UninstallOptions(yes=True, purge_data=purge))
+                return run_uninstall(
+                    _uninstall_context(prompt), UninstallOptions(yes=True, purge_data=purge, erase_encrypted=erase)
+                )
 
         rc = await asyncio.to_thread(run)
         job.progress = {"summary": out.getvalue()}

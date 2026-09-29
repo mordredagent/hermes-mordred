@@ -370,6 +370,37 @@ class _TypedPrompt:
         return self.text
 
 
+class TestEraseEncrypted:
+    def test_erases_without_decrypting_or_unlocking(
+        self, installed: Installed, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        home = installed.home
+        installed.backend.calls.clear()
+        prompt = _TypedPrompt(uninstall_cli.PURGE_PHRASE)
+        ctx = installed.context(prompt_io=prompt, telegram_forget=lambda: 0, keyvault_reset=lambda _home: 0)
+
+        rc = run_uninstall(ctx, UninstallOptions(yes=True, erase_encrypted=True))
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "ERASE encrypted data WITHOUT decrypting" in out
+        assert len(prompt.asked) == 1  # the typed "delete my data"
+        # Nothing was decrypted: no vault unlock, no plaintext written back.
+        assert not [call for call in installed.backend.calls if call[0] == "ecdh"]
+        assert not (home / ".env").exists() and not (home / "config.yaml").exists()
+        assert not any((home / "memories" / name).exists() for name in _MEMORIES)
+        # Mordred and all its data are gone.
+        assert not (home / "mordred").exists()
+        assert not (home / "plugins" / "mordred").exists()
+        assert installed.runner.uninstalls
+
+    def test_erase_needs_the_typed_phrase(self, installed: Installed) -> None:
+        ctx = installed.context(prompt_io=_TypedPrompt("yes"))
+        assert run_uninstall(ctx, UninstallOptions(yes=True, erase_encrypted=True)) == 1
+        assert all(is_sealed((installed.home / "memories" / n).read_bytes()) for n in _MEMORIES)
+        assert (installed.home / "mordred" / "vault").is_dir()
+
+
 class TestPurge:
     def test_deletes_data_after_typed_confirmation(self, installed: Installed) -> None:
         telegram = installed.home / "mordred" / "telegram"

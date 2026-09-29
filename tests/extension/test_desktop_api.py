@@ -347,7 +347,9 @@ def test_uninstall_plan_and_run_as_a_job(env, monkeypatch):
 
     monkeypatch.setattr(uninstall_cli, "run_uninstall", fake_run)
     plan = env.http.get("/api/plugins/mordred/uninstall/plan").json()
-    assert plan["ok"] and "plan text" in plan["plan"] and "plan text" in plan["plan_purge"]
+    assert plan["ok"] and all("plan text" in plan[k] for k in ("plan", "plan_purge", "plan_erase"))
+    # Erasing without decrypting deletes data: it needs the typed phrase too.
+    assert _post(env, "/uninstall", {"mode": "erase"}) == {"ok": False, "error": "uninstall_confirm_mismatch"}
 
     # Purging requires the exact typed phrase; nothing runs otherwise.
     assert _post(env, "/uninstall", {"purge_data": True, "confirm": "yes"}) == {
@@ -371,3 +373,18 @@ def test_uninstall_answers_give_the_phrase_and_passphrase_only():
     assert answers.ask_text("Type it") == "delete my data"
     assert answers.ask_password("Vault recovery passphrase") == "recovery words"
     assert answers.ask_bool("Uninstall?", False) is True
+
+
+def test_uninstall_erase_mode_runs_with_erase_options(env, monkeypatch):
+    import time as _time
+
+    from mordred_hermes.wizard import uninstall_cli
+
+    seen = []
+    monkeypatch.setattr(uninstall_cli, "run_uninstall", lambda ctx, opts: seen.append(opts) or 0)
+    started = _post(env, "/uninstall", {"mode": "erase", "confirm": uninstall_cli.PURGE_PHRASE})
+    for _ in range(50):
+        if env.http.get(f"/api/plugins/mordred/jobs/{started['job_id']}").json()["state"] != "running":
+            break
+        _time.sleep(0.05)
+    assert seen and seen[-1].erase_encrypted and seen[-1].purge_data and seen[-1].yes
