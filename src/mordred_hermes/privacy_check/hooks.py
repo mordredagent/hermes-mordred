@@ -168,6 +168,22 @@ def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> di
         if decision.taints and policy.taint:
             egress.mark_tainted(session_id)
         return None
+    if decision.approve:
+        # Hermes shows its approval prompt (once / session / always / deny) and
+        # blocks the call on deny or when no human is present.
+        safe_audit_append(
+            state.audit,
+            {
+                "event": "pre_tool_call",
+                "decision": "ask",
+                "reason": "policy.egress.tool_blocked",
+                "rule": decision.reason,
+                "level": policy.level,
+                "tool_name": tool_name,
+            },
+            logger=_LOG,
+        )
+        return {"action": "approve", "message": decision.message, "rule_key": decision.rule_key}
     safe_audit_append(
         state.audit,
         {
@@ -239,3 +255,25 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             ),
         }
     return None
+
+
+NETWORK_PROMPT = """## Internet use (Mordred)
+Do the work locally: files, local commands and code are fine. `web_search` is \
+fine. Avoid any other internet access (opening URLs, browsing, curl/wget, \
+installing packages, remote APIs, git push/pull): use it only when the task \
+really needs it. Each such call shows the user an approval prompt with where \
+it goes and what it sends, so say in one line why before you call it, and \
+accept a refusal. Never send the user's private data (Telegram answers, file \
+contents, notes) to the internet. Blocklisted sites and bare IP addresses are \
+always refused."""
+
+
+def network_prompt_section() -> str:
+    """The prompt section for the ``ask`` level (empty when another level is set)."""
+    from . import egress
+
+    try:
+        level = egress.load_policy().level
+    except Exception:
+        return ""
+    return NETWORK_PROMPT if level == "ask" else ""

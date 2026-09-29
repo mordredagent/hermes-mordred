@@ -97,7 +97,7 @@ Current defenses include:
 - encrypted audit records when a keyvault-backed writer is available; and
 - loopback-only, paired, encrypted browser-extension transport; and
 - a read-only Telegram importer (see [Telegram import](#telegram-import)); and
-- tool-egress levels (`lockdown` / `search` default / `blocklist` / `off`)
+- tool-egress levels (`lockdown` / `search` / `ask` default / `blocklist` / `off`)
   enforced in `privacy_check`'s `pre_tool_call`: free-form code tools are
   refused below `blocklist` except exact first-party read-only commands,
   unknown tools count as internet-capable, and a session that read private

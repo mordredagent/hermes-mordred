@@ -3,7 +3,8 @@
 Levels (see :mod:`mordred_hermes.privacy_check.egress`)::
 
     lockdown   no internet from tools
-    search     web search only                      (default)
+    search     web search only
+    ask        tools work; other internet use asks first (default)
     blocklist  everything except blocklisted domains/tools
     off        no restriction
 
@@ -23,6 +24,7 @@ from . import _term
 _DESCRIPTIONS = {
     "lockdown": "no internet from tools (local tools and Mordred's Telegram tools only)",
     "search": "web search only; no URL fetching, browsing, remote APIs or arbitrary commands",
+    "ask": "tools work; web search runs, any other internet use asks you first (showing what it sends)",
     "blocklist": "everything except blocklisted domains and tools",
     "off": "Mordred does not restrict tools",
 }

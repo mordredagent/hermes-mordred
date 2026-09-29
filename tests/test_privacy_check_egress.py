@@ -135,8 +135,8 @@ def test_taint_also_applies_at_blocklist_level_and_can_be_disabled():
 @pytest.mark.parametrize(
     ("section", "level"),
     [
-        (None, "search"),
-        ({}, "search"),
+        (None, "ask"),
+        ({}, "ask"),
         ({"level": "blocklist"}, "blocklist"),
         ({"level": "wide-open"}, "lockdown"),
         ("search", "lockdown"),
@@ -149,13 +149,13 @@ def test_parse_policy_fails_closed(section, level):
 
 def test_load_policy_reads_config_and_notices_changes(tmp_path):
     config = tmp_path / "config.yaml"
-    assert egress.load_policy(config).level == "search"  # no file: default
+    assert egress.load_policy(config).level == "ask"  # no file: default
     config.write_text("plugins:\n  mordred_privacy_check:\n    tool_egress:\n      level: lockdown\n")
     assert egress.load_policy(config).level == "lockdown"
     config.write_text("plugins:\n  mordred_privacy_check:\n    tool_egress:\n      level: blocklist\n  x: 1\n")
     assert egress.load_policy(config).level == "blocklist"
     config.write_text("plugins: [not: valid\n")
-    assert egress.load_policy(config).level in {"search", "lockdown"}
+    assert egress.load_policy(config).level in {"ask", "lockdown"}
 
 
 # -- hook integration ---------------------------------------------------------------------
@@ -286,3 +286,62 @@ def test_blocklist_level_refuses_bare_ip_addresses_but_not_loopback():
     assert egress.decide("web_extract", {"urls": ["https://example.com/"]}, "ip-1", policy).allow
     assert not egress.decide("terminal", {"command": "curl http://198.51.100.2/u"}, "ip-1", policy).allow
     assert egress.decide("terminal", {"command": "curl http://localhost:3000"}, "ip-1", policy).allow
+
+
+# -- "ask" (default): tools work, internet use asks the user ---------------------------------
+
+
+def _ask(tool, args, session="ask-s"):
+    return egress.decide(tool, args, session, egress.EgressPolicy(level="ask"))
+
+
+def test_ask_runs_local_work_and_search_without_prompting():
+    assert egress.DEFAULT_LEVEL == "ask"
+    assert _ask("terminal", {"command": "ls -la && grep -r foo src"}).allow
+    assert _ask("execute_code", {"code": "print(sum(range(10)))"}).allow
+    assert _ask("web_search", {"query": "python docs"}).allow
+    assert _ask("read_file", {"path": "/tmp/x"}).allow
+    assert _ask("telegram_ask", {"question": "q"}).allow
+
+
+def test_ask_prompts_with_destination_and_content_for_internet_use():
+    fetch = _ask("web_extract", {"urls": ["https://docs.example.com/a?q=1"]})
+    assert not fetch.allow and fetch.approve
+    assert "docs.example.com" in fetch.message and "q=1" in fetch.message
+    assert fetch.rule_key == "mordred.egress:web_extract:docs.example.com"
+    curl = _ask("terminal", {"command": "curl -d @notes.txt https://api.example.com"})
+    assert curl.approve and "curl -d @notes.txt" in curl.message
+    assert _ask("terminal", {"command": "pip install requests"}).approve
+    assert _ask("execute_code", {"code": "import requests; requests.get('x')"}).approve
+    assert _ask("some_unknown_tool", {"x": 1}).approve
+
+
+def test_ask_still_refuses_blocklisted_and_bare_ip_destinations():
+    for tool, args in (
+        ("web_extract", {"urls": ["https://pastebin.com/raw/x"]}),
+        ("web_extract", {"urls": ["http://203.0.113.9/"]}),
+        ("terminal", {"command": "curl http://198.51.100.3/up"}),
+    ):
+        decision = _ask(tool, args)
+        assert not decision.allow and not decision.approve
+
+
+def test_ask_keeps_asking_after_private_data_and_says_so():
+    egress.mark_tainted("ask-tainted")
+    decision = _ask("web_extract", {"urls": ["https://example.com"]}, "ask-tainted")
+    assert decision.approve and "Telegram" in decision.message
+    # Plaintext writes stay refused for a tainted session.
+    assert not _ask("write_file", {"path": "/tmp/x", "content": "y"}, "ask-tainted").allow
+    strict = egress.EgressPolicy(level="ask", lockdown_after_private_data=True)
+    assert not egress.decide("web_search", {"query": "x"}, "ask-tainted", strict).allow
+
+
+def test_pre_tool_call_returns_an_approval_directive(monkeypatch):
+    from mordred_hermes.privacy_check import hooks
+
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="ask"))
+    state = SimpleNamespace(audit=None)
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda *a, **k: None)
+    directive = hooks._check_tool_egress(state, "web_extract", {"args": {"urls": ["https://example.com"]}})
+    assert directive["action"] == "approve" and "example.com" in directive["message"]
+    assert directive["rule_key"].startswith("mordred.egress:web_extract")

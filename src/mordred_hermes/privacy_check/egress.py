@@ -10,8 +10,14 @@ internet at the configured level:
 =============  ================================================================
 ``lockdown``   No internet from tools. Local tools and Mordred's own Telegram
                tools (fixed Venice/loopback destination) only.
-``search``     (default) ``lockdown`` + ``web_search``. No URL fetching,
+``search``     ``lockdown`` + ``web_search``. No URL fetching,
                browsing, remote APIs, or arbitrary commands.
+``ask``        (default) Tools work. ``web_search`` and local work run as
+               usual; every other call that may reach the internet (URL
+               fetch, browser, remote API, a command that uses the network,
+               an unknown tool) asks the user first through Hermes's approval
+               prompt, showing where it goes and what it sends. Blocklisted
+               domains and bare IP addresses are refused outright.
 ``blocklist``  Everything except blocklisted domains and tools; URL
                arguments are checked against the domain blocklist.
 ``off``        Mordred does not restrict tools.
@@ -47,6 +53,7 @@ to ``lockdown``.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import re
@@ -56,9 +63,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-LEVELS = ("lockdown", "search", "blocklist", "off")
-DEFAULT_LEVEL = "search"
-_RANK = {"off": 0, "blocklist": 1, "search": 2, "lockdown": 3}
+LEVELS = ("lockdown", "search", "ask", "blocklist", "off")
+DEFAULT_LEVEL = "ask"
+_RANK = {"off": 0, "blocklist": 1, "ask": 2, "search": 3, "lockdown": 4}
 
 # Tools that never leave this machine.
 LOCAL_TOOLS = frozenset(
@@ -158,6 +165,7 @@ class EgressPolicy:
     blocklist: tuple[str, ...] = DEFAULT_BLOCKLIST
     blocked_tools: frozenset[str] = frozenset()
     taint: bool = True
+    lockdown_after_private_data: bool = False
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,9 @@ class Decision:
     reason: str = ""
     message: str = ""
     taints: bool = False
+    #: Ask the user (Hermes's approval prompt) instead of deciding here.
+    approve: bool = False
+    rule_key: str = ""
 
 
 @dataclass
@@ -212,6 +223,7 @@ def parse_policy(section: Any) -> EgressPolicy:
         blocklist=domains,
         blocked_tools=frozenset(str(t) for t in tools),
         taint=section.get("taint", True) is not False,
+        lockdown_after_private_data=section.get("lockdown_after_private_data") is True,
     )
 
 
@@ -371,6 +383,59 @@ def _decide_restricted(level: str, tool: str, args: dict[str, Any]) -> Decision:
     return _block(level, "egress.outbound_tool", f"{tool} can send data outside this machine.")
 
 
+# Commands that (usually) talk to the network. Anything else a command does
+# stays local and runs without asking.
+_NETWORK_COMMAND = re.compile(
+    r"://|\b(?:curl|wget|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|socat|ping|dig|nslookup|whois"
+    r"|git\s+(?:clone|fetch|pull|push|ls-remote|submodule)|gh|aws|gcloud|az|kubectl|docker\s+(?:pull|push|login|run)"
+    r"|pip3?\s+(?:install|download)|uv\s+(?:pip\s+install|add|sync|tool\s+install)|npm|npx|pnpm|yarn|bun"
+    r"|brew\s+(?:install|upgrade|update|tap)|cargo\s+(?:install|add|update)|go\s+(?:get|install)"
+    r"|requests|urllib|httpx|aiohttp|http\.client|socket|websocket|fetch\()\b",
+    re.IGNORECASE,
+)
+_PREVIEW_CHARS = 600
+
+
+def _preview(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return text if len(text) <= _PREVIEW_CHARS else text[:_PREVIEW_CHARS] + " …"
+
+
+def _ask(tool: str, where: str, what: Any, rule_key: str, *, tainted: bool) -> Decision:
+    warning = "This chat has read your private (Telegram) data. " if tainted else ""
+    return Decision(
+        allow=False,
+        approve=True,
+        reason="egress.ask",
+        rule_key=rule_key,
+        message=f"{warning}Mordred: {tool} wants to use the internet ({where}). It will send: {_preview(what)}",
+    )
+
+
+def _decide_ask(tool: str, args: dict[str, Any], policy: EgressPolicy, *, tainted: bool) -> Decision:
+    """``ask``: run local work, allow web search, ask before any other internet use."""
+    hard = _decide_blocklist(tool, args, policy)
+    if not hard.allow:
+        return hard
+    if tool in SEARCH_TOOLS:
+        return Decision(allow=True)
+    if tool in EXEC_TOOLS:
+        if tool == "terminal" and is_first_party_command(args.get("command")):
+            return Decision(allow=True)
+        text = " ".join(str(v) for v in args.values() if isinstance(v, str))
+        if not _NETWORK_COMMAND.search(text):
+            return Decision(allow=True)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        return _ask(tool, "a command that uses the network", text, f"mordred.egress:{tool}:{digest}", tainted=tainted)
+    urls = _urls(tool, args)
+    if tool == "desktop_preview" and all(_is_local_target(u) for u in urls):
+        return Decision(allow=True)
+    if urls:
+        hosts = sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls})
+        return _ask(tool, ", ".join(hosts), args, f"mordred.egress:{tool}:{','.join(hosts)}", tainted=tainted)
+    return _ask(tool, "an external service", args, f"mordred.egress:{tool}", tainted=tainted)
+
+
 def _session_guard(tool: str, tainted: bool, effective: str) -> Decision | None:
     """Rules for tools that could carry this session's data somewhere else."""
     if tainted and (tool in PERSIST_TOOLS or (tool.startswith("kanban_") and tool not in _READ_ONLY_KANBAN)):
@@ -466,7 +531,10 @@ def _decide_tool(tool: str, args: dict[str, Any], session_id: str | None, policy
     if tool in policy.blocked_tools:
         return _block(level, "egress.blocked_tool", f"the tool {tool} is blocklisted.")
     tainted = policy.taint and is_tainted(session_id)
-    effective = "lockdown" if tainted else level
+    # Under "ask" a tainted session keeps asking (the prompt says the chat has
+    # read private data); the stricter levels still lock it down.
+    lock = tainted and (level != "ask" or policy.lockdown_after_private_data)
+    effective = "lockdown" if lock else level
     if tool in FIRST_PARTY_TOOLS:
         return Decision(allow=True, taints=tool in TAINT_SOURCES)
     guard = _session_guard(tool, tainted, effective)
@@ -476,15 +544,21 @@ def _decide_tool(tool: str, args: dict[str, Any], session_id: str | None, policy
         return Decision(allow=True)
     if tool == "delegate_task":
         return Decision(allow=True)  # child agents' tools pass through this hook too
+    if effective == "ask":
+        return _decide_ask(tool, args, policy, tainted=tainted)
     if tool == "cronjob_manage" and _RANK[effective] >= _RANK["search"]:
         return _block(effective, "egress.schedule", "scheduled jobs can deliver data outside this session.")
     if effective == "blocklist":
         return _decide_blocklist(tool, args, policy)
-    decision = _decide_restricted(effective, tool, args)
-    if not decision.allow and tainted and level != "lockdown":
-        return _block(
-            "lockdown",
-            "egress.tainted_session",
-            f"this session has read private data, so {tool} (and all internet access) is disabled for it.",
-        )
-    return decision
+    return _explain_lock(_decide_restricted(effective, tool, args), tool, locked=lock and level != "lockdown")
+
+
+def _explain_lock(decision: Decision, tool: str, *, locked: bool) -> Decision:
+    """Say why a session raised to ``lockdown`` by taint refuses ``tool``."""
+    if decision.allow or not locked:
+        return decision
+    return _block(
+        "lockdown",
+        "egress.tainted_session",
+        f"this session has read private data, so {tool} (and all internet access) is disabled for it.",
+    )

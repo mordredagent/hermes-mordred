@@ -120,9 +120,9 @@ history unless the user explicitly asks for older messages. (Terminal users:
 while it runs (`coverage.sync_running` is true), and never retry a failing
 question in a loop — report the error code instead.
 
-After you use `telegram_ask` / `telegram_chats`, this session cannot use web
-search or any other internet tool (Mordred taint). Finish internet lookups
-first, or tell the user to start a new chat for them.
+After you use `telegram_ask` / `telegram_chats`, this chat may not write files,
+memory or skills (Mordred taint), and any internet use asks the user first.
+Never put Telegram content into a web search or any other internet request.
 
 ## Things that are NOT needed
 
