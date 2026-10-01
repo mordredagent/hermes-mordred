@@ -18,8 +18,8 @@ It is not a fork and has no shared Git history with Hermes.
   upstream checkout, or official upstream documentation.
 - Normal development never merges or rebases Hermes history into this repo.
 
-The six `hermes_agent.plugins` entry points in `pyproject.toml` are the public
-integration boundary. A future optional vendored layer would be separately
+The single `hermes_agent.plugins` entry point in `pyproject.toml`, `mordred`, is
+the public integration boundary. A future optional vendored layer would be separately
 version-pinned and would not turn this repository into an upstream fork.
 
 ## Zero-PR commitment
@@ -71,15 +71,14 @@ owns the behavior contract.
 
 ### Tier A: Plugin-side guard (v1 default, zero core change)
 
-- Five manifest-backed plugins carry `privacy_lock: true` as a declarative
-  marker. Hermes does not enforce that field.
-- Runtime enforcement uses the fixed six-entry
-  `privacy_check._runtime.SIBLING_PLUGINS` tuple, which includes the
-  manifest-less `mordred_e2e` entry point.
-- Each runtime sibling registers the shared `on_session_start` integrity
-  callback, so disabling only `mordred_privacy_check` does not remove the
-  detector.
-- Under `strict`, a disabled sibling is audited and raises
+- Mordred is one plugin, `mordred`; its components cannot be disabled one by
+  one. `privacy_check._runtime.SIBLING_PLUGINS` is `("mordred",)`, and a
+  component that failed to register is reported as `mordred/<component>`.
+- The plugin registers the shared `on_session_start` integrity callback before
+  its components, and the `.pth` runtime bootstrap keeps a mandatory copy at
+  the front of `on_session_start`, so disabling or not enabling `mordred` is
+  still detected.
+- Under `strict`, a disabled or incomplete plugin is audited and raises
   `MordredIntegrityRefused`, a direct `BaseException` subclass that escapes
   Hermes's ordinary `except Exception` hook wrapper.
 - Under `lenient` or `off`, the condition is audited and warned, then execution
@@ -128,6 +127,6 @@ Do not resurrect historical option tables as current guidance.
 - Distribution: `hermes-mordred` (PyPI; v1 is plugin-only)
 - Legacy distribution alias: `mordred-hermes` (metadata-only compatibility shim)
 - v2 candidate extra: `hermes-mordred[hard-lock]` (vendored fork, Tier B)
-- Current integration: six pip entry-point plugins plus `hermes-mordred`
+- Current integration: one pip entry-point plugin (`mordred`) plus `hermes-mordred`
 - Upstream PRs: never submitted
 - Vendored/hard-lock extra: not implemented; deferred

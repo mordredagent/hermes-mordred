@@ -31,15 +31,15 @@ full package is laid out at the repository root.
 
 ```
 hermes-mordred/
-├── pyproject.toml                    # hermes-mordred package config (6 entry points)
+├── pyproject.toml                    # hermes-mordred package config (1 entry point: mordred)
 ├── uv.lock                           # uv lockfile (for local dev use; CI resolves the latest from PyPI via pip)
-├── src/mordred_hermes/               # plugin body (6 entry points + shared helpers)
+├── src/mordred_hermes/               # plugin body (plugin.py = the mordred entry point; components + shared helpers)
 │   ├── privacy_check/
 │   ├── wizard/
 │   ├── llm_guard/
 │   ├── network/
 │   ├── keyvault/
-│   └── extension/                    # mordred_e2e + extension server
+│   └── extension/                    # e2e component (gateway_plugin.py) + extension server
 ├── tests/                            # default suite + integration/ (opt-in) + fixtures/
 ├── docs/dev/                         # SPEC / PLAN / TODO / ROADMAP / CI / setup, etc.
 ├── docs/user/                        # QUICKSTART / USAGE / EXTENSION
@@ -112,10 +112,10 @@ The extras defined by `[project.optional-dependencies]` in `pyproject.toml`. `uv
 
 > **CI uses two dependency profiles**: the main strict lane intentionally runs with only `.[dev,keyvault,extension]`, while `feature-extras` installs `ethereum` / `messaging` / `tor-control`, requires their imports, and runs the focused feature suites so `importorskip` cannot hide missing coverage. Use `uv sync --all-extras` when developing those optional features, and also reproduce the main profile before pushing (see `CI.md`).
 
-> **Verifying discovery**: `hermes plugins list` does not show entry-point plugins (upstream's `_discover_all_plugins` is designed to scan directory-based plugins only). The loader side (`PluginManager.discover_and_load`) performs discovery + `register()`. To confirm that all Mordred plugins actually load:
+> **Verifying discovery**: older Hermes releases' `hermes plugins list` does not show entry-point plugins (their `_discover_all_plugins` scanned directory-based plugins only). The loader side (`PluginManager.discover_and_load`) performs discovery + `register()`. To confirm that the Mordred plugin is discovered (`hermes-mordred plugins list` also shows per-component status):
 > ```sh
 > .venv/bin/python -c "from hermes_cli.plugins import PluginManager; m=PluginManager(); m.discover_and_load(force=True); print(sorted(k for k,p in m._plugins.items() if p.manifest.source=='entrypoint'))"
-> # → ['mordred_e2e', 'mordred_keyvault', 'mordred_llm_guard', 'mordred_network', 'mordred_privacy_check', 'mordred_wizard']
+> # → ['mordred']
 > ```
 
 ---

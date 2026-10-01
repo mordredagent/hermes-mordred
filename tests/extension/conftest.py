@@ -20,3 +20,15 @@ if _SRC.exists() and str(_SRC) not in sys.path:
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _memory_encryption_on(request, monkeypatch):
+    """Telegram requires sealed agent memory; tests opt out with @pytest.mark.memory_plain."""
+    if request.node.get_closest_marker("memory_plain"):
+        return
+    try:
+        from mordred_hermes.extension.telegram import memory_guard
+    except ImportError:
+        return
+    monkeypatch.setattr(memory_guard, "memory_encryption_active", lambda home=None: True)

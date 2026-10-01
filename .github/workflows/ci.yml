@@ -144,10 +144,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install Ethereum, messaging, and Tor-control extras
+      - name: Install Ethereum, messaging, Tor-control, and Telegram extras
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control]"
+          pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control,telegram]"
 
       - name: Require and exercise every feature dependency
         run: |
@@ -161,6 +161,7 @@ jobs:
           import requests
           import rlp
           import socks
+          import telethon
           import urllib3
           from stem.control import Controller
 
@@ -173,6 +174,7 @@ jobs:
           assert socks.socksocket
           assert urllib3.HTTPSConnectionPool
           assert callable(Controller.from_port)
+          assert telethon.TelegramClient
 
           qr = qrcode.QRCode(border=1)
           qr.add_data("MORT-CI000000-CI000000")
@@ -195,7 +197,8 @@ jobs:
             tests/test_wizard_keyvault_eth_cli.py \
             tests/extension/test_extension_sign_tx.py \
             tests/test_paths_tor.py \
-            tests/test_wizard_extension_pair_cli.py
+            tests/test_wizard_extension_pair_cli.py \
+            tests/extension/test_telegram_import.py
 
   # Build by the same sdist -> wheel path used by release.yml, install that
   # wheel into a fresh venv outside the checkout, and smoke the public package
@@ -262,14 +265,7 @@ jobs:
               for ep in dist.entry_points
               if ep.group == "hermes_agent.plugins"
           }
-          expected_plugins = {
-              "mordred_e2e",
-              "mordred_keyvault",
-              "mordred_llm_guard",
-              "mordred_network",
-              "mordred_privacy_check",
-              "mordred_wizard",
-          }
+          expected_plugins = {"mordred"}
           assert set(plugin_eps) == expected_plugins
           for name, entry_point in plugin_eps.items():
               module = entry_point.load()

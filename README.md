@@ -16,18 +16,27 @@ for the security boundary and accepted limitations.
 **Status: active alpha.** New users should start with the
 **[Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md)**.
 
-## The plugins
+## The plugin
 
-The package exposes six `hermes_agent.plugins` entry points:
+The package registers one Hermes plugin, `mordred` (a single
+`hermes_agent.plugins` entry point), made of these components:
 
-| Plugin | Purpose |
+| Component | Purpose |
 |---|---|
-| `mordred_privacy_check` | Skill-metadata policy enforcement and audit logging |
-| `mordred_wizard` | The `hermes-mordred` CLI |
-| `mordred_llm_guard` | Strict-mode local-LLM enforcement |
-| `mordred_network` | Tor, VPN, and clearnet path management |
-| `mordred_keyvault` | Secure Enclave / TPM-backed key management |
-| `mordred_e2e` | Encrypted Slack and Discord gateway commands and replies |
+| `keyvault` | Secure Enclave / TPM-backed key management and at-rest secrets |
+| `llm_guard` | Strict-mode local-LLM enforcement |
+| `network` | Tor, VPN, and clearnet path management |
+| `privacy_check` | Skill-metadata policy enforcement and audit logging |
+| `e2e` | Encrypted Slack and Discord gateway commands and replies |
+| `wizard` | The `hermes-mordred` CLI |
+
+Hermes (and Hermes Desktop) lists it as one plugin, `mordred`; enabling or
+disabling it turns every component on or off together. Releases up to
+0.1.0a20 registered six plugins instead (`mordred_network`,
+`mordred_privacy_check`, ...). `hermes-mordred plugins migrate` (also run by
+`install.sh`, `configure`, and `upgrade`) replaces those names in
+`plugins.enabled` / `plugins.disabled` with `mordred`. The `plugins.mordred_*`
+settings sections in `config.yaml` keep their names.
 
 ## Requirements
 
@@ -48,8 +57,8 @@ hermes-mordred status
 ```
 
 `install.sh` only installs the package; `hermes-mordred setup` is what
-configures Mordred and creates keys. It runs `configure`, which enables all six
-`mordred_*` plugins. Manual configuration is covered by the
+configures Mordred and creates keys. It runs `configure`, which enables the
+`mordred` plugin. Manual configuration is covered by the
 [usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md#2-first-run-quickstart).
 Version pins, optional features, inspect-before-running steps, platform
 commands, and expected output are documented in the
@@ -72,8 +81,8 @@ versions, or before the first `configure`, keep using `hermes-mordred`.
 hermes-mordred plugins list
 ```
 
-Use Mordred's command rather than `hermes plugins list`, which does not list
-package entry points.
+It shows the `mordred` plugin and whether each component registered. Some
+Hermes versions omit package entry points from `hermes plugins list`.
 
 ## Documentation
 
@@ -85,6 +94,7 @@ guides:
 | Users | [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md) | Install and first protected setup |
 | Users | [Usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md) | Commands, ceremonies, troubleshooting, upgrades, removal |
 | Users | [Extension guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Optional browser extension, E2E messaging, wallet bridge |
+| Users | [Telegram guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/TELEGRAM.md) | Ask Hermes about your own Telegram messages: read-only, Secure Enclave sealed, Venice/local only |
 | Developers | [Development setup](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/setup.md) | Editable `.venv`, `HERMES_HOME` isolation, validation |
 | Developers | [Development index](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/README.md) | Maintained sources of truth |
 

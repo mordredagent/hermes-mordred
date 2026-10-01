@@ -104,6 +104,7 @@ from ._encryption_status import render_text as render_text
 from ._encryption_status import status_mark as status_mark
 from ._encryption_status import style_mark as style_mark
 from ._encryption_status import workspace_status as workspace_status
+from ._flow_session import FlowSession
 from ._workspace_paths import WorkspacePaths, resolve_workspace_env
 
 __all__ = [
@@ -340,7 +341,13 @@ def cli_status(args: argparse.Namespace) -> int:
 # The encryption surface always uses the default vault root (a custom --root would
 # not be seen by the macOS startup shims, which read default_vault_root()).
 # -----------------------------------------------------------------------------
-def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False) -> int:
+def _dispatch(
+    verb: str, target: str, *, force_runtime_unverified: bool = False, flow_session: FlowSession | None = None
+) -> int:
+    """Run ``verb`` on one target. ``flow_session`` (a guided multi-target flow)
+    reaches the env / config / memory ``enable`` engines so they share one
+    passphrase prompt, one vault unlock and one key policy (see
+    :mod:`._flow_session`); every other route ignores it."""
     from . import config_decrypt_cli, env_decrypt_cli, memory_cli
 
     home = _hermes_home()
@@ -356,21 +363,33 @@ def _dispatch(verb: str, target: str, *, force_runtime_unverified: bool = False)
     routes: dict[str, dict[str, Callable[[], int]]] = {
         "env": {
             "enable": lambda: env_decrypt_cli.enable(
-                home=home, root=root, platform=platform, force_runtime_unverified=force_runtime_unverified
+                home=home,
+                root=root,
+                platform=platform,
+                force_runtime_unverified=force_runtime_unverified,
+                flow_session=flow_session,
             ),
             "disable": lambda: env_decrypt_cli.disable(home=home, root=root),
             "purge": lambda: env_decrypt_cli.purge(home=home, root=root),
         },
         "config": {
             "enable": lambda: config_decrypt_cli.enable(
-                home=home, root=root, platform=platform, force_runtime_unverified=force_runtime_unverified
+                home=home,
+                root=root,
+                platform=platform,
+                force_runtime_unverified=force_runtime_unverified,
+                flow_session=flow_session,
             ),
             "disable": lambda: config_decrypt_cli.disable(home=home, root=root),
             "purge": lambda: config_decrypt_cli.purge(home=home, root=root),
         },
         "memory": {
             "enable": lambda: memory_cli.enable(
-                home=home, root=root, platform=platform, force_runtime_unverified=force_runtime_unverified
+                home=home,
+                root=root,
+                platform=platform,
+                force_runtime_unverified=force_runtime_unverified,
+                flow_session=flow_session,
             ),
             "disable": lambda: memory_cli.disable(home=home, root=root),
             "purge": lambda: memory_cli.purge(home=home, root=root),
@@ -441,17 +460,26 @@ def _workspace_eligible(
     return False, "workspace not set up"
 
 
-def _run_target(verb: str, target: str, *, force_runtime_unverified: bool = False) -> tuple[str, int]:
+def _run_target(
+    verb: str, target: str, *, force_runtime_unverified: bool = False, flow_session: FlowSession | None = None
+) -> tuple[str, int]:
     """Dispatch one target for an ``all`` fan-out; return ``(status_label, exit_code)``.
 
     The engine streams its own detail to stdout here; the caller emits the
     one-line per-target status afterwards as a single contiguous summary block.
     """
-    rc = _dispatch(verb, target, force_runtime_unverified=force_runtime_unverified)
+    rc = _dispatch(verb, target, force_runtime_unverified=force_runtime_unverified, flow_session=flow_session)
     return ("ok" if rc == 0 else f"FAILED (exit {rc})"), rc
 
 
-def _run_core_target(verb: str, target: str, *, platform: str, force_runtime_unverified: bool) -> tuple[str, int, bool]:
+def _run_core_target(
+    verb: str,
+    target: str,
+    *,
+    platform: str,
+    force_runtime_unverified: bool,
+    flow_session: FlowSession | None = None,
+) -> tuple[str, int, bool]:
     """Run one core (env/config/memory) target; return ``(status_label, exit_code, skipped)``.
 
     ``memory`` under ``enable`` is special-cased, platform first: off macOS the
@@ -478,7 +506,7 @@ def _run_core_target(verb: str, target: str, *, platform: str, force_runtime_unv
         available, reason = memory_runtime_available()
         if not available:
             return f"skipped ({reason})", 0, True
-    status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified)
+    status, rc = _run_target(verb, target, force_runtime_unverified=force_runtime_unverified, flow_session=flow_session)
     return status, rc, False
 
 
@@ -523,15 +551,23 @@ def _dispatch_all(
     outcomes: list[tuple[str, str]] = []
     failed = 0
     skipped = 0
-    for target in _ALL_CORE_TARGETS:
-        status, rc, was_skipped = _run_core_target(
-            verb, target, platform=platform, force_runtime_unverified=force_runtime_unverified
-        )
-        outcomes.append((target, status))
-        if was_skipped:
-            skipped += 1
-        else:
-            failed += rc != 0
+    # One flow for the core targets: `enable all` asks for a new vault's
+    # passphrase once and unlocks the vault at most once (the handle is closed,
+    # zeroing the master, before the workspace step runs).
+    with FlowSession() as flow:
+        for target in _ALL_CORE_TARGETS:
+            status, rc, was_skipped = _run_core_target(
+                verb,
+                target,
+                platform=platform,
+                force_runtime_unverified=force_runtime_unverified,
+                flow_session=flow if verb == "enable" else None,
+            )
+            outcomes.append((target, status))
+            if was_skipped:
+                skipped += 1
+            else:
+                failed += rc != 0
 
     eligible, reason = _workspace_eligible(verb, platform=platform, on_path=on_path)
     if eligible:

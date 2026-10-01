@@ -5,7 +5,7 @@
 > and [`PATHS.md`](../dev/PATHS.md). For developer environment setup see
 > [`setup.md`](../dev/setup.md).
 >
-> **Scope**: the `mordred_wizard` CLI surface exposed today through the standalone `hermes-mordred …` command.
+> **Scope**: the Mordred CLI surface (the `mordred` plugin's wizard component) exposed today through the standalone `hermes-mordred …` command.
 
 ---
 
@@ -38,24 +38,38 @@ cd <repo-root>            # the hermes-mordred checkout
 Every example below uses `hermes-mordred <cmd>`. From an unactivated development
 checkout, use the full `.venv/bin/hermes-mordred` path instead.
 
-### Enabling all Mordred plugins
+### Enabling Mordred
 
-`hermes-mordred configure` manages this automatically. The resulting
-`~/.hermes/config.yaml` includes:
+Mordred is a single Hermes plugin, `mordred`; enabling it turns on every
+component (keyvault, llm_guard, network, privacy_check, e2e, wizard), and there
+is no way to enable only some of them. `hermes-mordred configure` manages this
+automatically. The resulting `~/.hermes/config.yaml` includes:
 
 ```yaml
 plugins:
   enabled:
-    - mordred_privacy_check
-    - mordred_wizard
-    - mordred_llm_guard
-    - mordred_network
-    - mordred_keyvault
-    - mordred_e2e
+    - mordred
 ```
 
-Use `hermes-mordred` for commands. (`hermes plugins list` does not surface
-entry-point plugins; use `hermes-mordred plugins list`.)
+Releases up to 0.1.0a20 registered six plugins (`mordred_privacy_check`,
+`mordred_wizard`, `mordred_llm_guard`, `mordred_network`, `mordred_keyvault`,
+`mordred_e2e`). Hermes no longer loads those names. `configure`, `upgrade`,
+`desktop install`, and the installer replace them with `mordred`; to do only
+that, run:
+
+```sh
+hermes-mordred plugins migrate
+```
+
+A legacy name under `plugins.disabled` is removed rather than carried over (a
+disabled piece used to leave the rest running; the parts can no longer be
+turned off separately), and the command says so. To turn Mordred off entirely,
+add `mordred` to `plugins.disabled`. The `plugins.mordred_*` settings sections
+keep their names.
+
+Use `hermes-mordred` for commands. `hermes-mordred plugins list` shows the
+`mordred` plugin and whether each component registered (some Hermes versions
+omit package entry points from `hermes plugins list`).
 
 ---
 
@@ -465,7 +479,8 @@ implementation first and can otherwise fail after staging recovery files.
 
 ### `plugins`
 ```sh
-hermes-mordred plugins list                 # discovered Mordred plugins
+hermes-mordred plugins list                 # the mordred plugin + per-component status
+hermes-mordred plugins migrate              # switch old mordred_* plugin names to mordred
 ```
 
 ### `extension` — browser-extension pairing and server (preview)
@@ -498,6 +513,141 @@ hermes-mordred extension serve --port 7799  # bind a non-default port (default: 
 > extension build. Non-loopback `--host` values are refused. To open the
 > localhost web app, copy the complete private `Web page:` URL printed at
 > startup, including its `#token=…` fragment.
+
+### `desktop` — Mordred setup page in Hermes Desktop
+```sh
+hermes-mordred desktop install     # place the setup page and its local API
+hermes-mordred desktop status
+hermes-mordred desktop uninstall
+```
+> Hermes loads desktop pages and their local APIs only from folders, so this
+> writes the page to `<home>/desktop-plugins/mordred/plugin.js` (Hermes
+> Desktop's user-plugin folder, which it loads switched on) and a
+> `<home>/plugins/mordred/dashboard/plugin_api.py` shim that imports this
+> package, and adds
+> `mordred` to `plugins.enabled` (migrating any pre-0.1.0a21 `mordred_*`
+> plugin names) — nothing else in `config.yaml` changes. `mordred` is also
+> Mordred's agent plugin, so this enables Mordred itself, and Hermes Desktop
+> shows the page and the plugin as one `mordred` row. The plugin also re-places
+> the page at every start, so any install method gets it. `desktop uninstall`
+> removes only the page and the shim; Mordred stays enabled (to remove Mordred
+> completely, use [`uninstall`](#uninstall-safely)). The
+> page sends secrets with the Desktop plugin REST bridge
+> (`/api/plugins/mordred/…`, session-token protected, loopback only) straight
+> to Mordred; they are sealed by the Secure Enclave and never returned.
+
+### `uninstall` — remove Mordred and restore Hermes's files
+```sh
+hermes-mordred uninstall --dry-run      # the plan only
+hermes-mordred uninstall                # restore plaintext, clean config, remove the package
+hermes-mordred uninstall --purge-data   # also delete Mordred's data and device keys
+```
+> Decrypts everything Mordred encrypted before it removes anything, and keeps
+> Mordred's data unless `--purge-data` is given. Details:
+> [§9 Uninstall safely](#uninstall-safely).
+
+### `egress` — limit what the agent's tools may send out
+```sh
+hermes-mordred egress status                 # level, taint setting, blocklists
+hermes-mordred egress set ask                # lockdown | search | ask (default) | blocklist | off
+hermes-mordred egress block evil.example     # add a domain to the blocklist (level "blocklist")
+hermes-mordred egress block-tool image_generate
+hermes-mordred egress taint on               # no plaintext writes after a session reads private data
+```
+> Even a private or local LLM can leak data by *calling tools* that reach the
+> internet. Mordred checks every tool call before it runs:
+>
+> | Level | Tools may reach the internet |
+> |---|---|
+> | `lockdown` | Never. Local tools and Mordred's own Telegram tools only. |
+> | `search` | Web search only. No URL fetching, browsing, remote APIs, scheduling, or arbitrary commands. |
+> | `ask` (default) | Tools work. Web search and local commands run as usual; any other internet use (a URL, browser, remote API, a command that uses the network, an unknown tool) shows Hermes's approval prompt with where it goes and what it sends. Blocklisted domains and bare IP addresses are refused outright. |
+> | `blocklist` | Everything except blocklisted domains/tools (paste sites, webhooks and tunnels are built in). |
+> | `off` | No restriction from Mordred. |
+>
+> `terminal`, `execute_code` and browser scripting run free-form code whose
+> destination cannot be checked, so under `lockdown`/`search` only exact
+> read-only Mordred commands (`hermes-mordred telegram doctor`, `status`, …)
+> may run. Unknown tools count as internet-capable. With taint on (default),
+> a session that has read private data (the Telegram tools) cannot delegate or
+> write files, skills, memory or kanban (private data stays out of plaintext
+> storage); under `lockdown`/`search`/`blocklist` it is also locked down, and
+> under `ask` every approval prompt warns that the chat has read private data
+> (`lockdown_after_private_data: true` locks it down under `ask` too). Under
+> `ask` Mordred also tells the agent to prefer local work and web search.
+> Mordred's own Telegram tools are never blocked. Blocked and prompted calls
+> are audited as `policy.egress.tool_blocked` (`decision` `block` / `ask`).
+> Changes apply on the next tool call.
+
+### `telegram` — read-only import of your own Telegram account (preview)
+
+Start with the [Telegram guide](./TELEGRAM.md); `telegram setup` does
+everything below in one guided command, and `telegram doctor` checks health.
+
+```sh
+hermes-mordred telegram setup               # guided: Enclave helper, login, privacy LLM, first import
+hermes-mordred telegram doctor              # health check from metadata only (no Touch ID, no content)
+hermes-mordred keyvault enable-se           # once: build the Secure Enclave helper (required)
+hermes-mordred telegram login               # API credentials + phone code (+ 2FA password); sealed by the Secure Enclave
+hermes-mordred telegram sync                # import new messages from every dialog into the encrypted archive
+hermes-mordred telegram sync --days 3 --skip-archived   # recent window, pinned chats first; options are remembered
+hermes-mordred telegram sync --skip-channels --limit-per-dialog 5000
+hermes-mordred telegram status              # login state and archive counts
+hermes-mordred telegram venice              # store the Venice.ai API key (hidden prompt); --model to pick a model
+hermes-mordred telegram local-llm --endpoint http://127.0.0.1:11434/v1 --model qwen3  # or: a model on this machine
+hermes-mordred telegram migrate-tee         # move credentials stored by an older build into the Enclave seal
+hermes-mordred telegram logout              # revoke the session at Telegram; keep the archive
+hermes-mordred telegram logout --forget     # also delete the API credentials, archive key and archive
+```
+> Requires the `telegram` extra and the Secure Enclave helper
+> (`hermes-mordred keyvault enable-se`). Create your own application at
+> <https://my.telegram.org> → *API development tools* for `api_id` / `api_hash`
+> (or export them as `TELEGRAM_MORDRED_APP_ID` / `TELEGRAM_MORDRED_APP_HASH`).
+>
+> **What is stored where.** The session (a full account credential), the API
+> credentials, the archive key and the LLM key are sealed by a key inside the
+> Secure Enclave and opened by the Enclave on every connection — with Touch ID
+> unless you log in with `--no-touch-id`. There is no software-key fallback,
+> and nothing is injected into the Hermes environment. Messages are stored in
+> `<home>/mordred/telegram/`, AES-256-GCM encrypted per chat under hashed file
+> names; plaintext exists only in memory (core dumps and debugger attach are
+> disabled). The 2FA password is never stored.
+>
+> **Read-only by construction.** Every MTProto request passes an allowlist
+> before it is sent: the importer can list chats and read history, but cannot
+> send, edit, delete, react, mark chats as read, set you online, or download
+> media. Secret chats are end-to-end encrypted to the device that created them
+> and are never visible to other sessions, including this one.
+>
+> **Network.** Telegram and Venice traffic follow the selected network route.
+> With Tor selected, a loopback SOCKS proxy is mandatory and hostnames resolve
+> remotely; with VPN selected in a standalone process, the command refuses
+> rather than assume the tunnel is up.
+>
+> **Questions (Venice.ai).** The browser extension's Telegram screen asks
+> questions over the archive. Only models Venice labels `private` (Venice-run,
+> zero retention) are used; `anonymized` models are refused. Only the selected
+> chats, or the messages matching the question, are sent — never the whole
+> archive — and by default sender names, chat titles, e-mail addresses and
+> phone numbers are replaced with aliases that are mapped back locally. Names
+> mentioned inside message text, and your question itself, are sent as
+> written. The model
+> gets no tools and no web search, so instructions planted in a message cannot
+> trigger actions. Under llm_guard `strict` mode, set `allow_cloud_llm` to true
+> and add `"venice"` to `cloud_provider_allowlist` in `policy.json`.
+>
+> **From Hermes itself.** The `mordred` plugin (its e2e component) adds two agent tools,
+> `telegram_chats` and `telegram_ask`. They are offered only when the Hermes
+> model is Venice (`https://api.venice.ai`) or a loopback server, and every
+> call re-checks the running model — a Venice model must be labelled
+> `private` — before the archive is opened. `telegram_ask` returns only the
+> privacy LLM's answer, marked as untrusted third-party-derived text. Each
+> call may ask for Touch ID.
+>
+> **Only Venice or a local model.** Imported text is never sent anywhere else:
+> the Venice URL is fixed in code, and `local-llm` accepts only a loopback
+> address (`127.0.0.1` / `[::1]`, reached without any proxy). Redirects are
+> never followed.
 
 ---
 
@@ -544,6 +694,14 @@ Three steps, in order:
 > for a recovery passphrase (keep it safe — it is the cold-path recovery if the
 > device key is ever lost). Later enables reuse it silently. You *can* pre-create
 > the vault with `vault init`, but you don't need to — `encryption` drives it.
+>
+> **Inside `hermes-mordred setup`** you choose a passphrase only once per run
+> (plus one confirmation). When one run creates both the keyvault and the
+> at-rest vault, the keyvault Passphrase also becomes the vault's recovery
+> passphrase; setup says so before the prompt. It is held in memory for the
+> run only and never written anywhere. Run `keyvault init` and
+> `encryption enable env` separately if you want two different passphrases, or
+> rotate the vault's afterwards with `encryption change-passphrase`.
 
 > **On ordering**: `keyvault init` and `encryption enable env` create different
 > stores and different native keys. Run `keyvault init` when you need keyvault
@@ -599,13 +757,22 @@ unwrapped**. Each component that opens the vault prompts independently, so a
 So with `env` + `config` on you will typically see **2–3 Touch ID prompts per
 command** — expected, not a bug.
 
+Guided flows unlock the vault at most once. `hermes-mordred setup`,
+`encryption enable all`, the Memory encryption step of `telegram setup`, and
+the Hermes Desktop setup page keep one vault handle open across their
+env / config / memory steps. The vault is unwrapped (one Touch ID) at most once
+per flow, and not at all when that flow has just created the vault. Running
+`encryption enable env` and `encryption enable memory` as two separate commands
+still costs one unlock each. On a Mac without usable Touch ID (no sensor, or the
+lid is closed), each unlock shows the macOS login-password dialog instead.
+
 **Recommended: create the SE key in unattended mode** — especially if anything
 starts Hermes in the **background** (a launchd-started gateway, `extension
 serve`). An attended key blocks a background process on a Touch ID prompt it can
 never answer: after the 120 s helper timeout the process starts **without** the
 vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
-that platform, with only a `Failed to load plugin 'mordred_keyvault':
-auth_failed` warning in the logs). To make the hot path **silent** (no Touch ID
+that platform, with only a `Mordred component 'keyvault' failed to register:
+... auth_failed` error in the logs). To make the hot path **silent** (no Touch ID
 while the Mac is unlocked), install the helper and select **unattended** policy
 on a later fresh device-key creation command:
 
@@ -620,6 +787,13 @@ MORDRED_SEKEY_UNATTENDED=1 hermes-mordred encryption enable env
 The environment variable applies only to the command it prefixes. After the
 file-vault key is created unattended, its normal opens do not require Touch ID
 while your login session is unlocked.
+
+`hermes-mordred setup` asks this once ("Allow background services … without a
+per-use Touch ID / passcode prompt?", or `--unattended-keys` /
+`--attended-keys`). The answer applies to every device key the run creates:
+the keyvault key and the file-vault key. The default is attended. The Hermes
+Desktop setup page uses the same default (`MORDRED_SEKEY_UNATTENDED=1`, else
+attended). A key that already exists keeps the policy it was created with.
 
 `keyvault enable-se` may install or refresh the helper with an existing
 keyvault, but never creates, promotes, or migrates a wrapping key. Existing
@@ -993,7 +1167,7 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 
 A Hermes self-update can recreate `~/.hermes/hermes-agent/venv`. Repeat the
 same feature flags whenever you reinstall or upgrade so optional dependencies
-such as `extension`, `ethereum`, `messaging`, and `tor-control` are installed
+such as `extension`, `ethereum`, `messaging`, `tor-control`, and `telegram` are installed
 and re-resolved in the new environment.
 
 To install an exact release, replace `VERSION` with its PEP 440 version and
@@ -1022,30 +1196,81 @@ instead.
 
 ### Uninstall safely
 
-Decrypt protected data before removing the package or native keys:
+One command removes Mordred and gives Hermes its files back:
 
 ```sh
-hermes-mordred encryption disable all
-hermes-mordred vault disable-config-decrypt
-hermes-mordred encryption status          # verify every target is off
+hermes-mordred uninstall --dry-run   # print the plan; change nothing
+hermes-mordred uninstall             # show the plan, ask once, then run it
 ```
 
-After verifying the plaintext data, you may explicitly destroy profile-owned
-keys. This command is irreversible:
+The same thing through the installer (useful when `hermes-mordred` is not on
+`PATH`, for example with Hermes Desktop):
 
 ```sh
-hermes-mordred keyvault reset --yes
+curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | \
+  bash -s -- --uninstall            # add --dry-run, --yes, --purge-data or --remove-helper
 ```
 
-Remove the six `mordred_*` entries from `plugins.enabled`, then uninstall both
-the canonical distribution and the legacy compatibility name:
+Quit Hermes Desktop and stop any `hermes gateway` first. The command then runs
+these steps in order; each is safe to repeat, and a second run changes nothing:
 
-```sh
-uv pip uninstall --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  mordred-hermes hermes-mordred
-rm -f "$(dirname "$(command -v hermes)")/hermes-mordred"
-```
+1. **Restore plaintext.** Every encryption target that is on is turned off with
+   the same reversible logic as `encryption disable` (config, memory, then env),
+   unlocking the vault once for all of them. `.env`, `config.yaml` and
+   `memories/*.md` are back on disk exactly as Hermes wrote them. If the device
+   key cannot open the vault you are offered the vault recovery passphrase. If
+   any target cannot be restored, the command **stops before removing
+   anything** and explains why — Mordred stays installed, so Hermes keeps
+   working.
+2. **Hermes configuration.** The Hermes Desktop page (`<home>/plugins/mordred`)
+   is removed. `mordred` and the pre-0.1.0a21 `mordred_*` names leave
+   `plugins.enabled` / `plugins.disabled`, and Mordred's settings blocks
+   (`plugins.mordred_*`, the legacy `memory.encryption` flag) leave
+   `config.yaml`; a copy is kept as
+   `config.yaml.mordred-uninstall-<timestamp>.bak`. `HERMES_MEMORY_KEY` and
+   `MORDRED_*` lines are moved out of `.env` into
+   `<home>/mordred/uninstall/env-removed-<timestamp>.env` (mode 0600).
+3. **Launchers.** The `hermes-mordred` launcher the installer wrote is removed
+   (only if it carries the installer's marker, or is a symlink to the console
+   script being uninstalled). The native helpers `~/.local/bin/mordred-hermes-sekey`
+   and `mordred-hermes-tpmkey` are kept unless you pass `--remove-helper` or
+   `--purge-data`, and are removed only when Mordred built them.
+4. **Package.** `uv pip uninstall hermes-mordred` (and the legacy
+   `mordred-hermes`) runs last in Hermes's own environment, found the same way
+   the installer finds it (including the Hermes Desktop managed environment and
+   its bundled `uv`).
+5. **Data.** By default nothing is deleted. The command lists what remains and
+   where: the vault and keyvault under `<home>/mordred/`, the Telegram archive
+   and sealed credentials, the audit log, `<home>/extension/`, and the device
+   keys: Secure Enclave keys (or, for a vault created before the Secure Enclave
+   helper was installed, a software P-256 key in the login keychain whose tag
+   starts with `mordred-hermes.wrsw.`) and the vault's Keychain anchor
+   (services `mordred-hermes.vault.anchor.sekey` and legacy
+   `mordred-hermes.vault.anchor`).
 
-State under `~/.hermes/mordred/` and installed native helpers are intentionally
-left behind. Remove them manually only after confirming that no encrypted data
-or backup still depends on them.
+`--purge-data` also deletes that data: it logs Telegram out (revoking the
+session), deletes the vault's device key and Keychain anchor, resets the
+keyvault (`keyvault reset`), and removes `<home>/mordred/` and
+`<home>/extension/`. A keychain item that only its creator may delete (for
+example a software key another Python created) is reported with the steps to
+remove it in Keychain Access. It asks you to type `delete my data`; `--yes` does not
+skip that. Afterwards anything encrypted with those keys can be recovered only
+with the keyvault Seed Phrase, Passphrase and backup blob or the vault recovery
+passphrase — and only from a copy of the data kept elsewhere.
+
+What `uninstall` cannot restore:
+
+- Mordred never recorded values it replaced, because it does not replace any
+  Hermes setting: `configure` only adds Mordred's own entries. If you changed
+  Hermes settings to point at Mordred yourself — for example
+  `model.provider: mordred-local` — the plan lists every remaining mention of
+  Mordred in `config.yaml` so you can set it back (for example with
+  `hermes model`).
+- If `config.yaml` had no `plugins.enabled` list before Mordred, an empty
+  `plugins.enabled: []` stays; Hermes treats both the same.
+- `config.yaml` is written back with the same round-trip writer Mordred used to
+  edit it, so comments and key order survive but indentation Mordred
+  normalised earlier stays normalised.
+- The encrypted Claude workspace (`encryption enable workspace`) belongs to the
+  external `claude-private` tool and is left as is.
+

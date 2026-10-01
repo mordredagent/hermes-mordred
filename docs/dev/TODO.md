@@ -45,7 +45,7 @@ change.
 ### 0.4 Plugin scaffolding (five plugins)
 
 No open work. The heading is retained as a stable historical anchor; the
-current package exposes five manifest-backed plugins plus `mordred_e2e`.
+current package exposes one entry-point plugin, `mordred`, with six components.
 
 ### 0.5 `mordred-hermes` package scaffold
 
@@ -67,7 +67,7 @@ field changes.
 
 ### Acceptance gate (Phase 0)
 
-The package must discover all six entry points and pass the documented checks
+The package must discover the `mordred` entry point and pass the documented checks
 from a clean supported environment.
 
 ## Phase 1 — Privacy Primitives (`mordred_privacy_check` + metadata + wizard)

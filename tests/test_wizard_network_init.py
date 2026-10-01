@@ -447,8 +447,8 @@ class TestRunInitPersistsConfig:
         assert section["tor_socks_port"] == 9050
         assert section["mullvad_relay_country"] == "jp"
         assert section["mullvad_killswitch"] is True
-        # Atomic-write contract: PolicyWriter adds the Mordred plugin names.
-        assert "mordred_network" in data["plugins"]["enabled"]
+        # Atomic-write contract: PolicyWriter enables the Mordred plugin.
+        assert "mordred" in data["plugins"]["enabled"]
 
     def test_merge_preserves_unrelated_fields(self, tmp_path: Path) -> None:
         config = tmp_path / "config.yaml"

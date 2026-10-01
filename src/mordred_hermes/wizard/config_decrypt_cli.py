@@ -34,6 +34,7 @@ from ._vault_open import _vault_present
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
+    from ._flow_session import FlowSession
     from .configure import PromptIO
 
 __all__ = ["cli_disable", "cli_enable", "disable", "enable"]
@@ -106,6 +107,7 @@ def enable(
     prompt_io: PromptIO | None = None,
     runtime_probe: RuntimeProbe | None = None,
     force_runtime_unverified: bool = False,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Enroll ``<home>/config.yaml`` into the vault and write the opt-in marker.
 
@@ -127,6 +129,9 @@ def enable(
     the config in practice. ``runtime_probe`` is injectable for tests;
     ``force_runtime_unverified`` bypasses both checks (advanced; arms the seal
     anyway).
+
+    ``flow_session`` (``encryption enable all``) shares the flow's passphrase,
+    open vault and key policy (see :mod:`._flow_session`).
     """
     from . import vault_cli
 
@@ -147,11 +152,15 @@ def enable(
     if gate != 0:
         return gate
 
-    rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    rc = vault_cli.ensure_initialised(
+        root=root, prompt_io=prompt_io, backend=backend, store=store, flow_session=flow_session
+    )
     if rc != 0:
         return rc  # could not create the vault (reason already printed)
 
-    rc = vault_cli.add(root=root, name=_CONFIG_NAME, source=config_path, backend=backend, store=store)
+    rc = vault_cli.add(
+        root=root, name=_CONFIG_NAME, source=config_path, backend=backend, store=store, flow_session=flow_session
+    )
     if rc != 0:
         return rc  # vault_cli.add already printed the reason; do NOT write the marker
 
@@ -183,13 +192,15 @@ def disable(
     root: Path,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Remove the opt-in marker and guarantee a readable plaintext config.yaml.
 
     If a managed session had sealed the plaintext away (reseal-on-exit removed it),
     it is decrypted back from the vault first so Hermes keeps a usable config. The
     vault copy is left intact. Returns 0 on success, 1 if the plaintext is missing
-    and the vault cannot be opened to recover it.
+    and the vault cannot be opened to recover it. ``flow_session`` (``uninstall``)
+    lends the flow's already open vault.
     """
     marker = _marker_path(home)
     config_path = home / _CONFIG_NAME
@@ -201,7 +212,7 @@ def disable(
         from ..keyvault import _storage
         from . import vault_cli
 
-        opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
+        opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
         if opened is None:
             return 1
         with opened:

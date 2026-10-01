@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.vault import OpenVault
     from ..keyvault.wrap import NativeBackend
+    from ._flow_session import FlowSession
 
 _MEMORY_KEY_ENV = "HERMES_MEMORY_KEY"
 
@@ -186,6 +187,7 @@ def ensure_memory_key(
     rotate: bool = False,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
 ) -> tuple[int, str | None]:
     """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY``, and report it.
 
@@ -221,11 +223,15 @@ def ensure_memory_key(
     fakes. Returns 0 on success (no-op, store, or adoption), 1 on an uninitialised
     / unverifiable vault, a non-UTF-8 or unreadable enrolled ``.env``, a
     malformed-``.env`` refusal, or a device key-store error.
+
+    With a ``flow_session`` (e.g. ``encryption enable memory`` right after
+    ``enable env`` in one setup run) the flow's already open vault is reused,
+    so this costs no second unlock / Touch ID.
     """
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
 
-    opened = _open_hot_path_or_report(root, backend=backend, store=store)
+    opened = _open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
     if opened is None:
         return 1, None
 

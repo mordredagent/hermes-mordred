@@ -19,6 +19,7 @@ macos = ["hermes-mordred[macos]==0.1.0a20"]
 ethereum = ["hermes-mordred[ethereum]==0.1.0a20"]
 messaging = ["hermes-mordred[messaging]==0.1.0a20"]
 tor-control = ["hermes-mordred[tor-control]==0.1.0a20"]
+telegram = ["hermes-mordred[telegram]==0.1.0a20"]
 integration = ["hermes-mordred[integration]==0.1.0a20"]
 dev = ["hermes-mordred[dev]==0.1.0a20"]
 

@@ -25,14 +25,13 @@ needs, it refuses rather than silently claiming protection.
 
 `hermes-mordred` is a standalone MIT-licensed package that depends on
 `hermes-agent`. It is not a fork or a copy of the upstream repository. It
-ships these six `hermes_agent.plugins` entry points:
-
-- `mordred_network`
-- `mordred_privacy_check`
-- `mordred_llm_guard`
-- `mordred_keyvault`
-- `mordred_wizard`
-- `mordred_e2e`
+ships one `hermes_agent.plugins` entry point, `mordred`
+(`mordred_hermes.plugin`), which registers the components listed under
+[What Mordred Adds](#what-mordred-adds-one-plugin-six-components). Releases up
+to 0.1.0a20 shipped each component as its own entry point (`mordred_network`,
+`mordred_privacy_check`, `mordred_llm_guard`, `mordred_keyvault`,
+`mordred_wizard`, `mordred_e2e`); config writers migrate those names in
+`plugins.enabled` / `plugins.disabled` to `mordred`.
 
 Hermes core stays unmodified and Mordred does not submit upstream pull
 requests. [`UPSTREAM.md`](./UPSTREAM.md) owns that relationship and the
@@ -96,9 +95,20 @@ Current defenses include:
 - strict startup refusal when a required Mordred sibling plugin is disabled;
 - purpose-bound envelope encryption and native-key authorization;
 - encrypted audit records when a keyvault-backed writer is available; and
-- loopback-only, paired, encrypted browser-extension transport.
+- loopback-only, paired, encrypted browser-extension transport; and
+- a read-only Telegram importer (see [Telegram import](#telegram-import)); and
+- tool-egress levels (`lockdown` / `search` / `ask` default / `blocklist` / `off`)
+  enforced in `privacy_check`'s `pre_tool_call`: free-form code tools are
+  refused below `blocklist` except exact first-party read-only commands,
+  unknown tools count as internet-capable, and a session that read private
+  data is locked down (taint).
 
 Accepted limitations include:
+
+- tool-egress control acts on tool calls, not sockets: under `blocklist` a
+  `terminal` command can still reach any host not named in the blocklist, and
+  a Hermes feature that sends data without a tool call (cron `no_agent`
+  scripts, platform delivery, external ACP delegates) is outside the hook;
 
 - a skill can open a direct socket or invoke an unwrapped executable;
 - Hermes does not provide trusted `origin_skill` provenance to
@@ -110,12 +120,83 @@ Accepted limitations include:
   detection cannot defeat a physical camera;
 - traffic emitted by a parent harness such as Codex CLI, Claude CLI, Cursor,
   or an ACP client bypasses Hermes plugin hooks;
-- if all Mordred plugins and the packaged interpreter-startup guard are
+- if the Mordred plugin and the packaged interpreter-startup guard are
   removed, plugin-only enforcement no longer runs;
 - helper discovery through writable PATH locations is not equivalent to
   signed-distribution attestation; and
 - wallet signing and payment authorization are not isolated into a separate
-  privilege domain.
+  privilege domain; and
+- the Telegram session is a full MTProto account credential (Telegram has no
+  scoped or read-only token). Read-only behavior is enforced by the client,
+  not by Telegram, and same-UID malware that can open the vault hot path can
+  use the session.
+
+### Telegram import
+
+The optional `telegram` extra lets the operator import their **own** Telegram
+account (MTProto user session via Telethon) and ask questions over it from the
+browser extension, using a Venice.ai private model.
+
+- **Custody (TEE).** API credentials, the Telethon `StringSession`, the
+  archive key and the LLM API key are sealed in `credentials.sealed` under a
+  data key wrapped (keyvault ECIES, `wrap.wrap_dek`) by a P-256 key inside the
+  Secure Enclave (Linux: TPM). The backend is the signed hardware helper only
+  — no software-key namespace, no legacy fallback — so without
+  `keyvault enable-se` every read and write fails with `tee_unavailable`.
+  Every unseal is a fresh Enclave ECDH (nothing decrypted is cached); the key
+  requires Touch ID / passcode per use unless created with `--no-touch-id`.
+  The sealed file is not the vault `.env`, so nothing is ever injected into a
+  Hermes process environment. The 2FA password is never stored.
+- **Plaintext in memory only.** Messages are AES-256-GCM encrypted on disk;
+  processes that unseal credentials disable core dumps, deny debugger attach
+  (`PT_DENY_ATTACH`), and cap Telethon logging at WARNING. Status polls use a
+  non-secret flags file and never unseal.
+- **Destinations.** Imported text goes only to Venice (fixed
+  `https://api.venice.ai/api/v1`, `private` models) or to a loopback model
+  (`telegram local-llm`, literal `127.0.0.1`/`::1`, no proxy). Redirects are
+  never followed. No other endpoint is configurable.
+- **Read-only.** Every request is checked against an allowlist of reads before
+  Telethon resolves or queues it, both at `TelegramClient._call` and at the
+  MTProto sender's `send`. Sending, editing, deleting, reacting,
+  `messages.ReadHistory`, `account.UpdateStatus`, media download (`upload.*`)
+  and cross-DC exported senders are refused. Auth requests are unlocked only
+  inside the interactive `telegram login`; `auth.LogOut` only inside
+  `telegram logout`. Telethon's update machinery is disabled (`_on_login`
+  seeds state from `updates.GetState` only; no update loop), so no
+  `updates.GetDifference` traffic is needed. A second `telegram login` is
+  refused while a session exists, and a login that fails after Telegram
+  accepted it revokes the new authorization.
+- **At rest.** `<home>/mordred/telegram/` holds an index plus AES-256-GCM
+  segment files of up to 2000 messages per chat (a sync rewrites only the last
+  segment). Separate HKDF subkeys of `store_key` encrypt and name files; the
+  AAD binds each blob to its logical name and file names are an HMAC of chat id
+  and segment number. File counts and sizes remain observable.
+- **Egress.** Telegram and Venice resolve one explicit route through
+  `extension.egress` (shared with Discord): Tor requires a loopback SOCKS proxy
+  with remote DNS; VPN without a live runtime is refused.
+- **Questions.** Only Venice models whose live catalog entry has
+  `model_spec.privacy == "private"` are used; `anonymized` models, unknown
+  models and an unreadable catalog fail closed. The request carries no tools,
+  disables web search and Venice's system prompt, and runs the llm_guard
+  `check_runtime_provider(active_provider="venice")` gate first. Only a
+  bounded selection is sent, pseudonymized by default (sender names, chat
+  titles, e-mail addresses, phone numbers become aliases mapped back locally;
+  alias brackets in message text are neutralized so text cannot forge one),
+  inside a delimiter message text cannot close. Names mentioned inside message
+  text and the question itself are sent as written.
+- **Wire.** Account label, chat titles and answer chunks are sealed with
+  `K_extchat`; the question must arrive sealed. Numeric chat ids, counts and
+  dates travel unsealed over the loopback socket. Each question runs as its
+  own task (at most two per socket) and `telegram_ask_cancel` or a closed
+  socket stops it. Page sessions cannot reach the Telegram handlers.
+- **Hermes tools.** The `mordred` plugin's e2e component registers `telegram_chats` / `telegram_ask`
+  (toolset `mordred_telegram`). `check_fn` offers them only when the
+  configured Hermes model is Venice or loopback; each call re-checks the
+  running agent's `model`/`base_url` and, for Venice, requires
+  `model_spec.privacy == "private"` from the public catalog before unsealing
+  anything. Results carry an untrusted-content note.
+- **Not covered.** Secret chats (device-bound E2EE), media contents, and
+  sending messages. Venice E2EE (TEE-attested) models are a planned follow-up.
 
 The remaining hardening work is tracked as release gates in
 [`ROADMAP.md`](./ROADMAP.md), especially OS1 and P1. Documentation must not
@@ -167,21 +248,32 @@ and do not turn Mordred into a replacement Python runtime.
 
 `hermes-mordred` is the canonical CLI spelling. The registered Hermes-host
 subcommand is a compatibility alias on versions that discover plugin CLI
-commands; it is not available before the wizard plugin is loaded on older
+commands; it is not available before the `mordred` plugin is loaded on older
 supported hosts.
 
-### What Mordred Adds (6 plugins)
+### What Mordred Adds (one plugin, six components)
 
 The distribution is `hermes-mordred`; imports remain under `mordred_hermes`.
+Hermes sees one plugin, `mordred`. Its `register()` first installs the shared
+integrity gate on `on_session_start`, then registers the components in this
+order (the table order):
 
-| Entry point | Current responsibility |
-|---|---|
-| `mordred_network` | Tor/VPN/clearnet route lifecycle, proxy evidence, health checks, transport gating |
-| `mordred_privacy_check` | install policy, generic runtime tool policy, audit writer, sibling integrity |
-| `mordred_llm_guard` | `mordred-local` registration, strict provider/endpoint refusal, harness and auxiliary-client guards |
-| `mordred_keyvault` | native-key envelopes, recovery primitives, audit encryption, macOS runtime secret lifecycle |
-| `mordred_wizard` | configuration, migration, status, policy, network, keyvault, vault, encryption, and plugin CLI |
-| `mordred_e2e` | gateway-side encrypted extension dispatch and signing integration |
+| Component | Module | Current responsibility |
+|---|---|---|
+| `keyvault` | `mordred_hermes.keyvault` | native-key envelopes, recovery primitives, audit encryption, macOS runtime secret lifecycle |
+| `llm_guard` | `mordred_hermes.llm_guard` | `mordred-local` registration, strict provider/endpoint refusal, harness and auxiliary-client guards |
+| `network` | `mordred_hermes.network` | Tor/VPN/clearnet route lifecycle, proxy evidence, health checks, transport gating |
+| `privacy_check` | `mordred_hermes.privacy_check` | install policy, generic runtime tool policy, audit writer, plugin integrity |
+| `e2e` | `mordred_hermes.extension.gateway_plugin` | gateway-side encrypted extension dispatch, signing integration, read-only Telegram tools |
+| `wizard` | `mordred_hermes.wizard` | configuration, migration, status, policy, network, keyvault, vault, encryption, and plugin CLI |
+
+A component whose `register()` raises an ordinary exception is contained: its
+registrations are disposed, the others still register, and the integrity gate
+reports it as `mordred/<component>` (strict: refuse the session; lenient/off:
+warn), exactly as a failed separate plugin was reported before. Deliberate
+fail-closed refusals (`BaseException`) propagate and stop startup. Settings
+stay in the `plugins.mordred_network`, `plugins.mordred_privacy_check`, and
+`plugins.mordred_llm_guard` sections of `config.yaml`.
 
 ### Conventions (not plugins)
 
@@ -208,10 +300,12 @@ be described as providing the same permissive fallback.
 ### Naming Convention
 
 The canonical distribution name is `hermes-mordred`; `mordred-hermes` is a
-metadata-only compatibility shim. Python imports use `mordred_hermes`, Hermes
-entry points use `mordred_*`, and audit reasons use stable dotted names. The
-browser-facing gateway entry point remains `mordred_e2e`, while its Python
-implementation lives under `mordred_hermes.extension`.
+metadata-only compatibility shim. Python imports use `mordred_hermes`, the one
+Hermes entry point is `mordred`, config sections keep the pre-0.1.0a21
+per-component names (`plugins.mordred_network`, ...), and audit reasons use
+stable dotted names. The `### Plugin: mordred_*` sections below describe the
+components by those historical names. The browser-facing gateway component
+(formerly the `mordred_e2e` entry point) lives under `mordred_hermes.extension`.
 
 ## Target User (v1)
 
@@ -696,14 +790,21 @@ vault       init | change-passphrase | recover | add | status | cat |
             migrate | set-memory-key | enable-config-decrypt |
             disable-config-decrypt
 encryption  status | enable | disable | purge | change-passphrase
-plugins     list
+plugins     list | migrate
 extension   pair | serve
+desktop     install | uninstall | status
+egress      status | set | block | unblock | block-tool | unblock-tool |
+            taint
+telegram    setup | doctor | login | sync | status | logout | venice |
+            local-llm | migrate-tee
+uninstall
 ```
 
 `status`, `policy show`, keyvault listing, vault status, and encryption status
 are non-mutating. `configure`, `keyvault init/reset`, `network init`, vault
-mutations, encryption toggles, audit purge, pairing, and serving can touch real
-profile or external state; tests and local experiments must isolate
+mutations, encryption toggles, audit purge, pairing, serving, and `uninstall`
+(restores plaintext, edits `config.yaml` / `.env`, removes the package; `--dry-run`
+is non-mutating) can touch real profile or external state; tests and local experiments must isolate
 `HERMES_HOME` as described in [`setup.md`](./setup.md).
 
 The wizard is the sole writer of the canonical Mordred policy transaction and
@@ -776,7 +877,8 @@ generations.
 
 ### Plugin Versioning & Compatibility
 
-All plugins ship in the `hermes-mordred` distribution and share one version.
+The `mordred` plugin and all its components ship in the `hermes-mordred`
+distribution and share one version.
 The package version in `src/mordred_hermes/__about__.py` is the release source
 of truth and is updated through `tools/bump_version.py`. The minimum supported
 Hermes version is declared in `pyproject.toml`; CI checks both the floor and a

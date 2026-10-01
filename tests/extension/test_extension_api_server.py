@@ -225,7 +225,7 @@ def test_full_server_flow():
     assert r["webauthn_required"] is False
     assert r["pair_type"] == "pair_complete"
     assert r["auth_type"] == "auth_ok"
-    assert r["auth_capabilities"] == ["discord_channel_resolve_v1"]
+    assert r["auth_capabilities"] == ["discord_channel_resolve_v1", "telegram_import_v1"]
     assert r["enc_type"] == "encrypt_result"
     assert r["client_decrypt"] == "秘密"
     assert r["dec_plaintext"] == "秘密"

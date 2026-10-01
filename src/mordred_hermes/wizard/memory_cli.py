@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from ..keyvault._runtime_probe import GatewayRuntime
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
+    from ._flow_session import FlowSession
     from .configure import PromptIO
 
 __all__ = ["disable", "enable", "purge"]
@@ -280,6 +281,7 @@ def _ensure_key(
     prompt_io: PromptIO | None,
     backend: NativeBackend | None,
     store: AnchorStore | None,
+    flow_session: FlowSession | None = None,
 ) -> tuple[int, bytes | None]:
     """Create the vault if needed, ensure the memory key, and decode it.
 
@@ -290,10 +292,14 @@ def _ensure_key(
     from ..keyvault.memory_crypto import MemoryCryptoError, decode_key
     from . import vault_cli, vault_memory_key
 
-    rc = vault_cli.ensure_initialised(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    rc = vault_cli.ensure_initialised(
+        root=root, prompt_io=prompt_io, backend=backend, store=store, flow_session=flow_session
+    )
     if rc != 0:
         return rc, None  # could not create the vault (reason already printed)
-    rc, value = vault_memory_key.ensure_memory_key(root=root, rotate=False, backend=backend, store=store)
+    rc, value = vault_memory_key.ensure_memory_key(
+        root=root, rotate=False, backend=backend, store=store, flow_session=flow_session
+    )
     if rc != 0 or value is None:
         return rc or 1, None
     try:
@@ -397,6 +403,7 @@ def enable(
     prompt_io: PromptIO | None = None,
     platform: str | None = None,
     force_runtime_unverified: bool = False,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Arm the memory hook and seal the memory files already on disk.
 
@@ -407,6 +414,9 @@ def enable(
 
     If no vault exists yet, one is created first (prompting once for a recovery
     passphrase), so a fresh install need not run ``vault init`` by hand.
+    ``flow_session`` (a guided flow) shares the flow's passphrase, open vault
+    and key policy, so enabling memory right after env costs no second unlock
+    (see :mod:`._flow_session`).
 
     Returns 0 on success; 1 when a gate refuses, the vault cannot be created or
     opened, the key is unusable, or the eager migration could not seal a file —
@@ -423,7 +433,7 @@ def enable(
     if gate != 0:
         return gate
 
-    rc, key = _ensure_key(root=root, prompt_io=prompt_io, backend=backend, store=store)
+    rc, key = _ensure_key(root=root, prompt_io=prompt_io, backend=backend, store=store, flow_session=flow_session)
     if rc != 0 or key is None:
         return rc or 1
 
@@ -439,6 +449,7 @@ def _memory_key_from_vault(
     root: Path,
     backend: NativeBackend | None,
     store: AnchorStore | None,
+    flow_session: FlowSession | None = None,
 ) -> bytes | None:
     """The effective ``HERMES_MEMORY_KEY`` from the vault ``.env``, or ``None``.
 
@@ -454,7 +465,7 @@ def _memory_key_from_vault(
 
     if not _vault_present(root):
         return None
-    opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
+    opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
     if opened is None:
         return None
     with opened:
@@ -552,8 +563,12 @@ def disable(
     root: Path,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
 ) -> int:
     """Decrypt every sealed memory file back and pause the hook (reversible).
+
+    ``flow_session`` (``uninstall``) lends the flow's already open vault, so the
+    key read here costs no second unlock.
 
     The key is kept in the vault, so ``enable`` restores the sealed state without
     re-keying. Returns 0 on success, 1 when sealed files exist and cannot be
@@ -571,7 +586,7 @@ def disable(
     sealed_paths = _sealed_memory_files(home)
     decrypted = 0
     if sealed_paths:
-        key = _memory_key_from_vault(root=root, backend=backend, store=store)
+        key = _memory_key_from_vault(root=root, backend=backend, store=store, flow_session=flow_session)
         if key is None:
             return _refuse(
                 "disable",
