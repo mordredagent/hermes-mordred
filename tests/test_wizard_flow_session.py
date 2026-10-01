@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import pickle
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +117,12 @@ class _NoopSurface:
 
     def clear(self) -> None:
         return None
+
+
+def _as_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These flows seal memory, which only exists on macOS; run them as macOS
+    on every CI runner (the backends are fakes, so nothing native is touched)."""
+    monkeypatch.setattr(sys, "platform", "darwin")
 
 
 def _stub_runtime_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,6 +360,7 @@ class TestVaultUnlocks:
     ) -> None:
         """`encryption enable all` creating the vault: 1 choose + 1 confirm and 0
         unlocks (before: 3 unlocks -- env, config, memory each opened it)."""
+        _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
         home = tmp_path / "home"
         _plaintext_home(home)
@@ -374,6 +382,7 @@ class TestVaultUnlocks:
     def test_enable_all_with_an_existing_vault_unlocks_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
         home = tmp_path / "home"
         _plaintext_home(home)
@@ -389,8 +398,10 @@ class TestVaultUnlocks:
     def test_desktop_memory_enable_is_one_flow(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Desktop `/memory/enable` on a fresh host: vault created and kept open,
         so 0 unlocks (before: 2), and the key follows setup's default policy."""
+        pytest.importorskip("fastapi")
         from mordred_hermes.desktop import api as desktop_api
 
+        _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
         monkeypatch.delenv("MORDRED_SEKEY_UNATTENDED", raising=False)
         home, root = tmp_path / "home", tmp_path / "v"
@@ -420,8 +431,10 @@ class TestVaultUnlocks:
     def test_desktop_memory_enable_honours_an_explicit_unattended_request(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        pytest.importorskip("fastapi")
         from mordred_hermes.desktop import api as desktop_api
 
+        _as_macos(monkeypatch)
         _stub_runtime_probes(monkeypatch)
         home, root = tmp_path / "home", tmp_path / "v"
         _plaintext_home(home)

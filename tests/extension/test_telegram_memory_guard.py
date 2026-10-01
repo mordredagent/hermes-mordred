@@ -26,7 +26,10 @@ def test_memory_encryption_active(monkeypatch, active, drift, ok):
 
 def test_service_entry_points_refuse_plaintext_memory(monkeypatch):
     monkeypatch.setattr("mordred_hermes.wizard.encryption_cli.memory_status", _status(False))
-    svc = service.TelegramService(secret_store=SimpleNamespace(load=lambda fresh=True: None, flags=lambda: None))
+    # The guard must hold whether or not the optional Telethon extra is installed.
+    svc = service.TelegramService(
+        secret_store=SimpleNamespace(load=lambda fresh=True: None, flags=lambda: None), installed=lambda: True
+    )
 
     async def ask() -> None:
         async for _ in svc.ask(AskRequest(question="q"), lambda _m: None):

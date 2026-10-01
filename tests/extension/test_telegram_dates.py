@@ -402,12 +402,14 @@ def _sync(fake: Any, tmp_path, **opts: Any) -> list[int]:
 
 
 def test_large_groups_are_skipped_by_default(tmp_path):
+    pytest.importorskip("telethon")  # the size lookup is a real Telethon request
     fake = _group_fixture(full_count=None)
     assert _sync(fake, tmp_path) == [-1]  # huge skipped; unknown size counts as large
     assert fake.full_requests == 1  # only the group whose size was not listed
 
 
 def test_unknown_size_resolved_by_read_only_lookup(tmp_path):
+    pytest.importorskip("telethon")  # the size lookup is a real Telethon request
     assert _sync(_group_fixture(full_count=40), tmp_path) == [-3, -1]
 
 

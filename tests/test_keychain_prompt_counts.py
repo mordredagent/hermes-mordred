@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -102,7 +103,10 @@ def _flow_telegram_setup_memory_step(world: _World) -> None:
 
 def _flow_desktop_memory_enable(world: _World, monkeypatch: pytest.MonkeyPatch) -> None:
     """Desktop ``POST /memory/enable`` with the vault already present."""
+    pytest.importorskip("fastapi")
     from mordred_hermes.desktop import api as desktop_api
+
+    monkeypatch.setattr(sys, "platform", "darwin")  # memory sealing is macOS-only; backends are fakes
 
     monkeypatch.setattr(desktop_api, "_home", lambda: world.home)
     monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: world.root)
