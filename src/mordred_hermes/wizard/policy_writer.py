@@ -43,6 +43,7 @@ from typing import Any, Final, Literal, NoReturn, Protocol, runtime_checkable
 from ruamel.yaml import YAML
 
 from .._file_lock import private_flock
+from .._plugin_identity import PLUGIN_NAME, PluginListMigration, migrate_plugin_lists
 from .._policy_io import (
     load_policy_mapping,
     policy_transaction_marker_for_policy,
@@ -66,7 +67,13 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None  # type: ignore[assignment]
 
-MORDRED_PLUGIN_NAMES: Final = (
+#: Names that must be in ``plugins.enabled``: the single ``mordred`` plugin.
+MORDRED_PLUGIN_NAMES: Final = (PLUGIN_NAME,)
+
+#: ``plugins.<section>`` settings blocks this writer may edit. These are
+#: Mordred's own config keys (named after the pre-0.2.0a0 per-component
+#: plugins), not Hermes plugin identities.
+MORDRED_CONFIG_SECTIONS: Final = (
     "mordred_privacy_check",
     "mordred_wizard",
     "mordred_llm_guard",
@@ -347,8 +354,8 @@ def _finish_policy_transaction(marker: Path) -> None:
     _fsync_parent(marker)
 
 
-def _ensure_plugins_enabled(root: Any) -> None:
-    """Ensure all Mordred plugin names appear in ``plugins.enabled``.
+def _ensure_plugins_enabled(root: Any, *, log_notes: bool = True) -> PluginListMigration:
+    """Ensure ``mordred`` appears in ``plugins.enabled`` (and migrate legacy names).
 
     Per HOOK_PAYLOADS.md §1, Hermes's
     entry-point plugins are NOT auto-loaded; their names must be listed
@@ -356,7 +363,11 @@ def _ensure_plugins_enabled(root: Any) -> None:
 
     No-op if the section is already complete. If ``plugins.enabled`` is
     absent we add it; if ``plugins`` itself is absent we add it. Existing
-    non-Mordred entries are preserved.
+    non-Mordred entries are preserved. The pre-0.2.0a0 per-component names
+    (``mordred_network``, ...) are removed from ``plugins.enabled`` and
+    ``plugins.disabled``; see :func:`mordred_hermes._plugin_identity.migrate_plugin_lists`.
+    The migration notes are logged as warnings unless ``log_notes`` is false
+    (callers that print them to the operator themselves).
     """
     plugins = root.get("plugins") if isinstance(root, Mapping) else None
     if not isinstance(plugins, MutableMapping):
@@ -368,36 +379,26 @@ def _ensure_plugins_enabled(root: Any) -> None:
         # Use a plain dict -- ruamel will still emit it as a mapping; round-trip
         # treatment of NEW keys is best-effort (we own this section).
         root["plugins"] = {"enabled": list(MORDRED_PLUGIN_NAMES)}
-        return
+        return PluginListMigration(added_enabled=True)
 
     enabled = plugins.get("enabled")
-    if enabled is None:
-        plugins["enabled"] = list(MORDRED_PLUGIN_NAMES)
-        return
-
-    if not isinstance(enabled, list):
+    if enabled is not None and not isinstance(enabled, list):
         # Hermes treats a malformed allow-list exactly like a missing one:
         # no entry-point plugin loads.  Leaving it untouched after a successful
-        # configure therefore strands every runtime guard.  Preserve a scalar
-        # plugin name when possible, otherwise replace the unusable value, then
-        # extend the repaired list below.
-        recovered = [enabled] if isinstance(enabled, str) and enabled.strip() else []
+        # configure therefore strands every runtime guard. The migration keeps
+        # a scalar plugin name when possible and replaces the unusable value.
         _LOG.warning(
             "plugins.enabled is %s, not list; replacing with a valid enabled list",
             type(enabled).__name__,
         )
-        plugins["enabled"] = recovered
-        enabled = recovered
-
-    sanitized = [item for item in enabled if isinstance(item, str) and item.strip()]
-    if len(sanitized) != len(enabled):
+    elif isinstance(enabled, list) and any(not isinstance(item, str) or not item.strip() for item in enabled):
         _LOG.warning("plugins.enabled contains invalid plugin names; removing non-string or empty entries")
-        enabled[:] = sanitized
 
-    existing = {str(x) for x in enabled if isinstance(x, str)}
-    for name in MORDRED_PLUGIN_NAMES:
-        if name not in existing:
-            enabled.append(name)
+    migration = migrate_plugin_lists(plugins)
+    if log_notes:
+        for note in migration.notes():
+            _LOG.warning("%s", note)
+    return migration
 
 
 def _upsert_mordred_section(root: Any, plugin_name: str, body: Mapping[str, Any]) -> None:
@@ -639,6 +640,29 @@ class PolicyWriter:
         with _policy_write_lock(self.policy_json_path.parent):
             self._edit_config(sections, _merge_mordred_section)
 
+    def migrate_plugin_identity(self, *, create_missing: bool = False) -> PluginListMigration:
+        """Switch ``plugins.enabled`` / ``plugins.disabled`` to the single ``mordred`` plugin.
+
+        Touches nothing but those two lists and writes only when something
+        changed. A missing ``config.yaml`` is left missing unless
+        ``create_missing`` (nothing to migrate; ``configure`` creates it).
+        See :func:`_ensure_plugins_enabled`.
+        """
+        with _policy_write_lock(self.policy_json_path.parent):
+            existing = _read_regular_text(self.config_path)
+            if existing is None and not create_missing:
+                return PluginListMigration()
+            yaml = _round_trip_yaml()
+            root = yaml.load(existing) if existing else None
+            if root is None:
+                root = {}
+            migration = _ensure_plugins_enabled(root, log_notes=False)
+            if migration.changed:
+                buf = io.StringIO()
+                yaml.dump(root, buf)
+                _atomic_write_text(self.config_path, buf.getvalue())
+            return migration
+
     def _edit_config(
         self,
         sections: Mapping[str, Mapping[str, Any]],
@@ -660,7 +684,7 @@ class PolicyWriter:
             root = {}
 
         for plugin_name, body in sections.items():
-            if plugin_name not in MORDRED_PLUGIN_NAMES:
+            if plugin_name not in MORDRED_CONFIG_SECTIONS:
                 raise ValueError(f"PolicyWriter only edits Mordred plugin sections; refusing to touch {plugin_name!r}")
             section_mutator(root, plugin_name, body)
 

@@ -822,15 +822,7 @@ class TestSetEncryptionFlagPreservesFormatting:
         )
         writer.write(PolicySnapshot(policy="lenient"))
         before = (home / "config.yaml").read_text(encoding="utf-8")
-        enabled_block = (
-            "  enabled:\n"
-            "    - mordred_privacy_check\n"
-            "    - mordred_wizard\n"
-            "    - mordred_llm_guard\n"
-            "    - mordred_network\n"
-            "    - mordred_keyvault\n"
-            "    - mordred_e2e\n"
-        )
+        enabled_block = "  enabled:\n    - mordred\n"
         assert enabled_block in before, "test setup must reproduce PolicyWriter's offset-2 dash indent"
 
         rc = memory_cli._set_encryption_flag(home, enabled=True)

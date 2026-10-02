@@ -51,4 +51,5 @@ ReasonCode = Literal[
     "policy.strict.keyvault_uninitialized",
     "policy.lenient.keyvault_uninitialized_warning",
     "mordred.degraded.audit_encryption_unavailable",
+    "policy.egress.tool_blocked",
 ]

@@ -4,23 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mordred-hermes"
-version = "0.1.0a20"
+version = "0.2.0a0"
 description = "Compatibility shim for the renamed hermes-mordred distribution"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "InternetMaximalism" }]
 license = { text = "MIT" }
-dependencies = ["hermes-mordred==0.1.0a20"]
+dependencies = ["hermes-mordred==0.2.0a0"]
 
 [project.optional-dependencies]
-keyvault = ["hermes-mordred[keyvault]==0.1.0a20"]
-extension = ["hermes-mordred[extension]==0.1.0a20"]
-macos = ["hermes-mordred[macos]==0.1.0a20"]
-ethereum = ["hermes-mordred[ethereum]==0.1.0a20"]
-messaging = ["hermes-mordred[messaging]==0.1.0a20"]
-tor-control = ["hermes-mordred[tor-control]==0.1.0a20"]
-integration = ["hermes-mordred[integration]==0.1.0a20"]
-dev = ["hermes-mordred[dev]==0.1.0a20"]
+keyvault = ["hermes-mordred[keyvault]==0.2.0a0"]
+extension = ["hermes-mordred[extension]==0.2.0a0"]
+macos = ["hermes-mordred[macos]==0.2.0a0"]
+ethereum = ["hermes-mordred[ethereum]==0.2.0a0"]
+messaging = ["hermes-mordred[messaging]==0.2.0a0"]
+tor-control = ["hermes-mordred[tor-control]==0.2.0a0"]
+telegram = ["hermes-mordred[telegram]==0.2.0a0"]
+integration = ["hermes-mordred[integration]==0.2.0a0"]
+dev = ["hermes-mordred[dev]==0.2.0a0"]
 
 [project.urls]
 Documentation = "https://github.com/mordredagent/hermes-mordred/tree/main/docs"

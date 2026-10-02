@@ -29,9 +29,12 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/config-vault.marker` | encryption CLI | enables config materialize/reseal lifecycle |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
+| `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
+| `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
+| `<home>/config.yaml.mordred-uninstall-<ts>.bak` | `uninstall` | copy of `config.yaml` taken before Mordred's entries are removed |
 | `<home>/memories/*.md` | Hermes memory tool | sealed by Mordred's memory hook when armed, otherwise plaintext |
 | user-home workspace paths | external `claude-private` tools | optional macOS encrypted workspace |
 
@@ -324,6 +327,49 @@ The extension owns:
 These are private mode-`0600` files beneath a real mode-`0700` directory.
 Pairing state and the software attestation private key are security-sensitive;
 do not publish them as diagnostics.
+
+## `<home>/mordred/telegram/`
+
+The optional Telegram importer (`mordred_hermes.extension.telegram`) owns:
+
+- `index.enc` — encrypted dialog list, sync cursors and account label;
+- `dialogs/<hmac>.enc` — encrypted segments of up to 2000 messages per chat;
+  the name is `HMAC-SHA256(name_key, "dialog:<chat_id>:<segment>")` truncated
+  to 40 hex chars; and
+- `.lock` — non-blocking cross-process `flock`: a second sync (CLI vs. server)
+  or `logout --forget` while a sync runs fails with `sync_in_progress`.
+
+Each `.enc` file is `MTG1 || nonce(12) || AES-256-GCM(ciphertext)` with the
+AAD bound to its logical name. `name_key` and the encryption key are HKDF-SHA256
+subkeys of `store_key`, which is held — with the Telethon session, the API
+credentials and the LLM API key — in:
+
+- `credentials.sealed` — `MTC1 || u16 len || wrap_blob || nonce || AES-GCM`,
+  where `wrap_blob` wraps the data key under the Secure Enclave key
+  `mordred-hermes.telegram.credentials.v1` (its opaque Enclave blob lives in
+  `<home>/mordred/keyvault/sekey/`); and
+- `credentials.meta.json` — non-secret flags only (logged in, LLM backend and
+  model) so status never unseals.
+
+`telegram logout --forget` deletes these files, the archive and the Enclave
+key. The directory is mode `0700`; files are mode `0600`.
+Every directory here carries a `.gitignore` of `*` (rewritten if changed), so
+not even the ciphertext can be committed if `HERMES_HOME` sits inside a git
+working tree.
+
+## `<home>/desktop-plugins/mordred/` and `<home>/plugins/mordred/`
+
+Written by `hermes-mordred desktop install`, and re-placed by the `mordred`
+plugin at every start (`desktop.install.ensure_page`, only changed files):
+`<home>/desktop-plugins/mordred/plugin.js` (the Hermes Desktop setup page,
+through the app's user-plugin folder, which loads enabled) and
+`<home>/plugins/mordred/dashboard/{manifest.json,plugin_api.py}` (a shim
+importing `mordred_hermes.desktop.api`). A page left at the older
+`plugins/mordred/desktop/` location is removed, because the app would copy it
+out as a second, switched-off row. No `plugin.yaml`, so Hermes'
+agent-plugin scanner finds no directory plugin there and the `mordred`
+entry-point plugin is not shadowed; Hermes Desktop pairs the page with that
+plugin by name. Holds no secrets.
 
 ## Hermes-owned and external targets
 

@@ -525,6 +525,14 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     logger.debug("mordred_e2e: registered pre_gateway_dispatch hook")
 
+    # Read-only Telegram tools; offered only to a Venice/loopback Hermes model.
+    try:
+        from .telegram.hermes_tools import register_tools
+
+        register_tools(ctx)
+    except Exception as e:
+        logger.warning("mordred_e2e: Telegram tools not registered: %s", type(e).__name__)
+
     # Outbound: wrap each installed platform adapter's send (best-effort).
     try:
         from . import outbound

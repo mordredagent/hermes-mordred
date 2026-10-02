@@ -6,10 +6,13 @@ condensed pointer — the documents under `docs/dev/` are the source of truth.
 ## What this repo is
 
 Standalone package repository for **hermes-mordred**, a plugin suite for
-[hermes-agent](https://pypi.org/project/hermes-agent/). It ships 6 entry-point
-plugins from `src/mordred_hermes/` (`privacy_check`, `wizard`, `llm_guard`,
-`network`, `keyvault`, `extension` — the last registers as the manifest-less
-`mordred_e2e` entry point). It is **not** a fork of Hermes upstream — never send
+[hermes-agent](https://pypi.org/project/hermes-agent/). It ships ONE entry-point
+plugin, `mordred` (`src/mordred_hermes/plugin.py`), whose `register()` wires the
+components in `src/mordred_hermes/` in a fixed order: `keyvault`, `llm_guard`,
+`network`, `privacy_check`, `e2e` (`extension/gateway_plugin.py`), `wizard`.
+The pre-0.2.0a0 per-component plugin names (`mordred_network`, ...) survive
+only as `plugins.mordred_*` config section names and are migrated out of
+`plugins.enabled` / `plugins.disabled` (`_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
 PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).
 
 ## Setup and everyday commands

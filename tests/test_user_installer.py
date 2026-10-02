@@ -57,7 +57,16 @@ if [ "$1" = pip ] && [ "$2" = uninstall ]; then
   : > "$UV_STATE/legacy-removed"
   exit 0
 fi
+if [ "$1" = pip ] && [ "$2" = freeze ]; then
+  printf '%s\n' ${UV_FREEZE:-}
+  exit 0
+fi
 if [ "$1" = pip ] && [ "$2" = install ]; then
+  prev=''
+  for arg in "$@"; do
+    if [ "$prev" = --constraint ]; then cp "$arg" "$UV_STATE/constraints"; fi
+    prev="$arg"
+  done
   case " $* " in
     *' --dry-run '*) exit "${UV_DRY_RUN_FAIL:-0}" ;;
   esac
@@ -252,10 +261,10 @@ def test_mordred_floor_excludes_the_canonical_name_reservation() -> None:
 
 
 def test_user_optional_extras_do_not_drift_from_pyproject_or_docs(tmp_path: Path) -> None:
-    """``USER_OPTIONAL_EXTRAS``, the usage text, the case whitelist, and the README table must agree.
+    """``USER_OPTIONAL_EXTRAS``, installer validation, and the Quickstart table agree.
 
     The extras list is hard-coded 3x in install.sh (the readonly declaration,
-    the usage heredoc, and the case whitelist arm) and again in the README
+    the usage heredoc, and the case whitelist arm) and again in the Quickstart
     extras table. The usage heredoc is interpolated from the readonly
     declaration so those two cannot drift; this test pins the remaining two.
     """
@@ -287,14 +296,13 @@ def test_user_optional_extras_do_not_drift_from_pyproject_or_docs(tmp_path: Path
     assert feature_line is not None, "--help output lost its 'Feature extras:' line"
     assert feature_line == "Feature extras: " + ", ".join(extras_in_order)
 
-    # Scope the README check to the extras table block; the same names appear
-    # in prose elsewhere (including the Upgrading section), which must not
-    # satisfy a stale-table assertion.
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "| Extra | Use it for |" in readme, "README.md extras table header changed"
-    table = readme.split("| Extra | Use it for |", 1)[1].split("\n\n", 1)[0]
+    # Scope the Quickstart check to the extras table block; the same names
+    # appear in prose elsewhere and must not satisfy a stale-table assertion.
+    quickstart = (ROOT / "docs" / "user" / "QUICKSTART.md").read_text(encoding="utf-8")
+    assert "| Extra | Use it for |" in quickstart, "QUICKSTART.md extras table header changed"
+    table = quickstart.split("| Extra | Use it for |", 1)[1].split("\n\n", 1)[0]
     for extra in user_extras:
-        assert f"| `{extra}` |" in table, f"README.md extras table omits {extra!r}"
+        assert f"| `{extra}` |" in table, f"QUICKSTART.md extras table omits {extra!r}"
 
 
 def test_user_docs_lead_with_the_installer_and_path_command() -> None:
@@ -304,14 +312,14 @@ def test_user_docs_lead_with_the_installer_and_path_command() -> None:
         "curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/scripts/install.sh | bash"
     )
 
-    for document in (quickstart, readme):
-        assert install_command in document
-        assert "hermes-mordred configure" in document
+    assert install_command in quickstart
+    assert "hermes-mordred configure" in quickstart
+    assert install_command in readme
+    assert "hermes-mordred setup" in readme
 
 
 def test_user_docs_describe_installer_options() -> None:
     paths = (
-        ROOT / "README.md",
         ROOT / "docs" / "user" / "QUICKSTART.md",
         ROOT / "docs" / "user" / "EXTENSION.md",
     )
@@ -325,25 +333,24 @@ def test_user_docs_describe_installer_options() -> None:
         )
         assert "terminal QR" in document, f"{path.relative_to(ROOT)} does not explain what messaging adds"
 
-    # Keep the common path focused on --with-extension. The README's advanced
-    # section retains one fully explicit three-extra example, while the
-    # extension guide shows the shorter additive form for users who want a QR.
-    readme = paths[0].read_text(encoding="utf-8")
-    extension_guide = paths[2].read_text(encoding="utf-8")
-    assert "--extras LIST" in readme
-    assert readme.count("--extras extension,ethereum,messaging") == 1
-    assert "--all-extras" in readme
+    # Keep the common path focused on --with-extension. Quickstart owns the
+    # advanced installer options; the Extension guide shows the shorter
+    # additive form for users who want a QR.
+    quickstart = paths[0].read_text(encoding="utf-8")
+    extension_guide = paths[1].read_text(encoding="utf-8")
+    assert "--extras LIST" in quickstart
+    assert "--all-extras" in quickstart
     assert "--with-extension --extras messaging" in extension_guide
 
     # A `hermes` self-update recreates ~/.hermes/hermes-agent/venv, so a bare
     # re-run of the installer only gets what that re-run itself asks for; the
-    # Upgrading section must tell the reader to repeat the same --extras /
+    # package-upgrade section must tell the reader to repeat the same --extras /
     # --all-extras / --with-extension flags, not just "re-run the installer".
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    upgrading_section = readme.split("## Upgrading", 1)[1].split("\n## ", 1)[0]
-    assert "--extras" in upgrading_section, "README.md Upgrading section omits --extras"
+    usage = (ROOT / "docs" / "user" / "USAGE.md").read_text(encoding="utf-8")
+    upgrading_section = usage.split("## 9. Package upgrades and removal", 1)[1]
+    assert "--extras" in upgrading_section, "USAGE.md package-upgrade section omits --extras"
     assert "recreate" in upgrading_section, (
-        "README.md Upgrading section does not explain that a recreated venv only gets what the re-run asks for"
+        "USAGE.md package-upgrade section does not explain that a recreated venv only gets what the re-run asks for"
     )
 
 
@@ -383,7 +390,7 @@ def test_installs_platform_extra_and_exposes_cli(
     assert expected_extra in calls
     assert "pip uninstall" not in calls
     assert fixture.launcher.is_file()
-    assert "Configuration and keys were not changed" in result.stdout
+    assert "Keys and policy were not changed" in result.stdout
     assert f"{fixture.launcher} configure" in result.stdout
 
 
@@ -527,7 +534,7 @@ def test_all_extras_are_deduplicated_in_stable_order(tmp_path: Path) -> None:
     result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "messaging,extension")
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control]>=0.1.0a16"
+    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
     calls = fixture.uv_calls()
     assert calls.count(expected) == 2
     assert "extension,extension" not in calls
@@ -540,7 +547,7 @@ def test_extras_all_matches_the_all_extras_flag(tmp_path: Path, args: tuple[str,
     result = _run(fixture, *args)
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control]>=0.1.0a16"
+    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
 
 
@@ -1025,7 +1032,7 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
     specs = (
         f"hermes-mordred[{platform_extra}]>=0.1.0a16",
         f"hermes-mordred[{platform_extra},extension,ethereum]==0.1.0a16,>=0.1.0a16",
-        f"hermes-mordred[{platform_extra},extension,ethereum,messaging,tor-control]>=0.1.0a16",
+        f"hermes-mordred[{platform_extra},extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16",
     )
     for spec in specs:
         install = subprocess.run(
@@ -1050,3 +1057,222 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
         # Every published release is still a pre-release; both the floor and
         # exact-pin forms must resolve rather than selecting the claim stub.
         assert "hermes-mordred==" in install.stdout + install.stderr
+
+
+def _source_checkout(tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").write_text('[project]\nname = "hermes-mordred"\n', encoding="utf-8")
+    return checkout
+
+
+def test_from_source_installs_the_local_checkout_without_pypi(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    checkout = _source_checkout(tmp_path)
+
+    result = _run(fixture, "--from-source", str(checkout), "--with-telegram")
+
+    assert result.returncode == 0, result.stderr
+    calls = fixture.uv_calls()
+    assert f"{checkout}[macos,extension,telegram]" in calls
+    assert "--reinstall-package hermes-mordred" in calls
+    assert "--dry-run" not in calls
+    assert "from the local checkout" in result.stdout + result.stderr
+
+
+def test_from_source_editable_links_the_checkout(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    checkout = _source_checkout(tmp_path)
+
+    result = _run(fixture, f"--from-source={checkout}", "--editable")
+
+    assert result.returncode == 0, result.stderr
+    assert f"--editable {checkout}[macos]" in fixture.uv_calls()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--editable",),
+        ("--from-source",),
+        ("--from-source", "/nonexistent/checkout"),
+    ],
+)
+def test_invalid_from_source_arguments_stop_before_uv(tmp_path: Path, args: tuple[str, ...]) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, *args)
+
+    assert result.returncode == 1
+    assert "mordred: error:" in result.stderr
+    assert not fixture.uv_log.exists()
+
+
+def test_from_source_refuses_a_foreign_checkout_and_version_pins(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (foreign / "pyproject.toml").write_text('[project]\nname = "other"\n', encoding="utf-8")
+    checkout = _source_checkout(tmp_path)
+
+    assert _run(fixture, "--from-source", str(foreign)).returncode == 1
+    assert _run(fixture, "--from-source", str(checkout), "--version", "0.1.0a20").returncode == 1
+    assert not fixture.uv_log.exists()
+
+
+def test_finds_the_hermes_desktop_managed_environment_and_uv(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, launcher_style="none")
+    hermes_home = fixture.home / ".hermes"
+    managed_python = _make_env(hermes_home / "installs" / "abc" / "environments" / "def" / "venv")
+    site = managed_python.parent.parent / "lib" / "python3.14" / "site-packages"
+    # The managed launcher reports the active environment through `--run-module site`.
+    _write_executable(
+        hermes_home / "hermes-agent" / ".hermes" / "bin" / "hermes",
+        f"#!/bin/sh\n[ \"$1\" = --run-module ] && printf \"sys.path = [\\n    '%s',\\n]\\n\" '{site}'\nexit 0\n",
+    )
+    managed_python.with_name("python").symlink_to(managed_python)
+    # uv only under <home>/tools, not on PATH.
+    fake_uv = Path(fixture.env["PATH"].split(os.pathsep)[0]) / "uv"
+    tools_uv = hermes_home / "tools" / "uv-9.9.9-test" / "uv"
+    tools_uv.parent.mkdir(parents=True)
+    fake_uv.rename(tools_uv)
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert str(managed_python.with_name("python")) in fixture.uv_calls()
+
+
+# -----------------------------------------------------------------------------
+# --uninstall: hand over to the installed CLI's `uninstall`
+# -----------------------------------------------------------------------------
+def _installed_cli_recording_args(fixture: InstallFixture, tmp_path: Path) -> Path:
+    """Put a `hermes-mordred` into Hermes's env that records how it was called."""
+    log = tmp_path / "cli.log"
+    _write_executable(fixture.installed_cli, f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n")
+    return log
+
+
+def test_uninstall_runs_the_installed_cli_with_passthrough_flags(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    log = _installed_cli_recording_args(fixture, tmp_path)
+
+    result = _run(fixture, "--uninstall", "--yes", "--purge-data")
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8") == "uninstall --yes --purge-data\n"
+    assert fixture.uv_calls() == ""  # nothing is installed or checked
+
+
+def test_uninstall_without_flags_and_from_stdin(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    log = _installed_cli_recording_args(fixture, tmp_path)
+
+    result = _run_from_stdin(fixture, "--uninstall", "--dry-run")
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8") == "uninstall --dry-run\n"
+
+
+def test_uninstall_ignores_a_stale_extras_variable(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    log = _installed_cli_recording_args(fixture, tmp_path)
+
+    result = _run(fixture, "--uninstall", MORDRED_INSTALL_EXTRAS="bogus")
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8") == "uninstall\n"
+
+
+def test_uninstall_finds_the_hermes_desktop_managed_environment(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, launcher_style="none")
+    hermes_home = fixture.home / ".hermes"
+    managed_python = _make_env(hermes_home / "installs" / "abc" / "environments" / "def" / "venv")
+    site = managed_python.parent.parent / "lib" / "python3.14" / "site-packages"
+    _write_executable(
+        hermes_home / "hermes-agent" / ".hermes" / "bin" / "hermes",
+        f"#!/bin/sh\n[ \"$1\" = --run-module ] && printf \"sys.path = [\\n    '%s',\\n]\\n\" '{site}'\nexit 0\n",
+    )
+    managed_python.with_name("python").symlink_to(managed_python)
+    log = tmp_path / "cli.log"
+    _write_executable(
+        managed_python.with_name("hermes-mordred"), f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n"
+    )
+
+    result = _run(fixture, "--uninstall", "--yes")
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8") == "uninstall --yes\n"
+
+
+def test_uninstall_propagates_the_cli_exit_code(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    _write_executable(fixture.installed_cli, "#!/bin/sh\necho 'uninstall stopped' >&2\nexit 1\n")
+
+    result = _run(fixture, "--uninstall", "--yes")
+
+    assert result.returncode == 1
+    assert "uninstall stopped" in result.stderr
+
+
+def test_uninstall_when_mordred_is_not_installed(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(fixture, "--uninstall")
+
+    assert result.returncode == 1
+    assert "Mordred is not installed in Hermes's environment" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--uninstall", "--extras", "telegram"), "--uninstall cannot be combined with --extras"),
+        (("--uninstall", "--from-source", "."), "--uninstall cannot be combined with --from-source"),
+        (("--purge-data",), "--purge-data is only valid with --uninstall"),
+        (("--yes",), "--yes is only valid with --uninstall"),
+    ],
+)
+def test_uninstall_flag_misuse_stops_before_anything_runs(tmp_path: Path, args: tuple[str, ...], message: str) -> None:
+    fixture = _fixture(tmp_path)
+    log = _installed_cli_recording_args(fixture, tmp_path)
+
+    result = _run(fixture, *args)
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert not log.exists()
+    assert fixture.uv_calls() == ""
+
+
+def test_source_hermes_version_comes_from_the_launcher(tmp_path: Path) -> None:
+    # Hermes Desktop's git install reports its package as 0.0.0.
+    fixture = _fixture(tmp_path, hermes_version="0.0.0", launcher_style="none")
+    launcher = fixture.home / ".hermes" / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    _write_executable(
+        launcher,
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo 'Hermes Agent v0.21.5+3640.ge5050a0 (2026.9.24)'\nexit 0\n",
+    )
+
+    result = _run(fixture)
+
+    assert result.returncode == 0, result.stderr
+    assert "Hermes Agent 0.21.5" in result.stdout + result.stderr
+
+
+def test_install_never_resolves_hermes_and_pins_what_hermes_has(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    # The fake Hermes python answers the requirements query with two packages.
+    _write_executable(fixture.hermes_python, "#!/bin/sh\nprintf 'telethon>=1.36\\nruamel.yaml>=0.18\\n'\n")
+
+    result = _run(fixture, UV_FREEZE="ruamel.yaml==0.18.16 hermes-mordred==0.1.0a19 cryptography==46.0.7")
+
+    assert result.returncode == 0, result.stderr
+    calls = [
+        line for line in fixture.uv_calls().splitlines() if line.startswith("pip install") and "--dry-run" not in line
+    ]
+    package_install, deps_install = calls[0], calls[1]
+    assert "--no-deps" in package_install and "hermes-mordred[macos]" in package_install
+    assert "--constraint" in deps_install and "telethon>=1.36" in deps_install and "hermes-mordred" not in deps_install
+    constraints = (tmp_path / "state" / "constraints").read_text(encoding="utf-8").split()
+    assert constraints == ["ruamel.yaml==0.18.16", "cryptography==46.0.7"]

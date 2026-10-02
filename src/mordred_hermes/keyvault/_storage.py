@@ -727,8 +727,28 @@ def _lock_inode_identity(st: os.stat_result) -> tuple[int, int, int]:
     return (st.st_dev, st.st_ino, st.st_ctime_ns)
 
 
+#: Attempts for :func:`_open_validated_lock` when only the change time moved.
+_LOCK_OPEN_ATTEMPTS = 3
+
+
 def _open_validated_lock(path: Path, *, label: str) -> int:
-    """Open a lock without following/blocking on special files or inode swaps."""
+    """Open a lock without following/blocking on special files or inode swaps.
+
+    macOS can advance ``st_ctime`` of an untouched file on its own (e.g. when
+    it attaches the ``com.apple.provenance`` extended attribute the first time
+    a new process opens it), which looks like a swap. Each retry repeats every
+    check from scratch, so a real swap still fails after the last attempt.
+    """
+    for attempt in range(_LOCK_OPEN_ATTEMPTS):
+        try:
+            return _open_validated_lock_once(path, label=label)
+        except KeyvaultPermissionError as exc:
+            if exc.errno != errno.EAGAIN or attempt == _LOCK_OPEN_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _open_validated_lock_once(path: Path, *, label: str) -> int:
     before = path.lstat()
     _validate_lock_stat(before, path, label=label, from_lstat=True)
     try:

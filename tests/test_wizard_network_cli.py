@@ -244,16 +244,8 @@ class TestNetworkUseAtomicity:
             "PolicyWriter must add plugins.enabled — network_cli regressed to a non-atomic write path"
         )
         enabled = data["plugins"]["enabled"]
-        # All Mordred plugin names must be present (PolicyWriter contract).
-        for name in (
-            "mordred_privacy_check",
-            "mordred_wizard",
-            "mordred_llm_guard",
-            "mordred_network",
-            "mordred_keyvault",
-            "mordred_e2e",
-        ):
-            assert name in enabled, f"{name} missing from plugins.enabled after network_cli write"
+        # The single Mordred plugin must be enabled (PolicyWriter contract).
+        assert "mordred" in enabled, "mordred missing from plugins.enabled after network_cli write"
 
     def test_use_does_not_leave_tmp_artifact(self, tmp_path: Path) -> None:
         """PolicyWriter's ``_atomic_write_text`` writes to ``<name>.tmp``

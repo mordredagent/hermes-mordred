@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.vault import OpenVault
     from ..keyvault.wrap import NativeBackend
+    from ._flow_session import FlowSession
     from .configure import PromptIO
 
 
@@ -119,7 +120,11 @@ def _open_cold_path(root: Path, *, prompt_io: PromptIO | None) -> OpenVault | No
 
 
 def _open_hot_path_or_report(
-    root: Path, *, backend: NativeBackend | None = None, store: AnchorStore | None = None
+    root: Path,
+    *,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
 ) -> OpenVault | None:
     """Open the vault at ``root`` on the **hot path**, or report and return ``None``.
 
@@ -141,16 +146,28 @@ def _open_hot_path_or_report(
     through the root :mod:`mordred_hermes._term` (its own import), not this
     module's ``_term`` alias — patch ``mordred_hermes._term.emit_error`` to
     intercept those messages.
+
+    With a ``flow_session`` (a guided flow's shared state), the flow's already
+    open vault is lent instead of unwrapping the master again, and a vault
+    opened here is kept in the flow for its later steps; either way the caller
+    gets a view whose ``close`` / ``with`` exit leaves the handle open (the
+    flow closes it when it ends). One unwrap -- one Touch ID -- per flow.
     """
     from ..keyvault import vault
     from ..keyvault._vault_open_report import report_hot_open_failure
+
+    if flow_session is not None:
+        lent = flow_session.lend_vault(root)
+        if lent is not None:
+            return lent
 
     key_id = anchor_label = _vault_identity(root)
     backend = resolve_backend(backend)
     store = resolve_store(store)
 
     with report_hot_open_failure(root):
-        return vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
+        opened = vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label)
+        return opened if flow_session is None else flow_session.keep_vault(root, opened)
     return None
 
 

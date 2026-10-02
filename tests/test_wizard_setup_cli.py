@@ -983,7 +983,13 @@ class TestKeyvaultStep:
         )
         assert result.action == "ran"
         assert calls == [
-            {"home": tmp_path, "prompt_io": calls[0]["prompt_io"], "store_seed_for_hd": False, "unattended": True}
+            {
+                "home": tmp_path,
+                "prompt_io": calls[0]["prompt_io"],
+                "store_seed_for_hd": False,
+                "unattended": True,
+                "flow_session": None,
+            }
         ]
 
     def test_absent_run_failure_is_failed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

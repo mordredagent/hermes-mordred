@@ -11,14 +11,19 @@ Hermes upstream.
 
 ## Current architecture
 
-| Entry point | Implementation | Responsibility |
+One Hermes entry point, `mordred` (`plugin.py`), registers these components in
+this order: keyvault, llm_guard, network, privacy_check, e2e, wizard. The
+component names below are the pre-0.2.0a0 entry-point names, which survive as
+config section names (`plugins.mordred_network`, ...).
+
+| Component (former entry point) | Implementation | Responsibility |
 |---|---|---|
 | `mordred_privacy_check` | `privacy_check/` | Skill policy, runtime tool guard, audit log |
 | `mordred_wizard` | `wizard/` | Standalone and host CLI surfaces |
 | `mordred_llm_guard` | `llm_guard/` | Provider, endpoint, and harness enforcement |
 | `mordred_network` | `network/` | Process-wide Tor/VPN/clearnet route |
 | `mordred_keyvault` | `keyvault/` | Vault, hardware key, backup, and signing |
-| `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook |
+| `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook, Telegram tools |
 
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
@@ -55,12 +60,12 @@ readers.
 
 ### 0.4 Plugin scaffolding pattern
 
-- Manifest-backed plugins provide `plugin.yaml` and a module-level
-  `register(ctx)`.
-- Entry points name modules, not `module:register`; Hermes loads the module and
-  calls `register` itself.
-- `mordred_e2e` is intentionally registered from
-  `extension.gateway_plugin` and has no separate manifest.
+- Each component provides a module-level `register(ctx)`; the single
+  `mordred` entry point (`mordred_hermes.plugin`) calls them in order. No
+  `plugin.yaml` ships: Hermes builds entry-point manifests from the entry-point
+  name and the distribution metadata.
+- The entry point names a module, not `module:register`; Hermes loads the
+  module and calls `register` itself.
 - Plugin boundaries expose narrow Protocols under `TYPE_CHECKING` rather than
   importing optional Hermes internals at runtime.
 
@@ -68,8 +73,9 @@ readers.
 
 - Python floor: 3.11; Hermes floor: 0.13.0.
 - Version source: `src/mordred_hermes/__about__.py`, read by Hatch.
-- Human marker, plugin manifests, README pins, and setup pins are synchronized
-  by `python tools/bump_version.py <version>`.
+- Human marker, plugin manifests, the development-setup pin, and compatibility
+  shim pins are synchronized by `python tools/bump_version.py <version>`; the
+  top-level README remains version-agnostic and relies on its PyPI badge.
 - Base install stays small. Platform and feature dependencies remain in the
   `keyvault`, `macos`, `extension`, `ethereum`, `messaging`, `tor-control`, and
   integration extras.
