@@ -233,32 +233,24 @@ def _normalize_reason(value: Any) -> str | None:
     return value if isinstance(value, str) and value in _OPS_REASONS else None
 
 
-def _run_helper(
+def _spawn_helper(
     binary: str,
     payload: dict[str, Any],
     *,
-    env_override: tuple[str, str] | None = None,
-) -> dict[str, Any]:
-    """Invoke the helper once with ``payload`` on stdin, return parsed stdout.
+    env_override: tuple[str, str] | None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run ``binary`` once with ``payload`` as JSON on stdin, capturing stdio.
 
     Raises:
-        _OpsError: On spawn failure, timeout, a non-JSON response, a JSON
-            ``{"error": {...}}`` object (carrying the helper's raw
-            ``status``/``domain``), or a non-zero exit without an error
-            object. ``domain="helper"`` (with ``status=-1``) marks failures
-            originating in this bridge rather than in Security.framework, so
-            ``_translate_error`` maps them to the conservative
-            ``auth_failed`` default. The non-JSON and non-zero-exit messages
-            include a truncated ``proc.stderr`` snippet alongside the
-            existing ``proc.stdout`` snippet, since the helper prints its
-            real failure cause to stderr.
+        _OpsError: On spawn failure or timeout, with ``domain="helper"`` and
+            ``status=-1`` (see :func:`_run_helper` for what that marks).
     """
     try:
         env = None
         if env_override is not None:
             env = dict(os.environ)
             env[env_override[0]] = env_override[1]
-        proc = subprocess.run(
+        return subprocess.run(
             [binary],
             input=json.dumps(payload).encode("utf-8"),
             capture_output=True,
@@ -270,6 +262,16 @@ def _run_helper(
     except OSError as exc:
         raise _OpsError(-1, "helper", f"failed to spawn helper {binary!r}: {exc}") from exc
 
+
+def _parse_helper_response(proc: subprocess.CompletedProcess[bytes]) -> dict[str, Any]:
+    """Turn a finished helper process into its parsed success response.
+
+    Raises:
+        _OpsError: On a non-JSON / non-object stdout, a JSON
+            ``{"error": {...}}`` object (carrying the helper's raw
+            ``status``/``domain``), or a non-zero exit without an error
+            object.
+    """
     # ``proc.stderr`` is where the Swift/Rust helper prints its real
     # failure cause (Security.framework message, panic text, etc.) — the
     # ``{"error": {...}}`` JSON-on-stdout path already carries that detail
@@ -314,6 +316,33 @@ def _run_helper(
         )
 
     return response
+
+
+def _run_helper(
+    binary: str,
+    payload: dict[str, Any],
+    *,
+    env_override: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    """Invoke the helper once with ``payload`` on stdin, return parsed stdout.
+
+    Sequences :func:`_spawn_helper` (spawn + timeout) and
+    :func:`_parse_helper_response` (decode + error translation).
+
+    Raises:
+        _OpsError: On spawn failure, timeout, a non-JSON response, a JSON
+            ``{"error": {...}}`` object (carrying the helper's raw
+            ``status``/``domain``), or a non-zero exit without an error
+            object. ``domain="helper"`` (with ``status=-1``) marks failures
+            originating in this bridge rather than in Security.framework, so
+            ``_translate_error`` maps them to the conservative
+            ``auth_failed`` default. The non-JSON and non-zero-exit messages
+            include a truncated ``proc.stderr`` snippet alongside the
+            existing ``proc.stdout`` snippet, since the helper prints its
+            real failure cause to stderr.
+    """
+    proc = _spawn_helper(binary, payload, env_override=env_override)
+    return _parse_helper_response(proc)
 
 
 def _hex_field(response: dict[str, Any], key: str) -> bytes:

@@ -49,6 +49,7 @@ from typing import Final
 
 from cryptography.exceptions import InvalidTag
 
+from ._canonical_json import canonical_json_bytes
 from .kek import MasterKey
 
 MAGIC: Final = b"MVLT"
@@ -81,7 +82,7 @@ def _build_header_bytes(key_id: str, wmk: bytes, name: str) -> bytes:
         "wmk": base64.b64encode(wmk).decode("ascii"),
         "name": name,
     }
-    return json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return canonical_json_bytes(header)
 
 
 def _aad(header_bytes: bytes, name: str) -> bytes:

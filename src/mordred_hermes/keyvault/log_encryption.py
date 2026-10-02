@@ -82,6 +82,7 @@ from .._log_rotation import rotate_and_compress as _rotate_and_compress
 from .._log_rotation import today_utc_date as _today_utc_date
 from .._log_rotation import utcnow_iso as _utcnow_iso
 from . import _native_key_id, _storage
+from ._canonical_json import canonical_json_bytes, canonical_json_bytes_unescaped
 from ._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
 from .crypto import decrypt as _aes_decrypt
 from .crypto import encrypt as _aes_encrypt
@@ -144,7 +145,7 @@ def _serialize(entry: Mapping[str, Any]) -> bytes:
     test fixtures' fixed expectations stable. Raises :class:`ValueError`
     if the entry exceeds :data:`MAX_ENTRY_BYTES`.
     """
-    data = json.dumps(entry, separators=(",", ":"), ensure_ascii=False, sort_keys=True).encode("utf-8")
+    data = canonical_json_bytes_unescaped(entry)
     if len(data) > MAX_ENTRY_BYTES:
         raise ValueError(f"audit entry exceeds {MAX_ENTRY_BYTES} bytes (got {len(data)})")
     return data
@@ -423,7 +424,7 @@ class EncryptedWriter:
         }
         if self.native_key_id is not None:
             header[_native_key_id.NATIVE_KEY_ID_FIELD] = self.native_key_id
-        header_bytes = json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        header_bytes = canonical_json_bytes(header)
         aad = _entry_aad(header_bytes)
 
         # O_EXCL: the file must not exist — _rotate above moved any prior

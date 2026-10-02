@@ -39,6 +39,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
 
+from ._canonical_json import canonical_json_bytes
+
 ANCHOR_VERSION: Final = 1
 """On-store anchor schema version."""
 
@@ -125,7 +127,7 @@ def _serialize(anchor: VaultAnchor) -> bytes:
         "wmk_sha256": anchor.wmk_sha256.hex(),
         "generation": anchor.generation,
     }
-    return json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return canonical_json_bytes(body)
 
 
 def _deserialize(raw: bytes) -> VaultAnchor:

@@ -30,10 +30,10 @@ from __future__ import annotations
 import base64
 import contextlib
 import hmac
-import json
 from pathlib import Path
 
 from . import _native_key_id, _storage, backup, crypto, wrap
+from ._canonical_json import canonical_json_bytes
 from ._envelope_codec import _hash_id, _split_envelope
 from .backup import BackupCorrupt
 from .digest import VerificationDigestMismatch, compute_digest
@@ -340,11 +340,7 @@ def export_backup(
             audit_sink=audit_sink,
         )
 
-    manifest_json = json.dumps(
-        {"version": _MANIFEST_VERSION, "key_id": key_id, "envelopes": entries},
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    manifest_json = canonical_json_bytes({"version": _MANIFEST_VERSION, "key_id": key_id, "envelopes": entries})
 
     # API-boundary normalization must cover the KDF as well as the digest.
     # Otherwise canonically equivalent NFKD spellings pass the digest check but
