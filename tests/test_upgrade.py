@@ -400,7 +400,7 @@ class TestRenderReport:
 
 
 class TestPluginIdentityMigration:
-    """``upgrade`` switches the pre-0.1.0a21 plugin names to the single ``mordred``."""
+    """``upgrade`` switches the pre-0.2.0a0 plugin names to the single ``mordred``."""
 
     def test_migrates_legacy_names_even_when_the_policy_is_unchanged(self, tmp_path: Path) -> None:
         w = _writer(tmp_path)

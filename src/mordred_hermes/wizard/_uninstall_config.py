@@ -4,7 +4,7 @@ Mordred's writers touch a small, known part of Hermes's files:
 
 ``config.yaml``
     - ``plugins.enabled`` / ``plugins.disabled``: the ``mordred`` plugin name
-      and the six pre-0.1.0a21 names (:mod:`.._plugin_identity`), written by
+      and the six pre-0.2.0a0 names (:mod:`.._plugin_identity`), written by
       :class:`.policy_writer.PolicyWriter`, ``desktop install`` and
       ``plugins migrate``;
     - ``plugins.mordred_*``: Mordred's own settings blocks (policy, LLM guard,

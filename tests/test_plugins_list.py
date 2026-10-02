@@ -247,7 +247,7 @@ class TestSinglePlugin:
     ) -> None:
         from mordred_hermes import plugin
 
-        mgr = _FakeManager([{"key": "mordred", "enabled": True, "version": "0.1.0a21"}])
+        mgr = _FakeManager([{"key": "mordred", "enabled": True, "version": "0.2.0a0"}])
         monkeypatch.setattr(plugins_list, "_get_manager", lambda: mgr)
         monkeypatch.setattr(plugin, "component_errors", lambda: {"network": "RuntimeError: boom"})
         monkeypatch.setattr(

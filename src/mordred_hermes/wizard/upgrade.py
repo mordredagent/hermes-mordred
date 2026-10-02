@@ -1,7 +1,7 @@
 """``hermes mordred upgrade`` -- Story 1 (idempotent migration) + Story 1.5 dispatch.
 
 Before either story, ``plugins.enabled`` / ``plugins.disabled`` are switched
-from the pre-0.1.0a21 per-component plugin names to the single ``mordred``
+from the pre-0.2.0a0 per-component plugin names to the single ``mordred``
 plugin (:meth:`PolicyWriter.migrate_plugin_identity`).
 
 Story 1 covers the simple case: a Hermes-only install whose ``config.yaml``
@@ -240,7 +240,7 @@ def run(
     )
 
     # Independent of the policy outcome (and first, so a policy conflict that
-    # aborts below cannot leave the pre-0.1.0a21 plugin names in place, which
+    # aborts below cannot leave the pre-0.2.0a0 plugin names in place, which
     # Hermes no longer loads).
     plugin_notes = tuple(policy_writer.migrate_plugin_identity().notes())
     story1 = _resolve_story1(options, policy_writer, target_snapshot)

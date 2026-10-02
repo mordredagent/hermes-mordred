@@ -451,7 +451,7 @@ def find_disabled_siblings(
 
 
 def find_legacy_plugin_names(*, config_path: Path | None = None) -> set[str]:
-    """Pre-0.1.0a21 per-component plugin names still listed in the config.
+    """Pre-0.2.0a0 per-component plugin names still listed in the config.
 
     Hermes ignores them now; they only explain why ``mordred`` is missing
     (an unmigrated config) and point at the migration command.

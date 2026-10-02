@@ -4,7 +4,7 @@ Hermes 0.11 silently drops ``ctx.register_cli_command`` from its argparse
 build (only ``plugins.memory.discover_plugin_cli_commands`` is consulted);
 that leaves users with no built-in way to confirm that Mordred loaded. This
 module is the workaround -- a direct ``PluginManager`` query restricted to
-the ``mordred`` plugin (plus any leftover pre-0.1.0a21 ``mordred_*`` names),
+the ``mordred`` plugin (plus any leftover pre-0.2.0a0 ``mordred_*`` names),
 followed by the per-component registration status.
 
 A YAML fallback reads ``~/.hermes/config.yaml`` ``plugins.enabled`` when
@@ -12,7 +12,7 @@ the ``hermes_cli.plugins`` module is unavailable (older / vendored Hermes
 or test environments).
 
 ``plugins migrate`` rewrites ``plugins.enabled`` / ``plugins.disabled`` from the
-six pre-0.1.0a21 plugin names to the single ``mordred`` plugin.
+six pre-0.2.0a0 plugin names to the single ``mordred`` plugin.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ __all__ = [
 
 
 def _is_mordred_name(name: object) -> bool:
-    """``mordred`` itself, or a leftover pre-0.1.0a21 ``mordred_*`` name."""
+    """``mordred`` itself, or a leftover pre-0.2.0a0 ``mordred_*`` name."""
     return isinstance(name, str) and (name == PLUGIN_NAME or name.startswith("mordred_"))
 
 
@@ -145,7 +145,7 @@ def migrate(*, config_path: Path = DEFAULT_CONFIG_PATH, only_legacy: bool = Fals
     """Switch config.yaml to the single ``mordred`` plugin. Returns CLI exit code.
 
     ``only_legacy`` (the installer's mode) does nothing, silently, unless the
-    config still lists a pre-0.1.0a21 plugin name: it keeps an already-enabled
+    config still lists a pre-0.2.0a0 plugin name: it keeps an already-enabled
     Mordred loading after an upgrade and never enables Mordred for a user who
     had not.
     """

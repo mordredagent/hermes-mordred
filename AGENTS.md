@@ -10,7 +10,7 @@ Standalone package repository for **hermes-mordred**, a plugin suite for
 plugin, `mordred` (`src/mordred_hermes/plugin.py`), whose `register()` wires the
 components in `src/mordred_hermes/` in a fixed order: `keyvault`, `llm_guard`,
 `network`, `privacy_check`, `e2e` (`extension/gateway_plugin.py`), `wizard`.
-The pre-0.1.0a21 per-component plugin names (`mordred_network`, ...) survive
+The pre-0.2.0a0 per-component plugin names (`mordred_network`, ...) survive
 only as `plugins.mordred_*` config section names and are migrated out of
 `plugins.enabled` / `plugins.disabled` (`_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
 PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).

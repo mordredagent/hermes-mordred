@@ -525,7 +525,7 @@ hermes-mordred desktop uninstall
 > Desktop's user-plugin folder, which it loads switched on) and a
 > `<home>/plugins/mordred/dashboard/plugin_api.py` shim that imports this
 > package, and adds
-> `mordred` to `plugins.enabled` (migrating any pre-0.1.0a21 `mordred_*`
+> `mordred` to `plugins.enabled` (migrating any pre-0.2.0a0 `mordred_*`
 > plugin names) — nothing else in `config.yaml` changes. `mordred` is also
 > Mordred's agent plugin, so this enables Mordred itself, and Hermes Desktop
 > shows the page and the plugin as one `mordred` row. The plugin also re-places
@@ -1223,7 +1223,7 @@ these steps in order; each is safe to repeat, and a second run changes nothing:
    anything** and explains why — Mordred stays installed, so Hermes keeps
    working.
 2. **Hermes configuration.** The Hermes Desktop page (`<home>/plugins/mordred`)
-   is removed. `mordred` and the pre-0.1.0a21 `mordred_*` names leave
+   is removed. `mordred` and the pre-0.2.0a0 `mordred_*` names leave
    `plugins.enabled` / `plugins.disabled`, and Mordred's settings blocks
    (`plugins.mordred_*`, the legacy `memory.encryption` flag) leave
    `config.yaml`; a copy is kept as
