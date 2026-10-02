@@ -222,7 +222,7 @@ plugins:
         assert _runtime.is_poisoned()
 
     def test_strict_with_only_legacy_plugin_names_raises_with_migration_hint(self, tmp_path: Path) -> None:
-        """An unmigrated config lists the pre-0.1.0a21 names, which Hermes no longer loads."""
+        """An unmigrated config lists the pre-0.2.0a0 names, which Hermes no longer loads."""
         config = _write_config(
             tmp_path / "config.yaml",
             """\

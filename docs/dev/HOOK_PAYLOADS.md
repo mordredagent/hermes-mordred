@@ -55,7 +55,7 @@ hooks, and that no component failed (a failed component is reported as
   every component.
 - `lenient` / `off`: audit and warn, then continue.
 
-When `mordred` is missing but `config.yaml` still lists the pre-0.1.0a21
+When `mordred` is missing but `config.yaml` still lists the pre-0.2.0a0
 per-component names (`mordred_network`, ...), the message points at
 `hermes-mordred plugins migrate`. Those names are no longer a unit of
 enablement: the components cannot be disabled one by one.

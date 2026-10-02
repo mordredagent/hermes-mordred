@@ -13,7 +13,7 @@ Hermes upstream.
 
 One Hermes entry point, `mordred` (`plugin.py`), registers these components in
 this order: keyvault, llm_guard, network, privacy_check, e2e, wizard. The
-component names below are the pre-0.1.0a21 entry-point names, which survive as
+component names below are the pre-0.2.0a0 entry-point names, which survive as
 config section names (`plugins.mordred_network`, ...).
 
 | Component (former entry point) | Implementation | Responsibility |

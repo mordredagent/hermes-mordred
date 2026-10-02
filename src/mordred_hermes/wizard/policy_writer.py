@@ -71,7 +71,7 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 MORDRED_PLUGIN_NAMES: Final = (PLUGIN_NAME,)
 
 #: ``plugins.<section>`` settings blocks this writer may edit. These are
-#: Mordred's own config keys (named after the pre-0.1.0a21 per-component
+#: Mordred's own config keys (named after the pre-0.2.0a0 per-component
 #: plugins), not Hermes plugin identities.
 MORDRED_CONFIG_SECTIONS: Final = (
     "mordred_privacy_check",
@@ -363,7 +363,7 @@ def _ensure_plugins_enabled(root: Any, *, log_notes: bool = True) -> PluginListM
 
     No-op if the section is already complete. If ``plugins.enabled`` is
     absent we add it; if ``plugins`` itself is absent we add it. Existing
-    non-Mordred entries are preserved. The pre-0.1.0a21 per-component names
+    non-Mordred entries are preserved. The pre-0.2.0a0 per-component names
     (``mordred_network``, ...) are removed from ``plugins.enabled`` and
     ``plugins.disabled``; see :func:`mordred_hermes._plugin_identity.migrate_plugin_lists`.
     The migration notes are logged as warnings unless ``log_notes`` is false

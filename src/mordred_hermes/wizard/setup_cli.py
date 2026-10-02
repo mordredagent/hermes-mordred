@@ -398,7 +398,7 @@ def _probe_configure(*, policy_writer: PolicyWriter) -> tuple[bool, str]:
     ``upgrade``), so those three are the real "configure ran" signal. The
     ``plugins.enabled`` check is kept as an extra completeness guard on top
     (a hand-edited config.yaml that dropped ``mordred``, or one still listing
-    only the pre-0.1.0a21 per-component names, reads as incomplete).
+    only the pre-0.2.0a0 per-component names, reads as incomplete).
     """
     if not policy_writer.config_path.exists():
         return False, "config.yaml does not exist yet"

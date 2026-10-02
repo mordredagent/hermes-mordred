@@ -1142,7 +1142,7 @@ class TestAtomicWriteHardening:
 
 class TestSinglePluginIdentity:
     """Mordred is one Hermes plugin, ``mordred``. Config writers enable it and
-    migrate the six pre-0.1.0a21 per-component names (``mordred_e2e`` once went
+    migrate the six pre-0.2.0a0 per-component names (``mordred_e2e`` once went
     missing from the enable list and left E2E inert; one name removes that
     class of bug)."""
 

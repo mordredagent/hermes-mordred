@@ -301,7 +301,7 @@ be described as providing the same permissive fallback.
 
 The canonical distribution name is `hermes-mordred`; `mordred-hermes` is a
 metadata-only compatibility shim. Python imports use `mordred_hermes`, the one
-Hermes entry point is `mordred`, config sections keep the pre-0.1.0a21
+Hermes entry point is `mordred`, config sections keep the pre-0.2.0a0
 per-component names (`plugins.mordred_network`, ...), and audit reasons use
 stable dotted names. The `### Plugin: mordred_*` sections below describe the
 components by those historical names. The browser-facing gateway component
