@@ -338,6 +338,63 @@ def _select_audit_native_key(root: Path, meta: Mapping[str, Any]) -> str | None:
     return audit_native_key_id
 
 
+def _open_encrypted_writer(
+    audit_path: Path,
+    keyvault_home: Path | None,
+    backend: NativeBackend | None,
+) -> Writer:
+    """Build the audit-log writer under the keyvault lifecycle lock.
+
+    Only called once the cheap, unlocked "is the keyvault initialized?"
+    probe has already passed — this is where the keyvault crypto stack is
+    first touched. The entire re-check-and-build sequence runs under
+    :func:`~mordred_hermes.keyvault._storage.keyvault_lifecycle_lock` so a
+    concurrent import/reset cannot be observed half-applied.
+    """
+    # Keyvault is initialized — only now touch the crypto stack.
+    from ..keyvault import _native_key_id, _storage
+    from ..keyvault._identity import resolve_backend
+    from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
+    from ..keyvault.wrap import get_wrapping_key_public
+    from ._keyvault_probe import keyvault_initialized
+
+    root = _storage.resolve_keyvault_dir(keyvault_home)
+    with _storage.keyvault_lifecycle_lock(root):
+        # The cheap probe above is intentionally unlocked. Re-check after
+        # acquiring the stable lifecycle lock: import may have published a
+        # meta rename and then rolled it back, or reset may have removed the
+        # profile while this factory was resolving the backend.
+        if not keyvault_initialized(keyvault_home):
+            _rotate_encrypted_log_aside(audit_path)
+            return NDJSONWriter(path=audit_path)
+
+        _storage.assert_keyvault_active(root)
+        meta = _storage.load_meta(root)
+        audit_native_key_id = _select_audit_native_key(root, meta)
+
+        backend = resolve_backend(backend)
+        selected_native_key_id = audit_native_key_id or AUDIT_LOG_KEY_ID
+        backend = _native_key_id.backend_for_persisted_key(
+            backend,
+            root,
+            AUDIT_LOG_KEY_ID,
+            selected_native_key_id,
+        )
+        # Probe that the audit-log wrapping key exists and the backend is
+        # usable. get_wrapping_key_public needs no Enclave authorization.
+        get_wrapping_key_public(
+            AUDIT_LOG_KEY_ID,
+            backend=backend,
+            native_key_id=audit_native_key_id,
+        )
+        return EncryptedWriter(
+            audit_path,
+            backend=backend,
+            native_key_id=audit_native_key_id,
+            keyvault_root=root,
+        )
+
+
 def make_audit_writer(
     audit_path: Path,
     *,
@@ -372,47 +429,7 @@ def make_audit_writer(
             _rotate_encrypted_log_aside(audit_path)
             return NDJSONWriter(path=audit_path)
 
-        # Keyvault is initialized — only now touch the crypto stack.
-        from ..keyvault import _native_key_id, _storage
-        from ..keyvault._identity import resolve_backend
-        from ..keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
-        from ..keyvault.wrap import get_wrapping_key_public
-
-        root = _storage.resolve_keyvault_dir(keyvault_home)
-        with _storage.keyvault_lifecycle_lock(root):
-            # The cheap probe above is intentionally unlocked. Re-check after
-            # acquiring the stable lifecycle lock: import may have published a
-            # meta rename and then rolled it back, or reset may have removed the
-            # profile while this factory was resolving the backend.
-            if not keyvault_initialized(keyvault_home):
-                _rotate_encrypted_log_aside(audit_path)
-                return NDJSONWriter(path=audit_path)
-
-            _storage.assert_keyvault_active(root)
-            meta = _storage.load_meta(root)
-            audit_native_key_id = _select_audit_native_key(root, meta)
-
-            backend = resolve_backend(backend)
-            selected_native_key_id = audit_native_key_id or AUDIT_LOG_KEY_ID
-            backend = _native_key_id.backend_for_persisted_key(
-                backend,
-                root,
-                AUDIT_LOG_KEY_ID,
-                selected_native_key_id,
-            )
-            # Probe that the audit-log wrapping key exists and the backend is
-            # usable. get_wrapping_key_public needs no Enclave authorization.
-            get_wrapping_key_public(
-                AUDIT_LOG_KEY_ID,
-                backend=backend,
-                native_key_id=audit_native_key_id,
-            )
-            return EncryptedWriter(
-                audit_path,
-                backend=backend,
-                native_key_id=audit_native_key_id,
-                keyvault_root=root,
-            )
+        return _open_encrypted_writer(audit_path, keyvault_home, backend)
     except Exception as exc:
         _LOG.warning(
             "encrypted audit log unavailable (%s: %s); falling back to plaintext NDJSON",
