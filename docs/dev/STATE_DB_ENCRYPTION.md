@@ -1,14 +1,20 @@
 # state.db at-rest encryption (SQLCipher) — design notes
 
-Status: phase 0 (feasibility spike) and phase 1 (startup hook under Hermes
-Desktop) done; phases 2–7 not started.
+Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
+and 2 (`mordred_hermes.dbcrypt`, all of Hermes's databases) done; phases 3–7
+not started.
 
 ## Goal
 
-Hermes's conversation store `<home>/state.db` (messages, three FTS5 indexes,
-session titles, system prompts) is plaintext SQLite. Encrypt the whole file
-with SQLCipher, keyed from the key Mordred already manages, without forking
-Hermes.
+Hermes's databases are plaintext SQLite: the conversation store `state.db`
+(messages, three FTS5 indexes, session titles, system prompts) and its
+siblings (`shared-state.db`, `projects.db`, `response_store.db`,
+`memory_store.db`, `verification_evidence.db`, `kanban.db`,
+`cron/executions.db`, `cron/deliveries.db`,
+`telemetry/shared_metrics/metrics.sqlite3`, the same set per profile home).
+Encrypt all of them with SQLCipher, keyed from the key Mordred already
+manages, without forking Hermes. Only Python opens them (no Node/Electron
+SQLite access in Hermes Desktop or the TUI).
 
 ## Key
 
@@ -16,11 +22,15 @@ No new key is created or stored. The SQLCipher key is derived from the
 existing agent-memory key (`HERMES_MEMORY_KEY`, already sealed in the vault
 and injected into every Hermes process at startup):
 
-    key  = HKDF-SHA256(HERMES_MEMORY_KEY, info="mordred state.db v1")
-    salt = HMAC-SHA256(key, "mordred state.db salt v1")[:16]
+    key  = HKDF-SHA256(HERMES_MEMORY_KEY, info="mordred sqlite v1")
+    salt = HMAC-SHA256(key, "mordred sqlite salt v1")[:16]
 
-The salt has to be supplied explicitly because the file header is kept in
-plaintext (below).
+One key and salt for every database, so copies and renames Hermes makes
+(backups, quarantines, staged exports) stay readable. The salt has to be
+supplied explicitly because the file header is kept in plaintext (below).
+The key is resolved on the first keyed `connect()`; if `HERMES_MEMORY_KEY` is
+not in the environment yet, the vault-sealed `.env` is injected then, and the
+plugin's later injection is skipped (one vault unlock per process).
 
 ## Mechanism
 
@@ -29,8 +39,18 @@ plaintext (below).
   SQLCipher's module lacks. Replacing only `connect` is not enough: Hermes
   catches `sqlite3.DatabaseError` etc. 494 times and needs the exception and
   `Connection` types to match.
-- `connect()` keys only `state.db` and the backups Hermes writes next to it
-  (`state.db.*`, not lock files). Every other database stays plain SQLite.
+- `connect()` keys every database in Hermes's home and profile homes
+  (`*.db`, `*.sqlite[3]` and the copies beside them such as
+  `state.db.pre-update-….bak`; not `-wal`/`-shm`/lock files), except in
+  directories that hold other programs' files (`installs/`, `tools/`,
+  `hermes-agent/`, `mcp-installs/`, `skills/`, `desktop*/`, `cache/`,
+  `mordred/`, `vault/`, `logs/`, ...). Nothing outside the home is in scope
+  (Chrome's cookie store, the user's project databases), except an existing
+  file that *is* one of our encrypted databases (a copy Hermes staged
+  elsewhere). Without the key an in-scope database is refused rather than
+  opened, so Hermes can never create a plaintext replacement.
+- Armed by `<home>/mordred/db-encryption.marker` (phase 3 writes it after
+  converting every database). Unarmed, nothing changes. macOS only.
 - `PRAGMA cipher_plaintext_header_size = 112`: Hermes reads fields of the
   100-byte SQLite header directly from the file (format string, page size,
   `application_id` at offset 68 for its "file was replaced" guard, the full
@@ -92,11 +112,19 @@ imported; the PluginManager wrapper is deferred to a post-import hook because
 the Hermes checkout is not on `sys.path` at that moment; `hermes_home()`
 honours `HERMES_HOME` before Hermes is importable.
 
+## Phase 2 (done)
+
+`mordred_hermes.dbcrypt` (`_policy`, `_key`, `_shim`), installed first thing
+by the runtime `.pth` bootstrap; `sqlcipher3-wheels` in the `macos` extra.
+End-to-end with Hermes's own code (stubbed bootstrap, throwaway home): four
+databases converted, then `SessionDB` read / English and Japanese search /
+append / search the new row / reopen, plain reads of `shared-state.db`,
+`projects.db`, `cron/executions.db`, and the Desktop backup preflight all
+work; every file, including the emergency backup, is unreadable to the stdlib
+module.
+
 ## Remaining phases
 
-2. Production shim + dependency (`sqlcipher3-wheels`, macOS extra), keyed
-   from the vault-injected key; refuse to open state.db when the key is
-   missing instead of letting Hermes create a plaintext file.
 3. Migration (`sqlcipher_export` while Hermes is stopped; encrypted backup
    first; verify, then swap).
 4. Monitor: at session start and before every model call, verify state.db is

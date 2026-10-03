@@ -184,9 +184,21 @@ def _wrap_plugin_manager(hermes_plugins: Any) -> None:
 
 def install() -> None:
     """Install all early runtime guards for the current Hermes process."""
+    _install_database_encryption()
     ensure_loopback_proxy_bypass()
     _install_plugin_discovery_wrapper()
     _install_memory_import_hook()
+
+
+def _install_database_encryption() -> None:
+    """Swap ``sqlite3`` for SQLCipher before anything imports it (only when armed).
+
+    First on purpose: a module that imported the stdlib ``sqlite3`` earlier
+    would keep it and could not open the encrypted databases.
+    """
+    from .dbcrypt import install as install_database_encryption
+
+    install_database_encryption()
 
 
 def _install_memory_import_hook() -> None:
