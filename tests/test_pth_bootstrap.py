@@ -177,7 +177,7 @@ def _eval_pth_engages(argv0: str) -> bool:
     the real builtins automatically when the globals dict omits the key,
     so the expression's bare ``len(...)`` call still resolves.
     """
-    fake_sys = SimpleNamespace(argv=[argv0])
+    fake_sys = SimpleNamespace(argv=[argv0], modules={})
     fake_os = SimpleNamespace(environ={}, path=_real_os.path)
     # eval() is safe here: the source is our own tracked packaging/pth/*.pth
     # file (not attacker- or user-controlled input), the prefix/suffix
@@ -220,4 +220,16 @@ class TestPthGateParity:
         # The real parity check: never hard-code only the expected literal —
         # assert equality against the production matcher itself, so the two
         # can never drift again even if one side's behaviour changes later.
-        assert engaged == _pth_bootstrap._looks_like_hermes([argv0])
+        assert engaged == _pth_bootstrap._looks_like_hermes([argv0], {})
+
+
+def test_config_decrypt_engages_under_the_managed_launcher() -> None:
+    managed = {_pth_bootstrap.MANAGED_LAUNCHER_MODULE: object()}
+    calls: list[str] = []
+    assert _pth_bootstrap.run(argv=["-c"], environ={}, installer=lambda: calls.append("x") or 0, modules=managed)
+    assert calls == ["x"]
+    # The recovery opt-out still wins.
+    assert not _pth_bootstrap.run(
+        argv=["-c"], environ={"MORDRED_CONFIG_DECRYPT": "0"}, installer=lambda: 0, modules=managed
+    )
+    assert not _pth_bootstrap.run(argv=["-c"], environ={}, installer=lambda: 0, modules={})

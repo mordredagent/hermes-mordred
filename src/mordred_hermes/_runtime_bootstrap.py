@@ -116,9 +116,40 @@ def _ensure_integrity_callback(manager: Any) -> None:
 
 
 def _install_plugin_discovery_wrapper() -> None:
-    """Patch the supported Hermes 0.13+ manager shape, idempotently."""
+    """Patch the supported Hermes 0.13+ manager shape, idempotently.
+
+    Under Hermes's managed launcher (Hermes Desktop) this runs while the
+    Hermes checkout is not on ``sys.path`` yet, so ``hermes_cli`` cannot be
+    imported: the patch is then applied the moment Hermes imports
+    ``hermes_cli.plugins`` (a failure there still refuses startup).
+    """
+    import importlib.util
+
+    from ._pth_bootstrap import MANAGED_LAUNCHER_MODULE
+
+    # Under the managed launcher never import Hermes from inside site
+    # processing, even if an editable finder could already resolve it.
+    defer = MANAGED_LAUNCHER_MODULE in sys.modules or importlib.util.find_spec("hermes_cli") is None
+    if "hermes_cli.plugins" not in sys.modules and defer:
+        from .keyvault._memory_hook import register_post_import_action
+
+        register_post_import_action("hermes_cli.plugins", _wrap_on_import)
+        return
     import hermes_cli.plugins as hermes_plugins
 
+    _wrap_plugin_manager(hermes_plugins)
+
+
+def _wrap_on_import(module: Any) -> None:
+    try:
+        _wrap_plugin_manager(module)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _raise_runtime_refusal("runtime guard bootstrap failed", exc)
+
+
+def _wrap_plugin_manager(hermes_plugins: Any) -> None:
     manager_type = hermes_plugins.PluginManager
     current = manager_type.discover_and_load
     if bool(getattr(current, _WRAPPED_MARKER, False)):

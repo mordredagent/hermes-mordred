@@ -40,7 +40,14 @@ __all__ = ["run"]
 _FORCE_ENV = "MORDRED_CONFIG_DECRYPT"
 
 
-def _looks_like_hermes(argv: Sequence[str]) -> bool:
+#: Imported only by Hermes's managed launchers (Hermes Desktop / bootstrap
+#: installs): they run ``python -I -c <code>``, so ``sys.argv[0]`` is ``'-c'``
+#: while ``.pth`` files run, but ``hermes_bootstrap`` is mid-import — it is the
+#: module whose ``site.addsitedir`` call processes them.
+MANAGED_LAUNCHER_MODULE = "hermes_bootstrap"
+
+
+def _looks_like_hermes(argv: Sequence[str], modules: Mapping[str, object] | None = None) -> bool:
     """Whether ``argv`` is an actual Hermes CLI invocation.
 
     Precise on purpose: matches every console script shipped by hermes-agent
@@ -57,7 +64,13 @@ def _looks_like_hermes(argv: Sequence[str]) -> bool:
     runpy-resolved path arrives only afterward). It is moot regardless —
     ``hermes_cli`` ships no ``__main__``, so ``python -m hermes_cli`` is not a
     runnable Hermes start. Use a console script or ``MORDRED_CONFIG_DECRYPT=1``.
+
+    A process started by Hermes's managed launcher is recognised by
+    :data:`MANAGED_LAUNCHER_MODULE` being imported (``modules`` defaults to
+    ``sys.modules``).
     """
+    if MANAGED_LAUNCHER_MODULE in (sys.modules if modules is None else modules):
+        return True
     if not argv:
         return False
     arg0 = argv[0] or ""
@@ -73,14 +86,16 @@ def _looks_like_hermes(argv: Sequence[str]) -> bool:
     return "/hermes_cli/" in norm or norm.endswith("/hermes_cli")
 
 
-def _should_engage(argv: Sequence[str], environ: Mapping[str, str]) -> bool:
+def _should_engage(
+    argv: Sequence[str], environ: Mapping[str, str], modules: Mapping[str, object] | None = None
+) -> bool:
     """Resolve the engage decision: explicit env override wins, else process sniffing."""
     flag = environ.get(_FORCE_ENV)
     if flag == "0":
         return False
     if flag == "1":
         return True
-    return _looks_like_hermes(argv)
+    return _looks_like_hermes(argv, modules)
 
 
 def run(
@@ -88,6 +103,7 @@ def run(
     argv: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
     installer: Callable[[], int] | None = None,
+    modules: Mapping[str, object] | None = None,
 ) -> bool:
     """Engage the config.yaml decrypt for a Hermes startup; no-op otherwise.
 
@@ -99,7 +115,7 @@ def run(
     """
     argv = list(sys.argv) if argv is None else argv
     environ = os.environ if environ is None else environ
-    if not _should_engage(argv, environ):
+    if not _should_engage(argv, environ, modules):
         return False
 
     if installer is None:
