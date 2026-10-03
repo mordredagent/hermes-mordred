@@ -80,10 +80,32 @@ def _is_encrypted_copy(path: str, key: DatabaseKey, sc: Any) -> bool:
         apply_key(probe, key)
         probe.execute("SELECT count(*) FROM sqlite_master").fetchone()
         return True
-    except sc.DatabaseError:
+    except (sc.DatabaseError, UnicodeDecodeError):  # a wrong key can surface as a decode error
         return False
     finally:
         probe.close()
+
+
+_STDLIB: types.ModuleType | None = None
+
+
+def stdlib_sqlite3() -> types.ModuleType:
+    """The real stdlib ``sqlite3`` (also after the swap), for plaintext checks."""
+    global _STDLIB
+    if _STDLIB is None:
+        current = sys.modules.get("sqlite3")
+        if current is not None and not getattr(current, MARKER, False):
+            _STDLIB = current
+        else:
+            import importlib.util
+
+            spec = importlib.util.find_spec("sqlite3")
+            if spec is None or spec.loader is None:  # pragma: no cover - CPython always ships it
+                raise ImportError("stdlib sqlite3 is unavailable")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _STDLIB = module
+    return _STDLIB
 
 
 def build_module(
@@ -93,12 +115,11 @@ def build_module(
     has_key: Callable[[], bool],
 ) -> types.ModuleType:
     """A ``sqlite3`` replacement backed by ``sqlcipher3`` (``import`` errors propagate)."""
-    import sqlite3 as stdlib_sqlite3
-
     import sqlcipher3.dbapi2 as sc
 
-    module = types.ModuleType("sqlite3", stdlib_sqlite3.__doc__)
-    module.__dict__.update({k: v for k, v in vars(stdlib_sqlite3).items() if not k.startswith("__")})
+    stdlib = stdlib_sqlite3()
+    module = types.ModuleType("sqlite3", stdlib.__doc__)
+    module.__dict__.update({k: v for k, v in vars(stdlib).items() if not k.startswith("__")})
     module.__dict__.update({k: v for k, v in vars(sc).items() if not k.startswith("__")})
 
     def connect(database: Any, *args: Any, **kwargs: Any) -> Any:

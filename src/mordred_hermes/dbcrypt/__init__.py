@@ -64,6 +64,29 @@ def _run_pending_conversion(base: Path, key_provider: KeyProvider) -> None:
         sys.stderr.write(f"mordred: database encryption postponed — {exc}\n")
 
 
+def _run_pending_decryption(base: Path, key_provider: KeyProvider) -> None:
+    """Turn the databases back into plain SQLite at startup if that was scheduled (best effort)."""
+    from . import _migrate
+
+    if not armed(base) or not _migrate.decrypt_pending_path(base).is_file():
+        return
+    try:
+        key = key_provider()
+        if key is None:
+            raise _migrate.MigrationError("the database key is not available")
+        report = _migrate.decrypt_all(base, key)
+        sys.stderr.write(f"mordred: decrypted {len(report.converted)} Hermes database(s) back to plain SQLite\n")
+    except Exception as exc:
+        sys.stderr.write(f"mordred: database decryption postponed — {exc}\n")
+
+
+def register(ctx: object) -> None:
+    """Hermes plugin component: the protection monitor and the status prompt line."""
+    from ._hooks import register as register_hooks
+
+    register_hooks(ctx)
+
+
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
     """Swap ``sqlite3`` for SQLCipher if database encryption is armed. Returns whether it did.
 
@@ -81,12 +104,13 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     global _PROVIDER
     _PROVIDER = provider or KeyProvider()
     key_provider = _PROVIDER
-    _run_pending_conversion(base, key_provider)
-    if not armed(base):
-        return False
-    if _migrate.journal_path(base).is_file():
+    if _migrate.journal_path(base).is_file():  # an interrupted conversion (either way); needs no key
         with _migrate.migration_lock(base):
             _migrate.resume(base)
+    _run_pending_conversion(base, key_provider)
+    _run_pending_decryption(base, key_provider)
+    if not armed(base):
+        return False
 
     def has_key() -> bool:
         return bool(os.environ.get("HERMES_MEMORY_KEY"))
@@ -102,4 +126,4 @@ def is_installed() -> bool:
     return _shim.is_installed()
 
 
-__all__ = ["arm", "armed", "install", "is_installed", "marker_path"]
+__all__ = ["arm", "armed", "install", "is_installed", "marker_path", "register"]

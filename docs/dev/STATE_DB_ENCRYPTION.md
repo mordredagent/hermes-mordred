@@ -1,8 +1,9 @@
 # state.db at-rest encryption (SQLCipher) — design notes
 
 Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
-2 (`mordred_hermes.dbcrypt`, all of Hermes's databases) and 3 (conversion of
-an existing home, `hermes-mordred databases encrypt`) done; phases 4–7 not
+2 (`mordred_hermes.dbcrypt`, all of Hermes's databases), 3 (conversion of
+an existing home, `hermes-mordred databases encrypt`), 4 (monitor), 5 (status
+line) and the reverse conversion (`databases decrypt`) done; phases 6–7 not
 started.
 
 ## Goal
@@ -140,11 +141,32 @@ runtime bootstrap then converts before the process opens any database (other
 starting processes wait on `db-encryption.lock`). Verified end-to-end on a
 throwaway home with Hermes's own code.
 
+## Phases 4 and 5 (done), and decrypting back
+
+- `dbcrypt._monitor.check` (component `dbcrypt`, hooks `on_session_start` and
+  `pre_llm_call`, i.e. every turn): when armed, it reports a process without
+  the SQLCipher module, a missing key, a left-over journal, and any Hermes
+  database the *stdlib* `sqlite3` can read (opened `mode=ro&immutable=1`, so
+  the probe creates no sidecars). Top-level files are re-listed every check,
+  the full walk is cached for five minutes. A violation is audited once per
+  process and kind (`mordred.db_encryption.violation`), broadcast to Hermes
+  Desktop, and either stops the turn (strict: a `MordredIntegrityRefused`
+  subclass, which escapes Hermes's hook guard) or is added to the turn's
+  context so the model tells the user (lenient).
+- The `mordred.databases` system-prompt section states the checked status:
+  encrypted, scheduled (not active yet), or the violation.
+- `databases decrypt` (`_migrate.decrypt_all`) mirrors the conversion: prepare
+  and verify every plaintext copy, journal, swap, then disarm; scheduled for
+  the next start (`db-decryption.pending`) when Hermes has the databases open.
+  An interrupted run is completed from the journal before anything else at
+  startup (no key needed).
+- Gotcha found while testing: reading an encrypted file without the right key
+  usually raises `DatabaseError`, but with the plaintext header SQLite
+  sometimes parses the encrypted page as a schema and the random bytes end up
+  in the error message, which the `sqlite3` module fails to decode — a
+  `UnicodeDecodeError`. Every probe treats both as "not this format".
+
 ## Remaining phases
 
-4. Monitor: at session start and before every model call, verify state.db is
-   encrypted and no quarantined/plaintext copy appeared; block (strict) or
-   warn (lenient) and notify.
-5. Live status line in the system prompt.
 6. Desktop page step and both uninstall modes (decrypt back / erase).
 7. Redact message previews (`msg=`) from `logs/agent.log`.

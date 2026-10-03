@@ -41,6 +41,7 @@ from ._policy import DENY_DIRS, in_scope, looks_like_database_name
 from ._shim import PLAINTEXT_HEADER_BYTES, SQLITE_MAGIC, apply_key
 
 PENDING_SUBPATH: Final = ("mordred", "db-encryption.pending")
+DECRYPT_PENDING_SUBPATH: Final = ("mordred", "db-decryption.pending")
 JOURNAL_SUBPATH: Final = ("mordred", "db-encryption.journal.json")
 LOCK_SUBPATH: Final = ("mordred", "db-encryption.lock")
 PREPARED_SUFFIX: Final = ".mordred-enc"
@@ -73,6 +74,10 @@ def pending_path(home: Path) -> Path:
     return _path(home, PENDING_SUBPATH)
 
 
+def decrypt_pending_path(home: Path) -> Path:
+    return _path(home, DECRYPT_PENDING_SUBPATH)
+
+
 def journal_path(home: Path) -> Path:
     return _path(home, JOURNAL_SUBPATH)
 
@@ -93,6 +98,16 @@ def _sqlcipher() -> Any:
     return sc
 
 
+def _wrong_key_errors(sc: Any) -> tuple[type[BaseException], ...]:
+    """What reading a file with the wrong (or no) key raises.
+
+    Usually ``DatabaseError``. With the plaintext header, SQLite sometimes
+    parses the encrypted page as a schema and puts its random bytes into the
+    error message, which the sqlite3 module then fails to decode.
+    """
+    return (sc.DatabaseError, UnicodeDecodeError)
+
+
 def _classify(path: Path, key: DatabaseKey | None) -> str:
     sc = _sqlcipher()
     try:
@@ -106,7 +121,7 @@ def _classify(path: Path, key: DatabaseKey | None) -> str:
         try:
             plain.execute("SELECT count(*) FROM sqlite_master").fetchone()
             return "plaintext"
-        except sc.DatabaseError:
+        except _wrong_key_errors(sc):
             pass
     if key is not None:
         with contextlib.closing(sc.connect(uri, uri=True)) as keyed:
@@ -114,7 +129,7 @@ def _classify(path: Path, key: DatabaseKey | None) -> str:
                 apply_key(keyed, key)
                 keyed.execute("SELECT count(*) FROM sqlite_master").fetchone()
                 return "encrypted"
-            except sc.DatabaseError:
+            except _wrong_key_errors(sc):
                 pass
     return "unreadable"
 
@@ -225,6 +240,36 @@ def prepare(database: Database, key: DatabaseKey) -> Path:
     return target
 
 
+def prepare_plain(database: Database, key: DatabaseKey) -> Path:
+    """Export an encrypted ``database`` to a plaintext sibling and verify it; return the sibling."""
+    sc = _sqlcipher()
+    target = Path(f"{database.path}{PREPARED_SUFFIX}")
+    target.unlink(missing_ok=True)
+    with contextlib.closing(sc.connect(str(database.path))) as source:
+        apply_key(source, key)
+        source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise MigrationError(f"{database.relative} fails SQLite's quick_check; not decrypted")
+        expected_counts, (app, version) = _counts(source), _ids(source)
+        journal_mode = source.execute("PRAGMA journal_mode").fetchone()[0]
+        source.execute("ATTACH DATABASE ? AS plain KEY ''", (str(target),))
+        source.execute("SELECT sqlcipher_export('plain')")
+        source.execute(f"PRAGMA plain.application_id = {app}")
+        source.execute(f"PRAGMA plain.user_version = {version}")
+        if str(journal_mode).lower() == "wal":
+            source.execute("PRAGMA plain.journal_mode = WAL")
+        source.execute("DETACH DATABASE plain")
+    with contextlib.closing(sc.connect(str(target))) as check:
+        if check.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise MigrationError(f"the decrypted copy of {database.relative} fails quick_check")
+        if _counts(check) != expected_counts or _ids(check) != (app, version):
+            raise MigrationError(f"the decrypted copy of {database.relative} does not match the original")
+        check.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for suffix in ("-wal", "-shm"):
+        Path(f"{target}{suffix}").unlink(missing_ok=True)
+    return target
+
+
 def _swap(path: Path, prepared: Path) -> None:
     if prepared.exists():
         os.replace(prepared, path)
@@ -235,17 +280,56 @@ def _swap(path: Path, prepared: Path) -> None:
 # -- the whole home ---------------------------------------------------------------------
 
 
-def resume(home: Path) -> bool:
-    """Finish an interrupted swap from its journal. Returns whether one was found."""
+def resume(home: Path, *, disarm: Callable[[Path], None] | None = None) -> bool:
+    """Finish an interrupted conversion from its journal (no key needed). Returns whether one was found."""
     journal = journal_path(home)
     if not journal.is_file():
         return False
-    entries = json.loads(journal.read_text(encoding="utf-8"))["swaps"]
-    for entry in entries:
+    data = json.loads(journal.read_text(encoding="utf-8"))
+    for entry in data["swaps"]:
         _swap(Path(entry["path"]), Path(entry["prepared"]))
+    if data.get("direction") == "decrypt":
+        (disarm or _disarm)(home)
+        decrypt_pending_path(home).unlink(missing_ok=True)
+    else:
+        pending_path(home).unlink(missing_ok=True)
     journal.unlink()
-    pending_path(home).unlink(missing_ok=True)
     return True
+
+
+def _disarm(home: Path) -> None:
+    home.joinpath("mordred", "db-encryption.marker").unlink(missing_ok=True)
+
+
+def _prepare_all(
+    todo: list[Database], prepare_one: Callable[[Database, DatabaseKey], Path], key: DatabaseKey
+) -> list[tuple[Database, Path]]:
+    prepared: list[tuple[Database, Path]] = []
+    try:
+        for database in todo:
+            prepared.append((database, prepare_one(database, key)))
+    except Exception:
+        for database in todo:
+            Path(f"{database.path}{PREPARED_SUFFIX}").unlink(missing_ok=True)
+        raise
+    return prepared
+
+
+def _refuse_if_open(todo: list[Database], holders_of: Callable[[list[Path]], list[int] | None] | None) -> None:
+    if not todo:
+        return
+    busy = (holders_of or holders)([d.path for d in todo])
+    if busy is None:
+        raise MigrationError("could not check whether Hermes has the databases open (lsof failed)")
+    if busy:
+        raise MigrationError(f"the databases are open in other processes (pids {busy}); stop Hermes first")
+
+
+def _write_journal(home: Path, prepared: list[tuple[Database, Path]], direction: str) -> None:
+    journal = journal_path(home)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    swaps = [{"path": str(d.path), "prepared": str(copy)} for d, copy in prepared]
+    journal.write_text(json.dumps({"direction": direction, "swaps": swaps}), encoding="utf-8")
 
 
 def migrate(
@@ -263,33 +347,56 @@ def migrate(
         report.already_encrypted = [d.relative for d in databases if d.state == "encrypted"]
         report.unreadable = [d.relative for d in databases if d.state == "unreadable"]
         todo = [d for d in databases if d.state == "plaintext"]
-        if todo:
-            busy = (holders_of or holders)([d.path for d in todo])
-            if busy is None:
-                raise MigrationError("could not check whether Hermes has the databases open (lsof failed)")
-            if busy:
-                raise MigrationError(f"the databases are open in other processes (pids {busy}); stop Hermes first")
-        prepared: list[tuple[Database, Path]] = []
-        try:
-            for database in todo:
-                prepared.append((database, prepare(database, key)))
-        except Exception:
-            for _database, copy in prepared:
-                copy.unlink(missing_ok=True)
-            for database in todo:
-                Path(f"{database.path}{PREPARED_SUFFIX}").unlink(missing_ok=True)
-            raise
-        journal = journal_path(home)
-        journal.parent.mkdir(parents=True, exist_ok=True)
-        swaps = [{"path": str(d.path), "prepared": str(copy)} for d, copy in prepared]
-        journal.write_text(json.dumps({"swaps": swaps}), encoding="utf-8")
+        _refuse_if_open(todo, holders_of)
+        prepared = _prepare_all(todo, prepare, key)
+        _write_journal(home, prepared, "encrypt")
         arm(home)
         for database, copy in prepared:
             _swap(database.path, copy)
             report.converted.append(database.relative)
-        journal.unlink()
+        journal_path(home).unlink()
         pending_path(home).unlink(missing_ok=True)
     return report
+
+
+def decrypt_all(
+    home: Path,
+    key: DatabaseKey,
+    *,
+    disarm: Callable[[Path], None] = _disarm,
+    holders_of: Callable[[list[Path]], list[int] | None] | None = None,
+) -> Report:
+    """Turn every encrypted Hermes database back into plain SQLite, then disarm.
+
+    Same all-or-nothing shape as :func:`migrate`; the swap happens before the
+    marker goes, so an interruption leaves an armed home whose journal
+    :func:`resume` completes (still without a key) on the next start.
+    """
+    report = Report()
+    with migration_lock(home):
+        resume(home, disarm=disarm)
+        databases = discover(home, key)
+        report.unreadable = [d.relative for d in databases if d.state == "unreadable"]
+        todo = [d for d in databases if d.state == "encrypted"]
+        _refuse_if_open(todo, holders_of)
+        prepared = _prepare_all(todo, prepare_plain, key)
+        _write_journal(home, prepared, "decrypt")
+        for database, copy in prepared:
+            _swap(database.path, copy)
+            report.converted.append(database.relative)
+        disarm(home)
+        journal_path(home).unlink()
+        decrypt_pending_path(home).unlink(missing_ok=True)
+        pending_path(home).unlink(missing_ok=True)
+    return report
+
+
+def schedule_decrypt(home: Path) -> None:
+    """Decrypt on the next Hermes start (the databases are in use now)."""
+    path = decrypt_pending_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1\n", encoding="utf-8")
+    pending_path(home).unlink(missing_ok=True)
 
 
 def schedule(home: Path) -> None:

@@ -121,6 +121,12 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     p_encrypt.add_argument("--dry-run", action="store_true", help="List what would be encrypted; change nothing")
     p_encrypt.set_defaults(func=_handle_databases)
+    p_decrypt = dsub.add_parser(
+        "decrypt",
+        help="Turn every Hermes database back into plain SQLite and switch database encryption off",
+    )
+    p_decrypt.add_argument("--dry-run", action="store_true", help="List what would be decrypted; change nothing")
+    p_decrypt.set_defaults(func=_handle_databases)
 
 
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

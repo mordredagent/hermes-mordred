@@ -551,6 +551,7 @@ hermes-mordred uninstall --purge-data   # also delete Mordred's data and device 
 hermes-mordred databases status            # each Hermes database: plaintext / encrypted
 hermes-mordred databases encrypt --dry-run # list what would be encrypted
 hermes-mordred databases encrypt           # encrypt them all (or at the next Hermes start)
+hermes-mordred databases decrypt           # back to plain SQLite; encryption off
 ```
 > Hermes keeps its conversation history and other state in SQLite files
 > (`state.db` with its search indexes, `shared-state.db`, `projects.db`,
@@ -567,7 +568,13 @@ hermes-mordred databases encrypt           # encrypt them all (or at the next He
 > replaced, not overwritten: on an SSD they can survive in free space or APFS
 > local snapshots until reused (FileVault keeps them unreadable). Tools outside
 > Hermes (a SQLite browser, the `sqlite3` command) can no longer open these
-> files — that is the point.
+> files — that is the point. While encryption is on, Mordred checks at every
+> session start and every turn that each Hermes process uses SQLCipher, has the
+> key, and that no plaintext database has appeared; strict policy stops the turn,
+> lenient policy warns you (through the agent and Hermes Desktop). The agent is
+> told the checked status, so it does not claim encryption that is not in
+> effect. `decrypt` (also scheduled for the next start if Hermes is running)
+> converts everything back before you uninstall Mordred.
 
 ### `egress` — limit what the agent's tools may send out
 ```sh

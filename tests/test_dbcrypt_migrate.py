@@ -58,7 +58,7 @@ def _is_plaintext(path: Path) -> bool:
     try:
         stdlib_sqlite3.connect(path).execute("SELECT count(*) FROM sqlite_master").fetchone()
         return True
-    except stdlib_sqlite3.DatabaseError:
+    except (stdlib_sqlite3.DatabaseError, UnicodeDecodeError):  # a wrong key can surface as either
         return False
 
 
@@ -172,4 +172,49 @@ def test_without_a_key_the_scheduled_conversion_waits(home: Path, monkeypatch: p
 
     assert dbcrypt.install(home=home, provider=provider) is False
     assert _is_plaintext(home / "state.db") and _migrate.pending_path(home).exists()
+    assert sys.modules["sqlite3"] is stdlib_sqlite3
+
+
+# -- decrypting back (before uninstalling) ---------------------------------------------
+
+
+def test_decrypt_all_restores_plain_sqlite_and_disarms(home: Path) -> None:
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    report = _migrate.decrypt_all(home, KEY, holders_of=_no_holders)
+
+    assert len(report.converted) == 4
+    for relative in report.converted:
+        conn = stdlib_sqlite3.connect(home / relative)
+        assert conn.execute("SELECT count(*) FROM messages").fetchone() == (3,)
+        assert conn.execute("PRAGMA application_id").fetchone() == (APP_ID,)
+    assert stdlib_sqlite3.connect(home / "state.db").execute(
+        "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'りんご'"
+    ).fetchone() == (3,)
+    assert not dbcrypt.marker_path(home).exists() and not _migrate.journal_path(home).exists()
+
+
+def test_an_interrupted_decryption_is_completed_and_disarmed(home: Path) -> None:
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    database = next(d for d in _migrate.discover(home, KEY) if d.relative == "state.db")
+    prepared = _migrate.prepare_plain(database, KEY)
+    _migrate.journal_path(home).write_text(
+        json.dumps({"direction": "decrypt", "swaps": [{"path": str(database.path), "prepared": str(prepared)}]}),
+        encoding="utf-8",
+    )
+    assert _migrate.resume(home) is True
+    assert _is_plaintext(home / "state.db") and not dbcrypt.marker_path(home).exists()
+
+
+def test_a_scheduled_decryption_runs_at_startup_and_leaves_sqlite3_alone(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_migrate, "holders", _no_holders)
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    _migrate.schedule_decrypt(home)
+    provider = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + bytes(range(32)).hex()}, inject=lambda: 0)
+
+    assert dbcrypt.install(home=home, provider=provider) is False
+    assert _is_plaintext(home / "state.db") and not _migrate.decrypt_pending_path(home).exists()
     assert sys.modules["sqlite3"] is stdlib_sqlite3

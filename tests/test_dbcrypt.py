@@ -134,7 +134,7 @@ def test_hermes_databases_are_created_encrypted(sqlcipher: object) -> None:
     assert raw[:16] == _shim.SQLITE_MAGIC  # Hermes's header probes still work
     assert struct.unpack(">I", raw[68:72])[0] == 682968903
     assert b"secret" not in raw and "りんご".encode() not in raw
-    with pytest.raises(stdlib_sqlite3.DatabaseError):
+    with pytest.raises((stdlib_sqlite3.DatabaseError, UnicodeDecodeError)):
         stdlib_sqlite3.connect(str(path)).execute("SELECT * FROM messages").fetchall()
 
     again = sq.connect(f"file:{path}?mode=ro", uri=True)
@@ -203,7 +203,7 @@ def test_a_plaintext_hermes_database_is_not_silently_opened(sqlcipher: object) -
     plain.execute("CREATE TABLE t (a)")
     plain.commit()
     plain.close()
-    with pytest.raises(sq.DatabaseError):
+    with pytest.raises((sq.DatabaseError, UnicodeDecodeError)):
         sq.connect(str(home / "state.db")).execute("SELECT * FROM t").fetchall()
 
 

@@ -120,10 +120,54 @@ def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int
     return 0
 
 
+def databases_decrypt(*, dry_run: bool = False, home: Path | None = None) -> int:
+    """Turn every encrypted Hermes database back into plain SQLite and switch encryption off."""
+    from ..dbcrypt import _migrate, armed
+    from ..dbcrypt._key import KeyProvider
+
+    refusal = _preflight()
+    if refusal:
+        _term.emit_error(refusal)
+        return 1
+    base = home or _home()
+    key = KeyProvider()()
+    if key is None:
+        _term.emit_error("the database key is not available (the vault could not be opened); nothing was changed.")
+        return 1
+    databases = _migrate.discover(base, key)
+    todo = [d for d in databases if d.state == "encrypted"]
+    for database in databases:
+        print(f"  {'will decrypt' if database.state == 'encrypted' else database.state:<14} {database.relative}")
+    if dry_run:
+        print("Dry run: nothing was changed.")
+        return 0
+    if not todo and not armed(base):
+        print("Database encryption is already off.")
+        return 0
+    busy = _migrate.holders([d.path for d in todo])
+    if busy is None or busy:
+        _migrate.schedule_decrypt(base)
+        print(
+            "Hermes has its databases open, so decryption is scheduled. Quit Hermes (in Hermes Desktop: ⌘Q) and "
+            "start it again — the databases are turned back into plain SQLite before Hermes opens them."
+        )
+        return 0
+    try:
+        report = _migrate.decrypt_all(base, key)
+    except _migrate.MigrationError as exc:
+        _term.emit_error(f"nothing was changed: {exc}")
+        return 1
+    print(f"Decrypted {len(report.converted)} database(s); database encryption is off.")
+    return 0
+
+
 def cli_databases(args: argparse.Namespace) -> int:
-    if getattr(args, "databases_command", None) == "encrypt":
+    command = getattr(args, "databases_command", None)
+    if command == "encrypt":
         return databases_encrypt(dry_run=bool(getattr(args, "dry_run", False)))
+    if command == "decrypt":
+        return databases_decrypt(dry_run=bool(getattr(args, "dry_run", False)))
     return databases_status()
 
 
-__all__ = ["cli_databases", "databases_encrypt", "databases_status"]
+__all__ = ["cli_databases", "databases_decrypt", "databases_encrypt", "databases_status"]
