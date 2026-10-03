@@ -37,22 +37,56 @@ def armed(home: Path | None = None) -> bool:
     return sys.platform == "darwin" and marker_path(home or _home()).is_file()
 
 
+def arm(home: Path) -> None:
+    path = marker_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("1\n", encoding="utf-8")
+
+
+def _run_pending_conversion(base: Path, key_provider: KeyProvider) -> None:
+    """Convert the databases at startup if a conversion was scheduled (best effort).
+
+    Runs before this process opens any database. Other Hermes processes that
+    start meanwhile wait on the conversion lock. On any refusal the databases
+    stay as they are (plaintext, unarmed) and the conversion stays scheduled.
+    """
+    from . import _migrate
+
+    if armed(base) or not _migrate.pending_path(base).is_file():
+        return
+    try:
+        key = key_provider()
+        if key is None:
+            raise _migrate.MigrationError("the database key is not available (memory encryption is not set up)")
+        report = _migrate.migrate(base, key, arm=arm)
+        sys.stderr.write(f"mordred: encrypted {len(report.converted)} Hermes database(s) with SQLCipher\n")
+    except Exception as exc:
+        sys.stderr.write(f"mordred: database encryption postponed — {exc}\n")
+
+
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
     """Swap ``sqlite3`` for SQLCipher if database encryption is armed. Returns whether it did.
 
+    Runs a scheduled conversion first, and completes an interrupted one.
     Raises when armed but SQLCipher cannot be loaded: Hermes's databases are
     encrypted then, and the stdlib module cannot open them.
     """
-    from . import _shim
+    from . import _migrate, _shim
 
     if _shim.is_installed():
         return True
     base = home or _home()
-    if not armed(base):
+    if sys.platform != "darwin":
         return False
     global _PROVIDER
     _PROVIDER = provider or KeyProvider()
     key_provider = _PROVIDER
+    _run_pending_conversion(base, key_provider)
+    if not armed(base):
+        return False
+    if _migrate.journal_path(base).is_file():
+        with _migrate.migration_lock(base):
+            _migrate.resume(base)
 
     def has_key() -> bool:
         return bool(os.environ.get("HERMES_MEMORY_KEY"))
@@ -68,4 +102,4 @@ def is_installed() -> bool:
     return _shim.is_installed()
 
 
-__all__ = ["armed", "install", "is_installed", "marker_path"]
+__all__ = ["arm", "armed", "install", "is_installed", "marker_path"]

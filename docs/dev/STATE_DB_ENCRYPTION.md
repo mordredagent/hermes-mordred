@@ -1,8 +1,9 @@
 # state.db at-rest encryption (SQLCipher) — design notes
 
 Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
-and 2 (`mordred_hermes.dbcrypt`, all of Hermes's databases) done; phases 3–7
-not started.
+2 (`mordred_hermes.dbcrypt`, all of Hermes's databases) and 3 (conversion of
+an existing home, `hermes-mordred databases encrypt`) done; phases 4–7 not
+started.
 
 ## Goal
 
@@ -123,10 +124,24 @@ append / search the new row / reopen, plain reads of `shared-state.db`,
 work; every file, including the emergency backup, is unreadable to the stdlib
 module.
 
+## Phase 3 (done)
+
+`dbcrypt._migrate` converts an existing home (Mordred installed later):
+discover every in-scope database (skipping other programs' directories),
+classify plaintext / encrypted / unreadable, refuse if another process has any
+open (`lsof`), then prepare every encrypted copy (`sqlcipher_export`, carrying
+over `application_id`, `user_version` and WAL mode) and verify it
+(`quick_check`, same tables and row counts). Only then: write a journal, arm,
+swap with `os.replace`, drop the old sidecars, remove the journal. A failure
+while preparing changes nothing; a crash after arming is completed from the
+journal on the next start. `hermes-mordred databases encrypt` runs it now, or
+schedules it (`db-encryption.pending`) when Hermes has the databases open; the
+runtime bootstrap then converts before the process opens any database (other
+starting processes wait on `db-encryption.lock`). Verified end-to-end on a
+throwaway home with Hermes's own code.
+
 ## Remaining phases
 
-3. Migration (`sqlcipher_export` while Hermes is stopped; encrypted backup
-   first; verify, then swap).
 4. Monitor: at session start and before every model call, verify state.db is
    encrypted and no quarantined/plaintext copy appeared; block (strict) or
    warn (lenient) and notify.

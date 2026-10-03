@@ -546,6 +546,29 @@ hermes-mordred uninstall --purge-data   # also delete Mordred's data and device 
 > Mordred's data unless `--purge-data` is given. Details:
 > [§9 Uninstall safely](#uninstall-safely).
 
+### `databases` — encrypt Hermes's SQLite databases (macOS)
+```sh
+hermes-mordred databases status            # each Hermes database: plaintext / encrypted
+hermes-mordred databases encrypt --dry-run # list what would be encrypted
+hermes-mordred databases encrypt           # encrypt them all (or at the next Hermes start)
+```
+> Hermes keeps its conversation history and other state in SQLite files
+> (`state.db` with its search indexes, `shared-state.db`, `projects.db`,
+> `cron/*.db`, ... in the Hermes home and each profile home). `encrypt`
+> converts every one of them to SQLCipher and turns database encryption on;
+> databases Hermes creates later are encrypted from the start. The key is
+> derived from the agent-memory key (no new key; run `encryption enable memory`
+> first) and is unlocked once per Hermes process. Files of other programs
+> (Hermes's install, toolchains, MCP servers, skills) and anything outside the
+> Hermes home are left alone. If Hermes has the databases open, the conversion
+> is scheduled and runs when Hermes next starts, before it opens them. The
+> conversion is all-or-nothing and verified (same tables and row counts); an
+> interrupted one is completed on the next start. Old plaintext blocks are
+> replaced, not overwritten: on an SSD they can survive in free space or APFS
+> local snapshots until reused (FileVault keeps them unreadable). Tools outside
+> Hermes (a SQLite browser, the `sqlite3` command) can no longer open these
+> files — that is the point.
+
 ### `egress` — limit what the agent's tools may send out
 ```sh
 hermes-mordred egress status                 # level, taint setting, blocklists

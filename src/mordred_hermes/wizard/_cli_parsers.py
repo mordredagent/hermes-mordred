@@ -56,6 +56,7 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
     _add_extension(sub)
     _add_telegram(sub)
     _add_egress(sub)
+    _add_databases(sub)
     _add_desktop(sub)
     _add_uninstall(sub)
 
@@ -106,6 +107,20 @@ def _add_uninstall(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         help="Also remove the Mordred-built native helper in ~/.local/bin (mordred-hermes-sekey / -tpmkey)",
     )
     p.set_defaults(func=_handle_uninstall)
+
+
+def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    p = sub.add_parser("databases", help="Encrypt Hermes's SQLite databases (state.db and its siblings) with SQLCipher")
+    dsub = p.add_subparsers(dest="databases_command", required=True, metavar="COMMAND")
+    dsub.add_parser("status", help="Show whether each Hermes database is encrypted").set_defaults(
+        func=_handle_databases
+    )
+    p_encrypt = dsub.add_parser(
+        "encrypt",
+        help="Encrypt every Hermes database now (or at the next Hermes start if Hermes has them open)",
+    )
+    p_encrypt.add_argument("--dry-run", action="store_true", help="List what would be encrypted; change nothing")
+    p_encrypt.set_defaults(func=_handle_databases)
 
 
 def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -995,6 +1010,12 @@ def _handle_uninstall(args: argparse.Namespace) -> int:
     from . import uninstall_cli
 
     return uninstall_cli.cli_uninstall(args)
+
+
+def _handle_databases(args: argparse.Namespace) -> int:
+    from . import databases_cli
+
+    return databases_cli.cli_databases(args)
 
 
 def _handle_egress(args: argparse.Namespace) -> int:

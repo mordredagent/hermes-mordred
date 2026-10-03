@@ -28,6 +28,11 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/env-vault.optout` | encryption CLI | disables runtime `.env` injection |
 | `<home>/mordred/config-vault.marker` | encryption CLI | enables config materialize/reseal lifecycle |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<home>/mordred/db-encryption.marker` | `databases encrypt` / startup conversion | arms SQLCipher for every Hermes database (`mordred_hermes.dbcrypt`) |
+| `<home>/mordred/db-encryption.pending` | `databases encrypt` while Hermes runs | converts the databases at the next Hermes start |
+| `<home>/mordred/db-encryption.journal.json` | database conversion | swaps still to do after an interrupted conversion |
+| `<home>/mordred/db-encryption.lock` | database conversion | serializes conversions and the Hermes processes waiting on one |
+| `<db>.mordred-enc` | database conversion | the verified encrypted copy, renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
