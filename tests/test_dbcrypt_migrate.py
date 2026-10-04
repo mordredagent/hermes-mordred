@@ -76,6 +76,12 @@ def test_discovery_finds_hermes_databases_only(home: Path) -> None:
     }
 
 
+def _expected_journal_mode() -> str:
+    import sqlcipher3.dbapi2 as sc
+
+    return "delete" if _migrate.wal_reset_vulnerable(sc.sqlite_version_info) else "wal"
+
+
 def test_migrate_encrypts_everything_and_keeps_the_data(home: Path) -> None:
     report = _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
 
@@ -88,7 +94,7 @@ def test_migrate_encrypts_everything_and_keeps_the_data(home: Path) -> None:
         assert conn.execute("SELECT count(*) FROM messages").fetchone() == (3,)
         assert conn.execute("PRAGMA application_id").fetchone() == (APP_ID,)
         assert conn.execute("PRAGMA user_version").fetchone() == (7,)
-        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert conn.execute("PRAGMA journal_mode").fetchone() == (_expected_journal_mode(),)
     fts = _keyed(home / "state.db").execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'りんご'")
     assert fts.fetchone() == (3,)
     assert _is_plaintext(home / "installs" / "env" / "build.db")  # left alone
@@ -129,6 +135,26 @@ def test_a_failure_while_preparing_changes_nothing(home: Path, monkeypatch: pyte
     assert all(_is_plaintext(home / r) for r in ("state.db", "shared-state.db", "cron/executions.db"))
     assert not dbcrypt.marker_path(home).exists()
     assert not list(home.rglob(f"*{_migrate.PREPARED_SUFFIX}"))
+
+
+def test_a_run_stopped_before_arming_is_completed_and_armed(home: Path) -> None:
+    """Crash point: the journal is written, the marker not yet; nothing swapped."""
+
+    class Crash(Exception):
+        pass
+
+    def crash(_home: Path) -> None:
+        raise Crash
+
+    with pytest.raises(Crash):
+        _migrate.migrate(home, KEY, arm=crash, holders_of=_no_holders)
+    assert _migrate.journal_path(home).is_file() and not dbcrypt.marker_path(home).exists()
+
+    assert _migrate.resume(home) is True
+    assert dbcrypt.marker_path(home).is_file()  # encrypted databases in an unarmed home would be unreadable
+    assert not _is_plaintext(home / "state.db")
+    assert _keyed(home / "state.db").execute("SELECT count(*) FROM messages").fetchone() == (3,)
+    assert not _migrate.journal_path(home).exists()
 
 
 def test_an_interrupted_swap_is_completed(home: Path) -> None:
@@ -218,3 +244,56 @@ def test_a_scheduled_decryption_runs_at_startup_and_leaves_sqlite3_alone(
     assert dbcrypt.install(home=home, provider=provider) is False
     assert _is_plaintext(home / "state.db") and not _migrate.decrypt_pending_path(home).exists()
     assert sys.modules["sqlite3"] is stdlib_sqlite3
+
+
+@pytest.mark.parametrize(("vulnerable", "expected"), [(True, "delete"), (False, "wal")])
+def test_wal_is_kept_only_where_hermes_would_keep_it(
+    home: Path, monkeypatch: pytest.MonkeyPatch, vulnerable: bool, expected: str
+) -> None:
+    """A SQLCipher build with SQLite's WAL-reset bug gets rollback-journal mode, as Hermes would choose."""
+    monkeypatch.setattr(_migrate, "wal_reset_vulnerable", lambda _version: vulnerable)
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    assert _keyed(home / "state.db").execute("PRAGMA journal_mode").fetchone() == (expected,)
+
+
+@pytest.mark.parametrize(
+    ("version", "vulnerable"),
+    [((3, 51, 1), True), ((3, 51, 3), False), ((3, 50, 7), False), ((3, 44, 6), False), ((3, 45, 1), True)],
+)
+def test_wal_reset_vulnerable_versions(version: tuple[int, int, int], vulnerable: bool) -> None:
+    assert _migrate.wal_reset_vulnerable(version) is vulnerable
+
+
+def test_conversion_keeps_each_files_permissions(home: Path) -> None:
+    """state.db is owner-only (0600); the new file must not fall back to the umask (0644)."""
+    (home / "state.db").chmod(0o600)
+    (home / "shared-state.db").chmod(0o644)
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    assert (home / "state.db").stat().st_mode & 0o777 == 0o600
+    assert (home / "shared-state.db").stat().st_mode & 0o777 == 0o644
+    _migrate.decrypt_all(home, KEY, holders_of=_no_holders)
+    assert (home / "state.db").stat().st_mode & 0o777 == 0o600
+
+
+def test_encrypt_with_another_key_does_not_claim_everything_is_encrypted(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.wizard import databases_cli
+
+    _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    wrong = _key.derive(bytes(32))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(_key, "KeyProvider", lambda: lambda: wrong)
+    assert databases_cli.databases_encrypt(home=home) == 0
+    out = capsys.readouterr()
+    assert "does not open" in out.out + out.err and "state.db" in out.out + out.err
+    assert "Every Hermes database is already encrypted" not in out.out
+
+
+def test_files_that_are_not_sqlite_are_not_listed(home: Path) -> None:
+    """Hermes keeps JSON beside state.db (``state.db.repair-attempts.json``); it is not an unreadable database."""
+    (home / "state.db.repair-attempts.json").write_text('{"attempts": 1}', encoding="utf-8")
+    (home / "empty.db").write_bytes(b"")
+    relatives = {d.relative for d in _migrate.discover(home, KEY)}
+    assert "state.db.repair-attempts.json" not in relatives and "empty.db" not in relatives
+    assert "state.db" in relatives

@@ -29,6 +29,7 @@ import contextlib
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator
@@ -38,7 +39,7 @@ from typing import Any, Final
 
 from ._key import DatabaseKey
 from ._policy import DENY_DIRS, in_scope, looks_like_database_name
-from ._shim import PLAINTEXT_HEADER_BYTES, SQLITE_MAGIC, apply_key
+from ._shim import PLAINTEXT_HEADER_BYTES, SQLITE_MAGIC, apply_key, wrong_key_errors
 
 PENDING_SUBPATH: Final = ("mordred", "db-encryption.pending")
 DECRYPT_PENDING_SUBPATH: Final = ("mordred", "db-decryption.pending")
@@ -55,7 +56,7 @@ class MigrationError(RuntimeError):
 class Database:
     path: Path
     relative: str
-    state: str  # "plaintext" | "encrypted" | "unreadable"
+    state: str  # "plaintext" | "encrypted" | "unreadable" (files that are not SQLite are not listed)
 
 
 @dataclass
@@ -99,13 +100,8 @@ def _sqlcipher() -> Any:
 
 
 def _wrong_key_errors(sc: Any) -> tuple[type[BaseException], ...]:
-    """What reading a file with the wrong (or no) key raises.
-
-    Usually ``DatabaseError``. With the plaintext header, SQLite sometimes
-    parses the encrypted page as a schema and puts its random bytes into the
-    error message, which the sqlite3 module then fails to decode.
-    """
-    return (sc.DatabaseError, UnicodeDecodeError)
+    """What reading a file with the wrong (or no) key raises (see :func:`._shim.wrong_key_errors`)."""
+    return wrong_key_errors(sc)
 
 
 def _classify(path: Path, key: DatabaseKey | None) -> str:
@@ -113,7 +109,7 @@ def _classify(path: Path, key: DatabaseKey | None) -> str:
     try:
         with path.open("rb") as handle:
             if handle.read(len(SQLITE_MAGIC)) != SQLITE_MAGIC:
-                return "unreadable"
+                return "other"  # not SQLite (``state.db.repair-attempts.json``) or empty
     except OSError:
         return "unreadable"
     uri = f"file:{path.as_posix()}?mode=ro"
@@ -144,7 +140,9 @@ def discover(home: Path, key: DatabaseKey | None) -> list[Database]:
             path = Path(root, name)
             if name.endswith(PREPARED_SUFFIX) or not looks_like_database_name(name) or not in_scope(path, home):
                 continue
-            found.append(Database(path, str(path.relative_to(home)), _classify(path, key)))
+            state = _classify(path, key)
+            if state != "other":
+                found.append(Database(path, str(path.relative_to(home)), state))
     return found
 
 
@@ -208,6 +206,18 @@ def _ids(conn: Any, schema: str = "main") -> tuple[int, int]:
     return int(app), int(version)
 
 
+def wal_reset_vulnerable(version_info: tuple[int, ...]) -> bool:
+    """Whether this SQLite has the WAL-reset corruption bug (https://sqlite.org/wal.html#walresetbug).
+
+    Same ranges as Hermes's own gate (``hermes_cli.sqlite_runtime``), which
+    creates new databases in rollback-journal mode on such a library.
+    """
+    info = (*tuple(version_info), 0, 0, 0)[:3]
+    return not (
+        info < (3, 7, 0) or info >= (3, 51, 3) or (3, 50, 7) <= info < (3, 51, 0) or (3, 44, 6) <= info < (3, 45, 0)
+    )
+
+
 def prepare(database: Database, key: DatabaseKey) -> Path:
     """Export ``database`` to an encrypted sibling and verify it; return the sibling."""
     sc = _sqlcipher()
@@ -225,7 +235,11 @@ def prepare(database: Database, key: DatabaseKey) -> Path:
         source.execute("SELECT sqlcipher_export('enc')")
         source.execute(f"PRAGMA enc.application_id = {app}")
         source.execute(f"PRAGMA enc.user_version = {version}")
-        if str(journal_mode).lower() == "wal":
+        # Keep WAL only where Hermes itself would: SQLCipher may link an older
+        # SQLite than the interpreter's, and on one with the WAL-reset bug
+        # Hermes uses rollback-journal mode (it never downgrades an open WAL DB,
+        # so the offline conversion is the moment to do it).
+        if str(journal_mode).lower() == "wal" and not wal_reset_vulnerable(sc.sqlite_version_info):
             source.execute("PRAGMA enc.journal_mode = WAL")
         source.execute("DETACH DATABASE enc")
     with contextlib.closing(sc.connect(str(target))) as check:
@@ -237,6 +251,7 @@ def prepare(database: Database, key: DatabaseKey) -> Path:
         check.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     for suffix in ("-wal", "-shm"):
         Path(f"{target}{suffix}").unlink(missing_ok=True)
+    os.chmod(target, stat.S_IMODE(database.path.stat().st_mode))  # e.g. state.db is owner-only
     return target
 
 
@@ -267,6 +282,7 @@ def prepare_plain(database: Database, key: DatabaseKey) -> Path:
         check.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     for suffix in ("-wal", "-shm"):
         Path(f"{target}{suffix}").unlink(missing_ok=True)
+    os.chmod(target, stat.S_IMODE(database.path.stat().st_mode))  # e.g. state.db is owner-only
     return target
 
 
@@ -280,15 +296,25 @@ def _swap(path: Path, prepared: Path) -> None:
 # -- the whole home ---------------------------------------------------------------------
 
 
-def resume(home: Path, *, disarm: Callable[[Path], None] | None = None) -> bool:
-    """Finish an interrupted conversion from its journal (no key needed). Returns whether one was found."""
+def resume(
+    home: Path, *, disarm: Callable[[Path], None] | None = None, arm: Callable[[Path], None] | None = None
+) -> bool:
+    """Finish an interrupted conversion from its journal (no key needed). Returns whether one was found.
+
+    An encryption journal also re-arms the home: the run may have stopped
+    between writing the journal and writing the marker, and encrypted
+    databases in an unarmed home are unreadable to Hermes.
+    """
     journal = journal_path(home)
     if not journal.is_file():
         return False
     data = json.loads(journal.read_text(encoding="utf-8"))
+    decrypting = data.get("direction") == "decrypt"
+    if not decrypting:
+        (arm or _arm)(home)
     for entry in data["swaps"]:
         _swap(Path(entry["path"]), Path(entry["prepared"]))
-    if data.get("direction") == "decrypt":
+    if decrypting:
         (disarm or _disarm)(home)
         decrypt_pending_path(home).unlink(missing_ok=True)
     else:
@@ -297,8 +323,17 @@ def resume(home: Path, *, disarm: Callable[[Path], None] | None = None) -> bool:
     return True
 
 
+def _marker(home: Path) -> Path:
+    return home.joinpath("mordred", "db-encryption.marker")
+
+
+def _arm(home: Path) -> None:
+    _marker(home).parent.mkdir(parents=True, exist_ok=True)
+    _marker(home).write_text("1\n", encoding="utf-8")
+
+
 def _disarm(home: Path) -> None:
-    home.joinpath("mordred", "db-encryption.marker").unlink(missing_ok=True)
+    _marker(home).unlink(missing_ok=True)
 
 
 def _prepare_all(
@@ -329,7 +364,12 @@ def _write_journal(home: Path, prepared: list[tuple[Database, Path]], direction:
     journal = journal_path(home)
     journal.parent.mkdir(parents=True, exist_ok=True)
     swaps = [{"path": str(d.path), "prepared": str(copy)} for d, copy in prepared]
-    journal.write_text(json.dumps({"direction": direction, "swaps": swaps}), encoding="utf-8")
+    staged = journal.with_name(f"{journal.name}.tmp")  # never a torn journal: startup would refuse to parse it
+    with staged.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"direction": direction, "swaps": swaps}))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(staged, journal)
 
 
 def migrate(
@@ -342,7 +382,7 @@ def migrate(
     """Convert every plaintext database under ``home``; raise :class:`MigrationError` on refusal."""
     report = Report()
     with migration_lock(home):
-        resume(home)
+        resume(home, arm=arm)
         databases = discover(home, key)
         report.already_encrypted = [d.relative for d in databases if d.state == "encrypted"]
         report.unreadable = [d.relative for d in databases if d.state == "unreadable"]

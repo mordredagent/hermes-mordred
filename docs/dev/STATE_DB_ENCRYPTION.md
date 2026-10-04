@@ -131,7 +131,9 @@ module.
 discover every in-scope database (skipping other programs' directories),
 classify plaintext / encrypted / unreadable, refuse if another process has any
 open (`lsof`), then prepare every encrypted copy (`sqlcipher_export`, carrying
-over `application_id`, `user_version` and WAL mode) and verify it
+over `application_id`, `user_version` and WAL mode — rollback-journal mode
+instead when SQLCipher's SQLite has the WAL-reset bug, as Hermes itself
+chooses for new databases) and verify it
 (`quick_check`, same tables and row counts). Only then: write a journal, arm,
 swap with `os.replace`, drop the old sidecars, remove the journal. A failure
 while preparing changes nothing; a crash after arming is completed from the

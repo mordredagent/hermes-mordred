@@ -40,6 +40,10 @@ KEY_UNAVAILABLE: Final = (
     "Mordred: this Hermes database is encrypted and the database key is not available "
     "(the vault could not be opened). Refusing to open it unencrypted."
 )
+KEY_DOES_NOT_OPEN: Final = (
+    "Mordred: the database key does not open this Hermes database (it was encrypted with another key, "
+    "or it is a plaintext copy). Refusing to open it; nothing was changed."
+)
 #: Set on the replacement module so a second install (and the integrity
 #: checks) can tell it apart from the stdlib module.
 MARKER: Final = "__mordred_sqlcipher__"
@@ -80,10 +84,89 @@ def _is_encrypted_copy(path: str, key: DatabaseKey, sc: Any) -> bool:
         apply_key(probe, key)
         probe.execute("SELECT count(*) FROM sqlite_master").fetchone()
         return True
-    except (sc.DatabaseError, UnicodeDecodeError):  # a wrong key can surface as a decode error
+    except wrong_key_errors(sc):
         return False
     finally:
         probe.close()
+
+
+def wrong_key_errors(sc: Any) -> tuple[type[BaseException], ...]:
+    """What reading an encrypted file with the wrong (or no) key raises.
+
+    Usually ``DatabaseError`` ("SQL logic error", "file is not a database").
+    With the plaintext header SQLite sometimes parses the encrypted page as a
+    schema and puts its random bytes into the error message, which the module
+    fails to decode (``UnicodeDecodeError``); a WAL-mode file can report
+    ``SQLITE_NOMEM``, which the module raises as ``MemoryError``.
+    """
+    return (sc.DatabaseError, UnicodeDecodeError, MemoryError)
+
+
+def _key_opens(conn: Any, sc: Any) -> bool:
+    """Whether a keyed connection to an existing file can read its schema."""
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return True
+    except sc.OperationalError as exc:
+        # Another process is writing: not a key problem.
+        return any(word in str(exc).lower() for word in ("locked", "busy"))
+    except wrong_key_errors(sc):
+        return False
+
+
+def _keyed_connection_class(sc: Any) -> Any:
+    class Connection(sc.Connection):  # type: ignore[misc]
+        """Remembers its key, so ``backup()`` into a new database encrypts it the same way.
+
+        SQLCipher cannot back an encrypted database up into a plaintext one
+        (``SQL logic error``). Hermes stages its backups outside the home (next
+        to the zip of ``hermes backup``), where the destination is a new,
+        unkeyed file: it gets the source's key instead of failing.
+        """
+
+        mordred_key: DatabaseKey | None = None
+        mordred_new_file = False
+
+        def backup(self, target: Any, *args: Any, **kwargs: Any) -> Any:
+            key = self.mordred_key
+            if key is not None and getattr(target, "mordred_key", 0) is None and target.mordred_new_file:
+                apply_key(target, key)
+                target.mordred_key = key
+            return super().backup(target, *args, **kwargs)
+
+    return Connection
+
+
+class _Opener:
+    """Opens (and keys) connections for the replacement ``connect``."""
+
+    def __init__(self, sc: Any) -> None:
+        self._sc = sc
+        self._connection = _keyed_connection_class(sc)
+
+    def open(self, database: Any, path: str | None, key: DatabaseKey | None, args: Any, kwargs: Any) -> Any:
+        custom_factory = "factory" in kwargs or len(args) >= 5
+        new_file = path is not None and (not os.path.exists(path) or os.path.getsize(path) == 0)
+        if custom_factory:
+            conn = self._sc.connect(database, *args, **kwargs)
+        else:
+            conn = self._sc.connect(database, *args, factory=self._connection, **kwargs)
+        if key is not None:
+            apply_key(conn, key)
+        if not custom_factory:
+            conn.mordred_key = key
+            conn.mordred_new_file = new_file
+        return conn
+
+    def open_hermes_database(self, database: Any, path: str, key: DatabaseKey, args: Any, kwargs: Any) -> Any:
+        existing = os.path.isfile(path) and os.path.getsize(path) > 0
+        conn = self.open(database, path, key, args, kwargs)
+        if existing and not _key_opens(conn, self._sc):
+            # A wrong key otherwise surfaces later as "SQL logic error" or MemoryError
+            # inside Hermes, which may take it for corruption.
+            conn.close()
+            raise self._sc.OperationalError(KEY_DOES_NOT_OPEN)
+        return conn
 
 
 _STDLIB: types.ModuleType | None = None
@@ -122,6 +205,8 @@ def build_module(
     module.__dict__.update({k: v for k, v in vars(stdlib).items() if not k.startswith("__")})
     module.__dict__.update({k: v for k, v in vars(sc).items() if not k.startswith("__")})
 
+    opener = _Opener(sc)
+
     def connect(database: Any, *args: Any, **kwargs: Any) -> Any:
         path = _database_path(database, bool(kwargs.get("uri", False)))
         if path is not None and in_scope(path, home()):
@@ -131,16 +216,12 @@ def build_module(
                 raise sc.OperationalError(f"{KEY_UNAVAILABLE} ({type(exc).__name__})") from exc
             if resolved is None:
                 raise sc.OperationalError(KEY_UNAVAILABLE)
-            conn = sc.connect(database, *args, **kwargs)
-            apply_key(conn, resolved)
-            return conn
+            return opener.open_hermes_database(database, path, resolved, args, kwargs)
         if path is not None and has_key() and os.path.isfile(path):
             resolved = key()
             if resolved is not None and _is_encrypted_copy(path, resolved, sc):
-                conn = sc.connect(database, *args, **kwargs)
-                apply_key(conn, resolved)
-                return conn
-        return sc.connect(database, *args, **kwargs)
+                return opener.open(database, path, resolved, args, kwargs)
+        return opener.open(database, path, None, args, kwargs)
 
     connect.__doc__ = sc.connect.__doc__
     module.connect = connect  # type: ignore[attr-defined]

@@ -30,7 +30,7 @@ from . import _migrate, _shim, armed
 from ._policy import in_scope, looks_like_database_name
 
 #: Findings that mean the databases are not protected.
-VIOLATIONS: Final = frozenset({"unprotected_process", "no_key", "interrupted", "plaintext"})
+VIOLATIONS: Final = frozenset({"unprotected_process", "no_key", "wrong_key", "interrupted", "plaintext"})
 _DEEP_SCAN_SECONDS: Final = 300.0
 _LOCK: Final = threading.Lock()
 _DEEP_CACHE: dict[str, Any] = {}
@@ -89,14 +89,45 @@ def is_plaintext(path: Path) -> bool:
     try:
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
         return True
-    except (stdlib.DatabaseError, UnicodeDecodeError):  # see _migrate._wrong_key_errors
+    except _shim.wrong_key_errors(stdlib):
         return False
     finally:
         conn.close()
 
 
-def check(home: Path, *, key_available: Any = None) -> list[Finding]:
-    """Everything wrong with the databases' protection right now (empty = fine)."""
+def key_opens(path: Path, key: Any) -> bool:
+    """Whether ``key`` opens the encrypted ``path`` (read-only, no locks, no sidecars).
+
+    Files that are not SQLite at all (``state.db.repair-attempts.json``) are not reported.
+    """
+    try:
+        with path.open("rb") as handle:
+            if handle.read(len(_shim.SQLITE_MAGIC)) != _shim.SQLITE_MAGIC:
+                return True
+    except OSError:
+        return True
+    sc = _migrate._sqlcipher()
+    try:
+        conn = sc.connect(f"file:{path.as_posix()}?mode=ro&immutable=1", uri=True)
+    except (OSError, sc.Error):
+        return True  # cannot tell; not reported
+    try:
+        _shim.apply_key(conn, key)
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return True
+    except _shim.wrong_key_errors(sc):
+        return False
+    finally:
+        conn.close()
+
+
+def check(home: Path, *, key_available: Any = None, key: Any = None) -> list[Finding]:
+    """Everything wrong with the databases' protection right now (empty = fine).
+
+    ``key`` (a callable returning the database key) also checks that the key
+    opens the top-level databases: with another key Hermes can read none of
+    its history and saves no new turns.
+    """
     if not armed(home):
         if _migrate.pending_path(home).is_file():
             return [Finding("pending", "database encryption is scheduled for the next Hermes start")]
@@ -108,10 +139,29 @@ def check(home: Path, *, key_available: Any = None) -> list[Finding]:
         findings.append(Finding("no_key", "the database key is not available (the vault could not be opened)"))
     if _migrate.journal_path(home).is_file():
         findings.append(Finding("interrupted", "an interrupted database conversion has not been completed"))
-    candidates = {*_top_level(home), *_deep(home)}
+    top_level = _top_level(home)
+    candidates = {*top_level, *_deep(home)}
     plaintext = sorted(str(p.relative_to(home)) for p in candidates if p.is_file() and is_plaintext(p))
     if plaintext:
         findings.append(Finding("plaintext", "unencrypted database(s): " + ", ".join(plaintext)))
+    resolved = key() if key is not None and _shim.is_installed() else None
+    if resolved is not None:
+        locked = sorted(
+            str(p.relative_to(home))
+            for p in top_level
+            if str(p.relative_to(home)) not in plaintext
+            and p.is_file()
+            and p.stat().st_size > 0
+            and not key_opens(p, resolved)
+        )
+        if locked:
+            findings.append(
+                Finding(
+                    "wrong_key",
+                    "the database key does not open " + ", ".join(locked) + " (encrypted with another key?); "
+                    "Hermes cannot read this history and does not save new turns",
+                )
+            )
     return findings
 
 

@@ -105,3 +105,50 @@ def test_component_registers_its_hooks_and_prompt_section() -> None:
 
     dbcrypt.register(Ctx())
     assert [name for name, _fn in calls] == ["on_session_start", "pre_llm_call", "mordred.databases"]
+
+
+def test_status_line_accepts_hermes_session_info(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes renders a prompt section by calling it with a read-only session-info mapping."""
+    from types import MappingProxyType
+
+    _protected(monkeypatch)
+    assert "encrypted at rest" in _hooks.status_line(MappingProxyType({"platform": "cli"}))
+
+
+def test_a_key_that_does_not_open_the_databases_is_a_violation(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wrong key: Hermes reads no history and saves no turns; never report "encrypted, all fine"."""
+    _protected(monkeypatch)
+    wrong = _key.derive(bytes(32))
+    (home / "state.db.repair-attempts.json").write_text("{}", encoding="utf-8")  # Hermes's, not SQLite
+    findings = _monitor.check(home, key_available=lambda: True, key=lambda: wrong)
+    assert [f.code for f in findings] == ["wrong_key"] and "state.db" in findings[0].detail
+    assert "repair-attempts" not in findings[0].detail
+    assert _monitor.check(home, key_available=lambda: True, key=lambda: KEY) == []
+
+
+def test_a_wal_file_read_with_the_wrong_key_is_unreadable_not_a_crash(tmp_path: Path) -> None:
+    """With the wrong key a WAL-mode file can raise MemoryError (SQLITE_NOMEM)."""
+    base = tmp_path / "h"
+    conn = stdlib_sqlite3.connect(base.mkdir() or base / "state.db")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("CREATE TABLE t (a)")
+    conn.commit()
+    conn.close()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(_migrate, "wal_reset_vulnerable", lambda _v: False)  # keep WAL
+        _migrate.migrate(base, KEY, arm=dbcrypt.arm, holders_of=lambda _p: [])
+    wrong = _key.derive(bytes(32))
+    for _ in range(3):
+        assert [d.state for d in _migrate.discover(base, wrong)] == ["unreadable"]
+        assert _monitor.key_opens(base / "state.db", wrong) is False
+
+
+def test_a_long_violation_still_fits_the_prompt_section(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermes drops a section longer than its max_chars, exactly when the warning matters."""
+    monkeypatch.setattr(
+        _monitor,
+        "check",
+        lambda *_a, **_k: [_monitor.Finding("plaintext", "unencrypted database(s): " + "x.db, " * 200)],
+    )
+    text = _hooks.status_line()
+    assert "NOT protected" in text and len(text) <= _hooks._SECTION_MAX_CHARS

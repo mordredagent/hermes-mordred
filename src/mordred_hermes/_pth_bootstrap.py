@@ -47,7 +47,23 @@ _FORCE_ENV = "MORDRED_CONFIG_DECRYPT"
 MANAGED_LAUNCHER_MODULE = "hermes_bootstrap"
 
 
-def _looks_like_hermes(argv: Sequence[str], modules: Mapping[str, object] | None = None) -> bool:
+def _runs_hermes_module(argv: Sequence[str], orig_argv: Sequence[str] | None = None) -> bool:
+    """``python -m hermes_cli.<module>``: at site-init ``sys.argv`` is ``['-m', ...]``.
+
+    The module name is only in ``sys.orig_argv``. Hermes itself re-executes
+    this way (``[sys.executable, "-m", "hermes_cli.main", ...]`` for the
+    dashboard/serve hand-off, gateway restarts, relaunches, per-profile
+    uninstall).
+    """
+    if list(argv[:1]) != ["-m"]:
+        return False
+    original = list(getattr(sys, "orig_argv", []) if orig_argv is None else orig_argv)
+    return "-m" in original[:-1] and original[original.index("-m") + 1].split(".")[0] == "hermes_cli"
+
+
+def _looks_like_hermes(
+    argv: Sequence[str], modules: Mapping[str, object] | None = None, orig_argv: Sequence[str] | None = None
+) -> bool:
     """Whether ``argv`` is an actual Hermes CLI invocation.
 
     Precise on purpose: matches every console script shipped by hermes-agent
@@ -59,11 +75,9 @@ def _looks_like_hermes(argv: Sequence[str], modules: Mapping[str, object] | None
     only consulted for the ``hermes_cli`` package segment, never a loose
     substring.
 
-    Note ``python -m hermes_cli`` is **not** matched: at ``.pth`` / site-init
-    time ``sys.argv[0]`` is ``'-m'`` (the module name is not in ``argv`` yet; the
-    runpy-resolved path arrives only afterward). It is moot regardless —
-    ``hermes_cli`` ships no ``__main__``, so ``python -m hermes_cli`` is not a
-    runnable Hermes start. Use a console script or ``MORDRED_CONFIG_DECRYPT=1``.
+    ``python -m hermes_cli.<module>`` (e.g. ``hermes_cli.main``) is matched
+    through ``sys.orig_argv`` (``orig_argv``): at ``.pth`` / site-init time
+    ``sys.argv[0]`` is only ``'-m'``.
 
     A process started by Hermes's managed launcher is recognised by
     :data:`MANAGED_LAUNCHER_MODULE` being imported (``modules`` defaults to
@@ -73,6 +87,8 @@ def _looks_like_hermes(argv: Sequence[str], modules: Mapping[str, object] | None
         return True
     if not argv:
         return False
+    if _runs_hermes_module(argv, orig_argv):
+        return True
     arg0 = argv[0] or ""
     norm = arg0.replace("\\", "/")
     base = os.path.basename(norm)

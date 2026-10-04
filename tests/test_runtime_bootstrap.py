@@ -523,3 +523,21 @@ def test_home_fallback_honours_hermes_home_before_hermes_is_importable(
     assert _home.hermes_home() == tmp_path / "profile"
     monkeypatch.delenv("HERMES_HOME")
     assert _home.hermes_home().name == ".hermes"
+
+
+@pytest.mark.parametrize(
+    ("orig_argv", "expected"),
+    [
+        (["/venv/bin/python", "-m", "hermes_cli.main", "-p", "default", "serve"], True),
+        (["/venv/bin/python", "-I", "-m", "hermes_cli.backup_sqlite", "/home"], True),
+        (["/venv/bin/python", "-m", "json.tool"], False),
+        (["/venv/bin/python", "-m", "pytest", "hermes_cli"], False),
+        (["/venv/bin/python", "-m"], False),
+    ],
+)
+def test_runtime_pth_gate_engages_for_python_m_hermes_cli(orig_argv: list[str], expected: bool) -> None:
+    """Hermes re-executes itself as ``python -m hermes_cli.main``; at site-init argv is only ``['-m', ...]``."""
+    fake_os = SimpleNamespace(path=os.path)
+    fake_sys = SimpleNamespace(argv=["-m", *orig_argv[3:]], modules={}, orig_argv=orig_argv)
+    assert bool(eval(_pth_engage_expr(), {"os": fake_os, "sys": fake_sys})) is expected
+    assert _pth_bootstrap._looks_like_hermes(["-m", *orig_argv[3:]], {}, orig_argv=orig_argv) is expected

@@ -233,3 +233,17 @@ def test_config_decrypt_engages_under_the_managed_launcher() -> None:
         argv=["-c"], environ={"MORDRED_CONFIG_DECRYPT": "0"}, installer=lambda: 0, modules=managed
     )
     assert not _pth_bootstrap.run(argv=["-c"], environ={}, installer=lambda: 0, modules={})
+
+
+@pytest.mark.parametrize(
+    ("orig_argv", "expected"),
+    [
+        (["/venv/bin/python", "-m", "hermes_cli.main", "-z", "hi"], True),
+        (["/venv/bin/python", "-m", "json.tool"], False),
+    ],
+)
+def test_config_pth_gate_engages_for_python_m_hermes_cli(orig_argv: list[str], expected: bool) -> None:
+    fake_sys = SimpleNamespace(argv=["-m", *orig_argv[3:]], modules={}, orig_argv=orig_argv)
+    fake_os = SimpleNamespace(environ={}, path=_real_os.path)
+    assert bool(eval(_pth_engage_expr(), {"os": fake_os, "sys": fake_sys})) is expected
+    assert _pth_bootstrap._looks_like_hermes(["-m", *orig_argv[3:]], {}, orig_argv=orig_argv) is expected

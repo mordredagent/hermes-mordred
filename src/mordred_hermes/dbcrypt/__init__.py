@@ -27,10 +27,21 @@ def marker_path(home: Path) -> Path:
     return home.joinpath(*MARKER_SUBPATH)
 
 
+def root_home(home: Path) -> Path:
+    """The Hermes home that owns the marker: the root for a profile home (``<root>/profiles/<name>``).
+
+    Hermes starts profile processes (gateways, Desktop chats, kanban workers)
+    with ``HERMES_HOME`` set to the profile home; their databases, and the
+    root's shared ones they open, are covered by the root's marker.
+    """
+    resolved = Path(os.path.realpath(home))
+    return resolved.parent.parent if resolved.parent.name == "profiles" else home
+
+
 def _home() -> Path:
     from .._home import hermes_home
 
-    return hermes_home()
+    return root_home(hermes_home())
 
 
 def armed(home: Path | None = None) -> bool:
@@ -126,4 +137,4 @@ def is_installed() -> bool:
     return _shim.is_installed()
 
 
-__all__ = ["arm", "armed", "install", "is_installed", "marker_path", "register"]
+__all__ = ["arm", "armed", "install", "is_installed", "marker_path", "register", "root_home"]

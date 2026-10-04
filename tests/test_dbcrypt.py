@@ -165,6 +165,36 @@ def test_types_and_constants_match_what_hermes_uses(sqlcipher: object) -> None:
         conn.execute("SELECT * FROM nope")
 
 
+def test_a_backup_staged_outside_the_home_is_encrypted_not_refused(sqlcipher: object, tmp_path: Path) -> None:
+    """``hermes backup`` stages each database next to the zip with ``Connection.backup()``.
+
+    SQLCipher refuses to back an encrypted database up into a plaintext one, so
+    the new destination gets the source's key (and stays readable as a copy).
+    """
+    import tempfile
+
+    sq, home = sqlcipher.module, sqlcipher.home  # type: ignore[attr-defined]
+    source = sq.connect(str(home / "state.db"))
+    source.execute("CREATE TABLE t (a)")
+    source.execute("INSERT INTO t VALUES ('secret')")
+    source.commit()
+    outside = tmp_path / "backups"
+    outside.mkdir()
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=outside) as tmp:  # exists, 0 bytes
+        staged = Path(tmp.name)
+    reader = sq.connect(f"{(home / 'state.db').resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+    target = sq.connect(str(staged))
+    reader.backup(target, pages=256)
+    target.close()
+
+    assert b"secret" not in staged.read_bytes()
+    assert sq.connect(str(staged)).execute("SELECT a FROM t").fetchall() == [("secret",)]
+    plain = sq.connect(str(outside / "plain.db"))  # unrelated databases stay plaintext
+    plain.execute("CREATE TABLE p (a)")
+    plain.commit()
+    assert stdlib_sqlite3.connect(str(outside / "plain.db")).execute("SELECT * FROM p").fetchall() == []
+
+
 def test_other_databases_stay_plain(sqlcipher: object, tmp_path: Path) -> None:
     sq = sqlcipher.module  # type: ignore[attr-defined]
     elsewhere = tmp_path / "project" / "app.db"
@@ -207,6 +237,30 @@ def test_a_plaintext_hermes_database_is_not_silently_opened(sqlcipher: object) -
         sq.connect(str(home / "state.db")).execute("SELECT * FROM t").fetchall()
 
 
+def test_a_database_the_key_does_not_open_is_refused_at_connect(sqlcipher: object) -> None:
+    """Another key (or a plaintext file) is refused up front with a clear error, file untouched.
+
+    Otherwise Hermes sees "SQL logic error" or MemoryError on its first query.
+    """
+    sq, home, state = sqlcipher.module, sqlcipher.home, sqlcipher.state  # type: ignore[attr-defined]
+    conn = sq.connect(str(home / "state.db"))
+    conn.execute("CREATE TABLE t (a)")
+    conn.commit()
+    conn.close()
+    plain = stdlib_sqlite3.connect(home / "kanban.db")
+    plain.execute("CREATE TABLE k (a)")
+    plain.commit()
+    plain.close()
+    before = {p.name: p.read_bytes() for p in home.iterdir()}
+
+    state["key"] = _key.derive(bytes(32))  # a different memory key
+    for name in ("state.db", "kanban.db"):
+        with pytest.raises(sq.OperationalError, match="does not open"):
+            sq.connect(str(home / name))
+    assert {p.name: p.read_bytes() for p in home.iterdir()} == before
+    sq.connect(str(home / "new.db")).execute("CREATE TABLE n (a)")  # a new database is still created
+
+
 # -- arming -----------------------------------------------------------------------
 
 
@@ -233,6 +287,32 @@ def test_install_swaps_sqlite3_when_armed(tmp_path: Path, monkeypatch: pytest.Mo
     assert getattr(sqlite3, _shim.MARKER)
     sqlite3.connect(str(tmp_path / "state.db")).execute("CREATE TABLE t (a)")
     assert b"CREATE TABLE" not in (tmp_path / "state.db").read_bytes()
+
+
+def test_a_process_started_in_a_profile_home_uses_the_roots_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hermes starts gateways, Desktop chats and kanban workers with HERMES_HOME=<root>/profiles/<name>."""
+    pytest.importorskip("sqlcipher3")
+    from mordred_hermes import _home
+
+    monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
+    monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sys.modules.get("sqlite3.dbapi2", stdlib_sqlite3))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    profile = tmp_path / "profiles" / "work"
+    profile.mkdir(parents=True)
+    dbcrypt.arm(tmp_path)
+    monkeypatch.setattr(_home, "hermes_home", lambda: profile)
+    assert dbcrypt.root_home(profile) == tmp_path.resolve()
+    assert dbcrypt.armed()
+    provider = _key.KeyProvider(environ={"HERMES_MEMORY_KEY": "hex:" + MEMORY_KEY.hex()}, inject=lambda: 0)
+
+    assert dbcrypt.install(provider=provider) is True
+    import sqlite3
+
+    sqlite3.connect(str(profile / "state.db")).execute("CREATE TABLE t (a)")
+    with pytest.raises((stdlib_sqlite3.DatabaseError, UnicodeDecodeError)):
+        stdlib_sqlite3.connect(str(profile / "state.db")).execute("SELECT * FROM t").fetchall()
 
 
 def test_install_is_a_noop_off_macos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

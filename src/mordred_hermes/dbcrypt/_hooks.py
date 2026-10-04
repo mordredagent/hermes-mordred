@@ -23,6 +23,9 @@ from . import _monitor, armed
 _LOG = logging.getLogger("mordred.dbcrypt")
 _REASON = "mordred.db_encryption.violation"
 _reported: set[tuple[str, str]] = set()
+_SECTION_MAX_CHARS = 600
+#: Room for the findings in the prompt section, inside ``_SECTION_MAX_CHARS``.
+_SECTION_DETAIL_CHARS = 420
 
 
 class DatabaseEncryptionRefused(MordredIntegrityRefused):
@@ -36,14 +39,18 @@ def _home() -> Path:
 
 
 def _key_available() -> bool:
+    return _key() is not None
+
+
+def _key() -> Any:
     from . import _PROVIDER
 
     if _PROVIDER is None:
-        return False
+        return None
     try:
-        return _PROVIDER() is not None
+        return _PROVIDER()
     except Exception:
-        return False
+        return None
 
 
 def _policy_mode() -> str:
@@ -87,7 +94,7 @@ def _describe(findings: list[_monitor.Finding]) -> str:
 def evaluate(event: str) -> str | None:
     """Run the monitor; return a warning for the model, or raise under strict policy."""
     try:
-        findings = [f for f in _monitor.check(_home(), key_available=_key_available) if f.violation]
+        findings = [f for f in _monitor.check(_home(), key_available=_key_available, key=_key) if f.violation]
     except Exception as exc:  # the monitor itself must never take a turn down
         _LOG.warning("database encryption check failed: %s", exc)
         return None
@@ -121,11 +128,14 @@ def pre_llm_call(**_kwargs: Any) -> dict[str, str] | None:
     return {"context": warning} if warning else None
 
 
-def status_line() -> str:
-    """The ``mordred.databases`` prompt section (empty when encryption is neither on nor scheduled)."""
+def status_line(_info: Any = None) -> str:
+    """The ``mordred.databases`` prompt section (empty when encryption is neither on nor scheduled).
+
+    Hermes calls a section callable with the session-info mapping.
+    """
     try:
         home = _home()
-        findings = _monitor.check(home, key_available=_key_available)
+        findings = _monitor.check(home, key_available=_key_available, key=_key)
     except Exception:
         return ""
     if not armed(home):
@@ -137,9 +147,12 @@ def status_line() -> str:
         return ""
     violations = [f for f in findings if f.violation]
     if violations:
+        detail = _describe(violations)
+        if len(detail) > _SECTION_DETAIL_CHARS:  # Hermes drops a section over its max_chars entirely
+            detail = detail[: _SECTION_DETAIL_CHARS - 1] + "…"
         return (
             "## Hermes's databases (Mordred)\nWARNING: Hermes's conversation history is NOT protected: "
-            f"{_describe(violations)}. Tell the user; never say it is encrypted."
+            f"{detail}. Tell the user; never say it is encrypted."
         )
     return (
         "## Hermes's databases (Mordred)\nHermes's conversation history and its other databases are encrypted "
@@ -153,4 +166,4 @@ def register(ctx: Any) -> None:
     register_section = getattr(ctx, "register_system_prompt_section", None)
     if register_section is not None:
         with contextlib.suppress(Exception):
-            register_section("mordred.databases", status_line, max_chars=600)
+            register_section("mordred.databases", status_line, max_chars=_SECTION_MAX_CHARS)

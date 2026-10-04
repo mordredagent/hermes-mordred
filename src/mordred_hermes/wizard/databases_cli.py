@@ -23,9 +23,9 @@ _RESIDUE_NOTE = (
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from ..dbcrypt import _home as database_home
 
-    return hermes_home()
+    return database_home()
 
 
 def _key_from_environment() -> object | None:
@@ -70,6 +70,23 @@ def _preflight() -> str | None:
     return None
 
 
+def _arm_already_encrypted(base: Path, unreadable: list[str]) -> int:
+    """Nothing left to convert: switch encryption on (and say which files the key does not open)."""
+    from ..dbcrypt import _migrate, arm
+
+    arm(base)
+    _migrate.pending_path(base).unlink(missing_ok=True)
+    if unreadable:
+        _term.emit_warn(
+            "the database key does not open: " + ", ".join(unreadable) + " (encrypted with another key, "
+            "or damaged); Hermes cannot read them with this key."
+        )
+        print("No plaintext Hermes database is left; database encryption is on.")
+    else:
+        print("Every Hermes database is already encrypted; database encryption is on.")
+    return 0
+
+
 def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int:
     from ..dbcrypt import _migrate, arm
     from ..dbcrypt._key import KeyProvider
@@ -96,10 +113,7 @@ def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int
         print("Dry run: nothing was changed.")
         return 0
     if not todo:
-        arm(base)
-        _migrate.pending_path(base).unlink(missing_ok=True)
-        print("Every Hermes database is already encrypted; database encryption is on.")
-        return 0
+        return _arm_already_encrypted(base, [d.relative for d in databases if d.state == "unreadable"])
     busy = _migrate.holders([d.path for d in todo])
     if busy is None or busy:
         _migrate.schedule(base)
