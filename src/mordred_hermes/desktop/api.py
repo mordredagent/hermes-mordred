@@ -171,16 +171,24 @@ async def _require_hermes_model() -> JSONResponse | None:
 @router.get("/status")
 async def status() -> dict[str, Any]:
     """Setup progress from metadata only (no Touch ID, no secrets, no content)."""
+    platform_status = {"platform": sys.platform, "telegram_supported": sys.platform == "darwin"}
+    jobs = [_job_view(j) for j in _JOBS.values() if j.state == "running"]
+    if not platform_status["telegram_supported"]:
+        # Telegram also requires the macOS-only memory encryption hook. A
+        # Linux TPM helper alone cannot make this setup flow usable.
+        return {"ok": True, **platform_status, "checks": {}, "jobs": jobs}
+
     from ..wizard.telegram_setup_cli import run_checks
 
     checks = await asyncio.to_thread(run_checks)
     return {
         "ok": True,
+        **platform_status,
         "hermes_model": await hermes_model_check(),
         "checks": {c.name: {"ok": c.ok, "detail": c.detail} for c in checks},
         "hermes_venice_key": _hermes_venice_key() is not None,
         "telegram_api": bool((await asyncio.to_thread(_store().flags) or {}).get("api_configured")),
-        "jobs": [_job_view(j) for j in _JOBS.values() if j.state == "running"],
+        "jobs": jobs,
     }
 
 
@@ -195,6 +203,9 @@ async def job_status(job_id: str) -> Any:
 
 @router.post("/enclave/build")
 async def enclave_build() -> Any:
+    if sys.platform != "darwin":
+        return _error("telegram_platform_unsupported")
+
     async def work(job: _Job) -> None:
         from ..wizard.keyvault_native_cli import enable_se
 
@@ -263,6 +274,9 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     in one flow, so the vault is unlocked at most once (not at all when it is
     created here).
     """
+    if sys.platform != "darwin":
+        return _error("telegram_platform_unsupported")
+
     from ..extension.telegram.memory_guard import memory_encryption_active
     from ..wizard import env_decrypt_cli, memory_cli
     from ..wizard._flow_session import FlowSession

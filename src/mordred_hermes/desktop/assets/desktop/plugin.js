@@ -24,6 +24,7 @@ const CHECKBOX_STYLE = { borderColor: 'CanvasText', borderWidth: 1.5, borderStyl
 const jobListeners = new Set()
 
 const MESSAGES = {
+  telegram_platform_unsupported: 'Private Telegram currently requires macOS with a Secure Enclave and memory encryption. Mordred also supports Linux, but this integration is not yet available there.',
   memory_encryption_required: 'Turn on memory encryption first (step 2).',
   memory_encryption_failed: 'Memory encryption could not be turned on. Check Touch ID and try again.',
   telegram_already_logged_in: 'Telegram is already connected.',
@@ -545,26 +546,35 @@ function SetupPage() {
     style: { maxWidth: 720, margin: '24px auto', padding: '0 16px' },
     children: [
       jsx('h2', { children: 'Mordred setup' }),
-      jsx('p', { children: 'Private, read-only Telegram for Hermes. Secrets entered here go only to Mordred on this Mac and are sealed by the Secure Enclave.' }),
+      jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
       status
-        ? jsxs(Fragment, {
-            children: [
-              jsx(HermesModelStep, { check: status.hermes_model, refresh }),
-              modelOk
-                ? jsxs(Fragment, {
-                    children: [
-                      jsx(EnclaveStep, { done: c.secure_enclave && /helper ready/.test(c.secure_enclave.detail || ''), refresh }),
-                      jsx(MemoryStep, { done: ok('memory_encryption'), refresh }),
-                      jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
-                      ok('privacy_llm')
-                        ? jsx(TelegramStep, { done: loggedIn, needsApi: !status.telegram_api, refresh })
-                        : jsx(Step, { n: 4, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 3).' }) }),
-                      jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
-                    ],
-                  })
-                : jsx('p', { children: 'The remaining steps unlock once Hermes uses a private or local model.' }),
-            ],
-          })
+        ? status.telegram_supported
+          ? jsxs(Fragment, {
+              children: [
+                jsx('p', { children: 'Secrets entered here go only to Mordred on this Mac and are sealed by the Secure Enclave.' }),
+                jsx(HermesModelStep, { check: status.hermes_model, refresh }),
+                modelOk
+                  ? jsxs(Fragment, {
+                      children: [
+                        jsx(EnclaveStep, { done: c.secure_enclave && /helper ready/.test(c.secure_enclave.detail || ''), refresh }),
+                        jsx(MemoryStep, { done: ok('memory_encryption'), refresh }),
+                        jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
+                        ok('privacy_llm')
+                          ? jsx(TelegramStep, { done: loggedIn, needsApi: !status.telegram_api, refresh })
+                          : jsx(Step, { n: 4, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 3).' }) }),
+                        jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
+                      ],
+                    })
+                  : jsx('p', { children: 'The remaining steps unlock once Hermes uses a private or local model.' }),
+              ],
+            })
+          : jsxs('section', {
+              role: 'status',
+              children: [
+                jsx('h3', { children: 'Private Telegram requires macOS' }),
+                jsx('p', { children: MESSAGES.telegram_platform_unsupported }),
+              ],
+            })
         : jsx('p', { children: 'Loading…' }),
       jsx(UninstallSection, {}),
     ],

@@ -75,6 +75,23 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Desktop Telegram platform guard validated on Ubuntu EC2.**
+  Ubuntu 24.04.5 x86_64, Python 3.12.3, in `ap-southeast-1`, with an isolated
+  `HERMES_HOME`. Before the fix, `/enclave/build` returned a job that failed
+  with `enclave_build_failed`; the native command rejected Linux before
+  checking the build tools. The actual Desktop plugin rendered in a temporary
+  React/SDK harness against the EC2 API reproduced the misleading Xcode toast.
+  After the fix, `/status` reported `platform=linux` and
+  `telegram_supported=false`; the page displayed the macOS requirement with
+  no Secure Enclave or memory-encryption setup buttons. Direct HTTP requests
+  to both setup endpoints returned `telegram_platform_unsupported` without
+  starting a job. The 12 platform tests had 10 expected failures before the
+  fix; all 115 platform, Desktop API, and native-helper CLI tests passed after
+  it. The full unit suite passed on Ubuntu (5,079 passed, 21 skipped) and
+  macOS (5,173 passed, 5 skipped), with 31 integration tests deselected on
+  each. Ruff, formatting, strict mypy with the Linux extras, and shellcheck
+  passed. This checks the Ubuntu runtime and plugin UI, not a full Hermes
+  Desktop installation, a live Telegram account, or TPM hardware operations.
 - **2026-05-25 — passed on real devices**:
   - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v`
   - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v`

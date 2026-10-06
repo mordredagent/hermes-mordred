@@ -25,6 +25,12 @@ messages ever reaching a model you did not choose.
 - Your own Telegram API application from <https://my.telegram.org> →
   *API development tools* (`api_id` and `api_hash`).
 
+Mordred also supports Linux, but this private Telegram integration currently
+requires macOS, including its agent-memory encryption. Linux TPM support alone
+does not enable it. On Ubuntu and other non-macOS hosts, the Desktop setup page
+shows this requirement instead of offering Secure Enclave setup. Installing
+Xcode is not a solution on Ubuntu.
+
 ## Set up (once, about 5 minutes)
 
 **In Hermes Desktop (recommended).** The installer places a Mordred setup
