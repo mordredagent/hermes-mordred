@@ -75,6 +75,21 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Packaged Hermes Desktop validated on Ubuntu EC2.**
+  Built the official Hermes release `v2026.9.24` (`f97608f178d1`, Agent
+  0.21.5 / Desktop 0.17.6 / Electron 40.10.2) with `hermes desktop
+  --build-only` on the same Ubuntu 24.04.5 x86_64 instance. Installed Mordred
+  commit `2c7073576` into the Python environment used by Desktop, with a
+  separate `HERMES_HOME` and Desktop user-data directory. Ran the packaged
+  Electron application under Xvfb/Openbox and inspected it through VNC over
+  an SSH tunnel. The app mounted `/api/plugins/mordred/`, loaded the Mordred
+  sidebar page, and displayed "Private Telegram requires macOS" without
+  Secure Enclave or memory-encryption setup buttons or an Xcode error.
+  The same page and platform guard remained visible after restarting the app
+  and its backend. The installed page's SHA-256 matched the source asset.
+  The virtual display produced a GPU command-buffer error during initial startup; the test used
+  `desktop.electron_flags: ["--disable-gpu"]` for software rendering.
+  No model credentials, Telegram login, or hardware-key operations were used.
 - **2026-10-07 — Desktop Telegram platform guard validated on Ubuntu EC2.**
   Ubuntu 24.04.5 x86_64, Python 3.12.3, in `ap-southeast-1`, with an isolated
   `HERMES_HOME`. Before the fix, `/enclave/build` returned a job that failed
