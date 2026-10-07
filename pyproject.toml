@@ -213,6 +213,12 @@ packages = ["src/mordred_hermes"]
 "native/tpmkey-helper/Cargo.lock" = "mordred_hermes/_native/tpmkey-helper/Cargo.lock"
 "native/tpmkey-helper/src" = "mordred_hermes/_native/tpmkey-helper/src"
 "native/tpmkey-helper/README.md" = "mordred_hermes/_native/tpmkey-helper/README.md"
+"native/winkey-helper/build.ps1" = "mordred_hermes/_native/winkey-helper/build.ps1"
+"native/winkey-helper/Cargo.toml" = "mordred_hermes/_native/winkey-helper/Cargo.toml"
+"native/winkey-helper/Cargo.lock" = "mordred_hermes/_native/winkey-helper/Cargo.lock"
+"native/winkey-helper/src" = "mordred_hermes/_native/winkey-helper/src"
+"native/winkey-helper/tests" = "mordred_hermes/_native/winkey-helper/tests"
+"native/winkey-helper/README.md" = "mordred_hermes/_native/winkey-helper/README.md"
 # config.yaml at-rest transparent decrypt (ROADMAP v2-F8). The .pth lands at the
 # site-packages root and runs a cheap inline guard at every interpreter start;
 # only a Hermes invocation (or MORDRED_CONFIG_DECRYPT=1) imports _pth_bootstrap.
@@ -246,6 +252,7 @@ include = ["/src", "/tests", "/README.md", "/LICENSE", "/pyproject.toml", "/nati
 # hit this, but exclude them explicitly so local and CI sdists are identical.
 exclude = [
   "native/tpmkey-helper/target",
+  "native/winkey-helper/target",
   "native/sekey-helper/.build",
   # Dev-era PoC harnesses for the extension plugin; their behavior is
   # mirrored by tests/extension/, so downstream builds don't need them.
