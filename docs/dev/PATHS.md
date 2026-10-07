@@ -377,6 +377,22 @@ agent-plugin scanner finds no directory plugin there and the `mordred`
 entry-point plugin is not shadowed; Hermes Desktop pairs the page with that
 plugin by name. Holds no secrets.
 
+On pm-managed Hermes installs (Hermes Desktop and source installs, detected by
+an importable `pm.workspace`) the plugin also keeps
+`<home>/plugins/mordred/pyproject.toml` plus a vendored copy of the installed
+`mordred_hermes/` package there (`desktop.member.ensure_member`, rewritten only
+when the bytes differ, serialized by `<home>/mordred/.pm-member.lock`). Hermes's
+package manager makes every enabled plugin folder with a `pyproject.toml` a uv
+workspace member of each environment it builds, so a Hermes update rebuilds
+Mordred in instead of dropping it. The member is a buildable project named
+`hermes-mordred` with Mordred's requirements minus `hermes-agent` (the
+workspace root is the Hermes checkout, version 0.0.0, which cannot satisfy
+`hermes-agent>=0.13.0`). `[tool.hermes-mordred]` records the install source
+(PyPI or local path) and extras. When the package is missing from Hermes's
+environment, the `dashboard/plugin_api.py` shim serves a fallback API
+(`/status` answers `mordred_not_installed`, `POST /repair` runs
+`hermes pm install venv`).
+
 ## Hermes-owned and external targets
 
 - `<home>/.env`: Hermes runtime secrets and the Mullvad account. Mordred's

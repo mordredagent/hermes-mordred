@@ -198,3 +198,11 @@ def register(ctx: Any) -> None:
         ensure_page()
     except Exception as exc:
         _LOG.warning("Mordred desktop page not placed: %s", type(exc).__name__)
+    # pm-managed Hermes rebuilds its Python environment on every update; keep
+    # Mordred one of that rebuild's inputs so it survives (desktop/member.py).
+    try:
+        from .desktop.install import ensure_member
+
+        ensure_member()
+    except Exception as exc:
+        _LOG.warning("Mordred not registered with Hermes's package manager: %s", type(exc).__name__)

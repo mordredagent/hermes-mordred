@@ -535,6 +535,16 @@ hermes-mordred desktop uninstall
 > page sends secrets with the Desktop plugin REST bridge
 > (`/api/plugins/mordred/…`, session-token protected, loopback only) straight
 > to Mordred; they are sealed by the Secure Enclave and never returned.
+>
+> **Hermes updates.** Hermes Desktop builds a new Python environment on every
+> update. Mordred registers itself with Hermes's package manager
+> (`<home>/plugins/mordred/pyproject.toml`) so those rebuilds include it. If
+> Mordred is still missing after an update (for example, it was installed by
+> an older version that did not register), Hermes Desktop shows a notice and
+> the Mordred page says "Mordred is not installed in Hermes's current
+> environment" with a **Repair / reinstall Mordred** button (it runs
+> `hermes pm install venv`); restart Hermes afterwards. An install that never
+> registered needs one reinstall with the installer.
 
 ### `uninstall` — remove Mordred and restore Hermes's files
 ```sh
