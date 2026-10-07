@@ -592,6 +592,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           TCTI: swtpm:host=127.0.0.1,port=2321
+          MORDRED_TPM_TEST: "1"
           HERMES_HOME: /tmp/mordred-ci-telegram-home
           MORDRED_LINUX_TELEGRAM_TEST: "1"
           MORDRED_TPMKEY_HELPER: ${{ github.workspace }}/native/tpmkey-helper/target/debug/mordred-hermes-tpmkey

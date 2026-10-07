@@ -1,4 +1,4 @@
-"""Opt-in actual Linux TPM acceptance, synthetic messages only; no live account."""
+"""Opt-in Linux TPM acceptance (hardware or gated swtpm); synthetic messages only."""
 
 from __future__ import annotations
 
@@ -30,7 +30,8 @@ def tpm_home(tmp_path, monkeypatch):
     monkeypatch.setenv("MORDRED_HERMES_RUNTIME_PYTHON", sys.executable)
     monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
     monkeypatch.delenv("MORDRED_TPMKEY_STORE", raising=False)
-    monkeypatch.delenv("MORDRED_TPM_TEST", raising=False)
+    # Preserve the operator's explicit emulator opt-in in CI. Without it the
+    # native helper intentionally ignores socket TCTIs and requires a device.
     from mordred_hermes.wizard.memory_cli import enable
 
     assert enable(home=home, root=home / "mordred/keyvault/vault", platform="linux") == 0
