@@ -10,6 +10,7 @@ design diaries and upstream snapshots remain available through Git history.
 |---|---|
 | [`SPEC.md`](./SPEC.md) | Supported behavior, threat model, and product boundaries |
 | [`PLAN.md`](./PLAN.md) | Current implementation shape and maintenance approach |
+| [`WINDOWS_FEASIBILITY.md`](./WINDOWS_FEASIBILITY.md) | Windows feasibility, actual-device findings, and proposed delivery sequence |
 | [`TODO.md`](./TODO.md) | Actionable work for the current release |
 | [`ROADMAP.md`](./ROADMAP.md) | Deferred work and its prerequisites |
 | [`CI.md`](./CI.md) | CI, branching, release, and changelog policy |

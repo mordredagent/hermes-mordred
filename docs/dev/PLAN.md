@@ -651,3 +651,230 @@ across component boundaries. One independent whole-branch review found four
 security/compatibility issues; regression tests reproduced each before the
 fixes. The final validation log distinguishes actual NitroTPM, swtpm, synthetic
 Telegram, and the pending operator-assisted live-account gate.
+
+
+## Windows CNG Helper Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:executing-plans for inline execution, or
+> superpowers:subagent-driven-development if the operator selects delegated
+> execution. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Deliver the independently testable Windows TPM helper and Python
+keyvault bridge without prematurely enabling the Windows product UI.
+
+**Architecture:** A separate Rust executable implements the existing helper JSON
+protocol using the Windows Platform Crypto Provider. Python keeps the existing
+MRKW wire format and shared backend adapter; the new executable owns native
+handles, key persistence and CNG error translation. Windows filesystem and
+feature integration remain dependent follow-on slices, not hidden additions to
+this keyvault PR.
+
+**Tech Stack:** Rust 2021/MSRV 1.85, serde/serde_json/hex/zeroize, `sha2 = "0.10"`, Windows-targeted
+`windows-sys = "=0.61.2"` bindings, PowerShell, Python 3.11–3.13 and pytest.
+Commit Cargo.lock and use `--locked`. The selected bindings' registry metadata
+reports MSRV 1.71 and not yanked as of 2026-10-07.
+
+**Spec:** [SPEC.md — Windows native support proposal
+(2026-10-07)](SPEC.md#windows-native-support-proposal-2026-10-07).
+Read [WINDOWS_FEASIBILITY.md](WINDOWS_FEASIBILITY.md) and the Windows evidence
+entry in CI.md before executing this plan.
+
+### Windows Global Constraints
+
+- Preserve the single `mordred` entry point and zero-upstream-PR commitment.
+- Preserve P-256 ECDH, HKDF-SHA256, AES-256-KW and 127-byte MRKW version 1.
+- Use only `Microsoft Platform Crypto Provider`; no software fallback.
+- User-scoped persistent keys; no product password capture or impersonation.
+- Machine-bound tier, no per-use presence or automatic recovery promise.
+- Actual AWS NitroTPM acceptance is separate from injected-backend CI tests.
+- Keep macOS/Linux behavior and helper namespaces unchanged.
+- Submit contract documentation first; this implementation PR owns keyvault only.
+- Do not enable Windows Private Telegram before storage/runtime/UI gates pass.
+
+### Windows Review Focus
+
+- Public-key SSH/S4U tokens may differ from password/interactive tokens: verify
+  actual key operations and refuse unavailable custody without replacing keys.
+- Little-endian raw CNG secrets with a leading zero must preserve all 32 bytes.
+- An inherited executable handle or interrupted install must retain the previous
+  helper rather than leave an absent or truncated executable.
+- Concurrent generate/delete/probe must not overwrite a committed key or delete
+  a different operation's key.
+- Malformed native responses and hardware errors must remain classified refusals,
+  never software fallback or plaintext success.
+
+### Task W0: Preserve and finish the Windows baseline evidence
+
+**Files:** Modify `docs/dev/CI.md`, `docs/dev/WINDOWS_FEASIBILITY.md`.
+Disposable probes remain under
+`~/.codex/artifacts/mordred-windows-validation-20261007/`.
+
+**Interfaces:** Consumes the approved Phase 0 probe and unmodified Mordred
+`f14c1edce`; produces an evidence-backed go/replan decision and a list of
+remaining acceptance gates. Probe scripts are not production implementation.
+
+- [x] Confirm AWS Windows 2025 recognizes actual AMZN NitroTPM.
+- [x] Verify native CNG operations and raw-secret parity using independent
+  Python/OpenSSL, including a leading-zero test vector.
+- [x] Exercise unchanged `wrap_dek`/`unwrap_dek` with the actual native key:
+  valid wrap, corrupt ciphertext, wrong profile, malformed point and retention.
+- [x] Repeat under a real non-administrator password-authenticated SSH process;
+  record public-key SSH refusal separately from successful credentialed access.
+- [x] Record pinned Hermes CLI, gateway and Desktop baseline attempts, source
+  installer workarounds and exact installed interpreter/version. CLI and host-only
+  Desktop start; Mordred-enabled Desktop and clean gateway lifecycle remain
+  implementation acceptance gates, with failures preserved in CI.md.
+- [x] Repeat retained-key/ciphertext checks after reboot and stop/start.
+- [x] Test a cloned synthetic disk on a second TPM, controlling for SID/DPAPI
+  differences, then remove disposable clone resources.
+- [x] Record Phase 0 resource states, costs/retention and explicit limitations.
+  The retained primary host is resumed separately for the approved implementation.
+
+### Task W1: Define bounded protocol and conversion tests
+
+**Files:** Create `native/winkey-helper/Cargo.toml`, `Cargo.lock`, `.gitignore`,
+`src/lib.rs`, `src/main.rs`, `src/wire.rs`, `src/codec.rs`, `src/error.rs`,
+`src/ops.rs`, `tests/protocol.rs`.
+
+**Interfaces:** `KeyOps` exposes `generate(tag_hex: &str) -> Result<Vec<u8>,
+OpError>`, `public_key(tag_hex: &str) -> Result<Vec<u8>, OpError>`,
+`ecdh(tag_hex: &str, peer_sec1: &[u8]) -> Result<[u8; 32], OpError>`,
+`delete(tag_hex: &str) -> Result<(), OpError>`, and `probe() -> Result<(),
+OpError>`. The dispatcher accepts the existing `cmd`, `tag_hex`, `label`,
+`peer_pub_hex`, `unattended` fields and emits existing response shapes. Define
+`dispatch(request: Request, ops: &mut dyn KeyOps) -> Response` in `wire.rs`,
+`decode_tag(tag_hex: &str) -> Result<Vec<u8>, OpError>` and
+`raw_to_be32(raw: &[u8]) -> Result<[u8; 32], OpError>`,
+`cng_public_to_sec1(blob: &[u8]) -> Result<Vec<u8>, OpError>` and
+`sec1_to_cng_public(peer: &[u8]) -> Result<Vec<u8>, OpError>` in `codec.rs`.
+Pure conversion checks blob magic, P-256 coordinate size and exact lengths;
+on-curve peer validation is proved through CNG import in W2.
+Success fields are `public_key_hex`, `shared_hex` or `ok`; native errors retain
+`domain: "cng"`, the numeric CNG `status`, a non-secret message, and one of
+`NOT_FOUND`, `EXISTS`, `UNAVAILABLE`, `AUTH_DENIED`. Request errors use domain
+`helper` and status `-1`, without a native reason. Refer to the existing
+`native/tpmkey-helper/src/wire.rs` shapes without copying its TPM implementation.
+
+- [ ] Prepare the Windows build host with the MSVC C++ build tools and Windows
+  SDK, then install Rust 1.85 and the current stable toolchain for
+  `x86_64-pc-windows-msvc`. Record `rustc -Vv`, `cargo -V`, SDK/toolset versions
+  and available disk space; use a new bounded auto-stop deadline for the run.
+  These Rust prerequisites were not installed by the CNG feasibility probe.
+- [ ] Write failing tests `request_size_is_bounded` (4,096 bytes maximum),
+  `tag_requires_even_hex` (1–256 decoded bytes), `unknown_command_is_refused`,
+  `sec1_rejects_bad_magic_length_curve`, `raw_secret_is_reversed_not_trimmed`,
+  and `failure_json_uses_neutral_reason`. Assert one JSON response and nonzero
+  status for malformed input, without echoing secret/request material.
+  The conversion assertion must retain a leading zero:
+
+  ```rust
+  let mut little = [0u8; 32];
+  little[0] = 1;
+  let big = raw_to_be32(&little).unwrap();
+  assert_eq!(big[0], 0);
+  assert_eq!(big[31], 1);
+  assert!(raw_to_be32(&little[..31]).is_err());
+  assert!(decode_tag("0").is_err());
+  assert!(decode_tag(&"00".repeat(257)).is_err());
+  ```
+
+- [ ] Run `cargo test --manifest-path native/winkey-helper/Cargo.toml --locked`;
+  record the intended failures before implementing the dispatch/conversion code.
+- [ ] Implement pure validation and conversion separately from native handles.
+  Use a test `KeyOps` for protocol checks; unsupported host builds return the
+  existing `UNAVAILABLE` reason, never a software key.
+- [ ] Re-run the tests and commit the protocol slice.
+
+### Task W2: Implement actual CNG custody
+
+**Files:** Create `native/winkey-helper/src/cng.rs`, `src/handles.rs`,
+`tests/live_cng.rs`; modify `src/ops.rs`, `src/main.rs` and Cargo manifests.
+
+**Interfaces:** `CngOps` implements W1's `KeyOps`. It uses user-scoped names
+`mordred-hermes:<sha256(decoded_tag)>` and returns SEC1 public keys and big-endian 32-byte
+secrets. RAII wrappers own provider/key/secret handles; successful deletion
+consumes the handle to avoid freeing it twice.
+
+- [ ] Add explicitly gated `MORDRED_WINKEY_TEST=1` live tests for creation,
+  duplicate refusal, fresh-process reopen, ECDH parity, leading zeroes, invalid
+  peer refusal, private-export rejection, deletion and missing-key refusal.
+  Test both an interactive/credentialed ordinary token and the expected refusal
+  under an incapable token. CI without hardware must report these as skipped.
+- [ ] Run the live test names on AWS and capture failures against the missing
+  backend. These tests must fail until real CNG calls are implemented.
+- [ ] Open and verify the hardware provider. Generate/finalize `ECDH_P256`
+  without setting the unsupported KeyAgreement usage property. Use provider-
+  scoped peer import and `TRUNCATE`, checking every return code and byte count.
+  Never request private export in production; assert its refusal in live tests.
+- [ ] Map duplicate/missing/permission/device/unsupported errors into the existing
+  closed neutral taxonomy. Preserve the cause when a keyset cannot be opened
+  under the current token; do not treat every access failure as a missing key.
+- [ ] Make `probe()` use a unique temporary name, prove a real ECDH operation,
+  and delete only its own successfully created key in all exit paths. Test
+  concurrent probes/generation and failure cleanup with scoped synthetic tags.
+- [ ] Run native unit and actual-device suites, plus MSRV/build checks, then
+  commit. No new runtime capability is advertised from mocked results alone.
+
+### Task W3: Integrate the keyvault helper boundary
+
+**Files:** Modify `src/mordred_hermes/keyvault/_seckey_helper.py` and, only if
+needed for accurate error/capability mapping, `_seckey_backend.py` and
+`_seckey_errors.py`. Extend `tests/test_keyvault_seckey_helper.py`; create
+`tests/integration/test_keyvault_windows.py`.
+
+**Interfaces:** Preserve `find_winkey_helper() -> str | None` and the existing
+`_HelperOps` interface. On Windows resolve the explicit
+`MORDRED_WINKEY_HELPER`, the current Hermes home's
+`bin/mordred-hermes-winkey.exe`, then the established executable search policy.
+Validate the resolved executable; do not execute a source/build script found
+only by its filename in an unrelated ancestor.
+
+- [ ] Add failing discovery/response tests for `.exe`, spaces/non-ASCII paths,
+  explicit missing override, absent helper, timeout, malformed JSON, nonzero
+  failure, neutral native errors and successful public-key/ECDH conversion.
+- [ ] Implement the Windows locator without changing the existing macOS/Linux
+  locator behavior or creating an import-time Windows API dependency.
+- [ ] Add gated production Python `wrap_dek`/`unwrap_dek` integration through
+  the compiled helper, not the disposable ctypes adapter. Exercise wrong
+  profile, ciphertext corruption, unavailable helper and valid-data retention.
+- [ ] Run focused pytest on Windows and macOS, strict mypy with the reduced
+  extras, Ruff and the helper tests. Commit only this keyvault bridge slice.
+
+### Task W4: Ship a reproducible helper build and prove persistence
+
+**Files:** Create `native/winkey-helper/build.ps1`, `README.md`; modify
+`pyproject.toml` source inclusion and existing packaging tests. Add a scoped
+helper build job to `.github/workflows/ci.yml`.
+
+**Interfaces:** `build.ps1 -InstallDir <directory>` builds the locked release
+binary and installs `mordred-hermes-winkey.exe`. Default destination is the
+resolved Hermes home's `bin`; installation must not mutate arbitrary homes
+while running tests. Wizard command/UI work belongs to the later wizard PR.
+
+- [ ] Add packaging assertions for manifest/lock/source/build-script inclusion
+  and target-artifact exclusion. Add Windows build/install tests covering an
+  in-use destination, failed build, spaces/non-ASCII and retained old binary.
+- [ ] Implement the PowerShell build with explicit native exit-code checks,
+  temporary output verification and checked replacement. Keep all failure paths
+  from claiming that a helper is installed/ready.
+- [ ] Build a wheel from the sdist, install outside the checkout and build the
+  helper from packaged sources. Validate the actual executable and interpreter
+  paths and file hashes on the AWS host.
+- [ ] Exercise process restart, Windows reboot and actual EC2 stop/start with
+  retained ciphertext, then a second-instance cloned-disk binding test. Include
+  key deletion and subsequent refusal with disposable data.
+- [ ] Run required checks and actual-device tests, update the manual validation
+  log, review the branch, and prepare a keyvault-only PR targeting `dev`.
+
+### Windows dependent plans
+
+After the helper slice, create separate executable plans for shared Windows
+private-filesystem primitives, keyvault memory custody, wizard installation,
+network routes, each policy/privacy caller migration, Desktop/extension and the
+full Windows CI/release matrix. Their contracts are already bounded in SPEC;
+none may skip its actual-device acceptance because the helper works.
+
+The immediate implementation review is for W1–W4, not approval to combine all
+components into one PR. No native production code was changed in the planning
+and baseline-validation branch.

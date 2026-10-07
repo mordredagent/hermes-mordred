@@ -75,6 +75,108 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Windows native feasibility on actual EC2 NitroTPM (Phase 0).**
+  Unchanged Mordred `f14c1edce23f88c4a2cb6f8bfd3c1454ed0a59ce` / `0.2.0a1`,
+  installed as a locally built wheel with `keyvault,extension` extras, was tested
+  on Windows Server 2025 build 26100, x86_64, `t3.large` in `ap-southeast-1`.
+  The TPM-enabled image was `ami-05171b2d13ab22cba` (2026-09-17); primary
+  instance `i-00f4db5c3a204906b`, encrypted 50 GiB gp3, UEFI/NitroTPM 2.0.
+  The older Linux validation instance remained stopped and untouched.
+
+  **Host baseline:** pinned upstream Hermes `v2026.9.24`, commit
+  `f97608f178d1ffeca59860195ab7da295f7c8e5f`; Agent `0.21.5`, Desktop `0.17.6`,
+  Electron `40.10.2`, Python `3.11.17`, Node `22.23.3` / npm `10.9.9`.
+  The plugin loaded from the wheel in
+  `C:\Users\mordred.000\hermes-source\venv\Lib\site-packages`, not the checkout.
+  `hermes --help`, `hermes-mordred --help`, and isolated
+  `hermes-mordred status --json` exited zero. `hermes desktop --build-only`
+  produced the real `win-unpacked/Hermes.exe`. Playwright launched that binary
+  under the ordinary user and captured screenshots: with Mordred disabled in
+  a separate baseline home, Desktop reached provider onboarding; with Mordred
+  enabled, backend startup refused at `_audit_io.py`'s unavailable `os.fchmod`
+  during the network plugin's audit initialization. No security checks were
+  bypassed and no upstream application source was patched. No model provider
+  or messaging account was configured, so onboarding is not a chat/E2E pass.
+
+  The upstream installer needed a clean checkout of its exact release in the
+  disposable source directory (initial checkout refused generated/line-ending
+  changes), then its official individual dependency stages after an existing-
+  venv cleanup failed under the ordinary user. npm completed, though the wrapper
+  emitted empty-exit-code failures; Desktop used the official CLI build. These
+  workarounds do not establish one-command Windows installation support.
+  An initial gateway harness timed out while collecting inherited output pipes.
+  A repeat with file output reached the Gateway Starting banner and remained
+  alive at 20 seconds; ordinary-user `taskkill /T /F` returned Access denied,
+  and the harness also hit cp1252 output encoding. Thus clean shutdown, channel
+  readiness and scheduled gateway support are not established; the later SYSTEM
+  cleanup found that PID already gone.
+
+  **Unmodified test baseline:**
+  `python -m pytest -q -o addopts= --tb=short tests/test_keyvault_wrap.py tests/test_file_lock.py`
+  returned **71 passed, 6 skipped, 12 failed**. All failures were in the file-lock
+  suite: both POSIX-mode assumptions and Windows-path regex assumptions occur.
+  These are recorded failures, not a passing Windows suite. The independent
+  wire probe used Python `3.12.15` / cryptography `50.0.2` and the unchanged
+  production `wrap.py` (SHA-256
+  `a043eb7dbc1c04ad0d80f849a588748ca50fb1b7d3b536b7b4fb4c097c2dfe6c`).
+
+  **Hardware custody:** `Get-Tpm` reported present/ready, manufacturer `AMZN`.
+  The explicit Microsoft Platform Crypto Provider reported implementation flag
+  `1` (hardware). Direct CNG user-scoped persisted `ECDH_P256` worked without
+  setting KeyAgreement usage; explicitly setting that property returned
+  `0x80090029`. `NCryptSecretAgreement` and `NCryptDeriveKey(TRUNCATE)` yielded
+  32 little-endian bytes, reversed for Mordred. Nine comparisons with independent
+  Python/OpenSSL ECDH passed, including leading-zero scalar `189`. The unchanged
+  127-byte MRKW wrapper round-tripped. Corrupt ciphertext, wrong profile,
+  malformed points and an invalid native peer were refused; valid ciphertext
+  remained usable. Private export failed with `0x8009000A`.
+
+  The same proof passed in a separate password-authenticated non-administrator
+  SSH process, without impersonation. Public-key-only SSH could not access the
+  persisted key (`0x80090016`); this token distinction must be diagnosed by the
+  actual product process. SYSTEM-only or impersonated results are not presented
+  as desktop/service identity proof. No Windows password capture or impersonation
+  is proposed for the product helper. Fresh-process reopen, Windows reboot and EC2 stop/start
+  retained public-key fingerprint
+  `7a573e66759b1ae7a4fa2715985d2ffa4d597eeab63978581170b0fe9c7f8e27`
+  and the valid synthetic wrapped DEK. The reboot repeat used a credentialed
+  user token from the SSM harness. The stop/start repeat also passed under the
+  actual password-authenticated ordinary-user SSH process. A separate disposable
+  key was created/reopened/deleted, and its subsequent open returned
+  `0x80090016`; the retained original fixture still decrypted afterward.
+  Scheduled gateway acceptance remains open.
+
+  **Device binding:** a cleanly stopped disk was imaged and launched on
+  second NitroTPM instance `i-08c6ec3e52adac82a`. Local SID, encrypted DPAPI test
+  credential, PCP key metadata and wrapped-fixture hashes matched the source.
+  DPAPI unprotect and credentialed logon succeeded, but the copied persisted key
+  could not open (`0x80090016`). A new, uniquely named key under the same user on
+  the second TPM completed ECDH with independent software parity and refused
+  private export; it was deleted afterward. This controls for unavailable TPM,
+  wrong SID and inability to authenticate. The test used synthetic data only.
+
+  **Phase 0 resources:** primary Windows and prior Linux instances were verified
+  stopped at the investigation boundary. Clone `i-08c6ec3e52adac82a` was
+  terminated; AMI `ami-021065c89d82a9745` was deregistered and snapshot
+  `snap-0b8b5d7ed23d25d0d` deleted. The task's TCP/22 ingress was revoked; all
+  working access uses SSM. The dedicated SSM role/profile and primary encrypted
+  50 GiB gp3 volume remain for implementation ($4.80/month storage at the
+  queried regional rate). The primary was then resumed for the approved helper
+  implementation with a new bounded shutdown deadline. Windows instance rate
+  was $0.1332/hour, excluding IPv4, surplus CPU credits and other usage.
+
+  **Scope and evidence:** disposable scripts, JSON results, baseline failure
+  logs, build logs and actual application screenshots are retained privately at
+  `~/.codex/artifacts/mordred-windows-validation-20261007/`; do not publish its
+  test credentials or private SSH key. The checked-in change is documentation
+  only. It proves feasibility of this device's CNG/wire boundary, not a shipped
+  helper, secure Windows file storage, Windows 11/MSIX, consumer TPMs, scheduled
+  gateway custody, Private Telegram or full Windows support. See
+  [Windows feasibility](WINDOWS_FEASIBILITY.md) and the Windows sections of
+  [SPEC](SPEC.md#windows-native-support-proposal-2026-10-07) and
+  [PLAN](PLAN.md#windows-cng-helper-implementation-plan).
+
+
 - **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**
   Installed the wheel built from `52e69d7fc` in the actual Hermes Desktop
   interpreter on the isolated Ubuntu 24.04 EC2 NitroTPM host. The CLI login

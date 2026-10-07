@@ -1172,3 +1172,136 @@ implementation or published PRs.
 Review decisions: approve the dedicated-key scope and its recovery limitation;
 choose in-session execution or subagent-driven execution. Recommended execution
 is in-session because the small sequence has tightly coupled interfaces.
+
+
+## Windows native support proposal (2026-10-07)
+
+Status: proposed implementation contract following the approved Windows
+feasibility investigation. Windows product support remains deferred until the
+component and acceptance gates below pass. This section does not change the
+currently shipped Platform Support (v1) claims.
+
+### Intended outcome and scope
+
+Run the single Mordred plugin natively on Windows, with the same policy and
+privacy decisions as the supported Linux tier, including TPM-protected Private
+Telegram credentials and agent memory. Validate progressively on AWS Windows
+Server with actual NitroTPM. Preserve public Hermes integration and the
+zero-upstream-PR commitment. WSL results are not native Windows results.
+
+Initial implementation targets x86_64, Python 3.11–3.13, and a pinned,
+Windows-capable released Hermes version. Server 2025 is the actual-device
+engineering target; Server 2022 is a compatibility target. Windows 11 Desktop
+installation and its bundled runtime need a distinct acceptance run. Neither
+Server tests nor source-built Desktop prove MSIX installation/update behavior.
+
+No new macOS-equivalent `.env`, configuration/workspace seal, Windows Hello,
+per-use presence, ARM64, or TPM-key recovery claim is part of this port.
+
+### Windows hardware custody
+
+Implement a separate `mordred-hermes-winkey.exe` helper using Windows CNG and
+`Microsoft Platform Crypto Provider`. Preserve the existing helper commands,
+neutral error taxonomy, SEC1 P-256 public-key representation and 127-byte MRKW
+version-1 format. No changes to P-256 ECDH, HKDF-SHA256 or AES-256-KW are required
+by the successful initial AWS wire-format experiment.
+
+- Open the explicit Platform Crypto Provider and verify its implementation
+  reports hardware, with no software-provider substitution.
+- Create user-scoped persisted `ECDH_P256` keys. Do not set the Key Usage property
+  to KeyAgreement: the actual provider refused that setting with `0x80090029`,
+  while its default key successfully performed ECDH. Probe actual operations,
+  not just advertised algorithms or a property's label.
+- Keep export policy non-exportable. Public-key export is permitted; a private
+  export must fail. Handle conversion validates magic, curve size and lengths.
+- Import a valid public peer into the same provider, call `NCryptSecretAgreement`
+  and `NCryptDeriveKey(TRUNCATE)`, reverse the returned little-endian secret and
+  return exactly 32 bytes, preserving leading zeroes. Test against independent
+  Python/OpenSSL ECDH and the production wrapping functions.
+- Key names use `mordred-hermes:` followed by the lowercase SHA-256 hex digest
+  of the decoded application tag, keeping CNG names bounded and case-stable.
+  Reject empty, odd-length, non-hex tags and tags larger than 256 decoded bytes
+  before calling CNG; a
+  4 KiB UTF-8 request limit bounds the new helper. Generation must not overwrite
+  an existing key. Deletion is idempotent and must respect lifecycle guards.
+- Do not store Windows passwords or impersonate users in the product helper.
+  It runs under the application's existing user token. Diagnostics test this
+  actual token's key access. The probe observed public-key-only SSH refusal and
+  password-authenticated ordinary-user success; desktop, terminal, scheduled
+  gateway and service contexts must be tested separately. Preserve native
+  error status in diagnostics: `NTE_BAD_KEYSET` is documented as key-not-found,
+  but the probe also observed it for an existing key under an incapable token.
+  Missing access must never be treated as permission to replace retained keys.
+  See [NCryptOpenKey](https://learn.microsoft.com/en-us/windows/win32/api/ncrypt/nf-ncrypt-ncryptopenkey).
+- Runtime lookup/open/unwrap failures never generate replacement keys, downgrade
+  to software, adopt an ambient plaintext key or erase valid ciphertext.
+- Describe the tier as machine-bound, without per-use presence or automatic
+  recovery. A copied disk is not a TPM backup; deletion/termination warnings
+  apply before irreversible custody actions.
+
+### Windows private storage and lifecycle
+
+Replace POSIX-specific security properties with tested Windows equivalents;
+never make Windows support a collection of skipped mode/lock checks.
+
+Private files and directories must have protected DACLs granting only the
+current user, SYSTEM and Administrators the necessary access. Validate ownership,
+parent-directory trust, unexpected inherited/broad grants, file type and stable
+handle identity. Deny reparse points and directory junctions on protected paths.
+Do not claim protection from administrators or arbitrary same-user hostile code.
+
+Use `CreateFileW` with a security descriptor at creation, handle-based metadata,
+`LockFileEx` for cooperating processes, and a checked replacement/flush strategy.
+Creation must not have an initial broad-permission window. Sharing violations,
+interrupted writes, concurrent writers and antivirus-held handles must preserve
+the prior valid data and return an actionable refusal. Network shares are not
+an initial supported secret-store location; validate local filesystem behavior.
+
+Keep the POSIX implementation intact behind an OS-dispatch boundary. Migrate
+caller components in separate PRs after the shared primitive contract is landed.
+
+Use upstream home resolution and explicit `HERMES_HOME`, Windows `Scripts`
+interpreter paths, `.exe` discovery, Unicode paths and PowerShell-compatible
+setup. Install native executables through a verified temporary file and atomic
+replacement; an in-use executable must not produce a partial installation.
+
+### Feature integration and truthful capabilities
+
+Windows memory custody follows the Linux wrapped-DEK lifecycle and retains its
+concurrent provision/reset/purge guards. Setup, doctor and status inspect the
+actual application interpreter and token before enabling encryption. Preserve
+existing data and report why custody is unavailable when that check fails.
+
+Desktop capability responses expose Windows TPM readiness, no per-use presence,
+setup prerequisites and restart requirements. Hide unsupported setup paths;
+never offer Xcode/Secure Enclave remediation on Windows. Old clients must not
+silently enable an unsupported setup flow.
+
+Each network path must verify Windows executable discovery, service ownership,
+process-tree termination, local/remote DNS, explicit proxy use, route liveness
+and failure behavior. Until verified, an unavailable route must refuse a strict
+operation rather than fall through to clearnet. Keep component-specific policy,
+LLM guard, privacy audit and extension changes separate.
+
+### Acceptance and delivery boundaries
+
+The first delivery is a docs-only contract PR targeting `dev`, then a keyvault
+helper PR, shared Windows primitives, keyvault runtime, wizard setup, separate
+network/policy/privacy caller migrations, Desktop/extension and CI integration.
+Do not advertise broad Windows support before all dependent slices pass.
+
+Actual-device gates cover ordinary-user generation/reopen/ECDH, independent
+cryptographic parity, non-exportability, malformed/corrupt inputs, process and
+OS restart, EC2 stop/start, unavailable provider/helper, deletion and device
+binding. A second instance must reject copied custody data after controlling for
+account/SID/DPAPI differences; an account-access denial alone is not that proof.
+
+Run unchanged-code baseline failures before porting, focused regression tests
+on Windows after each slice, reduced-extras typing, Windows wheel smoke and full
+macOS/Linux regressions. Standard hosted Windows CI does not establish TPM
+hardware support. Record emulator, actual NitroTPM, synthetic Telegram, real
+account/model and Desktop UI results separately in the CI validation log.
+
+The execution environment must contain only synthetic fixtures until a separate
+live-account test is requested. Stop task-owned compute, retain only explicitly
+identified development resources, and record residual storage costs.

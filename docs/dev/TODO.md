@@ -258,3 +258,22 @@ the source remains usable, and failure paths leave no partial destination.
   record the result in [`CI.md`](./CI.md).
 - Keep each implementation PR scoped to one plugin; land cross-plugin contract
   documentation first.
+
+
+## Windows native support
+
+- [x] Investigate native Windows feasibility and identify actual AWS NitroTPM
+  image candidates; preserve the existing Linux validation environment.
+- [x] Prove CNG P-256 ECDH and unchanged MRKW interoperability on actual AWS
+  Windows under a credentialed non-administrator user.
+- [x] Record Phase 0 host/persistence/device-binding outcomes and unmet scope.
+- [x] Review the Windows SPEC and helper implementation plan before production
+  implementation; in-session execution approved.
+- [ ] Submit the cross-component contract docs before the implementation PR.
+- [ ] Implement and live-validate the standalone Windows CNG helper (PLAN W1–W4).
+- [ ] Implement secure Windows filesystem primitives and migrate callers in
+  separate component PRs without weakening POSIX behavior.
+- [ ] Extend keyvault memory custody, wizard, network, policy/privacy and
+  Desktop/extension through their respective plans and Windows acceptance gates.
+- [ ] Add the Windows CI/packaging matrix and a separate Windows 11 Desktop
+  acceptance run before advertising general native Windows product support.
