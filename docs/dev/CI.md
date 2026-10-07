@@ -114,7 +114,7 @@ uses a paid account and mutates runner network state.
   and after actual EC2 stop/start. Each check verified the same public key and
   plaintext digest; SID, fixture, executable and PCP key-file hashes were
   retained. The final helper also reopened this unchanged fixture after upgrade and a
-  second Windows reboot.
+  second Windows reboot and EC2 stop/start.
   The same final executable on a cloned disk refused the retained key on the
   second TPM, while fresh production MRKW operations worked. Both clone
   integration tests passed; SID, credential-file and retained PCP-file hashes
@@ -135,7 +135,16 @@ uses a paid account and mutates runner network state.
   ShellCheck passed. A scoped Windows helper CI job is added; hosted runners do
   not substitute for hardware acceptance. Full Windows private filesystem,
   runtime, wizard, network, Desktop and Windows 11 acceptance remain separate
-  dependent plans. Final resource states are recorded below.
+  dependent plans.
+
+  **Cleanup:** second instance `i-0d0f2c45787bedcee` terminated; AMI
+  `ami-0d58a6979d00b69ff` deregistered and snapshot `snap-0cff25fd395bda4c2`
+  deleted. Primary `i-00f4db5c3a204906b` is retained for subsequent porting,
+  with CPU credits restored to standard and compute stopped after validation.
+  Its encrypted 50 GiB gp3 volume remains (approximately USD 4.80/month at
+  the recorded regional storage rate); the task-only SSM role/security group
+  remain, with no inbound rules. Previous Linux validation resources were
+  untouched. No production profiles or live Telegram/LLM accounts were used.
 
 - **2026-10-07 — Windows native feasibility on actual EC2 NitroTPM (Phase 0).**
   Unchanged Mordred `f14c1edce23f88c4a2cb6f8bfd3c1454ed0a59ce` / `0.2.0a1`,
