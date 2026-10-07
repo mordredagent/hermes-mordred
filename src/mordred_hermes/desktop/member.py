@@ -154,6 +154,11 @@ def install_source(dist: metadata.Distribution | None = None) -> InstallSource:
     return InstallSource(dist.version, kind, path, editable, inferred_extras(dist))
 
 
+def built_from_member(source: InstallSource) -> bool:
+    """Whether this install is pm's build of the member rather than a user install."""
+    return source.kind == "path" and source.path is not None and "/plugin-sources/" in source.path.replace("\\", "/")
+
+
 def member_requirements(dist: metadata.Distribution, extras: Iterable[str]) -> list[str]:
     """Mordred's own requirements for *extras*, without ``hermes-agent`` or markers.
 
@@ -290,8 +295,14 @@ def _ensure_member_locked(plugin_dir: Path, *, package_root: Path | None, dist: 
     dist = dist or _distribution()
     source = install_source(dist)
     root = package_root or _package_root()
-    if root.resolve().is_relative_to(plugin_dir.resolve()):
-        return False  # running from the vendored copy itself; nothing newer to copy.
+    if root.resolve().is_relative_to(plugin_dir.resolve()) or built_from_member(source):
+        # Running from the vendored copy itself, or from
+        # pm's build of the member (its own copy under
+        # environments/<id>/workspace/plugin-sources/). Its metadata no longer
+        # says where Mordred came from or which extras were chosen, so
+        # re-recording it would lose both and change the member — which makes
+        # pm rebuild again on every start.
+        return False
     pyproject = render_pyproject(dist, source).encode()
     wanted = _tree(root)
     vendored = plugin_dir / PACKAGE

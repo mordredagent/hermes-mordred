@@ -223,3 +223,19 @@ def test_health_reports_version_environment_and_member(tmp_path: Path, monkeypat
     body = TestClient(app).get("/health").json()
     assert body["ok"] and body["installed"] and body["version"] == __version__
     assert body["member"] == {"present": False} and body["environment"]["prefix"] == sys.prefix
+
+
+def test_a_pm_built_install_never_rewrites_the_member() -> None:
+    from mordred_hermes.desktop import member
+
+    pm_copy = member.InstallSource(
+        "0.2.0a0",
+        "path",
+        "/h/installs/x/environments/abc/workspace/plugin-sources/mordred-7b50b48140f67e3d",
+        True,
+        (),
+    )
+    user = member.InstallSource("0.2.0a0", "path", "/Users/me/repos/hermes-mordred", False, ("macos",))
+    assert member.built_from_member(pm_copy)
+    assert not member.built_from_member(user)
+    assert not member.built_from_member(member.InstallSource("0.2.0a0", "pypi", None, False, ("macos",)))
