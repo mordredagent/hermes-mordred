@@ -230,7 +230,7 @@ the source remains usable, and failure paths leave no partial destination.
 
 - [x] Review the [design](SPEC.md#linux-private-telegram-design) and
   [implementation plan](PLAN.md#linux-private-telegram-implementation-plan); land contracts
-  before component implementation commits (PR publication remains pending).
+  before component implementation PRs (contract PR #181).
 - [x] Verify the unchanged Linux TPM helper, Python wrap/unwrap, and Telegram
   secret-store path on actual EC2 NitroTPM before feature development (2026-10-07).
   Cross-instance rejection, stop/start persistence, CLI setup, and deletion
@@ -245,7 +245,8 @@ the source remains usable, and failure paths leave no partial destination.
 - [x] Operator-assisted live Telegram login, minimal sync, and private-model
   questions on actual EC2 NitroTPM (2026-10-07).
 - [ ] Live-account cancel/logout and live Hermes/Desktop question UI acceptance.
-- [ ] Publish component PRs to `dev` after integration selection.
+- [x] Split publication into contract, keyvault, wizard, and Desktop/extension
+  PRs targeting `dev`, in dependency order.
 
 ### Ongoing maintenance
 
