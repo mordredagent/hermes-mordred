@@ -47,7 +47,7 @@ _TPM_HELPER_NAME = "mordred-hermes-tpmkey"
 # Windows CNG helper executable name (native/winkey-helper/build script). Same
 # JSON-over-stdio protocol as the SE / TPM helpers (CNG Platform Crypto Provider
 # / TPM-backed ECDH P-256), so :class:`_HelperSecKeyOps` drives it unchanged.
-_WIN_HELPER_NAME = "mordred-hermes-winkey"
+_WIN_HELPER_NAME = "mordred-hermes-winkey.exe"
 
 # Wall-clock budget for a single helper invocation. Generous because the
 # ``ecdh`` command blocks on the Touch ID / passcode system prompt — the user
@@ -92,8 +92,35 @@ def find_tpmkey_helper() -> str | None:
 
 
 def find_winkey_helper() -> str | None:
-    """Locate the Windows CNG helper (``mordred-hermes-winkey``)."""
-    return _find_named_helper("MORDRED_WINKEY_HELPER", _WIN_HELPER_NAME)
+    """Locate the native Windows executable in the selected Hermes profile.
+
+    An explicit override is authoritative, including an empty/invalid value.
+    Search only absolute PATH entries: Windows executable lookup may otherwise
+    implicitly include the current directory or expand PATHEXT to a script.
+    Existence and suffix checks are not publisher/authenticity verification;
+    the operator must trust the selected installation and PATH directories.
+    """
+    from mordred_hermes._home import hermes_home
+
+    def executable(path: Path) -> str | None:
+        if path.is_absolute() and path.suffix.lower() == ".exe" and path.is_file():
+            return str(path)
+        return None
+
+    override = os.environ.get("MORDRED_WINKEY_HELPER")
+    if override is not None:
+        return executable(Path(override).expanduser()) if override else None
+
+    installed = executable(hermes_home() / "bin" / _WIN_HELPER_NAME)
+    if installed is not None:
+        return installed
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(entry)
+        if directory.is_absolute():
+            found = executable(directory / _WIN_HELPER_NAME)
+            if found is not None:
+                return found
+    return None
 
 
 # Back-compat alias: the original Secure-Enclave-only locator. Production
