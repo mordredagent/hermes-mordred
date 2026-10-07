@@ -1,6 +1,6 @@
 ---
 name: mordred-telegram
-description: "Answer questions about the user's own Telegram messages through Mordred's read-only, Secure-Enclave-sealed importer (telegram_ask / telegram_chats). Never read Telegram any other way."
+description: "Answer questions about the user's own Telegram messages through Mordred's read-only, hardware-sealed importer (telegram_ask / telegram_chats). Never read Telegram any other way."
 version: 1.0.0
 metadata:
   hermes:
@@ -51,7 +51,7 @@ raw messages.
 - **Never** run commands that decrypt or print archive content.
 
 These rules exist because the importer guarantees: read-only access,
-credentials sealed by the Secure Enclave (opened with Touch ID), an encrypted
+credentials sealed by macOS Secure Enclave or Linux TPM 2.0, an encrypted
 archive, and that only Venice-private or local models ever read message text.
 Any other path breaks those guarantees.
 
@@ -80,6 +80,11 @@ search. Never report "no messages" or "data missing" from a `keyword` search.
 
 ## Touch ID
 
+Linux TPM has no per-use user-presence prompt. Do not request Touch ID or Xcode
+on Linux. Linux setup enables memory directly without an `.env` vault. Its
+memory and Telegram keys have no portable recovery: losing TPM state loses
+access. Use `telegram setup` for platform-specific guidance.
+
 Each `telegram_ask` / `telegram_chats` call may show a Touch ID prompt on the
 Mac: the Secure Enclave must unseal the credentials. Tell the user to approve
 it. `tee_auth_cancelled` means they declined — do not retry automatically.
@@ -97,7 +102,7 @@ terminal (`hermes-mordred` may need its full venv path):
 | `invalid_date` | Bad `start_date` / `end_date` | Use `YYYY-MM-DD`; start must not be after end |
 | `no_matching_messages` | No hit | Rephrase, or pass `chat_ids` |
 | `llm_not_configured` | No privacy LLM | Run `hermes-mordred telegram venice` (or `telegram local-llm`) |
-| `tee_unavailable` | Secure Enclave helper missing | Run `hermes-mordred keyvault enable-se` |
+| `tee_unavailable` | Hardware helper unavailable | macOS: `hermes-mordred keyvault enable-se`; Linux: `hermes-mordred keyvault enable-tpm` |
 | `tee_auth_cancelled` | Touch ID declined | Ask whether to try again |
 | `hermes_model_not_allowed`, `hermes_model_not_private` | This chat's model may not read Telegram text | Switch this chat to a Venice `private` model or a local model |
 | `venice_model_not_private` | The importer's Venice model is `anonymized` | Pick a private model: `hermes-mordred telegram venice --model <id>` |

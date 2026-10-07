@@ -75,6 +75,94 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**
+  Installed the wheel built from `52e69d7fc` in the actual Hermes Desktop
+  interpreter on the isolated Ubuntu 24.04 EC2 NitroTPM host. The CLI login
+  completed against the user's real Telegram account with exit code 0.
+  A separate process successfully unsealed the saved session through the TPM;
+  metadata reported `logged_in=true` and `api_configured=true`, the sealed
+  file had the `MTC1` header and mode `0600`, and memory encryption was active.
+  Credential values and the decrypted session were not included in evidence.
+  Subsequent operator-authorized sync imported three messages across two
+  dialogs; a later incremental sync imported one new message into a third
+  dialog, while an unchanged sync imported zero duplicates. With a
+  TPM-sealed Venice key, `deepseek-v4-flash` passed the live private-model
+  catalog check and answered questions through the production service path.
+  The final period query considered all four imported messages without
+  truncation. No message content, account identifiers, or model answers are
+  recorded here. This validates the CLI/service path, not a live Hermes agent
+  conversation or the Desktop question UI. Live-account cancellation and
+  logout remain untested; the operator retained the encrypted session.
+  Login evidence:
+  `mordred-linux-telegram-20261007/live-login-success.png` and
+  `mordred-linux-telegram-20261007/live-login-verification.json`.
+
+- **2026-10-07 — Follow-up review and Linux TPM custody fixes.**
+  Tested commit `1e64c8d85` on the same isolated Ubuntu 24.04 EC2 NitroTPM
+  environment. An independent review reproduced two data-loss paths: keyvault
+  reset recursively deleting the native memory key, and inaccessible memory
+  directories being mistaken for empty during purge. The reset bug was also
+  reproduced against the prior code on actual NitroTPM using a disposable
+  profile; the new integration assertion failed before the fix (reset returned
+  success), then passed after it. The actual-device suite passed **2 tests in
+  8.29s**, including reset refusal, failed-scan key/ciphertext retention and
+  subsequent successful reads, plus synthetic Telegram sync/list/ask/cancel.
+  Added regression coverage for inaccessible directories and individual files,
+  concurrent provisioning/reset, uninstall purge ordering, ordinary Linux
+  plaintext reads/writes, and malformed ambient keys during re-enable.
+  Linux full suite: **5,118 passed, 21 skipped, 0 failures/errors** (172.375s).
+  macOS full suite: **5,212 passed, 5 skipped, 0 failures/errors** (160.681s).
+  A macOS symlink-handling regression found during remediation was fixed by
+  selecting the strict scanner only for Linux/TPM custody; its existing test
+  and the final full suite passed. Metadata-only Linux status now refuses
+  unreadable memory trees instead of reporting them ready. Ruff, format,
+  shellcheck, JavaScript syntax, and strict mypy passed; reduced-extras Linux
+  mypy checked 195 files. Coverage and the full CI interpreter matrix were not
+  repeated for this follow-up. Evidence: `mordred-linux-telegram-20261007/review-*`.
+  All three validation instances were verified stopped after this run; existing
+  EBS/AMI/snapshot resources were retained. No live account/model was used;
+  that acceptance gate remains pending.
+
+- **2026-10-07 — Linux Private Telegram implemented and validated on EC2.**
+  Tested feature code through commit `8b37984d3` on the existing Ubuntu
+  24.04.5 x86_64 `t3.medium` NitroTPM instance in `ap-southeast-1`, using isolated
+  source, memory, and Desktop homes. Python 3.12.3; production helper and
+  `/dev/tpmrm0`; no `TCTI` or native-test override for actual-device acceptance.
+  The explicit `MORDRED_LINUX_TELEGRAM_TEST=1` suite passed **2 tests** against
+  real NitroTPM (7.95s). It exercised fresh Hermes startup hooks, sealed memory
+  read/write, corrupt wrapped-key and unavailable-device refusal without ambient
+  key fallback, ciphertext preservation, disable/re-enable with the same key,
+  and purge. A synthetic Telegram client and local model drove real
+  `TelegramService` sync/list/ask/cancel, encrypted archive storage and fresh
+  process credential access through the real TPM. A separate swtpm run passed
+  the same **2 tests** (44.88s); it is recorded separately from hardware proof.
+  The complete Linux suite passed **5,103 tests, 21 skipped, 0 failures/errors**,
+  with **87.99% coverage**. macOS/Python 3.14.7 regression passed **5,197 tests,
+  5 skipped, 0 failures/errors**. Ruff, format, shellcheck, JavaScript syntax,
+  documentation links, and strict mypy passed; Linux mypy used a fresh venv
+  with only `dev,keyvault,extension` extras (195 files). The full CI Python
+  matrix was not rerun locally. The four post-review regression tests first
+  failed, then passed: runtime write/purge serialization, stale-profile path
+  refusal, re-enable authentication of existing seals, and old Desktop client
+  rejection. No Secure Enclave helper behavior changed; its live-device gate
+  was not rerun.
+  Installed the final wheel into the actual Python interpreter used by packaged
+  Hermes Desktop `v2026.9.24` (Agent 0.21.5 / Desktop 0.17.6 / Electron 40.10.2),
+  verified installed source/asset SHA-256 hashes against this checkout, and
+  observed the TPM 2.0 label, absence of per-use presence/recovery promises,
+  and successful memory enable through the page. The actual Desktop API
+  hardware build/probe and idempotent memory enable also passed. Screenshots
+  and sanitized logs are in `mordred-linux-telegram-20261007`.
+  Stopped and started the instance, verified the pinned SSH host key at its
+  new IP, and read the same sealed memory using Desktop's actual interpreter
+  through the Hermes startup path. Wrapped-key and ciphertext SHA-256 hashes
+  were unchanged. All three validation instances were stopped after testing;
+  prior encrypted EBS volumes, the private AMI, and snapshots remain retained.
+  **Limits:** no real Telegram login, live MTProto server, or live model was
+  exercised; operator-assisted login/sync/question/cancel/logout remains pending.
+  Linux memory is bound to its original TPM and has no portable recovery key.
+  The unchanged baseline's cross-instance rejection remains separate evidence.
+
 - **2026-10-07 — Current TPM implementation validated on actual EC2 NitroTPM.**
   Tested unchanged Mordred commit `f3211c6fb20b42d610feb00cfd6ed8d20681c888`
   on two `t3.medium` instances in `ap-southeast-1`, using a private,
