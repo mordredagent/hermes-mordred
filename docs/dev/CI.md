@@ -368,8 +368,38 @@ add-first with the new repository claim while preserving `release.yml` and the
    uninstall only the shim and confirm the runtime package and CLI remain.
 7. Repeat steps 4–6 against production PyPI, preserving the same canonical-first
    order.
-8. Add annotated tag `v<version>` on the release merge and create the GitHub
-   Release; mark pre-releases accordingly.
+8. After the production compatibility upload succeeds, `release.yml` creates
+   annotated tag `v<version>` on that run's exact release commit and publishes
+   the GitHub Release. Its notes and tag annotation come from the matching
+   merged `dev` → `main` PR; include nonempty `### Changes` and/or `### Fixes`
+   entries before publishing. Alpha, beta, RC, and development versions are
+   automatically marked as prereleases. Confirm the `github-release` job is
+   green and inspect the resulting Release.
+
+The finalizer runs only after a successful production `compat` publish, never
+for TestPyPI or reservation modes. Only this job receives `contents: write`
+and `pull-requests: read`; package publication retains its OIDC-only grant.
+It checks that both distributions have an unyanked wheel and sdist on PyPI.
+For all four files, PyPI's HTTPS Integrity API must report publishing
+provenance for this repository's `release.yml` on `main`, the production
+environment, the matching file digest, and the exact release SHA. This trusts
+PyPI's validated attestations; it is not independent offline signature
+verification. If `main` advances between the canonical and compatibility
+publishes, mismatched provenance stops tag creation even if versions match.
+Existing tags must resolve to the exact release SHA; they are never moved.
+Existing published Releases with the correct prerelease status are preserved,
+including any human edits to their notes.
+
+If finalization fails after upload (for example, an API outage), fix the cause
+and **re-run failed jobs** on the same workflow run. Do not dispatch a new
+publish or re-run all jobs: PyPI versions cannot be uploaded twice. A tag
+created before a Release API failure is reused safely. A mismatched tag,
+draft Release, or incorrect prerelease flag requires operator investigation;
+the finalizer fails rather than overwriting it. For read-only diagnosis, run
+`uv run python tools/finalize_release.py --repo mordredagent/hermes-mordred
+--sha <release-merge-sha> --version <version> --dry-run` from the matching
+version checkout with `GH_TOKEN` set. This verifies PyPI and GitHub state
+without creating tags or Releases.
 
 ## Changelog convention
 
