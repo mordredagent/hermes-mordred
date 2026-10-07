@@ -75,6 +75,40 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Current TPM implementation validated on actual EC2 NitroTPM.**
+  Tested unchanged Mordred commit `f3211c6fb20b42d610feb00cfd6ed8d20681c888`
+  on two `t3.medium` instances in `ap-southeast-1`, using a private,
+  NitroTPM-enabled UEFI AMI cloned from the previous stopped Ubuntu validation
+  disk. Ubuntu 24.04.5 x86_64, kernel `7.0.0-1014-aws`, Python 3.12.3,
+  Rust/Cargo 1.85.0. AWS reported `TpmSupport=v2.0`; `/dev/tpmrm0` reported
+  manufacturer `AMZN`, vendor `NitroTPM`, TPM 2.0, and NIST P-256 support.
+  No TPM emulator was running. Used separate source and `HERMES_HOME` paths;
+  the original validation instance remained stopped.
+  Native tests ran with `MORDRED_TPM_TEST=1` and
+  `TCTI=device:/dev/tpmrm0`: **64 passed, 0 failed, 0 ignored**, including
+  actual key creation, ECDH parity, encrypted-session attributes, substitution
+  rejection, and deletion. The existing focused Python suites passed
+  **172 tests**. Built and installed the release helper, then separately
+  verified production Python `wrap_dek`/`unwrap_dek` and `TeeSecretStore`
+  using synthetic secrets, with `TCTI` and `MORDRED_TPM_TEST` unset.
+  Verified fresh-process access, mode-`0600` key/ciphertext files, corrupt wrap
+  and credential rejection, wrong-profile refusal, unavailable-device refusal
+  without software fallback, and preservation of valid ciphertext after errors.
+  Copied both opaque native key blobs to the second NitroTPM instance: its
+  helper probe succeeded, but both copied blobs were rejected by that TPM.
+  Stopped and started the original test instance, verified its pinned SSH host
+  key at its new IP, and successfully unwrapped the original data and Telegram
+  credentials without regenerating keys. The actual `keyvault enable-tpm`
+  CLI also built, installed, and passed its hardware probe; original keys still
+  worked after installation. Finally verified idempotent key deletion and
+  refusal to unseal credentials after deletion of the synthetic test key.
+  Evidence bundle: `mordred-nitrotpm-validation-20261007` (source/helper hashes,
+  device properties, native/Python logs, and per-case results).
+  **Scope:** this validates the existing TPM backend and credential custody,
+  not Linux private Telegram as a complete feature. `telegram doctor` confirmed
+  the hardware check passed while agent-memory encryption remained inactive.
+  No real Telegram account, live model, memory-encryption implementation, or
+  full Telegram/Desktop workflow was exercised in this run.
 - **2026-10-07 — Packaged Hermes Desktop validated on Ubuntu EC2.**
   Built the official Hermes release `v2026.9.24` (`f97608f178d1`, Agent
   0.21.5 / Desktop 0.17.6 / Electron 40.10.2) with `hermes desktop
