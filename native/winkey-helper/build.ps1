@@ -8,6 +8,12 @@ Set-StrictMode -Version Latest
 $temporary = $null
 try {
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Windows is required.' }
+    # A pwsh -> Python -> powershell.exe chain can inherit PS7 module paths.
+    # Resolve built-in modules from THIS runtime, not that inherited search path.
+    foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management')) {
+        $manifest = [IO.Path]::Combine($PSHOME, 'Modules', $module, "$module.psd1")
+        Import-Module -Name $manifest -Force -ErrorAction Stop
+    }
     if (-not $InstallDir) {
         # ASCII JSON preserves Unicode paths across Python/PowerShell code pages.
         $resolve = "import json; from mordred_hermes._home import hermes_home; print(json.dumps(str(hermes_home().joinpath('bin'))))"

@@ -100,7 +100,11 @@ uses a paid account and mutates runner network state.
   helper, valid-data retention and refusal after deletion. The installer passed
   **4 actual Windows tests** covering replacement, failed-build retention,
   an in-use executable and a Japanese default home under a cp1252 Python pipe.
-  ASCII JSON transports the default path without code-page corruption. Windows PowerShell 5.1 requires `[NullString]::Value`
+  ASCII JSON transports the default path without code-page corruption.
+  The hosted Windows CI initially reproduced a PowerShell 7 -> Python -> 5.1
+  module-path inheritance failure (`Get-FileHash` unavailable). The installer
+  explicitly loads Utility/Management manifests from its own `$PSHOME`;
+  the existing build tests cover that actual runner invocation. Windows PowerShell 5.1 requires `[NullString]::Value`
   for the nullable `File.Replace` backup argument. A real sdist-to-wheel build
   passed **6 packaging checks**. The wheel installed outside the checkout;
   `build.ps1` compiled bundled sources under `site-packages` and installed into
