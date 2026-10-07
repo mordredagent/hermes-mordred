@@ -185,7 +185,7 @@ released package:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "hermes-mordred[macos,extension,ethereum]==0.2.0a0"
+  --reinstall "hermes-mordred[macos,extension,ethereum]==0.2.0a1"
 
 uv pip check --python ~/.hermes/hermes-agent/venv/bin/python3
 ~/.hermes/hermes-agent/venv/bin/python3 -c \
@@ -344,3 +344,43 @@ See `SPEC.md §Key generation and verification digest` for the detailed algorith
 - `UPSTREAM.md` — relationship with Hermes upstream
 - `CI.md` — CI workflow details
 - `ROADMAP.md` — deferred candidates and release gates
+
+## Linux Private Telegram validation
+
+Use a TPM 2.0 device with P-256 ECDH and an isolated test home. The operator
+running Hermes needs access to `/dev/tpmrm0`; do not relax the device to
+world-readable. Install the same Mordred build into both the CLI and the
+actual Hermes/Desktop interpreter. `MORDRED_HERMES_RUNTIME_PYTHON` can select
+the latter explicitly. Stop existing gateways before enabling memory.
+
+```sh
+uv sync --extra dev --extra keyvault --extra extension --extra telegram
+export HERMES_HOME=/tmp/mordred-linux-telegram-acceptance
+export MORDRED_TPMKEY_HELPER=/path/to/mordred-hermes-tpmkey
+export MORDRED_LINUX_TELEGRAM_TEST=1
+unset TCTI MORDRED_TPM_TEST MORDRED_TPMKEY_STORE HERMES_MEMORY_KEY
+uv run pytest -v -o addopts='' tests/integration/test_linux_telegram_tpm.py
+```
+
+This explicit hardware gate creates fresh pytest-owned profiles, runs the real
+Hermes startup hook in new processes, and tests memory write/read, corrupted
+keys, unavailable TPM, disable/re-enable/purge, and synthetic Telegram
+sync/list/ask/cancel. Network clients are synthetic; wrapping, memory hooks,
+credentials and archive encryption are real. It never logs into Telegram.
+
+For hermetic CI, the same suite accepts `TCTI=swtpm:host=127.0.0.1,port=2321`
+against a separately started loopback emulator. Label this result **swtpm**;
+it does not establish device or EC2 support. The native TPM CI job runs this
+suite after building the helper. Live EC2/account tests remain manual only.
+
+For EC2, verify AMI NitroTPM support, UEFI, `/dev/tpmrm0`, and the actual helper
+probe before testing. Retain package paths, source hashes, interpreter versions,
+commands and sanitized results. Check the packaged Desktop's TPM labels,
+recovery limitation, memory enable action, and behavior after restart. Use
+loopback services over SSH and stop test instances afterwards.
+
+A separate operator-assisted acceptance gate uses the operator's own Telegram
+account: enter API credentials, OTP and 2FA directly in the login screen, then
+perform a small read-only sync, one query, cancellation and logout. Never put
+those credentials or real message content into logs or test fixtures. Report
+this gate as pending when it has not run.

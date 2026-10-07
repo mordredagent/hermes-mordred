@@ -578,3 +578,12 @@ class TestHermesEnvDetection:
         helper_home = installed.context(stamp="x")
         assert run_uninstall(helper_home, UninstallOptions(yes=True, remove_helper=True)) == 0
         assert not helper.exists()
+
+
+@pytest.fixture(autouse=True)
+def _macos_key_custody_contract(monkeypatch):
+    """These regressions exercise macOS env/vault custody on every CI OS."""
+    import mordred_hermes.wizard.memory_cli as module
+    from tests._helpers import PlatformSys
+
+    monkeypatch.setattr(module, "sys", PlatformSys("darwin"))

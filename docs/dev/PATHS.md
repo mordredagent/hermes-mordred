@@ -27,6 +27,8 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/vault/` | vault/encryption CLI | at-rest file vault |
 | `<home>/mordred/env-vault.optout` | encryption CLI | disables runtime `.env` injection |
 | `<home>/mordred/config-vault.marker` | encryption CLI | enables config materialize/reseal lifecycle |
+| `<home>/mordred/memory-key.wrapped` | Linux memory provider | 127-byte TPM-wrapped memory key; private `0600`, no portable recovery |
+| `<home>/mordred/memory-key.lock` | Linux memory lifecycle | private interprocess provisioning/lifecycle lock |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
 | `<home>/mordred/telegram/` | extension (Telegram importer) | encrypted read-only Telegram archive |

@@ -24,8 +24,9 @@ const CHECKBOX_STYLE = { borderColor: 'CanvasText', borderWidth: 1.5, borderStyl
 const jobListeners = new Set()
 
 const MESSAGES = {
+  telegram_platform_unsupported: 'Private Telegram requires macOS Secure Enclave or Linux TPM 2.0, with memory encryption enabled. Update both Mordred and its Desktop assets if platform metadata is missing.',
   memory_encryption_required: 'Turn on memory encryption first (step 2).',
-  memory_encryption_failed: 'Memory encryption could not be turned on. Check Touch ID and try again.',
+  memory_encryption_failed: 'Memory encryption could not be turned on. Check hardware access and the Hermes runtime, then try again.',
   telegram_already_logged_in: 'Telegram is already connected.',
   invalid_api_credentials: 'api_id must be a number and api_hash 32 hex characters (my.telegram.org → API development tools).',
   invalid_phone: 'Enter the phone number in international format, e.g. +819012345678.',
@@ -37,9 +38,10 @@ const MESSAGES = {
   login_flow_expired: 'This login attempt expired. Start again.',
   telegram_rate_limited: 'Telegram asked to wait before trying again.',
   hermes_venice_key_missing: 'No Venice key is set in Hermes. Enter one below.',
-  local_endpoint_invalid: 'Use http://127.0.0.1:<port>/… (this Mac only).',
-  tee_unavailable: 'The Secure Enclave helper is missing (step 1).',
+  local_endpoint_invalid: 'Use http://127.0.0.1:<port>/… (this host only).',
+  tee_unavailable: 'The hardware key helper is unavailable (step 1).',
   tee_auth_cancelled: 'Touch ID was cancelled.',
+  tpm_build_failed: 'Building or probing the TPM helper failed. Install Rust, pkg-config and libtss2-dev; ensure this user can access /dev/tpmrm0.',
   enclave_build_failed: 'Building the Secure Enclave helper failed. Install the Xcode command-line tools and retry.',
   sync_in_progress: 'An import is already running.',
   telegram_not_configured: 'Set the question model first (step 3).',
@@ -83,13 +85,13 @@ function HermesModelStep({ check, refresh }) {
     children: [
       jsx('h3', { style: { margin: '0 0 8px' }, children: `${ok ? '✓' : '0'}  Hermes chat model` }),
       ok
-        ? jsx('p', { children: `${check.model} (${check.kind === 'local' ? 'local, this Mac only' : 'Venice private, no retention'})` })
+        ? jsx('p', { children: `${check.model} (${check.kind === 'local' ? 'local, this host only' : 'Venice private, no retention'})` })
         : jsxs(Fragment, {
             children: [
               jsx('p', {
                 children: verifying
                   ? `Could not verify ${check.model} with Venice right now (offline?).`
-                  : `Everything Hermes reads goes to its chat model${check && check.model ? ` (now: ${check.model})` : ''}. For Telegram it must be a Venice private model or a model on this Mac.`,
+                  : `Everything Hermes reads goes to its chat model${check && check.model ? ` (now: ${check.model})` : ''}. For Telegram it must be a Venice private model or a model on this host.`,
               }),
               verifying
                 ? null
@@ -108,13 +110,15 @@ function HermesModelStep({ check, refresh }) {
   })
 }
 
-function EnclaveStep({ done, refresh }) {
+function EnclaveStep({ done, refresh, hardwareKind }) {
+  const linux = hardwareKind === "tpm"
+  const label = linux ? "TPM 2.0" : "Secure Enclave"
   const [busy, setBusy] = useState(false)
   const build = async () => {
     setBusy(true)
     try {
-      await call('/enclave/build', {})
-      host.notify({ kind: 'info', message: 'Building the Secure Enclave helper… this takes a few minutes.' })
+      await call('/hardware/build', {})
+      host.notify({ kind: 'info', message: `Building the ${label} helper… this takes a few minutes.` })
       refresh()
     } catch (e) {
       host.notifyError(e, 'Build failed')
@@ -132,25 +136,25 @@ function EnclaveStep({ done, refresh }) {
   }, [])
   return jsx(Step, {
     n: 1,
-    title: 'Secure Enclave',
+    title: label,
     done,
     children: jsxs(Fragment, {
       children: [
-        jsx('p', { children: 'Your Telegram keys are sealed by a key that never leaves this Mac’s Secure Enclave.' }),
-        jsx(Button, { disabled: busy, onClick: build, children: busy ? 'Building…' : 'Set up the Secure Enclave' }),
+        jsx('p', { children: linux ? 'Telegram keys are bound to this TPM. There is no per-use user-presence prompt or portable recovery. Losing TPM state loses access.' : 'Your Telegram keys are sealed by a key that never leaves this device’s Secure Enclave.' }),
+        jsx(Button, { disabled: busy, onClick: build, children: busy ? 'Building…' : `Set up ${label}` }),
       ],
     }),
   })
 }
 
-function MemoryStep({ done, refresh }) {
+function MemoryStep({ done, refresh, hardwareKind }) {
   const [busy, setBusy] = useState(false)
   const [phrase, setPhrase] = useState(null)
   const [saved, setSaved] = useState(false)
   const enable = async () => {
     setBusy(true)
     try {
-      const r = await call('/memory/enable', {})
+      const r = await call('/memory/enable', { acknowledge_tpm_no_recovery: hardwareKind === 'tpm' })
       if (r.recovery_passphrase) setPhrase(r.recovery_passphrase)
       else refresh()
     } catch (e) {
@@ -193,7 +197,7 @@ function MemoryStep({ done, refresh }) {
     done,
     children: jsxs(Fragment, {
       children: [
-        jsx('p', { children: 'Telegram requires everything Hermes remembers to be encrypted. Touch ID may be requested.' }),
+        jsx('p', { children: hardwareKind === 'tpm' ? 'Memory is encrypted with a TPM-bound key, without per-use user presence or a recovery passphrase. Disable encryption before moving hosts to restore plaintext while the original TPM works. Restart Hermes after setup.' : 'Telegram requires everything Hermes remembers to be encrypted. Hardware approval may be requested.' }),
         jsx(Button, { disabled: busy, onClick: enable, children: busy ? 'Encrypting…' : 'Turn on memory encryption' }),
       ],
     }),
@@ -271,7 +275,7 @@ function TelegramStep({ done, needsApi, refresh }) {
                   children:
                     step === 'code'
                       ? 'Enter the login code Telegram just sent to your Telegram app.'
-                      : 'Enter your Telegram two-step verification password (the "Cloud Password" you set in Telegram → Settings → Privacy and Security). This is not your Mac password or a Mordred passphrase. It is not stored.',
+                      : 'Enter your Telegram two-step verification password (the "Cloud Password" you set in Telegram → Settings → Privacy and Security). This is not your computer password or a Mordred passphrase. It is not stored.',
                 }),
                 jsx(Row, { children: field({ type: 'password', placeholder: step === 'code' ? 'Telegram login code' : 'Telegram password', value: secret, onChange: (e) => setSecret(e.target.value) }) }),
               ],
@@ -351,7 +355,7 @@ function ImportStep({ ready, refresh }) {
   const start = async () => {
     try {
       await call('/sync', { days: Number(days) || 3, include_archived: false })
-      host.notify({ kind: 'info', message: 'Import started. Approve Touch ID if asked.' })
+      host.notify({ kind: 'info', message: 'Import started. Approve a hardware prompt if asked.' })
       poll()
     } catch (e) {
       host.notifyError(e, 'Import failed')
@@ -468,7 +472,7 @@ function UninstallSection() {
       open
         ? jsxs(Fragment, {
             children: [
-              choice('decrypt', 'Decrypt, then uninstall', 'Encrypted files (Hermes memory, .env, config) become normal files again, so Hermes keeps everything. Touch ID may be requested.'),
+              choice('decrypt', 'Decrypt, then uninstall', 'Encrypted files (Hermes memory, .env, config) become normal files again, so Hermes keeps everything. Hardware approval may be requested.'),
               mode === 'decrypt'
                 ? jsxs('label', {
                     style: { display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0 0 24px' },
@@ -496,7 +500,7 @@ function UninstallSection() {
                     disabled: busy || !plan || (deleting && phrase.trim() !== PURGE_PHRASE),
                     onClick: run,
                     children: busy
-                      ? 'Uninstalling… (approve Touch ID if asked)'
+                      ? 'Uninstalling… (approve a hardware prompt if asked)'
                       : mode === 'erase'
                         ? 'Erase and uninstall'
                         : purge
@@ -517,7 +521,7 @@ function SetupPage() {
   const [status, setStatus] = useState(null)
   const refresh = useCallback(async () => {
     try {
-      setStatus(await call('/status'))
+      setStatus(await call('/status?client_version=2'))
     } catch (e) {
       host.notifyError(e, 'Mordred is not reachable. Restart Hermes after installing Mordred.')
     }
@@ -545,26 +549,35 @@ function SetupPage() {
     style: { maxWidth: 720, margin: '24px auto', padding: '0 16px' },
     children: [
       jsx('h2', { children: 'Mordred setup' }),
-      jsx('p', { children: 'Private, read-only Telegram for Hermes. Secrets entered here go only to Mordred on this Mac and are sealed by the Secure Enclave.' }),
+      jsx('p', { children: 'Private, read-only Telegram for Hermes.' }),
       status
-        ? jsxs(Fragment, {
-            children: [
-              jsx(HermesModelStep, { check: status.hermes_model, refresh }),
-              modelOk
-                ? jsxs(Fragment, {
-                    children: [
-                      jsx(EnclaveStep, { done: c.secure_enclave && /helper ready/.test(c.secure_enclave.detail || ''), refresh }),
-                      jsx(MemoryStep, { done: ok('memory_encryption'), refresh }),
-                      jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
-                      ok('privacy_llm')
-                        ? jsx(TelegramStep, { done: loggedIn, needsApi: !status.telegram_api, refresh })
-                        : jsx(Step, { n: 4, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 3).' }) }),
-                      jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
-                    ],
-                  })
-                : jsx('p', { children: 'The remaining steps unlock once Hermes uses a private or local model.' }),
-            ],
-          })
+        ? status.telegram_supported && ["secure_enclave", "tpm"].includes(status.hardware_kind)
+          ? jsxs(Fragment, {
+              children: [
+                jsx('p', { children: 'Secrets entered here go only to Mordred on this host and are sealed by its hardware key.' }),
+                jsx(HermesModelStep, { check: status.hermes_model, refresh }),
+                modelOk
+                  ? jsxs(Fragment, {
+                      children: [
+                        jsx(EnclaveStep, { done: c.hardware?.ok === true, refresh, hardwareKind: status.hardware_kind }),
+                        jsx(MemoryStep, { done: ok('memory_encryption'), refresh, hardwareKind: status.hardware_kind }),
+                        jsx(LlmStep, { done: ok('privacy_llm'), hermesKey: status.hermes_venice_key, refresh }),
+                        ok('privacy_llm')
+                          ? jsx(TelegramStep, { done: loggedIn, needsApi: !status.telegram_api, refresh })
+                          : jsx(Step, { n: 4, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 3).' }) }),
+                        jsx(ImportStep, { ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
+                      ],
+                    })
+                  : jsx('p', { children: 'The remaining steps unlock once Hermes uses a private or local model.' }),
+              ],
+            })
+          : jsxs('section', {
+              role: 'status',
+              children: [
+                jsx('h3', { children: 'Private Telegram setup unavailable' }),
+                jsx('p', { children: MESSAGES.telegram_platform_unsupported }),
+              ],
+            })
         : jsx('p', { children: 'Loading…' }),
       jsx(UninstallSection, {}),
     ],

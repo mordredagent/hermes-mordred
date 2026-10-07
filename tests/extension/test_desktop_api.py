@@ -177,6 +177,7 @@ def test_local_llm_must_be_loopback(env):
 
 
 def test_memory_enable_returns_a_generated_passphrase_once(env, monkeypatch):
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
     calls: list[str] = []
     state = {"on": False}
 
