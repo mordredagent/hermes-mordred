@@ -40,3 +40,15 @@ def _writer(tmp_path: Path) -> PolicyWriter:
         policy_json_path=tmp_path / "mordred" / "policy.json",
         mordred_dir=tmp_path / "mordred",
     )
+
+
+class PlatformSys:
+    """Override a module's OS dispatch while forwarding live argv/stdio state."""
+
+    def __init__(self, platform: str) -> None:
+        self.platform = platform
+
+    def __getattr__(self, name: str):
+        import sys
+
+        return getattr(sys, name)

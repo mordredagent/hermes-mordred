@@ -1658,3 +1658,12 @@ def test_write_private_fsyncs_the_parent_directory(tmp_path: Path, monkeypatch: 
 
     assert str(tmp_path) in opened
     assert len(synced) == 2  # the file and its directory
+
+
+@pytest.fixture(autouse=True)
+def _macos_key_custody_contract(monkeypatch):
+    """These regressions exercise macOS env/vault custody on every CI OS."""
+    import mordred_hermes.keyvault._memory_hook as module
+    from tests._helpers import PlatformSys
+
+    monkeypatch.setattr(module, "sys", PlatformSys("darwin"))

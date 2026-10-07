@@ -332,3 +332,22 @@ class TestRuntimeMemoryEncryptionAvailable:
         runtime_env_injection_available(home=tmp_path, runtime_python=Path("/any/python"))
 
         assert "HERMES_MEMORY_KEY" not in captured["env"]
+
+
+def test_key_probe_uses_hermes_startup_and_sanitizes_failure(tmp_path, monkeypatch):
+    from mordred_hermes.keyvault import _runtime_probe as probe
+
+    def run(args, **kwargs):
+        assert args[0] == "/runtime/python"
+        script = Path(args[1])
+        assert script.name == "hermes"
+        assert script.is_file()
+        assert "HERMES_MEMORY_KEY" not in kwargs["env"]
+        assert kwargs["env"]["HERMES_HOME"] == str(tmp_path)
+        return subprocess.CompletedProcess(args, 35, "synthetic-secret", "synthetic-secret")
+
+    monkeypatch.setenv("HERMES_MEMORY_KEY", "synthetic-secret")
+    monkeypatch.setattr(subprocess, "run", run)
+    ok, reason = probe.runtime_memory_key_available(home=tmp_path, runtime_python=Path("/runtime/python"))
+    assert not ok
+    assert "synthetic-secret" not in reason

@@ -214,3 +214,12 @@ def test_probe_entry_point_exits_zero() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() in {"A", "B", "C"}
+
+
+@pytest.fixture(autouse=True)
+def _macos_key_custody_contract(monkeypatch):
+    """These regressions exercise macOS env/vault custody on every CI OS."""
+    import mordred_hermes.keyvault._memory_hook as module
+    from tests._helpers import PlatformSys
+
+    monkeypatch.setattr(module, "sys", PlatformSys("darwin"))
