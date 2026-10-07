@@ -235,6 +235,26 @@ def memory_runtime_available() -> tuple[bool, str]:
         return False, f"the memory-encryption hook is unusable here: {exc!r}"
 
 
+def _linux_memory_artifact_state(home: Path) -> tuple[bool, str, bool]:
+    """Check all local artifacts without unwrapping or accessing the TPM."""
+    from ..keyvault._exceptions import WrapError
+    from ..keyvault._memory_key import MemoryKeyError, linux_memory_files, memory_key_id, memory_key_path
+    from ..keyvault._storage import _check_dir_mode, safe_read
+    from ..keyvault.memory_crypto import is_sealed
+    from ..keyvault.wrap import _parse_header
+
+    try:
+        path = memory_key_path(home)
+        _check_dir_mode(path.parent)
+        _parse_header(safe_read(path), memory_key_id(home))
+        # Read every entry: short-circuiting on the first plaintext file could
+        # hide a later traversal/read failure and incorrectly report readiness.
+        states = [is_sealed(path.read_bytes()) for path in linux_memory_files(home)]
+    except (OSError, ValueError, WrapError, MemoryKeyError):
+        return False, "TPM memory key or memory files missing, invalid or unreadable", False
+    return True, "", not all(states)
+
+
 def memory_status(*, home: Path, platform: str) -> TargetStatus:
     """Resolve the ``memory`` target from the Mordred markers and the files on disk.
 
@@ -248,8 +268,14 @@ def memory_status(*, home: Path, platform: str) -> TargetStatus:
     optout = memory_optout_marker_path(home).exists()
     available, reason = memory_runtime_available()
     configured = marker or optout
-    active = marker and not optout and available and platform == _DARWIN
-    drift = marker and not optout and bool(_unsealed_memory_files(home))
+    drift = False
+    if platform == "linux" and marker and not optout:
+        artifact_ok, artifact_reason, drift = _linux_memory_artifact_state(home)
+        if not artifact_ok:
+            available, reason = False, artifact_reason
+    elif marker and not optout:
+        drift = bool(_unsealed_memory_files(home))
+    active = marker and not optout and available and platform in (_DARWIN, "linux")
 
     if not configured:
         detail = (
@@ -260,9 +286,15 @@ def memory_status(*, home: Path, platform: str) -> TargetStatus:
     elif optout:
         detail = "disabled — memories are plaintext; re-enable: encryption enable memory"
     elif not available:
-        detail = f"enabled, but {reason} — memories written by this runtime are plaintext"
+        detail = (
+            f"enabled, but {reason} — restore access before using encrypted memory"
+            if platform == "linux"
+            else f"enabled, but {reason} — memories written by this runtime are plaintext"
+        )
     elif drift:
         detail = "enabled, but a plaintext memory file is on disk — reseal with: encryption enable memory"
+    elif platform == "linux":
+        detail = "sealed memory; TPM key configured (live TPM access not checked by status)"
     elif platform != _DARWIN:
         detail = _os_note(False, platform)
     else:

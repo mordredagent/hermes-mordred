@@ -180,7 +180,14 @@ def _restores(ctx: UninstallContext) -> list[Restore]:
         out.append(Restore("config", detail, sealed_away))
     sealed = memory_cli._sealed_memory_files(home)
     if memory_marker_path(home).exists() or sealed:
-        out.append(Restore("memory", f"{len(sealed)} sealed memory file(s) will be decrypted back", bool(sealed)))
+        from ..keyvault._memory_key import memory_key_path
+
+        tpm_memory = ctx.platform == "linux" or memory_key_path(home).exists()
+        out.append(
+            Restore(
+                "memory", f"{len(sealed)} sealed memory file(s) will be decrypted back", bool(sealed) and not tpm_memory
+            )
+        )
     enrolled = ".env" in encryption_cli._enrolled_names(ctx.vault_root)
     plaintext = (home / ".env").exists()
     if enrolled and (not plaintext or not _env_optout_marker_path(home).exists()):
@@ -583,19 +590,40 @@ def _delete_vault_keys(ctx: UninstallContext) -> None:
         )
 
 
+def _purge_tpm_memory(ctx: UninstallContext) -> int:
+    from ..keyvault._memory_key import memory_key_path
+    from . import memory_cli
+
+    wrapped = memory_key_path(ctx.home)
+    if not (wrapped.exists() or wrapped.is_symlink()):
+        return 0
+    # Restore/erase already ran. Remove independent memory custody before
+    # keyvault reset can remove the containing native TPM store.
+    rc = memory_cli.purge(home=ctx.home, root=ctx.vault_root, backend=ctx.backend)
+    if rc != 0:
+        _term.emit_error("TPM memory could not be purged; Mordred data was retained")
+    return rc
+
+
+def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
+    forget = ctx.telegram_forget or _default_telegram_forget
+    try:
+        rc = forget()
+    except Exception as exc:  # e.g. the optional Telegram extra is missing
+        rc = 1
+        _term.emit_warn(f"Telegram logout failed: {exc}")
+    if rc != 0:
+        _term.emit_warn(
+            "the Telegram session could not be revoked here; terminate it in Telegram -> Settings -> Devices."
+        )
+
+
 def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
     """Step e with ``--purge-data``. Returns 1 when the keyvault could not be reset."""
     if plan.telegram_configured:
-        forget = ctx.telegram_forget or _default_telegram_forget
-        try:
-            rc = forget()
-        except Exception as exc:  # e.g. the optional Telegram extra is missing
-            rc = 1
-            _term.emit_warn(f"Telegram logout failed: {exc}")
-        if rc != 0:
-            _term.emit_warn(
-                "the Telegram session could not be revoked here; terminate it in Telegram -> Settings -> Devices."
-            )
+        _forget_telegram_for_uninstall(ctx)
+    if _purge_tpm_memory(ctx) != 0:
+        return 1
     if ctx.vault_root.exists():
         _delete_vault_keys(ctx)
     if (ctx.home / "mordred" / "keyvault").exists():

@@ -1,7 +1,7 @@
 """``hermes-mordred telegram setup`` and ``telegram doctor``.
 
 ``setup`` walks a first-time user through everything in one command: the
-Secure Enclave helper, the Telegram login, the privacy LLM (Venice or a local
+hardware key helper, the Telegram login, the privacy LLM (Venice or a local
 model) and a first import with conservative defaults, then says how to use it
 from Hermes Desktop and the browser extension.
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -54,7 +55,7 @@ def _check_enclave() -> Check:
     try:
         backend = hardware_backend()
     except TelegramSecretsError:
-        return Check("secure_enclave", False, "helper not installed", "hermes-mordred keyvault enable-se")
+        return Check("secure_enclave", False, "helper not installed", _hardware_fix())
     from ..keyvault import wrap
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -65,7 +66,7 @@ def _check_enclave() -> Check:
             "secure_enclave", True, "helper ready; Telegram key not created yet", "hermes-mordred telegram setup"
         )
     except WrapError:
-        return Check("secure_enclave", False, "helper present but not working", "hermes-mordred keyvault enable-se")
+        return Check("secure_enclave", False, "helper present but not working", _hardware_fix())
     return Check("secure_enclave", True, "helper ready; Telegram key present")
 
 
@@ -76,7 +77,7 @@ def _check_credentials(flags: dict[str, Any] | None) -> list[Check]:
         Check(
             "login",
             flags.get("logged_in") is True,
-            "logged in (credentials sealed by the Secure Enclave)" if flags.get("logged_in") else "logged out",
+            "logged in (credentials sealed by device hardware)" if flags.get("logged_in") else "logged out",
             "" if flags.get("logged_in") else "hermes-mordred telegram setup",
         )
     ]
@@ -132,7 +133,13 @@ def _check_memory() -> Check:
         "memory_encryption",
         ok,
         "agent memory sealed" if ok else "agent memory is plaintext (required for Telegram)",
-        "" if ok else "hermes-mordred encryption enable env && hermes-mordred encryption enable memory",
+        ""
+        if ok
+        else (
+            "hermes-mordred encryption enable memory"
+            if sys.platform == "linux"
+            else "hermes-mordred encryption enable env && hermes-mordred encryption enable memory"
+        ),
     )
 
 
@@ -143,9 +150,11 @@ def run_checks() -> list[Check]:
         flags = TeeSecretStore().flags()
     except Exception:
         flags = None
+    hardware = _check_enclave()
     return [
         _check_telethon(),
-        _check_enclave(),
+        hardware,
+        Check("hardware", hardware.ok, hardware.detail, hardware.fix),
         _check_memory(),
         *_check_credentials(flags),
         _check_archive(),
@@ -179,12 +188,13 @@ def _ensure_enclave(input_fn: InputFn) -> bool:
     check = _check_enclave()
     if check.ok:
         return True
-    print("Telegram credentials are sealed by the Secure Enclave. Its helper must be built once (a few minutes).")
-    if not _yes(input_fn, "Build the Secure Enclave helper now?"):
+    label = "TPM 2.0" if sys.platform == "linux" else "Secure Enclave"
+    print(f"Telegram credentials are sealed by {label}. Its helper must be built once (a few minutes).")
+    if not _yes(input_fn, f"Build the {label} helper now?"):
         return False
-    from .keyvault_native_cli import enable_se
+    from .keyvault_native_cli import enable_se, enable_tpm
 
-    return enable_se() == 0
+    return (enable_tpm() if sys.platform == "linux" else enable_se()) == 0
 
 
 def _ensure_memory_encryption(input_fn: InputFn) -> bool:
@@ -192,6 +202,17 @@ def _ensure_memory_encryption(input_fn: InputFn) -> bool:
 
     if memory_encryption_active():
         return True
+    if sys.platform == "linux":
+        print(
+            "Memory and Telegram keys are bound to this TPM, without per-use user presence. "
+            "There is no portable key recovery. Losing TPM state loses access; disable memory "
+            "encryption while the TPM works to restore plaintext before moving hosts."
+        )
+        if not _yes(input_fn, "Turn on TPM memory encryption now?"):
+            return False
+        from .encryption_cli import _dispatch
+
+        return _dispatch("enable", "memory") == 0 and memory_encryption_active()
     print(
         "Telegram requires agent-memory encryption, so nothing Hermes remembers about your chats is stored "
         "in plaintext. This turns on the sealed .env and sealed memory (Touch ID may be requested)."
@@ -218,7 +239,7 @@ def _choose_llm(input_fn: InputFn, secret_fn: InputFn) -> int:
 
     print("Questions are answered by a privacy LLM. Choose one:")
     print("  1) Venice.ai private model (no retention; needs a Venice API key)")
-    print("  2) A model running on this Mac (e.g. Ollama / LM Studio on 127.0.0.1)")
+    print("  2) A model running on this host (e.g. Ollama / LM Studio on 127.0.0.1)")
     choice = input_fn("Choice [1]: ").strip() or "1"
     if choice == "2":
         endpoint = input_fn("Local endpoint (e.g. http://127.0.0.1:11434/v1): ").strip()
@@ -233,12 +254,16 @@ def telegram_setup(
     secret_fn: InputFn = getpass.getpass,
     require_presence: bool = True,
 ) -> int:
-    from .telegram_cli import telegram_login, telegram_sync
+    from .telegram_cli import telegram_login
 
-    print("Mordred Telegram setup — read-only, Secure-Enclave-sealed, Venice/local only.\n")
-    print("Step 1/5  Secure Enclave")
+    if not _supported_platform():
+        return 1
+    label = "TPM 2.0" if sys.platform == "linux" else "Secure Enclave"
+    require_presence = require_presence and sys.platform != "linux"
+    print(f"Mordred Telegram setup — read-only, {label}-sealed, Venice/local only.\n")
+    print(f"Step 1/5  {label}")
     if not _ensure_enclave(input_fn):
-        _term.emit_error("the Secure Enclave helper is required; setup stopped.")
+        _term.emit_error(f"the {label} helper is required; setup stopped.")
         return 1
 
     print("\nStep 2/5  Memory encryption")
@@ -262,6 +287,42 @@ def telegram_setup(
     elif _choose_llm(input_fn, secret_fn) != 0:
         return 1
 
+    if _first_import(input_fn) != 0:
+        return 1
+
+    print(
+        "\nDone. How to use it:\n"
+        "  • Restart Hermes Desktop or the gateway, then ask e.g. “What did we decide on Telegram last week?”.\n"
+        "    The agent uses telegram_ask; approve a hardware prompt if requested.\n"
+        "  • Browser extension: ⚙ → ✈️ Telegram.\n"
+        "  • Health check any time: hermes-mordred telegram doctor"
+    )
+    return 0
+
+
+def cli_setup(args: argparse.Namespace) -> int:
+    return telegram_setup(require_presence=not getattr(args, "no_touch_id", False))
+
+
+def cli_doctor(args: argparse.Namespace) -> int:
+    return telegram_doctor(as_json=bool(getattr(args, "json", False)))
+
+
+def _hardware_fix() -> str:
+    return "hermes-mordred keyvault " + ("enable-tpm" if sys.platform == "linux" else "enable-se")
+
+
+def _supported_platform() -> bool:
+    if sys.platform in ("darwin", "linux"):
+        return True
+    _term.emit_error("Private Telegram requires macOS Secure Enclave or Linux TPM 2.0.")
+    return False
+
+
+def _first_import(input_fn: InputFn) -> int:
+    from ..extension.telegram.tee import TeeSecretStore
+    from .telegram_cli import telegram_sync
+
     print("\nStep 5/5  First import")
     print(
         f"Recommended: the last {DEFAULT_SINCE_DAYS} days of personal chats and groups; archived chats and "
@@ -282,19 +343,4 @@ def telegram_setup(
     else:
         print("Skipped. Run `hermes-mordred telegram sync` any time.")
 
-    print(
-        "\nDone. How to use it:\n"
-        "  • Hermes Desktop: restart it (⌘Q, reopen), then ask e.g. “What did we decide on Telegram last week?”.\n"
-        "    The agent uses telegram_ask; approve the Touch ID prompt.\n"
-        "  • Browser extension: ⚙ → ✈️ Telegram.\n"
-        "  • Health check any time: hermes-mordred telegram doctor"
-    )
     return 0
-
-
-def cli_setup(args: argparse.Namespace) -> int:
-    return telegram_setup(require_presence=not getattr(args, "no_touch_id", False))
-
-
-def cli_doctor(args: argparse.Namespace) -> int:
-    return telegram_doctor(as_json=bool(getattr(args, "json", False)))

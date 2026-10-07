@@ -834,7 +834,38 @@ def _delete_wrapping_keys(
     return failures
 
 
-def reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine is intentionally explicit
+def reset_keyvault(
+    *,
+    home: Path | None = None,
+    backend: NativeBackend | None = None,
+    prompt_io: PromptIO | None = None,
+    assume_yes: bool = False,
+) -> int:
+    """Reset keyvault only after independent TPM memory custody is removed."""
+    from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
+
+    root = _resolve_root(home)
+    resolved_home = root.parent.parent
+    wrapped = memory_key_path(resolved_home)
+    if (sys.platform == "linux" and root.exists()) or wrapped.exists() or wrapped.is_symlink():
+        try:
+            # Same lock as provision/purge: no new memory key can appear between
+            # this guard and recursive removal of its native keyvault/tpm store.
+            with memory_key_lock(resolved_home):
+                if wrapped.exists() or wrapped.is_symlink() or (root.parent / "memory-vault.marker").exists():
+                    _term.emit_error(
+                        "TPM memory depends on this keyvault directory. Run `hermes-mordred encryption purge memory` "
+                        "to restore plaintext and remove its key before keyvault reset. Nothing was deleted."
+                    )
+                    return 1
+                return _reset_keyvault(home=resolved_home, backend=backend, prompt_io=prompt_io, assume_yes=assume_yes)
+        except MemoryKeyError:
+            _term.emit_error("cannot lock TPM memory before keyvault reset; nothing was deleted")
+            return 1
+    return _reset_keyvault(home=resolved_home, backend=backend, prompt_io=prompt_io, assume_yes=assume_yes)
+
+
+def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine is intentionally explicit
     *,
     home: Path | None = None,
     backend: NativeBackend | None = None,

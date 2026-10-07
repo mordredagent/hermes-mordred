@@ -70,6 +70,13 @@ def _secret_store() -> Any:
 
 
 def _report(code: str) -> int:
+    hardware = "TPM" if sys.platform == "linux" else "Secure Enclave"
+    setup = "enable-tpm" if sys.platform == "linux" else "enable-se"
+    memory_setup = (
+        "`hermes-mordred encryption enable memory`"
+        if sys.platform == "linux"
+        else "`hermes-mordred encryption enable env` and `hermes-mordred encryption enable memory`"
+    )
     messages = {
         "vault_not_initialized": "no keyvault file vault exists. Run `hermes-mordred vault init` first: the Telegram "
         "session is an account credential and is only ever stored sealed in the vault.",
@@ -86,14 +93,13 @@ def _report(code: str) -> int:
         "invalid_api_credentials": "api_id must be a number and api_hash a 32-character hex string "
         "(from https://my.telegram.org → API development tools).",
         "sync_in_progress": "another sync is already running.",
-        "tee_unavailable": "the Secure Enclave helper is not available. Run `hermes-mordred keyvault enable-se` "
-        "first: Telegram credentials are only ever sealed by the Secure Enclave (no software fallback).",
+        "tee_unavailable": f"the {hardware} helper is not available. Run `hermes-mordred keyvault {setup}` "
+        "first: Telegram credentials require hardware sealing (no software fallback).",
         "tee_auth_cancelled": "Touch ID / passcode was cancelled, so the credentials stayed sealed.",
         "local_endpoint_invalid": "the local model endpoint must be http(s)://127.0.0.1:<port>/... or "
         "http(s)://[::1]:<port>/... (loopback only, with an explicit port).",
         "memory_encryption_required": "Telegram needs agent-memory encryption on, so nothing Hermes remembers "
-        "about your chats is stored in plaintext. Run `hermes-mordred encryption enable env` and "
-        "`hermes-mordred encryption enable memory`, restart Hermes, then try again "
+        f"about your chats is stored in plaintext. Run {memory_setup}, restart Hermes, then try again "
         "(`hermes-mordred telegram setup` does this for you).",
         "no_legacy_credentials": "there are no vault-stored Telegram credentials to migrate.",
         "telegram_already_logged_in": "a Telegram session is already stored. Run `hermes-mordred telegram logout` "
@@ -185,7 +191,7 @@ def telegram_login(
         _persist(secrets_store, replace(base, session=session), fresh=current is None, snapshot=snapshot)
     except TelegramSecretsError as exc:
         return _report(exc.code)
-    print("Logged in. The session is sealed by the Secure Enclave (credentials.sealed).")
+    print("Logged in. The session is sealed by device hardware (credentials.sealed).")
     print(
         "Telegram will show a new-login notice on your other devices. Keep Two-Step Verification enabled; "
         "revoke this session any time with `hermes-mordred telegram logout` or Settings → Devices."
@@ -420,7 +426,7 @@ def telegram_logout(
         if delete_key is not None:
             with contextlib.suppress(Exception):
                 delete_key()
-        print("Deleted the API credentials, the archive key, the Enclave key, and the local archive.")
+        print("Deleted the API credentials, the archive key, the hardware key, and the local archive.")
     else:
         print("Logged out. The encrypted archive is kept (use --forget to delete it).")
     return 0
@@ -459,7 +465,7 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
         return 1
     except TelegramSecretsError as exc:
         return _report(exc.code)
-    print("Sealed the Venice settings with the Secure Enclave. Only models Venice labels 'private' are used.")
+    print("Sealed the Venice settings with device hardware. Only models Venice labels 'private' are used.")
     print(
         'Under llm_guard strict mode, allow it: set allow_cloud_llm to true and add "venice" to '
         "cloud_provider_allowlist in <home>/mordred/policy.json."
