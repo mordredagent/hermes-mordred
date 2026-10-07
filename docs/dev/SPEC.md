@@ -949,7 +949,8 @@ is actually under test.
 
 ## Linux Private Telegram Design
 
-Status: dedicated-key design approved for implementation on 2026-10-07.
+Status: dedicated-key implementation completed on 2026-10-07; acceptance results
+are recorded below and in the validation log.
 Implementation and EC2 acceptance are recorded in PLAN.md and CI.md; live-account
 acceptance remains separate from synthetic hardware validation.
 
@@ -967,6 +968,10 @@ TPM, and failures to refuse without exposing plaintext or losing keys. A
 mocked platform check or successful helper compilation is insufficient.
 
 ### Current evidence
+
+The following describes the unchanged pre-feature baseline `f3211c6fb`; the
+implementation now supplies the dedicated provider, lifecycle, and Linux UI
+described below. See CI.md for feature acceptance and the pending live-account gate.
 
 - `extension/telegram/tee.py:hardware_backend` already selects the Linux TPM
   helper and excludes software and legacy fallbacks.
@@ -989,8 +994,8 @@ mocked platform check or successful helper compilation is insufficient.
   Python tests, production wrap/unwrap and Telegram credential-store round
   trips, cross-instance key-blob rejection, and stop/start persistence.
   See [the validation log](CI.md#manual-live-device-validation-log).
-  This proves the existing custody path; memory encryption and full private
-  Telegram integration on Linux remain unimplemented.
+  This established the existing custody path before the Linux memory and
+  Telegram integration work.
 
 ### Options and recommendation
 
@@ -1017,7 +1022,8 @@ recovery are outside this feature.
 - Memory remains AES-256-GCM in the existing `memory_crypto` format.
 - A new 32-byte memory key is wrapped with `wrap.wrap_dek`; its existing
   127-byte format is stored at `<home>/mordred/memory-key.wrapped`, mode `0600`.
-  The parent is private (`0700`). Reject symlinks and non-regular files.
+  The parent is private (`0700`); explicit provisioning tightens an existing
+  safe non-private parent to this mode. Reject symlinks and non-regular files.
 - The logical wrapping key ID is `mordred-hermes.memory.v1.` followed by the
   first 16 hex characters of SHA-256 over the canonical absolute Hermes home.
   Native storage uses that home's `mordred/keyvault` root. Another profile may
@@ -1032,7 +1038,8 @@ recovery are outside this feature.
   introduced in the first version: each key resolution follows the live home
   and revalidates the stored material.
 - A valid ambient memory key may be adopted only by explicit enable-time
-  migration, after it authenticates every existing sealed memory. Runtime use
+  migration, after it authenticates every existing sealed memory. Re-enable
+  with an existing wrapped key ignores ambient values, including malformed ones. Runtime use
   of a managed profile never falls back to ambient keys after TPM failure.
 - This is memory-key custody, not a new file-vault anchor. It does not add
   rollback protection to memory snapshots or authenticate a whole-disk state;
@@ -1066,11 +1073,27 @@ remains Darwin-only; only memory opts into Linux. Existing force semantics may
 skip interpreter verification, but never hardware, key-integrity, or migration
 checks. Guided Telegram setup does not use the force option.
 
+Linux hook operations pin the active home, refuse paths from another profile,
+and hold the profile lifecycle lock through managed reads, every write and
+drift-backup publication. Unmanaged reads create no files and require no
+writable Mordred directory; if they observe a seal, it is still authenticated.
+The non-secret lock accepts safe existing non-private directories without
+changing their mode. Disable and purge take the same lock; even disarmed writes
+join it so concurrent enable cannot be followed by a stale plaintext write.
+Re-enable authenticates all existing seals and backups before arming.
+Linux adoption, migration, disable, purge and readiness checks enumerate memory
+files explicitly and refuse traversal/read failures; an inaccessible directory
+is never evidence that no encrypted files remain.
+
 Disable decrypts existing files before disarming, retaining the Linux key for
 re-enable. Purge deletes the Linux key only after successful disable and a
 rescan proving no sealed memory remains. Keep the current refusal on concurrent
 gateway resealing. Uninstall restores memory before removing the runtime hook;
-Telegram logout/forget never deletes the separate memory key.
+Telegram logout/forget never deletes the separate memory key. Keyvault reset
+takes the memory lifecycle lock before its own lock and refuses to remove the
+native store while independent memory custody remains. Uninstall with data
+purge restores or explicitly erases memory, then purges its key before resetting
+the native keyvault store.
 
 Read-only status uses local capability, marker, key-artifact, and plaintext-drift
 checks; it does not unwrap keys. It must distinguish configured protection from
@@ -1084,10 +1107,14 @@ authority when hardware disappears or loses permissions after a status check.
   Keychain-backed vault. macOS retains its existing shared FlowSession.
 - Desktop adds `POST /hardware/build` with OS-aware dispatch. Retain
   `/enclave/build` as the macOS-only compatibility endpoint.
-- Desktop `/status` retains `platform` and `telegram_supported` (whether the
-  platform has an implementation, not whether setup is ready), and adds
+- Desktop `/status?client_version=2` retains `platform` and `telegram_supported`
+  (implementation support for a compatible client, not setup readiness), and adds
   `hardware_kind` (`secure_enclave`, `tpm`, or `null`) and
-  `user_presence_supported`. Unready Linux shows TPM prerequisites and failed
+  `user_presence_supported` and `telegram_platform_supported`. Legacy status
+  requests keep Linux unsupported so old assets cannot promise Secure Enclave
+  or Touch ID behavior. Linux `/memory/enable` requires the new client
+  acknowledgment `acknowledge_tpm_no_recovery: true`, sent only from the button
+  below the displayed recovery limitation. Unready Linux shows TPM prerequisites and failed
   checks; unsupported operating systems still refuse before any mutation.
 - Preserve the existing `secure_enclave` diagnostic field for older clients;
   add a hardware-neutral `hardware` check for new clients and use explicit

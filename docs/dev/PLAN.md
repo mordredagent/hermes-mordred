@@ -322,7 +322,11 @@ TPM helper/libtss2, FastAPI, existing Desktop JavaScript, Ubuntu EC2 and swtpm.
 **Spec:** [Linux Private Telegram Design](SPEC.md#linux-private-telegram-design).
 Status: implementation authorized on 2026-10-07. The separately requested
 unchanged-code NitroTPM baseline (Task 0A) is complete. Component implementation
-and real-device acceptance are in progress on `feat/linux-private-telegram`.
+is complete on `feat/linux-private-telegram`; final real-device acceptance
+is recorded in CI.md. Live-account acceptance and PR publication remain pending.
+Implementation scenarios are covered by the named suites; individual test names
+may differ from the initial plan. References to component PR commits below mean
+local component commits until publication is explicitly selected.
 
 ### Global Constraints
 
@@ -354,13 +358,14 @@ and real-device acceptance are in progress on `feat/linux-private-telegram`.
 **Files:** `docs/dev/SPEC.md`, `PLAN.md`, `TODO.md`, `PATHS.md`.
 **Interfaces:** Produces the approved provider/lifecycle/API contracts below.
 
-- [ ] Review dedicated TPM memory-key custody against the alternative of a full
+- [x] Review dedicated TPM memory-key custody against the alternative of a full
   Linux file-vault port, including lack of portable recovery and freshness.
-- [ ] Finalize proposed support/path language while clearly separating pending
+- [x] Finalize proposed support/path language while clearly separating pending
   work from currently shipped macOS-only support. Preserve all existing headings.
-- [ ] Run `uv run pytest -q tests/test_docs_links.py`; expect all links to pass.
-- [ ] Create the docs-only branch/commit and PR to `dev` before implementation
-  PRs, using the repository's Changes/Fixes convention. Preserve user edits.
+- [x] Run `uv run pytest -q tests/test_docs_links.py`; expect all links to pass.
+- [x] Create the docs-only commit before implementation commits; preserve user edits.
+- [ ] Publish the docs-first and component PRs to `dev`, using the repository's
+  Changes/Fixes convention, after the user selects integration.
 
 ### Task 0A: Verify the unchanged Linux TPM implementation first
 
@@ -439,21 +444,21 @@ Use `MemoryKeyError` for custody failures and retain the cause. Missing hardware
 must never construct a software or Keychain backend. Delete is a low-level
 primitive; only the lifecycle can authorize deletion after memory restoration.
 
-- [ ] Write failing tests `test_tpm_key_survives_new_process`,
+- [x] Write failing tests `test_tpm_key_survives_new_process`,
   `test_two_profiles_have_distinct_keys`, `test_no_software_fallback`,
   `test_corrupt_or_missing_key_never_regenerates`,
   `test_concurrent_enable_publishes_one_key`, and
   `test_publication_failure_preserves_existing_material`. Assert 32-byte keys,
   a 127-byte wrapped blob, mode `0600`/parent `0700`, no plaintext key on disk,
   no symlink following, and unchanged old material on failure.
-- [ ] Run `uv run pytest -q tests/test_keyvault_memory_key.py`; confirm failure
+- [x] Run `uv run pytest -q tests/test_keyvault_memory_key.py`; confirm failure
   because the provider is absent, not because a real TPM was accidentally used.
-- [ ] Implement the interfaces, home-derived identity, explicit TPM helper
+- [x] Implement the interfaces, home-derived identity, explicit TPM helper
   selection, private atomic no-replace publication, and interprocess locking.
   Inspect existing profile-native-ID conventions before finalizing the adapter.
-- [ ] Rerun the new tests plus `tests/test_keyvault_tpm_dispatch.py` and
+- [x] Rerun the new tests plus `tests/test_keyvault_tpm_dispatch.py` and
   `tests/test_keyvault_profile_native_ids.py`; all must pass.
-- [ ] Commit the keyvault slice after Task 2 also passes; no wizard/UI edits in
+- [x] Commit the keyvault slice after Task 2 also passes; no wizard/UI edits in
   this component PR. Document the new path with the contract.
 
 ### Task 2: Keyvault — runtime resolution and actual-interpreter probes
@@ -483,21 +488,21 @@ def runtime_memory_key_available(*, home: Path,
 The latter unwraps through the installed provider and tests a synthetic
 encrypt/decrypt round trip in RAM. It reports only success or a sanitized reason.
 
-- [ ] Add failing tests `test_linux_hook_resolves_live_home_key`,
+- [x] Add failing tests `test_linux_hook_resolves_live_home_key`,
   `test_managed_key_failure_never_falls_back_to_environment`,
   `test_sealed_memory_preserved_without_tpm`,
   `test_linux_hook_installs_before_plugin_registration`,
   `test_linux_probe_rejects_old_provider`, and
   `test_actual_runtime_probe_roundtrip_emits_no_secret`.
   Include safe mode, profile changes, corrupt ciphertext, and a different venv.
-- [ ] Run the four named existing test files with `uv run pytest -q`; capture
+- [x] Run the four named existing test files with `uv run pytest -q`; capture
   the expected new failures before changing the runtime.
-- [ ] Route `_HookConfig.key` through the provider without import-time hardware
+- [x] Route `_HookConfig.key` through the provider without import-time hardware
   access or a process-global key cache. Preserve macOS environment semantics.
   Translate custody failures to the hook's existing fail-closed errors.
-- [ ] Extend Linux capability checks to require provider version 1 and implement
+- [x] Extend Linux capability checks to require provider version 1 and implement
   the RAM-only key probe, including bounded timeout and sanitized output.
-- [ ] Rerun those tests and Task 1 tests. Run the upstream memory canary using
+- [x] Rerun those tests and Task 1 tests. Run the upstream memory canary using
   the installed Hermes seam, not only fakes. Commit the keyvault PR.
 
 ### Task 3: Wizard — Linux memory lifecycle and uninstall
@@ -512,24 +517,24 @@ encrypt/decrypt round trip in RAM. It reports only success or a sanitized reason
 memory caller passes `("darwin", "linux")`. Consume Task 1 custody and Task 2
 probes. Do not enable Linux `.env` or config status as a side effect.
 
-- [ ] Write failing tests `test_linux_enable_never_opens_file_vault`,
+- [x] Write failing tests `test_linux_enable_never_opens_file_vault`,
   `test_key_probe_failure_leaves_marker_and_memories_unchanged`,
   `test_existing_sealed_memory_requires_verified_adoption`,
   `test_disable_reenable_reuses_key`, `test_purge_refuses_concurrent_reseal`,
   `test_uninstall_restores_linux_memory_before_removing_hook`, and
   `test_status_never_unwraps_or_claims_env_support`.
-- [ ] Run those four test files and record the expected new failures.
-- [ ] Implement Linux gates, explicit adoption validation, provision/probe/arm
+- [x] Run those four test files and record the expected new failures.
+- [x] Implement Linux gates, explicit adoption validation, provision/probe/arm
   ordering, and migration through existing sealing helpers. Require the actual
   runtime and identified gateways to pass. A probe bypass never bypasses TPM
   or key validation. Refuse already running incompatible processes.
-- [ ] Implement Linux disable/purge/uninstall through the dedicated provider;
+- [x] Implement Linux disable/purge/uninstall through the dedicated provider;
   retain keys until plaintext restoration succeeds and no sealed files remain.
   Preserve recoverable state and accurate errors after partial failures.
-- [ ] Extend memory status with Linux capability/artifact/drift checks without
+- [x] Extend memory status with Linux capability/artifact/drift checks without
   decrypting. Re-run all four test files and existing encryption status tests.
   Confirm macOS behavior and `.env`/config gate behavior remain unchanged.
-- [ ] Commit this wizard slice together with Task 4 after both pass.
+- [x] Commit this wizard slice together with Task 4 after both pass.
 
 ### Task 4: Wizard — Telegram setup and diagnostics
 
@@ -541,15 +546,15 @@ extend `tests/extension/test_telegram_setup.py` and
 the hardware-neutral `hardware` check while retaining the legacy
 `secure_enclave` check. Reuse existing `enable_tpm()` / `enable_se()`.
 
-- [ ] Add failing tests `test_linux_setup_uses_tpm_and_memory_only`,
+- [x] Add failing tests `test_linux_setup_uses_tpm_and_memory_only`,
   `test_linux_doctor_reports_tpm_without_keychain`,
   `test_linux_setup_explains_presence_and_recovery_limits`, and
   `test_macos_setup_preserves_shared_flow`. Assert no Linux env enrollment,
   Xcode instructions, fake Touch ID promise, or printed secrets.
-- [ ] Run the two named suites, then implement OS-aware setup and remediation.
+- [x] Run the two named suites, then implement OS-aware setup and remediation.
   Explain recovery and unattended TPM access before provisioning. Use host-local
   model wording and platform-appropriate restart instructions.
-- [ ] Rerun both suites and Task 3 tests; commit the wizard PR. Linux CLI support
+- [x] Rerun both suites and Task 3 tests; commit the wizard PR. Linux CLI support
   can now be tested with synthetic fixtures before Desktop changes land.
 
 ### Task 5: Desktop/extension — Linux setup and compatibility
@@ -564,17 +569,17 @@ Keep `/enclave/build` Darwin-only. Implement the status metadata and Linux
 memory-enable response contract from the design; preserve existing errors on
 unsupported operating systems and macOS compatibility behavior.
 
-- [ ] Add failing tests `test_linux_hardware_build_dispatches_tpm`,
+- [x] Add failing tests `test_linux_hardware_build_dispatches_tpm`,
   `test_linux_memory_enable_does_not_create_vault_passphrase`,
   `test_linux_status_separates_platform_support_from_readiness`,
   `test_unsupported_platform_has_no_setup_side_effects`, and
   `test_old_client_or_missing_metadata_fails_safely`.
-- [ ] Run the four named suites, then implement API and page changes. Select
+- [x] Run the four named suites, then implement API and page changes. Select
   hardware labels and build errors from explicit metadata; eliminate English
   text matching as a readiness predicate. Retain all Telegram privacy gates.
-- [ ] Rerun the four suites. Check JavaScript syntax with
+- [x] Rerun the four suites. Check JavaScript syntax with
   `node --input-type=module --check < src/mordred_hermes/desktop/assets/desktop/plugin.js`.
-- [ ] Exercise the actual packaged Desktop in Task 6, then commit this slice.
+- [x] Exercise the actual packaged Desktop in Task 6, then commit this slice.
   Update `docs/user/TELEGRAM.md` and related user-facing claims only with the
   supported/tested hardware scope and explicit recovery limitation.
 
@@ -591,48 +596,48 @@ validation PR, after component PRs.
 drives `TelegramService`; no account or model credentials are required for the
 repeatable path. Native TPM tests retain `MORDRED_TPM_TEST=1` / `TCTI` conventions.
 
-- [ ] Recover the earlier AWS profile, instance ID, SSH key path, and host-key
+- [x] Recover the earlier AWS profile, instance ID, SSH key path, and host-key
   evidence from local validation artifacts; inspect instance/AMI TPM state.
   This planning pass already found the stopped instance and absent TPM support.
-- [ ] At feature execution time reuse the NitroTPM instances from Task 0A,
+- [x] At feature execution time reuse the NitroTPM instances from Task 0A,
   refresh their public
   IP and restricted SSH ingress if necessary, and verify its host key. Create a
   new checkout and test home; preserve the earlier Desktop build and evidence.
-- [ ] Use Task 0A's unchanged Linux baseline for comparison and capture each
+- [x] Use Task 0A's unchanged Linux baseline for comparison and capture each
   feature build's interpreter/package paths.
   Install only CI extras in one venv (`dev,keyvault,extension`), and include
   `telegram` in a separate feature/integration venv.
-- [ ] After Tasks 1–2, run TPM wrap/read/write across fresh processes on actual
+- [x] After Tasks 1–2, run TPM wrap/read/write across fresh processes on actual
   NitroTPM; keep an additional swtpm run as hermetic CI coverage.
   After Tasks 3–4, enable, seal, restart Hermes, read/write, disable/re-enable,
   and purge synthetic memory. Assert no plaintext/key leaks and no fallback on
   emulator loss, wrong profile, corrupt key, or unsupported memory seam.
-- [ ] After Task 5, verify the packaged Desktop page, TPM build action, memory
+- [x] After Task 5, verify the packaged Desktop page, TPM build action, memory
   setup, diagnostics, and restart. Install into Desktop's actual interpreter,
   compare installed asset hashes, and retain screenshots. Reuse the previous
   Xvfb/Openbox setup with software rendering where needed. Tunnel loopback
   services; do not expose Desktop, TPM emulator, or gateway ports publicly.
-- [ ] Reuse the verified NitroTPM targets and AMI from Task 0A; provision a
+- [x] Reuse the verified NitroTPM targets and AMI from Task 0A; provision a
   replacement only if they are unavailable, with a reviewed launch configuration.
   Use encrypted EBS, scoped access, tags, and bounded test lifetime. Probe P-256/ECDH and run the
   same custody/lifecycle tests against the device, without an emulator `TCTI`.
   A copied disk without original TPM state must not open sealed material.
-- [ ] Run synthetic Telegram sync/list/ask/cancel through CLI/service, extension,
+- [x] Run synthetic Telegram sync/list/ask/cancel through CLI/service, extension,
   and Desktop boundaries with real TPM custody. Check read-only RPC enforcement,
   encrypted archive files, sealed memory, and Venice/local-only routing.
 - [ ] Run the separate operator-assisted live Telegram acceptance flow: login,
   minimal read-only sync, one question, cancellation, and logout. Record a
   pending gate if credentials or an eligible account are unavailable; never
   report synthetic success as live account success.
-- [ ] Run `uv run pytest -q`, Ruff check/format, strict mypy with reduced extras,
+- [x] Run `uv run pytest -q`, Ruff check/format, strict mypy with reduced extras,
   `shellcheck scripts/*.sh native/*/build.sh`, and coverage (at least 80%) on
   Linux. Run relevant macOS regressions and gated Secure Enclave validation if
   shared hardware behavior changed. Use the existing CI Python 3.11–3.13 matrix.
-- [ ] Self-review the plan's five failure modes against results; request an
+- [x] Self-review the plan's five failure modes against results; request an
   independent implementation review under the execution skill before merging.
   Store sanitized evidence and separate emulator/NitroTPM/live-account results
   in the CI manual log; update pending TODO items only when their gates pass.
-- [ ] Stop task-owned EC2 instances, verify final states, and report residual
+- [x] Stop task-owned EC2 instances, verify final states, and report residual
   volumes/AMIs and any incomplete acceptance gates. Never delete earlier test
   resources or existing accounts/data as an implicit cleanup step.
 
@@ -641,8 +646,8 @@ repeatable path. Native TPM tests retain `MORDRED_TPM_TEST=1` / `TCTI` conventio
 The plan covers custody, early runtime behavior, lifecycle, UI compatibility,
 documentation, and actual EC2 validation. Task 0A verifies the existing TPM
 implementation before any new memory or Telegram behavior is implemented.
-The current decision to review is
-the dedicated Linux key versus a full file-vault port. Recommended execution
-is native/in-session, sequentially across component boundaries. Product code
-is unchanged. Task 0A used isolated AWS resources at the user's explicit request;
-the remaining feature tasks still await design review.
+The dedicated Linux key was selected and implemented inline, sequentially
+across component boundaries. One independent whole-branch review found four
+security/compatibility issues; regression tests reproduced each before the
+fixes. The final validation log distinguishes actual NitroTPM, swtpm, synthetic
+Telegram, and the pending operator-assisted live-account gate.
