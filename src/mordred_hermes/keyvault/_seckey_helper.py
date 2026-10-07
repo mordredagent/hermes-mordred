@@ -323,10 +323,15 @@ def _run_helper(
     if not isinstance(response, dict):
         raise _OpsError(-1, "helper", f"helper returned non-object JSON: {response!r}")
 
-    error = response.get("error")
-    if isinstance(error, dict):
+    if "error" in response:
+        error = response["error"]
+        if not isinstance(error, dict):
+            raise _OpsError(-1, "helper", "helper returned an invalid error object")
+        status = error.get("status", -1)
+        if not isinstance(status, int) or isinstance(status, bool):
+            raise _OpsError(-1, "helper", "helper returned an invalid error status")
         raise _OpsError(
-            int(error.get("status", -1)),
+            status,
             str(error.get("domain", "helper")),
             str(error.get("message", "")),
             reason=_normalize_reason(error.get("reason")),
@@ -406,7 +411,9 @@ class _HelperSecKeyOps:
 
     def delete_key(self, tag: bytes) -> None:
         # The helper treats errSecItemNotFound as success, so this is idempotent.
-        self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
+        response = self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
+        if response.get("ok") is not True:
+            raise _OpsError(-1, "helper", "helper did not acknowledge deletion")
 
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
         response = self._invoke(
@@ -415,7 +422,9 @@ class _HelperSecKeyOps:
         return _hex_field(response, "shared_hex")
 
     def probe(self) -> None:
-        self._invoke({"cmd": "probe"})
+        response = self._invoke({"cmd": "probe"})
+        if response.get("ok") is not True:
+            raise _OpsError(-1, "helper", "helper did not pass the probe")
 
 
 def _helper_ops_or_none(find: Callable[[], str | None]) -> _HelperSecKeyOps | None:

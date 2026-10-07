@@ -98,3 +98,38 @@ def test_winkey_process_timeout() -> None:
         pytest.raises(_OpsError, match="timed out"),
     ):
         helper._run_helper("C:/test/helper.exe", {"cmd": "probe"})
+
+
+@pytest.mark.parametrize(
+    "response", [{}, {"ok": False}, {"ok": 1}, {"ok": "true"}, {"error": "failure"}, {"error": None}]
+)
+@pytest.mark.parametrize("command", ["probe", "delete"])
+def test_winkey_requires_boolean_success(response: dict[str, object], command: str) -> None:
+    with (
+        patch.object(
+            helper.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(response).encode(), b""),
+        ),
+        pytest.raises(_OpsError),
+    ):
+        ops = helper._HelperSecKeyOps("C:/test/helper.exe")
+        if command == "probe":
+            ops.probe()
+        else:
+            ops.delete_key(b"synthetic-key")
+
+
+@pytest.mark.parametrize("status", ["bad", None, [], {}, True, 1.5])
+def test_winkey_invalid_status_is_classified(status: object) -> None:
+    response = {"error": {"status": status, "reason": "UNAVAILABLE"}}
+    with (
+        patch.object(
+            helper.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1, json.dumps(response).encode(), b""),
+        ),
+        pytest.raises(_OpsError) as caught,
+    ):
+        helper._run_helper("C:/test/helper.exe", {"cmd": "probe"})
+    assert caught.value.domain == "helper" and caught.value.status == -1
