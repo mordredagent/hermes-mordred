@@ -38,6 +38,7 @@ Heavy imports stay function-local so this module imports on any platform.
 from __future__ import annotations
 
 import io
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -226,8 +227,10 @@ def _enable_gate_reason(*, home: Path, root: Path, platform: str) -> str | None:
             f"{reason} — refusing to arm the hook. Use `hermes-mordred vault set-memory-key` to store the key "
             "anyway (it seals nothing on its own)."
         )
+    if platform == "linux":
+        return None
     if platform != _DARWIN:
-        return f"the memory-sealing runtime shims are macOS-only (this is {platform}); memories stay plaintext here."
+        return f"memory encryption is unsupported on {platform}."
     if not _env_target_ready(home=home, root=root):
         return (
             "memory encryption rides on the env target (the key is injected by the .env shim) — "
@@ -262,6 +265,7 @@ def _runtime_gate(*, home: Path, platform: str, force_runtime_unverified: bool) 
         runtime_probe=None,
         force_runtime_unverified=force_runtime_unverified,
         default_probe=_default_runtime_probe,
+        supported_platforms=("darwin", "linux"),
         target="agent memory",
         mechanism=(
             "  Sealed memory files are opened only by the mordred keyvault plugin in the\n"
@@ -341,7 +345,10 @@ def _seal_plaintext_files(home: Path, *, key: bytes) -> tuple[int, list[str]]:
 
     sealed = 0
     failures: list[str] = []
-    for path in _memory_file_paths(home):
+    from ..keyvault._memory_key import linux_memory_files
+
+    paths = linux_memory_files(home) if _uses_tpm_memory(home) else _memory_file_paths(home)
+    for path in paths:
         if path.is_symlink():
             failures.append(f"{path.name}: is a symlink — refusing to follow it")
             continue
@@ -429,9 +436,22 @@ def enable(
     if reason is not None:
         return _refuse("enable", reason)
 
+    if resolved == "linux" and not force_runtime_unverified:
+        from ..keyvault._runtime_probe import discover_running_gateway_runtimes
+
+        if discover_running_gateway_runtimes(home=home):
+            return _refuse(
+                "enable",
+                "stop running Hermes gateways before enabling TPM memory, then restart them; "
+                "a new subprocess cannot prove which hook an existing process has loaded",
+            )
+
     gate = _runtime_gate(home=home, platform=resolved, force_runtime_unverified=force_runtime_unverified)
     if gate != 0:
         return gate
+
+    if resolved == "linux":
+        return _enable_linux(home=home, backend=backend, force_runtime_unverified=force_runtime_unverified)
 
     rc, key = _ensure_key(root=root, prompt_io=prompt_io, backend=backend, store=store, flow_session=flow_session)
     if rc != 0 or key is None:
@@ -486,6 +506,13 @@ def _memory_key_from_vault(
         return None
 
 
+def _uses_tpm_memory(home: Path) -> bool:
+    from ..keyvault._memory_key import memory_key_path
+
+    path = memory_key_path(home)
+    return sys.platform == "linux" or path.exists() or path.is_symlink()
+
+
 def _sealed_memory_files(home: Path) -> list[Path]:
     """Memory files that are sealed right now (mostly the complement of the drift scan).
 
@@ -500,8 +527,16 @@ def _sealed_memory_files(home: Path) -> list[Path]:
     ``disable``'s normal ``_unseal_files`` instead makes ``unseal`` fail on it
     loudly and ``disable`` refuse, which is the safe outcome.
     """
+    from ..keyvault._memory_key import linux_memory_files
     from ..keyvault.memory_crypto import looks_like_magic_line
     from .encryption_cli import _memory_file_paths, _unsealed_memory_files
+
+    if _uses_tpm_memory(home):
+        return [
+            path
+            for path in linux_memory_files(home)
+            if looks_like_magic_line(path.read_bytes().decode("utf-8", "surrogateescape"))
+        ]
 
     plaintext = set(_unsealed_memory_files(home))
     sealed = []
@@ -565,6 +600,25 @@ def disable(
     store: AnchorStore | None = None,
     flow_session: FlowSession | None = None,
 ) -> int:
+    from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
+
+    if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
+        try:
+            with memory_key_lock(home):
+                return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+        except MemoryKeyError:
+            return _refuse("disable", "TPM memory lifecycle lock unavailable; existing state preserved")
+    return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+
+
+def _disable(
+    *,
+    home: Path,
+    root: Path,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
+) -> int:
     """Decrypt every sealed memory file back and pause the hook (reversible).
 
     ``flow_session`` (``uninstall``) lends the flow's already open vault, so the
@@ -585,8 +639,17 @@ def disable(
     """
     sealed_paths = _sealed_memory_files(home)
     decrypted = 0
+    key: bytes | None
     if sealed_paths:
-        key = _memory_key_from_vault(root=root, backend=backend, store=store, flow_session=flow_session)
+        from ..keyvault._memory_key import MemoryKeyError, load_linux_memory_key, memory_key_path
+
+        if memory_key_path(home).exists() or memory_key_path(home).is_symlink() or sys.platform == "linux":
+            try:
+                key = load_linux_memory_key(home=home, backend=backend)
+            except MemoryKeyError:
+                return _refuse("disable", "TPM memory key unavailable; restore the original TPM and wrapped key")
+        else:
+            key = _memory_key_from_vault(root=root, backend=backend, store=store, flow_session=flow_session)
         if key is None:
             return _refuse(
                 "disable",
@@ -618,8 +681,7 @@ def disable(
     _clear_legacy_flag(home)
     _warn_gateways(home, enabling=False)
     print(
-        f"Agent-memory encryption disabled ({decrypted} file(s) decrypted back to plaintext; "
-        "key kept in the vault for re-enable)."
+        f"Agent-memory encryption disabled ({decrypted} file(s) decrypted back to plaintext; key kept for re-enable)."
     )
     return 0
 
@@ -639,6 +701,22 @@ def purge(
     refuses the purge too. Returns 0 on success, 1 on that refusal or a vault
     open / re-enroll failure.
     """
+    from ..keyvault._memory_key import MemoryKeyError, delete_linux_memory_key, memory_key_lock, memory_key_path
+
+    if memory_key_path(home).exists() or memory_key_path(home).is_symlink() or sys.platform == "linux":
+        try:
+            with memory_key_lock(home):
+                rc = disable(home=home, root=root, backend=backend, store=store)
+                if rc != 0 or _sealed_memory_files(home):
+                    return _refuse("purge", "sealed memory remains; stop running gateways before retrying")
+                delete_linux_memory_key(home=home, backend=backend)
+                memory_marker_path(home).unlink(missing_ok=True)
+                memory_optout_marker_path(home).unlink(missing_ok=True)
+            print("TPM memory key purged. Old encrypted backups are no longer recoverable.")
+            return 0
+        except MemoryKeyError:
+            return _refuse("purge", "TPM memory key could not be removed")
+
     from ..keyvault import anchor, vault
     from . import vault_cli
 
@@ -670,3 +748,41 @@ def purge(
         "Memories encrypted under the old key can no longer be decrypted."
     )
     return 0
+
+
+def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_unverified: bool) -> int:
+    from ..keyvault._memory_key import MemoryKeyError, ensure_linux_memory_key, memory_key_lock, memory_key_path
+    from ..keyvault._runtime_probe import runtime_memory_key_available
+    from ..keyvault.memory_crypto import MemoryCryptoError, decode_key
+
+    print(
+        "Linux memory uses a machine-bound TPM key without per-use user presence. "
+        "There is no portable recovery: losing the TPM loses encrypted memory. "
+        "Disable encryption while the TPM is usable to restore plaintext first."
+    )
+    try:
+        with memory_key_lock(home):
+            path = memory_key_path(home)
+            # Ambient input is only for initial adoption, never an existing TPM key.
+            value = None if path.exists() or path.is_symlink() else os.environ.get(_MEMORY_KEY_ENV)
+            adopted = decode_key(value) if value else None
+            key = ensure_linux_memory_key(home=home, adopted_key=adopted, backend=backend)
+            # The generic capability gate already ran before provisioning. This second
+            # gate proves unwrapping in the installed Hermes and identified gateways.
+            gate = runtime_gate(
+                home=home,
+                platform="linux",
+                supported_platforms=("darwin", "linux"),
+                runtime_probe=None,
+                default_probe=runtime_memory_key_available,
+                force_runtime_unverified=force_runtime_unverified,
+                target="TPM agent memory",
+                mechanism="The Hermes runtime must access this profile's TPM memory key.\n",
+                rerun_tail="Install this build in that runtime, restore TPM access and retry.\n",
+            )
+            if gate:
+                return gate
+            _arm(home)
+            return _finish_enable(home=home, key=key)
+    except (MemoryKeyError, MemoryCryptoError):
+        return _refuse("enable", "TPM memory key unavailable or invalid; existing memory and markers are preserved")

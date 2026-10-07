@@ -139,8 +139,9 @@ class TestRefusalMessage:
         err = capsys.readouterr().err
         assert "refusing to vault-seal thing.yaml — no shim.\n" in err
         assert _MECHANISM in err
-        assert "  Install the published package into that interpreter:\n" in err
-        assert (f"    uv pip install --python {sys.executable} 'hermes-mordred[macos]>=0.1.0a16'\n") in err
+        assert "  Install the matching Mordred build into that interpreter:\n" in err
+        extra = "macos" if sys.platform == "darwin" else "keyvault,telegram"
+        assert (f"    uv pip install --python {sys.executable} 'hermes-mordred[{extra}]'\n") in err
         assert _TAIL in err
 
     def test_runtime_python_falls_back_under_home(
@@ -276,7 +277,8 @@ class TestRunningGatewayCheck:
         assert "a hermes gateway is RUNNING from a different" in err
         assert f"{foreign} (pid 4242)" in err
         assert "no mordred in that venv" in err
-        assert f"    uv pip install --python {foreign} 'hermes-mordred[macos]>=0.1.0a16'\n" in err
+        extra = "macos" if sys.platform == "darwin" else "keyvault,telegram"
+        assert f"    uv pip install --python {foreign} 'hermes-mordred[{extra}]'\n" in err
         assert _MECHANISM in err
         assert _TAIL in err  # the force/re-run guidance still closes the message
 
