@@ -75,6 +75,38 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Packaged Hermes Desktop validated on Ubuntu EC2.**
+  Built the official Hermes release `v2026.9.24` (`f97608f178d1`, Agent
+  0.21.5 / Desktop 0.17.6 / Electron 40.10.2) with `hermes desktop
+  --build-only` on the same Ubuntu 24.04.5 x86_64 instance. Installed Mordred
+  commit `2c7073576` into the Python environment used by Desktop, with a
+  separate `HERMES_HOME` and Desktop user-data directory. Ran the packaged
+  Electron application under Xvfb/Openbox and inspected it through VNC over
+  an SSH tunnel. The app mounted `/api/plugins/mordred/`, loaded the Mordred
+  sidebar page, and displayed "Private Telegram requires macOS" without
+  Secure Enclave or memory-encryption setup buttons or an Xcode error.
+  The same page and platform guard remained visible after restarting the app
+  and its backend. The installed page's SHA-256 matched the source asset.
+  The virtual display produced a GPU command-buffer error during initial startup; the test used
+  `desktop.electron_flags: ["--disable-gpu"]` for software rendering.
+  No model credentials, Telegram login, or hardware-key operations were used.
+- **2026-10-07 — Desktop Telegram platform guard validated on Ubuntu EC2.**
+  Ubuntu 24.04.5 x86_64, Python 3.12.3, in `ap-southeast-1`, with an isolated
+  `HERMES_HOME`. Before the fix, `/enclave/build` returned a job that failed
+  with `enclave_build_failed`; the native command rejected Linux before
+  checking the build tools. The actual Desktop plugin rendered in a temporary
+  React/SDK harness against the EC2 API reproduced the misleading Xcode toast.
+  After the fix, `/status` reported `platform=linux` and
+  `telegram_supported=false`; the page displayed the macOS requirement with
+  no Secure Enclave or memory-encryption setup buttons. Direct HTTP requests
+  to both setup endpoints returned `telegram_platform_unsupported` without
+  starting a job. The 12 platform tests had 10 expected failures before the
+  fix; all 115 platform, Desktop API, and native-helper CLI tests passed after
+  it. The full unit suite passed on Ubuntu (5,079 passed, 21 skipped) and
+  macOS (5,173 passed, 5 skipped), with 31 integration tests deselected on
+  each. Ruff, formatting, strict mypy with the Linux extras, and shellcheck
+  passed. This checks the Ubuntu runtime and plugin UI, not a full Hermes
+  Desktop installation, a live Telegram account, or TPM hardware operations.
 - **2026-05-25 — passed on real devices**:
   - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v`
   - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v`
