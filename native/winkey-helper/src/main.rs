@@ -1,14 +1,15 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
-use winkey_helper::{
-    ops::UnavailableOps,
-    wire::{dispatch, read_request, Response},
-};
+#[cfg(windows)]
+use winkey_helper::cng::CngOps as PlatformOps;
+#[cfg(not(windows))]
+use winkey_helper::ops::UnavailableOps as PlatformOps;
+use winkey_helper::wire::{dispatch, read_request, Response};
 use zeroize::Zeroize;
 
 fn main() -> ExitCode {
     let response = match read_request(io::stdin().lock()) {
-        Ok(request) => dispatch(request, &mut UnavailableOps),
+        Ok(request) => dispatch(request, &mut PlatformOps),
         Err(error) => Response::from_error(error),
     };
     let failed = response.is_error();

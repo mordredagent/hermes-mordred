@@ -16,7 +16,11 @@ sha2 = "0.10"
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+p256 = { version = "0.13", features = ["ecdh"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [profile.release]
 strip = true
