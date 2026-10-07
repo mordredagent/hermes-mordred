@@ -361,7 +361,7 @@ add-first with the new repository claim while preserving `release.yml` and the
 4. Dispatch TestPyPI from `main` with `mode=release` and the exact expected
    version.
 5. In a fresh venv, install `hermes-mordred` from TestPyPI (using PyPI as the
-   dependency index) and verify six-entry-point discovery plus
+   dependency index) and verify the single `mordred` plugin entry point plus
    `hermes-mordred --version`.
 6. Dispatch TestPyPI with `mode=compat`; install `mordred-hermes` in another
    fresh venv, verify that it resolves the matching canonical package, then
