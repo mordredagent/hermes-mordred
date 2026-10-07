@@ -410,7 +410,7 @@ class _HelperSecKeyOps:
         return _hex_field(response, "public_key_hex")
 
     def delete_key(self, tag: bytes) -> None:
-        # The helper treats errSecItemNotFound as success, so this is idempotent.
+        # Acknowledge deletion or confirmed absence; ambiguous native state refuses.
         response = self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
         if response.get("ok") is not True:
             raise _OpsError(-1, "helper", "helper did not acknowledge deletion")

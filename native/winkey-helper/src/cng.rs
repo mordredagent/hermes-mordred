@@ -241,10 +241,14 @@ impl KeyOps for CngOps {
         let provider = provider()?;
         match open(&provider, &name) {
             Ok(key) => key.delete(),
-            Err(error) if error.reason == Some(Reason::NotFound) => {
-                // BAD_KEYSET also occurs under an incapable SSH/S4U token. Do not
-                // claim successful deletion until this token can use the provider.
-                self.probe()
+            Err(mut error) if error.reason == Some(Reason::NotFound) => {
+                // PCP returns BAD_KEYSET for both absence and a retained key
+                // bound to another TPM. Enumeration also omits inaccessible keys,
+                // and a fresh-key probe can succeed there: neither proves absence.
+                // Preserve the cause and refuse to falsely acknowledge removal.
+                error.reason = Some(Reason::Unavailable);
+                error.message = "key absent or inaccessible; deletion was not performed";
+                Err(error)
             }
             Err(error) => Err(error),
         }

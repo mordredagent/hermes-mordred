@@ -79,3 +79,39 @@ def test_compiled_helper_production_wrap(tmp_path: Path, monkeypatch: pytest.Mon
     finally:
         if generated:
             backend.delete_enclave_key(key_id)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MORDRED_WINKEY_INACCESSIBLE_TAG"),
+    reason="requires an explicitly scoped retained key on a second TPM",
+)
+def test_retained_inaccessible_key_delete_refuses() -> None:
+    """Run only against a disposable cloned-disk fixture; never a production key."""
+    import hashlib
+
+    from mordred_hermes.keyvault._seckey_errors import _OpsError
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    binary = find_winkey_helper()
+    assert binary is not None
+    ops = _HelperSecKeyOps(binary)
+    tag = bytes.fromhex(os.environ["MORDRED_WINKEY_INACCESSIBLE_TAG"])
+    with pytest.raises(_OpsError) as opened:
+        ops.copy_public_key(tag)
+    assert opened.value.status == 0x80090016
+    # Establish the counterexample: this token/TPM can use newly created keys.
+    ops.probe()
+    store = Path(os.environ["LOCALAPPDATA"]) / "Microsoft/Crypto/PCPKSP"
+
+    def snapshot() -> dict[str, str]:
+        return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in store.rglob("*") if path.is_file()}
+
+    before = snapshot()
+    assert before
+    try:
+        with pytest.raises(_OpsError) as deleted:
+            ops.delete_key(tag)
+        assert deleted.value.status == opened.value.status
+        assert deleted.value.reason == "UNAVAILABLE"
+    finally:
+        assert snapshot() == before, "refused deletion must preserve retained key files"

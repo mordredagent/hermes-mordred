@@ -91,3 +91,27 @@ def test_windows_running_destination_retains_existing(source: Path, installed: P
         assert list(installed.parent.iterdir()) == [installed]
     finally:
         child.communicate(b'{"cmd":"unknown"}', timeout=15)
+
+
+def test_windows_default_home_unicode_independent_of_codepage(source: Path, tmp_path: Path) -> None:
+    home = tmp_path / "default Hermes 日本語"
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(source / "build.ps1"),
+            "-Python",
+            sys.executable,
+        ],
+        env={**os.environ, "HERMES_HOME": str(home), "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (home / "bin/mordred-hermes-winkey.exe").read_bytes()[:2] == b"MZ"

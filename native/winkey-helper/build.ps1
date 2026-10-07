@@ -9,10 +9,11 @@ $temporary = $null
 try {
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Windows is required.' }
     if (-not $InstallDir) {
-        $resolve = "from mordred_hermes._home import hermes_home; print(hermes_home().joinpath('bin'))"
+        # ASCII JSON preserves Unicode paths across Python/PowerShell code pages.
+        $resolve = "import json; from mordred_hermes._home import hermes_home; print(json.dumps(str(hermes_home().joinpath('bin'))))"
         $resolved = @(& $Python -c $resolve)
         if ($LASTEXITCODE -ne 0 -or $resolved.Count -ne 1) { throw 'Cannot resolve the Hermes home with the selected Python.' }
-        $InstallDir = [string]$resolved[0]
+        $InstallDir = [string]($resolved[0] | ConvertFrom-Json)
     }
     if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'InstallDir must be an absolute path.' }
     $InstallDir = [IO.Path]::GetFullPath($InstallDir)

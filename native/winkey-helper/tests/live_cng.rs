@@ -132,7 +132,10 @@ fn live_creation_duplicate_reopen_ecdh_invalid_peer_and_deletion() {
     let (ok, missing) = request(json!({"cmd":"public_key","tag_hex":key.tag}));
     assert!(!ok);
     assert_eq!(missing["error"]["reason"], "NOT_FOUND");
-    success(json!({"cmd":"delete","tag_hex":key.tag}));
+    let (ok, repeated) = request(json!({"cmd":"delete","tag_hex":key.tag}));
+    assert!(!ok, "PCP cannot prove absence from an inaccessible keyset");
+    assert_eq!(repeated["error"]["reason"], "UNAVAILABLE");
+    assert_eq!(repeated["error"]["status"], missing["error"]["status"]);
     println!("independent ECDH comparisons={comparisons}; leading-zero case passed");
 }
 

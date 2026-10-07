@@ -9,7 +9,9 @@ Windows support for Mordred's filesystem, memory, network, wizard, or Desktop.
 ## Build and install
 
 Install Rust MSVC (minimum 1.85), Visual Studio C++ Build Tools and a Windows
-SDK. From PowerShell, with the intended Hermes Python environment available:
+SDK. The source directory must be writable for Cargo build artifacts (use a
+user-owned Hermes virtual environment for bundled sources). From PowerShell,
+with the intended Hermes Python environment available:
 
 ```powershell
 .\build.ps1 -Python C:\path\to\venv\Scripts\python.exe
@@ -48,8 +50,12 @@ sessions (30-second timeout, no unlocked fallback). The tested TPM's native
 create/finalize pair alone allowed competing creations despite no overwrite
 flag. Probe uses its own random key, performs ECDH and requires successful
 cleanup. `NOT_FOUND` can also mean an inaccessible keyset under the current
-token; it is never permission to automatically regenerate a key. Missing-key
-deletion probes the current token before reporting idempotent success.
+token; it is never permission to automatically regenerate a key. Deletion must
+open and delete the exact key. An unopenable keyset returns `UNAVAILABLE` with
+the original status, including repeat deletion after successful removal. PCP
+enumeration omitted inaccessible retained keys in the actual cloned-disk test;
+neither enumeration nor a successful fresh-key probe can establish absence.
+Windows therefore does not promise success-on-missing deletion idempotency.
 
 Windows CNG `TRUNCATE` raw ECDH is little-endian: the helper reverses all 32 bytes,
 preserving leading zeros for the existing MRKW format. Private export policy

@@ -1223,7 +1223,14 @@ by the successful initial AWS wire-format experiment.
   Reject empty, odd-length, non-hex tags and tags larger than 256 decoded bytes
   before calling CNG; a
   4 KiB UTF-8 request limit bounds the new helper. Generation must not overwrite
-  an existing key. Deletion is idempotent and must respect lifecycle guards.
+  an existing key. Deletion must respect lifecycle guards. A successful Windows
+  deletion requires opening and deleting the exact key. An unopenable keyset
+  returns `UNAVAILABLE` with the original native status, even on a repeated
+  delete after successful removal. Actual PCP testing could not distinguish
+  absence from retained but inaccessible keys: both returned `NTE_BAD_KEYSET`,
+  and enumeration omitted the inaccessible retained key. Thus the Windows
+  helper does not promise success-on-missing idempotency; it must never falsely
+  confirm removal from a successful probe of a different key.
 - Do not store Windows passwords or impersonate users in the product helper.
   It runs under the application's existing user token. Diagnostics test this
   actual token's key access. The probe observed public-key-only SSH refusal and
