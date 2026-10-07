@@ -270,7 +270,7 @@ the source remains usable, and failure paths leave no partial destination.
 - [x] Review the Windows SPEC and helper implementation plan before production
   implementation; in-session execution approved.
 - [ ] Submit the cross-component contract docs before the implementation PR.
-- [ ] Implement and live-validate the standalone Windows CNG helper (PLAN W1–W4).
+- [x] Implement and live-validate the standalone Windows CNG helper (PLAN W1–W4).
 - [ ] Implement secure Windows filesystem primitives and migrate callers in
   separate component PRs without weakening POSIX behavior.
 - [ ] Extend keyvault memory custody, wizard, network, policy/privacy and

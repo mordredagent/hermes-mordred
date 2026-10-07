@@ -1,8 +1,8 @@
 # Windows support feasibility and proposed validation plan
 
 Date: 2026-10-07.
-Status: Phase 0 actual-device investigation completed; implementation approved
-for the CNG helper slice. Windows product support is not implemented.
+Status: Phase 0 and the W1–W4 CNG helper slice are implemented and validated
+on actual AWS Windows/NitroTPM. Full Windows product support remains incomplete.
 This document proposes work, not an approved support contract. SPEC.md, PLAN.md,
 TODO.md, and CI.md remain the source of truth for implemented behavior.
 
@@ -37,8 +37,8 @@ the existing local changes remain untouched.
 | --- | --- | --- |
 | Hermes host | Pinned v2026.9.24 CLI and source-built Desktop run; enabling Mordred reveals an `os.fchmod` startup refusal | Port audit/filesystem behavior and verify full gateway lifecycle and plugin hooks |
 | AWS environment | Dedicated Windows Server 2025 NitroTPM host provisioned and exercised | Retain only identified development resources; stop compute between runs |
-| Key backend | `_seckey_backend.py` selects `find_winkey_helper()` on `win32` | Implement the missing Windows helper; no `native/winkey-helper` exists |
-| Encryption contract | `keyvault/wrap.py` requires P-256 ECDH, HKDF, AES-KW and the existing MRKW format | Prove CNG provider capabilities, shared-secret representation, and protocol parity |
+| Key backend | `_seckey_backend.py` selects `find_winkey_helper()` on `win32` | Native CNG helper and production MRKW integration validated; port runtime/storage callers next |
+| Encryption contract | `keyvault/wrap.py` requires P-256 ECDH, HKDF, AES-KW and the existing MRKW format | Helper parity, persistence and second-TPM refusal proved; validate full product custody after filesystem port |
 | Files and locks | `_file_lock.py` depends on POSIX mode checks and `flock`; `_audit_io.py` calls `os.fchmod` | Provide equivalent Windows ACL, handle, reparse-point, and process-lock behavior |
 | Memory and setup | Linux support exists, but platform branches admit macOS/Linux | Extend custody, bootstrap, reset/purge protection, CLI setup and status |
 | Desktop | API capability responses and setup routes currently exclude Windows | Add accurate capabilities, setup actions and actual packaged/source-built app verification |
@@ -67,7 +67,8 @@ wire compatibility, private-export refusal, retained data after reboot and
 stop/start, deletion refusal, and the same-disk/second-TPM negative control have
 been observed. The host-only Desktop reaches onboarding. Existing Mordred startup
 and file-lock failures are explicit porting work, not waived acceptance gates.
-Scheduled gateway lifecycle, production-helper tests, consumer Windows 11/MSIX
+The subsequent W1–W4 implementation proved the production helper (see the
+CI manual validation log). Scheduled gateway lifecycle, consumer Windows 11/MSIX
 and end-to-end Private Telegram remain unproven. The user approved continuing
 with in-session implementation after reviewing the proposed plan.
 

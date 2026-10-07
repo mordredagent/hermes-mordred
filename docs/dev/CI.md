@@ -75,6 +75,68 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-07 — Windows CNG helper implementation (W1–W4).**
+  The dedicated Phase 0 Windows Server 2025/NitroTPM host was reused under the
+  ordinary `mordred` account with password-authenticated SSH through SSM. MSVC
+  Build Tools `17.14.37710.0`, toolset `14.44.35207`, Windows SDK 26100, Rust
+  `1.99.0` and MSRV `1.85.0` built the actual executable. The Rust protocol/unit
+  suite passed **12 tests**; the separately gated real CNG suite passed **3 tests**.
+  It verified P-256 ECDH against an independent implementation, a leading-zero
+  secret, duplicate preservation, malformed-point refusal, private-export
+  rejection with export policy zero, deletion, and concurrent probe cleanup.
+
+  **Actual-device corrections:** the provider rejected the silent flag on
+  deletion (`0x80090009`), while zero flags succeeded. Two parallel native
+  create/finalize operations returned distinct successful keys for one name
+  despite no overwrite flag; a user-SID/key-scoped Global Windows mutex now
+  serializes helper operations across processes and sessions. The same live
+  concurrency regression then passed. Public-key-only SSH still correctly
+  refused the compiled helper's probe with `AUTH_DENIED` (`0x80090010`). No
+  password capture, impersonation or software provider exists in the product.
+
+  **Python/build boundary:** actual Windows production MRKW wrap/unwrap through
+  the compiled helper passed, including a Unicode/space-containing installation
+  path, duplicate refusal, wrong-profile/corrupt-ciphertext rejection, missing
+  helper, valid-data retention and refusal after deletion. The installer passed
+  **4 actual Windows tests** covering replacement, failed-build retention,
+  an in-use executable and a Japanese default home under a cp1252 Python pipe.
+  ASCII JSON transports the default path without code-page corruption. Windows PowerShell 5.1 requires `[NullString]::Value`
+  for the nullable `File.Replace` backup argument. A real sdist-to-wheel build
+  passed **6 packaging checks**. The wheel installed outside the checkout;
+  `build.ps1` compiled bundled sources under `site-packages` and installed into
+  the selected Hermes home's `bin`. The resulting executable SHA256 was
+  `c3da84b5ab0a2e2171ce0f9663af2322fb811bc19b781418cb8c25a3f02e6255`
+  after the review corrections.
+
+  **Persistence:** a retained synthetic MRKW fixture (SHA256
+  `e80184560cc28a8342e745c34c43c90c8f673e072b8ff89eda9ee88f12404e81`) reopened
+  through the installed wheel/helper in a fresh process, after Windows reboot,
+  and after actual EC2 stop/start. Each check verified the same public key and
+  plaintext digest; SID, fixture, executable and PCP key-file hashes were
+  retained. The final helper also reopened this unchanged fixture after upgrade and a
+  second Windows reboot.
+  The same final executable on a cloned disk refused the retained key on the
+  second TPM, while fresh production MRKW operations worked. Both clone
+  integration tests passed; SID, credential-file and retained PCP-file hashes
+  matched the source host.
+
+  **Review/regressions:** one independent whole-branch review identified
+  malformed helper acknowledgement/status handling and a possible false-success
+  deletion of a retained inaccessible key. The bridge regression failed in 18
+  cases before correction; the focused local suite then passed **218 tests**,
+  and Windows passed **101 tests** with one explicitly clone-gated skip. The
+  inaccessible-key deletion regression failed on the real clone before the fix,
+  then passed with the final executable. A new-key probe succeeded and CNG
+  enumeration omitted the inaccessible retained key, so neither proved absence.
+  Windows deletion now refuses an unopenable keyset with the original status
+  and `UNAVAILABLE`, including repeat deletion; exact-key deletion still passes.
+  After the review fixes, the full local suite passed **5,158 tests**, with
+  **88.62% coverage**. Reduced-extras strict mypy, Ruff and
+  ShellCheck passed. A scoped Windows helper CI job is added; hosted runners do
+  not substitute for hardware acceptance. Full Windows private filesystem,
+  runtime, wizard, network, Desktop and Windows 11 acceptance remain separate
+  dependent plans. Final resource states are recorded below.
+
 - **2026-10-07 — Windows native feasibility on actual EC2 NitroTPM (Phase 0).**
   Unchanged Mordred `f14c1edce23f88c4a2cb6f8bfd3c1454ed0a59ce` / `0.2.0a1`,
   installed as a locally built wheel with `keyvault,extension` extras, was tested
