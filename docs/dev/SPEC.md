@@ -1658,6 +1658,30 @@ uncertain writes invalidate their cached active identity/header/DEK and require
 explicit reconciliation. Shared audit operations do not enable those consumers.
 
 
+### Windows custody coordination capabilities
+
+`CanonicalSession.borrow_mordred_transaction()` lends a lifetime-bound protected
+`PrivateTransaction` proxy under home-before-mordred coordination. It requires
+exact-private admission and matching checked directory identity, extends scope
+without reacquiring the home lock, honors nonblocking mode, and creates only
+when the owning outer session authorized creation. Pending policy state refuses
+borrowing. Configured/canonical policy leaves, pending/legacy locks, their
+legacy temporary files and foundation-reserved names cannot be read or mutated;
+both rename operands are checked and bounded enumeration filters protected names.
+The proxy never exposes or releases the underlying transaction. Successful
+mutations join outer publication tracking and classified uncertainty is sticky,
+even when caught by a caller. No unrelated policy marker is manufactured.
+
+`CanonicalSession.publication_receipt()` lends no filesystem authority. Its
+`mark_published()` and `mark_uncertain(error: PrivateFSError)` methods validate
+process/thread/owner/receipt lifetime, then monotonically record child outcome
+before any parent filesystem revalidation. A child writer must report each
+successful mutation and each uncertain primitive/cleanup outcome. Escaping
+errors after reported publication also poison the owner. Original uncertainty
+survives later outer cleanup; reports cannot reset state. See
+[the coordinator API](WINDOWS_CONFIG_IO.md#future-audit-integration) for the exact
+caller obligations. These capabilities do not activate production custody.
+
 ### Native Windows installation and helper (C4)
 
 The native PowerShell installer selects the actual Hermes virtualenv/conda
