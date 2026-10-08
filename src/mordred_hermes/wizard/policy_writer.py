@@ -182,6 +182,32 @@ def _checked_policy_edit(paths: CanonicalPaths, *, recover: bool = False) -> Ite
         update.commit()
 
 
+@dataclass
+class _PrivateWriteOutcome:
+    """Retain child publication evidence before canonical cleanup can replace it."""
+
+    published: bool = False
+    failure: PrivateFSError | None = None
+
+    def write(self, path: Path, data: bytes, *, backup: bool = False) -> None:
+        try:
+            self.published = _write_checked_private(path, data, backup=backup) or self.published
+        except PrivateFSError as exc:
+            self.failure = exc
+            raise
+
+    def reraise(self, exc: BaseException) -> NoReturn:
+        failure = self.failure if self.failure is not None else exc
+        if isinstance(failure, PrivateFSError) and (
+            self.published or (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain")
+        ):
+            failure.commit_state = "uncertain"
+        if failure is not exc:
+            failure.add_note(f"canonical cleanup also failed: {type(exc).__name__}")
+            raise failure from exc
+        raise failure
+
+
 def _write_checked_private(path: Path, data: bytes, *, backup: bool = False) -> bool:
     """Write a private child with its parents already checked and locked.
 

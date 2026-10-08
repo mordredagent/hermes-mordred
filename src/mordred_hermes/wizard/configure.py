@@ -35,7 +35,7 @@ import argparse
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, Protocol
 
 from mordred_hermes.network.provider_transport_flagger import KNOWN_PROVIDERS
@@ -446,6 +446,13 @@ def run(
             _term.emit_warn(f"`hermes setup` exited with code {rc}; continuing with Mordred prompts anyway")
 
     result = collect_answers(prompt_io)
+    if _windows():
+        # Prompts never resolve this operator-owned field. Read it only inside
+        # the owning update so a concurrent committed override cannot be lost.
+        snapshot = policy_writer.resolve_and_write(
+            lambda existing: replace(result.snapshot, provider_overrides=existing.get("provider_overrides", {}))
+        )
+        return ConfigureResult(snapshot=snapshot)
     # ``provider_overrides`` is an operator-managed policy.json extension,
     # not a wizard prompt. Carry it into the resolved snapshot before writing
     # so interactive configure cannot erase it (or turn an invalid value into
