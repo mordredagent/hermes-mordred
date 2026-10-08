@@ -67,6 +67,7 @@ def _private(fd: int, directory: bool = False) -> os.stat_result:
         or (not directory and info.st_nlink != 1)
     ):
         raise PrivateFSError("unsafe", "validate_object")
+    _validate_acl(fd)
     return info
 
 
@@ -74,6 +75,14 @@ def _ancestor(fd: int) -> None:
     info = os.fstat(fd)
     if info.st_uid not in (0, os.geteuid()) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
         raise PrivateFSError("unsafe", "validate_ancestor")
+    _validate_acl(fd)
+
+
+def _validate_acl(fd: int) -> None:
+    if sys.platform == "darwin":
+        from ._macos_acl import validate_acl
+
+        validate_acl(fd)
 
 
 def _flush(fd: int) -> None:

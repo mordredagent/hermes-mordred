@@ -177,6 +177,8 @@ def test_cleanup_failure_after_publication_is_never_retry_safe(
             raise original
     assert injected
     assert err.value.commit_state == "uncertain"
+    assert "uncertain" in str(err.value)
+    assert "not_committed" not in str(err.value)
     if body_error and stage != "staging":
         assert err.value is original
     assert (private_path / "secret").read_bytes() == b"complete"

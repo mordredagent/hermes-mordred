@@ -21,11 +21,22 @@ class PrivateFSError(OSError):
         native_code: int | None = None,
         commit_state: CommitState = "not_committed",
     ) -> None:
-        super().__init__(f"private filesystem {operation}: {reason} ({commit_state})")
+        super().__init__()
         self.reason = reason
         self.operation = operation
         self.native_code = native_code
         self.commit_state = commit_state
+
+    @property
+    def commit_state(self) -> CommitState:
+        return self._commit_state
+
+    @commit_state.setter
+    def commit_state(self, state: CommitState) -> None:
+        self._commit_state = state
+        # Publication reconciliation can promote an existing exception. Keep
+        # str(), repr(), and args consistent without replacing that exception.
+        self.args = (f"private filesystem {self.operation}: {self.reason} ({state})",)
 
 
 @dataclass(frozen=True)

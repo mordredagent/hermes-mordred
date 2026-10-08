@@ -110,3 +110,154 @@ def test_short_writes_do_not_truncate(fs, tmp_path: Path, monkeypatch: pytest.Mo
         monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, data[:2]))
         tx.create_bytes("secret", b"complete payload")
         assert d.read_bytes("secret", max_bytes=100) == b"complete payload"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="actual macOS extended ACLs")
+@pytest.mark.parametrize(
+    "ace",
+    [
+        "everyone allow read,execute,file_inherit,directory_inherit",
+        "everyone allow delete_child,add_file,add_subdirectory",
+        "everyone allow read,execute,file_inherit,directory_inherit,only_inherit",
+    ],
+)
+def test_macos_ancestor_acl_refused_before_private_creation(fs, tmp_path: Path, ace: str) -> None:
+    parent = tmp_path.resolve()
+    subprocess.run(["/bin/chmod", "+a", ace, str(parent)], check=True)
+    before = subprocess.check_output(["/bin/ls", "-lde", str(parent)])
+    with pytest.raises(fs.PrivateFSError) as err, fs.open_private_directory(parent / "private", create=True):
+        pytest.fail("unsafe ancestor reached the operation body")
+    assert err.value.reason == "unsafe"
+    assert not (parent / "private").exists()
+    assert subprocess.check_output(["/bin/ls", "-lde", str(parent)]) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="actual macOS extended ACLs")
+@pytest.mark.parametrize("target", ["directory", "file", "lock"])
+def test_macos_private_acl_refused_without_repair(fs, tmp_path: Path, target: str) -> None:
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as d, d.transaction() as tx:
+        tx.create_bytes("secret", b"keep")
+    path = root if target == "directory" else root / ("secret" if target == "file" else ".mordred-fs.lock")
+    subprocess.run(["/bin/chmod", "+a", "everyone allow read,execute", str(path)], check=True)
+    before = subprocess.check_output(["/bin/ls", "-lde", str(path)])
+    with pytest.raises(fs.PrivateFSError) as err, fs.open_private_directory(root) as d:
+        if target == "file":
+            d.read_bytes("secret", max_bytes=100)
+        else:
+            with d.transaction():
+                pytest.fail("unsafe ACL entered the transaction")
+    assert err.value.reason == "unsafe"
+    assert (root / "secret").read_bytes() == b"keep"
+    assert subprocess.check_output(["/bin/ls", "-lde", str(path)]) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="actual macOS extended ACLs")
+def test_macos_deny_only_acl_does_not_break_normal_profiles(fs, tmp_path: Path) -> None:
+    parent = tmp_path.resolve()
+    subprocess.run(["/bin/chmod", "+a", "everyone deny delete", str(parent)], check=True)
+    try:
+        with fs.open_private_directory(parent / "private", create=True) as d, d.transaction() as tx:
+            tx.create_bytes("secret", b"private")
+            assert tx.read_bytes("secret", max_bytes=100) == b"private"
+    finally:
+        subprocess.run(["/bin/chmod", "-N", str(parent)], check=True)
+
+
+def test_postpublication_refusal_message_matches_uncertain_state(fs, tmp_path: Path, monkeypatch) -> None:
+    from mordred_hermes._private_fs import _posix
+
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as d, d.transaction() as tx:
+        real_private = _posix._private
+
+        def fail_after_publish(fd, directory=False):
+            if not directory and (root / "secret").exists():
+                raise fs.PrivateFSError("unsafe", "validate_object")
+            return real_private(fd, directory)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(_posix, "_private", fail_after_publish)
+            with pytest.raises(fs.PrivateFSError) as err:
+                tx.create_bytes("secret", b"complete")
+        assert err.value.commit_state == "uncertain"
+        assert "uncertain" in str(err.value)
+        assert "not_committed" not in str(err.value)
+        assert (root / "secret").read_bytes() == b"complete"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="actual macOS extended ACLs")
+@pytest.mark.parametrize("failure", ["query", "valid", "entry", "tag", "unknown_tag", "free"])
+def test_macos_acl_query_failure_refuses_and_frees_copy(fs, tmp_path: Path, monkeypatch, failure: str) -> None:
+    import ctypes as c
+
+    from mordred_hermes._private_fs import _macos_acl
+
+    parent = tmp_path.resolve()
+    subprocess.run(["/bin/chmod", "+a", "everyone deny delete", str(parent)], check=True)
+    library = _macos_acl._libc()
+    allocated = []
+    freed = []
+
+    class FailingLibrary:
+        def acl_get_fd_np(self, fd, acl_type):
+            if failure == "query":
+                c.set_errno(errno.EIO)
+                return None
+            acl = library.acl_get_fd_np(fd, acl_type)
+            if acl:
+                allocated.append(acl)
+            return acl
+
+        def acl_free(self, acl):
+            freed.append(acl)
+            result = library.acl_free(acl)
+            if failure == "free":
+                c.set_errno(errno.EIO)
+                return -1
+            return result
+
+        def __getattr__(self, name):
+            if name == {"valid": "acl_valid", "entry": "acl_get_entry", "tag": "acl_get_tag_type"}.get(failure):
+
+                def fail(*args):
+                    c.set_errno(errno.EIO)
+                    return -1
+
+                return fail
+            if name == "acl_get_tag_type" and failure == "unknown_tag":
+
+                def unknown(entry, output):
+                    c.cast(output, c.POINTER(c.c_int))[0] = 99
+                    return 0
+
+                return unknown
+            return getattr(library, name)
+
+    monkeypatch.setattr(_macos_acl, "_libc", FailingLibrary)
+    try:
+        with pytest.raises(fs.PrivateFSError) as err, fs.open_private_directory(parent / "private", create=True):
+            pytest.fail("failed ACL validation reached the operation body")
+        assert err.value.reason == ("unsafe" if failure == "unknown_tag" else "io")
+        if failure != "unknown_tag":
+            assert err.value.native_code == errno.EIO
+        assert not (parent / "private").exists()
+        assert freed == allocated
+        assert bool(allocated) == (failure != "query")
+    finally:
+        subprocess.run(["/bin/chmod", "-N", str(parent)], check=True)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="actual macOS extended ACLs")
+def test_macos_acl_changed_during_transaction_refuses_before_writing(fs, tmp_path: Path) -> None:
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as d, d.transaction() as tx:
+        subprocess.run(
+            ["/bin/chmod", "+a", "everyone allow read,execute,file_inherit,directory_inherit", str(root)],
+            check=True,
+        )
+        before = sorted(path.name for path in root.iterdir())
+        with pytest.raises(fs.PrivateFSError) as err:
+            tx.create_bytes("secret", b"must not be written")
+        assert err.value.reason == "unsafe"
+        assert sorted(path.name for path in root.iterdir()) == before
