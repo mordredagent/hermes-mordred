@@ -1573,8 +1573,10 @@ invalid closed/thread/fork lifetimes before touching filesystem state.
 
 Windows-only `open_confidential_directory(path, *, create=False)` admits a
 trusted shared parent while preserving exact-private `open_private_directory`.
-`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, and `transaction`;
-`ConfidentialTransaction` adds `create_bytes`, `replace_bytes`, and
+`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, bounded
+`list_names(max_entries=...)`, and `transaction`;
+`ConfidentialTransaction` exposes the same bounded `list_names` and adds
+`create_bytes`, `replace_bytes`, and
 `delete_file(name, *, expected_identity=None)`. Existing files must be owned by
 the current user, regular, non-reparse and single-linked. Ordinary allow/deny
 ACEs with known inheritance flags and masks are accepted only if every
@@ -1613,6 +1615,18 @@ with the same checked identity contract. This method never reacquires a lock.
 
 
 
+The confidential inventory uses the same handle-bound checked enumeration,
+namespace validation and entry budget as private inventory. It filters only
+foundation-reserved entries and does not admit listed children as safe files;
+callers must use checked file operations for each selected name. Enumeration
+rechecks directory binding/security before returning and respects directory and
+transaction process/thread/lifetime boundaries.
+
+`current_principal_id() -> bytes` returns the effective Windows token's validated
+canonical binary SID through the existing token capability. It has no account-name,
+path or environment fallback; token and cleanup failures propagate. Other platforms
+raise classified `unsupported`. This is identity data, not a secret or a key.
+
 ### Checked Windows audit sessions
 
 Shared audit operations use one exact-private directory transaction across
@@ -1643,6 +1657,30 @@ made. Consumers own encryption formats, generation leases and key authorization;
 uncertain writes invalidate their cached active identity/header/DEK and require
 explicit reconciliation. Shared audit operations do not enable those consumers.
 
+
+### Windows custody coordination capabilities
+
+`CanonicalSession.borrow_mordred_transaction()` lends a lifetime-bound protected
+`PrivateTransaction` proxy under home-before-mordred coordination. It requires
+exact-private admission and matching checked directory identity, extends scope
+without reacquiring the home lock, honors nonblocking mode, and creates only
+when the owning outer session authorized creation. Pending policy state refuses
+borrowing. Configured/canonical policy leaves, pending/legacy locks, their
+legacy temporary files and foundation-reserved names cannot be read or mutated;
+both rename operands are checked and bounded enumeration filters protected names.
+The proxy never exposes or releases the underlying transaction. Successful
+mutations join outer publication tracking and classified uncertainty is sticky,
+even when caught by a caller. No unrelated policy marker is manufactured.
+
+`CanonicalSession.publication_receipt()` lends no filesystem authority. Its
+`mark_published()` and `mark_uncertain(error: PrivateFSError)` methods validate
+process/thread/owner/receipt lifetime, then monotonically record child outcome
+before any parent filesystem revalidation. A child writer must report each
+successful mutation and each uncertain primitive/cleanup outcome. Escaping
+errors after reported publication also poison the owner. Original uncertainty
+survives later outer cleanup; reports cannot reset state. See
+[the coordinator API](WINDOWS_CONFIG_IO.md#future-audit-integration) for the exact
+caller obligations. These capabilities do not activate production custody.
 
 ### Native Windows installation and helper (C4)
 

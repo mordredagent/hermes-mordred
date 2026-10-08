@@ -112,3 +112,47 @@ with canonical_session(paths, scope="policy", create=True) as session, session.p
         if child.poll() is None:
             child.kill()
         child.communicate(timeout=20)
+
+
+def test_native_custody_loan_and_audit_share_owned_policy_lock(shared_home):
+    from mordred_hermes._audit_session import audit_session
+
+    paths = CanonicalPaths(shared_home)
+    log = shared_home / "mordred" / "audit.ndjson"
+    with canonical_session(paths, scope="home", create=True) as session:
+        with session.borrow_mordred_transaction() as tx:
+            tx.create_bytes("custody.json", b"synthetic ownership")
+            with pytest.raises(ValueError):
+                tx.replace_bytes("POLICY.JSON", b"bypass")
+            with audit_session(log, transaction=tx) as audit:
+                metadata = audit.create(log.name, b'{"event":"synthetic"}\n')
+                audit.append(log.name, b'{"event":"next"}\n', expected_identity=metadata.identity)
+            assert tx.list_names(max_entries=2) == ("audit.ndjson", "custody.json")
+        with pytest.raises(RuntimeError):
+            tx.directory_identity()
+    assert not (shared_home / "mordred" / "policy.json").exists()
+    with canonical_session(paths, scope="policy") as session, session.borrow_mordred_transaction() as tx:
+        assert tx.read_bytes("custody.json", max_bytes=64) == b"synthetic ownership"
+        assert tx.read_bytes(log.name, max_bytes=128) == b'{"event":"synthetic"}\n{"event":"next"}\n'
+
+
+def test_native_child_publication_receipt_reports_caught_uncertainty(shared_home):
+    from mordred_hermes._private_fs import PrivateFSError, open_confidential_directory
+
+    paths = CanonicalPaths(shared_home)
+    original = PrivateFSError("io", "synthetic_child_cleanup", commit_state="uncertain")
+    with (
+        pytest.raises(PrivateFSError) as caught,
+        canonical_session(paths, scope="policy", create=True) as session,
+        session.publication_receipt() as receipt,
+    ):
+        with (
+            open_confidential_directory(shared_home / "memories", create=True) as directory,
+            directory.transaction() as tx,
+        ):
+            tx.create_bytes("MEMORY.md", b"synthetic ciphertext")
+            receipt.mark_published()
+        receipt.mark_uncertain(original)
+    assert caught.value is original
+    with open_confidential_directory(shared_home / "memories") as directory:
+        assert directory.read_bytes("MEMORY.md", max_bytes=64) == b"synthetic ciphertext"

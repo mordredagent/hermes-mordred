@@ -93,10 +93,43 @@ native results separately; host doubles do not establish native acceptance.
 C7a audit sessions can borrow an already-held private transaction only after
 `assert_private_admission()` validates the exact-private admission strategy,
 then checking `directory_identity()`. Identity alone cannot distinguish a
-confidential transaction from a private one. C2 has no audit callers and exposes no raw transaction
-accessor yet. A future explicit session method can lend its live policy capability
-without reacquiring or releasing it. Do not use global lock lookup or acquire
-home from an independent mordred/audit transaction.
+confidential transaction from a private one. C2 exposes
+`session.borrow_mordred_transaction()` as a context-managed protected
+`PrivateTransaction` proxy. It may extend home scope to an existing mordred
+scope in home-before-mordred order, honoring the current session's blocking
+choice. Only an outer `create=True` session authorizes creation. A checked absent
+scope cannot be upgraded. The loan never releases the owner's locks and expires
+when its own context or creating session closes. Each operation validates owner
+process/thread/lifetime, exact-private admission and checked directory identity.
+Do not use global lock lookup, retain the proxy, reach into its internals, or
+acquire home from an independent mordred/audit transaction.
+
+The proxy refuses the configured policy leaf, canonical `policy.json`, pending
+marker, legacy `.policy-write.lock`, their legacy `.tmp`/random `.tmp` staging
+names, and foundation lock/staging names. Reads and all mutation operands,
+including both rename operands, obey this boundary. Enumeration filters these
+names after a bounded underlying scan; protected entries still consume that
+scan's budget. Pending policy state refuses borrowing, including from a recovery
+update. Successful mutations update the owning session's publication tracking.
+Uncertain operations and admission errors poison it with the first classified
+failure even if the caller catches the immediate exception. Borrowing does not
+create a policy pending marker for unrelated custody/audit mutations.
+
+`session.publication_receipt()` provides a separate lifetime-bound receipt with
+`mark_published()` and `mark_uncertain(error: PrivateFSError)` only. It grants no
+filesystem authority. A caller holding a separately checked child transaction
+must report every successful mutation immediately, and report uncertain
+primitive/child-exit errors before suppressing them. Escaping errors also join
+the owner outcome; after reported publication they poison the owner. Receipts
+validate process/thread/session/receipt lifetime before recording a result,
+without parent filesystem revalidation first: such a check could hide an
+already-published child. Parent security/identity revalidation and cleanup still
+run at the owning boundary. Reports cannot clear publication or the original
+failure; wrong-thread/process and expired receipts cannot report.
+
+These APIs establish shared coordination only. Custody enrollment, memory
+sealing and production encrypted-audit callers remain separate component work.
+
 
 ## Wizard consumers (C3)
 
