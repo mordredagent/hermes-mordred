@@ -26,6 +26,7 @@ dependencies = [
   # suite minus the two latest-tracking drift detectors (see ci.yml).
   "hermes-agent>=0.13.0",
   "ruamel.yaml>=0.18",
+  "psutil>=7.2.2",
 ]
 
 [project.optional-dependencies]
@@ -358,6 +359,8 @@ follow_imports = "skip"
 # Treat all as untyped so `mypy --strict src` resolves cross-platform.
 [[tool.mypy.overrides]]
 module = [
+    "psutil",
+    "psutil.*",
     "eth_keys",
     "eth_keys.*",
     "eth_account",

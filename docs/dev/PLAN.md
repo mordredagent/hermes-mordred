@@ -1125,3 +1125,42 @@ postcheck/cleanup failures and retained old helper/receipt. Keep standalone
 helper builds compatible. Exercise real owned build/reinstall under available
 PowerShell runtimes; include C4 installer and public-reader tests in the scoped
 Windows filesystem CI job alongside the existing foundation selectors.
+
+### Windows gateway inventory (C5c)
+
+The keyvault runtime inventory uses psutil's native Windows process APIs.
+`inspect_windows_gateway_runtimes(home)` returns an immutable `GatewayInventory`
+with `known` / `unknown`, observed runtimes and bounded sanitized PID/reason
+codes. A checked, bounded `gateway_state.json` supplies only a PID locator;
+its recorded command line never selects an interpreter. Access denial, unstable
+PID creation time, unreadable state and unresolved launchers are uncertainty,
+not evidence that a gateway stopped. Positive foreign ownership excludes a
+process; only the kernel PID 0 / PID 4 pseudo-processes have a narrow exception.
+A current-user gateway blocks a transition even when its profile is uncertain.
+The adjacent `gateway run` argv pair is conservative: custom script launchers
+are included, and unrelated current-user apps using that pair can over-block.
+
+Process inventory never executes an interpreter or launcher. It can run while
+custody locks are held: structural Python-environment attribution reuses C4's
+`environment_root`, while full interpreter selection and installed capability
+proof use C4's resolver **outside** custody locks. The selected override remains
+authoritative. A known inventory is a point-in-time observation, not a process
+start lock; lifecycle callers still serialize filesystem changes and recheck
+the profile and role generation.
+
+The legacy list API preserves POSIX behavior and returns Windows runtimes only
+for a known inventory; unknown Windows inventory raises
+`GatewayDiscoveryUnavailable`. Every Windows destructive lifecycle caller must
+call `require_stopped_windows_gateways(home)` directly. Both unknown and running
+states refuse, without a force parameter. The old wizard diagnostic wrapper
+catches discovery failures and cannot be used as this gate. C6 routing and the
+C5 installed-memory provider proof remain separate required work; this slice
+does not claim Windows memory encryption or product completion.
+
+Validation: run `tests/test_keyvault_windows_processes.py` in both the source
+checkout and an installed sdist-built wheel with Hermes present. Its ordinary
+Windows native test launches a short-lived sleeping Python child with gateway
+argv, verifies live native discovery and lifecycle refusal, then terminates only
+that test child. No gateway/network service or user profile is modified. Record
+ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
+are not evidence of a successful native inventory.
