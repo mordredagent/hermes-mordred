@@ -1632,9 +1632,9 @@ Automatic retention uses checked mtime and excludes the current operation's
 new raw/gzip artifacts from that immediate sweep. It never selects unrelated
 prefix-matching files or permanent locks.
 
-Compression may report a degraded raw-retained result only for a known
-not-committed I/O/access/busy publication failure after verifying the original
-raw identity remains intact. Unsafe, identity, unsupported and uncertain errors
+Compression may report a degraded raw-retained result only for a local
+compression failure before publication, or a known not-committed I/O/access/busy
+publication failure, after verifying the original raw identity remains intact. Unsafe, identity, unsupported and uncertain errors
 propagate. Published gzip is verified before identity-bound raw deletion;
 failed deletion may leave both copies. Fatal compound failures after prior
 persistent mutation are reported uncertain, preserving underlying diagnostics.
