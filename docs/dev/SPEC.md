@@ -2036,3 +2036,41 @@ namespace is outside the supported set and can be omitted. Its operator must
 stop it before lifecycle migration or use a supported launcher. Windows managed
 memory hooks and installed-runtime proof must require the supported C4 runtime
 boundary; no universal quiescence claim or force-proof bypass is introduced.
+
+Image inspection applies a role-based mutation policy that is separate from
+storage admission. The inspected image and its immediate parent directory
+refuse every untrusted data, append, extended-attribute, attribute, delete,
+delete-child, DACL and owner grant; the immediate parent additionally refuses
+untrusted subdirectory creation because the application directory leads the
+DLL search order. Directories strictly above the immediate parent refuse only
+untrusted DELETE, FILE_DELETE_CHILD, WRITE_DAC and WRITE_OWNER: adding new
+entries, extended attributes or attributes cannot rename, delete or replace an
+existing child component or change its security, and every component is
+verified to be a non-reparse NTFS directory on pinned handles and named
+reopens. This admits the Windows default `ProgramData` ACL
+(`BUILTIN\Users` container-inherit ADD_FILE, ADD_SUBDIRECTORY, WRITE_EA,
+WRITE_ATTRIBUTES) above vendor-protected subtrees such as the Defender
+platform directory. Private, confidential and public-build storage admission
+keeps refusing untrusted ADD_FILE on ancestors; the relaxation applies to
+read-only image inspection only.
+
+Accepted residual: a directory-bit reparse tag set by an untrusted principal
+on such an upper ancestor outside the inspection window, combined with a
+filter that shadows existing on-disk children, could cause a denied process to
+be omitted from the supported inventory. Such an omission never admits a
+plausible interpreter, generic execution host, hinted PID or positively
+current-owned process, and the inventory only gates destructive memory
+migration. No vendor list, service-manager query, session classification or
+privileged broker is introduced.
+
+The inventory classifies a denied, non-hinted record in this order: literal
+kernel pseudo images (`Registry`, `MemCompression`) are outside the supported
+set; plausible basenames (`python*`, `pythonw*`, `py`, `pyw`, any basename
+containing `hermes` or `mordred`, and the generic hosts `cmd`, `powershell`,
+`powershell_ise`, `pwsh`, `rundll32`, `mshta`, `wscript`, `cscript`) remain
+unknown; every other image is submitted to
+`inspect_managed_installation_image` and is outside the supported set only
+when admitted and after fresh PID, creation-time, name and image
+revalidation. Any refusal, unsupported result or query failure keeps the
+record unknown. The fixed OS-image list and `GetSystemDirectoryW` lookup are
+removed; `System32` images are admitted by the same capability.

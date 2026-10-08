@@ -339,7 +339,10 @@ Implementation and acceptance remain open:
 - [ ] Verify ordinary-user Server and Windows 11 installed flows, preserving
   ciphertext after missing hardware, token denial and uncertain operations.
 
-- [ ] Add checked read-only managed installation image admission, then complete
-  C5c ordinary-user supported-runtime inventory and native known-empty proof.
+- [ ] Managed image admission fix round: role-based ancestor policy (upper
+  ancestors admit entry-creation rights, parent and image stay strict),
+  storage-admission lock test, native fixture/probe evidence.
+- [ ] C5c R2: managed-image classification of denied non-plausible images,
+  removal of the fixed OS list, ordinary-user source/wheel known-empty proof.
 - [ ] Enforce the same supported C4 interpreter boundary in Windows managed
   memory hooks and installed-runtime proof; document opaque-runtime limits.

@@ -57,6 +57,43 @@ def test_untrusted_ancestor_mutation_is_refused(security, mask: int) -> None:
         s.check_ancestor(s.Descriptor(s.SYSTEM, False, [s.Ace(0, 0, mask, b"other")]), b"user", creating_child=False)
 
 
+@pytest.mark.parametrize("creating_child", [False, True])
+@pytest.mark.parametrize("flags", [0, 0x02, 0x03])
+@pytest.mark.parametrize("mask", [0x2, 0x10, 0x100, 0x116])
+def test_storage_ancestor_admission_keeps_refusing_entry_ea_and_attribute_grants(
+    security, mask: int, flags: int, creating_child: bool
+) -> None:
+    # Lock: the managed-image upper-ancestor relaxation (R-C5c-1) must never
+    # reach private, confidential or public-build storage admission.
+    s = security
+    for sid in (b"other", b"users", b"user-group"):
+        with pytest.raises(s.PrivateFSError) as err:
+            s.check_ancestor(
+                s.Descriptor(s.SYSTEM, False, [s.Ace(0, flags, mask, sid)]), b"user", creating_child=creating_child
+            )
+        assert (err.value.reason, err.value.operation) == ("unsafe", "ancestor_acl")
+
+
+@pytest.mark.parametrize("creating_child", [False, True])
+def test_storage_ancestor_admission_refuses_the_default_programdata_descriptor(security, creating_child: bool) -> None:
+    s = security
+    users = b"users"
+    descriptor = s.Descriptor(
+        s.SYSTEM,
+        False,
+        [
+            s.Ace(0, 0x03, 0x1F01FF, s.SYSTEM),
+            s.Ace(0, 0x03, 0x1F01FF, s.ADMINISTRATORS),
+            s.Ace(0, 0x0B, 0x10000000, b"creator-owner"),
+            s.Ace(0, 0x03, 0x1200A9, users),
+            s.Ace(0, 0x02, 0x116, users),
+        ],
+    )
+    with pytest.raises(s.PrivateFSError) as err:
+        s.check_ancestor(descriptor, b"user", creating_child=creating_child)
+    assert err.value.operation == "ancestor_acl"
+
+
 def test_normal_system_ancestor_is_distinct_from_private_policy(security) -> None:
     s = security
     aces = [

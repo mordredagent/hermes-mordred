@@ -465,6 +465,16 @@ never glob-deletes them. No default component root or Hermes home changes in thi
 foundation slice. Existing component lock names remain authoritative until their
 separate migration PRs define mixed-version behavior.
 
+`inspect_managed_installation_image(path)` is a read-only Windows observation
+of a caller-selected local NTFS image. It creates no lock, staging file or
+directory alongside OS or vendor executables, reads no executable contents,
+changes no ACL and grants no mutation capability. No environment variable,
+known folder or vendor basename establishes a trusted installation root.
+Checked descriptors and pinned file/ancestor identities establish admission;
+source-only hardlinks are permitted. The existing stored private/confidential
+single-link requirements are unchanged. Process ownership and supported-runtime
+classification belong to their consumers, never this metadata operation.
+
 ## Windows wallet storage boundary
 
 The keyvault caller migration uses `<home>/extension/wallet.json` and a permanent

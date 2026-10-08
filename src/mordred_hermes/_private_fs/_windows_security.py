@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ._types import PrivateFSError
 
@@ -24,6 +24,11 @@ ADMINISTRATORS = _sid(5, 32, 544)
 TRUSTED_INSTALLER = _sid(5, 80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464)
 OWNER_RIGHTS = _sid(3, 4)
 FULL_CONTROL = 0x1F01FF
+
+# Position of an inspected object relative to the managed image: the image
+# file, its immediate parent directory, or any directory strictly above that
+# parent (including the volume root unless the root is the parent).
+ManagedImageRole = Literal["image", "image_parent", "upper_ancestor"]
 
 
 @dataclass(frozen=True)
@@ -74,21 +79,55 @@ def check_private(descriptor: Descriptor, user: bytes) -> None:
 
 def check_ancestor(descriptor: Descriptor, user: bytes, *, creating_child: bool) -> None:
     trusted = {user, SYSTEM, ADMINISTRATORS, TRUSTED_INSTALLER}
-    if descriptor.owner not in trusted or descriptor.aces is None:
-        raise PrivateFSError("unsafe", "ancestor_acl")
     # Directory FILE_ADD_FILE also permits reparse-relevant data mutation.
     forbidden = 0x10000 | 0x40000 | 0x80000 | 0x100 | 0x40 | 0x10 | 0x2
     if creating_child:
         forbidden |= 0x4
+    _check_mutation_grants(descriptor, trusted, forbidden, "ancestor_acl")
+
+
+def _check_mutation_grants(
+    descriptor: Descriptor, trusted: set[bytes], forbidden: int, operation: str, *, strict: bool = False
+) -> None:
+    if descriptor.owner not in trusted or descriptor.aces is None:
+        raise PrivateFSError("unsafe", operation)
     for ace in descriptor.aces:
-        if ace.kind not in (0, 1) or ace.flags & ~0x1F:
-            raise PrivateFSError("unsafe", "ancestor_acl")
+        if ace.kind not in (0, 1) or ace.flags & ~0x1F or (strict and _mapped(ace.mask) & ~FULL_CONTROL):
+            raise PrivateFSError("unsafe", operation)
         if ace.flags & 0x08 or ace.kind == 1:
             continue  # Deny ACEs cannot excuse an unsafe allow ACE.
         mask = _mapped(ace.mask)
         principal = descriptor.owner if ace.sid == OWNER_RIGHTS else ace.sid
         if mask & ~FULL_CONTROL or (principal not in trusted and mask & forbidden):
-            raise PrivateFSError("unsafe", "ancestor_acl")
+            raise PrivateFSError("unsafe", operation)
+
+
+def check_managed_image(descriptor: Descriptor, user: bytes, service_sid: bytes, *, role: ManagedImageRole) -> None:
+    """Separate role-based installation policy; the current principal is never a writer.
+
+    service_sid must come from the bounded native fixed-account validation.
+    Every role requires a trusted owner, refuses unknown ACE kinds/flags/rights
+    and refuses untrusted DELETE, FILE_DELETE_CHILD, WRITE_DAC and WRITE_OWNER,
+    the rights that replace, rename or re-secure an existing component.
+
+    The image and its immediate parent also refuse untrusted write-data/add-file,
+    append/add-subdirectory, write-EA and write-attributes: the application
+    directory leads the DLL search order, so a planted DLL or ``<image>.local``
+    folder would run inside the admitted image. Upper ancestors admit those
+    entry-creation rights (the Windows default ProgramData ACL): new entries are
+    creator-owned and cannot collide with an existing child, and every component
+    is separately verified to be a non-reparse directory on pinned handles and
+    named reopens. Storage admission (check_ancestor) is deliberately unchanged.
+    """
+    if service_sid != TRUSTED_INSTALLER:
+        raise PrivateFSError("unsafe", "managed_service_sid")
+    forbidden = 0x10000 | 0x40000 | 0x80000 | 0x40
+    if role in ("image", "image_parent"):
+        forbidden |= 0x2 | 0x4 | 0x10 | 0x100
+    elif role != "upper_ancestor":
+        raise PrivateFSError("unsafe", "managed_image_role")
+    trusted = {SYSTEM, ADMINISTRATORS, service_sid} - {user}
+    _check_mutation_grants(descriptor, trusted, forbidden, "managed_image_acl", strict=True)
 
 
 def current_user_sid() -> bytes:
