@@ -1255,3 +1255,27 @@ Run these machine-wide gateway fixtures sequentially. C5b/C5c managed-hook and
 runtime-proof admission must enforce the same supported interpreter boundary.
 Record the unsupported opaque-runtime limitation and retain Windows 11 as a
 separate acceptance gate.
+
+Controller ruling (2026-10-08): `check_managed_image` takes a role
+(`image`, `image_parent`, `upper_ancestor`) stored on each observation and
+reused by every recheck. Upper ancestors admit untrusted ADD_FILE,
+ADD_SUBDIRECTORY, WRITE_EA and WRITE_ATTRIBUTES; the image and its immediate
+parent stay strict and the parent also refuses ADD_SUBDIRECTORY. Directory
+pins opened with READ_CONTROL and FILE_READ_ATTRIBUTES do not conflict with
+later rename or delete opens; safety comes from the DACL policy plus
+final-path and identity rechecks, and no later change may rely on pinning
+alone. Required tests: the existing ancestor-mutation case split by role; an
+explicit lock that storage `check_ancestor` still refuses 0x2, 0x10, 0x100
+and 0x116 for both `creating_child` values; a full-flow upper ancestor with
+the exact ProgramData ACE admitted while the same ACE on the parent, the
+image or a root that is the parent refuses; reparse appearing only at recheck
+or named reopen refuses; the native `writable-parent` fixture keeps refusing;
+a new elevated fixture `relaxed/parent/image.exe` with the ProgramData ACE on
+`relaxed` is admitted and the same ACE on `parent` refuses; ordinary-token
+probes record CreateHardLinkW, mount-point-tag-on-non-empty-directory and
+cloud/WCI tag outcomes; a real Defender image is admitted with its
+descriptors unchanged. C5c R2 then replaces the fixed OS-image list with this
+capability, keeps plausible basenames unknown, and must pass source and
+sdist-wheel native runs including known-empty after the controlled child
+exits, executed through the ordinary SSH path (SSM commands run PowerShell as
+SYSTEM and correctly produce unknown).
