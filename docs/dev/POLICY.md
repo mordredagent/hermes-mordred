@@ -254,3 +254,30 @@ not-yet-created cookie uses the shallow child-process check; authentication,
 ControlPort, malformed-response, and known terminal-state failures are
 unhealthy. The optional dependency bounds the risk of the old, lightly
 maintained Stem package.
+
+### Windows canonical privacy decisions
+
+On Windows, each privacy hook reads one checked canonical generation of
+`config.yaml` and `mordred/policy.json` before authorizing a tool or accepting
+plugin integrity. The mode, cloud permission and allowlist, tool-egress settings,
+and enabled/disabled plugin lists are derived from that generation. The shared
+mode, cloud permission, allowlist and audit path must agree when both mirror
+files exist. A policy-only installation uses its checked policy values; checked
+absence of both documents retains fresh-install defaults.
+
+Pending updates, unsafe permissions, hardlinks/reparse points, lock contention,
+failed cleanup, oversized or malformed documents, invalid permission fields,
+and conflicting mirrors refuse the decision. A previously cached permissive
+state never overrides these failures, including for local tools. Session
+integrity uses the existing `MordredIntegrityRefused` hard refusal because Hermes
+swallows ordinary hook exceptions. Tool hooks return the existing block action.
+The install wrapper also refreshes the canonical generation; a supplied mode
+may strengthen but cannot weaken it. Its optional `config_path` selects an
+explicit canonical config leaf.
+
+Snapshots release all filesystem capabilities before audit writer construction,
+network status resolution, keyvault probes, approvals or installer execution.
+Standalone Windows egress reads use the same checked parser and propagate
+failure; callers must refuse rather than substitute permissive defaults.
+POSIX policy loading and pure policy evaluators retain their existing behavior.
+Audit storage migration is tracked separately from these readers.

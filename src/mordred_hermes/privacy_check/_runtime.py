@@ -18,6 +18,7 @@ in depth for strict mode.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -34,8 +35,11 @@ from .._policy_io import (
 from .._policy_types import POLICY_MODES
 from .._yaml_io import load_plugin_section, load_yaml_mapping
 from ..plugin import COMPONENT_REQUIRED_HOOKS, COMPONENTS
+from ._checked_policy import CheckedPolicy, read_checked_policy
 from .audit import Writer
 from .policy import PolicyMode
+
+_platform = os.name
 
 _LOG = logging.getLogger("mordred.privacy_check")
 
@@ -76,6 +80,7 @@ class PluginState:
     cloud_provider_allowlist: tuple[str, ...]
     audit: Writer
     config_path: Path
+    checked: CheckedPolicy | None = None
 
 
 _state: PluginState | None = None
@@ -89,11 +94,30 @@ def ensure_state(
     config_path: Path | None = None,
     audit_path: Path | None = None,
 ) -> PluginState:
-    """Load PluginState on first call, return cached state thereafter.
+    """Refresh checked Windows decisions; retain legacy cached state on POSIX.
 
     Test code calls :func:`reset_state_for_tests` between scenarios.
     """
     global _state
+    if _platform == "nt":
+        with _state_lock:
+            previous = _state
+        path = config_path or (previous.config_path if previous else DEFAULT_HERMES_CONFIG_PATH)
+        checked = read_checked_policy(path)
+        # Never hold canonical filesystem locks during writer construction.
+        audit = (
+            previous.audit
+            if previous is not None
+            and previous.config_path == path
+            and previous.checked is not None
+            and previous.checked.audit_log_path == checked.audit_log_path
+            and audit_path is None
+            else None
+        )
+        fresh = _load_state(path, audit_path, checked=checked, existing_audit=audit)
+        with _state_lock:
+            _state = fresh
+        return fresh
     with _state_lock:
         if _state is None:
             _state = _load_state(
@@ -230,6 +254,16 @@ def _read_section_fail_closed(config_path: Path) -> tuple[PolicyMode, dict[str, 
     returned section is ``{}`` whenever the file is unreadable, and
     ``allow_cloud_llm``/``audit_log_path`` defaults are already safe.
     """
+    if _platform == "nt":
+        try:
+            checked = read_checked_policy(config_path)
+        except Exception:
+            return "strict", {}
+        return checked.mode, {
+            "allow_cloud_llm": checked.allow_cloud_llm,
+            "cloud_provider_allowlist": list(checked.cloud_provider_allowlist),
+            "audit_log_path": checked.audit_log_path,
+        }
     settled, data = _load_config_document(
         config_path,
         policy_transaction_marker_for_config(config_path),
@@ -271,11 +305,27 @@ def get_active_audit_path(*, config_path: Path | None = None) -> Path:
     return _resolve_audit_path(section.get("audit_log_path"))
 
 
-def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginState:
+def _load_state(
+    config_path: Path,
+    audit_path_override: Path | None,
+    *,
+    checked: CheckedPolicy | None = None,
+    existing_audit: Writer | None = None,
+) -> PluginState:
     # One fail-closed read serves both the mode (strict on a damaged file)
     # and the section (degrades to {} — the remaining fields' defaults are
     # already the safe ones).
-    policy_mode, section = _read_section_fail_closed(config_path)
+    if checked is None:
+        policy_mode, section = _read_section_fail_closed(config_path)
+    else:
+        policy_mode, section = (
+            checked.mode,
+            {
+                "allow_cloud_llm": checked.allow_cloud_llm,
+                "cloud_provider_allowlist": list(checked.cloud_provider_allowlist),
+                "audit_log_path": checked.audit_log_path,
+            },
+        )
 
     # M2 (security review 2026-06-11): only the bool ``True`` may grant
     # cloud-LLM permission. ``bool(...)`` truthy-coerced YAML strings, so a
@@ -305,7 +355,11 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
     # Reloading this PluginState therefore reuses the active writer (and, for
     # MRAL, its DEK) instead of rotating the file out from under network,
     # llm_guard, or extension-sign hooks that still reference it.
-    audit = build_audit_writer(audit_path, keyvault_home=config_path.parent)
+    audit = (
+        existing_audit
+        if existing_audit is not None
+        else build_audit_writer(audit_path, keyvault_home=config_path.parent)
+    )
 
     return PluginState(
         policy_mode=policy_mode,
@@ -313,6 +367,7 @@ def _load_state(config_path: Path, audit_path_override: Path | None) -> PluginSt
         cloud_provider_allowlist=allowlist,
         audit=audit,
         config_path=config_path,
+        checked=checked,
     )
 
 
@@ -391,6 +446,8 @@ def get_disabled_plugins(config_path: Path | None = None) -> set[str]:
     (tests, scripted configs) read that path's YAML directly — never the
     user's real config.
     """
+    if _platform == "nt":
+        return set(read_checked_policy(config_path or DEFAULT_HERMES_CONFIG_PATH).disabled)
     if _is_production_path(config_path):
         try:
             from hermes_cli.plugins import _get_disabled_plugins
@@ -411,6 +468,9 @@ def get_enabled_plugins(config_path: Path | None = None) -> set[str] | None:
 
     Path-resolution rules mirror :func:`get_disabled_plugins`.
     """
+    if _platform == "nt":
+        enabled = read_checked_policy(config_path or DEFAULT_HERMES_CONFIG_PATH).enabled
+        return set(enabled) if enabled is not None else None
     if _is_production_path(config_path):
         try:
             from hermes_cli.plugins import _get_enabled_plugins
@@ -443,6 +503,9 @@ def find_disabled_siblings(
     ``config_path=None`` uses production resolution (Hermes API + default YAML).
     Explicit paths read only that YAML — never the user's real config.
     """
+    if _platform == "nt":
+        checked = read_checked_policy(config_path or DEFAULT_HERMES_CONFIG_PATH)
+        return disabled_from_checked(checked, siblings)
     deny = get_disabled_plugins(config_path)
     allow = get_enabled_plugins(config_path)
     if allow is None:
@@ -545,3 +608,10 @@ def claim_no_origin_skill_emit() -> bool:
             return False
         _degraded_no_origin_skill_emitted = True
         return True
+
+
+def disabled_from_checked(checked: CheckedPolicy, siblings: Iterable[str] = SIBLING_PLUGINS) -> set[str]:
+    """Evaluate the opt-in list from the same generation as the mode."""
+    if checked.enabled is None:
+        return set(siblings)
+    return {name for name in siblings if name in checked.disabled or name not in checked.enabled}
