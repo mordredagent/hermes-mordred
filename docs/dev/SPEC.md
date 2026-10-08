@@ -1172,3 +1172,49 @@ implementation or published PRs.
 Review decisions: approve the dedicated-key scope and its recovery limitation;
 choose in-session execution or subagent-driven execution. Recommended execution
 is in-session because the small sequence has tightly coupled interfaces.
+## Windows keyvault wallet configuration (2026-10-08)
+
+This is the first bounded keyvault caller migration after the private filesystem
+foundation in PR #192 (contract PR #191). It covers only the keyvault-owned
+`<home>/extension/wallet.json` selection document. Native Windows product support,
+key custody, signing, memory, reset/purge, audit and Desktop remain incomplete.
+The component contract must precede its implementation PR; both target `dev`.
+
+On Windows, `extension_sign.set_wallet` and `_load_wallet_cfg` use checked
+private directories, bounded reads and transactions from `_private_fs`.
+Keep the POSIX implementation and `.wallet.lock` protocol unchanged. On Windows
+use the permanent `<home>/extension/.mordred-fs.lock` for the entire file
+existence/read/create-or-replace operation; retain the in-process wallet mutex.
+All Windows wallet writers/readers in this version use that same lock. Older
+Windows writers do not participate: stop them before using this version. No
+mixed-version Windows writer compatibility or automatic ACL migration is claimed.
+
+Writes create only the final `extension` directory under an existing trusted
+profile path. Existing directories/files must satisfy the foundation's private
+ACL contract; never chmod, repair or adopt them automatically. Reject junctions,
+unsafe ancestors, hard-linked files and unsafe lock objects. A missing checked
+directory or wallet alone permits the existing absent-wallet discovery behavior;
+access, ACL, lock, cleanup, size and other I/O failures must never become absence.
+The scope of a missing-error handler must distinguish the open/read operation
+from transaction/directory cleanup errors, even when those errors say `missing`.
+
+Preserve the existing JSON schema, duplicate-member rejection and UTF-8 checks.
+Both existing-file reads and serialized writes are bounded at 1 MiB. Validate
+the proposed document before creating a directory. Under the transaction, read
+and validate the existing file's storage posture before choosing exclusive
+creation for absence or checked replacement for presence. Oversized existing
+files are refused without replacement. This operation is not a multi-file or
+native-key lifecycle transaction and needs no delete/append primitive.
+
+Map filesystem failures to a `WalletConfigError` subclass, retaining non-secret
+reason, native status and `commit_state`. Its message must distinguish an
+uncertain save and tell the caller to inspect before retrying. Never retry,
+delete, regenerate keys, return a default wallet or roll back after an uncertain
+publication, including errors during context cleanup. Do not include document
+contents, key IDs, RPC credentials or paths in the public error text.
+
+Acceptance covers public set/load behavior on Windows Server 2022 hosted CI
+(Python 3.11–3.13) and retained Server 2025 ordinary-user source/wheel checks,
+including a fresh process, other-user denial and retained selection. No TPM
+operation is needed for this selection-document slice. Windows 11, interactive
+installation and whole-product flows remain later acceptance gates.

@@ -258,3 +258,12 @@ the source remains usable, and failure paths leave no partial destination.
   record the result in [`CI.md`](./CI.md).
 - Keep each implementation PR scoped to one plugin; land cross-plugin contract
   documentation first.
+## Windows keyvault wallet storage
+
+- [ ] Land the wallet storage contract before its dependent keyvault PR.
+- [ ] Complete WW1–WW2 in [PLAN.md](PLAN.md#windows-wallet-storage-implementation-plan).
+- [ ] Design shared safe deletion/lifecycle contracts before remaining keyvault
+  storage, memory provision/reset/purge and plaintext capture migration.
+- [ ] Finish wizard/install, network, policy/LLM guard, privacy/audit and
+  extension/Desktop migration, Windows 11 and full installation-to-use acceptance.
+  Passing wallet storage tests does not establish these capabilities.
