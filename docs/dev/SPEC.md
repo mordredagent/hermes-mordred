@@ -1915,3 +1915,13 @@ locks; `None` means only the already checked absent home. It grants no raw
 handle or transaction access. A supplied custody home must resolve through a
 checked directory capability to that same identity before borrowing custody
 state; string spelling and private coordinator attributes are not authority.
+
+Managed-memory evidence is role-specific after validating the complete physical
+profile manifest. Valid audit/Telegram ownership alone does not imply a missing
+memory wrapper. Confirmed memory deletion first records its durable deleted
+phase, then removes the checked wrapper and opt-out, clears only the memory
+role, and removes its journal last. Recovery of that recorded phase may finish
+already-partial cleanup, but still refuses unexpected opt-in, seals or unsafe
+objects. Successful purge leaves an unmanaged memory role while preserving
+independent audit/Telegram roles. A missing wrapper with retained memory-role,
+marker, opt-out, seal or ambiguous pending evidence remains broken, never fresh.
