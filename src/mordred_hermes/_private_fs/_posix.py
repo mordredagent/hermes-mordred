@@ -18,6 +18,28 @@ from ._types import CommitState, PrivateDirectory, PrivateFSError, PrivateTransa
 _NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _guard = threading.Lock()
 _owners: set[tuple[int, int, int]] = set()
+_lock_fds: set[int] = set()
+
+
+def _before_fork() -> None:
+    _guard.acquire()
+
+
+def _after_parent_fork() -> None:
+    _guard.release()
+
+
+def _after_child_fork() -> None:
+    global _guard
+    for fd in _lock_fds:
+        with contextlib.suppress(OSError):
+            os.close(fd)  # Never LOCK_UN a shared open-file description in the child.
+    _lock_fds.clear()
+    _owners.clear()
+    _guard = threading.Lock()
+
+
+os.register_at_fork(before=_before_fork, after_in_parent=_after_parent_fork, after_in_child=_after_child_fork)
 
 
 def _error(exc: OSError, operation: str, committed: bool = False) -> PrivateFSError:
@@ -105,17 +127,21 @@ class _Directory:
     def __init__(self, fd: int) -> None:
         self.fd = fd
         self.active = True
+        self.pid = os.getpid()
 
     def _check(self) -> None:
-        if not self.active:
-            raise RuntimeError("private directory is closed")
+        if not self.active or self.pid != os.getpid():
+            raise RuntimeError("private directory is closed or inherited across fork")
         _private(self.fd, directory=True)
 
     @contextlib.contextmanager
     def _open(self, name: str, *, lock: bool = False) -> Iterator[int]:
         self._check()
         flags = os.O_RDWR | os.O_CREAT if lock else os.O_RDONLY
-        fd = os.open(name, flags | _NOFOLLOW, 0o600, dir_fd=self.fd)
+        with _guard:
+            fd = os.open(name, flags | _NOFOLLOW, 0o600, dir_fd=self.fd)
+            if lock:
+                _lock_fds.add(fd)
         try:
             info = _private(fd)
             named = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
@@ -123,7 +149,12 @@ class _Directory:
                 raise PrivateFSError("unsafe", "identity")
             yield fd
         finally:
-            os.close(fd)
+            if not lock or self.pid == os.getpid():
+                with _guard:
+                    try:
+                        os.close(fd)
+                    finally:
+                        _lock_fds.discard(fd)
 
     def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
         self._check()
@@ -175,15 +206,17 @@ class _Directory:
                 finally:
                     tx.active = False
                     # Closing the descriptor also releases the lock if unlock fails.
-                    with contextlib.suppress(OSError):
-                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    if self.pid == os.getpid():
+                        with contextlib.suppress(OSError):
+                            fcntl.flock(fd, fcntl.LOCK_UN)
         except PrivateFSError:
             raise
         except OSError as exc:
             raise _error(exc, "transaction") from exc
         finally:
-            with _guard:
-                _owners.remove(owner)
+            if self.pid == os.getpid():
+                with _guard:
+                    _owners.remove(owner)
 
 
 class _Transaction:
