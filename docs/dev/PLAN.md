@@ -883,3 +883,30 @@ none may skip its actual-device acceptance because the helper works.
 The immediate implementation review is for W1–W4, not approval to combine all
 components into one PR. No native production code was changed in the planning
 and baseline-validation branch.
+
+
+### Native Windows installation and helper (C4)
+
+1. Write regression tests for Windows interpreter selection (override, actual
+   Hermes validation, Desktop, Scripts/conda, system refusal), helper CLI parser,
+   unsupported/tools/source/build/timeout failures, exact custom-dir TPM probe,
+   setup/status wiring and content-bound launcher/helper ownership. Observe RED.
+2. Implement a reusable stdlib Windows interpreter resolver and route Windows
+   wizard discovery through it; preserve POSIX seams and behavior.
+3. Add enable-winkey orchestration and validated packaged/checkout source lookup,
+   argv-only PowerShell build with selected Python and exact installed probe.
+   Route only hardware helper setup and helper discovery status.
+4. Implement install.ps1 with literal paths, isolated env, interpreter/Hermes
+   validation, pinned or explicit source/wheel spec, uv install and registration
+   verification, ownership-safe launcher, installation-only mode and delegation
+   to existing dispatch; propagate native failures before success output.
+5. Add ownership manifests for Windows helpers and launchers; refuse unowned
+   upgrades and reparse paths. Uninstall preserves unknown helpers. Extend
+   sdist/wheel packaging tests and add real PS fixture execution tests, skipped
+   explicitly when Windows/PowerShell are unavailable.
+6. Run focused suites, all Ruff/format, reduced-extras strict mypy, full unit
+   suite and packaging verification. Record RED/GREEN evidence and unexecuted
+   native gates, self-review, commit coherent wizard-only changes and report.
+
+Canonical configure remains C3's implementation; no alternative writer or
+whole-product Windows support claim is introduced by this slice.

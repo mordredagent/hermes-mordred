@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir,
-    [string]$Python = 'python'
+    [string]$Python = 'python',
+    [switch]$OwnedInstall
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -44,23 +45,32 @@ try {
         if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) { throw 'Build output is not a Windows executable.' }
     } finally { $stream.Dispose() }
     $expected = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
-    [IO.Directory]::CreateDirectory($InstallDir) | Out-Null
-    $destination = Join-Path $InstallDir $name
-    $temporary = Join-Path $InstallDir ('.winkey-' + [Guid]::NewGuid().ToString('N') + '.tmp')
-    [IO.File]::Copy($built, $temporary, $false)
-    if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $expected) { throw 'Copied helper hash mismatch.' }
-    if ([IO.File]::Exists($destination)) {
-        # Refuse a mapped/in-use binary before replacement. File.Replace is atomic;
-        # a concurrent opener or a failed replacement leaves the old file intact.
-        $exclusive = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        $exclusive.Dispose()
-        # PowerShell 5.1 coerces untyped $null to an empty string here.
-        [IO.File]::Replace($temporary, $destination, [NullString]::Value)
+    if ($OwnedInstall) {
+        # The installed package owns publication and refuses unknown/reparse destinations.
+        $publishArgs = @('-m', 'mordred_hermes.wizard._windows_install', 'helper', $built, $InstallDir)
+        & $Python @publishArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Helper publication failed; no verified installation is claimed.' }
+        $destination = Join-Path $InstallDir $name
+        if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $expected) { throw 'Installed helper hash mismatch.' }
     } else {
-        [IO.File]::Move($temporary, $destination)
+        [IO.Directory]::CreateDirectory($InstallDir) | Out-Null
+        $destination = Join-Path $InstallDir $name
+        $temporary = Join-Path $InstallDir ('.winkey-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        [IO.File]::Copy($built, $temporary, $false)
+        if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $expected) { throw 'Copied helper hash mismatch.' }
+        if ([IO.File]::Exists($destination)) {
+            # Refuse a mapped/in-use binary before replacement. File.Replace is atomic;
+            # a concurrent opener or a failed replacement leaves the old file intact.
+            $exclusive = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $exclusive.Dispose()
+            # PowerShell 5.1 coerces untyped $null to an empty string here.
+            [IO.File]::Replace($temporary, $destination, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $destination)
+        }
+        $temporary = $null
+        if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $expected) { throw 'Installed helper hash mismatch.' }
     }
-    $temporary = $null
-    if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $expected) { throw 'Installed helper hash mismatch.' }
     Write-Output "Installed: $destination"
     Write-Output "SHA256: $expected"
     Write-Output 'Build/install only: TPM readiness requires an explicit live probe under the intended user logon.'

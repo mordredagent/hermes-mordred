@@ -75,6 +75,16 @@ def _install_lines(python: Path) -> str:
 
 def _expected_runtime_python(home: Path) -> Path:
     """The interpreter the seal expects to run ``hermes``, for guidance text."""
+    if sys.platform == "win32":
+        import os
+
+        from .._windows_runtime import resolve_windows_python
+        from ._uninstall_hermes_env import find_hermes_launcher
+
+        selected = resolve_windows_python(
+            home, find_hermes_launcher(home), override=os.environ.get("MORDRED_HERMES_PYTHON")
+        )
+        return selected or (home / "hermes-agent" / "venv" / "Scripts" / "python.exe")
     from ..keyvault._runtime_probe import discover_runtime_python
 
     return discover_runtime_python(home=home) or (home / "hermes-agent" / "venv" / "bin" / "python3")

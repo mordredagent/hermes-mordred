@@ -602,6 +602,12 @@ def _run_tpm_helper(*, home: Path) -> int:
     return keyvault_native_cli.enable_tpm(home=home)
 
 
+def _probe_winkey_helper(*, home: Path) -> bool:
+    from . import keyvault_native_cli
+
+    return keyvault_native_cli._verify_winkey_helper(install_dir=home / "bin")[0]
+
+
 def _resolve_step_hardware_helper(*, home: Path, platform: str) -> StepResult:
     """Build/install the platform hardware helper. A build failure here (e.g. no
     ``native/`` sources on a wheel install, missing Xcode CLT / Rust toolchain)
@@ -618,6 +624,19 @@ def _resolve_step_hardware_helper(*, home: Path, platform: str) -> StepResult:
       early, before the keyvault step even gets to try, would hide that detail
       behind a generic "enable-tpm failed" instead.
     """
+    if platform == "win32":
+        from . import keyvault_native_cli
+
+        if _probe_winkey_helper(home=home):
+            return StepResult(_STEP_HARDWARE_HELPER, "done", "Windows TPM helper probe succeeded")
+        if keyvault_native_cli.enable_winkey(home=home) != 0:
+            return StepResult(
+                _STEP_HARDWARE_HELPER,
+                "manual",
+                "enable-winkey failed; Windows TPM custody fails "
+                "closed. Retry `hermes-mordred keyvault enable-winkey` (see errors above).",
+            )
+        return StepResult(_STEP_HARDWARE_HELPER, "ran", "Windows TPM helper probe succeeded")
     if platform == "darwin":
         if _probe_se_helper():
             return StepResult(_STEP_HARDWARE_HELPER, "done", "Secure Enclave helper installed")

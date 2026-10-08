@@ -110,3 +110,9 @@ def test_sdist_bundles_winkey_sources_without_build_artifacts(built_wheel: Path)
     for name in ("Cargo.toml", "Cargo.lock", "build.ps1", "README.md", "src/cng.rs", "tests/live_cng.rs"):
         assert "native/winkey-helper/" + name in names
     assert not any("/target/" in name for name in names)
+
+
+def test_sdist_ships_native_installer(built_wheel: Path) -> None:
+    with tarfile.open(next(built_wheel.parent.glob("*.tar.gz"))) as archive:
+        names = {name.partition("/")[2] for name in archive.getnames()}
+    assert "scripts/install.ps1" in names

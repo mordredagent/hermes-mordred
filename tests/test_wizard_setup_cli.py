@@ -380,13 +380,13 @@ class TestRunSetupOrchestration:
         out = capsys.readouterr().out
         assert "hermes-mordred keyvault init" in out
 
-    def test_win32_platform_is_unsupported_and_stops_before_keyvault(
+    def test_unknown_platform_is_unsupported_and_stops_before_keyvault(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _force_steps_done(monkeypatch, _STEP_HERMES, _STEP_CONFIGURE, _STEP_NETWORK)
         monkeypatch.setattr(setup_cli, "_resolve_step_keyvault", _raiser("keyvault step must not run"))
 
-        rc = _run_setup(tmp_path, platform="win32", prompt_io=_RefusingPromptIO(), options=setup_cli.SetupOptions())
+        rc = _run_setup(tmp_path, platform="freebsd", prompt_io=_RefusingPromptIO(), options=setup_cli.SetupOptions())
 
         assert rc == 1
         out = capsys.readouterr().out
@@ -820,8 +820,8 @@ class TestHardwareHelperStep:
         assert result.action == "ran"
         assert calls == [{"home": tmp_path}]
 
-    def test_win32_is_unsupported(self, tmp_path: Path) -> None:
-        result = setup_cli._resolve_step_hardware_helper(home=tmp_path, platform="win32")
+    def test_unknown_platform_is_unsupported(self, tmp_path: Path) -> None:
+        result = setup_cli._resolve_step_hardware_helper(home=tmp_path, platform="freebsd")
         assert result.action == "unsupported"
 
 

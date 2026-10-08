@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,11 +107,17 @@ class HermesEnv:
 
     @property
     def console_script(self) -> Path | None:
-        return self.python.parent / LAUNCHER_NAME if self.python is not None else None
+        return (
+            self.python.parent / (LAUNCHER_NAME + (".exe" if sys.platform == "win32" else ""))
+            if self.python is not None
+            else None
+        )
 
     @property
     def root(self) -> Path | None:
-        return self.python.parent.parent if self.python is not None else None
+        if self.python is None:
+            return None
+        return _environment_root(self.python) if sys.platform == "win32" else self.python.parent.parent
 
 
 def _looks_like_python(path: Path) -> bool:
@@ -119,6 +126,10 @@ def _looks_like_python(path: Path) -> bool:
 
 def _environment_root(python: Path) -> Path | None:
     """The venv / conda root of ``python``, or ``None`` for a system interpreter."""
+    if sys.platform == "win32":
+        from .._windows_runtime import environment_root
+
+        return environment_root(python)
     root = python.parent.parent
     if (root / "pyvenv.cfg").is_file() or (root / "conda-meta").is_dir():
         return root
@@ -134,10 +145,10 @@ def _first_lines(path: Path, count: int) -> list[str]:
 
 
 def find_hermes_launcher(home: Path, *, which: Which = shutil.which) -> Path | None:
-    on_path = which("hermes")
+    on_path = which("hermes.exe" if sys.platform == "win32" else "hermes")
     if on_path:
         return Path(on_path)
-    managed = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    managed = home / "hermes-agent" / ".hermes" / "bin" / ("hermes.exe" if sys.platform == "win32" else "hermes")
     return managed if managed.is_file() and os.access(managed, os.X_OK) else None
 
 
@@ -176,6 +187,10 @@ def _python_from_managed_launcher(launcher: Path, runner: Runner) -> Path | None
 
 def find_hermes_python(home: Path, launcher: Path | None, *, runner: Runner) -> Path | None:
     """The interpreter of Hermes's environment, found the way ``install.sh`` finds it."""
+    if sys.platform == "win32":
+        from .._windows_runtime import resolve_windows_python
+
+        return resolve_windows_python(home, launcher, override=os.environ.get("MORDRED_HERMES_PYTHON"), runner=runner)
     if launcher is not None:
         lines = _first_lines(launcher, 40)
         detected = _python_from_shebang(lines) or _python_from_exec_line(lines)
@@ -194,10 +209,11 @@ def find_hermes_python(home: Path, launcher: Path | None, *, runner: Runner) -> 
 
 
 def find_uv(home: Path, *, which: Which = shutil.which) -> Path | None:
-    on_path = which("uv")
+    on_path = which("uv.exe" if sys.platform == "win32" else "uv")
     if on_path:
         return Path(on_path)
-    bundled = sorted(path for path in (home / "tools").glob("uv-*/uv") if os.access(path, os.X_OK))
+    pattern = "uv-*/uv.exe" if sys.platform == "win32" else "uv-*/uv"
+    bundled = sorted(path for path in (home / "tools").glob(pattern) if os.access(path, os.X_OK))
     return bundled[-1] if bundled else None
 
 
@@ -256,8 +272,25 @@ def _points_at(link: Path, target: Path) -> bool:
     return os.path.normpath(resolved) == os.path.normpath(target)
 
 
-def classify_launchers(env: HermesEnv, *, user_home: Path) -> list[LauncherFinding]:
+def _classify_windows_launchers(home: Path) -> list[LauncherFinding]:
+    from ._windows_install import is_owned
+
+    path = home / "bin" / "hermes-mordred.ps1"
+    if not (path.exists() or path.is_symlink()):
+        return []
+    owned = is_owned(path)
+    reason = "verified installer receipt" if owned else "unknown Windows launcher; kept"
+    return [LauncherFinding(path, owned, reason)]
+
+
+def classify_launchers(env: HermesEnv, *, user_home: Path, hermes_home: Path | None = None) -> list[LauncherFinding]:
     """Every ``hermes-mordred`` launcher candidate, with whether ``uninstall`` removes it."""
+    if sys.platform == "win32":
+        return _classify_windows_launchers(hermes_home if hermes_home is not None else user_home / ".hermes")
+    return _classify_posix_launchers(env, user_home=user_home)
+
+
+def _classify_posix_launchers(env: HermesEnv, *, user_home: Path) -> list[LauncherFinding]:
     candidates: list[Path] = []
     if env.launcher is not None:
         candidates.append(env.launcher.parent / LAUNCHER_NAME)
@@ -309,8 +342,19 @@ def _sekey_is_mordred_built(path: Path, runner: Runner) -> tuple[bool, str]:
     return False, "not the ad-hoc signed build from `keyvault enable-se`"
 
 
-def classify_helpers(*, user_home: Path, platform: str, runner: Runner = default_runner) -> list[HelperFinding]:
+def classify_helpers(
+    *, user_home: Path, platform: str, runner: Runner = default_runner, hermes_home: Path | None = None
+) -> list[HelperFinding]:
     """The native helpers in ``~/.local/bin`` and whether Mordred built them."""
+    if platform == "win32":
+        from ._windows_install import is_owned
+
+        home = hermes_home if hermes_home is not None else user_home / ".hermes"
+        path = home / "bin" / "mordred-hermes-winkey.exe"
+        if not (path.exists() or path.is_symlink()):
+            return []
+        owned = is_owned(path)
+        return [HelperFinding(path, owned, "verified build receipt" if owned else "unknown Windows helper; kept")]
     findings: list[HelperFinding] = []
     for name in HELPER_NAMES:
         path = user_home / ".local" / "bin" / name
