@@ -14,6 +14,7 @@ The ``runner`` parameter is injectable for tests; the default invokes
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from ._keyvault_probe import keyvault_initialized
 from .audit import Writer
 from .policy import PolicyMode, PolicyOutcome, evaluate_install
 from .skill_frontmatter import parse
+
+_platform = os.name
 
 SubprocessRunner: TypeAlias = Callable[[list[str]], "subprocess.CompletedProcess[bytes]"]
 
@@ -71,6 +74,7 @@ def run(
     skill_md_name: str = "SKILL.md",
     runner: SubprocessRunner = _default_runner,
     keyvault_probe: KeyvaultProbe = keyvault_initialized,
+    config_path: Path | None = None,
 ) -> InstallResult:
     """Run the install wrapper for one skill.
 
@@ -78,11 +82,29 @@ def run(
     written first). On allow / warn, invokes ``runner(["hermes", "skills",
     "install", <skill_path>])`` and returns its returncode.
 
+    On Windows a fresh canonical read precedes every execution; ``config_path``
+    selects an explicit canonical config leaf. A supplied mode can strengthen
+    but cannot weaken that checked policy. An unreadable generation refuses
+    before the keyvault probe or installer runs.
+
     ``keyvault_probe`` reports whether the Mordred keyvault is initialized;
     it is consulted *only* when the skill declares
     ``metadata.mordred.requires_keyvault: true`` (TODO.md §4.1), so skills
     that do not opt in incur no keyvault import or filesystem read.
     """
+    if _platform == "nt":
+        from . import _runtime
+        from ._checked_policy import read_checked_policy
+
+        try:
+            checked = read_checked_policy(config_path or _runtime.DEFAULT_HERMES_CONFIG_PATH)
+        except Exception:
+            raise InstallBlocked("canonical privacy policy unavailable", None) from None
+        # A caller may request a stricter policy, but cannot override the
+        # current checked generation with a stale permissive mode.
+        rank = {"off": 0, "lenient": 1, "strict": 2}
+        if rank[checked.mode] > rank[policy_mode]:
+            policy_mode = checked.mode
     md = _resolve_skill_md(skill_path, skill_md_name)
     metadata = parse(md)
     vault_ready = keyvault_probe() if metadata.requires_keyvault else True

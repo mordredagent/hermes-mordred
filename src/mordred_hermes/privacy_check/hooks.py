@@ -67,8 +67,24 @@ def check_plugin_integrity(**kwargs: Any) -> None:
     manager in hand it also reports each failed component as
     ``mordred/<component>``.
     """
-    state = _runtime.ensure_state()
-    disabled = _runtime.find_disabled_siblings(config_path=state.config_path)
+    _check_plugin_integrity_state(**kwargs)
+
+
+def _check_plugin_integrity_state(**kwargs: Any) -> _runtime.PluginState:
+    """Return the state that passed the gate without another canonical read."""
+    try:
+        state = _runtime.ensure_state()
+    except Exception:
+        if _runtime._platform != "nt":
+            raise
+        message = "Mordred cannot safely read its canonical privacy policy; session refused."
+        _runtime.poison(message)
+        raise MordredIntegrityRefused(message) from None
+    disabled = (
+        _runtime.disabled_from_checked(state.checked)
+        if state.checked is not None
+        else _runtime.find_disabled_siblings(config_path=state.config_path)
+    )
     plugin_manager = kwargs.get("plugin_manager")
     if plugin_manager is not None:
         disabled.update(_runtime.find_unloaded_siblings(plugin_manager))
@@ -116,6 +132,7 @@ def check_plugin_integrity(**kwargs: Any) -> None:
         _LOG.warning(
             "Mordred plugin not loaded or incomplete in %s mode: %s.%s", state.policy_mode, sorted(disabled), hint
         )
+    return state
 
 
 def _legacy_names_hint(config_path: Any) -> str:
@@ -138,8 +155,14 @@ def on_session_start(**kwargs: Any) -> None:
     Always emits ``mordred.degraded.no_origin_skill`` once per process
     (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
     """
-    check_plugin_integrity(**kwargs)
-    state = _runtime.ensure_state()
+    if _runtime._platform == "nt":
+        # The marker belongs to the already checked startup decision. A second
+        # read here could fail outside the hard-refusal gate and be swallowed
+        # by Hermes's ordinary-exception hook wrapper.
+        state = _check_plugin_integrity_state(**kwargs)
+    else:
+        check_plugin_integrity(**kwargs)
+        state = _runtime.ensure_state()
     if _runtime.claim_no_origin_skill_emit():
         safe_audit_append(
             state.audit,
@@ -158,7 +181,8 @@ def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> di
 
     session_id = str(kwargs.get("session_id") or "") or None
     try:
-        policy = egress.load_policy()
+        checked = getattr(state, "checked", None)
+        policy = checked.egress if checked is not None else egress.load_policy()
         decision = egress.decide(tool_name, kwargs.get("args"), session_id, policy)
     except Exception:
         _LOG.exception("tool-egress evaluation failed; blocking %s", tool_name)
@@ -206,7 +230,12 @@ def pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     is absent from the payload (HOOK_PAYLOADS §4). Strict-mode
     per-skill checks live in :mod:`install_wrapper`.
     """
-    state = _runtime.ensure_state()
+    try:
+        state = _runtime.ensure_state()
+    except Exception:
+        if _runtime._platform != "nt":
+            raise
+        return {"action": "block", "message": "Mordred cannot safely read its canonical privacy policy."}
     tool_name = str(kwargs.get("tool_name") or "")
 
     if _runtime.is_poisoned():
