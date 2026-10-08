@@ -238,6 +238,8 @@ def parse_pending(data: bytes, manifest: Manifest, role: Role) -> Pending:
     ):
         raise CustodyError("custody journal profile or role mismatch")
     operation, phase = obj["operation"], obj["phase"]
+    if not isinstance(operation, str) or not isinstance(phase, str):
+        raise CustodyError("invalid custody journal phase")
     if (operation, phase) not in {
         ("create", "intent"),
         ("create", "verified"),

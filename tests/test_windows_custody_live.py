@@ -8,6 +8,7 @@ for explicit reconciliation. No existing fixture keys or user profiles are used.
 
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 import uuid
@@ -40,9 +41,11 @@ def test_real_cng_memory_and_independent_audit_custody_survive_new_session():
         key = session.enroll_memory()
         memory = session.lease("memory")
         audit = session.enroll_role("audit")
-        assert session.load_memory_key() == key
+        matches = hmac.compare_digest(session.load_memory_key(), key)
+        assert matches, "memory custody roundtrip failed"
     with windows_custody_session(home) as session:
-        assert session.load_memory_key() == key
+        matches = hmac.compare_digest(session.load_memory_key(), key)
+        assert matches, "memory custody roundtrip failed"
         session.validate_lease(memory)
         session.backend_for(audit)
     # No hooks were armed and no memory was written; explicit opt-out satisfies

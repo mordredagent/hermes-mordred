@@ -133,3 +133,15 @@ def test_retained_record_bound_and_duplicate_generation_refuse():
     duplicate = manifest.with_role("audit", p.RoleState(records[0], records[:1]), epoch=1)
     with pytest.raises(p.CustodyError):
         p.parse_manifest(p.encode_manifest(duplicate), IDENTITY, SID)
+
+
+@pytest.mark.parametrize("field", ["operation", "phase"])
+@pytest.mark.parametrize("value", [[], {}])
+def test_unhashable_journal_fields_use_custody_failure_contract(field, value):
+    p = module()
+    manifest = p.new_manifest(IDENTITY, SID)
+    pending = p.Pending(manifest.profile_nonce, "memory", "create", "intent", p.new_record(manifest, "memory"))
+    obj = json.loads(p.encode_pending(pending))
+    obj[field] = value
+    with pytest.raises(p.CustodyError):
+        p.parse_pending(json.dumps(obj).encode(), manifest, "memory")
