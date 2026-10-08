@@ -1568,3 +1568,44 @@ Never retry uncertain operations automatically. There is no secure-erasure,
 power-loss atomic append, or protection from hostile same-user code claim.
 All new operations reject invalid positive limits, reserved/path filenames and
 invalid closed/thread/fork lifetimes before touching filesystem state.
+
+### Confidential Windows directory capabilities
+
+Windows-only `open_confidential_directory(path, *, create=False)` admits a
+trusted shared parent while preserving exact-private `open_private_directory`.
+`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, and `transaction`;
+`ConfidentialTransaction` adds `create_bytes`, `replace_bytes`, and
+`delete_file(name, *, expected_identity=None)`. Existing files must be owned by
+the current user, regular, non-reparse and single-linked. Ordinary allow/deny
+ACEs with known inheritance flags and masks are accepted only if every
+effective allow targets that user, SYSTEM or Administrators; OWNER_RIGHTS maps
+to the verified owner. Denies never excuse an outside grant. Inherited,
+duplicate and restricted safe grants need not match the private descriptor.
+New locks, staging files, backups and replacements are exact-private before
+content. Existing parent descriptors and no-op file descriptors stay unchanged.
+
+`open_optional_confidential_directory(path)` and
+`open_optional_private_directory(path)` are Windows-only, noncreating contexts
+yielding the corresponding capability or `None`. Only a checked missing final
+leaf yields `None`; missing intermediate ancestors and unsafe/inaccessible
+objects fail. All checked ancestor handles stay pinned through context exit;
+cleanup errors propagate, including after an absence observation. No missing
+sentinel crosses cleanup. The endpoint is checked as a trusted parent with
+`creating_child=True`; create permits only a missing final leaf and verifies its
+new exact-private descriptor. Each operation
+rechecks the directory security/identity and successful observations recheck
+the file binding and security. Failed lock creation never permits unlocked IO.
+
+
+Both `PrivateDirectory` and `ConfidentialDirectory` expose
+`directory_identity() -> FileIdentity` for coordinator identity binding. It
+validates active context, originating process/thread, pinned directory and
+ancestor security, identity and path binding before returning the checked
+handle identity. There is no path-only or raw-stat fallback. POSIX private
+directories revalidate descriptor-relative names throughout the pinned chain.
+
+
+`PrivateTransaction` and `ConfidentialTransaction` also expose
+`directory_identity() -> FileIdentity`. A borrowed transaction must be active
+and belong to the current thread/process, then revalidate its owning directory
+with the same checked identity contract. This method never reacquires a lock.

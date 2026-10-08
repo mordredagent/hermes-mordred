@@ -6,14 +6,27 @@ import os
 from contextlib import AbstractContextManager
 from pathlib import Path
 
-from ._types import FileIdentity, FileMetadata, PrivateDirectory, PrivateFSError, PrivateTransaction
+from ._types import (
+    ConfidentialDirectory,
+    ConfidentialTransaction,
+    FileIdentity,
+    FileMetadata,
+    PrivateDirectory,
+    PrivateFSError,
+    PrivateTransaction,
+)
 
 __all__ = [
+    "ConfidentialDirectory",
+    "ConfidentialTransaction",
     "FileIdentity",
     "FileMetadata",
     "PrivateDirectory",
     "PrivateFSError",
     "PrivateTransaction",
+    "open_confidential_directory",
+    "open_optional_confidential_directory",
+    "open_optional_private_directory",
     "open_private_directory",
 ]
 _platform = os.name
@@ -30,3 +43,29 @@ def open_private_directory(path: str | Path, *, create: bool = False) -> Abstrac
         return windows_opener(path, create=create)
     else:
         raise PrivateFSError("unsupported", "open_directory")
+
+
+def open_confidential_directory(
+    path: str | Path, *, create: bool = False
+) -> AbstractContextManager[ConfidentialDirectory]:
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "open_confidential_directory")
+    from ._windows_io import open_confidential_directory as opener
+
+    return opener(path, create=create)
+
+
+def open_optional_confidential_directory(path: str | Path) -> AbstractContextManager[ConfidentialDirectory | None]:
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "open_optional_confidential_directory")
+    from ._windows_io import open_optional_confidential_directory as opener
+
+    return opener(path)
+
+
+def open_optional_private_directory(path: str | Path) -> AbstractContextManager[PrivateDirectory | None]:
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "open_optional_private_directory")
+    from ._windows_io import open_optional_private_directory as opener
+
+    return opener(path)

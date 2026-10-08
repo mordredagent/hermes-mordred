@@ -182,3 +182,40 @@ def test_cleanup_failure_after_publication_is_never_retry_safe(
     if body_error and stage != "staging":
         assert err.value is original
     assert (private_path / "secret").read_bytes() == b"complete"
+
+
+def test_directory_identity_is_stable_across_checked_reopens(fs, private_path):
+    with fs.open_private_directory(private_path, create=True) as directory:
+        first = directory.directory_identity()
+        assert isinstance(first, fs.FileIdentity)
+        assert directory.directory_identity() == first
+    with pytest.raises(RuntimeError):
+        directory.directory_identity()
+    with fs.open_private_directory(private_path) as reopened:
+        assert reopened.directory_identity() == first
+
+
+def test_transaction_identity_is_borrowable_only_while_active(fs, private_path):
+    with fs.open_private_directory(private_path, create=True) as directory:
+        identity = directory.directory_identity()
+        with directory.transaction() as transaction:
+            assert transaction.directory_identity() == identity
+            assert transaction.directory_identity() == identity
+        with pytest.raises(RuntimeError):
+            transaction.directory_identity()
+
+
+@pytest.mark.parametrize("change", ["thread", "process"])
+def test_transaction_identity_rejects_foreign_lifetime(fs, private_path, monkeypatch, change):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with fs.open_private_directory(private_path, create=True) as directory, directory.transaction() as transaction:
+        assert transaction.directory_identity() == directory.directory_identity()
+        if change == "thread":
+            with ThreadPoolExecutor(max_workers=1) as executor, pytest.raises(RuntimeError):
+                executor.submit(transaction.directory_identity).result()
+        else:
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "getpid", lambda: -1)
+                with pytest.raises(RuntimeError):
+                    transaction.directory_identity()

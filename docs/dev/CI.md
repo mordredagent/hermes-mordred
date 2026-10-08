@@ -124,6 +124,22 @@ uses a paid account and mutates runner network state.
   stop mechanisms were disarmed. Its retained disk and synthetic wallet remain.
   Evidence is retained under `~/.codex/artifacts/mordred-windows-wallet-20261008/`.
 
+- **2026-10-08 — Windows confidential-file and coordinator identity capabilities.**
+  Code `fc5db88455592badb638ca400507866b53328450` passed ordinary-user
+  Windows Server 2025 source and isolated sdist-derived wheel runs: **279 passed,
+  53 POSIX-only skips** each, including the explicitly enabled inherited-ACL
+  live roundtrip. Wheel SHA-256: `d55a4ee4aba92a146387f5aedaf1b9fe0b227d0c59498db5d11e1e278eb5c648`. Module origin was checked inside the
+  fresh wheel environment. The preceding `4f3f4377e` implementation also passed
+  actual Hermes-created `config.yaml`/`.env` read and replacement with unchanged
+  parent ACLs; replacements became exact-private. Local Python 3.13 all-extras
+  regression at `4f3f4377e`: 5,493 passed, 59 skipped, 35 integration deselected;
+  final identity-seam focused suite: 277 passed, 54 skipped, one live deselected.
+  Strict reduced-extras mypy, Ruff and formatting passed. Independent original
+  and identity-seam reviews found no actionable issues. Evidence is retained
+  under `~/.codex/artifacts/mordred-windows-completion-20261008/` (C1b logs).
+  These are shared-boundary checks; production caller migration, full product,
+  Windows 11 and new reboot/TPM validation are not established by this entry.
+
 - **2026-10-08 — Private filesystem review fixes on macOS.**
   Review reproduced inherited extended-ACL grants despite mode 0700/0600 and
   stale exception text after promotion to an uncertain commit. Before the fix,

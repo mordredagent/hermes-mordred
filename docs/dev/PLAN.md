@@ -1043,3 +1043,29 @@ Native ABI references: Microsoft [FILE_BASIC_INFO](https://learn.microsoft.com/e
 [FILE_FULL_DIR_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_full_dir_info),
 [FILE_DISPOSITION_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info),
 and [SetFilePointerEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex).
+
+### Confidential Windows filesystem implementation
+
+C1b shares the native IO, publication and locking code with strict private
+capabilities through an internal validation strategy. Add separate protocols
+and Windows-only openers specified in SPEC, factoring the pinned walk to
+represent final-leaf absence directly while retaining handles until exit.
+Keep private admission unchanged and locks/staging always exact-private.
+
+Validate with pure ACL cases (inherited, duplicate/restricted, OWNER_RIGHTS,
+null/foreign/unknown/outside deny-plus-allow), fake native IO cases (checked
+absence versus intermediate/cleanup failures, type/link/path changes, private
+staging before bytes, parent unchanged, replacement descriptor, lock failure,
+original exception/uncertainty), and actual Windows roundtrips using inherited
+profile-style files. Add native cases to the Windows filesystem CI job.
+Run focused/full suites, Ruff, formatting and reduced-extras strict mypy; native
+ordinary-user source/wheel acceptance is separately required by the controller.
+
+
+C2 integration adds `directory_identity()` to both directory protocols, using
+Windows checked-directory revalidation and POSIX pinned descriptor/name-chain
+validation. Test closed/foreign thread/process lifetimes, unsafe ACL/mode,
+identity/path replacement and consistent repeated identities. Keep private and
+confidential admission policies distinct. Transactions expose the same method
+for borrowed audit-session validation, checking their own lifetime before
+delegating to their directory without reacquiring a lock.

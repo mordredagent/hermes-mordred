@@ -261,3 +261,56 @@ def test_macos_acl_changed_during_transaction_refuses_before_writing(fs, tmp_pat
             tx.create_bytes("secret", b"must not be written")
         assert err.value.reason == "unsafe"
         assert sorted(path.name for path in root.iterdir()) == before
+
+
+def test_directory_identity_live_stable_then_closed(fs, tmp_path):
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as directory:
+        identity = directory.directory_identity()
+        assert identity.volume == root.stat().st_dev
+        assert directory.directory_identity() == identity
+    with pytest.raises(RuntimeError):
+        directory.directory_identity()
+
+
+@pytest.mark.parametrize("change", ["thread", "process", "mode", "rename", "ancestor", "symlink"])
+def test_directory_identity_revalidates_descriptor_and_path(fs, tmp_path, monkeypatch, change):
+    from concurrent.futures import ThreadPoolExecutor
+
+    parent = tmp_path.resolve() / "parent"
+    parent.mkdir(mode=0o700)
+    root = parent / "private"
+    with fs.open_private_directory(root, create=True) as directory:
+        assert directory.directory_identity()
+        if change == "thread":
+            with ThreadPoolExecutor(max_workers=1) as executor, pytest.raises(RuntimeError):
+                executor.submit(directory.directory_identity).result()
+            return
+        if change == "process":
+            monkeypatch.setattr(os, "getpid", lambda: -1)
+        elif change == "mode":
+            root.chmod(0o755)
+        elif change == "ancestor":
+            parent.chmod(0o777)
+        elif change == "rename":
+            root.rename(parent / "moved")
+            root.mkdir(mode=0o700)
+        else:
+            root.rename(parent / "moved")
+            root.symlink_to(parent / "moved", target_is_directory=True)
+        with pytest.raises(RuntimeError if change == "process" else fs.PrivateFSError):
+            directory.directory_identity()
+
+
+@pytest.mark.parametrize("change", ["mode", "rename"])
+def test_transaction_identity_rechecks_posix_directory(fs, tmp_path, change):
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as directory, directory.transaction() as transaction:
+        assert transaction.directory_identity() == directory.directory_identity()
+        if change == "mode":
+            root.chmod(0o755)
+        else:
+            root.rename(root.with_name("moved"))
+            root.mkdir(mode=0o700)
+        with pytest.raises(fs.PrivateFSError):
+            transaction.directory_identity()
