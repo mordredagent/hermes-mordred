@@ -78,6 +78,30 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Private filesystem review fixes on macOS.**
+  Review reproduced inherited extended-ACL grants despite mode 0700/0600 and
+  stale exception text after promotion to an uncertain commit. Before the fix,
+  six native ACL regressions and one exception-message regression failed.
+  Product revision `e6efd9dfc` checks macOS ACLs through validated descriptors,
+  accepts only absent/empty/deny-only ACLs and refuses all allow/unknown entries
+  or query failures without repairing permissions. Even owner-only, read-only
+  and inherit-only allow entries are intentionally refused; the normal profile
+  deny-delete ACL remains accepted. Exception `args` and text now follow the
+  current `commit_state` while preserving the original exception.
+
+  Native macOS tests cover inherited grants, existing directory/file/lock ACLs,
+  ACL changes during a transaction and injected native-query/free failures with
+  resource cleanup. The five filesystem test files produced **85 passed,
+  34 platform skips**. The full default suite produced **5,250 passed, 49 skipped,
+  34 integration deselected; 87.42% coverage**. Ruff/format, strict mypy (205
+  files), shellcheck and an independent read-only review passed. Hosted Windows
+  cleanup tests also assert that rendered errors match uncertain commit state;
+  current-head CI results are tracked on PR #192. AWS was not started for these
+  fixes, and Linux validation resources were untouched. The actual Windows
+  wheel/restart evidence below predates these fixes and is not a fresh host run.
+  Local evidence is retained under
+  `~/.codex/artifacts/mordred-filesystem-review-fixes-20261008/`.
+
 - **2026-10-08 — Shared private filesystem foundation (WF1–WF5).**
   Independent foundation PR #192 follows contract PR #191; neither includes the
   pending CNG helper implementation or migrates component callers. The product
