@@ -101,6 +101,31 @@ Record native results separately under the existing validation log.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Windows dedicated custody checked-file candidate (C5a).**
+  Revision `b4793e7d3` passed **51 tests with 11 POSIX-only fault-injection
+  skips** in both ordinary-user Server 2025 / Python 3.11.17 source and fresh
+  sdist-derived wheel environments. Selectors:
+  `tests/test_windows_custody.py tests/test_windows_custody_profile.py`.
+  These runs use real Windows checked files and real MRKW cryptography with
+  an injected native-key backend; they do **not** establish actual CNG enrollment
+  or deletion. All profiles are disposable and imported origins were checked.
+  Wheel SHA-256: `32298344357c81e279a0d66668b4f392170f6e583613feb7379949fae98345be`.
+
+  Core and scoped R1 independent reviews approved. Host full regression before
+  the narrow R1 correction: 6,060 passed, 126 skipped, 38 excluded. Final focused
+  checks: 62 passed, one native-only skip; reduced-extras types, lint/format,
+  shellcheck and docs passed. R1 validates malformed journal field types and
+  prevents pytest from rendering native key operands in live-test failures.
+
+  Real CNG validation is pending the C5c ordinary-user process-inventory gate:
+  protected foreign process token access is denied on this machine. The gate
+  remains strict; no native-key live test or fixture was run as a workaround.
+  The managed installation image prerequisite and supported-runtime boundary
+  are tracked in shared contract PR #195. Memory hooks, installed-runtime proof,
+  encrypted audit/Telegram consumers, wizard flows and Windows 11 are separate
+  unfinished gates. The component PR remains a draft until native custody
+  acceptance is complete.
+
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
   #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
