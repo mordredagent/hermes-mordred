@@ -288,8 +288,10 @@ def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
         config=config,
         env=env,
         desktop_page=page if page.is_dir() and not page.is_symlink() else None,
-        launchers=classify_launchers(hermes_env, user_home=ctx.user_home),
-        helpers=classify_helpers(user_home=ctx.user_home, platform=ctx.platform, runner=ctx.runner),
+        launchers=classify_launchers(hermes_env, user_home=ctx.user_home, hermes_home=ctx.home),
+        helpers=classify_helpers(
+            user_home=ctx.user_home, platform=ctx.platform, runner=ctx.runner, hermes_home=ctx.home
+        ),
         hermes_env=hermes_env,
         data=_data_inventory(ctx),
         device_keys=_device_keys(ctx, telegram_configured),
@@ -536,7 +538,12 @@ def _remove_launchers(plan: UninstallPlan) -> None:
     """Step c (launchers). Helpers go in :func:`_remove_helpers`, after the purge."""
     for launcher in plan.launchers:
         if launcher.remove:
-            launcher.path.unlink(missing_ok=True)
+            if launcher.path.name == "hermes-mordred.ps1":
+                from ._windows_install import remove_owned
+
+                remove_owned(launcher.path)
+            else:
+                launcher.path.unlink(missing_ok=True)
             print(f"Removed {launcher.path}.")
 
 
@@ -546,7 +553,12 @@ def _remove_helpers(plan: UninstallPlan, opts: UninstallOptions) -> None:
     if opts.remove_helper or opts.purge_data:
         for helper in plan.helpers:
             if helper.mordred_built:
-                helper.path.unlink(missing_ok=True)
+                if helper.path.name == "mordred-hermes-winkey.exe":
+                    from ._windows_install import remove_owned
+
+                    remove_owned(helper.path)
+                else:
+                    helper.path.unlink(missing_ok=True)
                 print(f"Removed {helper.path}.")
             else:
                 _term.emit_warn(f"kept {helper.path}: {helper.reason}.")

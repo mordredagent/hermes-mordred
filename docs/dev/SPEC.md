@@ -791,7 +791,7 @@ network     use | status | init
 policy      show | explain | dry-run | reload
 audit       tail | grep | decrypt | purge
 keyvault    init | list | verify-digest | export | recover | reset |
-            enable-se | enable-tpm | eth
+            enable-se | enable-tpm | enable-winkey | eth
 vault       init | change-passphrase | recover | add | status | cat |
             migrate | set-memory-key | enable-config-decrypt |
             disable-config-decrypt
@@ -1642,3 +1642,37 @@ No automatic retry, guessed rollback, secure-erasure or power-loss claim is
 made. Consumers own encryption formats, generation leases and key authorization;
 uncertain writes invalidate their cached active identity/header/DEK and require
 explicit reconciliation. Shared audit operations do not enable those consumers.
+
+
+### Native Windows installation and helper (C4)
+
+The native PowerShell installer selects the actual Hermes virtualenv/conda
+interpreter, verifies Hermes distribution/CLI registration there, installs a
+pinned release or explicitly supplied source/wheel with keyvault and extension
+extras, and verifies the single `mordred` entry point. It scrubs Python/uv
+redirects and checks every native exit status. `-InstallOnly` finishes package
+validation without claiming configure/setup; otherwise it delegates the existing
+install dispatch and canonical writers (C3 dependency). No Bash or WSL is used.
+
+Windows wizard interpreter discovery has one reusable Python resolver, honoring
+an authoritative explicit override, `Scripts/python.exe`, conda roots and
+Desktop managed environments. System Python and mismatched Hermes launchers
+refuse. Public launchers and native helpers require verifiable content-bound
+ownership; unknown files and reparse destinations are retained/refused.
+
+`keyvault enable-winkey [--install-dir PATH]` builds only packaged or validated
+checkout sources with PowerShell array arguments and the running interpreter.
+Rust MSVC/Visual C++ tools are prerequisites. The exact freshly installed helper
+is probed under the current token, including custom destinations; build/probe
+errors remain failures. A successful probe establishes TPM machine binding,
+not presence, active memory encryption or Windows product completion. Windows
+setup/status use this command/finder without broadening encryption capabilities.
+
+Native PowerShell 5.1/pwsh and ordinary-user Windows installation, upgrade,
+uninstall and CNG evidence remain controller-run acceptance gates.
+
+C4 native executable/receipt publication depends on C1b's
+`open_confidential_directory` transactions, including trusted-parent ACL checks
+and identity-bound deletion. Missing C1b refuses; no weak native fallback is
+permitted. C4 cannot be finalized or advertised as native installation-ready
+until that dependency and its native acceptance pass.

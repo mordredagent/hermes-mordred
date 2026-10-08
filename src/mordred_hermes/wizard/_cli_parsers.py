@@ -521,6 +521,9 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     )
     p_enable_tpm.add_argument("--install-dir", help="Install directory for the helper (default: ~/.local/bin)")
     p_enable_tpm.set_defaults(func=_handle_keyvault_enable_tpm)
+    p_enable_win = ksub.add_parser("enable-winkey", help="Build and probe the Windows CNG TPM helper")
+    p_enable_win.add_argument("--install-dir", help="Helper directory (default: <HERMES_HOME>/bin)")
+    p_enable_win.set_defaults(func=_handle_keyvault_enable_winkey)
 
     from . import keyvault_eth_cli
 
@@ -1016,3 +1019,9 @@ def _handle_extension_serve(args: argparse.Namespace) -> int:
     from mordred_hermes.extension.__main__ import serve
 
     return serve(host=args.host, port=args.port)
+
+
+def _handle_keyvault_enable_winkey(args: argparse.Namespace) -> int:
+    from . import keyvault_native_cli
+
+    return keyvault_native_cli.cli_enable_winkey(args)
