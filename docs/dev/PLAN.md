@@ -1374,3 +1374,40 @@ main-thread `SystemExit` and in a child process for the worker-thread
 An interrupt during a Windows memory publication is deliberately recorded as
 uncertain and surfaces at the hook as `MemoryEncryptionUnavailable`
 (fail-closed, at the cost of interrupt responsiveness).
+
+### Windows capability predicates and role reset (C5e)
+
+Public signatures are frozen in SPEC.md §Windows dedicated custody and memory
+lifecycle. `keyvault/_windows_capability.py` is the only new module; custody
+gains read-only `role_status` and journaled `reset_role`, and the excluded
+entry points gain one first-statement guard each. No wizard, privacy,
+extension, network or Desktop file changes.
+
+Capability predicates reuse existing seams instead of re-implementing them:
+`find_winkey_helper` for helper presence, `windows_memory_runtime_admitted`
+for structural C4 admission, and one load-only custody session for ownership.
+They never construct the native backend, probe the helper, unwrap, launch a
+subprocess or enroll. Classified custody failures map to `custody-unsafe`,
+`custody-uncertain` or `custody-broken`; unclassified exceptions propagate.
+Excluded guards are lazy imports of `refuse_excluded_on_windows`, so the
+POSIX import graph and behavior are unchanged. Startup/session hooks were
+already inert off macOS with never-raise contracts and stay that way; making
+them raise would fail every Windows Hermes startup.
+
+Reset composes the existing `delete_role` journals rather than adding a new
+deletion path. Preflight refusals all precede the first intent journal; each
+generation is then deleted and committed individually, so partial progress is
+durable and the failed generation remains unresolved for reconciliation.
+Memory reset keeps the SPEC rule that seals block deletion even with
+`erase_authorized`, and refuses unexpected retained memory records because
+memory cleanup removes the single current wrapper.
+
+Validation: portable `test_windows_capability.py`,
+`test_windows_custody_reset.py` and `test_windows_excluded_guards.py` use real
+checked files and MRKW crypto with injected native backend, principal and
+platform admission, plus fault injectors on `_storage`, anchor/backend
+resolution, locks, native wrap and plaintext capture. Host-skipped
+`test_windows_capability_native.py` covers an inherited-safe NTFS home, a case
+alias and copied-home refusal for capabilities and reset. All four join the
+scoped Windows CI job. Real CNG, Windows 11 and C6 user routing remain
+separate gates; capability truthfulness does not establish product support.

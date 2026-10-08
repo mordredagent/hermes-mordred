@@ -335,6 +335,10 @@ Implementation and acceptance remain open:
   publication receipts are implemented. Independent review, native source/wheel
   CNG and Windows 11 acceptance remain; C7b factory/CLI adoption is separate.
 - [ ] C5e: excluded file-vault refusal and flat role reset/deletion journals.
+  C5e now supplies pure capability predicates (no aggregate readiness flag),
+  pre-mutation `KeyvaultUnsupportedOnWindows` guards, retained excluded-artifact
+  reports and journaled role-specific `reset_role`. Independent review, native
+  Windows CI, real CNG/Windows 11 acceptance and C6 routing remain open.
 - [ ] C6: explicit native-custody/audit initialization and wizard memory flows;
   preserve separate C7b privacy/CLI and C10 Telegram migrations.
 - [ ] Design and implement checked tree lifecycle before recursive cleanup;

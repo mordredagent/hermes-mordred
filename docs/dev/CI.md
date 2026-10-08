@@ -1196,3 +1196,26 @@ a worker thread. They prove that broken or unproven custody with an unsupported
 seam ends the process through `os._exit(1)`, and that a fresh unmanaged
 profile continues in plaintext. The native junction case asserts the
 foundation's classified `unsafe`/`ancestor_identity` refusal.
+
+### Windows capability and role reset validation (C5e)
+
+The scoped Windows job adds `test_windows_capability.py`,
+`test_windows_capability_native.py`, `test_windows_custody_reset.py` and
+`test_windows_excluded_guards.py`. Host tests use real checked transactions
+and MRKW crypto, injecting only the native backend, principal and platform
+admission. Fault injectors fail if an excluded entry point reaches `_storage`,
+anchor or backend resolution, a lock, native wrap/unwrap or plaintext capture.
+Native cases use an inherited-safe task-owned NTFS home, its case alias and a
+copied exact-private home; only CNG and the gateway inventory gate are
+injected. They prove checked admission and refusal, not TPM availability.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_windows_capability.py tests/test_windows_capability_native.py tests/test_windows_custody_reset.py tests/test_windows_excluded_guards.py
+```
+
+Capability predicates are diagnostics, not product acceptance. Real CNG reset,
+Windows 11 and C6 wizard routing remain separate gates; record native results
+in the Manual live-device validation log.
