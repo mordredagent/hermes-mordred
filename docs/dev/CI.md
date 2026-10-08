@@ -76,6 +76,29 @@ manual `mullvad_version` input. It installs the official daemon, runs
 disconnects and logs out in teardown. It never runs automatically because it
 uses a paid account and mutates runner network state.
 
+## Windows dedicated custody validation
+
+The scoped Windows job includes `test_windows_custody_profile.py` and
+`test_windows_custody.py`. These use real checked files and real MRKW crypto
+with an injected native P-256 boundary; they do not prove TPM availability.
+POSIX primitive fault-injection cases are skipped on Windows, where the
+foundation's native fault suite remains required.
+
+Real CNG validation is explicit: set `MORDRED_TEST_WINDOWS_CUSTODY_LIVE=1` and
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` to an existing isolated retained task root,
+then run `uv run pytest -q -o addopts= -m integration
+ tests/test_windows_custody_live.py` (one command line). Use the installed
+wheel venv's Python for the corresponding out-of-checkout run. Each run creates
+a UUID profile, reports only its path, enrolls new independent memory/audit
+keys and deletes only those keys after checked verification. A failed run
+preserves its profile/journals for explicit reconciliation; never remove that
+fixture first or blindly regenerate after a native missing result. The real
+known-stopped gateway gate must pass before the live test creates keys.
+
+This slice does not arm memory, run an installed Hermes hook, exercise Telegram,
+provide excluded file-vault features, or establish Windows 11/product readiness.
+Record native results separately under the existing validation log.
+
 ## Manual live-device validation log
 
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**

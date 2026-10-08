@@ -323,6 +323,10 @@ Implementation and acceptance remain open:
   principal API; protected C2 transaction proxy and publication receipts.
 - [ ] C5a: freeze exact flat current/retained ownership and pending-journal
   schemas; implement identity-bound create-only custody and load-only providers.
+  C5a now supplies the exact v1 schema, inert enrollment/load, retained role
+  leases, read-only memory inventory and positive-deletion cleanup. Local tests
+  and the explicit native fixture are implemented; independent review and
+  ordinary-user Server/Windows 11 acceptance remain required before completion.
 - [ ] C5b: checked memory storage/hooks, markers, adoption and flat lifecycle.
 - [ ] C5c: reuse C4 runtime selection, implement known/unknown process inventory,
   and require actual installed-runtime memory proof without a force override.

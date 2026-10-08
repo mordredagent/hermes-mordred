@@ -509,13 +509,13 @@ there is no implicit stale-staging cleanup or recursive directory removal.
 
 ### Windows dedicated custody paths
 
-These paths belong to the approved C5 contract; their implementation is separate
-from this documentation. All resolve beneath the selected `HERMES_HOME`.
+These paths belong to the approved C5 contract; C5a implements flat ownership
+and inert custody while hooks and user ceremonies remain separate. All resolve beneath the selected `HERMES_HOME`.
 
 | Path | Owner and contract |
 | --- | --- |
 | `mordred/windows-custody.json` | Keyvault; exact-private flat versioned ownership manifest, at most 64 KiB and 64 retained role generations; exact current/retained field schema frozen by C5a |
-| `mordred/` role-specific custody pending journals | Keyvault; record enrollment/deletion intent before native action; exact role filenames and schemas frozen by C5a, never inferred from a native missing result |
+| `mordred/windows-{memory,audit,telegram}.pending.json` | Keyvault; record enrollment/deletion intent before native action; exact v1 role schemas frozen by C5a, never inferred from a native missing result |
 | `mordred/memory-key.wrapped` | Keyvault; existing 127-byte MRKW container, create-no-replace enrollment and checked role binding |
 | `mordred/memory-vault.marker` and `mordred/memory-vault.optout` | Memory lifecycle; checked markers, no raw writes/unlinks or uncertainty-to-absence conversion |
 | `memories/*.md` and `memories/*.md.bak.*` | Upstream memory names through Mordred's checked Windows adapter; trusted/confidential existing parent/files, private new ciphertext/restored plaintext/backups, bounded flat inventory |

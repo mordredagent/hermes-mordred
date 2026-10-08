@@ -1836,6 +1836,75 @@ custody journals, not a new vault freshness anchor or whole-disk rollback
 protection. Memory purge does not delete independent audit or Telegram roles;
 retained audit generations remain owned while their history is retained.
 
+##### Dedicated Windows custody v1 schema
+
+The manifest has exactly `version: 1`, `home: {volume, file_id}`, `sid`,
+`profile_nonce`, `epoch`, and `roles`. Volume is an unsigned 64-bit integer;
+file ID is 16 bytes encoded as lowercase hex; SID is canonical revision-1
+binary SID encoded as lowercase hex. Nonces are independent random 32-byte
+lowercase hex values. Epoch is an integer from 0 through 2^53-1, never a
+boolean. `roles` contains exactly `memory`, `audit`, and `telegram`, each with
+`current` (null or record) and `retained` (record array). A record has exactly
+`generation`, `epoch`, `key_id`, `native_key_id`, and `public_sha256`.
+Logical IDs are respectively `mordred.memory`, `mordred.audit-log`, and
+`mordred-hermes.telegram.credentials.v1`. Public fingerprints are full SHA-256
+over validated uncompressed P-256 public bytes. Generation nonces are unique across all
+records. A current record's epoch does not change when another role changes.
+Duplicate JSON keys, unknown fields, invalid UTF-8, noncanonical hex, malformed
+SID/identity, record mismatch, overflow, and more than 64 retained generations
+refuse. Encoded manifests and journals are each bounded to 64 KiB.
+
+`windows-{role}.pending.json` has exactly `version`, `profile_nonce`, `role`,
+`operation`, `phase`, and `record`. Operation is `create` or `delete`; create
+phases are `intent` and `verified`, delete phases `intent` and `deleted`.
+Only create intent permits a null public fingerprint. Journal identity and
+generation are checked against the bound manifest. Create intent is durable
+before native creation, verified fingerprint before memory-wrapper publication,
+current ownership before final journal deletion. Delete intent precedes native
+deletion, and positive deletion is durably recorded before artifact cleanup.
+An interrupted native delete with only intent remains ambiguous even if the
+key subsequently cannot be opened. Explicit reconciliation never generates.
+Retained audit/Telegram records can be selected only by a validated generation
+lease; a new current role may retain its predecessor without deleting it.
+
+The native selector is `mordred-hermes.windows.v1.` plus full lowercase SHA-256
+of the domain `mordred-hermes.windows-custody.v1\0` followed by length-prefixed
+binary fields: big-endian 64-bit volume, 16-byte file ID, SID, profile nonce,
+ASCII role, and generation nonce. Each length is unsigned big-endian 32-bit.
+No pathname participates in native authority.
+
+`windows_custody_session(home, create=False, canonical=None, backend=None)`
+owns home then mordred, or joins an explicit C2 session after checking the
+physical home identity without reacquiring its lock. `WindowsCustodySession`
+provides immutable `GenerationLease` values (profile nonce, role, generation,
+epoch, logical/native IDs and fingerprint), current/retained `lease()` selection,
+`validate_lease()` and `backend_for()` exact-public verification. Leases are
+observations, not perpetual authority: consumers validate them inside a fresh
+custody scope before mutation. The session's checked `canonical` coordinator
+supports subsequent memory/audit adapters; use ends when either scope closes.
+
+`enroll_memory(adopted_key=None)` provisions inert memory custody;
+`enroll_role(role, retain_current=False)` explicitly provisions audit/Telegram.
+Runtime `resolve_windows_memory_key` is load-only. A valid manifest containing
+only other roles is not broken memory custody; no memory role/journal/blob,
+marker/opt-out or seal evidence means an unmanaged result without creation.
+Helper discovery happens before enrollment intent, but native creation failures
+retain the intent journal. `reconcile_pending()` never creates a native key.
+
+`delete_role(lease, erase_authorized=False)` validates ownership and journals
+irreversible deletion. Memory requires explicit opt-out, no opt-in/seals and a
+known stopped Windows gateway inventory. Audit/Telegram require a future caller
+ceremony proving history removal or explicitly authorizing erasure. Only a
+positively recorded `deleted` phase permits checked wrapper/opt-out removal,
+role cleanup and journal removal last; recovery may encounter already-removed
+cleanup members, but still refuses opt-in, seals or unsafe objects. Independent
+roles and permanent directory locks survive. Successful memory purge returns
+to unmanaged state; a later explicit enrollment obtains a fresh generation.
+An intent with an ambiguous native deletion result remains unresolved. Native
+create/delete scopes mark the owning publication receipt before the call, so
+later ledger failures remain sticky even if a borrower catches them; classified
+filesystem failures retain their identity and are promoted to uncertain.
+
 #### Enrollment, loading and lifecycle failures
 
 Separate explicit create-only enrollment from load-only key resolution.
