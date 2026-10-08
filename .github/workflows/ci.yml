@@ -93,6 +93,8 @@ jobs:
           tests/test_windows_encrypted_audit_windows.py
           tests/test_windows_privacy_policy.py
           tests/test_llm_windows_policy.py tests/test_llm_windows_policy_native.py
+          tests/test_windows_memory_storage.py tests/test_windows_memory_hook.py
+          tests/test_windows_memory_native.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs

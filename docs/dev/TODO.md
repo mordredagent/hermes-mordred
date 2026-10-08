@@ -349,3 +349,23 @@ Implementation and acceptance remain open:
   removal of the fixed OS list, ordinary-user source/wheel known-empty proof.
 - [ ] Enforce the same supported C4 interpreter boundary in Windows managed
   memory hooks and installed-runtime proof; document opaque-runtime limits.
+
+### Windows memory storage follow-up (C5b)
+
+- [ ] Review and accept checked Windows storage/hooks independently; native
+  source/sdist-wheel inherited-ACL and real CNG installed-Hermes validation
+  remain controller-owned until recorded.
+- [ ] After C5c installed proof is frozen, implement reusable enable/seal,
+  disable/decrypt, marker transitions and purge verification with exact
+  physical-home/SID/generation/epoch/wrapped-digest proof preconditions.
+  Expose no bool/callback proof bypass; C5a continues to own deletion journals.
+- [ ] Implement checked atomic Windows plaintext Journey memory mutations;
+  first-slice refusal is a preserved functional gap, not complete integration.
+- [ ] Complete separate C6 ceremony consumers and ordinary-user Windows 11
+  installed product acceptance.
+- [ ] C5b review follow-ups deferred from fix round 1: replace scattered
+  `sys.platform == "win32"` hook branches with install-time dispatch and split
+  `_memory_hook.py`; return `{"ok": False}` instead of raising for unmappable
+  Windows journey sources; cut per-call inventory/stat/unwrap cost (shape B
+  reads three times per mutation); strengthen the native process-lock test
+  beyond `poll() is None`.

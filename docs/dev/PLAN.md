@@ -1321,3 +1321,56 @@ capability, keeps plausible basenames unknown, and must pass source and
 sdist-wheel native runs including known-empty after the controlled child
 exits, executed through the ordinary SSH path (SSM commands run PowerShell as
 SYSTEM and correctly produce unknown).
+
+### Windows checked memory storage and hooks (C5b)
+
+Freeze the public session/state contract in SPEC before code. Extend the C5a
+flat inventory rather than adding another filesystem/ACL implementation. Add
+immutable public custody `memory_state()` with checked bounded marker reads and
+wrapped digest. Resolve load-only custody before taking the memories lock to
+avoid inventory recursion, then retain the same generation/state throughout
+the child scope. Own home -> mordred -> memories explicitly; borrowed owners
+and publication receipts retain their lifetime, thread and physical identity
+requirements. Every child mutation records publication immediately and catches
+classified uncertainty before returning; child cleanup remains inside receipt
+tracking so caught failures cannot make outer exit acknowledge success.
+
+Implement read/text/plaintext, entry joining/publication, sealed no-replace
+backups and bounded inventory under one session. Bind leaf paths using checked
+parent identities and the foundation leaf validator. Keep existing basename
+AAD when an NTFS alias selects the same physical file. Validate existing seals
+before any rewrite, including opt-out and safe mode. Windows A/B/C hooks must
+branch before upstream raw I/O and drift publication, and avoid callbacks while
+holding custody/child locks. Journey memory mutations that cannot prove a
+checked atomic seam refuse, including stale/malicious target paths.
+
+Use C4 `environment_root` for structural current-interpreter admission before
+locks, with explicit Pythonw sibling handling. This admits hook storage only;
+C5c installed proof and C6 ceremonies are later work. Do not introduce a bool
+or callback as a proof token. Public marker writes, arming, plaintext-removing
+enable, decrypting disable and purge orchestration are deferred to the lifecycle
+follow-up once its immutable proof binding contract is available. C5a continues
+to own native deletion journals; C5b never duplicates deletion.
+
+TDD uses real checked file transactions and real MRKW/AES-GCM with only native
+backend/principal/platform admission injected on POSIX; native Windows fixtures
+exercise inherited admission directly. Validate absent/unmanaged, seals and
+wrong keys, every seam, drift collisions, bounds, stale ownership and receipt
+faults. Preserve POSIX regressions, select Windows tests in CI, then run frozen
+focused/full suite once, reduced-extras strict types, Ruff, format, shellcheck
+and docs. Controller owns real CNG and installed source/wheel acceptance.
+
+Fix round 1 removes the catchable Windows refusal. One probe returns empty
+only for checked fresh unmanaged custody, and an empty answer is the only way an
+unsupported or partially wrapped memory seam continues. Every other answer goes
+through the shared non-catchable stop (stderr, then `SystemExit`/`os._exit`),
+because `plugin.register`, the post-import loader and the catch-up sweep all
+contain `except Exception`. The Windows journey install is total: it wraps, stays
+inert on fresh unmanaged state, installs refusal stubs, or stops. The fail-open
+`keyvault` wrapper therefore never sees an ordinary exception for managed or
+indeterminate custody. Regressions drive the real wrappers in-process for the
+main-thread `SystemExit` and in a child process for the worker-thread
+`os._exit`, with fresh unmanaged state as the positive control.
+An interrupt during a Windows memory publication is deliberately recorded as
+uncertain and surfaces at the hook as `MemoryEncryptionUnavailable`
+(fail-closed, at the cost of interrupt responsiveness).

@@ -1148,3 +1148,51 @@ deselected**. Ruff check/format, ShellCheck and strict mypy for 217 source
 files (separate `dev,keyvault,extension,macos` environment) passed. All 18
 native cases skip on this macOS host; those skips are not Windows execution
 evidence, and native source/wheel acceptance remains a controller gate.
+
+### Windows checked memory adapter validation (C5b)
+
+The scoped Windows job includes `test_windows_memory_storage.py`,
+`test_windows_memory_hook.py` and `test_windows_memory_native.py`. Host tests
+use real checked transactions and MRKW/AES-GCM, injecting only native custody,
+principal and platform admission. Native cases use inherited-safe task-owned
+Windows directories, actual NTFS casing/ACL/hardlink/junction admission and an
+independent process competing for the canonical home lock. Their injected CNG
+backend does not establish actual TPM acceptance. Existing POSIX memory suites
+remain required.
+
+For explicit ordinary-user CNG and installed-Hermes acceptance, first verify
+`mordred_hermes.__file__` in the selected source environment and again in the
+sdist-built wheel environment. Supply `MORDRED_TEST_WINDOWS_MEMORY_LIVE=1` and
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` pointing to an existing retained isolated
+root, then run that environment's Python with:
+
+```powershell
+python -m pytest -q -o addopts= -m integration tests/test_windows_memory_live.py
+```
+
+This test checks the real unchanged C5c stopped-gateway gate before native
+enrollment, uses a fresh UUID profile/key, releases custody before starting the
+installed Hermes subprocess, and exercises checked sticky seal load/write/drift
+backup through the actual supported seam. A new native owner authenticates all
+files/backups before checked fixture-only removal and journaled key deletion.
+Failure retains its profile/journals and reports only a nonsensitive profile
+path. No ambient key, software fallback, key argv/env, or process-global cache
+is used; native key operands never appear inside rewritten pytest assertions.
+The root/profile directory remains as validation evidence. Record source and
+wheel results separately in the Manual live-device validation log.
+
+This smoke is an inert-custody storage check, not the C5c installed proof API,
+C6 arming/disable/purge ceremony, Windows 11 product acceptance, or complete
+Journey integration. Marker writes and destructive migration helpers are
+unavailable in this first C5b slice. Windows Journey memory mutations safely
+refuse the unsupported atomic seam; checked plaintext Journey edits remain a
+required follow-up. Skill mutations retain their existing behavior unless the
+journey signature itself is unsupported on a managed or indeterminate profile,
+where both mutations are refusal stubs.
+
+`test_windows_memory_hook.py` also starts host child processes (scrubbed
+environment, task-owned `HERMES_HOME`) that call the real `plugin.register` on
+a worker thread. They prove that broken or unproven custody with an unsupported
+seam ends the process through `os._exit(1)`, and that a fresh unmanaged
+profile continues in plaintext. The native junction case asserts the
+foundation's classified `unsafe`/`ancestor_identity` refusal.

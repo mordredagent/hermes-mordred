@@ -2122,3 +2122,61 @@ when admitted and after fresh PID, creation-time, name and image
 revalidation. Any refusal, unsupported result or query failure keeps the
 record unknown. The fixed OS-image list and `GetSystemDirectoryW` lookup are
 removed; `System32` images are admitted by the same capability.
+##### Windows checked memory operations (C5b)
+
+`windows_memory_session(home, path=None, create=False, custody=None, lease=None,
+safe_mode=False)` owns or explicitly joins custody and yields a lifetime-bound
+`WindowsMemorySession`. It resolves the native memory key before opening the
+memories child transaction, pins an immutable `WindowsMemoryState` (memory lease
+or absence, bounded opt-in/opt-out bytes and wrapper SHA-256), and validates the
+same state on every operation. `memory_state()` is the narrow public custody
+read API; marker mutation and destructive migration are deferred until C5c
+provides the approved installed-runtime proof contract. An injected custody
+owner must match the checked physical home. A supplied lease must be current
+and memory-specific. No ambient key or implicit transaction context is used.
+
+The session exposes checked `read_text`, `read_plaintext`, `write_entries`,
+`create_backup` and `inventory`. Reads distinguish checked absence from denial;
+plaintext parsing preserves upstream delimiter/whitespace/newline semantics.
+All Windows publishers use confidential transactions and immediately report
+every successful or uncertain mutation to the canonical publication receipt.
+Backups are sealed before create-no-replace publication and are included in the
+flat bounded inventory. Timestamp collisions refuse without overwriting.
+Physical directory identity pins every supplied target to active memories;
+unsafe leaves, aliases to another home, stale leases and closed scopes refuse.
+
+Managed Windows memory requires a structurally admitted current C4 Python
+environment (`python.exe`, or `pythonw.exe` with its admitted Python sibling).
+Admission runs before custody locks and performs no subprocess proof. Unmanaged
+checked plaintext remains usable in other interpreters. Structural admission
+does not establish installed-runtime proof or authorize enable/disable/purge.
+C5b arming and destructive migration helpers remain unavailable until the C5c
+proof contract is implemented and reviewed; this slice is storage and hooks.
+
+Hook installation on Windows has one continue rule: upstream's raw memory seam
+may run only on a checked fresh unmanaged profile, meaning a cleanly closed
+custody owner observed no memory ownership, marker, opt-out, wrapper or pending
+journal and a complete bounded inventory with no seal or broken seal. Every
+other outcome with an unsupported or partially wrapped seam (managed custody,
+retained seals or markers without ownership, lost wrappers, unreadable or
+inadmissible custody, ACL/identity failures or an unresolvable home) stops the
+process: stderr diagnostic, then `SystemExit` on the main thread or `os._exit`
+off it, never a catchable exception that plugin or post-import containment
+could swallow. Safe mode does not bypass this. Only Mordred's own
+classification import reports instead of stopping. On a fresh unmanaged
+profile, plaintext stays plaintext under upstream's raw seam, which is the
+documented unmanaged behavior.
+
+Windows journey mutations follow the same rule. A supported journey signature
+is wrapped and memory nodes refuse with upstream's `{"ok": False, ...}`
+contract, keyed on the computed memory path as well as the `memory:` prefix.
+With an unsupported signature, a fresh unmanaged profile leaves upstream
+untouched. Otherwise `delete_node`/`edit_node` are replaced by refusal stubs
+that validate nothing, reach no I/O and log once; skill nodes are refused too.
+If the stubs cannot be installed, the process stops. Keyless unmanaged drift
+returns upstream's `BACKUP FAILED — file unchanged on disk` contract: no
+plaintext backup is published and no key is enrolled.
+A `KeyboardInterrupt` or `SystemExit` during a Windows memory publication is
+recorded as uncertain and surfaces at the hook boundary as
+`MemoryEncryptionUnavailable`, trading interrupt responsiveness for retained
+uncertainty (fail-closed).
