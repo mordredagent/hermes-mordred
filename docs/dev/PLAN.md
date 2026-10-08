@@ -1184,7 +1184,11 @@ Validate current generation before taking the writer mutex and C7a session.
 Default storage borrows C2's protected loan; custom preexisting directories use
 nonblocking child locks and immediate publication receipts for create, append,
 rename, delete, promoted generic post-publication failures and child cleanup.
-Wipe cached ownership on failures; uncertain writes and lost active files poison
+Wrap the new DEK, build its header and seal the entry before rotation, so only
+checked filesystem primitives follow the first mutation. Settle failures under
+the writer mutex (a late custody-exit outcome settles before another thread
+reuses the writer): wipe the DEK but keep the owned active-file identity across
+definite failures and close; uncertain writes and lost owned active files poison
 the instance permanently. Read bounded snapshots before native unwrap callbacks,
 retain lifecycle through authentication, and require explicit custody borrowing
 for synchronous nested appends. Do not resolve providers or prompt under audit

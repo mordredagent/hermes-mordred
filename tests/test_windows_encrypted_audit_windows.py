@@ -47,6 +47,13 @@ def test_encrypted_adapter_hostile_active_file_refuses_without_repair(fs, hostil
     if hostile != "junction":
         assert path.read_bytes() == before
     assert not list(path.parent.glob("audit.log.*.gz"))
+    if hostile == "junction":
+        # The definite refusal kept the owned active identity: once the hostile
+        # junction is gone, the writer poisons instead of starting a fresh log.
+        os.rmdir(path)
+        with pytest.raises(PrivateFSError, match="audit_active_missing"):
+            writer.append({"event": "recreate"})
+        assert not path.exists()
 
 
 def test_native_home_case_alias_uses_same_owned_role_and_default_loan(fs):

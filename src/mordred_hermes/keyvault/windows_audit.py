@@ -31,6 +31,7 @@ from .._private_fs import (
 )
 from . import log_encryption as mral
 from ._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
+from ._native_key_id import NATIVE_KEY_ID_FIELD
 from ._windows_custody import GenerationLease, WindowsCustodySession, windows_custody_session
 from ._windows_profile import CustodyError
 from .crypto import encrypt
@@ -56,23 +57,37 @@ def _custody_scope(
 
 
 class _RecordedAudit(AuditSession):
-    """Forward C7a operations and immediately account for independent children."""
+    """Forward C7a operations and immediately account for independent children.
+
+    Every public operation forwards to the wrapped session, so mutations always
+    pass receipt accounting; inherited helpers validate through ``_check``.
+    """
 
     def __init__(self, session: AuditSession, receipt: PublicationReceipt) -> None:
+        super().__init__(session.active_name, session._owner)
         self._session = session
         self._receipt = receipt
-        self.active_name = session.active_name
         self.published = False
+
+    def _check(self, name: str | None = None) -> PrivateTransaction | None:
+        # Valid exactly while the wrapped C7a session is; never outlives it.
+        return self._session._check(name)
 
     def _mutation(self, call: Callable[[], _T]) -> _T:
         try:
             result = call()
-        except PrivateFSError as exc:
-            if exc.commit_state == "uncertain":
-                self._receipt.mark_uncertain(exc)
+        except BaseException as exc:
+            if isinstance(exc, PrivateFSError):
+                if exc.commit_state == "uncertain":
+                    self._receipt.mark_uncertain(exc)
+            elif not isinstance(exc, Exception):
+                # KeyboardInterrupt/SystemExit may land after the primitive
+                # committed; _audit_scope records it without changing its type.
+                self.published = True
             raise
-        self._receipt.mark_published()
+        # Record locally first: a failing receipt still leaves promotion state.
         self.published = True
+        self._receipt.mark_published()
         return result
 
     def directory_identity(self) -> FileIdentity:
@@ -111,7 +126,7 @@ class _RecordedAudit(AuditSession):
 @contextlib.contextmanager
 def _audit_scope(
     path: Path, custody: WindowsCustodySession, *, transaction: PrivateTransaction | None = None
-) -> Iterator[AuditSession]:
+) -> Iterator[_RecordedAudit]:
     custody.check()
     with custody.canonical.borrow_mordred_transaction() as loan:
         with open_optional_private_directory(path.parent) as directory:
@@ -137,19 +152,34 @@ def _audit_scope(
                     yield recorded
             except BaseException as exc:
                 if recorded is not None and recorded.published:
-                    if isinstance(exc, PrivateFSError):
-                        exc.commit_state = "uncertain"
-                        receipt.mark_uncertain(exc)
-                    else:
-                        error = PrivateFSError("io", "audit_operation", commit_state="uncertain")
-                        receipt.mark_uncertain(error)
-                        raise error from exc
+                    _account_after_publication(receipt, exc)
                 raise
+
+
+def _account_after_publication(receipt: PublicationReceipt, exc: BaseException) -> None:
+    """Classify any failure after publication as uncertain in the receipt.
+
+    Ordinary exceptions are promoted to classified uncertainty. Interrupts keep
+    their type: only the receipt records uncertainty, so the owning outer exit
+    still cannot acknowledge success.
+    """
+    if isinstance(exc, PrivateFSError):
+        exc.commit_state = "uncertain"
+        receipt.mark_uncertain(exc)
+    elif isinstance(exc, Exception):
+        error = PrivateFSError("io", "audit_operation", commit_state="uncertain")
+        receipt.mark_uncertain(error)
+        raise error from exc
+    else:
+        # A refusal here means the receipt already holds a failure that the
+        # owning exit re-raises; the interrupt itself must propagate unchanged.
+        with contextlib.suppress(Exception):
+            receipt.mark_uncertain(PrivateFSError("io", "audit_operation_interrupted", commit_state="uncertain"))
 
 
 def _header_lease(path: Path, header_bytes: bytes, custody: WindowsCustodySession) -> tuple[GenerationLease, bytes]:
     header, wrapped = mral._parse_log_header(path, header_bytes)
-    native = header.get("native_key_id")
+    native = header.get(NATIVE_KEY_ID_FIELD)
     if not isinstance(native, str):
         raise mral.AuditLogDecryptError(f"{path}: Windows audit header requires an owned native selector")
     try:
@@ -194,7 +224,14 @@ class WindowsAuditProvider:
 
 
 class WindowsEncryptedWriter:
-    """A generation lease with checked C7a append/rotation, sharing MRAL crypto."""
+    """A generation lease with checked C7a append/rotation, sharing MRAL crypto.
+
+    The cached DEK is disposable, but the identity of the active file this
+    writer published is not: definite failures and ``close()`` wipe the DEK yet
+    keep that identity, so a later missing active file poisons the writer
+    instead of silently starting a fresh log. Only this writer's own rotation
+    clears it, and only its own checked header publication replaces it.
+    """
 
     def __init__(
         self,
@@ -217,12 +254,14 @@ class WindowsEncryptedWriter:
         self.rotate_bytes = rotate_bytes
         self.retention_days = retention_days
         self._lock = threading.Lock()
+        self._settled = threading.Condition(self._lock)
         self._dek: bytearray | None = None
         self._aad = b""
         self._header_bytes = b""
-        self._active_identity: FileIdentity | None = None
+        self._owned_active: FileIdentity | None = None
         self._last_date = ""
         self._poisoned = False
+        self._in_flight = False
 
     def _wipe_dek(self) -> None:
         if self._dek is not None:
@@ -230,9 +269,15 @@ class WindowsEncryptedWriter:
         self._dek = None
         self._aad = b""
         self._header_bytes = b""
-        self._active_identity = None
+
+    def _fail(self, exc: BaseException, *, published: bool) -> None:
+        """Settle a failure under the writer mutex: wipe, and poison if uncertain."""
+        self._wipe_dek()
+        if published or (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain"):
+            self._poisoned = True
 
     def close(self) -> None:
+        """Wipe the cached DEK; poison and the owned active identity remain."""
         with self._lock:
             self._wipe_dek()
 
@@ -258,35 +303,81 @@ class WindowsEncryptedWriter:
     ) -> None:
         plaintext = mral._serialize({"ts": utcnow_iso(), **dict(entry)})
         incoming = mral._encrypted_line_len(len(plaintext))
-        # Include owned custody/child cleanup in failure handling: even a late
-        # exit error wipes cached ownership. An uncertain writer never retries.
+        # Failures inside the mutex settle there. Custody exit runs after the
+        # mutex is released, so an in-flight mark keeps other threads off the
+        # cached state until that late outcome also settles. Never retry.
+        flight = False
         try:
             with _custody_scope(self.home, custody, self.backend) as session:
                 session.validate_lease(self.lease)
                 if session.lease("audit") != self.lease:
                     raise CustodyError("audit writer generation is no longer current")
                 with self._lock:
-                    if self._poisoned:
-                        raise CustodyError("audit writer is poisoned; explicit reconciliation is required")
-                    backend = session.backend_for(self.lease)
-                    with _audit_scope(self.path, session, transaction=transaction) as audit:
-                        self._append_checked(audit, session, backend, plaintext, incoming)
+                    self._settled.wait_for(lambda: not self._in_flight)
+                    self._locked_append(session, transaction, plaintext, incoming)
+                    self._in_flight = flight = True
         except BaseException as exc:
             with self._lock:
-                self._wipe_dek()
-                if isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain":
-                    self._poisoned = True
+                self._fail(exc, published=False)
+                self._land(flight)
             raise
+        with self._lock:
+            self._land(flight)
+
+    def _land(self, flight: bool) -> None:
+        if flight:
+            self._in_flight = False
+            self._settled.notify_all()
+
+    def _locked_append(
+        self,
+        session: WindowsCustodySession,
+        transaction: PrivateTransaction | None,
+        plaintext: bytes,
+        incoming: int,
+    ) -> None:
+        audit: _RecordedAudit | None = None
+        try:
+            if self._poisoned:
+                raise CustodyError("audit writer is poisoned; explicit reconciliation is required")
+            backend = session.backend_for(self.lease)
+            with _audit_scope(self.path, session, transaction=transaction) as audit:
+                self._append_checked(audit, session, backend, plaintext, incoming)
+        except BaseException as exc:
+            self._fail(exc, published=audit is not None and audit.published)
+            raise
+
+    def _recognize(self, probe: AuditProbe, custody: WindowsCustodySession) -> None:
+        """Admit only checked plaintext or an owned MRAL generation for rotation.
+
+        Copied/foreign selectors raise ``CustodyError``; anything else is a
+        classified definite write refusal, never a read-side decrypt error.
+        """
+        if probe.kind == "ndjson":
+            return
+        if probe.kind == "mral" and probe.first_line is not None:
+            try:
+                _header_lease(self.path, probe.first_line, custody)
+            except mral.AuditLogDecryptError as exc:
+                raise PrivateFSError("unsafe", "audit_header_unrecognized") from exc
+            return
+        raise PrivateFSError("unsafe", "audit_header_unrecognized")
 
     def _rotate(self, audit: AuditSession, suffix: str) -> None:
         self._wipe_dek()
         result = rotate_audit(audit, suffix)
+        # This writer moved the active file itself: its identity is history now.
+        self._owned_active = None
         protected = frozenset(n for n in (result.raw_name, result.gzip_name) if n is not None)
         sweep_audit_retention(
             audit,
             cutoff_mtime_ns=time.time_ns() - self.retention_days * 86400 * 1_000_000_000,
             protected_names=protected,
         )
+
+    @staticmethod
+    def _seal(dek: bytearray, aad: bytes, plaintext: bytes) -> bytes:
+        return base64.b64encode(encrypt(bytes(dek), plaintext, aad=aad)) + b"\n"
 
     def _append_checked(
         self,
@@ -297,48 +388,60 @@ class WindowsEncryptedWriter:
         incoming: int,
     ) -> None:
         probe = audit.probe(audit.active_name)
-        if self._dek is not None and probe.metadata is None:
+        if probe.metadata is None and self._owned_active is not None:
             self._poisoned = True
-            self._wipe_dek()
             raise PrivateFSError("unsafe", "audit_active_missing")
         if self._dek is not None and (
             probe.metadata is None
-            or probe.metadata.identity != self._active_identity
+            or probe.metadata.identity != self._owned_active
             or probe.first_line != self._header_bytes
         ):
             self._wipe_dek()
         today = today_utc_date()
+        rotate = False
         if probe.metadata is not None:
             # A checked safe file is not necessarily an owned MRAL generation.
             # Refuse copied/unknown selectors before rotation or replacement.
-            if probe.kind == "mral" and probe.first_line is not None:
-                _header_lease(self.path, probe.first_line, custody)
-            elif probe.kind != "ndjson":
-                raise mral.AuditLogDecryptError(f"{self.path}: existing audit header is not safely recognized")
-            if self._dek is None or self._last_date != today or probe.metadata.size + incoming > self.rotate_bytes:
-                self._rotate(audit, self._last_date or today)
-        if self._dek is None:
-            dek = bytearray(os.urandom(DEK_LEN))
-            try:
-                wrapped = wrap_dek(
-                    bytes(dek), mral.AUDIT_LOG_KEY_ID, backend=backend, native_key_id=self.lease.native_key_id
-                )
-                header = mral._make_log_header(wrapped, mral.AUDIT_LOG_KEY_ID, self.lease.native_key_id)
-                metadata = audit.create(audit.active_name, header + b"\n")
-                verified = audit.probe(audit.active_name)
-                if verified.metadata != metadata or verified.first_line != header:
-                    raise PrivateFSError("unsafe", "audit_header_verification", commit_state="uncertain")
-                self._dek = dek
-                self._header_bytes = header
-                self._aad = mral._entry_aad(header)
-                self._active_identity = metadata.identity
-            finally:
-                if self._dek is not dek:
-                    dek[:] = bytes(len(dek))
+            self._recognize(probe, custody)
+            rotate = self._dek is None or self._last_date != today or probe.metadata.size + incoming > self.rotate_bytes
+        if self._dek is None or rotate:
+            self._next_generation(
+                audit, backend, plaintext, rotate_suffix=(self._last_date or today) if rotate else None
+            )
+        else:
+            assert self._owned_active is not None
+            token = self._seal(self._dek, self._aad, plaintext)
+            audit.append(audit.active_name, token, expected_identity=self._owned_active)
         self._last_date = today
-        assert self._dek is not None and self._active_identity is not None
-        token = base64.b64encode(encrypt(bytes(self._dek), plaintext, aad=self._aad)) + b"\n"
-        audit.append(audit.active_name, token, expected_identity=self._active_identity)
+
+    def _next_generation(
+        self, audit: AuditSession, backend: NativeBackend, plaintext: bytes, *, rotate_suffix: str | None
+    ) -> None:
+        """Wrap, build the header and seal BEFORE the first mutation.
+
+        A definite native wrap failure therefore publishes nothing and poisons
+        no writer; only checked filesystem primitives follow the rotation.
+        """
+        dek = bytearray(os.urandom(DEK_LEN))
+        try:
+            wrapped = wrap_dek(
+                bytes(dek), mral.AUDIT_LOG_KEY_ID, backend=backend, native_key_id=self.lease.native_key_id
+            )
+            header = mral._make_log_header(wrapped, mral.AUDIT_LOG_KEY_ID, self.lease.native_key_id)
+            aad = mral._entry_aad(header)
+            token = self._seal(dek, aad, plaintext)
+            if rotate_suffix is not None:
+                self._rotate(audit, rotate_suffix)
+            metadata = audit.create(audit.active_name, header + b"\n")
+            verified = audit.probe(audit.active_name)
+            if verified.metadata != metadata or verified.first_line != header:
+                raise PrivateFSError("unsafe", "audit_header_verification", commit_state="uncertain")
+            self._dek, self._header_bytes, self._aad = dek, header, aad
+            self._owned_active = metadata.identity
+            audit.append(audit.active_name, token, expected_identity=metadata.identity)
+        finally:
+            if self._dek is not dek:
+                dek[:] = bytes(len(dek))
 
 
 def decrypt_windows_log_file(

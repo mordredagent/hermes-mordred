@@ -1989,11 +1989,18 @@ aliases. A custom exact-private directory must already exist and obtains a
 nonblocking lock after custody, so cross-profile custom paths cannot form a
 waiting lock cycle. A custom path equal to the physical home is refused.
 Every successful or uncertain mutation and child-exit failure is immediately
-reported through the owning monotonic publication receipt. Caught errors cannot
-acknowledge success at the outer exit. Uncertain outcomes and missing previously
-owned active files permanently poison that writer; close wipes the DEK but does
-not clear poison. Header/identity changes wipe the prior DEK before validating
-and rotating only checked recognized plaintext or owned MRAL history.
+reported through the owning monotonic publication receipt. After publication,
+ordinary failures become classified uncertainty; interrupts keep their type and
+are recorded as uncertain. Caught errors cannot acknowledge success at the
+outer exit. A new generation's DEK is wrapped, its complete header built and the
+entry sealed before rotation, so only checked filesystem primitives follow the
+first mutation: a definite native wrap failure publishes nothing, poisons no
+writer and leaves the outer exit definite. Uncertain outcomes and a missing
+previously owned active file permanently poison that writer. Definite failures
+and close wipe the DEK but keep poison and the owned active-file identity, which
+only the writer's own rotation clears. Header/identity changes wipe the prior
+DEK before validating and rotating only checked recognized plaintext or owned
+MRAL history; any other active header is a classified write refusal.
 
 `decrypt_windows_log_file(path, home=..., audit_sink=..., backend=None,
 custody=None, max_file_bytes=16842752, max_output_bytes=16777216)` takes a bounded
