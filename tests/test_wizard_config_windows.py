@@ -225,7 +225,7 @@ def test_public_writer_publication_fault_keeps_uncertainty(writer, fault):
         assert ".policy-write.pending" in b.policy.files
 
 
-@pytest.mark.parametrize("data", [b"\xff", b"x" * (cio.DOTENV_LIMIT + 1)])
+@pytest.mark.parametrize("data", [b"\xff", b"x" * (cio.DOTENV_LIMIT + 1)], ids=["invalid_utf8", "oversize"])
 def test_bad_dotenv_source_stays_unchanged(writer, data):
     b, w = writer
     put(b.home, ".env", data)
