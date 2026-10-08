@@ -450,3 +450,22 @@ def test_windows_transaction_identity_checks_owning_directory(native, monkeypatc
                         transaction.directory_identity()
         with pytest.raises(RuntimeError):
             transaction.directory_identity()
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_transaction_asserts_immutable_private_admission(native, private):
+    from dataclasses import FrozenInstanceError
+
+    native.nodes["C:\\home"].descriptor = PRIVATE
+    opener = fs.open_private_directory if private else fs.open_confidential_directory
+    with opener("C:\\home") as directory, directory.transaction() as tx:
+        if private:
+            tx.assert_private_admission()
+        else:
+            with pytest.raises(fs.PrivateFSError) as err:
+                tx.assert_private_admission()
+            assert (err.value.reason, err.value.operation) == ("unsafe", "private_admission")
+        with pytest.raises(FrozenInstanceError):
+            directory.checked.confidential = not private
+    with pytest.raises(RuntimeError):
+        tx.assert_private_admission()

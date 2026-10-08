@@ -41,7 +41,7 @@ def split_path(path: str | Path) -> tuple[str, list[str]]:
     return drive, parts
 
 
-@dataclass
+@dataclass(frozen=True)
 class CheckedDirectory:
     handle: OwnedHandle
     identity: FileIdentity

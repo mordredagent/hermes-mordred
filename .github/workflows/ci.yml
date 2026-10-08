@@ -76,6 +76,9 @@ jobs:
           tests/test_private_fs_processes.py
           tests/test_private_fs_lifecycle.py tests/test_private_fs_lifecycle_faults.py
           tests/test_private_fs_confidential.py tests/test_private_fs_confidential_windows.py
+          tests/test_audit_session.py tests/test_audit_session_faults.py
+          tests/test_audit_rotation.py tests/test_audit_session_processes.py
+          tests/test_audit_session_windows.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
@@ -99,6 +102,13 @@ jobs:
               tx.create_bytes('secret', b'old')
               tx.replace_bytes('secret', b'new')
               assert d.read_bytes('secret', max_bytes=3) == b'new'
+          from mordred_hermes._audit_io import audit_session, decode_audit_bytes
+          from mordred_hermes._log_rotation import rotate_audit
+          with audit_session(Path.cwd() / 'audit' / 'custom.log', create=True) as session:
+              session.create('custom.log', b'{}\n')
+              result = rotate_audit(session, '2026-10-08')
+              snapshot = session.snapshot(result.gzip_name, max_bytes=1024)
+          assert decode_audit_bytes(snapshot.data, max_output_bytes=3) == b'{}\n'
           print(mordred_hermes.__file__)
           '@ | Set-Content -LiteralPath "$smoke/check.py" -Encoding utf8
           Set-Location $smoke
