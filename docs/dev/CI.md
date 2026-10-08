@@ -78,6 +78,25 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Windows custody coordination prerequisites (C5 shared).**
+  Code `c6d2e8ab767d26df408aae3ca7091f55634fbcb0` passed ordinary-user
+  Server 2025 source and fresh sdist-derived wheel runs: **503 passed,
+  54 skipped each**. Native cases include inherited-safe confidential inventory,
+  canonical SID, bounded enumeration, protected transaction loans, child
+  publication receipts, process/lifetime refusal and borrowed C7a audit sessions.
+  The subsequent four-line checked-home identity accessor at `ff4edbbc2` passed
+  six focused cases in its fresh sdist-derived wheel, including native case-alias
+  identity (113 unrelated cases deselected). Both module origins were verified.
+  The final wheel SHA-256 was
+  `1ba8409d02a8550a866325e314814ce5bd9b6d99dda040e41a9fde0648f8e412`.
+  Independent original and accessor reviews found no actionable findings.
+  Host full regression before the accessor: 5,895 passed, 106 skipped,
+  37 integration deselected; final accessor focused host checks and strict
+  reduced-extras mypy (210 files), Ruff/format and shellcheck passed.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c5-foundation-*`.
+  Custody providers, memory hooks, Windows 11 and full-product use are separate
+  gates. These tests do not provision or recover a TPM role key.
+
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
   #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
