@@ -1249,7 +1249,9 @@ proof. Do not claim `FILE_FLAG_OPEN_REPARSE_POINT` alone protects ancestors.
 
 ### Transaction and replacement semantics
 
-Use a permanent `.mordred-fs.lock` within each private directory. Never delete,
+Reserve lock/staging spellings case-insensitively on both backends, including
+case-insensitive POSIX filesystems. Use a permanent `.mordred-fs.lock` within
+each private directory. Never delete,
 truncate, rotate or replace it. A transaction holds an exclusive `LockFileEx`
 lock on byte `[0, 1)` of its validated handle, with read/write sharing but no
 delete sharing. Identity is rechecked after acquisition. Blocking acquisition
@@ -1283,7 +1285,10 @@ The rename is the visibility commit point. Before commit, write/flush/sharing
 failures leave the old target and bytes intact (or the target absent for create).
 After commit, verification/flush failures report an uncertain commit and leave
 the complete published object in place: no rollback, automatic retry, key
-regeneration or target deletion. An unexpected rename error whose state cannot
+regeneration or target deletion. Closing a published file or leaving its
+transaction/directory context must also classify cleanup failures as uncertain
+when publication has occurred, while preserving an already active body error.
+An unexpected rename error whose state cannot
 be reconciled by handle identity is also uncertain. Cleanup only removes the
 operation's own unpublished staging object by handle; a crash may leave a private
 orphan. Never glob-delete staging files during open or recovery.

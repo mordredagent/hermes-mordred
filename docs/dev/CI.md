@@ -80,9 +80,9 @@ approved and in progress as of 2026-10-08. WF0 assumption-probe evidence is
 recorded below; full foundation acceptance is not complete. Helper PR #190's 16 successful checks at `441083f61`
 are helper/regression evidence, not private-filesystem or whole-Windows acceptance.
 
-The future scoped `windows-private-fs` job must use Server 2022 and Python
-3.11–3.13 with `.[dev,keyvault,extension]`; this document does not claim that job
-already exists. Native ACL/junction/lock/publication tests run there without a
+The scoped `windows-private-fs` job must use Server 2022 and Python
+3.11–3.13 with `.[dev,keyvault,extension]`. Its implementation and run evidence
+belong to the separate foundation PR. Native ACL/junction/lock/publication tests run there without a
 TPM. Separate faults injected into the binding layer from real native calls.
 The existing macOS/Linux suite, coverage floor and reduced-extras typing stay
 required. Do not turn the recorded Windows baseline failures into blanket skips.
