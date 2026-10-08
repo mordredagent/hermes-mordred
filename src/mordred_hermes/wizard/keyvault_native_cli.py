@@ -412,6 +412,8 @@ def _run_winkey_build(src: Path, *, install_dir: Path) -> tuple[int, str]:
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
     if powershell is None:
         return 1, "PowerShell executable not found"
+    env = scrubbed_environment(os.environ)
+    env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
         result = subprocess.run(
             [
@@ -431,9 +433,10 @@ def _run_winkey_build(src: Path, *, install_dir: Path) -> tuple[int, str]:
                 sys.executable,
             ],
             cwd=str(src),
-            env=scrubbed_environment(os.environ),
+            env=env,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
         )
     except (OSError, subprocess.SubprocessError) as exc:

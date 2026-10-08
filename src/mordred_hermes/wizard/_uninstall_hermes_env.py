@@ -84,8 +84,19 @@ def default_runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     """Run ``argv`` with a scrubbed environment; never raises for a missing binary."""
     env = {key: value for key, value in os.environ.items() if key not in _SCRUBBED_ENV}
     env["UV_NO_CONFIG"] = "1"
+    if sys.platform == "win32":
+        env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
-        return subprocess.run(list(argv), capture_output=True, text=True, check=False, timeout=300, env=env)
+        return subprocess.run(
+            list(argv),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+            env=env,
+            encoding="utf-8" if sys.platform == "win32" else None,
+            errors="replace" if sys.platform == "win32" else None,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(list(argv), 127, "", str(exc))
 

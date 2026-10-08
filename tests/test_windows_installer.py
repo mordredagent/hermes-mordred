@@ -127,3 +127,16 @@ def test_winkey_build_has_process_only_policy_for_bound_script(monkeypatch, tmp_
     monkeypatch.setattr("subprocess.run", run)
     monkeypatch.setattr("shutil.which", lambda name: "/trusted/powershell.exe")
     assert native._run_winkey_build(tmp_path, install_dir=tmp_path)[0] == 0
+
+
+def test_winkey_build_uses_matching_utf8_child_and_capture(monkeypatch, tmp_path):
+    def run(argv, **kw):
+        assert kw["env"]["PYTHONIOENCODING"] == "utf-8"
+        assert kw["env"]["PYTHONUTF8"] == "1"
+        assert kw["encoding"] == "utf-8"
+        return subprocess.CompletedProcess(argv, 0, "Installed: 日本", "")
+
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr("shutil.which", lambda name: "/trusted/powershell.exe")
+    assert native._run_winkey_build(tmp_path, install_dir=tmp_path) == (0, "Installed: 日本")

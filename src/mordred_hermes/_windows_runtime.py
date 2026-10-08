@@ -45,9 +45,11 @@ def scrubbed_environment(environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def default_runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    env = scrubbed_environment(os.environ)
+    env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
         return subprocess.run(
-            list(argv), capture_output=True, text=True, timeout=30, env=scrubbed_environment(os.environ), check=False
+            list(argv), capture_output=True, encoding="utf-8", errors="replace", timeout=30, env=env, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(list(argv), 127, "", str(exc))

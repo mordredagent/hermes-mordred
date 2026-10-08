@@ -9,6 +9,9 @@ Set-StrictMode -Version Latest
 $temporary = $null
 try {
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Windows is required.' }
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+    $env:PYTHONUTF8 = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
     # A pwsh -> Python -> powershell.exe chain can inherit PS7 module paths.
     # Resolve built-in modules from THIS runtime, not that inherited search path.
     foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management')) {

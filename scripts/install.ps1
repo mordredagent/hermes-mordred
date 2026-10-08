@@ -82,6 +82,9 @@ function Find-Python {
 try {
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'This installer requires native Windows.' }
     [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+    # Piped native Python otherwise defaults to the Windows ANSI code page.
+    $env:PYTHONUTF8 = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
     foreach ($module in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management')) {
         Import-Module -Name ([IO.Path]::Combine($PSHOME, 'Modules', $module, "$module.psd1")) -Force
     }

@@ -176,7 +176,7 @@ def test_installer_configure_dispatch_nonzero_is_failure(native_fixture):
 def test_exposed_launcher_executes_cli_and_propagates_exit(native_fixture, ps, tmp_path):
     from mordred_hermes.wizard import _windows_install
 
-    _argv, env, _home, _log, python, _source = native_fixture
+    argv, env, _home, _log, python, _source = native_fixture
     launcher = tmp_path / "literal launcher 日本 & $.ps1"
     # Test-owned launcher fixture tests invocation before C1b publication lands.
     launcher.write_bytes(_windows_install._launcher_content(python))
@@ -199,6 +199,17 @@ def test_exposed_launcher_executes_cli_and_propagates_exit(native_fixture, ps, t
         timeout=60,
     )
     assert invalid.returncode == 2
+    plan_env = {**env, "MORDRED_HERMES_PYTHON": str(python), "MORDRED_HERMES_UV": argv[argv.index("-Uv") + 1]}
+    plan = subprocess.run(
+        [ps, "-NoProfile", "-File", str(launcher), "uninstall", "--dry-run"],
+        env=plan_env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="strict",
+        timeout=60,
+    )
+    assert plan.returncode == 0, plan.stdout + plan.stderr
+    assert str(python.parent.parent) in plan.stdout
 
 
 def test_installer_explicit_uninstall_targets_environment_and_uv_a(native_fixture, tmp_path):
@@ -227,6 +238,7 @@ def test_installer_explicit_uninstall_targets_environment_and_uv_a(native_fixtur
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert str(python_a.parent.parent) in result.stdout
     lines = [line.split("\t") for line in log.read_text(encoding="utf-8-sig").splitlines()]
     uninstalls = [line for line in lines if line[1:3] == ["pip", "uninstall"]]
     assert uninstalls

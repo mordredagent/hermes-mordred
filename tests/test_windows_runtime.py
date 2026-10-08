@@ -149,3 +149,20 @@ def test_windows_uninstall_honors_selected_uv_and_interpreter(monkeypatch, tmp_p
     assert ok
     assert calls[-1][:5] == [str(uv_a), "pip", "uninstall", "--python", str(selected)]
     assert all(str(ambient) not in command for command in calls)
+
+
+@pytest.mark.parametrize("which_runner", ["runtime", "uninstall"])
+def test_windows_runner_matches_utf8_child_output_and_capture(monkeypatch, which_runner):
+    from mordred_hermes.wizard import _uninstall_hermes_env as env
+
+    def run(argv, **kw):
+        assert kw["env"]["PYTHONUTF8"] == "1"
+        assert kw["env"]["PYTHONIOENCODING"] == "utf-8"
+        assert kw["encoding"] == "utf-8"
+        return subprocess.CompletedProcess(argv, 0, "Hermes 日本", "")
+
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+    monkeypatch.setattr("subprocess.run", run)
+    runner = runtime.default_runner if which_runner == "runtime" else env.default_runner
+    assert runner(["python.exe"]).stdout == "Hermes 日本"
