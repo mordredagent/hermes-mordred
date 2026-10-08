@@ -1125,3 +1125,38 @@ postcheck/cleanup failures and retained old helper/receipt. Keep standalone
 helper builds compatible. Exercise real owned build/reinstall under available
 PowerShell runtimes; include C4 installer and public-reader tests in the scoped
 Windows filesystem CI job alongside the existing foundation selectors.
+
+
+### Windows C5 dedicated custody implementation
+
+Follow SPEC.md §Windows dedicated custody and memory lifecycle. These are
+separate implementation slices, not a claim that Windows support is complete.
+
+| Slice | Scope | Dependencies and exit evidence |
+| --- | --- | --- |
+| Shared prerequisite | Confidential bounded enumeration and public binary-SID principal seam; C2 protected Mordred loan and monotonic publication receipt | C1b/C2; reject protected names and confidential loans; caught uncertainty and child/outer cleanup tests |
+| C5a: custody/lifecycle | Flat Windows ownership schema, profile/role IDs, explicit create-only enrollment, load-only provider and role journals | Shared prerequisite, native CNG helper; freeze exact current/retained records first; alias/copy, concurrent enrollment and native failure tests |
+| C5b: memory storage/hooks | Checked inherited-safe memory adapter, markers, ciphertext writes and drift backups | C5a; no raw upstream Windows publication; adoption, broken seals, partial disable/purge and lifecycle race tests |
+| C5c: runtime discovery/proof | Reuse C4 interpreter resolver; typed known/unknown process inventory; installed hook and CNG memory proof | C4, C5a/b for final proof; ordinary-user denied/working inventory, actual interpreter and no subprocess-under-lock tests |
+| C5d: encrypted audit adapter | Independent audit role/generation lease and checked encrypted writer/reader | C5a, C7a; retained history, borrowed callback, DEK invalidation and uncertainty tests |
+| C5e: capability/reset boundaries | Truthful excluded file-vault gates and flat role-specific reset/purge | C5a/b/d; no mutation on excluded paths, retained audit/Telegram ownership and ambiguous deletion journals |
+| C6: wizard consumers | Explicit native-custody init, proven memory enable/disable/purge and unsupported-path guidance | C3/C4 and relevant C5 slices; no force-proof bypass; real installed flow and failure preservation |
+
+C5c inventory work may proceed against its typed contract while custody is
+implemented; its final key proof waits for C5a/b. C7b privacy/CLI and C10 Telegram
+remain separate component PRs and consume the shared identity/lifecycle services.
+Do not turn audit callbacks into initialization paths or implement another
+native-key selector scheme in Telegram.
+
+Keep the full macOS file-vault `_storage` rewrite out of these Linux-tier slices.
+Flat custody does not require recursive deletion. Schedule checked tree lifecycle
+as a separate foundation dependency before recursive C6/C10 cleanup; preserve
+unknown retained trees rather than substituting `shutil.rmtree`.
+
+Acceptance includes wrong-user/token refusal, same-identity rename, copied-home
+refusal, no key generation after BAD_KEYSET, all publication/delete journal
+failure points, bounded memory backup enumeration, unknown-process refusal and
+post-probe generation revalidation. Preserve POSIX tests and run reduced-extras
+checks, ordinary-user Server source/sdist-wheel tests and separate Windows 11
+installation-to-use checks. Native memory/audit evidence does not establish
+Telegram account/model, Desktop or recursive uninstall acceptance.
