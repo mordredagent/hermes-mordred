@@ -182,3 +182,14 @@ def test_cleanup_failure_after_publication_is_never_retry_safe(
     if body_error and stage != "staging":
         assert err.value is original
     assert (private_path / "secret").read_bytes() == b"complete"
+
+
+def test_directory_identity_is_stable_across_checked_reopens(fs, private_path):
+    with fs.open_private_directory(private_path, create=True) as directory:
+        first = directory.directory_identity()
+        assert isinstance(first, fs.FileIdentity)
+        assert directory.directory_identity() == first
+    with pytest.raises(RuntimeError):
+        directory.directory_identity()
+    with fs.open_private_directory(private_path) as reopened:
+        assert reopened.directory_identity() == first

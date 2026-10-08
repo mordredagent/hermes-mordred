@@ -98,6 +98,10 @@ class _Directory:
             raise RuntimeError("private directory is closed")
         self.checked.check()
 
+    def directory_identity(self) -> FileIdentity:
+        self.check()
+        return self.checked.identity
+
     def validate_file(self, handle: OwnedHandle) -> None:
         if self.checked.confidential:
             validate_confidential_file(handle)

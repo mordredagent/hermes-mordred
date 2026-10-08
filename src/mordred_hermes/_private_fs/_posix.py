@@ -133,7 +133,11 @@ def open_private_directory(path: str | Path, *, create: bool = False) -> Iterato
             fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW, dir_fd=fd)
             fds.append(fd)
         _private(fd, directory=True)
-        directory = _Directory(fd)
+        chain = tuple(
+            (parent, name, child, _identity(os.fstat(child)))
+            for parent, name, child in zip(fds[:-1], parts, fds[1:], strict=True)
+        )
+        directory = _Directory(fd, chain)
         yield directory
     except PrivateFSError:
         raise
@@ -146,8 +150,10 @@ def open_private_directory(path: str | Path, *, create: bool = False) -> Iterato
 
 
 class _Directory:
-    def __init__(self, fd: int) -> None:
+    def __init__(self, fd: int, chain: tuple[tuple[int, str, int, FileIdentity], ...]) -> None:
         self.fd = fd
+        self.chain = chain
+        self.identity = _identity(os.fstat(fd))
         self.active = True
         self.pid = os.getpid()
         self.thread = threading.get_ident()
@@ -157,6 +163,24 @@ class _Directory:
         if not self.active or self.pid != os.getpid() or self.thread != threading.get_ident():
             raise RuntimeError("private directory is closed or inherited across fork")
         _private(self.fd, directory=True)
+
+    def directory_identity(self) -> FileIdentity:
+        try:
+            self._check()
+            for parent, name, child, identity in self.chain:
+                _ancestor(parent)
+                held = os.fstat(child)
+                named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISDIR(named.st_mode) or _identity(held) != identity or _identity(named) != identity:
+                    raise PrivateFSError("unsafe", "directory_identity")
+            info = _private(self.fd, directory=True)
+            if _identity(info) != self.identity:
+                raise PrivateFSError("unsafe", "directory_identity")
+            return self.identity
+        except PrivateFSError:
+            raise
+        except OSError as exc:
+            raise _error(exc, "directory_identity") from exc
 
     @contextlib.contextmanager
     def _open(

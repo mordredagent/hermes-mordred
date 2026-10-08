@@ -59,12 +59,14 @@ def test_native_inherited_safe_update_keeps_shared_parent(shared_home):
     file_before = descriptor(root / "config.yaml")
     assert "ID;" in file_before
     with open_confidential_directory(root) as directory:
+        identity = directory.directory_identity()
         assert directory.read_bytes("config.yaml", max_bytes=3) == b"old"
         assert descriptor(root / "config.yaml") == file_before
         with directory.transaction() as tx:
             tx.replace_bytes("config.yaml", b"new")
             tx.create_bytes("backup.yaml", b"old")
             assert tx.read_bytes("config.yaml", max_bytes=3) == b"new"
+        assert directory.directory_identity() == identity
     assert descriptor(root) == parent_before
     from mordred_hermes._private_fs._windows_api import get_api
     from mordred_hermes._private_fs._windows_security import validate_private
