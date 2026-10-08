@@ -47,7 +47,11 @@ def test_public_create_replace_and_checked_lock(wallet: Path) -> None:
     assert extension_sign._load_wallet_cfg() == HD
 
 
-@pytest.mark.parametrize("payload", [b"{", b"[]", b"\xff", b'{"kind":"raw","kind":"hd"}', b"x" * (1048576 + 1)])
+@pytest.mark.parametrize(
+    "payload",
+    [b"{", b"[]", b"\xff", b'{"kind":"raw","kind":"hd"}', b"x" * (1048576 + 1)],
+    ids=["truncated", "array", "invalid-utf8", "duplicate-member", "oversized"],
+)
 def test_invalid_explicit_wallet_never_discovers(wallet: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes) -> None:
     put(wallet, payload)
     monkeypatch.setattr(extension_sign.ethereum, "list_seed_envelope_ids", lambda _: pytest.fail("fallback"))
@@ -82,17 +86,28 @@ def test_hardlinked_wallet_is_refused_for_read_and_write(wallet: Path) -> None:
     assert (wallet / "alias").read_bytes() == original
 
 
-def test_missing_lock_error_is_not_absence(wallet: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("phase", ["acquire", "release"])
+@pytest.mark.parametrize("present", [True, False])
+def test_missing_lock_error_is_not_absence(
+    wallet: Path, monkeypatch: pytest.MonkeyPatch, phase: str, present: bool
+) -> None:
     from mordred_hermes.keyvault import _wallet_storage
 
-    put(wallet, json.dumps(RAW).encode())
+    if present:
+        put(wallet, json.dumps(RAW).encode())
+    else:
+        with open_private_directory(wallet, create=True):
+            pass
 
     @contextlib.contextmanager
     def fail_lock(self, *, blocking=True):
+        if phase == "release":
+            with transaction(self, blocking=blocking) as tx:
+                yield tx
         raise PrivateFSError("missing", "lock")
-        yield
 
     with open_private_directory(wallet) as directory:
+        transaction = type(directory).transaction
         monkeypatch.setattr(type(directory), "transaction", fail_lock)
     with pytest.raises(extension_sign.WalletConfigError) as error:
         _wallet_storage.read_wallet_bytes(wallet)
