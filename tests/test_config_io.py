@@ -348,7 +348,7 @@ def test_oversize_and_unsafe_marker_cannot_be_recovered(fs):
 
 def test_failed_scope_extension_cannot_be_reused_as_absence(fs):
     b, paths = fs
-    with pytest.raises(RuntimeError), cio.canonical_session(paths, scope="home") as session:
+    with pytest.raises(PrivateFSError), cio.canonical_session(paths, scope="home") as session:
         b.fault = "policy:open"
         with pytest.raises(PrivateFSError), cio.canonical_session(paths, scope="policy"):
             pass
@@ -492,3 +492,134 @@ def test_foundation_errors_are_preserved(fs, reason):
     with pytest.raises(PrivateFSError) as err:
         cio.read_canonical_snapshot(paths)
     assert err.value.reason == reason
+
+
+@pytest.mark.parametrize("operation", ["write", "delete", "commit"])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_caught_uncertain_mutation_survives_outer_exit(fs, operation, cleanup_failure):
+    b, paths = fs
+    b.home.create_bytes(".env", b"old")
+    original = PrivateFSError("io", "injected_mutation", commit_state="uncertain")
+    event = {"write": "home:replace:.env", "delete": "home:delete:.env", "commit": "home:create:config.yaml"}[operation]
+
+    def refuse(actual):
+        if actual == event:
+            raise original
+
+    b.hook = refuse
+    with pytest.raises(PrivateFSError) as outer, cio.canonical_session(paths, scope="policy") as session:
+        with pytest.raises(PrivateFSError) as caught:
+            if operation == "write":
+                session.write_home(".env", b"new")
+            elif operation == "delete":
+                session.delete_home(".env", expected_identity=b.home.stat(".env").identity)
+            else:
+                with session.policy_update() as update:
+                    update.put_config(b"new")
+                    update.commit()
+        assert caught.value is original
+        with pytest.raises(PrivateFSError) as subsequent:
+            session.read_home(".env", max_bytes=10)
+        assert subsequent.value is original
+        b.hook = None
+        if cleanup_failure:
+            b.fault = "home:close"
+    assert outer.value is original
+    assert outer.value.commit_state == "uncertain"
+
+
+def test_nested_snapshot_extension_remains_nonblocking(fs):
+    b, paths = fs
+    with cio.canonical_session(paths, scope="home", blocking=True):
+        assert cio.read_canonical_snapshot(paths).config is None
+    assert b.blocking == [True, False]
+
+
+@pytest.mark.parametrize("operation", ["write", "delete"])
+@pytest.mark.parametrize("spelling", [".env.mordred-uninstall-123.bak", ".ENV.MORDRED-UNINSTALL-123.BAK"])
+def test_backup_shaped_config_cannot_bypass_pair_protocol(fs, operation, spelling):
+    b, paths = fs
+    custom = cio.CanonicalPaths(paths.home, config_name=".env.mordred-uninstall-123.bak")
+    b.home.create_bytes(spelling, b"original")
+    original = b.home.files.copy()
+    with cio.canonical_session(custom, scope="home") as session, pytest.raises(ValueError):
+        if operation == "write":
+            session.write_home(spelling, b"new")
+        else:
+            session.delete_home(spelling, expected_identity=b.home.stat(spelling).identity)
+    assert b.home.files == original
+
+
+@pytest.mark.parametrize("operation", ["write", "delete"])
+def test_caught_post_publication_verification_failure_is_retained(fs, operation):
+    b, paths = fs
+    if operation == "delete":
+        b.home.create_bytes(".env", b"old")
+    failure = PrivateFSError("io", "verification")
+    changed = False
+
+    def fail_verification(event):
+        nonlocal changed
+        if event == f"home:{'create' if operation == 'write' else 'delete'}:.env":
+            changed = True
+        if changed and (event == "home:read:.env" or (operation == "delete" and ".env" not in b.home.files)):
+            raise failure
+
+    with pytest.raises(PrivateFSError) as outer, cio.canonical_session(paths, scope="home") as session:
+        identity = b.home.stat(".env").identity if operation == "delete" else None
+        b.hook = fail_verification
+        with pytest.raises(PrivateFSError) as inner:
+            if operation == "write":
+                session.write_home(".env", b"new")
+            else:
+                session.delete_home(".env", expected_identity=identity)
+        assert inner.value is failure
+        b.hook = None
+    assert outer.value is failure
+    assert failure.commit_state == "uncertain"
+
+
+def test_backup_shaped_config_cannot_be_created_through_home_writer(fs):
+    b, paths = fs
+    custom = cio.CanonicalPaths(paths.home, config_name=".env.mordred-uninstall-123.bak")
+    with cio.canonical_session(custom, scope="home") as session, pytest.raises(ValueError):
+        session.write_home(custom.config_name, b"new")
+    assert b.home.files == {} and b.policy.files == {}
+
+
+def test_caught_nested_cleanup_uncertainty_survives_outer_exit(fs):
+    b, paths = fs
+    failure = PrivateFSError("io", "nested_cleanup", commit_state="uncertain")
+
+    def fail_once(event):
+        if event == "home:close":
+            b.hook = None
+            raise failure
+
+    with pytest.raises(PrivateFSError) as outer, cio.canonical_session(paths, scope="home") as session:
+        b.hook = fail_once
+        with pytest.raises(PrivateFSError) as nested, cio.canonical_session(paths, scope="home"):
+            pass
+        assert nested.value is failure
+        with pytest.raises(PrivateFSError) as subsequent:
+            session.read_home(".env", max_bytes=8)
+        assert subsequent.value is failure
+    assert outer.value is failure and outer.value.commit_state == "uncertain"
+
+
+def test_nested_ordinary_read_refusal_does_not_claim_mutation_uncertainty(fs):
+    b, paths = fs
+    b.home.create_bytes(".env", b"old")
+    failure = PrivateFSError("access_denied", "read")
+
+    def refuse(event):
+        if event == "home:read:.env":
+            raise failure
+
+    with cio.canonical_session(paths, scope="home") as outer:
+        b.hook = refuse
+        with pytest.raises(PrivateFSError) as error, cio.canonical_session(paths, scope="home") as inner:
+            inner.read_home(".env", max_bytes=8)
+        b.hook = None
+        assert error.value is failure and failure.commit_state == "not_committed"
+        assert outer.read_home(".env", max_bytes=8).data == b"old"
