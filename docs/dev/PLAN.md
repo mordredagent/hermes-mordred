@@ -1129,6 +1129,15 @@ Windows filesystem CI job alongside the existing foundation selectors.
 
 ### Windows C5 dedicated custody implementation
 
+C5a freezes the exact v1 manifest and role journals in SPEC before implementation.
+Build strict immutable profile/role parsing first, then checked read-only memory
+inventory and the owned/nested custody coordinator. Exercise real MRKW crypto
+against an injected P-256 native boundary; journal creation, native generation,
+fingerprint verification, wrapper publication, ownership commit and final journal
+cleanup are separate failure points. Implement explicit positive-proof recovery
+and role deletion last. Runtime arming, memory mutation hooks, process proof,
+audit consumers and user ceremonies remain subsequent slices.
+
 Follow SPEC.md §Windows dedicated custody and memory lifecycle. These are
 separate implementation slices, not a claim that Windows support is complete.
 
