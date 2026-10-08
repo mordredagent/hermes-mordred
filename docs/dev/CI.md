@@ -890,3 +890,27 @@ defect, fixed and re-reviewed with no remaining important findings. Shellcheck
 also passed. This slice did not repeat reboot/stop-start or TPM custody tests;
 it adds no Windows 11 or whole-product acceptance claim. Host shutdown remains
 the responsibility of the ongoing completion task's bounded auto-stop controls.
+
+### C5 custody foundation validation (2026-10-08)
+
+The shared prerequisite exposes validated Windows principal identity,
+confidential bounded inventory, protected canonical transaction loans and
+monotonic child publication receipts. It does not enable production custody,
+memory or encrypted audit callers. Scoped Windows CI additionally selects
+`tests/test_private_fs_principal.py` and `tests/test_config_io_custody.py`;
+existing native confidential/coordinator suites now include inherited inventory,
+fresh-process SID comparison, borrowed audit and child receipt cases.
+
+Local macOS Python 3.13.12 all-extras verification at code `c6d2e8ab7`:
+**5,895 passed, 106 skipped, 37 integration cases deselected**. Five warnings are
+existing dependency/fork deprecations and an upstream-source escape warning. Focused shared capabilities/readers and
+docs: **281 passed, 16 skipped** with default marker filtering disabled; the
+native/integration skips are not Windows execution evidence. Ruff check/format,
+ShellCheck and strict mypy for 210 source files passed; mypy used an isolated
+reduced-extras environment (`dev,keyvault,extension,macos`).
+
+Regression development caught missing interfaces, nested nonblocking loan
+acquisition, caught uncertain admission failures and child outcome loss when
+parent security revalidation happened before receipt reporting. Native Server
+source/wheel validation, independent review, Windows 11 and production caller
+adoption remain separate gates controlled by the completion run.
