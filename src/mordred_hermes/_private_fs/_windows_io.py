@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from ._types import (
+    ConfidentialDirectory,
     FileIdentity,
     FileMetadata,
     PrivateDirectory,
@@ -20,8 +21,8 @@ from ._types import (
 )
 from ._windows_api import OwnedHandle
 from ._windows_lock import exclusive_lock
-from ._windows_paths import CheckedDirectory, checked_directory, windows_leaf
-from ._windows_security import validate_private
+from ._windows_paths import CheckedDirectory, checked_directory, checked_directory_optional, windows_leaf
+from ._windows_security import validate_confidential_file, validate_private
 
 
 @contextlib.contextmanager
@@ -40,6 +41,50 @@ def open_private_directory(path: str | Path, *, create: bool = False) -> Iterato
         raise
 
 
+@contextlib.contextmanager
+def open_confidential_directory(path: str | Path, *, create: bool = False) -> Iterator[ConfidentialDirectory]:
+    with _open_directory(path, create=create, confidential=True) as directory:
+        assert directory is not None
+        yield directory
+
+
+@contextlib.contextmanager
+def open_optional_confidential_directory(path: str | Path) -> Iterator[ConfidentialDirectory | None]:
+    with _open_directory(path, confidential=True, optional=True) as directory:
+        yield directory
+
+
+@contextlib.contextmanager
+def open_optional_private_directory(path: str | Path) -> Iterator[PrivateDirectory | None]:
+    with _open_directory(path, optional=True) as directory:
+        yield directory
+
+
+@contextlib.contextmanager
+def _open_directory(
+    path: str | Path,
+    *,
+    create: bool = False,
+    confidential: bool = False,
+    optional: bool = False,
+) -> Iterator[_Directory | None]:
+    directory: _Directory | None = None
+    try:
+        with checked_directory_optional(path, create=create, confidential=confidential, optional=optional) as checked:
+            if checked is None:
+                yield None
+            else:
+                directory = _Directory(checked)
+                try:
+                    yield directory
+                finally:
+                    directory.active = False
+    except PrivateFSError as exc:
+        if directory is not None and directory.published:
+            exc.commit_state = "uncertain"
+        raise
+
+
 class _Directory:
     def __init__(self, checked: CheckedDirectory) -> None:
         self.checked = checked
@@ -51,9 +96,32 @@ class _Directory:
     def check(self) -> None:
         if not self.active or self.pid != os.getpid() or self.thread != threading.get_ident():
             raise RuntimeError("private directory is closed")
-        validate_private(self.checked.handle, directory=True)
-        if self.checked.handle.api.metadata(self.checked.handle).identity != self.checked.identity:
-            raise PrivateFSError("unsafe", "directory_identity")
+        self.checked.check()
+
+    def validate_file(self, handle: OwnedHandle) -> None:
+        if self.checked.confidential:
+            validate_confidential_file(handle)
+        else:
+            validate_private(handle, directory=False)
+
+    def file_identity(self, handle: OwnedHandle, expected: FileIdentity | None) -> FileIdentity:
+        self.validate_file(handle)
+        identity = handle.api.metadata(handle).identity
+        if expected is not None and identity != expected:
+            raise PrivateFSError("unsafe", "identity")
+        return identity
+
+    def verify_read(self, handle: OwnedHandle, name: str, identity: FileIdentity) -> None:
+        if not self.checked.confidential:
+            return
+        self.check()
+        self.file_identity(handle, identity)
+        path = self.path(name)
+        if handle.api.final_path(handle).casefold() != path.casefold():
+            raise PrivateFSError("unsafe", "file_path")
+        with handle.api.open(path, share=7) as named:
+            self.file_identity(named, identity)
+        self.check()
 
     def path(self, name: str) -> str:
         windows_leaf(name)
@@ -65,7 +133,7 @@ class _Directory:
         self.check()
         api = self.checked.handle.api
         with api.open(path, access=access, share=share) as handle:
-            validate_private(handle, directory=False)
+            self.validate_file(handle)
             if api.final_path(handle).casefold() != path.casefold():
                 raise PrivateFSError("unsafe", "file_path")
             yield handle
@@ -75,7 +143,9 @@ class _Directory:
         self.check()
         with self.opened(name) as handle:
             metadata = handle.api.metadata(handle)
-            return FileMetadata(metadata.identity, metadata.size, handle.api.mtime_ns(handle))
+            result = FileMetadata(metadata.identity, metadata.size, handle.api.mtime_ns(handle))
+            self.verify_read(handle, name, metadata.identity)
+            return result
 
     def read_prefix(self, name: str, *, max_bytes: int) -> bytes:
         self.path(name)
@@ -115,11 +185,13 @@ class _Directory:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
         with self.opened(name) as handle:
+            identity = handle.api.metadata(handle).identity
             chunks: list[bytes] = []
             size = 0
             while size <= max_bytes:
                 data = handle.api.read(handle, min(65536, max_bytes + 1 - size))
                 if not data:
+                    self.verify_read(handle, name, identity)
                     return b"".join(chunks)
                 size += len(data)
                 chunks.append(data)
@@ -184,7 +256,7 @@ class _Transaction:
         attempted = False
         try:
             with self.directory.opened(name, access=0x130089, share=0) as handle:
-                _check_identity(handle, expected_identity)
+                self.directory.file_identity(handle, expected_identity)
                 attempted = True
                 handle.api.discard(handle)
             self._absent(name)
@@ -308,13 +380,14 @@ class _Transaction:
                     except PrivateFSError as exc:
                         safe_to_discard = exc.commit_state == "not_committed"
                         raise
+                    api.flush(staging)
                     validate_private(staging, directory=False)
                     if (
                         api.metadata(staging).identity != identity
                         or api.final_path(staging).casefold() != destination.casefold()
                     ):
                         raise PrivateFSError("unsafe", "published_identity", commit_state="uncertain")
-                    api.flush(staging)
+                    self.directory.check()
                 finally:
                     if not safe_to_discard:
                         self.published = True

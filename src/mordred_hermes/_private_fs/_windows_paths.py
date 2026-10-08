@@ -46,10 +46,39 @@ class CheckedDirectory:
     handle: OwnedHandle
     identity: FileIdentity
     path: str
+    confidential: bool = False
+    ancestors: tuple[tuple[OwnedHandle, FileIdentity], ...] = ()
+
+    def check(self) -> None:
+        for handle, identity in self.ancestors:
+            validate_ancestor(handle, creating_child=False)
+            if handle.api.metadata(handle).identity != identity:
+                raise PrivateFSError("unsafe", "ancestor_identity")
+        if self.confidential:
+            validate_ancestor(self.handle, creating_child=True)
+        else:
+            validate_private(self.handle, directory=True)
+        if self.handle.api.metadata(self.handle).identity != self.identity:
+            raise PrivateFSError("unsafe", "directory_identity")
+        if self.ancestors and self.handle.api.final_path(self.handle).casefold() != self.path.casefold():
+            raise PrivateFSError("unsafe", "directory_path")
 
 
 @contextlib.contextmanager
 def checked_directory(path: str | Path, *, create: bool = False) -> Iterator[CheckedDirectory]:
+    with checked_directory_optional(path, create=create) as checked:
+        assert checked is not None
+        yield checked
+
+
+@contextlib.contextmanager
+def checked_directory_optional(
+    path: str | Path,
+    *,
+    create: bool = False,
+    confidential: bool = False,
+    optional: bool = False,
+) -> Iterator[CheckedDirectory | None]:
     drive, parts = split_path(path)
     api = get_api()
     api.validate_drive(drive)
@@ -57,24 +86,55 @@ def checked_directory(path: str | Path, *, create: bool = False) -> Iterator[Che
         parent = stack.enter_context(api.open(drive))
         api.validate_volume(parent)
         volume = api.metadata(parent).identity.volume
+        ancestors: list[tuple[OwnedHandle, FileIdentity]] = []
         for index, part in enumerate(parts):
             validate_ancestor(parent, creating_child=False)
+            ancestors.append((parent, api.metadata(parent).identity))
             destination = api.final_path(parent).rstrip("\\") + "\\" + part
+            created = False
+            child: OwnedHandle | None = None
             try:
                 child = api.open(destination)
             except PrivateFSError as exc:
-                if exc.reason != "missing" or not create or index != len(parts) - 1:
+                if (
+                    exc.reason != "missing"
+                    or exc.operation != "open"
+                    or exc.commit_state != "not_committed"
+                    or index != len(parts) - 1
+                    or not (optional or create)
+                ):
                     raise
                 validate_ancestor(parent, creating_child=True)
-                try:
-                    api.mkdir(destination)
-                except PrivateFSError as creation:
-                    if creation.reason != "exists":
-                        raise
-                child = api.open(destination)
+                if create:
+                    child, created = _create_directory(destination)
+            if child is None:
+                for ancestor, identity in ancestors:
+                    validate_ancestor(ancestor, creating_child=ancestor is parent)
+                    if api.metadata(ancestor).identity != identity:
+                        raise PrivateFSError("unsafe", "ancestor_identity")
+                # No missing exception crosses either the yield or cleanup.
+                yield None
+                return
             parent = stack.enter_context(child)
+            if created:
+                validate_private(parent, directory=True)
             metadata = api.metadata(parent)
             if metadata.reparse or not metadata.directory or metadata.identity.volume != volume:
                 raise PrivateFSError("unsafe", "ancestor_identity")
-        validate_private(parent, directory=True)
-        yield CheckedDirectory(parent, api.metadata(parent).identity, api.final_path(parent))
+        checked = CheckedDirectory(
+            parent, api.metadata(parent).identity, api.final_path(parent), confidential, tuple(ancestors)
+        )
+        checked.check()
+        yield checked
+
+
+def _create_directory(destination: str) -> tuple[OwnedHandle, bool]:
+    api = get_api()
+    created = True
+    try:
+        api.mkdir(destination)
+    except PrivateFSError as exc:
+        if exc.reason != "exists":
+            raise
+        created = False
+    return api.open(destination), created

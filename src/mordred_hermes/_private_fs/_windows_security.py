@@ -109,3 +109,23 @@ def validate_ancestor(handle: OwnedHandle, *, creating_child: bool) -> None:
     if not metadata.directory or metadata.reparse:
         raise PrivateFSError("unsafe", "ancestor_type")
     check_ancestor(handle.api.descriptor(handle), handle.api.user_sid(), creating_child=creating_child)
+
+
+def check_confidential(descriptor: Descriptor, user: bytes) -> None:
+    """Admit inherited safe grants without changing an existing descriptor."""
+    if descriptor.owner != user or descriptor.aces is None:
+        raise PrivateFSError("unsafe", "confidential_acl")
+    for ace in descriptor.aces:
+        mask = _mapped(ace.mask)
+        if ace.kind not in (0, 1) or ace.flags & ~0x1F or mask & ~FULL_CONTROL:
+            raise PrivateFSError("unsafe", "confidential_acl")
+        principal = descriptor.owner if ace.sid == OWNER_RIGHTS else ace.sid
+        if ace.kind == 0 and not ace.flags & 0x08 and mask and principal not in (user, SYSTEM, ADMINISTRATORS):
+            raise PrivateFSError("unsafe", "confidential_acl")
+
+
+def validate_confidential_file(handle: OwnedHandle) -> None:
+    metadata = handle.api.metadata(handle)
+    if metadata.directory or metadata.reparse or metadata.links != 1:
+        raise PrivateFSError("unsafe", "object_type")
+    check_confidential(handle.api.descriptor(handle), handle.api.user_sid())
