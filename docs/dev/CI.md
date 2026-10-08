@@ -78,6 +78,24 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Windows LLM canonical decisions (C8).**
+  Final component revision `a3be33537` passed **70 tests** in both ordinary-user
+  Server 2025 / Python 3.11.17 source and fresh sdist-derived wheel environments:
+  `tests/test_llm_windows_policy.py` and
+  `tests/test_llm_windows_policy_native.py`. Verified module origins and
+  disposable profiles kept production state unchanged. Native cases exercise
+  inherited ACL preservation, permission broadening, hardlinks and pending
+  markers after prompt/auxiliary grants were cached. No live model was called.
+  Wheel SHA-256: `1000c52f982faa6cd37791c5700eb1648bc9f03e34bf093a81e679e8be67ce64`.
+
+  Independent review and scoped R1 review approved. The R1 fix validates main
+  model endpoint/default/alias types before off-mode exits. Final focused host
+  checks passed 303 tests with four native skips; reduced-extras strict typing,
+  Ruff, formatting, shellcheck and docs checks passed. A prior full suite exited
+  successfully before the final ownership/schema changes; it is not evidence
+  for the final full-suite snapshot. Production audit IO, live provider flow,
+  other components, Windows 11 and full-product acceptance remain unfinished.
+
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
   #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
