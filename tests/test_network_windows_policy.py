@@ -540,6 +540,91 @@ def test_unexpected_checked_reader_failure_escapes_hermes_wrapper(
     assert_sanitized(caught.value)
 
 
+def exception_chain(error: BaseException) -> list[BaseException]:
+    """Every exception reachable through ``__cause__`` and ``__context__``."""
+    seen: list[BaseException] = []
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or any(current is known for known in seen):
+            continue
+        seen.append(current)
+        pending.extend([current.__cause__, current.__context__])
+    return seen
+
+
+@pytest.mark.parametrize(
+    "entrypoint", ["pre_api_request", "pre_tool_call", "on_session_start", "runtime_config", "default_path_strict"]
+)
+def test_refusal_retains_no_original_exception_object(
+    profile: CanonicalPaths, tor_runtime: _FakeRuntime, monkeypatch: pytest.MonkeyPatch, entrypoint: str
+) -> None:
+    original = RuntimeError(SECRET)
+
+    def broken(paths: CanonicalPaths) -> Any:
+        raise original
+
+    monkeypatch.setattr(_windows_policy, "read_canonical_snapshot", broken)
+    with pytest.raises((MordredPathBringupFailed, ValueError)) as caught:
+        if entrypoint == "default_path_strict":
+            settings_mod.read_default_path_strict(config_path(profile))
+        else:
+            run(entrypoint, profile, audit=Audit())
+    chain = exception_chain(caught.value)
+    assert all(link is not original for link in chain)
+    assert all(isinstance(link, (MordredPathBringupFailed, ValueError)) for link in chain)
+    assert all(SECRET not in str(link) for link in chain)
+
+
+@pytest.mark.parametrize("damage", ["parser", "reader"])
+def test_registration_refusal_chain_retains_no_original_exception(
+    profile: CanonicalPaths, wired: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    if damage == "parser":
+        policy_path(profile).write_bytes(b'{"policy": "strict", "x": "' + SECRET.encode())
+    else:
+
+        def broken(paths: CanonicalPaths) -> Any:
+            raise RuntimeError(SECRET)
+
+        monkeypatch.setattr(_windows_policy, "read_canonical_snapshot", broken)
+    with pytest.raises(MordredPathBringupFailed) as caught:
+        network.register(wired.ctx)
+    chain = exception_chain(caught.value)
+    assert len(chain) == 2
+    assert all(type(link) is MordredPathBringupFailed for link in chain)
+    assert all(SECRET not in str(link) for link in chain)
+
+
+@pytest.mark.parametrize("provider, refused", [("anthropic", False), ("bedrock", True)])
+def test_automatic_config_provider_falls_back_to_auth_json(
+    profile: CanonicalPaths, tor_runtime: _FakeRuntime, monkeypatch: pytest.MonkeyPatch, provider: str, refused: bool
+) -> None:
+    monkeypatch.setattr(hooks, "_read_config_model_provider", lambda path: pytest.fail("unchecked config read"))
+    publish(profile, config={**TOR_CONFIG, "model": {"provider": "auto"}})
+    (profile.home / "auth.json").write_text(json.dumps({"active_provider": provider.upper()}), encoding="utf-8")
+    audit = Audit()
+    if refused:
+        with pytest.raises(MordredPathBringupFailed, match="incompatible"):
+            run("on_session_start", profile, audit=audit)
+    else:
+        run("on_session_start", profile, audit=audit)
+    aborted = {entry["provider"] for entry in audit.entries if entry.get("severity") == "abort"}
+    assert aborted == ({provider} if refused else set())
+
+
+def test_malformed_auth_json_is_unresolved_and_strict_tor_refuses(
+    profile: CanonicalPaths, tor_runtime: _FakeRuntime
+) -> None:
+    publish(profile, config={**TOR_CONFIG, "model": {"provider": "auto"}})
+    (profile.home / "auth.json").write_bytes(b'{"active_provider": ' + SECRET.encode())
+    audit = Audit()
+    with pytest.raises(MordredPathBringupFailed, match="incompatible"):
+        run("on_session_start", profile, audit=audit)
+    assert {entry["provider"] for entry in audit.entries if entry.get("severity") == "abort"} == {"<unresolved>"}
+    assert tor_runtime.stop_called is False
+
+
 def test_canonical_locks_are_released_before_route_and_network_calls(
     wired: SimpleNamespace, profile: CanonicalPaths
 ) -> None:

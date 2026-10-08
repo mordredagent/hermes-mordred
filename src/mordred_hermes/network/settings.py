@@ -124,12 +124,14 @@ def _checked_default_path(config_path: Path) -> ActivePath:
     from ._exceptions import MordredPathBringupFailed
     from ._windows_policy import read_network_decision
 
+    message = "checked Windows network decision unavailable"
     try:
         decision = read_network_decision(config_path.parent / "mordred" / "policy.json", config_path)
     except MordredPathBringupFailed as refusal:
-        raise ValueError(str(refusal)) from None
-    if decision is None:  # pragma: no cover - only reachable on win32
-        raise ValueError("checked Windows network decision unavailable")
+        decision, message = None, str(refusal)
+    if decision is None:
+        # Raised outside the handler: the ordinary refusal carries no chain.
+        raise ValueError(message) from None
     return decision.default_path
 
 

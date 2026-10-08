@@ -1100,7 +1100,10 @@ derived from a refused read. Only checked absence yields `off` / `clearnet`.
 Refusals expose no document bytes or parser diagnostics. Handles and locks are
 closed before route activation, Tor/VPN process calls or network calls. POSIX
 readers are unchanged. The detailed contract is in POLICY.md §Native Windows
-network policy decisions; native Tor/VPN routes remain C9.
+network policy decisions; native Tor/VPN routes remain C9. A null
+`model.provider` is unset for the network gate (it only selects the provider
+that refuse-only gate evaluates) but refused by the LLM reader, which validates
+the main model route it authorizes.
 
 ## MVP Phasing
 

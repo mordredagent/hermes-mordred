@@ -49,6 +49,7 @@ def read_network_decision(policy_path: Path, config_path: Path) -> NetworkDecisi
     """Return None only on POSIX; unsafe Windows state always refuses."""
     if sys.platform != "win32":
         return None
+    failure = "Exception"
     try:
         home = policy_path.parent.parent
         if policy_path.parent.name.casefold() != "mordred":
@@ -81,12 +82,15 @@ def read_network_decision(policy_path: Path, config_path: Path) -> NetworkDecisi
             generation=_generation(paths, snapshot),
         )
     except Exception as exc:
-        # BaseException is deliberate: Hermes catches ordinary exceptions and
-        # continues. Do not expose policy/config bytes or parser diagnostics.
-        raise MordredPathBringupFailed(
-            "Mordred refuses this network operation because canonical Windows policy/config "
-            f"could not be safely read ({type(exc).__name__}). Inspect the profile and recover configuration."
-        ) from None
+        # Keep only the type name. Raising after the handler leaves no
+        # ``__context__`` that could retain the parser exception or bytes.
+        failure = type(exc).__name__
+    # BaseException is deliberate: Hermes catches ordinary exceptions and
+    # continues. Do not expose policy/config bytes or parser diagnostics.
+    raise MordredPathBringupFailed(
+        "Mordred refuses this network operation because canonical Windows policy/config "
+        f"could not be safely read ({failure}). Inspect the profile and recover configuration."
+    ) from None
 
 
 def _network_section(config: dict[str, Any]) -> dict[str, Any]:

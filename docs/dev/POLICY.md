@@ -347,6 +347,11 @@ of strings or null; `disable_ipv6` a boolean when present; `provider_overrides`
 uses the existing override parser; `model` must be absent, null, a string or a
 mapping whose `provider` is a string or null. Keys the runtime does not consume,
 such as `mullvad_account_id_env` and `mullvad_killswitch`, are not rejected.
+Unlike the LLM reader, which refuses a null `model.provider` because it
+validates the main model route before authorizing it, the network reader
+treats null as unset like `_provider_resolution`: the value only selects the
+provider evaluated by the refuse-only session gate, which then falls back to
+`auth.json` or `<unresolved>` (refused under strict Tor).
 
 A pending transaction, unsafe descriptor/owner/link, identity change, lock
 contention, read or cleanup failure, oversized or malformed document, or any
@@ -356,7 +361,8 @@ Hermes' ordinary hook handlers cannot swallow it, and it never falls back to a
 clearnet route. Registration refusals keep the existing `network.register`
 audit shape; request hooks record `stage: checked_policy`. Messages and audit
 entries name only the exception type, never document bytes or parser
-diagnostics. `read_default_path_strict` keeps its ordinary `ValueError`
+diagnostics, and the raised refusal retains no original exception in its
+`__cause__`/`__context__` chain. `read_default_path_strict` keeps its ordinary `ValueError`
 contract for callers such as the extension egress gate. Only checked absence
 yields the unconfigured `off` / `clearnet` defaults.
 

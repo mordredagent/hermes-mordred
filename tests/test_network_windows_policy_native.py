@@ -55,7 +55,8 @@ def test_native_warmed_network_allow_refuses_changed_admission(warmed: Path, dam
     policy, config = warmed / "mordred" / "policy.json", warmed / "config.yaml"
     parent_before = descriptor(warmed)
     before = policy.read_bytes(), config.read_bytes()
-    damaged = config if damage == "config-acl" else policy
+    # The hardlinked member is config; ACL damage names its own member.
+    damaged = policy if damage in ("policy-acl", "pending") else config
     if damage.endswith("acl"):
         subprocess.run(["icacls.exe", str(damaged), "/grant", "*S-1-1-0:(R)"], capture_output=True, check=True)
     elif damage == "hardlink":
