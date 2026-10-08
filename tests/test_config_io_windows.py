@@ -156,3 +156,14 @@ def test_native_child_publication_receipt_reports_caught_uncertainty(shared_home
     assert caught.value is original
     with open_confidential_directory(shared_home / "memories") as directory:
         assert directory.read_bytes("MEMORY.md", max_bytes=64) == b"synthetic ciphertext"
+
+
+def test_native_canonical_home_identity_is_shared_by_checked_case_alias(shared_home):
+    with canonical_session(CanonicalPaths(shared_home), scope="home") as outer:
+        original = outer.home_directory_identity()
+        assert original is not None
+        with canonical_session(CanonicalPaths(Path(str(shared_home).upper())), scope="home") as alias:
+            assert alias.home_directory_identity() == original
+        assert outer.home_directory_identity() == original
+    with pytest.raises(RuntimeError):
+        alias.home_directory_identity()

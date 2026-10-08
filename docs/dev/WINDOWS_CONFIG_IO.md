@@ -22,6 +22,13 @@ aliases only when they identify the pinned directory. Optional directory openers
 must exit successfully before missing-home/mordred observations escape. The
 coordinator never interprets arbitrary opener errors as fresh state.
 
+`session.home_directory_identity() -> FileIdentity | None` returns the checked
+home binding for a caller-supplied session. It validates the creating session's
+process/thread/lifetime and the pinned home identity/security before returning;
+`None` represents only the session's already-checked absence. It does not open
+raw paths or reacquire a lock. As with all observations, successful outer exit
+is required before absence can escape the owning checked context.
+
 `CheckedContents(data, metadata)` records bounded bytes and checked metadata.
 `CanonicalSnapshot(config, policy)` uses `None` only for clean checked absence.
 `read_canonical_snapshot` uses nonblocking locks; errors remain errors.
