@@ -1994,3 +1994,34 @@ already-partial cleanup, but still refuses unexpected opt-in, seals or unsafe
 objects. Successful purge leaves an unmanaged memory role while preserving
 independent audit/Telegram roles. A missing wrapper with retained memory-role,
 marker, opt-out, seal or ambiguous pending evidence remains broken, never fresh.
+
+##### Windows checked memory operations (C5b)
+
+`windows_memory_session(home, path=None, create=False, custody=None, lease=None,
+safe_mode=False)` owns or explicitly joins custody and yields a lifetime-bound
+`WindowsMemorySession`. It resolves the native memory key before opening the
+memories child transaction, pins an immutable `WindowsMemoryState` (memory lease
+or absence, bounded opt-in/opt-out bytes and wrapper SHA-256), and validates the
+same state on every operation. `memory_state()` is the narrow public custody
+read API; marker mutation and destructive migration are deferred until C5c
+provides the approved installed-runtime proof contract. An injected custody
+owner must match the checked physical home. A supplied lease must be current
+and memory-specific. No ambient key or implicit transaction context is used.
+
+The session exposes checked `read_text`, `read_plaintext`, `write_entries`,
+`create_backup` and `inventory`. Reads distinguish checked absence from denial;
+plaintext parsing preserves upstream delimiter/whitespace/newline semantics.
+All Windows publishers use confidential transactions and immediately report
+every successful or uncertain mutation to the canonical publication receipt.
+Backups are sealed before create-no-replace publication and are included in the
+flat bounded inventory. Timestamp collisions refuse without overwriting.
+Physical directory identity pins every supplied target to active memories;
+unsafe leaves, aliases to another home, stale leases and closed scopes refuse.
+
+Managed Windows memory requires a structurally admitted current C4 Python
+environment (`python.exe`, or `pythonw.exe` with its admitted Python sibling).
+Admission runs before custody locks and performs no subprocess proof. Unmanaged
+checked plaintext remains usable in other interpreters. Structural admission
+does not establish installed-runtime proof or authorize enable/disable/purge.
+C5b arming and destructive migration helpers remain unavailable until the C5c
+proof contract is implemented and reviewed; this slice is storage and hooks.

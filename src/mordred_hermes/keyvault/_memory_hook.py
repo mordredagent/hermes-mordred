@@ -94,6 +94,8 @@ if TYPE_CHECKING:
     from importlib.machinery import ModuleSpec
     from types import ModuleType
 
+    from ._memory_storage import WindowsMemorySession
+
 __all__ = [
     "MemoryEncryptionUnavailable",
     "classify_seam",
@@ -153,6 +155,11 @@ def memory_optout_marker_path(home: Path) -> Path:
 
 def _marker_armed(home: Path) -> bool:
     """Opt-in present and not paused — the on-disk half of "armed"."""
+    if sys.platform == "win32":
+        from ._windows_custody import windows_custody_session
+
+        with windows_custody_session(home) as session:
+            return session.memory_state().armed
     return memory_marker_path(home).exists() and not memory_optout_marker_path(home).exists()
 
 
@@ -608,12 +615,57 @@ def _profile_operation(cfg: _HookConfig, path: Path, *, reading: bool = False) -
         raise MemoryEncryptionUnavailable("TPM memory lifecycle lock or key unavailable") from exc
 
 
+@contextlib.contextmanager
+def _windows_operation(cfg: _HookConfig, path: Path, *, create: bool = False) -> Iterator[WindowsMemorySession]:
+    from ._memory_storage import windows_memory_session
+
+    home = cfg.home  # one active profile observation per call
+    try:
+        with windows_memory_session(home, path=path, create=create, safe_mode=_safe_mode(cfg.environ)) as session:
+            yield session
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        if isinstance(exc, MemoryEncryptionUnavailable):
+            raise
+        raise MemoryEncryptionUnavailable(
+            "checked Windows memory operation refused; inspect its classified cause"
+        ) from exc
+
+
+def _windows_drift(cfg: _HookConfig, path: Path, *, limit: int, raw: str | None = None) -> str | None:
+    from .._private_fs import PrivateFSError
+
+    backup = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
+    with _windows_operation(cfg, path) as session:
+        plaintext = session.read_plaintext(path.name, encoding="utf-8-sig" if raw is not None else "utf-8")
+        if raw is not None and (plaintext or "") != raw:
+            raise MemoryEncryptionUnavailable("Windows memory drift snapshot changed; reload before mutation")
+        if not plaintext or not plaintext.strip():
+            return None
+        parsed = _split_entries(plaintext, cfg.delimiter)
+        if (
+            plaintext.strip() == cfg.delimiter.join(parsed)
+            and max((len(entry) for entry in parsed), default=0) <= limit
+        ):
+            return None
+        try:
+            session.create_backup(backup.name, plaintext)
+        except PrivateFSError as exc:
+            if exc.reason != "exists" or exc.commit_state != "not_committed":
+                raise
+            return str(backup) + " (BACKUP FAILED — file unchanged on disk)"
+    return str(backup)
+
+
 def _wrap_write_file(store: Any, cfg: _HookConfig) -> None:
     """The single content write of every shape — and the one place plaintext can escape."""
     original = store._write_file
 
     @functools.wraps(original)
     def _write_file(path: Path, entries: list[str]) -> Any:
+        if sys.platform == "win32":
+            with _windows_operation(cfg, path, create=True) as session:
+                session.write_entries(path.name, entries, delimiter=cfg.delimiter)
+            return None
         with _profile_operation(cfg, path) as bound:
             if _sealed_on_disk(path):
                 key = _require_key_for_sealed(bound, path)  # sealed stays sealed, armed or not
@@ -638,6 +690,10 @@ def _wrap_read_raw_checked(store: Any, cfg: _HookConfig) -> None:
 
     @functools.wraps(original)
     def _read_raw_checked(path: Path) -> tuple[str, bool]:
+        if sys.platform == "win32":
+            with _windows_operation(cfg, path) as session:
+                text = session.read_plaintext(path.name, encoding="utf-8-sig")
+            return text or "", True
         with _profile_operation(cfg, path, reading=True) as bound:
             raw, read_ok = original(path)
             if not read_ok or not raw:
@@ -664,6 +720,10 @@ def _wrap_read_file(store: Any, cfg: _HookConfig) -> None:
 
     @functools.wraps(original)
     def _read_file(path: Path) -> list[str]:
+        if sys.platform == "win32":
+            with _windows_operation(cfg, path) as session:
+                text = session.read_plaintext(path.name)
+            return _split_entries(text or "", cfg.delimiter)
         with _profile_operation(cfg, path, reading=True) as bound:
             entries: list[str] = original(path)
             # A sealed file holds no delimiter, so it always parses as exactly one
@@ -692,6 +752,8 @@ def _wrap_drift_on_snapshot(store: Any, cfg: _HookConfig) -> None:
     @functools.wraps(original)
     def _detect_external_drift(self: Any, target: str, raw: str) -> Any:
         path = Path(self._path_for(target))
+        if sys.platform == "win32":
+            return _windows_drift(cfg, path, limit=self._char_limit(target), raw=raw)
         with _profile_operation(cfg, path) as bound:
             if not (bound.armed or _sealed_on_disk(path)):
                 return original(self, target, raw)  # plaintext at rest and disarmed: upstream logic intact
@@ -714,6 +776,8 @@ def _wrap_drift_self_read(store: Any, cfg: _HookConfig) -> None:
     @functools.wraps(original)
     def _detect_external_drift(self: Any, target: str) -> Any:
         path = Path(self._path_for(target))
+        if sys.platform == "win32":
+            return _windows_drift(cfg, path, limit=self._char_limit(target))
         with _profile_operation(cfg, path) as bound:
             raw = _sealed_text_at(path)
             if raw is None:
@@ -852,7 +916,21 @@ def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) ->
     stopping the process would only take out the diagnostic. Nothing is wrapped
     either way, and every other importer still refuses.
     """
-    if not _marker_armed(home):
+    if sys.platform == "win32":
+        from ._windows_custody import windows_custody_session
+
+        try:
+            with windows_custody_session(home) as session:
+                managed = session.memory_state().lease is not None
+                if not managed:
+                    session.resolve_memory_key()  # retained seals are not fresh unmanaged state
+        except (OSError, RuntimeError) as exc:
+            raise MemoryEncryptionUnavailable(
+                "Windows memory state cannot be admitted with an unsupported seam"
+            ) from exc
+        if not managed:
+            return
+    elif not _marker_armed(home):
         return
     if _SUPPRESS_REFUSAL:
         logger.warning(
@@ -861,16 +939,21 @@ def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) ->
             reason,
         )
         return
-    if _safe_mode(environ):
+    if _safe_mode(environ) and sys.platform != "win32":
         logger.warning(
             "memory encryption is on but the Hermes memory seam cannot be wrapped: %s "
             "(HERMES_SAFE_MODE is set, so startup continues and nothing new is sealed)",
             reason,
         )
         return
+    remedy = (
+        "install a supported Hermes memory seam"
+        if sys.platform == "win32"
+        else "set HERMES_SAFE_MODE=1 to bypass for recovery"
+    )
     sys.stderr.write(
         "mordred: refusing to start — memory encryption is on but the Hermes memory seam "
-        f"cannot be wrapped: {reason} (set HERMES_SAFE_MODE=1 to bypass for recovery)\n"
+        f"cannot be wrapped: {reason} ({remedy})\n"
     )
     with contextlib.suppress(OSError):
         sys.stderr.flush()
@@ -1065,6 +1148,16 @@ def _wrap_journey_mutation(module: Any, name: str, home_factory: Callable[[], Pa
     def _guarded(*args: Any, **kwargs: Any) -> Any:
         node_id = args[0] if args else kwargs.get("node_id")
         path = _journey_memory_path(module, node_id, home_factory) if isinstance(node_id, str) else None
+        if sys.platform == "win32" and isinstance(node_id, str) and node_id.startswith("memory:"):
+            if path is None:
+                raise MemoryEncryptionUnavailable("unsupported Windows journey memory target")
+            cfg = _HookConfig(environ=os.environ, delimiter="\n§\n", home_factory=home_factory)
+            with _windows_operation(cfg, path) as session:
+                session.read_plaintext(path.name)
+            return {
+                "ok": False,
+                "message": "Windows journey memory mutation requires a checked atomic seam; use the memory tool.",
+            }
         if path is not None and _sealed_on_disk(path):
             # Upstream's own error shape: {"ok": False, "message": ...}.
             return {"ok": False, "message": _JOURNEY_SEALED_MESSAGE}
@@ -1120,6 +1213,21 @@ def warn_when_memory_is_locked(
     """
     resolved = _home_factory(home)()
     if str(resolved) in _LOCKED_WARNED:
+        return False
+    if sys.platform == "win32":
+        from ._memory_storage import windows_memory_session
+
+        try:
+            with windows_memory_session(resolved) as session:
+                for snapshot in session.inventory():
+                    session.read_plaintext(snapshot.name)
+        except (OSError, RuntimeError, UnicodeError):
+            _LOCKED_WARNED.add(str(resolved))
+            sys.stderr.write(
+                "mordred: Windows memory storage or native custody unavailable; "
+                "restore the checked profile and original TPM key\n"
+            )
+            return True
         return False
     from ._memory_key import MemoryKeyError, resolve_memory_key
 

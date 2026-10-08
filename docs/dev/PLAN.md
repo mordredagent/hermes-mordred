@@ -1209,3 +1209,41 @@ argv, verifies live native discovery and lifecycle refusal, then terminates only
 that test child. No gateway/network service or user profile is modified. Record
 ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
 are not evidence of a successful native inventory.
+
+### Windows checked memory storage and hooks (C5b)
+
+Freeze the public session/state contract in SPEC before code. Extend the C5a
+flat inventory rather than adding another filesystem/ACL implementation. Add
+immutable public custody `memory_state()` with checked bounded marker reads and
+wrapped digest. Resolve load-only custody before taking the memories lock to
+avoid inventory recursion, then retain the same generation/state throughout
+the child scope. Own home -> mordred -> memories explicitly; borrowed owners
+and publication receipts retain their lifetime, thread and physical identity
+requirements. Every child mutation records publication immediately and catches
+classified uncertainty before returning; child cleanup remains inside receipt
+tracking so caught failures cannot make outer exit acknowledge success.
+
+Implement read/text/plaintext, entry joining/publication, sealed no-replace
+backups and bounded inventory under one session. Bind leaf paths using checked
+parent identities and the foundation leaf validator. Keep existing basename
+AAD when an NTFS alias selects the same physical file. Validate existing seals
+before any rewrite, including opt-out and safe mode. Windows A/B/C hooks must
+branch before upstream raw I/O and drift publication, and avoid callbacks while
+holding custody/child locks. Journey memory mutations that cannot prove a
+checked atomic seam refuse, including stale/malicious target paths.
+
+Use C4 `environment_root` for structural current-interpreter admission before
+locks, with explicit Pythonw sibling handling. This admits hook storage only;
+C5c installed proof and C6 ceremonies are later work. Do not introduce a bool
+or callback as a proof token. Public marker writes, arming, plaintext-removing
+enable, decrypting disable and purge orchestration are deferred to the lifecycle
+follow-up once its immutable proof binding contract is available. C5a continues
+to own native deletion journals; C5b never duplicates deletion.
+
+TDD uses real checked file transactions and real MRKW/AES-GCM with only native
+backend/principal/platform admission injected on POSIX; native Windows fixtures
+exercise inherited admission directly. Validate absent/unmanaged, seals and
+wrong keys, every seam, drift collisions, bounds, stale ownership and receipt
+faults. Preserve POSIX regressions, select Windows tests in CI, then run frozen
+focused/full suite once, reduced-extras strict types, Ruff, format, shellcheck
+and docs. Controller owns real CNG and installed source/wheel acceptance.

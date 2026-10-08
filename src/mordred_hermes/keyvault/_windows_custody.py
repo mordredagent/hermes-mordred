@@ -63,6 +63,18 @@ class GenerationLease:
     public_sha256: str
 
 
+@dataclass(frozen=True)
+class WindowsMemoryState:
+    lease: GenerationLease | None
+    marker: bytes | None
+    optout: bytes | None
+    wrapped_sha256: str | None
+
+    @property
+    def armed(self) -> bool:
+        return self.marker is not None and self.optout is None
+
+
 def windows_backend() -> NativeBackend:
     from . import _seckey_helper
     from ._seckey_backend import _SecKeyBackend
@@ -277,6 +289,24 @@ class WindowsCustodySession:
     def validate_lease(self, lease: GenerationLease) -> None:
         if self.lease(lease.role, generation=lease.generation) != lease:
             raise CustodyError("custody generation lease changed")
+
+    def memory_state(self) -> WindowsMemoryState:
+        """Checked flat state only; no inventory, enrollment or native operation."""
+        manifest = self._manifest()
+        marker = _read(self._tx, MARKER, 4096)
+        optout = _read(self._tx, OPTOUT, 4096)
+        wrapped = _read(self._tx, WRAPPED, wrap.HEADER_LEN)
+        if manifest is None or manifest.role("memory") == RoleState():
+            if any(value is not None for value in (marker, optout, wrapped, _read(self._tx, _pending_name("memory")))):
+                raise CustodyError("retained memory state has no committed ownership")
+            lease = None
+        else:
+            lease = self.lease("memory")
+            if wrapped is None:
+                raise CustodyError("retained memory ownership has lost its wrapper")
+        return WindowsMemoryState(
+            lease, marker, optout, None if wrapped is None else hashlib.sha256(wrapped).hexdigest()
+        )
 
     def backend_for(self, lease: GenerationLease) -> NativeBackend:
         self.validate_lease(lease)

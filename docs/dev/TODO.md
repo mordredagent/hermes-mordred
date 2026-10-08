@@ -338,3 +338,18 @@ Implementation and acceptance remain open:
   do not make it an implicit requirement for flat memory enrollment/purge.
 - [ ] Verify ordinary-user Server and Windows 11 installed flows, preserving
   ciphertext after missing hardware, token denial and uncertain operations.
+
+
+### Windows memory storage follow-up (C5b)
+
+- [ ] Review and accept checked Windows storage/hooks independently; native
+  source/sdist-wheel inherited-ACL and real CNG installed-Hermes validation
+  remain controller-owned until recorded.
+- [ ] After C5c installed proof is frozen, implement reusable enable/seal,
+  disable/decrypt, marker transitions and purge verification with exact
+  physical-home/SID/generation/epoch/wrapped-digest proof preconditions.
+  Expose no bool/callback proof bypass; C5a continues to own deletion journals.
+- [ ] Implement checked atomic Windows plaintext Journey memory mutations;
+  first-slice refusal is a preserved functional gap, not complete integration.
+- [ ] Complete separate C6 ceremony consumers and ordinary-user Windows 11
+  installed product acceptance.
