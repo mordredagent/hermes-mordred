@@ -255,11 +255,19 @@ def test_retention_checked_absence_only_before_selection(audit_path, monkeypatch
         else:
 
             def swapped(selected, **kwargs):
-                delete(selected, expected_identity=stat(selected).identity)
-                session.create(selected, b"new")
+                # Retain the old inode: unlink/recreate can recycle its ID on
+                # Linux and fail to construct the identity change under test.
+                retained = session.rename(
+                    selected, "retained-selected-source", expected_identity=stat(selected).identity
+                )
+                replacement = session.create(selected, b"new")
+                assert retained.identity == kwargs["expected_identity"]
+                assert replacement.identity != retained.identity
                 delete(selected, **kwargs)
 
             monkeypatch.setattr(session, "delete", swapped)
-            with pytest.raises(fs.PrivateFSError):
+            with pytest.raises(fs.PrivateFSError) as err:
                 rotation.sweep_audit_retention(session, cutoff_mtime_ns=2**63)
+            assert err.value.reason == "unsafe"
             assert session.snapshot(name, max_bytes=3).data == b"new"
+            assert session.snapshot("retained-selected-source", max_bytes=3).data == b"old"
