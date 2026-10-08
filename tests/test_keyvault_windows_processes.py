@@ -217,6 +217,9 @@ def test_native_gateway_child_is_discovered_without_cim(tmp_path):
     finally:
         child.terminate()
         child.wait(timeout=10)
+    stopped = win.inspect_windows_gateway_runtimes(tmp_path)
+    assert stopped.state == "known" and not stopped.runtimes, stopped
+    runtime.require_stopped_windows_gateways(tmp_path)
 
 
 def test_explicit_probe_python_is_validated_on_windows(monkeypatch, tmp_path):
@@ -311,3 +314,109 @@ def test_deeply_nested_state_is_typed_unknown(monkeypatch, tmp_path):
 def test_custom_python_launcher_cannot_hide_gateway(monkeypatch, tmp_path):
     process = Process(argv=["python.exe", r"C:\日本\custom-launcher.py", "gateway", "run"])
     assert scan(monkeypatch, tmp_path, [process]).runtimes
+
+
+@pytest.mark.parametrize(
+    "name, image",
+    [
+        ("Registry", "Registry"),
+        ("MemCompression", "MemCompression"),
+        ("LogonUI.exe", r"C:\Windows\System32\LogonUI.exe"),
+        ("svchost.exe", r"C:\Windows\System32\svchost.exe"),
+        ("csrss.exe", r"C:\Windows\System32\csrss.exe"),
+        ("wininit.exe", r"C:\Windows\System32\wininit.exe"),
+        ("services.exe", r"C:\Windows\System32\services.exe"),
+    ],
+)
+def test_stable_protected_os_image_does_not_make_scan_unknown(monkeypatch, tmp_path, name, image):
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
+    found = scan(monkeypatch, tmp_path, [Process(name=name, argv=[image], denied="owner")])
+    assert found.state == "known" and not found.runtimes
+
+
+@pytest.mark.parametrize(
+    "name, image",
+    [
+        ("python.exe", r"C:\Windows\System32\python.exe"),
+        ("hermes.exe", r"C:\Windows\System32\hermes.exe"),
+        ("Hermes Desktop.exe", r"C:\Windows\System32\Hermes Desktop.exe"),
+        ("svchost.exe", r"C:\Users\alice\svchost.exe"),
+        ("Registry", r"C:\Users\alice\Registry"),
+        ("unknown.exe", r"C:\Windows\System32\unknown.exe"),
+        ("svchost.exe", r"C:\Windows\System32-other\svchost.exe"),
+        ("powershell.exe", r"C:\Windows\System32\powershell.exe"),
+        ("cmd.exe", r"C:\Windows\System32\cmd.exe"),
+        ("rundll32.exe", r"C:\Windows\System32\rundll32.exe"),
+        ("mshta.exe", r"C:\Windows\System32\mshta.exe"),
+        ("wscript.exe", r"C:\Windows\System32\wscript.exe"),
+        ("cscript.exe", r"C:\Windows\System32\cscript.exe"),
+    ],
+)
+def test_denied_plausible_or_unrecognized_image_remains_unknown(monkeypatch, tmp_path, name, image):
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
+    found = scan(monkeypatch, tmp_path, [Process(name=name, argv=[image], denied="owner")])
+    assert found.state == "unknown"
+
+
+def test_protected_image_hint_is_still_unknown(monkeypatch, tmp_path):
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
+    p = Process(name="svchost.exe", argv=[r"C:\Windows\System32\svchost.exe"], denied="owner")
+    assert scan(monkeypatch, tmp_path, [p], hints=(42,)).state == "unknown"
+
+
+@pytest.mark.parametrize("changed", ["born", "name", "exe"])
+def test_protected_image_identity_change_is_unknown(monkeypatch, tmp_path, changed):
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
+    p = Process(name="svchost.exe", argv=[r"C:\Windows\System32\svchost.exe"], denied="owner")
+    calls = 0
+    field = {"born": "create_time", "name": "name", "exe": "exe"}[changed]
+    original = getattr(p, field)
+
+    def read():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return 2.0 if changed == "born" else "different"
+        return original()
+
+    setattr(p, field, read)
+    assert scan(monkeypatch, tmp_path, [p]).state == "unknown"
+
+
+@pytest.mark.parametrize("field", ["create_time", "name", "exe"])
+def test_protected_image_denied_recheck_remains_unknown(monkeypatch, tmp_path, field):
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32")
+    p = Process(name="svchost.exe", argv=[r"C:\Windows\System32\svchost.exe"], denied="owner")
+    calls = 0
+    original = getattr(p, field)
+
+    def read():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise psutil.AccessDenied(p.pid)
+        return original()
+
+    setattr(p, field, read)
+    assert scan(monkeypatch, tmp_path, [p]).state == "unknown"
+
+
+@pytest.mark.parametrize("image", [r"D:\Windows\System32\svchost.exe", r"C:\Windows\System32\svchost.exe"])
+def test_system_directory_failure_never_uses_environment(monkeypatch, tmp_path, image):
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("WINDIR", r"C:\Windows")
+    monkeypatch.setattr(win, "_system_directory", lambda: None)
+    p = Process(name="svchost.exe", argv=[image], denied="owner")
+    assert scan(monkeypatch, tmp_path, [p]).state == "unknown"

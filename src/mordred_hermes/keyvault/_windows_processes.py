@@ -70,16 +70,93 @@ class _Uncertain(Exception):
     """Internal sanitized reason, never an external exception message."""
 
 
+# These fixed-function OS images cannot be a supported Python/Hermes/Desktop
+# runtime. Generic hosts (cmd, PowerShell, rundll32, wscript, mshta, etc.) are
+# deliberately absent. A basename alone never admits an ordinary executable.
+_PROTECTED_OS_IMAGES = frozenset(
+    {
+        "csrss.exe",
+        "dwm.exe",
+        "fontdrvhost.exe",
+        "logonui.exe",
+        "lsass.exe",
+        "services.exe",
+        "smss.exe",
+        "svchost.exe",
+        "wininit.exe",
+        "winlogon.exe",
+    }
+)
+_KERNEL_IMAGES = frozenset({"Registry", "MemCompression"})
+
+
+def _system_directory() -> str | None:
+    """Read the OS system directory, never a caller-controlled environment path."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    win_dll = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        return None
+    kernel = win_dll("kernel32", use_last_error=True)
+    get_directory = kernel.GetSystemDirectoryW
+    get_directory.argtypes = (wintypes.LPWSTR, wintypes.UINT)
+    get_directory.restype = wintypes.UINT
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_directory(buffer, len(buffer))
+    if not 0 < length < len(buffer) or not ntpath.isabs(buffer.value):
+        return None
+    return buffer.value
+
+
+def _protected_os_image(process: psutil.Process, name: str) -> bool:
+    """Exclude only positively classified, stable native OS images.
+
+    Called exclusively after ownership AccessDenied, and never for a PID hint.
+    psutil's native exe query returns literal Registry/MemCompression for those
+    kernel processes; an ordinary executable has a full image path instead.
+    """
+    pid = process.pid
+    born = process.create_time()
+    exe = process.exe()
+    if exe in _KERNEL_IMAGES and name == exe:
+        irrelevant = True
+    elif name.casefold() in _PROTECTED_OS_IMAGES and ntpath.basename(exe).casefold() == name.casefold():
+        directory = _system_directory()
+        irrelevant = directory is not None and ntpath.dirname(exe).casefold() == directory.casefold()
+    else:
+        return False
+    if not irrelevant:
+        return False
+    # Reopen by PID: neither psutil's cached creation time nor image/name can
+    # authorize exclusion after a process exited, changed or was replaced.
+    current = psutil.Process(pid)
+    if current.create_time() != born or current.name() != name or current.exe() != exe:
+        raise _Uncertain("process-changed")
+    return True
+
+
+def _belongs_to_user(process: psutil.Process, name: str, owner: str, *, hinted: bool) -> bool:
+    try:
+        actual_owner = process.username()
+    except psutil.AccessDenied:
+        if not hinted and _protected_os_image(process, name):
+            return False
+        raise
+    if not actual_owner:
+        raise _Uncertain("owner-unavailable")
+    return bool(actual_owner.casefold() == owner.casefold())
+
+
 def _inspect_process(pid: int, owner: str, *, hinted: bool) -> GatewayRuntime | None:
     process = psutil.Process(pid)
     name = process.name()
     # Only kernel pseudo-processes are exempt from positive ownership checks.
     if (pid, name.casefold()) in {(0, "system idle process"), (4, "system")} and not hinted:
         return None
-    actual_owner = process.username()
-    if not actual_owner:
-        raise _Uncertain("owner-unavailable")
-    if actual_owner.casefold() != owner.casefold():
+    if not _belongs_to_user(process, name, owner, hinted=hinted):
         return None
     born = process.create_time()
     exe = process.exe()
@@ -90,7 +167,7 @@ def _inspect_process(pid: int, owner: str, *, hinted: bool) -> GatewayRuntime | 
     current = psutil.Process(pid)
     if (
         current.create_time() != born
-        or current.username().casefold() != actual_owner.casefold()
+        or current.username().casefold() != owner.casefold()
         or current.exe() != exe
         or current.cmdline() != argv
     ):

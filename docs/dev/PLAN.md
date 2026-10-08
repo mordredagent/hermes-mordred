@@ -1135,7 +1135,14 @@ codes. A checked, bounded `gateway_state.json` supplies only a PID locator;
 its recorded command line never selects an interpreter. Access denial, unstable
 PID creation time, unreadable state and unresolved launchers are uncertainty,
 not evidence that a gateway stopped. Positive foreign ownership excludes a
-process; only the kernel PID 0 / PID 4 pseudo-processes have a narrow exception.
+process. Ownership AccessDenied can exclude only a positively identified OS
+image: literal native Registry/MemCompression pseudo-images or a fixed OS-binary
+allowlist with the full image path in GetSystemDirectoryW's actual directory.
+PID, creation time, name and image are rechecked through a fresh process object.
+Hinted PIDs never use this exclusion. Unknown images, executable copies outside
+the system directory, and generic hosts such as PowerShell/cmd/rundll32 remain
+unknown when ownership cannot be read. The existing PID 0 / PID 4 kernel
+pseudo-process exceptions remain narrow.
 A current-user gateway blocks a transition even when its profile is uncertain.
 The adjacent `gateway run` argv pair is conservative: custom script launchers
 are included, and unrelated current-user apps using that pair can over-block.
@@ -1161,6 +1168,6 @@ Validation: run `tests/test_keyvault_windows_processes.py` in both the source
 checkout and an installed sdist-built wheel with Hermes present. Its ordinary
 Windows native test launches a short-lived sleeping Python child with gateway
 argv, verifies live native discovery and lifecycle refusal, then terminates only
-that test child. No gateway/network service or user profile is modified. Record
+that test child and requires a known-empty inventory and successful stopped gate. No gateway/network service or user profile is modified. Record
 ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
 are not evidence of a successful native inventory.
