@@ -1217,15 +1217,17 @@ not evidence that a gateway stopped. Positive foreign ownership excludes a
 process. After ownership AccessDenied a non-hinted record is classified in the
 SPEC order: literal native Registry/MemCompression pseudo-images are outside
 the supported set; a plausible reported name or image basename (one frozen
-rule: `python*`, `py`/`pyw`, any basename containing `hermes` or `mordred`, and
-the generic hosts cmd, PowerShell, pwsh, rundll32, mshta, wscript and cscript)
-stays unknown (`owner-denied-plausible`); every other image string from psutil
-is submitted to `inspect_managed_installation_image` (managed installation
-prerequisite below). PID, creation time, name and image are then rechecked
-through a fresh process object. Any capability refusal (including unsupported
-and NT-device-form paths), OSError/ValueError, changed or denied recheck, or an
-admission that returns after the scan deadline keeps the record unknown
-(`image-unverified`, `process-changed`, `inventory-limit`). Hinted PIDs and
+rule: a `python*` basename or one containing `hermes` or `mordred`, and the
+stems `py`, `pyw` and the generic hosts cmd, powershell, powershell_ise, pwsh,
+rundll32, mshta, wscript and cscript under any extension) stays unknown
+(`owner-denied-plausible`); an empty reported name or one that differs from the
+image basename stays unknown (`image-name-mismatch`); every other image string
+from psutil is submitted to `inspect_managed_installation_image` (managed
+installation prerequisite below). PID, creation time, name and image are then
+rechecked through a fresh process object. Any capability refusal (including
+unsupported, rooted and NT-device-form paths), OSError/ValueError, changed or
+denied recheck, or an admission that returns after the scan deadline keeps the
+record unknown (`image-unverified`, `process-changed`, `inventory-limit`). Hinted PIDs and
 positively owned processes never reach the capability. There is no fixed
 OS-image list or system-directory lookup. The existing PID 0 / PID 4 kernel
 pseudo-process exceptions remain narrow.
@@ -1256,7 +1258,8 @@ Windows native test launches a short-lived sleeping Python child with gateway
 argv, verifies live native discovery and lifecycle refusal, then terminates only
 that test child and requires a known-empty inventory and successful stopped gate.
 A second native case prints one `gateway-inventory-image` line per sanitized
-basename and capability result for comparison with the managed-image probe log.
+basename and capability result, plus the elapsed scan seconds, for comparison
+with the managed-image probe log.
 No gateway/network service or user profile is modified. Record
 ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
 are not evidence of a successful native inventory.

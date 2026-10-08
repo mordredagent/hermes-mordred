@@ -77,32 +77,38 @@ class _Uncertain(Exception):
 class _BasenameRule:
     prefixes: tuple[str, ...]
     substrings: tuple[str, ...]
-    names: frozenset[str]
+    stems: frozenset[str]
 
     def matches(self, basename: str) -> bool:
         name = basename.casefold()
-        return name in self.names or name.startswith(self.prefixes) or any(part in name for part in self.substrings)
+        # Hosts match on the stem so cmd.com, pwsh.scr or py.cmd stay plausible.
+        return (
+            ntpath.splitext(name)[0] in self.stems
+            or name.startswith(self.prefixes)
+            or any(part in name for part in self.substrings)
+        )
 
 
 # Ownership-denied records whose reported name or image basename could be a
 # supported interpreter, Hermes/Desktop launcher or generic execution host.
 # This rule only widens unknown; a match never admits or excludes a process.
-# The prefix covers python, pythonw and versioned python3.x images.
+# The prefix covers python, pythonw and versioned python3.x images; prefix and
+# substrings apply to the full basename, launcher/host stems to any extension.
 _PLAUSIBLE = _BasenameRule(
     prefixes=("python",),
     substrings=("hermes", "mordred"),
-    names=frozenset(
+    stems=frozenset(
         {
-            "py.exe",
-            "pyw.exe",
-            "cmd.exe",
-            "powershell.exe",
-            "powershell_ise.exe",
-            "pwsh.exe",
-            "rundll32.exe",
-            "mshta.exe",
-            "wscript.exe",
-            "cscript.exe",
+            "py",
+            "pyw",
+            "cmd",
+            "powershell",
+            "powershell_ise",
+            "pwsh",
+            "rundll32",
+            "mshta",
+            "wscript",
+            "cscript",
         }
     ),
 )
@@ -121,8 +127,12 @@ def _require_outside_supported_set(process: psutil.Process, name: str, deadline:
     born = process.create_time()
     exe = process.exe()
     if not (exe in _KERNEL_IMAGES and name == exe):
-        if _PLAUSIBLE.matches(name) or _PLAUSIBLE.matches(ntpath.basename(exe)):
+        basename = ntpath.basename(exe)
+        if _PLAUSIBLE.matches(name) or _PLAUSIBLE.matches(basename):
             raise _Uncertain("owner-denied-plausible")
+        # Admission speaks only for the image psutil reports under this name.
+        if not name or name.casefold() != basename.casefold():
+            raise _Uncertain("image-name-mismatch")
         try:
             inspect_managed_installation_image(exe)
         except (OSError, ValueError):

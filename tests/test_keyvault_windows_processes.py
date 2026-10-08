@@ -78,7 +78,7 @@ def scan(monkeypatch, tmp_path, processes, *, replacement=None, hints=(), manage
     monkeypatch.setattr(win, "_read_state_pid", lambda home: None)
     monkeypatch.setattr(win, "_gateway_python", lambda exe: Path(exe))
     # The module-level seam replaces only the shared capability, never its policy.
-    monkeypatch.setattr(win, "inspect_managed_installation_image", managed, raising=False)
+    monkeypatch.setattr(win, "inspect_managed_installation_image", managed)
     return win.inspect_windows_gateway_runtimes(tmp_path, hinted_pids=hints)
 
 
@@ -258,6 +258,7 @@ def test_native_managed_image_submissions_are_recorded(tmp_path, monkeypatch, re
     """
     import json
     import ntpath
+    import time
     from collections import Counter
 
     from mordred_hermes.keyvault import _windows_processes as win
@@ -279,12 +280,16 @@ def test_native_managed_image_submissions_are_recorded(tmp_path, monkeypatch, re
         return result
 
     monkeypatch.setattr(win, "inspect_managed_installation_image", recording)
+    started = time.monotonic()
     inventory = win.inspect_windows_gateway_runtimes(tmp_path)
+    elapsed = round(time.monotonic() - started, 3)
     lines = [
         json.dumps({"image": image, "result": result, "count": count}, sort_keys=True)
         for (image, result), count in sorted(outcomes.items())
     ]
-    summary = json.dumps({"state": inventory.state, "reasons": list(inventory.reasons)}, sort_keys=True)
+    summary = json.dumps(
+        {"elapsed_seconds": elapsed, "state": inventory.state, "reasons": list(inventory.reasons)}, sort_keys=True
+    )
     record_property("gateway_inventory_images", "\n".join(lines))
     record_property("gateway_inventory_summary", summary)
     with capsys.disabled():
@@ -459,6 +464,68 @@ def test_denied_plausible_basename_is_unknown_even_when_capability_would_admit(m
 @pytest.mark.parametrize(
     "name, image",
     [
+        ("cmd.com", SYSTEM32 + "cmd.com"),
+        ("CMD", SYSTEM32 + "CMD"),
+        ("pwsh.scr", "C:\\Program Files\\PowerShell\\7\\pwsh.scr"),
+        ("py.cmd", "C:\\Windows\\py.cmd"),
+        ("pyw.bat", "C:\\Windows\\pyw.bat"),
+        ("PowerShell_ISE.pif", SYSTEM32 + "PowerShell_ISE.pif"),
+        ("powershell.com", SYSTEM32 + "powershell.com"),
+        ("rundll32.scr", SYSTEM32 + "rundll32.scr"),
+        ("mshta.hta", SYSTEM32 + "mshta.hta"),
+        ("wscript.com", SYSTEM32 + "wscript.com"),
+        ("cscript.bat", SYSTEM32 + "cscript.bat"),
+    ],
+)
+def test_generic_host_or_launcher_stem_under_any_extension_is_plausible(monkeypatch, tmp_path, name, image):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:owner-denied-plausible",)
+    assert managed.calls == []
+
+
+@pytest.mark.parametrize(
+    "name, image",
+    [
+        ("cmdkey.exe", SYSTEM32 + "cmdkey.exe"),
+        ("pyramid.exe", "C:\\Program Files\\Vendor\\pyramid.exe"),
+        ("wscript2.exe", SYSTEM32 + "wscript2.exe"),
+        ("cmd.exe.bak", SYSTEM32 + "cmd.exe.bak"),
+    ],
+)
+def test_host_stem_rule_is_exact_not_a_prefix(monkeypatch, tmp_path, name, image):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], managed=managed)
+    assert found.state == "known" and managed.calls == [image]
+
+
+@pytest.mark.parametrize(
+    "name, image",
+    [
+        ("svchost.exe", SYSTEM32 + "LogonUI.exe"),
+        ("agent.exe", "C:\\Program Files\\Vendor\\agent-real.exe"),
+        ("", SYSTEM32 + "svchost.exe"),
+        ("svchost.exe", ""),
+        ("svchost.exe", SYSTEM32),
+    ],
+    ids=["other-image", "renamed", "empty-name", "empty-image", "directory-only"],
+)
+def test_denied_image_must_match_its_reported_name_before_admission(monkeypatch, tmp_path, name, image):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:image-name-mismatch",)
+    assert managed.calls == []
+
+
+def test_reported_name_matches_image_basename_case_insensitively(monkeypatch, tmp_path):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied("SVCHOST.EXE", SYSTEM32 + "svchost.exe")], managed=managed)
+    assert found.state == "known" and managed.calls == [SYSTEM32 + "svchost.exe"]
+
+
+@pytest.mark.parametrize(
+    "name, image",
+    [
         ("svchost.exe", SYSTEM32 + "svchost.exe"),
         ("LogonUI.exe", SYSTEM32 + "LogonUI.exe"),
         ("csrss.exe", SYSTEM32 + "csrss.exe"),
@@ -529,8 +596,10 @@ def test_capability_query_failure_keeps_record_unknown(monkeypatch, tmp_path, er
         "\\Device\\HarddiskVolume3\\Program Files\\Vendor\\agent.exe",
         "\\\\?\\C:\\Program Files\\Vendor\\agent.exe",
         "\\\\server\\share\\agent.exe",
+        "\\Program Files\\Vendor\\agent.exe",
+        "\\??\\C:\\Program Files\\Vendor\\agent.exe",
     ],
-    ids=["nt-device", "verbatim", "unc"],
+    ids=["nt-device", "verbatim", "unc", "rooted", "nt-object"],
 )
 def test_non_dos_image_path_is_refused_by_the_real_capability_and_unknown(monkeypatch, tmp_path, image):
     from mordred_hermes._private_fs import _windows_managed
