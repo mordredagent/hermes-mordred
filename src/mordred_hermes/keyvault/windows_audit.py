@@ -39,6 +39,9 @@ from .wrap import DEK_LEN, AuditSink, NativeBackend, _parse_header, unwrap_dek, 
 
 DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024 + 65536
 DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+# Bound on waiting for another append's late custody-exit outcome. Settlement
+# needs only the writer mutex, so expiry means a stuck latch: refuse, never hang.
+_IN_FLIGHT_TIMEOUT = 30.0
 _T = TypeVar("_T")
 
 
@@ -148,6 +151,9 @@ def _audit_scope(
                 with audit_session(
                     path, blocking=False, transaction=(transaction or loan) if default else None
                 ) as session:
+                    # The child lock must hold exactly the directory checked above.
+                    if session.directory_identity() != identity:
+                        raise PrivateFSError("unsafe", "audit_directory_identity")
                     recorded = _RecordedAudit(session, receipt)
                     yield recorded
             except BaseException as exc:
@@ -305,29 +311,40 @@ class WindowsEncryptedWriter:
         incoming = mral._encrypted_line_len(len(plaintext))
         # Failures inside the mutex settle there. Custody exit runs after the
         # mutex is released, so an in-flight mark keeps other threads off the
-        # cached state until that late outcome also settles. Never retry.
-        flight = False
+        # cached state until that late outcome also settles. Never retry. The
+        # latch is cleared in ``finally`` by plain assignments, and an
+        # interrupted settlement poisons conservatively. The bounded wait turns
+        # any residual stuck latch (an interrupt while re-acquiring the mutex)
+        # into a definite busy refusal instead of a hang.
+        flight = settled = False
         try:
-            with _custody_scope(self.home, custody, self.backend) as session:
-                session.validate_lease(self.lease)
-                if session.lease("audit") != self.lease:
-                    raise CustodyError("audit writer generation is no longer current")
+            try:
+                with _custody_scope(self.home, custody, self.backend) as session:
+                    session.validate_lease(self.lease)
+                    if session.lease("audit") != self.lease:
+                        raise CustodyError("audit writer generation is no longer current")
+                    with self._lock:
+                        if not self._settled.wait_for(lambda: not self._in_flight, timeout=_IN_FLIGHT_TIMEOUT):
+                            raise PrivateFSError("busy", "audit_in_flight")
+                        self._locked_append(session, transaction, plaintext, incoming)
+                        flight = True
+                        self._in_flight = True
+            except BaseException as exc:
                 with self._lock:
-                    self._settled.wait_for(lambda: not self._in_flight)
-                    self._locked_append(session, transaction, plaintext, incoming)
-                    self._in_flight = flight = True
-        except BaseException as exc:
-            with self._lock:
-                self._fail(exc, published=False)
-                self._land(flight)
-            raise
-        with self._lock:
-            self._land(flight)
-
-    def _land(self, flight: bool) -> None:
-        if flight:
-            self._in_flight = False
-            self._settled.notify_all()
+                    self._fail(exc, published=False)
+                    settled = True
+                raise
+            settled = True
+        finally:
+            if flight:
+                with self._lock:
+                    try:
+                        if not settled:
+                            self._poisoned = True
+                            self._wipe_dek()
+                    finally:
+                        self._in_flight = False
+                        self._settled.notify_all()
 
     def _locked_append(
         self,

@@ -778,3 +778,109 @@ def test_decrypt_refuses_history_of_removed_retained_record(fs):
     assert len(backend.calls) == calls
     current = a.decrypt_windows_log_file(path, home=home, backend=backend, audit_sink=lambda event: None)
     assert [event["event"] for event in current] == ["new"]
+
+
+def append_without_blocking(writer, entry, *, timeout=5):
+    """Run one append on another thread; a stuck latch is a failure, never a hang."""
+    outcome = {}
+
+    def run():
+        try:
+            writer.append(entry)
+            outcome["result"] = "appended"
+        except Exception as exc:
+            outcome["result"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    blocked = thread.is_alive()
+    if blocked:
+        # Release the stale latch so the abandoned append cannot keep custody locks.
+        with writer._lock:
+            writer._in_flight = False
+            writer._settled.notify_all()
+        thread.join(timeout)
+    assert not blocked, "append blocked on a stale in-flight latch"
+    return outcome["result"]
+
+
+@pytest.mark.parametrize("settlement", ["_fail", "_wipe_dek"])
+def test_interrupted_late_settlement_never_leaves_in_flight_latch(fs, monkeypatch, settlement):
+    a, c, home, backend, _ = enrolled(fs)
+    path = home / "mordred" / "audit.log"
+    w = provider(a, home, backend).writer(path)
+    w.append({"event": "before"})
+    scope = a._custody_scope
+    original = getattr(a.WindowsEncryptedWriter, settlement)
+
+    @contextmanager
+    def late_failure(*args, **kwargs):
+        with scope(*args, **kwargs) as session:
+            yield session
+        raise PrivateFSError("io", "injected_custody_exit")
+
+    def interrupted(self, *args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(a, "_custody_scope", late_failure)
+    monkeypatch.setattr(a.WindowsEncryptedWriter, settlement, interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        w.append({"event": "late"})
+    monkeypatch.setattr(a.WindowsEncryptedWriter, settlement, original)
+    monkeypatch.setattr(a, "_custody_scope", scope)
+    # Interrupted settlement leaves the late outcome unknown: conservatively poisoned.
+    result = append_without_blocking(w, {"event": "after"})
+    assert isinstance(result, c.CustodyError)
+    assert "poison" in str(result)
+    assert_no_cached_dek(w)
+
+
+def test_stale_in_flight_latch_times_out_as_classified_busy_refusal(fs, monkeypatch):
+    a, _, home, backend, _ = enrolled(fs)
+    path = home / "mordred" / "audit.log"
+    w = provider(a, home, backend).writer(path)
+    w.append({"event": "before"})
+    before = path.read_bytes()
+    monkeypatch.setattr(a, "_IN_FLIGHT_TIMEOUT", 0.05, raising=False)
+    with w._lock:
+        w._in_flight = True  # Another append's outcome never settles.
+    result = append_without_blocking(w, {"event": "blocked"})
+    assert isinstance(result, PrivateFSError)
+    assert (result.reason, result.operation, result.commit_state) == ("busy", "audit_in_flight", "not_committed")
+    assert path.read_bytes() == before
+    with w._lock:
+        w._in_flight = False
+    w.append({"event": "after"})  # Definite refusal: the writer is not poisoned.
+    events = []
+    for candidate in path.parent.glob("audit.log*"):
+        events += a.decrypt_windows_log_file(candidate, home=home, backend=backend, audit_sink=lambda event: None)
+    assert sorted(event["event"] for event in events) == ["after", "before"]
+
+
+def test_custom_directory_swapped_after_check_refuses_before_any_mutation(fs, monkeypatch):
+    a, _, home, backend, _ = enrolled(fs)
+    custom = custom_directory(home)
+    moved = home.parent / "custom-checked"
+    w = provider(a, home, backend).writer(custom / "audit.log")
+    original = a.audit_session
+
+    @contextmanager
+    def swapped(path, **kwargs):
+        # Replace the checked directory between identity check and child lock.
+        custom.rename(moved)
+        with open_private_directory(custom, create=True):
+            pass
+        with original(path, **kwargs) as session:
+            yield session
+
+    monkeypatch.setattr(a, "audit_session", swapped)
+    with pytest.raises(PrivateFSError) as error:
+        w.append({"event": "refuse"})
+    assert (error.value.reason, error.value.operation, error.value.commit_state) == (
+        "unsafe",
+        "audit_directory_identity",
+        "not_committed",
+    )
+    assert not list(custom.glob("audit.log*"))
+    assert not list(moved.glob("audit.log*"))

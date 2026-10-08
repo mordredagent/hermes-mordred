@@ -1185,11 +1185,14 @@ Default storage borrows C2's protected loan; custom preexisting directories use
 nonblocking child locks and immediate publication receipts for create, append,
 rename, delete, promoted generic post-publication failures and child cleanup.
 Wrap the new DEK, build its header and seal the entry before rotation, so only
-checked filesystem primitives follow the first mutation. Settle failures under
-the writer mutex (a late custody-exit outcome settles before another thread
-reuses the writer): wipe the DEK but keep the owned active-file identity across
-definite failures and close; uncertain writes and lost owned active files poison
-the instance permanently. Read bounded snapshots before native unwrap callbacks,
+checked filesystem primitives follow the first mutation. The child audit lock
+must hold the checked directory identity. Settle failures under the writer mutex
+(a late custody-exit outcome settles before another thread reuses the writer):
+wipe the DEK but keep the owned active-file identity across definite failures
+and close; uncertain writes and lost owned active files poison the instance
+permanently. An interrupted settlement poisons yet always clears the in-flight
+latch; a latch still set after 30 s is a definite busy refusal, never a hang.
+Read bounded snapshots before native unwrap callbacks,
 retain lifecycle through authentication, and require explicit custody borrowing
 for synchronous nested appends. Do not resolve providers or prompt under audit
 locks, provision keys on lookup failure, or use a retry as reconciliation.
