@@ -307,6 +307,9 @@ required.
 - [ ] C7a: shared audit append/rotation/compression/retention prerequisites.
 - [ ] C7b: audit privacy and CLI migration after keyvault integration.
 - [ ] C8: network/LLM/privacy checked readers and fail-closed cache decisions.
+  The network slice routes every Windows network decision through one checked
+  canonical generation (host-tested; native Windows source/wheel validation of
+  `tests/test_network_windows_policy_native.py` is still required).
 - [ ] C9: native Tor/VPN route behavior and process cleanup.
 - [ ] C10: extension pairing/history/Telegram storage and lifecycle.
 - [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.

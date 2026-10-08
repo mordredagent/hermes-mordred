@@ -21,6 +21,7 @@ from __future__ import annotations
 import atexit
 import functools
 import logging
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -29,12 +30,13 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from .._audit_support import build_audit_writer, safe_audit_append
 from .._home import HERMES_BASE
 from .._policy_io import load_policy_mapping
-from .._policy_types import VALID_ACTIVE_PATHS
+from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
 from .._yaml_io import load_plugin_section
 from . import api, hooks
 from . import proxy_env as proxy_env_mod
 from . import settings as settings_mod
 from ._exceptions import MordredPathBringupFailed
+from ._windows_policy import NetworkDecision, read_network_decision
 from .runtime import Runtime, RuntimeConfig, route_config_fingerprint
 from .vpn_providers import known_providers
 
@@ -86,7 +88,7 @@ def register(ctx: PluginContext) -> None:
     every one of those.
     """
     audit = _registration_audit()
-    config = _registration_config(audit)
+    config = _registration_config(audit, decision=_checked_registration_decision(audit))
     _register_proxy_env_passthrough(config=config, audit=audit)
     new_runtime = _prepare_process_runtime(config=config, audit=audit)
     try:
@@ -181,12 +183,31 @@ def _registration_audit() -> Writer:
         )
 
 
-def _registration_config(audit: Writer) -> RuntimeConfig:
+def _checked_registration_decision(audit: Writer) -> NetworkDecision | None:
+    """Windows: read one checked canonical generation for this activation.
+
+    ``None`` on POSIX. The checked reader's refusal is already sanitized; it
+    is audited and raised like every other registration refusal, without a
+    second (tolerant) read for a policy label.
+    """
+    try:
+        return read_network_decision(DEFAULT_POLICY_JSON_PATH, DEFAULT_CONFIG_PATH)
+    except MordredPathBringupFailed as refusal:
+        _raise_process_route_refusal(
+            audit=audit,
+            attempted_path="<invalid-config>",
+            policy_mode="strict",
+            error=refusal,
+        )
+
+
+def _registration_config(audit: Writer, *, decision: NetworkDecision | None = None) -> RuntimeConfig:
     """Load activation config or convert an ordinary reader error to refusal."""
     try:
         return _load_runtime_config(
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
             config_path=DEFAULT_CONFIG_PATH,
+            _decision=decision,
         )
     except Exception as e:
         _raise_process_route_refusal(
@@ -199,6 +220,10 @@ def _registration_config(audit: Writer) -> RuntimeConfig:
 
 def _policy_mode_for_registration_refusal() -> str:
     """Best-effort policy label; the refusal itself always remains strict."""
+    if sys.platform == "win32":
+        # Windows decisions come only from the checked reader; never consult
+        # a tolerant reader, even for a label on an unconditional refusal.
+        return "strict"
     try:
         return settings_mod.read_policy_mode(DEFAULT_POLICY_JSON_PATH, log=_LOG)
     except Exception as error:
@@ -285,13 +310,17 @@ def _wire_network_hooks(*, ctx: PluginContext, audit: Writer) -> None:
         # Hermes /reset clears its ContextVar-backed env passthrough registry.
         # Reassert the complete route environment at every new session before
         # any execute_code child can run, using the policy currently on disk.
-        session_config = _registration_config(audit)
+        # On Windows the passthrough and the session gate share one checked
+        # generation; a second read could observe a different pair.
+        decision = _checked_registration_decision(audit)
+        session_config = _registration_config(audit, decision=decision)
         _register_proxy_env_passthrough(config=session_config, audit=audit)
         hooks.on_session_start(
             policy_json_path=DEFAULT_POLICY_JSON_PATH,
             config_path=DEFAULT_CONFIG_PATH,
             auth_json_path=DEFAULT_AUTH_JSON_PATH,
             audit=audit,
+            _decision=decision,
             **kwargs,
         )
 
@@ -407,7 +436,7 @@ def _raise_process_route_refusal(
     audit: Writer,
     attempted_path: str,
     policy_mode: str,
-    error: Exception,
+    error: BaseException,
     lifecycle_context: str = "before provider client construction",
 ) -> NoReturn:
     """Audit and raise a fail-closed process-start refusal."""
@@ -455,7 +484,12 @@ def _register_process_shutdown() -> None:
     _PROCESS_SHUTDOWN_REGISTERED = True
 
 
-def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> RuntimeConfig:
+def _load_runtime_config(
+    *,
+    policy_json_path: Path,
+    config_path: Path,
+    _decision: NetworkDecision | None = None,
+) -> RuntimeConfig:
     """Build a :class:`RuntimeConfig` from disk state.
 
     Reads:
@@ -486,7 +520,21 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
     (RuntimeConfig has no field for it; the VPN path derives lockdown
     from ``policy_mode``). Threading an explicit user override is a
     follow-up.
+
+    On Windows every field comes from one checked canonical generation
+    (``_decision`` when the caller already holds it). Unsafe, pending,
+    malformed or mistyped state refuses in every policy mode; only checked
+    absence yields the unconfigured defaults. The tolerant readers below are
+    POSIX-only.
     """
+    decision = _decision or read_network_decision(policy_json_path, config_path)
+    if decision is not None:
+        return _runtime_config(
+            policy_mode=decision.mode,
+            default_path=decision.default_path,
+            network=decision.section,
+            disable_ipv6=decision.disable_ipv6,
+        )
     policy_data = _load_policy_json(policy_json_path)
     # Registration precedes provider construction, so it must use the same
     # fail-closed policy reader as the hook layer. A damaged existing policy
@@ -502,6 +550,22 @@ def _load_runtime_config(*, policy_json_path: Path, config_path: Path) -> Runtim
         if policy_mode == "strict"
         else settings_mod.resolve_default_path(network)
     )
+    return _runtime_config(
+        policy_mode=policy_mode,
+        default_path=default_path,
+        network=network,
+        disable_ipv6=disable_ipv6,
+    )
+
+
+def _runtime_config(
+    *,
+    policy_mode: PolicyMode,
+    default_path: ActivePath,
+    network: dict[str, Any],
+    disable_ipv6: bool,
+) -> RuntimeConfig:
+    """Resolve the activation fields shared by the POSIX and Windows readers."""
     return RuntimeConfig(
         policy_mode=policy_mode,
         default_path=default_path,

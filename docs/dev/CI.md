@@ -1196,3 +1196,27 @@ a worker thread. They prove that broken or unproven custody with an unsupported
 seam ends the process through `os._exit(1)`, and that a fresh unmanaged
 profile continues in plaintext. The native junction case asserts the
 foundation's classified `unsafe`/`ancestor_identity` refusal.
+
+### Windows network canonical decisions validation (C8)
+
+The scoped Windows job includes `test_network_windows_policy.py` and
+`test_network_windows_policy_native.py`. Host tests drive the real canonical
+coordinator, registration, session-start wrapper and request hooks with a fake
+route runtime; no Tor/VPN process or network route is started. Native cases
+use inherited-safe task-owned homes and prove that broadened ACLs, hardlinks,
+pending markers, a policy-directory junction and another process holding the
+canonical locks refuse a previously allowed decision without repairing ACLs or
+rewriting documents. Existing POSIX network suites remain required.
+
+For controller acceptance, use an ordinary non-administrator account and a
+disposable `HERMES_HOME`. Verify `mordred_hermes.__file__` in the source
+environment and again in a fresh sdist-built wheel environment, then run that
+environment's Python with:
+
+```powershell
+python -m pytest -q -o addopts= tests/test_network_windows_policy.py tests/test_network_windows_policy_native.py
+```
+
+Record source and wheel results separately in the Manual live-device
+validation log. This does not validate native Tor/VPN routes (C9), live
+provider traffic, wizard status presentation or Windows 11 product acceptance.

@@ -1391,3 +1391,28 @@ main-thread `SystemExit` and in a child process for the worker-thread
 An interrupt during a Windows memory publication is deliberately recorded as
 uncertain and surfaces at the hook as `MemoryEncryptionUnavailable`
 (fail-closed, at the cost of interrupt responsiveness).
+
+### Windows network checked decisions (C8 network slice)
+
+`network/_windows_policy.py` provides `read_network_decision(policy_path,
+config_path)`, mirroring the LLM reader: `None` on POSIX, otherwise one
+checked snapshot, field validation limited to what the runtime resolvers and
+transport gate consume, a generation digest built exactly like the LLM module,
+and a sanitized `MordredPathBringupFailed` refusal. The provider-override
+parser moved to `network.settings` so POSIX hooks and the checked reader share
+it. Registration reads once and passes the decision to `_load_runtime_config`;
+the session-start wrapper reads once and hands the same decision to passthrough
+registration and `hooks.on_session_start`; `pre_api_request` and
+`pre_tool_call` read once before the mode check and pass the decision into the
+activation comparison. `read_default_path_strict` uses the reader on Windows
+and keeps its ordinary-exception contract. Route/transport logic is unchanged.
+
+TDD covers clean generations, pending markers, injected admission/cleanup
+faults, malformed or oversized documents without byte exposure, invalid
+consumed fields even in off mode, checked absence, generation changes after a
+previous allow, one read per decision, unreachable POSIX readers, lock release
+before route/status calls and strict registration without clearnet fallback.
+`tests/test_network_windows_policy_native.py` exercises inherited ACLs,
+broadened ACLs, hardlinks, pending markers, a policy-directory junction and a
+competing process lock on actual Windows; both modules are in the scoped
+Windows CI selector. Native source/wheel acceptance is a controller gate.
