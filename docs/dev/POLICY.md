@@ -323,3 +323,47 @@ services, or establish whole-product Windows support. Native regression cases
 cover inherited profile descriptors and cached grants followed by ACL,
 hardlink and pending-marker changes, without repairing ACLs or rewriting
 retained documents.
+
+## Native Windows network policy decisions
+
+On Windows, `network._windows_policy.read_network_decision` reads
+`config.yaml` and `mordred/policy.json` as one checked canonical snapshot for
+each network decision: plugin registration and its pre-client route
+activation, the registered session-start wrapper (passthrough registration and
+the session gate share that generation), `on_session_start`, `pre_api_request`,
+`pre_tool_call`, the activation-configuration comparison and
+`settings.read_default_path_strict`. Policy mode, `default_path`, the
+`plugins.mordred_network` fields consumed by the runtime resolvers,
+`disable_ipv6`, `provider_overrides` and `model.provider` all come from that
+generation. Nothing is cached across decisions: the next request re-reads, so a
+new generation, pending marker or ACL/identity change applies immediately.
+
+Validation is exactly what the resolvers consume. `policy` must be a known
+mode and `default_path` a known path; `tor_binary_path`,
+`wireguard_config_path` and `mullvad_relay_country` must be strings or null;
+`tor_socks_port` an integer from 0 to 65534 (0 lets the runtime choose) or
+null; `vpn_provider` a registered provider or null; each `custom_*_cmd` a list
+of strings or null; `disable_ipv6` a boolean when present; `provider_overrides`
+uses the existing override parser; `model` must be absent, null, a string or a
+mapping whose `provider` is a string or null. Keys the runtime does not consume,
+such as `mullvad_account_id_env` and `mullvad_killswitch`, are not rejected.
+
+A pending transaction, unsafe descriptor/owner/link, identity change, lock
+contention, read or cleanup failure, oversized or malformed document, or any
+invalid consumed field refuses the decision in every policy mode with the
+existing `MordredPathBringupFailed` refusal. It is a `BaseException`, so
+Hermes' ordinary hook handlers cannot swallow it, and it never falls back to a
+clearnet route. Registration refusals keep the existing `network.register`
+audit shape; request hooks record `stage: checked_policy`. Messages and audit
+entries name only the exception type, never document bytes or parser
+diagnostics. `read_default_path_strict` keeps its ordinary `ValueError`
+contract for callers such as the extension egress gate. Only checked absence
+yields the unconfigured `off` / `clearnet` defaults.
+
+Snapshots release every handle and lock before route activation, Tor/VPN
+process calls, status/readiness checks, provider evaluation or audit writes.
+The `auth.json` provider fallback is Hermes credential state outside the
+canonical pair; it only chooses the provider this refuse-only session gate
+evaluates, and `pre_api_request` evaluates the actual request provider. POSIX
+readers and behavior are unchanged. Wizard status presentation, native Tor/VPN
+route behavior (C9) and live routes are separate gates.

@@ -1087,6 +1087,21 @@ behavior remains unchanged; Windows legacy mode-based writers must all be
 stopped during migration. Unsafe upstream-created Windows defaults remain
 unchanged/refused and require a separately reviewed explicit migration.
 
+### Windows network checked decisions (C8)
+
+Every Windows network decision reads one checked canonical generation of the
+config/policy pair: registration and pre-client activation, the session-start
+wrapper and gate, `pre_api_request`, `pre_tool_call`, the activation-config
+comparison and the strict default-path reader. A decision never combines
+values from two reads and never reuses an earlier generation. Unsafe, pending,
+contended, unreadable, malformed or mistyped consumed state refuses in every
+mode with the existing non-catchable route refusal; no clearnet fallback is
+derived from a refused read. Only checked absence yields `off` / `clearnet`.
+Refusals expose no document bytes or parser diagnostics. Handles and locks are
+closed before route activation, Tor/VPN process calls or network calls. POSIX
+readers are unchanged. The detailed contract is in POLICY.md §Native Windows
+network policy decisions; native Tor/VPN routes remain C9.
+
 ## MVP Phasing
 
 The original phase headings and pull-request notes have been removed from the

@@ -10,16 +10,31 @@ dependency. The small pure readers below are the shared boundary instead.
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from .._policy_io import read_policy_mode_fail_closed
 from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
 from .._yaml_io import load_plugin_section
+from .provider_transport_flagger import ProviderEntry, TransportClass
 
 DEFAULT_NETWORK_PATH: Final[ActivePath] = "clearnet"
 DEFAULT_POLICY_MODE: Final[PolicyMode] = "off"
+_OVERRIDE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "transport",
+        "respects_proxy",
+        "respects_socks5h",
+        "localhost_only",
+        "dns_quirk",
+        "unverified_baseline",
+        "transport_class",
+        "respects_ipv6_proxy",
+    }
+)
+_TRANSPORT_CLASSES: Final[frozenset[str]] = frozenset({"http", "tcp", "udp", "quic", "grpc", "websocket"})
 
 
 def read_policy_mode(
@@ -60,7 +75,18 @@ def read_default_path_strict(config_path: Path) -> ActivePath:
     Missing files and absent keys are legitimate unconfigured state and map
     to clearnet. Malformed YAML/container shapes and invalid explicit values
     raise so strict request-time enforcement can fail closed.
+
+    On Windows the value comes from one checked canonical generation of the
+    ``config.yaml`` / ``mordred/policy.json`` pair. A refused generation keeps
+    this function's ordinary-exception contract (callers such as the extension
+    egress gate convert it to their own refusal) and carries no file bytes.
     """
+    if sys.platform == "win32":
+        return _checked_default_path(config_path)
+    return _posix_default_path_strict(config_path)
+
+
+def _posix_default_path_strict(config_path: Path) -> ActivePath:
     from ruamel.yaml import YAML
 
     try:
@@ -93,9 +119,100 @@ def read_default_path_strict(config_path: Path) -> ActivePath:
     return cast(ActivePath, value)
 
 
+def _checked_default_path(config_path: Path) -> ActivePath:
+    """Windows ``default_path`` from one checked generation; ordinary refusal."""
+    from ._exceptions import MordredPathBringupFailed
+    from ._windows_policy import read_network_decision
+
+    try:
+        decision = read_network_decision(config_path.parent / "mordred" / "policy.json", config_path)
+    except MordredPathBringupFailed as refusal:
+        raise ValueError(str(refusal)) from None
+    if decision is None:  # pragma: no cover - only reachable on win32
+        raise ValueError("checked Windows network decision unavailable")
+    return decision.default_path
+
+
 def resolve_disable_ipv6(data: Mapping[str, Any], policy_mode: str) -> bool:
     """Resolve the advisory IPv6 preference from policy data."""
     raw = data.get("disable_ipv6")
     if isinstance(raw, bool):
         return raw
     return policy_mode == "strict"
+
+
+def parse_provider_overrides(data: Mapping[str, Any]) -> dict[str, ProviderEntry]:
+    """Parse additive transport facts from a ``policy.json`` mapping.
+
+    Missing fields take conservative defaults so an incomplete entry cannot
+    accidentally satisfy strict Tor: SOCKS5h/IPv6 support default false and
+    ``unverified_baseline`` defaults true. Invalid types and unknown fields
+    raise ``ValueError``. Baseline replacement remains prohibited by
+    :func:`provider_transport_flagger.evaluate`. POSIX hooks and the checked
+    Windows reader share this parser so the two platforms cannot drift.
+    """
+    if "provider_overrides" not in data:
+        return {}
+    raw_overrides = data["provider_overrides"]
+    if not isinstance(raw_overrides, dict):
+        raise ValueError("policy.json provider_overrides must be an object")
+
+    overrides: dict[str, ProviderEntry] = {}
+    for raw_name, raw_entry in raw_overrides.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError("provider_overrides keys must be non-empty strings")
+        name = raw_name.strip().lower()
+        if name in overrides:
+            raise ValueError(f"provider_overrides contains duplicate normalized provider {name!r}")
+        overrides[name] = _parse_provider_override(name, raw_entry)
+    return overrides
+
+
+def _parse_provider_override(name: str, raw_entry: Any) -> ProviderEntry:
+    if not isinstance(raw_entry, dict):
+        raise ValueError(f"provider override {name!r} must be an object")
+    unknown_fields = [field for field in raw_entry if field not in _OVERRIDE_FIELDS]
+    if unknown_fields:
+        raise ValueError(f"provider override {name!r} has unsupported field {unknown_fields[0]!r}")
+
+    raw_transport = raw_entry.get("transport", "unknown")
+    if not isinstance(raw_transport, str) or not raw_transport.strip():
+        raise ValueError(f"provider override {name!r} transport must be a non-empty string")
+
+    raw_respects_proxy = raw_entry.get("respects_proxy", False)
+    if not isinstance(raw_respects_proxy, bool) and raw_respects_proxy != "partial":
+        raise ValueError(f"provider override {name!r} respects_proxy must be boolean or 'partial'")
+    respects_proxy = cast(bool | Literal["partial"], raw_respects_proxy)
+
+    raw_transport_class = raw_entry.get("transport_class", "http")
+    if not isinstance(raw_transport_class, str) or raw_transport_class not in _TRANSPORT_CLASSES:
+        raise ValueError(f"provider override {name!r} transport_class must be one of {sorted(_TRANSPORT_CLASSES)!r}")
+
+    return ProviderEntry(
+        name=name,
+        transport=raw_transport.strip(),
+        respects_proxy=respects_proxy,
+        respects_socks5h=_read_override_bool(raw_entry, name=name, field="respects_socks5h", default=False),
+        localhost_only=_read_override_bool(raw_entry, name=name, field="localhost_only", default=False),
+        dns_quirk=_read_override_bool(raw_entry, name=name, field="dns_quirk", default=False),
+        unverified_baseline=_read_override_bool(
+            raw_entry,
+            name=name,
+            field="unverified_baseline",
+            default=True,
+        ),
+        transport_class=cast(TransportClass, raw_transport_class),
+        respects_ipv6_proxy=_read_override_bool(
+            raw_entry,
+            name=name,
+            field="respects_ipv6_proxy",
+            default=False,
+        ),
+    )
+
+
+def _read_override_bool(entry: Mapping[str, Any], *, name: str, field: str, default: bool) -> bool:
+    value = entry.get(field, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"provider override {name!r} {field} must be boolean")
+    return value
