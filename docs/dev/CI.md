@@ -78,6 +78,63 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Shared private filesystem foundation (WF1–WF5).**
+  Independent foundation PR #192 follows contract PR #191; neither includes the
+  pending CNG helper implementation or migrates component callers. The product
+  source at `cb266a5` was built as an sdist and then wheel, installed in a fresh
+  out-of-checkout `wf-wheel-final\venv` under the credentialed ordinary `mordred`
+  user on retained Server 2025 build 26100, fixed local NTFS. Python was 3.11.17
+  AMD64; the imported module was under that venv's
+  `Lib\site-packages\mordred_hermes`. Wheel SHA-256:
+  `BFBC6419B245DE7026F43699CD623F70269F37B74E16F130313DC8069C12FEB4`.
+
+  Running `python -m pytest -q` against the five `test_private_fs*.py` files
+  produced **91 passed, 13 POSIX-only skips** from both source and installed
+  wheel. Native checks cover create-time/existing ACLs, normal profile ancestors,
+  junctions/hard links, >260-character paths, an actual 8.3 sidecar alias,
+  concurrent process/thread transactions, crash release, interrupted writes and
+  held-target refusal. Fault-injection tests separately cover short/zero writes,
+  ambiguous publication, flush/close/unlock failures and uncertain commit state;
+  they are not physical disk-failure tests. Independent review found two issues:
+  case-sensitive POSIX reserved names and cleanup misclassifying completed
+  publication. Both reproduced before fixes and passed afterward, including
+  preservation of the original exception when cleanup also fails.
+
+  With `MORDRED_WINDOWS_FS_LIVE=1`, a synthetic
+  `MORDRED_WINDOWS_FS_TEST_ROOT` and provision/reopen phases,
+  `python -m pytest -q -s -m integration tests/integration/test_private_fs_windows.py`
+  passed under a non-administrator token. A separately credentialed disposable
+  ordinary user was denied access to the wheel-created file. Only its temporary
+  batch-logon right was granted; that right, account and scheduled task were
+  removed after the assertion. Existing accounts, TPM fixtures and Linux
+  validation resources were unchanged. No inbound network rules were added.
+
+  Fresh-process, final-wheel Windows reboot and EC2 stop/start reopen each passed. Synthetic
+  fixture SHA-256 remained
+  `5aa341081d33ad1cfdbb608258d9f0a4078e54f7458a6133011837e96eef33de`.
+  This is retention evidence, not sudden power-loss durability.
+
+  On the clean dev-based foundation branch, the full default suite with coverage
+  produced **5,235 passed, 49 skipped, 34 integration deselected; 87.38% coverage**.
+  The earlier branch including pending helper changes passed 5,269 tests; the
+  differing count reflects PR isolation, not removed foundation assertions.
+  Ruff/format, shellcheck and reduced-extras strict mypy (204 source files) passed.
+  Hosted CI gates are tracked on PR #192 (three Windows cells plus existing
+  Linux/macOS checks); early failures and their resolutions follow. Final host
+  state was independently verified **stopped** after acceptance. The retained
+  development instance has one encrypted 50 GiB gp3 volume
+  (`vol-08b0b74e57e899ad0`), existing TPM fixtures and synthetic filesystem evidence.
+  Storage remains billable; no new volume, snapshot or instance was created. The initial hosted native run passed 90 checks and failed
+  only the independent Get-Acl subprocess: inherited PowerShell 7 module paths
+  prevented Windows PowerShell from loading its security module. The test child
+  now reconstructs the default PSModulePath without weakening ACL assertions.
+  The next hosted run passed all native tests but correctly refused the broadly
+  writable ancestor on the RUNNER_TEMP data volume. The out-of-checkout wheel
+  smoke now uses the runner's ordinary profile; the product trust policy and
+  system ACLs are unchanged.
+  Sanitized run evidence is retained privately under
+  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`.
+
 - **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**
   Installed the wheel built from `52e69d7fc` in the actual Hermes Desktop
   interpreter on the isolated Ubuntu 24.04 EC2 NitroTPM host. The CLI login
