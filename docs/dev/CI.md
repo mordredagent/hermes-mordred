@@ -78,6 +78,38 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Windows wizard canonical writers (C3).**
+  Final code/tests `d6cfc519223096680005684d253e2fc6fcd0a6ee` passed
+  ordinary-user Server 2025 source and fresh sdist-derived wheel suites:
+  **147 passed each**. Native cases include configure rerun, concurrent config
+  and dotenv edits, crash/recovery, checked private credentials/backups,
+  no-overwrite collisions, busy custom destinations and hostile ACL/hardlink
+  refusal. The wheel SHA-256 was
+  `930c4c81db439f274fb041bc4727d4fca378e3d74475515d6c82c8e5006bd26a`.
+  Both module origins were checked; wheel tests borrowed only test dependencies
+  from the unchanged earlier validation environment.
+  A separate full Hermes 0.19.0 environment installed the final candidate wheel,
+  created a fresh home through Hermes itself, and ran the actual console
+  `configure --non-interactive --policy strict` twice. The checked policy was
+  strict, config/policy contents remained unchanged on rerun and the parent's
+  ACL was preserved. No account/provider calls or production home were used.
+
+  Independent review found two Important defects: lost child publication
+  uncertainty during a second cleanup failure, and stale interactive provider
+  overrides. Both reproduced and were fixed at `08ec8a76b`; scoped review
+  approved the fixes. Final targeted regression: 346 passed, eight native skips;
+  strict reduced-extras mypy (209 files), Ruff/format, shellcheck and docs links
+  passed. The earlier full host suite was 5,757 passed, 105 skipped, 37 excluded;
+  final narrow fixes have the focused and native evidence above.
+  Initial native testing completed 139 checks with two setup/teardown errors
+  because an 8 MiB pytest parameter ID exceeded Windows' environment limit.
+  Short IDs fixed only the harness. The resulting 67 MiB diagnostic log also
+  made line-based PowerShell tailing expensive; bounded recovery confirmed the
+  test process had finished. Only those task-owned log readers were stopped.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c3-*`.
+  Memory/OpenClaw lifecycle, enforcement callers, Windows 11 and full-product
+  acceptance remain separate; legacy generic Windows writers still refuse.
+
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
   #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
