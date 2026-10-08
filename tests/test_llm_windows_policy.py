@@ -501,3 +501,23 @@ def test_malformed_route_fields_cannot_bypass_admission_in_off_mode(profile, bad
     (profile.home / "config.yaml").write_bytes(bad_config)
     with pytest.raises(MordredSessionRefused):
         run_provider(profile)
+
+
+@pytest.mark.parametrize("field", ["base_url", "default", "model"])
+@pytest.mark.parametrize("value", [[], {}, False, 0], ids=["list", "object", "boolean", "number"])
+def test_malformed_main_model_fields_refuse_before_off_mode_exit(profile, field, value):
+    config = json.dumps({"model": {"provider": "openai", field: value}}).encode()
+    (profile.home / "mordred" / "policy.json").write_bytes(b'{"policy":"off"}')
+    target = profile.home / "config.yaml"
+    target.write_bytes(config)
+    with pytest.raises(MordredSessionRefused):
+        run_provider(profile)
+    assert target.read_bytes() == config
+
+
+@pytest.mark.parametrize("field", ["base_url", "default", "model"])
+@pytest.mark.parametrize("value", [None, "", "https://api.openai.com/v1"], ids=["unset", "empty", "string"])
+def test_main_model_string_and_unset_fields_keep_off_mode(profile, field, value):
+    (profile.home / "mordred" / "policy.json").write_bytes(b'{"policy":"off"}')
+    (profile.home / "config.yaml").write_bytes(json.dumps({"model": {"provider": "openai", field: value}}).encode())
+    run_provider(profile)

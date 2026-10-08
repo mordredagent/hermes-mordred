@@ -97,12 +97,26 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError("invalid LLM guard mapping")
     if "harness_primary" in section and not isinstance(section["harness_primary"], str):
         raise ValueError("invalid harness primary")
-    if "model" in config and not isinstance(config["model"], (dict, str)):
-        raise ValueError("invalid model configuration")
-    model = config.get("model")
-    if isinstance(model, dict) and "provider" in model and not isinstance(model["provider"], str):
-        raise ValueError("invalid model provider")
+    _validate_main_model(config)
     _validate_routes(config)
+
+
+def _validate_main_model(config: dict[str, Any]) -> None:
+    if "model" not in config:
+        return
+    model = config["model"]
+    if isinstance(model, str):
+        return
+    if not isinstance(model, dict):
+        raise ValueError("invalid model configuration")
+    if "provider" in model and not isinstance(model["provider"], str):
+        raise ValueError("invalid model provider")
+    # Hermes consumes these as strings before resolving the main route. Its
+    # null/empty defaults are valid; falsy non-strings must not become absence.
+    for field in ("base_url", "default", "model"):
+        value = model.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError("invalid main model field")
 
 
 def _validate_routes(config: dict[str, Any]) -> None:
