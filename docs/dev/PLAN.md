@@ -1416,3 +1416,54 @@ before route/status calls and strict registration without clearnet fallback.
 broadened ACLs, hardlinks, pending markers, a policy-directory junction and a
 competing process lock on actual Windows; both modules are in the scoped
 Windows CI selector. Native source/wheel acceptance is a controller gate.
+### Windows capability predicates and role reset (C5e)
+
+Public signatures are frozen in SPEC.md §Windows dedicated custody and memory
+lifecycle. `keyvault/_windows_capability.py` is the only new module; custody
+gains read-only `role_status` and journaled `reset_role`, and the excluded
+entry points gain one first-statement guard each. No wizard, privacy,
+extension, network or Desktop file changes.
+
+Capability predicates reuse existing seams instead of re-implementing them:
+`find_winkey_helper` for helper presence, `windows_memory_runtime_admitted`
+for structural C4 admission, and one load-only custody session for ownership.
+They never construct the native backend, probe the helper, unwrap, launch a
+subprocess or enroll. Classified custody failures map to `custody-unsafe`,
+`custody-uncertain` or `custody-broken`; unclassified exceptions propagate.
+Excluded guards are lazy imports of `refuse_excluded_on_windows`, so the
+POSIX import graph and behavior are unchanged. Startup/session hooks were
+already inert off macOS with never-raise contracts and stay that way; making
+them raise would fail every Windows Hermes startup.
+
+Reset composes the existing `delete_role` journals rather than adding a new
+deletion path. Preflight refusals all precede the first intent journal; each
+generation is then deleted and committed individually, so partial progress is
+durable and the failed generation remains unresolved for reconciliation.
+Memory reset keeps the SPEC rule that seals block deletion even with
+`erase_authorized`, and refuses unexpected retained memory records because
+memory cleanup removes the single current wrapper.
+
+Validation: portable `test_windows_capability.py`,
+`test_windows_custody_reset.py` and `test_windows_excluded_guards.py` use real
+checked files and MRKW crypto with injected native backend, principal and
+platform admission, plus fault injectors on `_storage`, anchor/backend
+resolution, locks, native wrap and plaintext capture. Host-skipped
+`test_windows_capability_native.py` covers an inherited-safe NTFS home, a case
+alias and copied-home refusal for capabilities and reset. All four join the
+scoped Windows CI job. Real CNG, Windows 11 and C6 user routing remain
+separate gates; capability truthfulness does not establish product support.
+
+Fix round 1 (review rulings): capability predicates and `excluded_artifacts`
+open `canonical_session(..., blocking=False)` and join custody through
+`canonical=`, so a held lock is reported (`custody-uncertain` / `busy`) rather
+than awaited; reset keeps blocking locks. The generic `_storage` secret store
+(`api.generate`, `confirm_generate`, `encrypt`, `decrypt` and the wizard
+store reset) is not ported to Windows and is not an excluded capability: it
+reports `secret_store` / `not-ported-on-windows` and refuses before any
+`_storage` call or mkdir, with `_storage.ensure_layout` and
+`keyvault_lifecycle_lock` refusing on Windows as defence in depth.
+`export_backup` / `import_backup` stay under the excluded `recovery`
+capability. Memory reset refusals name the C6 ceremony and never relax with
+erasure authorization; the reset failure note no longer claims a journal that
+was never written. A future Windows secret-store port needs its own checked
+`_storage` layout design before these refusals are lifted.

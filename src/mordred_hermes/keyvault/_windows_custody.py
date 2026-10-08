@@ -64,6 +64,24 @@ class GenerationLease:
 
 
 @dataclass(frozen=True)
+class RoleStatus:
+    """Checked read-only observation of one role; leases still need revalidation."""
+
+    role: Role
+    current: GenerationLease | None
+    retained: tuple[GenerationLease, ...]
+    pending: bool
+
+
+@dataclass(frozen=True)
+class RoleReset:
+    """Generations positively deleted and committed, retained first, current last."""
+
+    role: Role
+    deleted: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class WindowsMemoryState:
     lease: GenerationLease | None
     marker: bytes | None
@@ -475,6 +493,94 @@ class WindowsCustodySession:
         if current != state.current or retained != state.retained:
             self._save(manifest.with_role(pending.role, RoleState(current, retained), epoch=manifest.epoch + 1))
         self._remove(_pending_name(pending.role))
+
+    def role_status(self, role: Role) -> RoleStatus:
+        """Observe one role from the complete checked manifest; no native operation."""
+        _pending_name(role)
+        manifest = self._manifest()
+        if manifest is None:
+            if any(_read(self._tx, _pending_name(name)) is not None for name in ROLES):
+                raise CustodyError("orphan custody journal must be preserved")
+            return RoleStatus(role, None, (), False)
+        state = manifest.role(role)
+
+        def observed(record: RoleRecord) -> GenerationLease:
+            if record.public_sha256 is None:
+                raise CustodyError("custody generation is not owned")
+            return GenerationLease(
+                manifest.profile_nonce,
+                role,
+                record.generation,
+                record.epoch,
+                record.key_id,
+                record.native_key_id,
+                record.public_sha256,
+            )
+
+        return RoleStatus(
+            role,
+            None if state.current is None else observed(state.current),
+            tuple(observed(record) for record in state.retained),
+            self._pending(manifest, role) is not None,
+        )
+
+    def _reset_leases(self, role: Role, *, erase_authorized: bool) -> tuple[GenerationLease, ...]:
+        status = self.role_status(role)
+        manifest = self._manifest()
+        if manifest is None:
+            raise CustodyError("custody ownership is absent; nothing to reset")
+        for name in ROLES:
+            self._pending(manifest, name)  # validate every role journal before mutation
+        if status.pending:
+            raise CustodyError("custody role has an unresolved journal; reconcile before reset")
+        leases = status.retained + (() if status.current is None else (status.current,))
+        if not leases:
+            raise CustodyError("custody role has no owned generation to reset")
+        if role == "memory":
+            self._memory_reset_guard(status)
+        elif not erase_authorized:
+            raise CustodyError("audit or Telegram reset requires explicit erasure authorization")
+        return leases
+
+    def _memory_reset_guard(self, status: RoleStatus) -> None:
+        """Memory reset never crypto-shreds; ``erase_authorized`` relaxes nothing here."""
+        if status.retained:
+            # Flat memory owns one wrapper; retained memory records are unexpected.
+            raise CustodyError("memory reset refuses unexpected retained memory generations; reconcile them in C6")
+        # ``memory_state`` fails closed on a lost wrapper or retained evidence.
+        if self.memory_state().marker is not None:
+            raise CustodyError("memory reset refuses while a memory marker exists; disable memory through C6 first")
+        try:
+            self._validate_memory(None)
+        except CustodyError as exc:
+            raise CustodyError(
+                "memory reset refuses while sealed memory remains; decrypt it through the C6 disable ceremony first"
+            ) from exc
+
+    def reset_role(self, role: Role, *, erase_authorized: bool = False) -> RoleReset:
+        """Delete every owned generation of exactly one role through ``delete_role``.
+
+        All refusals happen before the first deletion journal. Each generation
+        uses its own ``delete_role`` journal, so an ambiguous native result
+        stays unresolved and blocks the next reset; a failure before that
+        journal leaves the generation owned. Memory files are never decrypted
+        or deleted; other roles and the permanent directory lock are untouched.
+        Audit/Telegram reset does not consult the gateway inventory (callers gate).
+        """
+        leases = self._reset_leases(role, erase_authorized=erase_authorized)
+        deleted: list[str] = []
+        for lease in leases:
+            try:
+                self.delete_role(lease, erase_authorized=erase_authorized)
+            except BaseException as exc:
+                exc.add_note(
+                    f"Windows {role} custody reset stopped after {len(deleted)} confirmed deletion(s); "
+                    "if the failed generation's intent journal was written it is retained for explicit "
+                    "reconciliation, otherwise no deletion journal was written and that generation remains owned"
+                )
+                raise
+            deleted.append(lease.generation)
+        return RoleReset(role, tuple(deleted))
 
     def reconcile_pending(
         self,
