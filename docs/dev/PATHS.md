@@ -456,3 +456,35 @@ namespace is live. Archive reset/purge cannot remove an active lock and then
 recreate a competing lock namespace. Rotated audit targets and backup exports
 publish without overwriting an existing path. Every recursive lifecycle action
 must check each traversed entry and stay inside its declared root.
+
+### Windows dedicated custody paths
+
+These paths belong to the approved C5 contract; their implementation is separate
+from this documentation. All resolve beneath the selected `HERMES_HOME`.
+
+| Path | Owner and contract |
+| --- | --- |
+| `mordred/windows-custody.json` | Keyvault; exact-private flat versioned ownership manifest, at most 64 KiB and 64 retained role generations; exact current/retained field schema frozen by C5a |
+| `mordred/` role-specific custody pending journals | Keyvault; record enrollment/deletion intent before native action; exact role filenames and schemas frozen by C5a, never inferred from a native missing result |
+| `mordred/memory-key.wrapped` | Keyvault; existing 127-byte MRKW container, create-no-replace enrollment and checked role binding |
+| `mordred/memory-vault.marker` and `mordred/memory-vault.optout` | Memory lifecycle; checked markers, no raw writes/unlinks or uncertainty-to-absence conversion |
+| `memories/*.md` and `memories/*.md.bak.*` | Upstream memory names through Mordred's checked Windows adapter; trusted/confidential existing parent/files, private new ciphertext/restored plaintext/backups, bounded flat inventory |
+| `mordred/audit.log` and dated siblings, or the explicitly configured audit path | Audit consumer through C7a; exact-private storage and an independent retained audit-key role |
+
+The home remains a shared trusted parent. Lock order is home, mordred, memories;
+custom audit storage follows custody locks. The protected C2 loan excludes policy,
+pending-marker and coordinator-lock names. Independent memory publications report
+through the owning coordinator's monotonic publication receipt. Permanent locks
+remain after flat purge while their namespaces are live.
+
+Windows CNG keys live in the user-scoped Platform Crypto Provider, not in a new
+file-vault blob tree. Native role IDs bind checked home FileIdentity, current
+binary SID and persisted profile/role nonces. A safe same-identity rename is
+allowed; a copy/restore/recreation into another physical directory is refused
+without automatic adoption. Decrypt before such a move or await explicit future
+migration. The legacy migration/export guidance above does not authorize Windows
+TPM recovery or the excluded Windows file vault.
+
+No recursive removal is implied by these flat paths. Unknown legacy vault trees
+and retained ciphertext stay intact until a separately checked lifecycle supports
+that operation; never remove live directory locks to force cleanup.
