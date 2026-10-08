@@ -1247,3 +1247,15 @@ wrong keys, every seam, drift collisions, bounds, stale ownership and receipt
 faults. Preserve POSIX regressions, select Windows tests in CI, then run frozen
 focused/full suite once, reduced-extras strict types, Ruff, format, shellcheck
 and docs. Controller owns real CNG and installed source/wheel acceptance.
+
+Fix round 1 removes the catchable Windows refusal. One probe returns empty
+only for checked fresh unmanaged custody, and an empty answer is the only way an
+unsupported or partially wrapped memory seam continues. Every other answer goes
+through the shared non-catchable stop (stderr, then `SystemExit`/`os._exit`),
+because `plugin.register`, the post-import loader and the catch-up sweep all
+contain `except Exception`. The Windows journey install is total: it wraps, stays
+inert on fresh unmanaged state, installs refusal stubs, or stops. The fail-open
+`keyvault` wrapper therefore never sees an ordinary exception for managed or
+indeterminate custody. Regressions drive the real wrappers in-process for the
+main-thread `SystemExit` and in a child process for the worker-thread
+`os._exit`, with fresh unmanaged state as the positive control.

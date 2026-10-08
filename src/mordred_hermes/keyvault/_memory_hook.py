@@ -154,12 +154,11 @@ def memory_optout_marker_path(home: Path) -> Path:
 
 
 def _marker_armed(home: Path) -> bool:
-    """Opt-in present and not paused — the on-disk half of "armed"."""
-    if sys.platform == "win32":
-        from ._windows_custody import windows_custody_session
+    """Opt-in present and not paused — the on-disk half of "armed".
 
-        with windows_custody_session(home) as session:
-            return session.memory_state().armed
+    POSIX only: every Windows caller branches to checked storage first, where
+    arming is part of the pinned :class:`WindowsMemoryState`.
+    """
     return memory_marker_path(home).exists() and not memory_optout_marker_path(home).exists()
 
 
@@ -623,7 +622,8 @@ def _windows_operation(cfg: _HookConfig, path: Path, *, create: bool = False) ->
     try:
         with windows_memory_session(home, path=path, create=create, safe_mode=_safe_mode(cfg.environ)) as session:
             yield session
-    except (OSError, RuntimeError, UnicodeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
+        # ValueError covers canonical-session argument refusals and UnicodeError.
         if isinstance(exc, MemoryEncryptionUnavailable):
             raise
         raise MemoryEncryptionUnavailable(
@@ -635,6 +635,7 @@ def _windows_drift(cfg: _HookConfig, path: Path, *, limit: int, raw: str | None 
     from .._private_fs import PrivateFSError
 
     backup = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
+    failed = str(backup) + " (BACKUP FAILED — file unchanged on disk)"
     with _windows_operation(cfg, path) as session:
         plaintext = session.read_plaintext(path.name, encoding="utf-8-sig" if raw is not None else "utf-8")
         if raw is not None and (plaintext or "") != raw:
@@ -647,13 +648,31 @@ def _windows_drift(cfg: _HookConfig, path: Path, *, limit: int, raw: str | None 
             and max((len(entry) for entry in parsed), default=0) <= limit
         ):
             return None
+        if not session.sealing_available:
+            # Keyless (fresh unmanaged) drift: upstream's own failed-backup string
+            # aborts the mutation with the file unchanged, so nothing is lost. The
+            # checked adapter publishes backups sealed-before-publication only; a
+            # plaintext copy would be a second unsealed artifact for later enable/
+            # purge inventories to chase, and creating a key here would be
+            # implicit enrollment. Neither is this hook's call.
+            return failed
         try:
             session.create_backup(backup.name, plaintext)
         except PrivateFSError as exc:
             if exc.reason != "exists" or exc.commit_state != "not_committed":
                 raise
-            return str(backup) + " (BACKUP FAILED — file unchanged on disk)"
+            return failed
     return str(backup)
+
+
+def _windows_read(cfg: _HookConfig, path: Path, *, encoding: str = "utf-8") -> str:
+    """Checked Windows read; the armed-plaintext note is logged after the operation closes."""
+    with _windows_operation(cfg, path) as session:
+        text, sealed = session.read_classified(path.name, encoding=encoding)
+        plaintext_while_armed = not sealed and bool(text and text.strip()) and session.armed
+    if plaintext_while_armed:
+        _note_plaintext_seen(path)
+    return text or ""
 
 
 def _wrap_write_file(store: Any, cfg: _HookConfig) -> None:
@@ -691,9 +710,7 @@ def _wrap_read_raw_checked(store: Any, cfg: _HookConfig) -> None:
     @functools.wraps(original)
     def _read_raw_checked(path: Path) -> tuple[str, bool]:
         if sys.platform == "win32":
-            with _windows_operation(cfg, path) as session:
-                text = session.read_plaintext(path.name, encoding="utf-8-sig")
-            return text or "", True
+            return _windows_read(cfg, path, encoding="utf-8-sig"), True
         with _profile_operation(cfg, path, reading=True) as bound:
             raw, read_ok = original(path)
             if not read_ok or not raw:
@@ -721,9 +738,7 @@ def _wrap_read_file(store: Any, cfg: _HookConfig) -> None:
     @functools.wraps(original)
     def _read_file(path: Path) -> list[str]:
         if sys.platform == "win32":
-            with _windows_operation(cfg, path) as session:
-                text = session.read_plaintext(path.name)
-            return _split_entries(text or "", cfg.delimiter)
+            return _split_entries(_windows_read(cfg, path), cfg.delimiter)
         with _profile_operation(cfg, path, reading=True) as bound:
             entries: list[str] = original(path)
             # A sealed file holds no delimiter, so it always parses as exactly one
@@ -885,31 +900,92 @@ def install_memory_hook(
     * Unsupported seam **while armed** → the process is stopped (see
       :func:`_refuse_or_ignore`). Sealed memories are on disk and we cannot open
       them; starting would let upstream treat them as garbage and overwrite them.
+    * Windows: the raw upstream seam may run only on a *checked fresh unmanaged*
+      profile (:func:`_windows_custody_failure`). Managed, retained-but-unowned,
+      unreadable or otherwise unproven custody stops the process, safe mode
+      included — and so does a seam whose wrapping fails part-way.
     """
     environ = os.environ if environ is None else environ
     factory = _home_factory(home)
 
     module, load_reason = (memory_tool_module, "") if memory_tool_module is not None else _load_memory_tool()
     if module is None:
-        _refuse_or_ignore(load_reason, home=factory(), environ=environ)
+        _refuse_or_ignore(load_reason, home=factory, environ=environ)
         return False
     shape, reason = classify_seam(module)
     if not shape:
-        _refuse_or_ignore(reason, home=factory(), environ=environ)
+        _refuse_or_ignore(reason, home=factory, environ=environ)
         return False
 
     cfg = _HookConfig(environ=environ, delimiter=module.ENTRY_DELIMITER, home_factory=factory)
-    _wrap_seam(module.MemoryStore, shape, cfg)
+    try:
+        _wrap_seam(module.MemoryStore, shape, cfg)
+    except Exception as exc:
+        if sys.platform == "win32":
+            # A partially wrapped seam is an unguarded one. Only checked fresh
+            # unmanaged state returns here, and it still sees the original failure.
+            _refuse_or_ignore(f"seam wrapping failed ({type(exc).__name__})", home=factory, environ=environ)
+        raise
     return True
 
 
-def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) -> None:
-    """Stop the process on an unsupported seam, but only when memory encryption is on.
+def _windows_custody_failure(home: Path | Callable[[], Path]) -> str:
+    """``""`` only for a checked fresh unmanaged Windows profile; otherwise why not.
 
-    The exit must survive every ``except Exception`` between here and the
-    interpreter: upstream only debug-logs what ``register()`` raises, and
-    ``threading.excepthook`` swallows a ``SystemExit`` raised off the main thread
-    (plugin discovery can run on a worker). So off-main it is ``os._exit``.
+    Fresh unmanaged means no memory ownership, marker, opt-out, wrapper or
+    pending journal (``memory_state``) and a complete bounded checked inventory
+    holding no seal or broken seal (``resolve_memory_key`` returning ``None``),
+    observed by one checked custody owner that closed cleanly. Every other
+    outcome — managed custody, retained evidence without ownership, unreadable
+    or inadmissible custody, an unresolvable home, any unexpected failure — is
+    reported as a reason, never raised: callers sit under ``except Exception``
+    wrappers and must stop instead of running upstream's raw seam.
+    """
+    from ._windows_custody import windows_custody_session
+
+    try:
+        resolved = home() if callable(home) else home
+        with windows_custody_session(resolved) as session:
+            # No native operation: a lease short-circuits before key resolution.
+            if session.memory_state().lease is not None or session.resolve_memory_key() is not None:
+                return "Windows memory custody is managed"
+    except Exception as exc:
+        detail = type(exc).__name__
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, str):
+            detail = f"{detail}: {reason}/{getattr(exc, 'operation', '?')}"
+        return f"Windows memory custody is not a checked fresh unmanaged profile ({detail})"
+    return ""
+
+
+def _stop_process(message: str) -> None:
+    """Stop through a path no ``except Exception`` between here and the interpreter can swallow.
+
+    Upstream only debug-logs what ``register()`` raises, and ``threading.excepthook``
+    swallows a ``SystemExit`` raised off the main thread (plugin discovery can run
+    on a worker), so off-main it is ``os._exit``. The diagnostic is best-effort:
+    ``pythonw`` has no stderr, and a missing stream must not turn the stop into a
+    catchable ``AttributeError``.
+    """
+    with contextlib.suppress(Exception):
+        sys.stderr.write(f"mordred: refusing to start — {message}\n")
+        sys.stderr.flush()
+    if threading.current_thread() is threading.main_thread():
+        raise SystemExit(1)
+    # ``os._exit`` skips interpreter shutdown, so nothing buffered is flushed for
+    # us — including whatever the host had already written to stdout.
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    os._exit(1)
+
+
+def _refuse_or_ignore(reason: str, *, home: Path | Callable[[], Path], environ: Mapping[str, str]) -> None:
+    """Stop the process on an unsupported seam unless nothing on disk depends on it.
+
+    POSIX stops only when memory encryption is on (``HERMES_SAFE_MODE`` bypasses).
+    Windows continues only for a checked fresh unmanaged profile: anything it
+    cannot prove fresh — managed, sealed-but-unowned, unreadable — stops, safe
+    mode included. The stop is :func:`_stop_process`, never a catchable error.
 
     The one exception is a Mordred classification import (:data:`_SUPPRESS_REFUSAL`):
     the caller asked *whether* the seam is supported and is about to be told, so
@@ -917,53 +993,23 @@ def _refuse_or_ignore(reason: str, *, home: Path, environ: Mapping[str, str]) ->
     either way, and every other importer still refuses.
     """
     if sys.platform == "win32":
-        from ._windows_custody import windows_custody_session
-
-        try:
-            with windows_custody_session(home) as session:
-                managed = session.memory_state().lease is not None
-                if not managed:
-                    session.resolve_memory_key()  # retained seals are not fresh unmanaged state
-        except (OSError, RuntimeError) as exc:
-            raise MemoryEncryptionUnavailable(
-                "Windows memory state cannot be admitted with an unsupported seam"
-            ) from exc
-        if not managed:
+        failure = _windows_custody_failure(home)
+        if not failure:
+            return  # nothing owned or sealed: Hermes runs exactly as upstream does, in plaintext
+        problem = f"the Hermes memory seam cannot be wrapped: {reason}; {failure}"
+        remedy = "install a supported Hermes memory seam or restore the checked Windows profile"
+    else:
+        if not _marker_armed(home() if callable(home) else home):
             return
-    elif not _marker_armed(home):
-        return
+        problem = f"memory encryption is on but the Hermes memory seam cannot be wrapped: {reason}"
+        remedy = "set HERMES_SAFE_MODE=1 to bypass for recovery"
     if _SUPPRESS_REFUSAL:
-        logger.warning(
-            "memory encryption is on but the Hermes memory seam cannot be wrapped: %s "
-            "(reported by a Mordred classification call, so this process is not stopped)",
-            reason,
-        )
+        logger.warning("%s (reported by a Mordred classification call, so this process is not stopped)", problem)
         return
     if _safe_mode(environ) and sys.platform != "win32":
-        logger.warning(
-            "memory encryption is on but the Hermes memory seam cannot be wrapped: %s "
-            "(HERMES_SAFE_MODE is set, so startup continues and nothing new is sealed)",
-            reason,
-        )
+        logger.warning("%s (HERMES_SAFE_MODE is set, so startup continues and nothing new is sealed)", problem)
         return
-    remedy = (
-        "install a supported Hermes memory seam"
-        if sys.platform == "win32"
-        else "set HERMES_SAFE_MODE=1 to bypass for recovery"
-    )
-    sys.stderr.write(
-        "mordred: refusing to start — memory encryption is on but the Hermes memory seam "
-        f"cannot be wrapped: {reason} ({remedy})\n"
-    )
-    with contextlib.suppress(OSError):
-        sys.stderr.flush()
-    if threading.current_thread() is threading.main_thread():
-        raise SystemExit(1)
-    # ``os._exit`` skips interpreter shutdown, so nothing buffered is flushed for
-    # us — including whatever the host had already written to stdout.
-    with contextlib.suppress(OSError):
-        sys.stdout.flush()
-    os._exit(1)
+    _stop_process(f"{problem} ({remedy})")
 
 
 # ---------------------------------------------------------------------------
@@ -1110,25 +1156,94 @@ _JOURNEY_MEMORY_FILES: Final = {"memory": "MEMORY.md", "profile": "USER.md"}
 #: The mutations we guard and the exact signature each must have.
 _JOURNEY_SEAMS: Final = (("delete_node", ("node_id",)), ("edit_node", ("node_id", "content")))
 
+#: Upstream's own ``{"ok": False, ...}`` message for every refused Windows journey mutation.
+_WINDOWS_JOURNEY_REFUSAL: Final = "Windows journey memory mutation requires a checked atomic seam; use the memory tool."
+
+#: Stamped on a stub that replaced an unsupported Windows journey mutation.
+_JOURNEY_STUB_FLAG: Final = "_mordred_journey_refusal_stub"
+
 
 def install_journey_guard(module: Any, *, home: Path | None = None) -> bool:
     """Refuse journey mutations that would rewrite a sealed memory file by index.
 
-    Returns whether both mutations are wrapped. A signature that is not exactly
+    Returns whether both mutations are guarded. A signature that is not exactly
     upstream's is left alone (debug-logged): guessing at a renamed parameter is
     how a guard becomes the data-loss bug it exists to prevent. Skill nodes are
     untouched. Idempotent.
+
+    Windows is stricter (:func:`_install_windows_journey_guard`): outside a
+    checked fresh unmanaged profile an unsupported seam is replaced by refusal
+    stubs, or the process stops when they cannot be installed.
     """
+    home_factory = _home_factory(home)
+    if sys.platform == "win32":
+        return _install_windows_journey_guard(module, home_factory)
+    reason = _journey_mismatch(module)
+    if reason:
+        logger.debug("journey guard not installed: %s", reason)
+        return False
+    _wrap_journey_mutations(module, home_factory)
+    return True
+
+
+def _journey_mismatch(module: Any) -> str:
     for name, expected in _JOURNEY_SEAMS:
         reason = _journey_signature_mismatch(module, name, expected)
         if reason:
-            logger.debug("journey guard not installed: %s", reason)
-            return False
-    home_factory = _home_factory(home)
+            return reason
+    return ""
+
+
+def _wrap_journey_mutations(module: Any, home_factory: Callable[[], Path]) -> None:
     for name, _expected in _JOURNEY_SEAMS:
         if not bool(getattr(getattr(module, name, None), _WRAPPED_FLAG, False)):
             _wrap_journey_mutation(module, name, home_factory)
+
+
+def _install_windows_journey_guard(module: Any, home_factory: Callable[[], Path]) -> bool:
+    """Wrap; stay inert on fresh unmanaged state; else stub the mutations or stop.
+
+    Total on purpose: ``keyvault.register`` installs this under a fail-open
+    ``except Exception``, so on a managed or indeterminate profile nothing here
+    may surface as an ordinary exception — an unguarded journey seam would
+    raw-read and raw-write sealed memory. The stubs validate nothing and reach
+    no I/O; skill nodes are refused too, because an unrecognised seam cannot
+    tell them apart. Mutations that cannot be located cannot be stubbed, so the
+    process stops instead.
+    """
+    try:
+        if all(getattr(getattr(module, name, None), _JOURNEY_STUB_FLAG, False) for name, _ in _JOURNEY_SEAMS):
+            return True
+        reason = _journey_mismatch(module)
+        if not reason:
+            _wrap_journey_mutations(module, home_factory)
+            return True
+    except Exception as exc:
+        reason = f"journey guard installation failed ({type(exc).__name__})"
+    failure = _windows_custody_failure(home_factory)
+    if not failure:
+        logger.debug("journey guard not installed: %s", reason)
+        return False
+    try:
+        for name, _expected in _JOURNEY_SEAMS:
+            if not callable(getattr(module, name, None)):
+                raise LookupError(f"agent.learning_mutations.{name} cannot be located")
+        for name, _expected in _JOURNEY_SEAMS:
+            setattr(module, name, _journey_refusal_stub(name))
+    except Exception as exc:
+        _stop_process(f"Windows journey memory mutations cannot be guarded: {reason}; {failure} ({type(exc).__name__})")
+        return False
+    logger.warning("Windows journey memory mutations are refused: %s; %s", reason, failure)
     return True
+
+
+def _journey_refusal_stub(name: str) -> Callable[..., dict[str, Any]]:
+    def refuse(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"ok": False, "message": _WINDOWS_JOURNEY_REFUSAL}
+
+    refuse.__name__ = refuse.__qualname__ = name
+    setattr(refuse, _JOURNEY_STUB_FLAG, True)
+    return refuse
 
 
 def _journey_signature_mismatch(module: Any, name: str, expected: tuple[str, ...]) -> str:
@@ -1148,16 +1263,15 @@ def _wrap_journey_mutation(module: Any, name: str, home_factory: Callable[[], Pa
     def _guarded(*args: Any, **kwargs: Any) -> Any:
         node_id = args[0] if args else kwargs.get("node_id")
         path = _journey_memory_path(module, node_id, home_factory) if isinstance(node_id, str) else None
-        if sys.platform == "win32" and isinstance(node_id, str) and node_id.startswith("memory:"):
+        # Windows keys on the computed memory path as well as the id prefix: a
+        # node upstream classifies as memory must never reach the raw mutation.
+        if sys.platform == "win32" and isinstance(node_id, str) and (path is not None or node_id.startswith("memory:")):
             if path is None:
                 raise MemoryEncryptionUnavailable("unsupported Windows journey memory target")
             cfg = _HookConfig(environ=os.environ, delimiter="\n§\n", home_factory=home_factory)
             with _windows_operation(cfg, path) as session:
                 session.read_plaintext(path.name)
-            return {
-                "ok": False,
-                "message": "Windows journey memory mutation requires a checked atomic seam; use the memory tool.",
-            }
+            return {"ok": False, "message": _WINDOWS_JOURNEY_REFUSAL}
         if path is not None and _sealed_on_disk(path):
             # Upstream's own error shape: {"ok": False, "message": ...}.
             return {"ok": False, "message": _JOURNEY_SEALED_MESSAGE}

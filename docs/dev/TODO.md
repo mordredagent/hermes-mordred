@@ -353,3 +353,9 @@ Implementation and acceptance remain open:
   first-slice refusal is a preserved functional gap, not complete integration.
 - [ ] Complete separate C6 ceremony consumers and ordinary-user Windows 11
   installed product acceptance.
+- [ ] C5b review follow-ups deferred from fix round 1: replace scattered
+  `sys.platform == "win32"` hook branches with install-time dispatch and split
+  `_memory_hook.py`; return `{"ok": False}` instead of raising for unmappable
+  Windows journey sources; cut per-call inventory/stat/unwrap cost (shape B
+  reads three times per mutation); strengthen the native process-lock test
+  beyond `poll() is None`.

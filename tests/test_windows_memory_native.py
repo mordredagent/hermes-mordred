@@ -96,8 +96,15 @@ def test_native_unsafe_memory_refuses_unchanged(native_memory, tmp_path, kind):
         )
         path = alias / "MEMORY.md"
     before = descriptor(home / "memories")
-    with pytest.raises((PrivateFSError, RuntimeError)), storage.windows_memory_session(home, path=path, create=True):
+    with (
+        pytest.raises((PrivateFSError, RuntimeError)) as refused,
+        storage.windows_memory_session(home, path=path, create=True),
+    ):
         pass
+    if kind == "junction":
+        # Opened as the reparse point itself, never followed into memories.
+        assert isinstance(refused.value, PrivateFSError)
+        assert (refused.value.reason, refused.value.operation) == ("unsafe", "ancestor_identity")
     assert (home / "memories" / "MEMORY.md").read_bytes() == b"synthetic memory"
     assert descriptor(home / "memories") == before
 

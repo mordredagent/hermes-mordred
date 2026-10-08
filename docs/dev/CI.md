@@ -1009,4 +1009,13 @@ C6 arming/disable/purge ceremony, Windows 11 product acceptance, or complete
 Journey integration. Marker writes and destructive migration helpers are
 unavailable in this first C5b slice. Windows Journey memory mutations safely
 refuse the unsupported atomic seam; checked plaintext Journey edits remain a
-required follow-up. Skill mutations retain their existing behavior.
+required follow-up. Skill mutations retain their existing behavior unless the
+journey signature itself is unsupported on a managed or indeterminate profile,
+where both mutations are refusal stubs.
+
+`test_windows_memory_hook.py` also starts host child processes (scrubbed
+environment, task-owned `HERMES_HOME`) that call the real `plugin.register` on
+a worker thread. They prove that broken or unproven custody with an unsupported
+seam ends the process through `os._exit(1)`, and that a fresh unmanaged
+profile continues in plaintext. The native junction case asserts the
+foundation's classified `unsafe`/`ancestor_identity` refusal.

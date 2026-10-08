@@ -59,7 +59,8 @@ def test_managed_sticky_write_and_bounded_state(memory):
         session.write_entries("MEMORY.md", ["beta"], delimiter="\n§\n")
     data = (home / "memories" / "MEMORY.md").read_bytes()
     assert is_sealed(data)
-    assert unseal(data, key=key, name="MEMORY.md") == b"beta"
+    opened = unseal(data, key=key, name="MEMORY.md") == b"beta"
+    assert opened, "safe-mode write did not stay sealed"
     with c.windows_custody_session(home) as owner:
         state = owner.memory_state()
         assert state.lease == lease
@@ -99,7 +100,8 @@ def test_backup_is_sealed_before_publication_and_collision_preserves(memory):
         assert collision.value.reason == "exists"
         inventory = session.inventory()
         assert [row.name for row in inventory] == [name]
-        assert unseal(inventory[0].data, key=key, name=name) == b" keep me "
+        opened = unseal(inventory[0].data, key=key, name=name) == b" keep me "
+        assert opened, "backup collision replaced the original seal"
 
 
 def test_stale_lease_refuses_without_publication(memory):
@@ -343,3 +345,86 @@ def test_empty_file_at_exact_aggregate_bound_is_valid(memory, monkeypatch):
     with storage.windows_memory_session(home) as session:
         assert len(session.inventory()) == 2
         assert session.read_plaintext("USER.md") == ""
+
+
+def test_name_lookup_skips_non_memory_entries(memory):
+    _, home, _ = memory
+    put(home, "MEMORY.md", b"plain")
+    (home / "memories" / ".archive").mkdir()
+    with storage.windows_memory_session(home) as session:
+        assert session.read_plaintext("MEMORY.md") == "plain"
+        session.write_entries("MEMORY.md", ["next"], delimiter="\n§\n")
+    assert (home / "memories" / "MEMORY.md").read_bytes() == b"next"
+
+
+class Abort(BaseException):
+    pass
+
+
+def test_postpublication_base_exception_stays_unchanged_and_uncertain(memory, monkeypatch):
+    c, home, _ = memory
+    put(home, "MEMORY.md", b"old")
+    injected = Abort()
+    caught = []
+    with pytest.raises(PrivateFSError) as outer, c.windows_custody_session(home, create=True) as owner:
+        try:
+            with storage.windows_memory_session(home, custody=owner) as session:
+                transaction = session._tx
+                write = transaction.replace_bytes
+                read = transaction.read_bytes
+                published = False
+
+                def publish(name, data):
+                    nonlocal published
+                    write(name, data)
+                    published = True
+
+                def interrupt_after_publish(name, **kwargs):
+                    if published:
+                        raise injected
+                    return read(name, **kwargs)
+
+                monkeypatch.setattr(transaction, "replace_bytes", publish)
+                monkeypatch.setattr(transaction, "read_bytes", interrupt_after_publish)
+                session.write_entries("MEMORY.md", ["new"], delimiter="\n§\n")
+        except Abort as exc:
+            caught.append(exc)
+    assert caught == [injected]
+    assert outer.value.commit_state == "uncertain"
+    assert (home / "memories" / "MEMORY.md").read_bytes() == b"new"
+
+
+@pytest.mark.parametrize(
+    "leaf",
+    ["memory-vault.marker", "memory-vault.optout", "memory-key.wrapped", "windows-memory.pending.json"],
+    ids=["marker", "optout", "wrapper", "pending"],
+)
+def test_memory_state_rejects_evidence_without_ownership(memory, leaf):
+    c, home, _ = memory
+    with open_private_directory(home / "mordred", create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes(leaf, b"1\n")
+    with pytest.raises(c.CustodyError), c.windows_custody_session(home) as owner:
+        owner.memory_state()
+
+
+def test_memory_state_rejects_ownership_without_wrapper(memory):
+    c, home, _ = memory
+    enroll(memory)
+    with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+        tx.delete_file("memory-key.wrapped", expected_identity=tx.stat("memory-key.wrapped").identity)
+    with pytest.raises(c.CustodyError), c.windows_custody_session(home) as owner:
+        owner.memory_state()
+
+
+def test_case_alias_keeps_stored_basename_aad(memory):
+    _, home, _ = memory
+    key, _ = enroll(memory)
+    put(home, "MEMORY.md", seal(b"alpha", key=key, name="MEMORY.md"))
+    if not (home / "memories" / "memory.MD").exists():
+        pytest.skip("case-sensitive host filesystem")
+    with storage.windows_memory_session(home) as session:
+        assert session.read_plaintext("memory.MD") == "alpha"
+        session.write_entries("memory.md", ["beta"], delimiter="\n§\n")
+        assert [row.name for row in session.inventory()] == ["MEMORY.md"]
+    opened = unseal((home / "memories" / "MEMORY.md").read_bytes(), key=key, name="MEMORY.md") == b"beta"
+    assert opened, "case alias did not keep the stored basename as AAD"

@@ -2025,3 +2025,27 @@ checked plaintext remains usable in other interpreters. Structural admission
 does not establish installed-runtime proof or authorize enable/disable/purge.
 C5b arming and destructive migration helpers remain unavailable until the C5c
 proof contract is implemented and reviewed; this slice is storage and hooks.
+
+Hook installation on Windows has one continue rule: upstream's raw memory seam
+may run only on a checked fresh unmanaged profile, meaning a cleanly closed
+custody owner observed no memory ownership, marker, opt-out, wrapper or pending
+journal and a complete bounded inventory with no seal or broken seal. Every
+other outcome with an unsupported or partially wrapped seam (managed custody,
+retained seals or markers without ownership, lost wrappers, unreadable or
+inadmissible custody, ACL/identity failures or an unresolvable home) stops the
+process: stderr diagnostic, then `SystemExit` on the main thread or `os._exit`
+off it, never a catchable exception that plugin or post-import containment
+could swallow. Safe mode does not bypass this. Only Mordred's own
+classification import reports instead of stopping. On a fresh unmanaged
+profile, plaintext stays plaintext under upstream's raw seam, which is the
+documented unmanaged behavior.
+
+Windows journey mutations follow the same rule. A supported journey signature
+is wrapped and memory nodes refuse with upstream's `{"ok": False, ...}`
+contract, keyed on the computed memory path as well as the `memory:` prefix.
+With an unsupported signature, a fresh unmanaged profile leaves upstream
+untouched. Otherwise `delete_node`/`edit_node` are replaced by refusal stubs
+that validate nothing, reach no I/O and log once; skill nodes are refused too.
+If the stubs cannot be installed, the process stops. Keyless unmanaged drift
+returns upstream's `BACKUP FAILED — file unchanged on disk` contract: no
+plaintext backup is published and no key is enrolled.

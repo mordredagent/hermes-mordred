@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import sys
 import threading
@@ -219,8 +220,11 @@ class WindowsMemorySession:
         # Use the stored basename as AAD for NTFS casing aliases. Distinct
         # case-sensitive files remain distinct because selection uses identity.
         for existing in self._tx.list_names(max_entries=MEMORY_ENTRY_LIMIT):
-            if self._tx.stat(existing).identity == identity:
+            try:
                 _memory_leaf(existing)
+            except PrivateFSError:
+                continue  # upstream locks/subdirectories are never memory aliases; never stat them
+            if self._tx.stat(existing).identity == identity:
                 return existing
         raise PrivateFSError("unsafe", "memory_name_identity")
 
@@ -244,34 +248,47 @@ class WindowsMemorySession:
         self.check()
         return data.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
 
-    def read_plaintext(self, name: str, *, encoding: str = "utf-8") -> str | None:
+    @property
+    def sealing_available(self) -> bool:
+        """Whether this operation holds a native memory key (managed or adopted seals)."""
+        self.check()
+        return self._key is not None
+
+    def read_classified(self, name: str, *, encoding: str = "utf-8") -> tuple[str | None, bool]:
+        """Plaintext plus whether its stored bytes were an authenticated seal."""
         actual = self._name(name)
         text = self.read_text(actual, encoding=encoding)
-        if text is None:
-            return None
-        if looks_like_magic_line(text):
-            if not is_sealed(text) or self._key is None:
-                raise MemoryStorageError("memory seal is broken or its native key is unavailable")
-            try:
-                return unseal(text.encode("utf-8"), key=self._key, name=actual).decode("utf-8")
-            except (MemoryCryptoError, UnicodeError) as exc:
-                raise MemoryStorageError("memory seal does not authenticate") from exc
-        return text
+        if text is None or not looks_like_magic_line(text):
+            return text, False
+        if not is_sealed(text) or self._key is None:
+            raise MemoryStorageError("memory seal is broken or its native key is unavailable")
+        try:
+            return unseal(text.encode("utf-8"), key=self._key, name=actual).decode("utf-8"), True
+        except (MemoryCryptoError, UnicodeError) as exc:
+            raise MemoryStorageError("memory seal does not authenticate") from exc
 
-    def _publish(self, name: str, data: bytes, *, create: bool) -> None:
-        name = self._name(name)
-        if self._tx is None:
-            raise MemoryStorageError("memory publication requires an existing checked directory")
+    def read_plaintext(self, name: str, *, encoding: str = "utf-8") -> str | None:
+        return self.read_classified(name, encoding=encoding)[0]
+
+    def _bounded_existing(self, tx: ConfidentialTransaction, name: str, data: bytes) -> bool:
+        """Check entry/byte bounds before publication; return whether ``name`` exists."""
         inventory = self.inventory()
-        names = self._tx.list_names(max_entries=MEMORY_ENTRY_LIMIT)
+        names = tx.list_names(max_entries=MEMORY_ENTRY_LIMIT)
         if name not in names and len(names) >= MEMORY_ENTRY_LIMIT:
             raise PrivateFSError("unsafe", "memory_publication_entry_limit")
         total = sum(len(row.data) for row in inventory if row.name != name) + len(data)
         if len(data) > MEMORY_FILE_LIMIT or total > MEMORY_TOTAL_LIMIT:
             raise PrivateFSError("unsafe", "memory_publication_limit")
+        return any(row.name == name for row in inventory)
+
+    def _publish(self, name: str, data: bytes, *, create: bool) -> None:
+        name = self._name(name)
+        if self._tx is None:
+            raise MemoryStorageError("memory publication requires an existing checked directory")
+        exists = self._bounded_existing(self._tx, name, data)
         published = False
         try:
-            if create or not any(row.name == name for row in inventory):
+            if create or not exists:
                 self._tx.create_bytes(name, data)
             else:
                 self._tx.replace_bytes(name, data)
@@ -280,7 +297,7 @@ class WindowsMemorySession:
             if self._tx.read_bytes(name, max_bytes=MEMORY_FILE_LIMIT) != data:
                 raise PrivateFSError("unsafe", "memory_publication_verify", commit_state="uncertain")
             self.check()
-        except BaseException as exc:
+        except Exception as exc:
             if published:
                 if not isinstance(exc, PrivateFSError):
                     failure = PrivateFSError("unsafe", "memory_postpublication", commit_state="uncertain")
@@ -289,6 +306,16 @@ class WindowsMemorySession:
                 exc.commit_state = "uncertain"
             if isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain":
                 self._receipt.mark_uncertain(exc)
+            raise
+        except BaseException:
+            # An interrupt may land inside or after the primitive, so the outcome is
+            # unknown: the owner learns that through a classified uncertain failure,
+            # while the interrupt itself propagates unchanged. A receipt that cannot
+            # take the report is already poisoned or closed; it must not replace it.
+            with contextlib.suppress(Exception):
+                self._receipt.mark_uncertain(
+                    PrivateFSError("unsafe", "memory_postpublication", commit_state="uncertain")
+                )
             raise
 
     def write_entries(self, name: str, entries: Sequence[str], *, delimiter: str) -> None:
