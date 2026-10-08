@@ -330,3 +330,42 @@ def _eventual_transaction(directory):
         yield
     finally:
         lock.__exit__(None, None, None)
+
+
+def test_long_path_and_overlong_leaf_have_complete_file_semantics(tmp_path: Path) -> None:
+    with contextlib.ExitStack() as stack:
+        path = tmp_path
+        for _ in range(3):
+            path = path / ("nested-" + "a" * 90)
+            d = stack.enter_context(open_private_directory(path, create=True))
+        assert len(str(path)) > 260
+        with d.transaction() as tx:
+            tx.create_bytes("secret", b"keep")
+            with pytest.raises(PrivateFSError) as err:
+                tx.create_bytes("x" * 256, b"wrong")
+            assert err.value.commit_state == "not_committed"
+            assert tx.read_bytes("secret", max_bytes=4) == b"keep"
+
+
+def test_short_name_alias_cannot_replace_held_sidecar(tmp_path: Path) -> None:
+    import ctypes
+
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    root = tmp_path / "private"
+    short_path = get_api().kernel.GetShortPathNameW
+    short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    short_path.restype = ctypes.c_uint32
+    with open_private_directory(root, create=True) as d, d.transaction() as tx:
+        lock = root / ".mordred-fs.lock"
+        buffer = ctypes.create_unicode_buffer(32768)
+        assert 0 < short_path(str(lock), buffer, len(buffer)) < len(buffer)
+        alias = Path(buffer.value).name
+        if alias.casefold() == lock.name:
+            pytest.skip("this NTFS volume does not generate a short alias for the sidecar")
+        identity = lock.stat().st_ino
+        with pytest.raises(PrivateFSError) as err:
+            tx.replace_bytes(alias, b"wrong")
+        assert err.value.commit_state == "not_committed"
+        assert err.value.reason in ("busy", "access_denied", "unsafe")
+        assert lock.stat().st_ino == identity

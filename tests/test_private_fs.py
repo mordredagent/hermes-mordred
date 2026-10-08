@@ -96,3 +96,87 @@ def test_missing_directory_does_not_get_created_by_read(fs, private_path: Path) 
         pass
     assert err.value.reason == "missing"
     assert not private_path.exists()
+
+
+@pytest.mark.parametrize("stage", ["staging", "lock", "directory", "unlock"])
+@pytest.mark.parametrize("body_error", [False, True])
+def test_cleanup_failure_after_publication_is_never_retry_safe(
+    fs, private_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, body_error: bool
+) -> None:
+    if stage == "unlock" and os.name != "nt":
+        pytest.skip("POSIX unlock failure is recovered by closing the lock fd")
+    armed = False
+    injected = False
+    original = fs.PrivateFSError("io", "body", commit_state="uncertain")
+
+    if os.name == "nt":
+        from mordred_hermes._private_fs._windows_api import NativeAPI, OwnedHandle
+
+        close = OwnedHandle.close
+        unlock = NativeAPI.unlock
+
+        def failing_close(handle):
+            nonlocal injected
+            selected = False
+            if armed and not injected and handle.value is not None and handle.api.GetType(handle.value) == 1:
+                path = handle.api.final_path(handle).casefold()
+                selected = (
+                    (stage == "staging" and path.endswith("\\secret"))
+                    or (stage == "lock" and path.endswith("\\.mordred-fs.lock"))
+                    or (stage == "directory" and path.endswith("\\private"))
+                )
+            close(handle)
+            if selected:
+                injected = True
+                raise fs.PrivateFSError("io", "close", native_code=6)
+
+        def failing_unlock(api, handle):
+            nonlocal injected
+            unlock(api, handle)
+            if armed and stage == "unlock" and not injected:
+                injected = True
+                raise fs.PrivateFSError("io", "unlock", native_code=6)
+
+        monkeypatch.setattr(OwnedHandle, "close", failing_close)
+        monkeypatch.setattr(NativeAPI, "unlock", failing_unlock)
+    else:
+        import fcntl
+        import stat
+
+        close = os.close
+
+        def failing_close(fd):
+            nonlocal injected
+            selected = False
+            if armed and not injected:
+                info = os.fstat(fd)
+                selected = (
+                    (stage == "staging" and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_WRONLY)
+                    or (stage == "lock" and stat.S_ISREG(info.st_mode) and info.st_size == 0)
+                    or (stage == "directory" and stat.S_ISDIR(info.st_mode))
+                )
+            close(fd)
+            if selected:
+                injected = True
+                raise OSError(5, "injected close error")
+
+        monkeypatch.setattr(os, "close", failing_close)
+
+    with (
+        pytest.raises(fs.PrivateFSError) as err,
+        fs.open_private_directory(private_path, create=True) as d,
+        d.transaction() as tx,
+    ):
+        # For a staging close, arm at the file flush boundary; all other
+        # cleanup errors occur only after the write returned successfully.
+        if stage == "staging":
+            armed = True
+        tx.create_bytes("secret", b"complete")
+        armed = True
+        if body_error:
+            raise original
+    assert injected
+    assert err.value.commit_state == "uncertain"
+    if body_error and stage != "staging":
+        assert err.value is original
+    assert (private_path / "secret").read_bytes() == b"complete"

@@ -8,6 +8,7 @@ import fcntl
 import os
 import secrets
 import stat
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -119,8 +120,7 @@ def open_private_directory(path: str | Path, *, create: bool = False) -> Iterato
     finally:
         if directory is not None:
             directory.active = False
-        for handle in reversed(fds):
-            os.close(handle)
+        _close_fds(reversed(fds), committed=directory is not None and directory.published)
 
 
 class _Directory:
@@ -128,6 +128,7 @@ class _Directory:
         self.fd = fd
         self.active = True
         self.pid = os.getpid()
+        self.published = False
 
     def _check(self) -> None:
         if not self.active or self.pid != os.getpid():
@@ -152,7 +153,7 @@ class _Directory:
             if not lock or self.pid == os.getpid():
                 with _guard:
                     try:
-                        os.close(fd)
+                        _close_fds(iter((fd,)), committed=lock and self.published)
                     finally:
                         _lock_fds.discard(fd)
 
@@ -283,10 +284,27 @@ class _Transaction:
         except OSError as exc:
             raise _error(exc, "replace" if replace else "create", committed) from exc
         finally:
+            if committed:
+                directory.published = True
             if staged and not committed:
                 _cleanup_staging(directory.fd, tmp, identity)
             if fd is not None:
-                os.close(fd)
+                _close_fds(iter((fd,)), committed=committed)
+
+
+def _close_fds(fds: Iterator[int], *, committed: bool) -> None:
+    # Close every descriptor once and preserve an active body error. A close
+    # failure after publication cannot make the enclosing with-block retry-safe.
+    active_error = sys.exc_info()[0] is not None
+    failure: OSError | None = None
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if failure is None:
+                failure = exc
+    if failure is not None and not active_error:
+        raise _error(failure, "close", committed) from failure
 
 
 def _cleanup_staging(directory_fd: int, name: str, identity: tuple[int, int] | None) -> None:

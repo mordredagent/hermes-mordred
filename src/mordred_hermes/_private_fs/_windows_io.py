@@ -17,18 +17,27 @@ from ._windows_security import validate_private
 
 @contextlib.contextmanager
 def open_private_directory(path: str | Path, *, create: bool = False) -> Iterator[PrivateDirectory]:
-    with checked_directory(path, create=create) as checked:
-        directory = _Directory(checked)
-        try:
-            yield directory
-        finally:
-            directory.active = False
+    directory: _Directory | None = None
+    body_finished = False
+    try:
+        with checked_directory(path, create=create) as checked:
+            directory = _Directory(checked)
+            try:
+                yield directory
+                body_finished = True
+            finally:
+                directory.active = False
+    except PrivateFSError as exc:
+        if body_finished and directory is not None and directory.published:
+            exc.commit_state = "uncertain"
+        raise
 
 
 class _Directory:
     def __init__(self, checked: CheckedDirectory) -> None:
         self.checked = checked
         self.active = True
+        self.published = False
 
     def check(self) -> None:
         if not self.active:
@@ -67,12 +76,19 @@ class _Directory:
     @contextlib.contextmanager
     def transaction(self, *, blocking: bool = True) -> Iterator[PrivateTransaction]:
         self.check()
-        with exclusive_lock(self.checked, blocking=blocking):
-            transaction = _Transaction(self)
-            try:
-                yield transaction
-            finally:
-                transaction.active = False
+        transaction = _Transaction(self)
+        body_finished = False
+        try:
+            with exclusive_lock(self.checked, blocking=blocking):
+                try:
+                    yield transaction
+                    body_finished = True
+                finally:
+                    transaction.active = False
+        except PrivateFSError as exc:
+            if body_finished and transaction.published:
+                exc.commit_state = "uncertain"
+            raise
 
 
 class _Transaction:
@@ -80,6 +96,7 @@ class _Transaction:
         self.directory = directory
         self.active = True
         self.thread = threading.get_ident()
+        self.published = False
 
     def check(self) -> None:
         self.directory.check()
@@ -129,6 +146,9 @@ class _Transaction:
                         raise PrivateFSError("unsafe", "published_identity", commit_state="uncertain")
                     api.flush(staging)
                 finally:
+                    if not safe_to_discard:
+                        self.published = True
+                        self.directory.published = True
                     if safe_to_discard:
                         with contextlib.suppress(OSError):
                             api.discard(staging)

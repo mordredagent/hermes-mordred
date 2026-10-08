@@ -213,3 +213,14 @@ def test_inherited_transaction_cannot_operate_in_child(root: Path) -> None:
         finally:
             os.close(reader)
             os.close(writer)
+
+
+def test_reserved_case_alias_cannot_replace_live_lock(root: Path) -> None:
+    with open_private_directory(root) as d, d.transaction() as tx:
+        before = (root / ".mordred-fs.lock").stat().st_ino
+        with pytest.raises(PrivateFSError) as err:
+            tx.replace_bytes(".MORDRED-FS.LOCK", b"new lock")
+        assert err.value.reason == "unsafe"
+        assert (root / ".mordred-fs.lock").stat().st_ino == before
+        with _child(root, "try") as child:
+            assert _line(child) == "error busy"

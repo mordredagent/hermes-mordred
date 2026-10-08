@@ -50,7 +50,7 @@ def validate_leaf(name: str) -> None:
         not name
         or name in (".", "..")
         or any(c in name for c in "/\\:\x00")
-        or name == ".mordred-fs.lock"
-        or name.startswith(".mordred-fs-tmp-")
+        or name.casefold() == ".mordred-fs.lock"
+        or name.casefold().startswith(".mordred-fs-tmp-")
     ):
         raise PrivateFSError("unsafe", "leaf")
