@@ -338,3 +338,8 @@ Implementation and acceptance remain open:
   do not make it an implicit requirement for flat memory enrollment/purge.
 - [ ] Verify ordinary-user Server and Windows 11 installed flows, preserving
   ciphertext after missing hardware, token denial and uncertain operations.
+
+- [ ] Add checked read-only managed installation image admission, then complete
+  C5c ordinary-user supported-runtime inventory and native known-empty proof.
+- [ ] Enforce the same supported C4 interpreter boundary in Windows managed
+  memory hooks and installed-runtime proof; document opaque-runtime limits.

@@ -1994,3 +1994,45 @@ already-partial cleanup, but still refuses unexpected opt-in, seals or unsafe
 objects. Successful purge leaves an unmanaged memory role while preserving
 independent audit/Telegram roles. A missing wrapper with retained memory-role,
 marker, opt-out, seal or ambiguous pending evidence remains broken, never fresh.
+
+### Windows supported gateway inventory boundary
+
+Ordinary Windows tokens cannot necessarily open foreign process tokens, even
+with minimum query rights. WTS NULL SIDs, access denial, service accounts,
+process-object owners and image publishers do not prove foreign ownership.
+The lifecycle gate therefore describes the supported Windows runtime inventory,
+not universal absence of arbitrary interpreters embedded in native applications.
+
+C4-admitted Python/pythonw environments, recognizable Python and Hermes/Desktop
+launchers, generic execution hosts and every hinted PID remain plausible.
+Denied or unstable plausible records remain unknown. Every positively
+current-owned process still receives the full argv/identity scan, regardless of
+its image name; custom scripts executed by supported Python are included.
+Unknown images in user-writable or untrusted locations remain unknown.
+
+A denied noncandidate image may be outside this supported set only after a
+shared foundation capability positively validates its file and ancestor
+namespace as administrator/OS-managed and not mutable by the current ordinary
+user or other untrusted principals. This is a support-boundary exclusion, not
+foreign-owner proof. Stable native PID, creation time and image revalidation
+remain required. No vendor basename list, environment-derived trusted root,
+signed-file shortcut, missing SID or failed query grants this exclusion.
+
+The new read-only Windows foundation operation
+`inspect_managed_installation_image(path) -> FileMetadata` pins and checks the
+local NTFS image and ancestor identities, rejects reparse points and unsafe
+ownership/ACLs, and returns only after revalidation and successful cleanup.
+It grants no mutation authority and changes no permissions. Current-user-owned
+or writable installation namespaces cannot qualify. OS/administrative writers
+remain trusted under the existing threat model; service ownership such as
+TrustedInstaller requires explicit native SID validation. Source hardlinks may
+be admitted because this operation only observes a protected executable; stored
+private/confidential-file single-link rules remain unchanged. Implement this
+separate policy through shared native descriptor/handle primitives, never by
+weakening existing confidential or public-build admission.
+
+An opaque renamed or embedded interpreter inside such an admitted managed
+namespace is outside the supported set and can be omitted. Its operator must
+stop it before lifecycle migration or use a supported launcher. Windows managed
+memory hooks and installed-runtime proof must require the supported C4 runtime
+boundary; no universal quiescence claim or force-proof bypass is introduced.

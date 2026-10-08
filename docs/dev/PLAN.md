@@ -1180,7 +1180,10 @@ codes. A checked, bounded `gateway_state.json` supplies only a PID locator;
 its recorded command line never selects an interpreter. Access denial, unstable
 PID creation time, unreadable state and unresolved launchers are uncertainty,
 not evidence that a gateway stopped. Positive foreign ownership excludes a
-process; only the kernel PID 0 / PID 4 pseudo-processes have a narrow exception.
+process. Kernel pseudo-processes have narrow exceptions; the later managed
+installation prerequisite below defines the additional supported-runtime
+boundary for denied noncandidate images. It must be implemented before native
+known-empty acceptance can pass.
 A current-user gateway blocks a transition even when its profile is uncertain.
 The adjacent `gateway run` argv pair is conservative: custom script launchers
 are included, and unrelated current-user apps using that pair can over-block.
@@ -1209,3 +1212,25 @@ argv, verifies live native discovery and lifecycle refusal, then terminates only
 that test child. No gateway/network service or user profile is modified. Record
 ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
 are not evidence of a successful native inventory.
+### Managed installation image prerequisite for gateway inventory
+
+Add a separate shared filesystem slice implementing
+`inspect_managed_installation_image(path) -> FileMetadata` before revising C5c
+ordinary-user gateway exclusions. Reuse native pinned path, security descriptor
+and handle operations; require OS/administrator-managed ownership and absence
+of current-user/untrusted mutation grants on the executable and relevant
+ancestor namespace. Check identities and security before return, retain cleanup
+failures, and never modify descriptors or files. Include public-image hardlinks,
+user-owned/writable lookalikes, ancestor replacement, junctions, held mutation
+handles and failure classification in native tests. Existing private and
+confidential admission rules must remain unchanged.
+
+C5c keeps all positively current-owned argv inspection. Plausible interpreter,
+Hermes/Desktop, generic-host and hinted records stay unknown when denied; only
+stable, noncandidate images admitted by the new capability are outside the
+supported inventory. Test the exclusions against ordinary Server source and
+sdist-wheel runs, including known-empty after the controlled gateway exits.
+Run these machine-wide gateway fixtures sequentially. C5b/C5c managed-hook and
+runtime-proof admission must enforce the same supported interpreter boundary.
+Record the unsupported opaque-runtime limitation and retain Windows 11 as a
+separate acceptance gate.
