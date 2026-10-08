@@ -742,6 +742,8 @@ ID; POSIX inode encoded as unsigned bytes). `PrivateFSError(OSError)` exposes
 `commit_state: Literal["not_committed", "uncertain"]`. Paths may be included in
 errors; bytes, credentials and key material may not. For reads, lock/open errors
 and prepublication failures the commit state is `not_committed`.
+When postpublication reconciliation promotes the state to `uncertain`, the
+exception's rendered message and `args` must agree with its `commit_state`.
 
 Context/transaction use after exit raises `RuntimeError`; mutations cannot be
 called on `PrivateDirectory`. Reject nonpositive `max_bytes` with `ValueError`.
@@ -750,6 +752,11 @@ The foundation does not expose raw handles, generic open flags, append, unlink,
 recursive mkdir or permission-repair APIs. POSIX modes are 0700/0600, current
 euid ownership, no symlinks and one link per regular file; ancestor checks allow
 root-owned normal system directories but reject writable untrusted ancestors.
+On macOS, validate extended ACLs through those same descriptors and reject
+allow/unknown entries or query failures; absent, empty and deny-only ACLs are
+accepted. Test inherited grants, private-directory/file/lock grants, mutation
+during an open transaction, normal deny-delete ancestors and native-query
+failure cleanup without changing existing descriptors.
 
 ### Task WF0: Prove the native filesystem assumptions
 

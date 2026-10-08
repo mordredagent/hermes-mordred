@@ -1177,7 +1177,7 @@ is in-session because the small sequence has tightly coupled interfaces.
 
 Status: approved contract; native assumptions and foundation behavior validated
 on 2026-10-08. Foundation implementation/acceptance is tracked separately in PR #192.
-Foundation implementation and full acceptance are in progress. The broader Windows feasibility and helper work is tracked in PRs #189/#190. The
+The foundation is unmerged and under review. The broader Windows feasibility and helper work is tracked in PRs #189/#190. The
 implementation sequence is [WF0–WF5 in PLAN](PLAN.md#windows-private-filesystem-implementation-plan).
 
 ### Filesystem scope and boundary
@@ -1190,6 +1190,16 @@ PowerShell/icacls subprocess is part of a product I/O operation. Existing
 `_file_lock.py`, `_audit_io.py` and component storage code remain unchanged until
 their individual migration PRs. The new POSIX backend uses descriptor-relative
 operations, private modes and flock; it does not replace existing POSIX code.
+
+On macOS, mode bits do not bound extended ACL grants. Inspect the extended ACL
+through each checked descriptor for ancestors, private directories, locks,
+staging files and targets, including operation-time revalidation. Initially
+accept only absent, empty or deny-only ACLs; reject every allow entry (including
+owner-only, read-only and inherit-only entries) and unknown entry types. This
+conservative policy permits the normal home-directory deny-delete ACL without
+attempting a full effective-rights evaluator. Native query failures must refuse
+the operation; do not remove or rewrite existing ACLs. This is a macOS backend
+rule, not a change to the Windows DACL policies below.
 
 This choice keeps locks and handles in the calling process without adding a
 packaged binary or a base dependency. A pywin32 backend would add a dependency;
