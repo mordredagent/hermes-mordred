@@ -30,7 +30,10 @@ def ps(request):
 @pytest.fixture
 def native_fixture(ps, tmp_path):
     root = tmp_path / "env 日本 & $ user's"
-    subprocess.run([sys.executable, "-m", "venv", str(root)], check=True, timeout=60)
+    # Pip is unused: metadata/dependencies come from the explicit read-only
+    # test-site .pth, and uv is a compiled logging fixture. Avoid ensurepip's
+    # unrelated nested-path failure while retaining native Unicode paths.
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root)], check=True, timeout=60)
     python = root / "Scripts/python.exe"
     site = root / "Lib/site-packages"
     (site / "fixture.pth").write_text(
@@ -108,7 +111,9 @@ def test_installer_literal_paths_selected_runtime_and_owned_upgrade(native_fixtu
         pytest.skip("native successful publication pending shared C1b ACL capability")
     argv, env, home, log, python, source = native_fixture
     for _ in range(2):
-        result = subprocess.run([*argv, "-InstallOnly"], env=env, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            [*argv, "-InstallOnly"], env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=120
+        )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "Installation-only validation completed" in result.stdout
         assert str(python) in result.stdout
@@ -122,7 +127,12 @@ def test_installer_literal_paths_selected_runtime_and_owned_upgrade(native_fixtu
 def test_installer_nonzero_native_exit_never_claims_success(native_fixture, stage):
     argv, env, home, _log, _python, _source = native_fixture
     result = subprocess.run(
-        [*argv, "-InstallOnly"], env={**env, "UV_FIXTURE_FAIL": stage}, capture_output=True, text=True, timeout=120
+        [*argv, "-InstallOnly"],
+        env={**env, "UV_FIXTURE_FAIL": stage},
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
     )
     assert result.returncode != 0
     assert "completed" not in result.stdout
@@ -134,7 +144,9 @@ def test_installer_unknown_launcher_preserved(native_fixture):
     (home / "bin").mkdir()
     path = home / "bin/hermes-mordred.ps1"
     path.write_text("unknown launcher", encoding="utf-8")
-    result = subprocess.run([*argv, "-InstallOnly"], env=env, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(
+        [*argv, "-InstallOnly"], env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=120
+    )
     assert result.returncode != 0
     assert path.read_text() == "unknown launcher"
     assert "completed" not in result.stdout
@@ -192,7 +204,7 @@ def test_exposed_launcher_executes_cli_and_propagates_exit(native_fixture, ps, t
 def test_installer_explicit_uninstall_targets_environment_and_uv_a(native_fixture, tmp_path):
     argv, env, home, log, python_a, _source = native_fixture
     root_b = home / "hermes-agent/venv"
-    subprocess.run([sys.executable, "-m", "venv", str(root_b)], check=True, timeout=60)
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root_b)], check=True, timeout=60)
     python_b = root_b / "Scripts/python.exe"
     (root_b / "Lib/site-packages/fixture.pth").write_text(
         f"import site; site.addsitedir({sysconfig.get_path('purelib')!r})\n", encoding="utf-8"
@@ -231,11 +243,13 @@ def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture
     target.mkdir()
     (source / "build.ps1").write_text(
         "param([string]$InstallDir, [string]$Python, [switch]$OwnedInstall)\n"
-        "[IO.File]::WriteAllText((Join-Path $InstallDir 'entered.txt'), (Get-ExecutionPolicy -Scope Process))\n",
+        "[IO.File]::WriteAllText((Join-Path $InstallDir 'entered.txt'), $env:PSExecutionPolicyPreference)\n",
         encoding="utf-8-sig",
     )
     code = (
-        "import os, sys; os.environ.pop('PSExecutionPolicyPreference', None); "
+        "import os, sys; assert os.environ.get('PSExecutionPolicyPreference') == 'Restricted'; "
+        "os.environ.pop('PSExecutionPolicyPreference'); "
+        "assert 'PSExecutionPolicyPreference' not in os.environ; "
         "from mordred_hermes.wizard import keyvault_native_cli as n; "
         "from pathlib import Path; "
         "import shutil; shutil.which = lambda name: os.environ['MORDRED_FIXTURE_PS']; "
@@ -252,7 +266,7 @@ def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture
     }
     env.pop("PSExecutionPolicyPreference", None)
     command = (
-        "Write-Output (Get-ExecutionPolicy); & $env:MORDRED_FIXTURE_PYTHON -c "
+        "[Console]::WriteLine('PARENT=' + $env:PSExecutionPolicyPreference); & $env:MORDRED_FIXTURE_PYTHON -c "
         "$env:MORDRED_FIXTURE_CODE $env:MORDRED_FIXTURE_SOURCE $env:MORDRED_FIXTURE_TARGET; exit $LASTEXITCODE"
     )
     result = subprocess.run(
@@ -264,5 +278,5 @@ def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Restricted" in result.stdout
+    assert "PARENT=Restricted" in result.stdout
     assert (target / "entered.txt").read_text() == "Bypass"
