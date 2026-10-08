@@ -225,10 +225,16 @@ class NativeAPI:
     def sid_text(self, sid: bytes) -> str:
         output = PTR()
         self.checked(self.SidString(sid, c.byref(output)), "sid_string")
+        original: BaseException | None = None
         try:
             return c.wstring_at(output)
+        except BaseException as exc:
+            original = exc
+            raise
         finally:
-            self.LocalFree(output)
+            # Runs before any object is created, so not_committed is exact.
+            if self.LocalFree(output):
+                cleanup_failure(original, native_error(self.last_error(), "free_sid_string"), committed=False)
 
     @contextlib.contextmanager
     def attributes(self) -> Iterator[SecurityAttributes]:
@@ -369,7 +375,10 @@ class NativeAPI:
         name = c.create_unicode_buffer(32)
         self.checked(self.VolumeInfo(handle.value, None, 0, None, None, None, name, len(name)), "volume")
         path = self.final_path(handle)
-        root = path[: path.index("}") + 1] + "\\"
+        closing = path.find("}")
+        if closing < 0:
+            raise PrivateFSError("unsupported", "volume_path")
+        root = path[: closing + 1] + "\\"
         if name.value != "NTFS" or self.DriveType(root) != 3:
             raise PrivateFSError("unsupported", "filesystem")
 

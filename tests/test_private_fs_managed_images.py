@@ -358,6 +358,73 @@ def test_security_descriptor_free_failure_prevents_metadata_or_preserves_body(bo
         assert any("cleanup failed" in note for note in err.value.__notes__)
 
 
+@pytest.mark.parametrize("body_error", [False, True])
+def test_sid_string_free_failure_is_checked_or_preserves_body(monkeypatch, body_error):
+    import ctypes as c
+
+    from mordred_hermes._private_fs._windows_api import PTR, NativeAPI
+
+    api = NativeAPI.__new__(NativeAPI)
+    text = c.create_unicode_buffer("S-1-5-18")
+
+    def convert(sid, output):
+        c.cast(output, c.POINTER(PTR))[0] = c.addressof(text)
+        return True
+
+    def unreadable(pointer):
+        raise ValueError("body")
+
+    api.SidString = convert
+    api.LocalFree = lambda ptr: 456
+    api.last_error = lambda: 6
+    if body_error:
+        monkeypatch.setattr(c, "wstring_at", unreadable)
+        with pytest.raises(ValueError, match="body") as body:
+            api.sid_text(s.SYSTEM)
+        assert any("cleanup failed" in note for note in body.value.__notes__)
+        return
+    with pytest.raises(PrivateFSError) as err:
+        api.sid_text(s.SYSTEM)
+    assert (err.value.operation, err.value.native_code) == ("free_sid_string", 6)
+
+
+def test_successful_sid_string_free_returns_text():
+    import ctypes as c
+
+    from mordred_hermes._private_fs._windows_api import PTR, NativeAPI
+
+    api = NativeAPI.__new__(NativeAPI)
+    text = c.create_unicode_buffer("S-1-5-18")
+    freed = []
+
+    def convert(sid, output):
+        c.cast(output, c.POINTER(PTR))[0] = c.addressof(text)
+        return True
+
+    api.SidString = convert
+    api.LocalFree = lambda ptr: freed.append(ptr.value) or None
+    assert api.sid_text(s.SYSTEM) == "S-1-5-18"
+    assert freed == [c.addressof(text)]
+
+
+@pytest.mark.parametrize("path", ["\\\\?\\Volume{broken", "\\\\?\\Volume{"])
+def test_malformed_native_volume_guid_path_is_classified(path):
+    from mordred_hermes._private_fs._windows_api import NativeAPI
+
+    api = NativeAPI.__new__(NativeAPI)
+
+    def volume_info(handle, name, size, serial, length, flags, filesystem, filesystem_size):
+        filesystem.value = "NTFS"
+        return True
+
+    api.VolumeInfo = volume_info
+    api.final_path = lambda handle: path
+    api.DriveType = lambda root: 3
+    with pytest.raises(PrivateFSError) as err:
+        api.validate_volume(OwnedHandle(api, 123))
+    assert (err.value.reason, err.value.operation) == ("unsupported", "volume_path")
+
+
 @pytest.mark.parametrize("root_path", ["\\\\?\\Volume{broken", "\\\\?\\Volume{test}\\nested\\", "C:\\"])
 def test_malformed_native_root_is_classified_and_closed(native, monkeypatch, root_path):
     original = native.final_path
