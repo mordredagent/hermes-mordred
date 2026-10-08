@@ -1696,3 +1696,13 @@ The wizard checks the PE header and any supplied build-script SHA256 against
 these bytes before publishing. Executable and receipt remain separate checked
 publications; failure may leave an unowned artifact requiring inspection, and
 never constitutes a successful installation.
+
+
+C3 may create a verified, create-no-replace `env-removed-[safe stamp].env`
+backup directly in the already-held exact-private policy directory through
+`CanonicalSession.create_policy_backup`. It rejects canonical policy and pending
+marker names before matching backup names, including custom canonical leaves.
+The method uses existing coordinator bounds, marker guards and classified
+publication/failure tracking. Explicit backup child directories retain their
+checked private capabilities and lock order; a successful child publication
+followed by outer coordination cleanup failure remains uncertain.
