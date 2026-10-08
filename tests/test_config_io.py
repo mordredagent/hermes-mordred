@@ -623,3 +623,32 @@ def test_nested_ordinary_read_refusal_does_not_claim_mutation_uncertainty(fs):
         b.hook = None
         assert error.value is failure and failure.commit_state == "not_committed"
         assert outer.read_home(".env", max_bytes=8).data == b"old"
+
+
+def test_policy_backup_checked_no_replace_and_canonical_exclusion(fs):
+    b, paths = fs
+    with cio.canonical_session(paths, scope="policy", create=True) as session:
+        session.create_policy_backup("env-removed-2026.env", b"secret")
+        with pytest.raises(cio.PrivateFSError, match="exists"):
+            session.create_policy_backup("env-removed-2026.env", b"other")
+    assert b.policy.files["env-removed-2026.env"][0] == b"secret"
+    custom = cio.CanonicalPaths(paths.home, policy_name="env-removed-2026.env")
+    with cio.canonical_session(custom, scope="policy") as session, pytest.raises(ValueError):
+        session.create_policy_backup("ENV-REMOVED-2026.ENV", b"overwrite")
+
+
+def test_policy_backup_verification_failure_poisoned(fs):
+    b, paths = fs
+    with (
+        pytest.raises(cio.PrivateFSError) as error,
+        cio.canonical_session(paths, scope="policy", create=True) as session,
+    ):
+
+        def fail_after_create(event):
+            if event == "policy:create:env-removed-now.env":
+                b.fault = "policy:read:env-removed-now.env"
+
+        b.hook = fail_after_create
+        with pytest.raises(cio.PrivateFSError):
+            session.create_policy_backup("env-removed-now.env", b"secret")
+    assert error.value.commit_state == "uncertain"
