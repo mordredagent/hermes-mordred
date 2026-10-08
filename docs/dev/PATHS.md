@@ -560,3 +560,7 @@ role reset (`reset_role`) changes only `mordred/windows-custody.json`, the
 role's `mordred/windows-{role}.pending.json` journal and, for memory, the
 existing wrapper/opt-out cleanup of `delete_role`; it never touches
 `memories/` files, other roles or the permanent `.mordred-fs.lock`.
+The generic secret store `mordred/keyvault/` (meta, ciphertexts, digests,
+`.lock`) and its parent `mordred/.keyvault.lifecycle.lock` are not ported to
+Windows: `_storage.ensure_layout` and the lifecycle lock refuse there before
+creating directories or lock files, and retained store files are preserved.

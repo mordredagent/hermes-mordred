@@ -339,6 +339,12 @@ Implementation and acceptance remain open:
   pre-mutation `KeyvaultUnsupportedOnWindows` guards, retained excluded-artifact
   reports and journaled role-specific `reset_role`. Independent review, native
   Windows CI, real CNG/Windows 11 acceptance and C6 routing remain open.
+  Fix round 1: predicates are non-blocking; the unported `_storage` secret
+  store reports `secret_store` / `not-ported-on-windows` and refuses before
+  any mkdir. Remaining: design a checked Windows secret-store port; C6/C7b
+  must gate audit/Telegram role reset on their consumers because reset does
+  not consult the gateway inventory; C6 status/doctor must route retained
+  secret-store refusals (now raised by the Windows lifecycle-lock guard).
 - [ ] C6: explicit native-custody/audit initialization and wizard memory flows;
   preserve separate C7b privacy/CLI and C10 Telegram migrations.
 - [ ] Design and implement checked tree lifecycle before recursive cleanup;

@@ -16,6 +16,7 @@ from tests.test_windows_custody import fs  # noqa: F401
 
 SUPPORTED = ("memory_custody", "native_audit", "telegram_hardware")
 EXCLUDED = ("file_vault", "env_config_workspace_seals", "recovery", "presence")
+UNPORTED = ("secret_store",)
 
 
 def capability_module():
@@ -64,7 +65,7 @@ def test_capability_shape_is_frozen_without_aggregate_ready_flag(caps, monkeypat
     cap, c, _, home, _ = caps
     forbid_native(monkeypatch, c)
     result = cap.windows_capabilities(home)
-    assert tuple(item.name for item in result) == SUPPORTED + EXCLUDED
+    assert tuple(item.name for item in result) == SUPPORTED + EXCLUDED + UNPORTED
     assert [field.name for field in dataclasses.fields(cap.WindowsCapability)] == [
         "name",
         "supported",
@@ -278,3 +279,128 @@ def test_excluded_capability_query_reads_no_custody(caps, monkeypatch):
         assert cap.windows_capability(home, name) == cap.WindowsCapability(name, False, False, "excluded-on-windows")
     with pytest.raises(ValueError):
         cap.windows_capability(home, "windows_ready")
+
+
+def run_promptly(call, timeout=10.0):
+    """Run ``call`` on a daemon thread; a blocking lock wait fails instead of hanging."""
+    import threading
+
+    outcome = {}
+
+    def target():
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:  # reported to the test thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert not worker.is_alive(), "capability read blocked on a held lock"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def hold_in_child(path):
+    import sys
+
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from mordred_hermes._private_fs import open_private_directory\n"
+        "with open_private_directory(Path(sys.argv[1])) as d, d.transaction():\n"
+        "    print('held', flush=True)\n"
+        "    sys.stdin.read()\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout.readline().strip() == "held"
+    return child
+
+
+def release_child(child):
+    child.stdin.close()
+    child.wait(timeout=15)
+    assert child.returncode == 0
+
+
+def test_canonical_session_held_by_another_thread_is_uncertain_promptly(caps, monkeypatch):
+    import threading
+
+    cap, c, _, home, backend = caps
+    with c.windows_custody_session(home, create=True, backend=backend) as session:
+        session.enroll_memory()
+    forbid_native(monkeypatch, c)
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with cio.canonical_session(cio.CanonicalPaths(home), scope="policy"):
+            held.set()
+            release.wait(timeout=30)
+
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert held.wait(timeout=10)
+    try:
+        result = reasons(run_promptly(lambda: cap.windows_capabilities(home)))
+        with pytest.raises(PrivateFSError) as busy:
+            run_promptly(lambda: cap.excluded_artifacts(home))
+        assert busy.value.reason == "busy"
+    finally:
+        release.set()
+        thread.join(timeout=10)
+    for name in SUPPORTED:
+        assert result[name] == (True, False, "custody-uncertain")
+    assert reasons(cap.windows_capabilities(home))["memory_custody"] == (True, True, "enrolled")
+
+
+@pytest.mark.parametrize("holder", ["home", "mordred"])
+def test_directory_lock_held_by_another_process_is_uncertain_promptly(caps, monkeypatch, holder):
+    cap, c, _, home, backend = caps
+    with c.windows_custody_session(home, create=True, backend=backend) as session:
+        session.enroll_memory()
+        session.enroll_role("audit")
+    child = hold_in_child(home if holder == "home" else home / "mordred")
+    try:
+        forbid_native(monkeypatch, c)
+        result = reasons(run_promptly(lambda: cap.windows_capabilities(home)))
+        with pytest.raises(PrivateFSError) as busy:
+            run_promptly(lambda: cap.excluded_artifacts(home))
+        assert busy.value.reason == "busy"
+    finally:
+        release_child(child)
+    for name in SUPPORTED:
+        assert result[name] == (True, False, "custody-uncertain")
+
+
+def test_runtime_admission_failure_is_uncertain_not_available(caps, monkeypatch):
+    cap, c, storage, home, backend = caps
+    with c.windows_custody_session(home, create=True, backend=backend) as session:
+        session.enroll_memory()
+
+    def unreadable(executable=None):
+        raise PermissionError("interpreter metadata unreadable")
+
+    monkeypatch.setattr(storage, "windows_memory_runtime_admitted", unreadable)
+    forbid_native(monkeypatch, c)
+    assert reasons(cap.windows_capabilities(home))["memory_custody"] == (True, False, "runtime-uncertain")
+
+
+def test_unported_secret_store_is_reported_without_custody(caps, monkeypatch):
+    cap, c, _, home, _ = caps
+    forbid_native(monkeypatch, c)
+    result = cap.windows_capabilities(home)
+    assert result[-1] == cap.WindowsCapability("secret_store", False, False, "not-ported-on-windows")
+
+    def tripwire(*args, **kwargs):
+        raise AssertionError("secret_store capability touched custody")
+
+    monkeypatch.setattr(c, "windows_custody_session", tripwire)
+    monkeypatch.setattr(cio, "canonical_session", tripwire)
+    assert cap.windows_capability(home, "secret_store") == result[-1]

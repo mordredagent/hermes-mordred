@@ -290,3 +290,62 @@ def test_role_status_is_read_only_and_needs_no_native_backend(stopped, monkeypat
         assert session.role_status("audit") == c.RoleStatus("audit", leases["audit"], (), False)
         assert session.role_status("telegram") == c.RoleStatus("telegram", None, (), False)
     assert backend.calls == calls
+
+
+def test_memory_reset_fails_closed_on_lost_wrapper(stopped):
+    c, _, home, backend, gates = stopped
+    lease = enrolled(c, home, backend, "memory", "audit")["memory"]
+    opt_out(home)
+    manifest = (home / "mordred" / "windows-custody.json").read_bytes()
+    (home / "mordred" / "memory-key.wrapped").unlink()
+    with (
+        c.windows_custody_session(home, backend=backend) as session,
+        pytest.raises(c.CustodyError, match="lost its wrapper"),
+    ):
+        session.reset_role("memory", erase_authorized=True)
+    assert gates == []
+    assert deletes(backend) == 0
+    assert lease.native_key_id in backend._keys
+    assert (home / "mordred" / "windows-custody.json").read_bytes() == manifest
+    assert not (home / "mordred" / "windows-memory.pending.json").exists()
+
+
+def test_failure_before_any_journal_is_noted_without_claiming_a_journal(stopped, monkeypatch):
+    c, _, home, backend, _ = stopped
+    lease = enrolled(c, home, backend, "memory")["memory"]
+    opt_out(home)
+
+    def unknown(path):
+        raise RuntimeError("unknown gateway inventory")
+
+    monkeypatch.setattr(c, "require_stopped_windows_gateways", unknown)
+    with pytest.raises(RuntimeError) as failed, c.windows_custody_session(home, backend=backend) as session:
+        session.reset_role("memory")
+    notes = getattr(failed.value, "__notes__", ())
+    assert any("0 confirmed deletion" in note and "no deletion journal" in note for note in notes)
+    assert not (home / "mordred" / "windows-memory.pending.json").exists()
+    with c.windows_custody_session(home, backend=backend) as session:
+        session.validate_lease(lease)
+    assert deletes(backend) == 0
+
+
+@pytest.mark.parametrize("state", ["marker", "sealed", "retained"])
+def test_memory_reset_refusals_name_the_c6_ceremony_not_erasure(stopped, state, request):
+    c, _, home, backend, _ = stopped
+    from mordred_hermes.keyvault.memory_crypto import seal
+
+    if state == "retained":
+        c, home, backend = request.getfixturevalue("retained_memory")
+    else:
+        enrolled(c, home, backend, "memory")
+        opt_out(home)
+        if state == "marker":
+            with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+                tx.create_bytes("memory-vault.marker", b"1\n")
+        else:
+            write_memory(home, "MEMORY.md", seal(b"sealed memory", key=b"K" * 32, name="MEMORY.md"))
+    with c.windows_custody_session(home, backend=backend) as session, pytest.raises(c.CustodyError) as refused:
+        session.reset_role("memory", erase_authorized=True)
+    assert "C6" in str(refused.value)
+    assert "erasure authorization" not in str(refused.value)
+    assert deletes(backend) == 0

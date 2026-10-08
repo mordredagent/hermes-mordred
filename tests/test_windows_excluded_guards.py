@@ -123,6 +123,9 @@ def retained(tmp_path):
     with open_private_directory(mordred / "vault", create=True) as directory, directory.transaction() as tx:
         tx.create_bytes("manifest.0.mvmf", b"retained manifest")
         tx.create_bytes("recovery.mrkv", b"retained recovery")
+    # The generic secret store (_storage layout) is not ported to Windows.
+    with open_private_directory(mordred / "keyvault", create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes("meta.json", b'{"version":1,"keys":{}}')
     (home / ".env").write_bytes(b"API_KEY=plaintext\n")
     (home / "config.yaml").write_bytes(b"model: local\n")
     return home
@@ -136,9 +139,11 @@ def snapshot(home: Path) -> dict[str, bytes | None]:
         home / "mordred" / "env-vault.optout",
         home / "mordred" / "vault" / "manifest.0.mvmf",
         home / "mordred" / "vault" / "recovery.mrkv",
+        home / "mordred" / "keyvault" / "meta.json",
     ]
     state: dict[str, bytes | None] = {str(path): path.read_bytes() if path.exists() else None for path in paths}
     state["vault-names"] = "\n".join(sorted(p.name for p in (home / "mordred" / "vault").iterdir())).encode()
+    state["store-names"] = "\n".join(sorted(p.name for p in (home / "mordred" / "keyvault").iterdir())).encode()
     state["mordred-names"] = "\n".join(sorted(p.name for p in (home / "mordred").iterdir())).encode()
     return state
 
@@ -208,14 +213,50 @@ def _calls(home: Path, backend: FakeBackend, store: FakeAnchorStore):
                 b"blob", "p", seed_phrase="s", pow_bytes=b"x", backend=backend, audit_sink=_sink, home=home
             ),
         ),
+        (
+            "secret_store",
+            "generate",
+            lambda: api.generate("seed", "p", b"pow", b"d" * 32, backend=backend, audit_sink=_sink, home=home),
+        ),
+        (
+            "secret_store",
+            "confirm_generate",
+            lambda: api.confirm_generate(object(), b"d" * 32, backend=backend, audit_sink=_sink, home=home),
+        ),
+        (
+            "secret_store",
+            "encrypt",
+            lambda: api.encrypt("k", b"secret", "purpose", backend=backend, audit_sink=_sink, home=home),
+        ),
+        (
+            "secret_store",
+            "decrypt",
+            lambda: api.decrypt("k", "envelope", "purpose", backend=backend, audit_sink=_sink, home=home),
+        ),
     ]
 
 
 _NAMES = [operation for _, operation, _ in _calls(Path("unused"), FakeBackend(), FakeAnchorStore())]
 
 
+def _reason(capability):
+    return "not-ported-on-windows" if capability == "secret_store" else "excluded-on-windows"
+
+
+@pytest.fixture
+def no_mkdir(monkeypatch):
+    import os
+
+    def mkdir(*args, **kwargs):
+        raise Reached("mkdir")
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    monkeypatch.setattr(os, "makedirs", mkdir)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+
+
 @pytest.mark.parametrize("operation", _NAMES)
-def test_excluded_entry_points_refuse_before_any_mutation(windows, tripwires, retained, operation):
+def test_excluded_entry_points_refuse_before_any_mutation(windows, tripwires, retained, no_mkdir, operation):
     backend, store = FakeBackend(), FakeAnchorStore()
     capability, call = next((cap, fn) for cap, name, fn in _calls(retained, backend, store) if name == operation)
     before = snapshot(retained)
@@ -223,7 +264,7 @@ def test_excluded_entry_points_refuse_before_any_mutation(windows, tripwires, re
         call()
     error = refused.value
     assert isinstance(error, vault.VaultError)
-    assert (error.capability, error.operation, error.reason) == (capability, operation, "excluded-on-windows")
+    assert (error.capability, error.operation, error.reason) == (capability, operation, _reason(capability))
     assert "preserved" in str(error)
     assert tripwires == []
     assert backend.calls == []
@@ -270,9 +311,12 @@ def test_low_level_crypto_and_injected_backends_remain_usable(windows):
 
     backend = FakeBackend()
     backend.generate_enclave_key("k")
-    blob = wrap.wrap_dek(b"D" * 32, "k", backend=backend)
-    assert wrap.unwrap_dek(blob, "k", backend=backend, audit_sink=lambda entry: None) == b"D" * 32
-    assert unseal(seal(b"memory", key=b"K" * 32, name="MEMORY.md"), key=b"K" * 32, name="MEMORY.md") == b"memory"
+    dek, memory_key = b"D" * 32, b"K" * 32
+    blob = wrap.wrap_dek(dek, "k", backend=backend)
+    roundtrip = wrap.unwrap_dek(blob, "k", backend=backend, audit_sink=lambda entry: None) == dek
+    assert roundtrip, "injected-backend MRKW roundtrip failed"
+    sealed = unseal(seal(b"memory", key=memory_key, name="MEMORY.md"), key=memory_key, name="MEMORY.md")
+    assert sealed == b"memory"
 
 
 def test_retained_artifacts_are_reported_as_preserved(fs, windows, retained):  # noqa: F811
@@ -306,3 +350,87 @@ def test_excluded_artifact_inspection_failure_is_not_empty(fs, windows, retained
     with pytest.raises(PrivateFSError) as refused:
         windows.excluded_artifacts(retained)
     assert refused.value.reason == "unsafe"
+
+
+def test_secret_store_layout_and_lifecycle_primitives_refuse_before_any_creation(
+    windows, tmp_path, monkeypatch, no_mkdir
+):
+    reached = []
+    for name in ("ensure_lock_file", "_advisory_file_lock", "_ensure_layout_locked", "_check_dir_mode"):
+
+        def tripwire(*args, name=name, **kwargs):
+            reached.append(name)
+            raise Reached(name)
+
+        monkeypatch.setattr(_storage, name, tripwire)
+    root = tmp_path / "fresh-home" / "mordred" / "keyvault"
+    for operation, call in (
+        ("ensure_layout", lambda: _storage.ensure_layout(root)),
+        ("keyvault_lifecycle_lock", lambda: _storage.keyvault_lifecycle_lock(root).__enter__()),
+        ("keyvault_lock", lambda: _storage.keyvault_lock(root).__enter__()),
+    ):
+        with pytest.raises(windows.KeyvaultUnsupportedOnWindows) as refused:
+            call()
+        assert (refused.value.capability, refused.value.reason) == ("secret_store", "not-ported-on-windows")
+        assert refused.value.operation in (operation, "keyvault_lifecycle_lock")
+    assert reached == []
+    assert not (tmp_path / "fresh-home").exists()
+
+
+def test_secret_store_reset_refuses_before_lock_journal_or_native_deletion(windows, retained, monkeypatch, no_mkdir):
+    import shutil
+
+    from mordred_hermes.wizard.keyvault_cli import reset_keyvault
+
+    def tripwire(*args, **kwargs):
+        raise Reached("reset mutation")
+
+    for name in ("ensure_lock_file", "write_reset_journal", "clear_reset_journal"):
+        monkeypatch.setattr(_storage, name, tripwire)
+    monkeypatch.setattr(shutil, "rmtree", tripwire)
+    backend = FakeBackend()
+    before = snapshot(retained)
+    with pytest.raises(windows.KeyvaultUnsupportedOnWindows) as refused:
+        reset_keyvault(home=retained, backend=backend, assume_yes=True)
+    assert (refused.value.capability, refused.value.reason) == ("secret_store", "not-ported-on-windows")
+    assert backend.calls == []
+    assert snapshot(retained) == before
+
+
+def test_secret_store_layout_unchanged_off_windows(monkeypatch, tmp_path):
+    cap = capability_module()
+    monkeypatch.setattr(cap, "_platform", lambda: "linux")
+    root = tmp_path / "posix-home" / "mordred" / "keyvault"
+    if sys.platform == "win32":
+        pytest.skip("POSIX keyvault layout modes")
+    _storage.ensure_layout(root)
+    assert (root / "meta.json").is_file()
+
+
+def test_guards_stay_importable_without_the_keyvault_crypto_stack(tmp_path):
+    import subprocess
+
+    script = (
+        "import sys\n"
+        "for name in ('argon2', 'blake3', 'cryptography'):\n"
+        "    sys.modules[name] = None\n"
+        "from pathlib import Path\n"
+        "from mordred_hermes.keyvault import _env_reseal, _storage, _windows_capability\n"
+        "home = Path(sys.argv[1])\n"
+        "if sys.platform != 'win32':\n"
+        "    (home / '.env').write_text('A=1\\n')\n"
+        "    assert _env_reseal.reseal_env(home=home, root=home / 'mordred' / 'vault') == 0\n"
+        "    root = home / 'mordred' / 'keyvault'\n"
+        "    root.mkdir(mode=0o700, parents=True)\n"
+        "    with _storage.keyvault_read_lock(root) as present:\n"
+        "        assert present is True\n"
+        "assert issubclass(_windows_capability.KeyvaultUnsupportedOnWindows, Exception)\n"
+        "print('ok')\n"
+    )
+    home = tmp_path / "minimal-home"
+    home.mkdir()
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(home)], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.strip() == "ok"

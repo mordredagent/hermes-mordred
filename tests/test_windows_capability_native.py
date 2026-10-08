@@ -1,8 +1,10 @@
 """Native NTFS capability predicates and flat role reset (C5e).
 
-Real confidential/private admission, binary SID and physical home identity;
-only the CNG boundary and the gateway inventory gate are injected. Host-skipped
-off Windows; selected by the scoped Windows CI job.
+Real confidential/private admission, binary SID and physical home identity.
+Injected seams: the CNG backend, the gateway inventory gate, C4 helper presence
+(``find_winkey_helper``) and C4 structural runtime admission
+(``windows_memory_runtime_admitted``). Host-skipped off Windows; selected by
+the scoped Windows CI job.
 """
 
 import os

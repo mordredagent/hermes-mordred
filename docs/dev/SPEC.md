@@ -2049,30 +2049,38 @@ marker, opt-out, seal or ambiguous pending evidence remains broken, never fresh.
 `WindowsCapability(name, supported, available, reason)` is returned by
 `windows_capabilities(home) -> tuple[WindowsCapability, ...]` in the fixed
 order `memory_custody`, `native_audit`, `telegram_hardware`, `file_vault`,
-`env_config_workspace_seals`, `recovery`, `presence`.
+`env_config_workspace_seals`, `recovery`, `presence`, `secret_store`.
 `windows_capability(home, name) -> WindowsCapability` returns one entry and
 rejects unknown names with `ValueError`. Off Windows both raise
 `PrivateFSError("unsupported", ...)`. There is no aggregate readiness flag,
 and installed-runtime proof (C5c) is not reported here.
 
-The first three names are supported on Windows. The last four always report
-`supported=False, available=False, reason="excluded-on-windows"` and are
-answered without custody reads. For a supported name, `available` is true only
+The first three names are supported on Windows. The next four always report
+`supported=False, available=False, reason="excluded-on-windows"`;
+`secret_store` (the generic `_storage` keyvault: meta, ciphertexts, digests)
+is not an excluded capability but has no checked Windows port yet and reports
+`supported=False, available=False, reason="not-ported-on-windows"`. All of
+these are answered without custody reads. For a supported name, `available` is true only
 with reason `enrolled`. It derives from C4 helper presence (the same
 `find_winkey_helper` selection custody uses, never a probe), the current
 interpreter's structural C4 admission for memory
 (`windows_memory_runtime_admitted`, no subprocess) and one load-only
 `windows_custody_session(home)` reading `role_status(role)`, `memory_state()`
-and `validate_lease(...)`. No native backend is constructed and nothing is
-generated, unwrapped or deleted; the checked lock protocol may create its
-permanent lock files as other checked readers do. Reasons are evaluated in
+and `validate_lease(...)`. That session joins a `canonical_session(...,
+scope="policy", blocking=False)`: predicates never wait for a lock. A home,
+Mordred or in-process canonical lock held by another thread or process yields
+`busy`, reported as `custody-uncertain`. No native backend is constructed and
+nothing is generated, unwrapped or deleted; the checked lock protocol may
+create its permanent lock files as other checked readers do. Reasons are evaluated in
 this order: custody failures (`custody-unsafe` for unsafe, access-denied or
 unsupported admission; `custody-uncertain` for an unresolved role journal,
 uncertain/io/busy outcomes or a pending policy publication; `custody-broken`
 for retained evidence that does not validate for this physical profile and
 token, such as a copied or malformed manifest, lost wrapper or orphan
 marker/journal), then `helper-missing` / `helper-uncertain`, then
-`runtime-not-admitted` (memory only), then `not-enrolled`. Any other exception
+`runtime-not-admitted` or `runtime-uncertain` (memory only; an `OSError` while
+checking structural admission is uncertain, still unavailable), then
+`not-enrolled`. Any other exception
 propagates; no failure is reported as available or treated as empty.
 
 Excluded public entry points first call
@@ -2083,10 +2091,22 @@ before `_storage`, anchor/backend resolution, lock acquisition, native use or
 plaintext capture/deletion. Guarded: `vault.init_vault`, `vault.open_vault`,
 `OpenVault.enroll_file` and `OpenVault.unenroll_file` (`file_vault`);
 `vault.recover_vault`, `vault.recover_to_device`, `vault.change_passphrase`,
-`api.export_backup` and `api.import_backup` (`recovery`);
+`api.export_backup` and `api.import_backup` (`recovery`: file-vault master
+and keyvault cross-device recovery; memory plaintext capture/export is a
+separate C5b/C6 surface);
 `_runtime_env.inject_vault_env`, `_config_bootstrap.materialize_config`,
 `_config_bootstrap.reseal_config` and `_env_reseal.reseal_env`
-(`env_config_workspace_seals`). The guard is a no-op on POSIX. The startup
+(`env_config_workspace_seals`). The unported secret store refuses through
+`refuse_unported_on_windows("secret_store", operation)` with the same
+exception and `reason == "not-ported-on-windows"`: `api.generate`,
+`api.confirm_generate`, `api.encrypt` and `api.decrypt` refuse before any
+`_storage` call or mkdir, and `_storage.ensure_layout` and
+`_storage.keyvault_lifecycle_lock` (hence `keyvault_lock`) refuse on Windows
+as defence in depth, so no `<home>/mordred` directory or lock file is created
+with an unchecked ACL; the wizard's secret-store reset therefore refuses at its
+first `_storage` lifecycle step, before any journal, native deletion or tree
+removal. `prepare_generate` stays a pure in-memory step. The guards are no-ops
+on POSIX. The startup
 and session hooks `install_vault_env_decrypt`, `install_config_decrypt`,
 `install_env_write_guard` and `reseal_stray_env_if_present` keep their existing
 inert non-macOS behavior and never-raise contracts: they return before any
@@ -2097,7 +2117,8 @@ memory AEAD, file containers) and injected test backends remain usable.
 vault/encryption commands to this refusal before any native key generation.
 
 `excluded_artifacts(home) -> tuple[ExcludedArtifactReport, ...]` lists
-retained `<home>/mordred` entries through the checked canonical Mordred loan:
+retained `<home>/mordred` entries through a non-blocking checked canonical
+Mordred loan (a held lock raises `PrivateFSError` `busy`):
 `vault` (`file_vault`), `env-vault.optout` (`env_seal_optout`) and
 `config-vault.marker` (`config_seal_marker`), each reported as
 `ExcludedArtifactReport(kind, path, present=True)`. A checked absent home or
@@ -2112,17 +2133,22 @@ normal revalidation. `reset_role(role, *, erase_authorized=False) ->
 RoleReset(role, deleted)` deletes every owned generation of exactly that role.
 Before the first journal it validates the complete manifest and the syntax of
 every role journal, then refuses absent ownership, an unresolved journal for
-that role, a role with no owned generation, any audit or Telegram reset and any
-retained generation without `erase_authorized`, any retained memory
-generation, and any memory marker. It then deletes one generation at a time
-through `delete_role`, retained first and current last, reusing its
-intent/deleted journals and memory guards (explicit opt-out, no seal or broken
-seal, known-stopped gateways). `erase_authorized` never authorizes deleting
-memory custody while seals remain. `RoleReset.deleted` records the confirmed
-generations. A failure propagates with its original type and commit state plus
-a note naming the confirmed count; the failed generation keeps its journal, so
-an ambiguous native result or a crash between native deletion and the
-deleted-phase commit refuses the next reset until explicit reconciliation.
+that role and a role with no owned generation. Audit and Telegram reset
+require `erase_authorized`. Memory reset ignores `erase_authorized` and
+refuses, pointing to the C6 ceremony, any retained memory generation, any
+memory marker and any seal or broken seal; a lost wrapper fails closed through
+`memory_state()`. It then deletes one generation at a time through
+`delete_role`, retained first and current last, reusing its intent/deleted
+journals and memory guards (explicit opt-out, known-stopped gateways).
+`RoleReset.deleted` records the confirmed generations. A failure propagates
+with its original type and commit state plus a note naming the confirmed
+count. If the failed generation's intent journal was written it is retained,
+so an ambiguous native result or a crash between native deletion and the
+deleted-phase commit refuses the next reset until explicit reconciliation; a
+failure before that journal (for example an unknown gateway inventory) writes
+no journal and leaves the generation owned. Audit and Telegram reset do not
+consult the gateway inventory; C6 and C7b callers must gate them on their own
+consumers. Predicates are non-blocking; reset keeps blocking custody locks.
 Memory reset preserves audit and Telegram roles; audit or Telegram reset
 preserves the other roles. Reset never decrypts or deletes memory files,
 performs no recursive deletion and keeps the permanent directory and its lock.

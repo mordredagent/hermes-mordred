@@ -1206,8 +1206,12 @@ and MRKW crypto, injecting only the native backend, principal and platform
 admission. Fault injectors fail if an excluded entry point reaches `_storage`,
 anchor or backend resolution, a lock, native wrap/unwrap or plaintext capture.
 Native cases use an inherited-safe task-owned NTFS home, its case alias and a
-copied exact-private home; only CNG and the gateway inventory gate are
-injected. They prove checked admission and refusal, not TPM availability.
+copied exact-private home. Their injected seams are the CNG backend, the
+gateway inventory gate, C4 helper presence and C4 structural runtime
+admission; filesystem admission, SID and physical identity are real. They
+prove checked admission and refusal, not TPM availability. Held-lock cases
+use a real lock holder in another thread or process and require predicates
+to return `custody-uncertain` promptly instead of waiting.
 
 Explicit native rerun in the selected source or installed-wheel environment
 (after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):

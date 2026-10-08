@@ -536,23 +536,36 @@ class WindowsCustodySession:
         leases = status.retained + (() if status.current is None else (status.current,))
         if not leases:
             raise CustodyError("custody role has no owned generation to reset")
-        if (status.retained or role != "memory") and not erase_authorized:
-            raise CustodyError("audit, Telegram or retained generations require explicit erasure authorization")
         if role == "memory":
-            if status.retained:
-                # Flat memory owns one wrapper; retained memory records are unexpected.
-                raise CustodyError("memory custody has retained generations; refusing reset")
-            if self.memory_state().marker is not None:
-                raise CustodyError("memory must be explicitly disabled before reset")
+            self._memory_reset_guard(status)
+        elif not erase_authorized:
+            raise CustodyError("audit or Telegram reset requires explicit erasure authorization")
         return leases
+
+    def _memory_reset_guard(self, status: RoleStatus) -> None:
+        """Memory reset never crypto-shreds; ``erase_authorized`` relaxes nothing here."""
+        if status.retained:
+            # Flat memory owns one wrapper; retained memory records are unexpected.
+            raise CustodyError("memory reset refuses unexpected retained memory generations; reconcile them in C6")
+        # ``memory_state`` fails closed on a lost wrapper or retained evidence.
+        if self.memory_state().marker is not None:
+            raise CustodyError("memory reset refuses while a memory marker exists; disable memory through C6 first")
+        try:
+            self._validate_memory(None)
+        except CustodyError as exc:
+            raise CustodyError(
+                "memory reset refuses while sealed memory remains; decrypt it through the C6 disable ceremony first"
+            ) from exc
 
     def reset_role(self, role: Role, *, erase_authorized: bool = False) -> RoleReset:
         """Delete every owned generation of exactly one role through ``delete_role``.
 
         All refusals happen before the first deletion journal. Each generation
-        keeps its own journal, so an ambiguous native result stays unresolved
-        and blocks the next reset. Memory files are never decrypted or deleted;
-        other roles and the permanent directory lock are untouched.
+        uses its own ``delete_role`` journal, so an ambiguous native result
+        stays unresolved and blocks the next reset; a failure before that
+        journal leaves the generation owned. Memory files are never decrypted
+        or deleted; other roles and the permanent directory lock are untouched.
+        Audit/Telegram reset does not consult the gateway inventory (callers gate).
         """
         leases = self._reset_leases(role, erase_authorized=erase_authorized)
         deleted: list[str] = []
@@ -562,7 +575,8 @@ class WindowsCustodySession:
             except BaseException as exc:
                 exc.add_note(
                     f"Windows {role} custody reset stopped after {len(deleted)} confirmed deletion(s); "
-                    "the failed generation keeps its journal for explicit reconciliation"
+                    "if the failed generation's intent journal was written it is retained for explicit "
+                    "reconciliation, otherwise no deletion journal was written and that generation remains owned"
                 )
                 raise
             deleted.append(lease.generation)

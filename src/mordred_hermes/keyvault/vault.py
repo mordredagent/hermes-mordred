@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING
 
 from . import anchor, file_container, manifest, vault_master
 from ._storage import atomic_write, ensure_lock_file, keyvault_lock, safe_read
+from ._vault_errors import VaultError as VaultError
 from .anchor import AnchorStore
 from .kek import MasterKey, open_master_key
 from .wrap import NativeBackend
@@ -75,21 +76,6 @@ _RECOVERY_NAME = "recovery.mrkv"
 _LOCK_NAME = ".lock"
 _BLOBS_DIR = "blobs"
 _DIR_MODE = 0o700
-
-
-class VaultError(Exception):
-    """A vault operation failed closed.
-
-    Raised for vault-level faults: an uninitialized / already-initialized
-    root, a missing authoritative manifest, a name that is not enrolled, a
-    ciphertext blob that is missing or does not match its content address,
-    an AEAD failure, or use of a closed vault. Distinct from
-    :class:`mordred_hermes.keyvault.anchor.AnchorError` (freshness-pin
-    failures) and :class:`mordred_hermes.keyvault.manifest.ManifestError`
-    (manifest authentication failures), which propagate as themselves so a
-    caller can tell a tamper attempt from an operational error — but all
-    three are hard failures that prevent the vault from opening or reading.
-    """
 
 
 def _refuse_excluded(capability: ExcludedCapability, operation: str) -> None:

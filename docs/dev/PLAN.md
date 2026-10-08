@@ -1411,3 +1411,18 @@ resolution, locks, native wrap and plaintext capture. Host-skipped
 alias and copied-home refusal for capabilities and reset. All four join the
 scoped Windows CI job. Real CNG, Windows 11 and C6 user routing remain
 separate gates; capability truthfulness does not establish product support.
+
+Fix round 1 (review rulings): capability predicates and `excluded_artifacts`
+open `canonical_session(..., blocking=False)` and join custody through
+`canonical=`, so a held lock is reported (`custody-uncertain` / `busy`) rather
+than awaited; reset keeps blocking locks. The generic `_storage` secret store
+(`api.generate`, `confirm_generate`, `encrypt`, `decrypt` and the wizard
+store reset) is not ported to Windows and is not an excluded capability: it
+reports `secret_store` / `not-ported-on-windows` and refuses before any
+`_storage` call or mkdir, with `_storage.ensure_layout` and
+`keyvault_lifecycle_lock` refusing on Windows as defence in depth.
+`export_backup` / `import_backup` stay under the excluded `recovery`
+capability. Memory reset refusals name the C6 ceremony and never relax with
+erasure authorization; the reset failure note no longer claims a journal that
+was never written. A future Windows secret-store port needs its own checked
+`_storage` layout design before these refusals are lifted.
