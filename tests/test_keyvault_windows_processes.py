@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from typing import get_args
 
 import psutil
 import pytest
 
+import mordred_hermes._private_fs as fs
+from mordred_hermes._private_fs import FileIdentity, FileMetadata, PrivateFSError
+from mordred_hermes._private_fs._types import Reason
 from mordred_hermes.keyvault import _runtime_probe as runtime
 
 
@@ -42,7 +47,26 @@ class Process:
         return self.value("born", self.born)
 
 
-def scan(monkeypatch, tmp_path, processes, *, replacement=None, hints=()):
+def never_inspected(path):
+    raise AssertionError("this record must never reach managed image inspection")
+
+
+class Managed:
+    """Injected managed-image capability: records every submitted image path."""
+
+    def __init__(self, outcome=None):
+        self.outcome, self.calls = outcome, []
+
+    def __call__(self, path):
+        self.calls.append(path)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        if callable(self.outcome):
+            return self.outcome(path)
+        return FileMetadata(FileIdentity(7, b"image"), 1, 0)
+
+
+def scan(monkeypatch, tmp_path, processes, *, replacement=None, hints=(), managed=never_inspected):
     from mordred_hermes.keyvault import _windows_processes as win
 
     current = Process(os.getpid(), argv=["python.exe", "-m", "pytest"])
@@ -53,6 +77,8 @@ def scan(monkeypatch, tmp_path, processes, *, replacement=None, hints=()):
     )
     monkeypatch.setattr(win, "_read_state_pid", lambda home: None)
     monkeypatch.setattr(win, "_gateway_python", lambda exe: Path(exe))
+    # The module-level seam replaces only the shared capability, never its policy.
+    monkeypatch.setattr(win, "inspect_managed_installation_image", managed, raising=False)
     return win.inspect_windows_gateway_runtimes(tmp_path, hinted_pids=hints)
 
 
@@ -222,6 +248,56 @@ def test_native_gateway_child_is_discovered_without_cim(tmp_path):
     runtime.require_stopped_windows_gateways(tmp_path)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="ordinary-user Windows process acceptance")
+def test_native_managed_image_submissions_are_recorded(tmp_path, monkeypatch, record_property, capsys):
+    """Record which denied images reached the real capability and its results.
+
+    Only sanitized image basenames and classified refusal codes are emitted,
+    one ``gateway-inventory-image`` line per distinct outcome, for comparison
+    with the controller's managed-image API probe log.
+    """
+    import json
+    import ntpath
+    from collections import Counter
+
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    real = win.inspect_managed_installation_image
+    outcomes: Counter[tuple[str, str]] = Counter()
+
+    def recording(path):
+        image = ntpath.basename(os.fspath(path))
+        try:
+            result = real(path)
+        except PrivateFSError as exc:
+            outcomes[(image, f"refused:{exc.reason}:{exc.operation}")] += 1
+            raise
+        except (OSError, ValueError) as exc:
+            outcomes[(image, f"error:{type(exc).__name__}")] += 1
+            raise
+        outcomes[(image, "admitted")] += 1
+        return result
+
+    monkeypatch.setattr(win, "inspect_managed_installation_image", recording)
+    inventory = win.inspect_windows_gateway_runtimes(tmp_path)
+    lines = [
+        json.dumps({"image": image, "result": result, "count": count}, sort_keys=True)
+        for (image, result), count in sorted(outcomes.items())
+    ]
+    summary = json.dumps({"state": inventory.state, "reasons": list(inventory.reasons)}, sort_keys=True)
+    record_property("gateway_inventory_images", "\n".join(lines))
+    record_property("gateway_inventory_summary", summary)
+    with capsys.disabled():
+        for line in lines:
+            print("gateway-inventory-image " + line, flush=True)
+        print("gateway-inventory-summary " + summary, flush=True)
+    # Plausible interpreters, Hermes/Desktop images and generic hosts never reach admission.
+    assert not [image for image, _ in outcomes if win._PLAUSIBLE.matches(image)]
+    if any(result != "admitted" for _, result in outcomes):
+        assert inventory.state == "unknown"
+        assert any(reason.endswith(":image-unverified") for reason in inventory.reasons)
+
+
 def test_explicit_probe_python_is_validated_on_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime.sys, "platform", "win32")
     bogus = tmp_path / "python.exe"
@@ -316,66 +392,165 @@ def test_custom_python_launcher_cannot_hide_gateway(monkeypatch, tmp_path):
     assert scan(monkeypatch, tmp_path, [process]).runtimes
 
 
+SYSTEM32 = "C:\\Windows\\System32\\"
+
+
+def denied(name, image, pid=42):
+    return Process(pid, name=name, argv=[image], denied="owner")
+
+
+def test_fixed_os_image_list_and_system_directory_lookup_are_removed():
+    import inspect
+
+    from mordred_hermes.keyvault import _windows_processes as win
+
+    for removed in ("_PROTECTED_OS_IMAGES", "_system_directory", "_protected_os_image"):
+        assert not hasattr(win, removed), removed
+    assert "GetSystemDirectoryW" not in inspect.getsource(win)
+    assert win.inspect_managed_installation_image is fs.inspect_managed_installation_image
+
+
+def test_system32_image_is_classified_by_managed_capability_not_by_name(monkeypatch, tmp_path):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied("svchost.exe", SYSTEM32 + "svchost.exe")], managed=managed)
+    assert found.state == "known" and not found.runtimes
+    assert managed.calls == [SYSTEM32 + "svchost.exe"]
+
+
+def test_system32_basename_refused_by_capability_remains_unknown(monkeypatch, tmp_path):
+    managed = Managed(PrivateFSError("unsafe", "managed_image_acl"))
+    found = scan(monkeypatch, tmp_path, [denied("svchost.exe", SYSTEM32 + "svchost.exe")], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:image-unverified",)
+    assert managed.calls == [SYSTEM32 + "svchost.exe"]
+
+
 @pytest.mark.parametrize(
     "name, image",
     [
-        ("Registry", "Registry"),
-        ("MemCompression", "MemCompression"),
-        ("LogonUI.exe", r"C:\Windows\System32\LogonUI.exe"),
-        ("svchost.exe", r"C:\Windows\System32\svchost.exe"),
-        ("csrss.exe", r"C:\Windows\System32\csrss.exe"),
-        ("wininit.exe", r"C:\Windows\System32\wininit.exe"),
-        ("services.exe", r"C:\Windows\System32\services.exe"),
+        ("python3.13.exe", "C:\\Program Files\\Python313\\python3.13.exe"),
+        ("python.exe", SYSTEM32 + "python.exe"),
+        ("pythonw.exe", "C:\\Program Files\\Python313\\pythonw.exe"),
+        ("Python3.12.EXE", "C:\\Program Files\\Python312\\Python3.12.EXE"),
+        ("py.exe", "C:\\Windows\\py.exe"),
+        ("pyw.exe", "C:\\Windows\\pyw.exe"),
+        ("hermes.exe", SYSTEM32 + "hermes.exe"),
+        ("Hermes Desktop.exe", "C:\\Program Files\\Hermes\\Hermes Desktop.exe"),
+        ("mordred-hermes-winkey.exe", "C:\\Program Files\\Mordred\\mordred-hermes-winkey.exe"),
+        ("cmd.exe", SYSTEM32 + "cmd.exe"),
+        ("powershell.exe", SYSTEM32 + "WindowsPowerShell\\v1.0\\powershell.exe"),
+        ("powershell_ise.exe", SYSTEM32 + "WindowsPowerShell\\v1.0\\powershell_ise.exe"),
+        ("pwsh.exe", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+        ("rundll32.exe", SYSTEM32 + "rundll32.exe"),
+        ("mshta.exe", SYSTEM32 + "mshta.exe"),
+        ("wscript.exe", SYSTEM32 + "wscript.exe"),
+        ("cscript.exe", SYSTEM32 + "cscript.exe"),
+        # Either the reported name or the image basename makes a record plausible.
+        ("svchost.exe", SYSTEM32 + "pythonw.exe"),
+        ("python.exe", SYSTEM32 + "svchost.exe"),
     ],
 )
-def test_stable_protected_os_image_does_not_make_scan_unknown(monkeypatch, tmp_path, name, image):
-    from mordred_hermes.keyvault import _windows_processes as win
+def test_denied_plausible_basename_is_unknown_even_when_capability_would_admit(monkeypatch, tmp_path, name, image):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:owner-denied-plausible",)
+    assert managed.calls == []
 
-    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
-    found = scan(monkeypatch, tmp_path, [Process(name=name, argv=[image], denied="owner")])
+
+@pytest.mark.parametrize(
+    "name, image",
+    [
+        ("svchost.exe", SYSTEM32 + "svchost.exe"),
+        ("LogonUI.exe", SYSTEM32 + "LogonUI.exe"),
+        ("csrss.exe", SYSTEM32 + "csrss.exe"),
+        ("conhost.exe", SYSTEM32 + "conhost.exe"),
+        ("sshd.exe", SYSTEM32 + "OpenSSH\\sshd.exe"),
+        ("MicrosoftEdgeUpdate.exe", "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe"),
+        ("amazon-ssm-agent.exe", "C:\\Program Files\\Amazon\\SSM\\amazon-ssm-agent.exe"),
+        (
+            "MsMpEng.exe",
+            "C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.26080.4-0\\MsMpEng.exe",
+        ),
+        ("サービス.exe", "C:\\Program Files\\日本 space\\サービス.exe"),
+    ],
+)
+def test_denied_noncandidate_image_admitted_by_capability_is_outside_supported_set(monkeypatch, tmp_path, name, image):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], managed=managed)
+    assert found.state == "known" and not found.runtimes and not found.reasons
+    assert managed.calls == [image]
+
+
+@pytest.mark.parametrize("name", ["Registry", "MemCompression"])
+def test_literal_kernel_pseudo_image_is_outside_supported_set_without_capability(monkeypatch, tmp_path, name):
+    found = scan(monkeypatch, tmp_path, [denied(name, name)])
     assert found.state == "known" and not found.runtimes
 
 
 @pytest.mark.parametrize(
     "name, image",
     [
-        ("python.exe", r"C:\Windows\System32\python.exe"),
-        ("hermes.exe", r"C:\Windows\System32\hermes.exe"),
-        ("Hermes Desktop.exe", r"C:\Windows\System32\Hermes Desktop.exe"),
-        ("svchost.exe", r"C:\Users\alice\svchost.exe"),
-        ("Registry", r"C:\Users\alice\Registry"),
-        ("unknown.exe", r"C:\Windows\System32\unknown.exe"),
-        ("svchost.exe", r"C:\Windows\System32-other\svchost.exe"),
-        ("powershell.exe", r"C:\Windows\System32\powershell.exe"),
-        ("cmd.exe", r"C:\Windows\System32\cmd.exe"),
-        ("rundll32.exe", r"C:\Windows\System32\rundll32.exe"),
-        ("mshta.exe", r"C:\Windows\System32\mshta.exe"),
-        ("wscript.exe", r"C:\Windows\System32\wscript.exe"),
-        ("cscript.exe", r"C:\Windows\System32\cscript.exe"),
+        ("svchost.exe", "C:\\Users\\alice\\svchost.exe"),
+        ("Registry", "C:\\Users\\alice\\Registry"),
+        ("Registry", "registry"),
+        ("unknown.exe", SYSTEM32 + "unknown.exe"),
+        ("svchost.exe", "C:\\Windows\\System32-other\\svchost.exe"),
     ],
 )
-def test_denied_plausible_or_unrecognized_image_remains_unknown(monkeypatch, tmp_path, name, image):
-    from mordred_hermes.keyvault import _windows_processes as win
-
-    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
-    found = scan(monkeypatch, tmp_path, [Process(name=name, argv=[image], denied="owner")])
-    assert found.state == "unknown"
-
-
-def test_protected_image_hint_is_still_unknown(monkeypatch, tmp_path):
-    from mordred_hermes.keyvault import _windows_processes as win
-
-    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
-    p = Process(name="svchost.exe", argv=[r"C:\Windows\System32\svchost.exe"], denied="owner")
-    assert scan(monkeypatch, tmp_path, [p], hints=(42,)).state == "unknown"
+def test_denied_unrecognized_image_refused_by_capability_remains_unknown(monkeypatch, tmp_path, name, image):
+    managed = Managed(PrivateFSError("unsafe", "managed_image_acl"))
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:image-unverified",)
+    assert managed.calls == [image]
 
 
+@pytest.mark.parametrize("reason", get_args(Reason))
+def test_every_capability_refusal_reason_keeps_record_unknown(monkeypatch, tmp_path, reason):
+    managed = Managed(PrivateFSError(reason, "TOP_SECRET", native_code=5))
+    found = scan(monkeypatch, tmp_path, [denied("agent.exe", "C:\\Program Files\\Vendor\\agent.exe")], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:image-unverified",)
+    assert "TOP_SECRET" not in str(found)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("TOP_SECRET"), PermissionError("TOP_SECRET"), FileNotFoundError("TOP_SECRET"), ValueError("TOP_SECRET")],
+    ids=["OSError", "PermissionError", "FileNotFoundError", "ValueError"],
+)
+def test_capability_query_failure_keeps_record_unknown(monkeypatch, tmp_path, error):
+    managed = Managed(error)
+    found = scan(monkeypatch, tmp_path, [denied("agent.exe", "C:\\Program Files\\Vendor\\agent.exe")], managed=managed)
+    assert found.state == "unknown" and found.reasons == ("pid=42:image-unverified",)
+    assert "TOP_SECRET" not in str(found)
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "\\Device\\HarddiskVolume3\\Program Files\\Vendor\\agent.exe",
+        "\\\\?\\C:\\Program Files\\Vendor\\agent.exe",
+        "\\\\server\\share\\agent.exe",
+    ],
+    ids=["nt-device", "verbatim", "unc"],
+)
+def test_non_dos_image_path_is_refused_by_the_real_capability_and_unknown(monkeypatch, tmp_path, image):
+    from mordred_hermes._private_fs import _windows_managed
+
+    def no_native(*args, **kwargs):
+        raise AssertionError("non-DOS image paths are refused before native use")
+
+    # Exercise the real shared capability's Windows path parser on every host.
+    monkeypatch.setattr(fs, "_platform", "nt")
+    monkeypatch.setattr(_windows_managed, "get_api", no_native)
+    found = scan(monkeypatch, tmp_path, [denied("agent.exe", image)], managed=fs.inspect_managed_installation_image)
+    assert found.state == "unknown" and found.reasons == ("pid=42:image-unverified",)
+
+
+@pytest.mark.parametrize(
+    "name, image", [("svchost.exe", SYSTEM32 + "svchost.exe"), ("Registry", "Registry")], ids=["admitted", "kernel"]
+)
 @pytest.mark.parametrize("changed", ["born", "name", "exe"])
-def test_protected_image_identity_change_is_unknown(monkeypatch, tmp_path, changed):
-    from mordred_hermes.keyvault import _windows_processes as win
-
-    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32", raising=False)
-    p = Process(name="svchost.exe", argv=[r"C:\Windows\System32\svchost.exe"], denied="owner")
+def test_excluded_image_identity_change_is_unknown(monkeypatch, tmp_path, changed, name, image):
+    p = denied(name, image)
     calls = 0
     field = {"born": "create_time", "name": "name", "exe": "exe"}[changed]
     original = getattr(p, field)
@@ -388,15 +563,13 @@ def test_protected_image_identity_change_is_unknown(monkeypatch, tmp_path, chang
         return original()
 
     setattr(p, field, read)
-    assert scan(monkeypatch, tmp_path, [p]).state == "unknown"
+    found = scan(monkeypatch, tmp_path, [p], managed=Managed())
+    assert found.state == "unknown" and found.reasons == ("pid=42:process-changed",)
 
 
 @pytest.mark.parametrize("field", ["create_time", "name", "exe"])
-def test_protected_image_denied_recheck_remains_unknown(monkeypatch, tmp_path, field):
-    from mordred_hermes.keyvault import _windows_processes as win
-
-    monkeypatch.setattr(win, "_system_directory", lambda: r"C:\Windows\System32")
-    p = Process(name="svchost.exe", argv=[r"C:\Windows\System32\svchost.exe"], denied="owner")
+def test_admitted_image_denied_recheck_remains_unknown(monkeypatch, tmp_path, field):
+    p = denied("svchost.exe", SYSTEM32 + "svchost.exe")
     calls = 0
     original = getattr(p, field)
 
@@ -404,19 +577,86 @@ def test_protected_image_denied_recheck_remains_unknown(monkeypatch, tmp_path, f
         nonlocal calls
         calls += 1
         if calls > 1:
-            raise psutil.AccessDenied(p.pid)
+            raise psutil.AccessDenied(p.pid, name="TOP_SECRET")
         return original()
 
     setattr(p, field, read)
-    assert scan(monkeypatch, tmp_path, [p]).state == "unknown"
+    found = scan(monkeypatch, tmp_path, [p], managed=Managed())
+    assert found.state == "unknown" and found.reasons == ("pid=42:process-changed",)
+    assert "TOP_SECRET" not in str(found)
 
 
-@pytest.mark.parametrize("image", [r"D:\Windows\System32\svchost.exe", r"C:\Windows\System32\svchost.exe"])
-def test_system_directory_failure_never_uses_environment(monkeypatch, tmp_path, image):
+def test_admitted_image_that_exits_before_recheck_is_absent(monkeypatch, tmp_path):
+    p = denied("svchost.exe", SYSTEM32 + "svchost.exe")
+    managed = Managed(lambda path: setattr(p, "gone", True) or FileMetadata(FileIdentity(7, b"image"), 1, 0))
+    found = scan(monkeypatch, tmp_path, [p], managed=managed)
+    assert found.state == "known" and not found.runtimes and managed.calls == [SYSTEM32 + "svchost.exe"]
+
+
+@pytest.mark.parametrize(
+    "name, image", [("svchost.exe", SYSTEM32 + "svchost.exe"), ("Registry", "Registry"), ("pwsh.exe", "pwsh.exe")]
+)
+def test_hinted_pid_never_reaches_managed_image_capability(monkeypatch, tmp_path, name, image):
+    managed = Managed()
+    found = scan(monkeypatch, tmp_path, [denied(name, image)], hints=(42,), managed=managed)
+    assert found.state == "unknown" and managed.calls == []
+
+
+@pytest.mark.parametrize(
+    "process",
+    [
+        Process(name="svchost.exe", argv=[SYSTEM32 + "svchost.exe", "-k", "netsvcs"]),
+        Process(name="agent.exe", argv=["C:\\Program Files\\Vendor\\agent.exe", "gateway", "run"]),
+        Process(argv=["python.exe", "-m", "pytest"]),
+        Process(owner="HOST\\bob", name="svchost.exe", argv=[SYSTEM32 + "svchost.exe"]),
+    ],
+    ids=["owned-system32", "owned-gateway-pair", "owned-python", "foreign"],
+)
+def test_positively_owned_process_never_reaches_managed_image_capability(monkeypatch, tmp_path, process):
+    # The default seam raises if called: owned records keep the full argv scan.
+    found = scan(monkeypatch, tmp_path, [process])
+    assert found.state == "known"
+    gateway = process.owner == "HOST\\alice" and "gateway" in process.argv
+    assert [p.pid for p in found.runtimes] == ([42] if gateway else [])
+
+
+def test_owned_gateway_with_ordinary_host_image_is_still_found(monkeypatch, tmp_path):
+    process = Process(name="svchost.exe", argv=[SYSTEM32 + "svchost.exe", "gateway", "run"])
+    assert [p.pid for p in scan(monkeypatch, tmp_path, [process]).runtimes] == [42]
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_deadline_exhaustion_during_capability_calls_is_inventory_limit(monkeypatch, tmp_path, count):
     from mordred_hermes.keyvault import _windows_processes as win
 
-    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
-    monkeypatch.setenv("WINDIR", r"C:\Windows")
-    monkeypatch.setattr(win, "_system_directory", lambda: None)
-    p = Process(name="svchost.exe", argv=[image], denied="owner")
-    assert scan(monkeypatch, tmp_path, [p]).state == "unknown"
+    now = [100.0]
+    monkeypatch.setattr(win, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def slow(path):
+        now[0] += 11.0
+        return FileMetadata(FileIdentity(7, b"image"), 1, 0)
+
+    managed = Managed(slow)
+    processes = [denied("svchost.exe", SYSTEM32 + "svchost.exe", pid) for pid in range(100, 100 + count)]
+    found = scan(monkeypatch, tmp_path, processes, managed=managed)
+    assert found.state == "unknown" and any(r.endswith("inventory-limit") for r in found.reasons)
+    # The admission returned after the deadline is not used, and no later PID is inspected.
+    assert len(managed.calls) == 1
+
+
+def test_capability_calls_count_toward_the_entry_bound(monkeypatch, tmp_path):
+    managed = Managed()
+    processes = [denied("svchost.exe", SYSTEM32 + "svchost.exe", pid) for pid in range(100, 100 + 4097)]
+    found = scan(monkeypatch, tmp_path, processes, managed=managed)
+    assert found.state == "unknown" and found.reasons == ("scan:inventory-limit",)
+    assert len(managed.calls) == 4096
+
+
+@pytest.mark.parametrize("image", ["D:\\Windows\\System32\\svchost.exe", SYSTEM32 + "svchost.exe"])
+def test_environment_never_selects_or_admits_an_image(monkeypatch, tmp_path, image):
+    monkeypatch.setenv("SYSTEMROOT", "C:\\Windows")
+    monkeypatch.setenv("WINDIR", "C:\\Windows")
+    managed = Managed(PrivateFSError("unsafe", "managed_image_acl"))
+    found = scan(monkeypatch, tmp_path, [denied("svchost.exe", image)], managed=managed)
+    # The capability receives psutil's reported image, never an environment root.
+    assert found.state == "unknown" and managed.calls == [image]
