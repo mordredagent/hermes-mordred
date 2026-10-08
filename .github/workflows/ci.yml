@@ -88,6 +88,8 @@ jobs:
           tests/test_audit_session_windows.py
           tests/test_wizard_config_windows.py tests/test_wizard_config_native_windows.py
           tests/test_windows_custody_profile.py tests/test_windows_custody.py
+          tests/test_windows_encrypted_audit.py tests/test_windows_encrypted_audit_processes.py
+          tests/test_windows_encrypted_audit_windows.py
           tests/test_windows_privacy_policy.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |

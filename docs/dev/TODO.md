@@ -331,6 +331,9 @@ Implementation and acceptance remain open:
 - [ ] C5c: reuse C4 runtime selection, implement known/unknown process inventory,
   and require actual installed-runtime memory proof without a force override.
 - [ ] C5d: independent audit role leases and C7a encrypted writer integration.
+  The opt-in provider/writer/reader, exact retained-selector lookup and checked
+  publication receipts are implemented. Independent review, native source/wheel
+  CNG and Windows 11 acceptance remain; C7b factory/CLI adoption is separate.
 - [ ] C5e: excluded file-vault refusal and flat role reset/deletion journals.
 - [ ] C6: explicit native-custody/audit initialization and wizard memory flows;
   preserve separate C7b privacy/CLI and C10 Telegram migrations.

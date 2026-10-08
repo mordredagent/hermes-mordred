@@ -1171,6 +1171,33 @@ installation-to-use checks. Native memory/audit evidence does not establish
 Telegram account/model, Desktop or recursive uninstall acceptance.
 
 
+### Windows encrypted audit adapter (C5d)
+
+The keyvault-only opt-in implementation is `keyvault/windows_audit.py`, sharing
+MRAL header serialization, validation, AAD and entry crypto with
+`log_encryption.py`; its Unix writer/decrypt interfaces stay unchanged. Public
+provider/writer/read signatures are frozen in SPEC.md §Windows dedicated custody
+and memory lifecycle. The only custody addition is exact current/retained
+`lease_for_native`; no file-vault or memory storage mutation is needed.
+
+Validate current generation before taking the writer mutex and C7a session.
+Default storage borrows C2's protected loan; custom preexisting directories use
+nonblocking child locks and immediate publication receipts for create, append,
+rename, delete, promoted generic post-publication failures and child cleanup.
+Wipe cached ownership on failures; uncertain writes and lost active files poison
+the instance permanently. Read bounded snapshots before native unwrap callbacks,
+retain lifecycle through authentication, and require explicit custody borrowing
+for synchronous nested appends. Do not resolve providers or prompt under audit
+locks, provision keys on lookup failure, or use a retry as reconciliation.
+
+Portable real-file/MRKW/MRAL suites cover independent roles, retained history
+across memory purge, copied/wrong-home/header selectors, stale leases, active
+identity drift, caught uncertainty, bounded/malformed crypto, explicit nested
+callbacks and independent writer processes. Native ACL/hardlink/junction/case
+fixtures join scoped Windows CI. The opt-in UUID audit-only CNG fixture and its
+fresh-process check remain controller-owned source/sdist-wheel acceptance; local
+fake-native success does not satisfy TPM, Windows 11 or product acceptance.
+
 ### Windows gateway inventory (C5c)
 
 The keyvault runtime inventory uses psutil's native Windows process APIs.
