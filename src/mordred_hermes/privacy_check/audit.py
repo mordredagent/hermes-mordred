@@ -25,6 +25,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -52,6 +53,10 @@ if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
 
 _LOG = logging.getLogger("mordred.privacy_check.audit")
+
+# Patchable platform selector: Windows routes through native audit custody
+# (``_windows_audit``) and never reaches the POSIX fail-open factory below.
+_platform = sys.platform
 
 # Frozen bounded-entry limit shared with the encrypted writer. Cross-process
 # whole-entry serialization comes from the stable sidecar lock, not PIPE_BUF
@@ -352,10 +357,17 @@ def make_audit_writer(
     the keyvault is initialized *and* its audit-log wrapping key is
     usable, and an :class:`NDJSONWriter` otherwise.
 
-    Fail-open by design: an uninitialized keyvault, a corrupt keyvault, a
-    missing audit-log wrapping key, a non-macOS host, or any other
+    Fail-open by design on POSIX/macOS: an uninitialized keyvault, a corrupt
+    keyvault, a missing audit-log wrapping key, a non-macOS host, or any other
     keyvault / Enclave error all fall back to :class:`NDJSONWriter` so
     privacy_check never stops auditing. Every fallback is logged.
+
+    Windows (``win32``) is different and fails closed: the decision queries the
+    independent native audit custody role, never ``keyvault_initialized``. A
+    committed role yields the C5d encrypted writer, checked clean absence an
+    explicitly degraded checked plaintext writer, and every other state raises
+    :class:`~mordred_hermes.privacy_check._exceptions.AuditWriterRefused`
+    without rotating an ``MRAL`` log aside (see :mod:`._windows_audit`).
 
     The keyvault crypto stack is imported only after the cheap,
     stdlib-only "is the keyvault initialized?" probe passes, so an
@@ -363,6 +375,12 @@ def make_audit_writer(
     ``backend=None`` builds the production Secure-Enclave backend; tests
     inject a software backend.
     """
+    if _platform == "win32":
+        from .._home import hermes_home
+        from ._windows_audit import make_windows_audit_writer
+
+        home = keyvault_home if keyvault_home is not None else hermes_home()
+        return make_windows_audit_writer(audit_path, home=home, backend=backend)
     try:
         from ._keyvault_probe import keyvault_initialized
 

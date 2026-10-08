@@ -11,6 +11,44 @@ not an ordinary CLI/process exit, and cleanup code that catches
 
 from __future__ import annotations
 
+from typing import Literal
+
+# Closed Windows audit-writer refusal vocabulary (C7b). Sticky reasons keep a
+# constructed writer refused for the rest of the process; see
+# ``privacy_check._windows_audit``.
+AuditRefusalReason = Literal[
+    "audit-uncertain",
+    "audit-unsafe",
+    "audit-unavailable",
+    "policy-pending",
+    "custody-broken",
+    "custody-pending",
+    "custody-retained",
+    "native-key-missing",
+    "native-unavailable",
+    "retained-ciphertext",
+    "history-unrecognized",
+    "audit-role-enrolled",
+    "entry-rejected",
+    "interrupted",
+]
+
 
 class MordredIntegrityRefused(BaseException):
     """Strict mode detected a disabled mandatory Mordred sibling plugin."""
+
+
+class AuditWriterRefused(RuntimeError):
+    """Windows audit custody or storage refused the audit writer (fail closed).
+
+    Deliberately an ordinary :class:`Exception`: every Windows caller already
+    converts audit-factory failures into its own hard refusal (privacy hooks
+    into a tool block or :class:`MordredIntegrityRefused`, llm_guard's
+    ``guarded_audit_factory`` and network registration into theirs). A bare
+    ``BaseException`` here would bypass those classified conversions.
+    """
+
+    def __init__(self, reason: AuditRefusalReason, detail: str = "") -> None:
+        message = f"Windows audit writer refused: {reason}"
+        super().__init__(f"{message} ({detail})" if detail else message)
+        self.reason: AuditRefusalReason = reason

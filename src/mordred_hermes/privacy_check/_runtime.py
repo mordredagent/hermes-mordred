@@ -348,8 +348,10 @@ def _load_state(
     audit_path = audit_path_override
     if audit_path is None:
         audit_path = _resolve_audit_path(section.get("audit_log_path"))
-    # Encrypt the audit log once the keyvault is initialized. The factory
-    # fails open to plaintext NDJSON. keyvault_home is the Hermes
+    # Encrypt the audit log once the keyvault is initialized. On POSIX the
+    # factory fails open to plaintext NDJSON; on Windows it routes through the
+    # native audit custody role and refuses (AuditWriterRefused) instead, which
+    # the hooks turn into a fail-closed refusal. keyvault_home is the Hermes
     # home — the directory holding config.yaml.
     # All Mordred plugins share one process-wide writer per normalized path.
     # Reloading this PluginState therefore reuses the active writer (and, for

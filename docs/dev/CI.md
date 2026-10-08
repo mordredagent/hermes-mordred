@@ -129,6 +129,23 @@ regenerate missing native keys. No existing fixture, production home, unknown
 custom history, memory role or recursive tree is deleted. This worker's local
 run leaves the gate skipped; native results must be recorded by the controller.
 
+### Windows privacy audit routing validation (C7b)
+
+Scoped Windows CI also selects `test_windows_privacy_audit.py` and
+`test_windows_privacy_audit_windows.py`. The first uses real custody, canonical
+coordination, C7a sessions and MRKW/MRAL with an injected native P-256 boundary
+and covers every factory decision, sticky refusal and hook/install wiring. The
+second needs actual Windows: inherited-safe home plaintext publication without
+ACL repair, broadened active ACL, inherited custom directory and junction
+refusals. Neither establishes CNG, wizard CLI or product acceptance.
+
+The controller runs `uv run pytest -q -o addopts= tests/test_windows_privacy_audit.py
+ tests/test_windows_privacy_audit_windows.py` (one command line) against the
+source, then with the isolated sdist-derived installed wheel interpreter after
+verifying `mordred_hermes.__file__` selects that wheel. Live CNG for a managed
+role reuses the C5d audit live gate above; this slice adds no new live test.
+Record native results in the validation log below.
+
 ## Manual live-device validation log
 
 - **2026-10-08 — Windows privacy canonical decisions (C8).**

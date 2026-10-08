@@ -840,6 +840,11 @@ logging was expected but cannot be constructed, the factory falls back to
 plaintext and emits `mordred.degraded.audit_encryption_unavailable` when it can
 do so safely.
 
+Native Windows has no such catch-all fallback: its factory selects the
+encrypted, explicitly degraded plaintext or refused outcome from the
+independent audit custody role, as defined in
+[Windows privacy audit writer routing (C7b)](#windows-privacy-audit-writer-routing-c7b).
+
 Encryption protects record confidentiality and per-entry integrity at rest.
 It does not make the log append-only or prevent a same-UID process from
 deleting, truncating, or replacing history.
@@ -2042,6 +2047,49 @@ already-partial cleanup, but still refuses unexpected opt-in, seals or unsafe
 objects. Successful purge leaves an unmanaged memory role while preserving
 independent audit/Telegram roles. A missing wrapper with retained memory-role,
 marker, opt-out, seal or ambiguous pending evidence remains broken, never fresh.
+
+#### Windows privacy audit writer routing (C7b)
+
+On Windows, `privacy_check.audit.make_audit_writer(audit_path, keyvault_home,
+backend)` never consults `keyvault_initialized` or file-vault metadata; that
+probe returns `False` on Windows without reading `_storage`. Inside one
+load-only custody session (home, then mordred) the factory observes the
+independent audit role from the checked manifest and journals, without native
+I/O, then decides:
+
+| Observed state | Result |
+| --- | --- |
+| Committed current audit generation | C5d `WindowsEncryptedWriter` from `WindowsAuditProvider.writer(..., custody=session)`, reported as `mode == "encrypted"` |
+| Checked clean absence: no manifest or an empty audit role, no pending or orphan journal, and no MRAL or unrecognized active or dated history in the audit namespace | Checked plaintext writer reported as `mode == "plaintext-degraded"`, with a logged downgrade warning |
+| Pending or orphan journal, retained generations without a current one, copied or malformed manifest, missing native key or helper, pending policy, unsafe or uncertain storage, retained MRAL or unrecognized history | `AuditWriterRefused` with a closed `reason`; no writer |
+
+The POSIX catch-all plaintext fallback does not apply: no MRAL log is rotated
+aside and plaintext is never written over retained ciphertext. The factory never
+enrolls, creates or probes native keys beyond C5d's load-only lease (exactly one
+native public-key lookup for a managed role, none otherwise) and creates no
+files or directories at construction. The plaintext writer publishes only
+through C7a sessions in the C5d audit scope. Each append reenters custody,
+refuses once the audit role has been enrolled, takes the writer mutex, refuses
+an MRAL or unrecognized active file, and then appends, rotates, compresses and
+applies retention through the checked session. A missing `<home>/mordred` is
+created exact-private at the first append; a custom directory must already be
+exact-private. The mutex is released only after custody exits, so a late
+outcome settles before another thread appends.
+
+`AuditWriterRefused` is an ordinary exception, so existing Windows guards
+convert it: privacy hooks block tools or raise `MordredIntegrityRefused`, and
+poison the process as for an unreadable policy. Uncertain, unsafe, custody and
+interrupted failures make a constructed writer's `refusal` sticky, after which
+every privacy hook refuses until reconciliation and restart. Recoverable definite
+failures (busy, I/O, missing directory, pending policy, transient native
+failure, oversized entry) refuse only the current operation: an unrecordable
+session-start entry refuses the session, an unrecordable egress approval becomes
+a block, and an unrecordable Windows `pre_install` entry raises
+`InstallBlocked`. Privacy hooks append outside any held canonical session, so a
+plain `append` never nests the home lock; `append_in_custody` serves callers
+that already own custody. The wizard audit CLI (C7b part 2) is separate. Until
+C5e merges, the role observation mirrors C5e `role_status` semantics, refusing
+retained-only generations.
 
 ### Windows supported gateway inventory boundary
 

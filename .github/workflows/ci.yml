@@ -92,6 +92,7 @@ jobs:
           tests/test_windows_encrypted_audit.py tests/test_windows_encrypted_audit_processes.py
           tests/test_windows_encrypted_audit_windows.py
           tests/test_windows_privacy_policy.py
+          tests/test_windows_privacy_audit.py tests/test_windows_privacy_audit_windows.py
           tests/test_llm_windows_policy.py tests/test_llm_windows_policy_native.py
           tests/test_windows_memory_storage.py tests/test_windows_memory_hook.py
           tests/test_windows_memory_native.py

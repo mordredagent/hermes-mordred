@@ -15,13 +15,21 @@ callers in the privacy_check / wizard layer can handle it without a
 module-level import of the keyvault plugin's internal exception types.
 
 This module reads files but does not write.
+
+On Windows the macOS file vault is excluded (C5e ``file_vault`` capability),
+so the probe truthfully reports "not initialized" without reading any
+``_storage`` state. It is not an input to the Windows audit-writer decision,
+which queries the independent native audit custody role instead.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 __all__ = ["KeyvaultProbeError", "keyvault_initialized"]
+
+_platform = sys.platform
 
 
 class KeyvaultProbeError(RuntimeError):
@@ -45,7 +53,11 @@ def keyvault_initialized(home: Path | None = None) -> bool:
     structurally invalid — a corrupt keyvault is an exceptional state the
     operator must repair, and failing loud is safer than silently treating
     it as uninitialized.
+
+    Windows has no file vault: return ``False`` before touching ``_storage``.
     """
+    if _platform == "win32":
+        return False
     from ..keyvault import _native_key_id, _storage
 
     root = _storage.resolve_keyvault_dir(home)
