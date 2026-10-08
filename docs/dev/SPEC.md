@@ -1024,6 +1024,69 @@ Windows-11-tested and externally unverified. Until the applicable Windows 11
 installation-to-use and security gates pass, Windows product support remains
 incomplete even if every component PR has been created.
 
+### Canonical Windows configuration boundary
+
+`open_confidential_directory(path, create=False)` is a separate internal
+capability for shared Hermes home files and installer-owned profile executables.
+It does not relax `open_private_directory`: Mordred state directories and their
+files keep the exact private DACL requirement. The confidential capability
+pins every local NTFS ancestor and validates the endpoint as a trusted parent,
+including refusal of untrusted add-file/add-directory/delete-child, ownership,
+ACL or reparse-relevant mutation rights. Directory read/traverse rights alone
+are acceptable. Existing parent descriptors are never repaired.
+
+An existing confidential file must be regular, non-reparse, single-linked and
+owned by the current token user. Its DACL may be inherited, but every effective
+allow must grant only the current user, SYSTEM or Administrators. Recognize
+only supported ordinary allow/deny ACEs, inheritance flags and permission bits;
+unknown descriptors fail closed. Denies do not excuse unsafe allows. Safe
+duplicate or restricted grants are acceptable; a null DACL is not. Actual access
+failure remains a failure. New/staged/backup/lock files always receive the exact
+private DACL before content. Replacing a validated inherited-safe file creates
+a private replacement; a no-op preserves its bytes and descriptor. Broad or
+foreign-owned existing files cannot be adopted by silently replacing them.
+
+The capability exposes checked `stat`, bounded `read_bytes`, and transactions
+with `stat`, `read_bytes`, `create_bytes`, `replace_bytes` and identity-bound
+`delete_file`. Missing final-leaf observations must be distinguished from
+missing/uncheckable ancestors and cleanup uncertainty. Creation is limited to
+the checked missing final directory. No generic public `strict=False` switch,
+raw fallback or second installer-specific ACL validator is permitted.
+
+Canonical Windows configuration sessions acquire the home transaction before
+the private `home/mordred` transaction. Nested same-home calls reuse live
+capabilities bound to process, thread and directory identity; nested different
+homes refuse. Policy scope can extend an existing home scope in that order and
+retains both until outer exit. Never call a home operation while holding only a
+lower-level Mordred lock. Runtime readers take the same locks nonblocking and
+fail closed on contention. A decision reading both config and policy uses one
+checked snapshot; separate before/after marker checks cannot exclude a complete
+intervening write. Windows decision caches must not bypass this boundary.
+
+Policy updates stage complete intended changes before an explicit commit.
+Parse and validate existing documents first; neither unreadable nor malformed
+state becomes an empty config. Publish/verify the pending marker before either
+member, publish the changed members, then read and verify the complete intended
+pair. Only that verification permits identity-bound marker deletion. An
+interrupted or uncertain pair publication retains the marker. Failure during
+or after final marker deletion is uncertain and requires reconciliation; it
+may leave an already verified consistent pair marker-free. Do not promise to
+recreate an already deleted marker, automatically retry, or provide two-file
+power-loss atomicity. Full configure may explicitly reconcile a stale safe
+marker; generic readers, dotenv operations and uninstall cannot clear it.
+Reading through a pending marker requires the active owning canonical session
+for full recovery; a public boolean bypass is insufficient. Ordinary snapshots
+fail closed on marker presence or inability to validate it.
+
+Canonical config, policy and dotenv reads are initially bounded to 8 MiB each;
+marker diagnostics to 4 KiB. Checked absence alone selects fresh-install state.
+Config-only edits and deletion use the pair protocol, even when policy remains
+unchanged. Dotenv RMW uses home scope. Cleanup first creates and verifies a
+private no-replace backup under the same locks. Existing POSIX lock/adoption
+behavior remains unchanged; Windows legacy mode-based writers must all be
+stopped during migration. Unsafe upstream-created Windows defaults remain
+unchanged/refused and require a separately reviewed explicit migration.
+
 ## MVP Phasing
 
 The original phase headings and pull-request notes have been removed from the
