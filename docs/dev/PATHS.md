@@ -532,8 +532,10 @@ and inert custody while hooks and user ceremonies remain separate. All resolve b
 | `mordred/audit.log` and dated siblings, or the explicitly configured audit path | Audit consumer through C7a; exact-private storage and an independent retained audit-key role |
 
 The home remains a shared trusted parent. Lock order is home, mordred, memories;
-custom audit storage follows custody locks. The protected C2 loan excludes policy,
-pending-marker and coordinator-lock names. Independent memory publications report
+custom audit storage follows custody locks, using a nonblocking directory lock.
+The C5d adapter reuses the permanent `.mordred-fs.lock`, never the POSIX
+`.audit.log.lock`; custom exact-private audit directories must already exist. The protected C2 loan excludes policy,
+pending-marker and coordinator-lock names. Independent memory and C5d audit publications report
 through the owning coordinator's monotonic publication receipt. Permanent locks
 remain after flat purge while their namespaces are live.
 

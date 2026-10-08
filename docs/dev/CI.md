@@ -99,6 +99,36 @@ This slice does not arm memory, run an installed Hermes hook, exercise Telegram,
 provide excluded file-vault features, or establish Windows 11/product readiness.
 Record native results separately under the existing validation log.
 
+### Windows encrypted audit validation
+
+Scoped Windows CI also selects `test_windows_encrypted_audit.py`,
+`test_windows_encrypted_audit_processes.py` and
+`test_windows_encrypted_audit_windows.py`. These use real checked transactions
+and MRKW/MRAL crypto with an injected native P-256 boundary. Native hostile ACL,
+hardlink, junction and home-case-alias cases require actual Windows. This does
+not establish CNG or factory/CLI adoption.
+
+The controller runs `uv run pytest -q -o addopts= tests/test_windows_encrypted_audit.py
+ tests/test_windows_encrypted_audit_processes.py tests/test_windows_encrypted_audit_windows.py`
+(one command line), first against the source and then with the isolated
+sdist-derived installed wheel interpreter. Verify `mordred_hermes.__file__`
+selects that wheel before claiming wheel coverage; the tests/helper modules
+remain importable but source `src/` must not shadow the installed package.
+
+Optional actual-CNG acceptance requires BOTH `MORDRED_TEST_WINDOWS_AUDIT_LIVE=1`
+and `MORDRED_WINDOWS_AUDIT_TEST_ROOT` pointing to an already existing isolated
+retained task root. Run `uv run pytest -q -o addopts= -m integration
+ tests/test_windows_encrypted_audit_live.py` (one command line), then the
+corresponding installed-wheel interpreter. The real known-stopped inventory gate
+runs before enrollment. Each invocation creates its own UUID audit-only profile,
+checks parent/fresh-process writes and retained-generation decrypt, verifies the
+complete known fixture history, then deletes only those newly enrolled roles
+and checked logs. It logs only the fixture path and nonsensitive pass/fail output.
+Failure preserves the profile/journals for reconciliation; do not erase it or
+regenerate missing native keys. No existing fixture, production home, unknown
+custom history, memory role or recursive tree is deleted. This worker's local
+run leaves the gate skipped; native results must be recorded by the controller.
+
 ## Manual live-device validation log
 
 - **2026-10-08 — Windows privacy canonical decisions (C8).**

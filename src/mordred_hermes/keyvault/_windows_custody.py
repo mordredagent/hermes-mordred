@@ -274,6 +274,22 @@ class WindowsCustodySession:
             record.public_sha256,
         )
 
+    def lease_for_native(self, role: Role, native_key_id: str) -> GenerationLease:
+        """Resolve only an exact current/retained selector in this checked profile.
+
+        Header input never authorizes arbitrary native lookup. Reuse ``lease``
+        so unresolved journals and incomplete records refuse identically.
+        """
+        manifest = self._manifest()
+        if manifest is None:
+            raise CustodyError("custody ownership is absent")
+        state = manifest.role(role)
+        records = state.retained + (() if state.current is None else (state.current,))
+        for record in records:
+            if record.native_key_id == native_key_id:
+                return self.lease(role, generation=record.generation)
+        raise CustodyError("native selector is not owned by this custody role/profile")
+
     def validate_lease(self, lease: GenerationLease) -> None:
         if self.lease(lease.role, generation=lease.generation) != lease:
             raise CustodyError("custody generation lease changed")

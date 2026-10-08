@@ -1971,6 +1971,54 @@ active identity/header/DEK and require reconciliation. Existing audit downgrade
 policy remains a separate consumer decision; unsafe/uncertain storage never
 permits overwriting retained ciphertext or silently creating replacement keys.
 
+The opt-in C5d API is `keyvault.windows_audit.WindowsAuditProvider(home,
+backend=None)`. `lease(custody=None)` resolves the current independent audit
+role and verifies its native public fingerprint. `writer(path,
+rotate_bytes=10485760, retention_days=30, custody=None)` returns a
+`WindowsEncryptedWriter` containing an immutable lease and backend, never a
+live custody session. Construction is load-only; missing ownership, helper or
+native key never causes enrollment. `enroll_role("audit")` remains an explicit
+ceremony. Product factory/CLI routing belongs to C7b.
+
+`WindowsEncryptedWriter.append(entry)` owns a fresh custody scope. A synchronous
+nested callback uses `append_in_custody(entry, custody=session,
+transaction=None)`; an optional transaction must be a live, matching protected
+Mordred loan. Lock order is home, mordred, writer mutex, then audit. The default
+physical Mordred directory borrows its C2 transaction even through safe path
+aliases. A custom exact-private directory must already exist and obtains a
+nonblocking lock after custody, so cross-profile custom paths cannot form a
+waiting lock cycle. A custom path equal to the physical home is refused.
+Every successful or uncertain mutation and child-exit failure is immediately
+reported through the owning monotonic publication receipt. After publication,
+ordinary failures become classified uncertainty; interrupts keep their type and
+are recorded as uncertain. Caught errors cannot acknowledge success at the
+outer exit. A new generation's DEK is wrapped, its complete header built and the
+entry sealed before rotation, so only checked filesystem primitives follow the
+first mutation: a definite native wrap failure publishes nothing, poisons no
+writer and leaves the outer exit definite. Uncertain outcomes and a missing
+previously owned active file permanently poison that writer. Definite failures
+and close wipe the DEK but keep poison and the owned active-file identity, which
+only the writer's own rotation clears. Header/identity changes wipe the prior
+DEK before validating and rotating only checked recognized plaintext or owned
+MRAL history; any other active header is a classified write refusal.
+
+`decrypt_windows_log_file(path, home=..., audit_sink=..., backend=None,
+custody=None, max_file_bytes=16842752, max_output_bytes=16777216)` takes a bounded
+immutable C7a snapshot and releases its audit context/custom lock before native
+unwrap or its synchronous audit callback. The retained custody scope excludes
+reset through entry authentication. The default borrowed Mordred lock belongs
+to that lifecycle, not to an additional audit sidecar. Nested sinks explicitly
+borrow the caller's custody; they must never recursively resolve a fresh
+provider/home. Raw caller snapshots are not accepted. Gzip output, exact MRAL
+schema and MRKW structure are checked before native I/O. Shared MRAL header/AAD,
+entry encoding and crypto remain byte-for-byte unchanged; Windows requires the
+scoped native field. `WindowsCustodySession.lease_for_native(role,
+native_key_id)` resolves only exact owned current/retained records in the checked
+physical profile, then uses normal lease/journal validation. An arbitrary tag,
+another role/profile, or a legacy global native selector grants no lookup
+permission. Memory purge/re-enrollment does not invalidate retained audit roles.
+Destructive audit-key/history purge remains a later explicit caller ceremony.
+
 Flat memory/audit lifecycle needs no recursive filesystem API. Keep its
 permanent directory lock after purge. Recursive uninstall of Telegram/archive
 or legacy vault trees remains a later shared-foundation prerequisite requiring
