@@ -1384,3 +1384,13 @@ format/hash checks remain in the installer. Stored confidential/private files,
 helper destinations and ownership receipts retain their single-link admission
 and checked publication requirements. No private native internals or duplicate
 ACL implementation belong in wizard consumers.
+
+
+C3 may create a verified, create-no-replace `env-removed-[safe stamp].env`
+backup directly in the already-held exact-private policy directory through
+`CanonicalSession.create_policy_backup`. It rejects canonical policy and pending
+marker names before matching backup names, including custom canonical leaves.
+The method uses existing coordinator bounds, marker guards and classified
+publication/failure tracking. Explicit backup child directories retain their
+checked private capabilities and lock order; a successful child publication
+followed by outer coordination cleanup failure remains uncertain.
