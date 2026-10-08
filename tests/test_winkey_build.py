@@ -22,10 +22,12 @@ def source() -> Path:
     return Path(os.environ.get("MORDRED_WINKEY_SOURCE", Path(__file__).resolve().parents[1] / "native/winkey-helper"))
 
 
-def install(source: Path, destination: Path) -> subprocess.CompletedProcess[str]:
+def install(
+    source: Path, destination: Path, *, powershell: str = "powershell.exe", owned: bool = False
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            "powershell.exe",
+            powershell,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -35,6 +37,7 @@ def install(source: Path, destination: Path) -> subprocess.CompletedProcess[str]
             str(destination),
             "-Python",
             sys.executable,
+            *(["-OwnedInstall"] if owned else []),
         ],
         capture_output=True,
         text=True,
@@ -42,6 +45,23 @@ def install(source: Path, destination: Path) -> subprocess.CompletedProcess[str]
         errors="replace",
         timeout=600,
     )
+
+
+@pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
+def test_windows_real_build_owned_publication(source: Path, tmp_path: Path, powershell: str) -> None:
+    if shutil.which(powershell) is None:
+        pytest.skip(f"{powershell} unavailable")
+    from mordred_hermes.wizard._windows_install import is_owned
+
+    destination = tmp_path / "owned Hermes 日本語 bin"
+    result = install(source, destination, powershell=powershell, owned=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    binary = destination / "mordred-hermes-winkey.exe"
+    assert binary.read_bytes().startswith(b"MZ")
+    assert binary.stat().st_nlink == 1 and is_owned(binary)
+    result = install(source, destination, powershell=powershell, owned=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert is_owned(binary)
 
 
 def digest(path: Path) -> str:

@@ -1676,3 +1676,23 @@ C4 native executable/receipt publication depends on C1b's
 and identity-bound deletion. Missing C1b refuses; no weak native fallback is
 permitted. C4 cannot be finalized or advertised as native installation-ready
 until that dependency and its native acceptance pass.
+### Public Windows build-source reads
+
+Windows-only `read_public_build_output(path, *, max_bytes) -> bytes` reads public
+build output under the shared trusted-ancestor policy. The positive integer
+bound is at most 64 MiB. The source must be a regular, non-reparse file on the
+same local NTFS volume as its pinned parent, with a trusted owner and no foreign
+mutation rights. Read-only outside grants are allowed. Cargo output may have
+multiple hardlinks; the capability neither changes nor adopts the source.
+
+A single source handle excludes concurrent write/delete access through every
+alias until reading and security, identity, size and path postchecks finish.
+The named source is rechecked under that handle. Bytes are returned only after
+source and ancestor cleanup succeeds. There is no staging, guessed rollback or
+retry. Installed confidential/private files, receipts and destination admission
+still require a single link and retain their existing ownership/ACL rules.
+
+The wizard checks the PE header and any supplied build-script SHA256 against
+these bytes before publishing. Executable and receipt remain separate checked
+publications; failure may leave an unowned artifact requiring inspection, and
+never constitutes a successful installation.

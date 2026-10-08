@@ -1109,3 +1109,19 @@ and plaintext/CLI consumers only in their later component PRs.
 
 Canonical configure remains C3's implementation; no alternative writer or
 whole-product Windows support claim is introduced by this slice.
+### Public Windows build-source implementation
+
+Add a narrow shared Windows-only reader for Cargo's hardlinked release output.
+Reuse the pinned local NTFS ancestor walk, native descriptor policy and handle
+IO; require regular non-reparse sources without foreign mutation grants. Open
+with share-read only, read within a 64 MiB bound, revalidate the source handle
+and name, and return only after all handles close. Do not mutate or stage the
+source and do not relax private/confidential stored-file validation.
+
+Pass the PowerShell build digest into owned publication and compare it against
+the protected-read bytes before touching the destination. Test actual hardlinked
+PE input, foreign writable sources, junctions, held writers, bounded reads,
+postcheck/cleanup failures and retained old helper/receipt. Keep standalone
+helper builds compatible. Exercise real owned build/reinstall under available
+PowerShell runtimes; include C4 installer and public-reader tests in the scoped
+Windows filesystem CI job alongside the existing foundation selectors.
