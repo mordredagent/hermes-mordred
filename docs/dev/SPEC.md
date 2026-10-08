@@ -1368,3 +1368,19 @@ No automatic retry, guessed rollback, secure-erasure or power-loss claim is
 made. Consumers own encryption formats, generation leases and key authorization;
 uncertain writes invalidate their cached active identity/header/DEK and require
 explicit reconciliation. Shared audit operations do not enable those consumers.
+
+
+### Windows public build-output reads
+
+Cargo may hardlink its public executable build output to a sibling artifact.
+The native helper installer uses a separate Windows-only bounded
+`read_public_build_output(path, max_bytes=...)` capability for this input.
+It validates the pinned trusted parent chain and a regular non-reparse source,
+refuses foreign mutation rights, holds a read-only handle denying write/delete
+sharing, and rechecks identity, size, path and security before returning bytes
+only after successful cleanup. Multiple links are allowed only for this
+immutable public build input; it never writes or removes the source. Executable
+format/hash checks remain in the installer. Stored confidential/private files,
+helper destinations and ownership receipts retain their single-link admission
+and checked publication requirements. No private native internals or duplicate
+ACL implementation belong in wizard consumers.

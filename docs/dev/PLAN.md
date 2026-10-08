@@ -723,3 +723,9 @@ lock acquisition. Require no-overwrite, checked raw retention, bounded gzip,
 identity-bound deletion and compound uncertainty tests, plus ordinary-user
 Windows process contention and source/wheel checks. Migrate encrypted keyvault
 and plaintext/CLI consumers only in their later component PRs.
+
+
+C4 native acceptance additionally exercises actual Cargo hardlinked release
+output through the separate bounded public-input capability. Cover source
+reparse/foreign-writer refusal, read/identity/cleanup faults and ordinary-user
+package-bound build/probe; retain destination/receipt refusal tests unchanged.
