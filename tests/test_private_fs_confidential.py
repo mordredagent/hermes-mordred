@@ -412,3 +412,41 @@ def test_windows_directory_identity_revalidates_all_boundaries(native, monkeypat
             )
         with pytest.raises(RuntimeError if change == "process" else fs.PrivateFSError):
             directory.directory_identity()
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("change", ["thread", "process", "acl", "identity", "path"])
+def test_windows_transaction_identity_checks_owning_directory(native, monkeypatch, private, change):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mordred_hermes._private_fs import _windows_io as win
+
+    if private:
+        native.nodes["C:\\home"].descriptor = PRIVATE
+    opener = fs.open_private_directory if private else fs.open_confidential_directory
+    with opener("C:\\home") as directory:
+        with directory.transaction() as transaction:
+            assert transaction.directory_identity() == directory.directory_identity()
+            if change == "thread":
+                with ThreadPoolExecutor(max_workers=1) as executor, pytest.raises(RuntimeError):
+                    executor.submit(transaction.directory_identity).result()
+            else:
+                with monkeypatch.context() as patch:
+                    if change == "process":
+                        patch.setattr(win.os, "getpid", lambda: -1)
+                    elif change == "acl":
+                        native.nodes["C:\\home"].descriptor = security.Descriptor(
+                            USER, False, [security.Ace(0, 0, 2, b"outside")]
+                        )
+                    else:
+                        value = directory.checked.handle.value
+                        path, node = native.handles[value]
+                        native.handles[value] = (
+                            (path, Node(True, PRIVATE if private else SAFE))
+                            if change == "identity"
+                            else ("C:\\elsewhere", node)
+                        )
+                    with pytest.raises(RuntimeError if change == "process" else fs.PrivateFSError):
+                        transaction.directory_identity()
+        with pytest.raises(RuntimeError):
+            transaction.directory_identity()

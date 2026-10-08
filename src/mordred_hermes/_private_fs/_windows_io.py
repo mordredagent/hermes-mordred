@@ -229,6 +229,10 @@ class _Transaction:
             raise RuntimeError("private transaction is closed or belongs to another thread")
         self.directory.check()
 
+    def directory_identity(self) -> FileIdentity:
+        self.check()
+        return self.directory.directory_identity()
+
     def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
         windows_leaf(name)
         validate_limit(max_bytes)
