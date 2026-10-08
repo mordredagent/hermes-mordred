@@ -115,3 +115,15 @@ def test_windows_default_home_unicode_independent_of_codepage(source: Path, tmp_
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert (home / "bin/mordred-hermes-winkey.exe").read_bytes()[:2] == b"MZ"
+
+
+@pytest.mark.parametrize("destination", ["relative-bin", "C:relative-bin", "C:", r"\relative-bin", "/relative-bin"])
+def test_windows_relative_destination_refused_before_build(source: Path, tmp_path: Path, destination: str) -> None:
+    # Deliberately omit Cargo.toml: even the unfixed installer cannot install
+    # outside this test's home. Path validation must precede build-tool use.
+    isolated = tmp_path / "installer only"
+    isolated.mkdir()
+    shutil.copy2(source / "build.ps1", isolated / "build.ps1")
+    result = install(isolated, Path(destination))
+    assert result.returncode != 0
+    assert "InstallDir must be an absolute path." in result.stdout + result.stderr
