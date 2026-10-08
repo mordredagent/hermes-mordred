@@ -28,7 +28,9 @@ def test_native_private_directory_and_first_file(tmp_path: Path) -> None:
     # Inspect with an independent Windows security API consumer.
     p = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", script],
-        env=os.environ | {"MORDRED_FS_ACL_TEST_PATH": str(root / "secret")},
+        # pwsh -> Python -> powershell.exe otherwise inherits incompatible PS7 modules.
+        env={key: value for key, value in os.environ.items() if key.casefold() != "psmodulepath"}
+        | {"MORDRED_FS_ACL_TEST_PATH": str(root / "secret")},
         capture_output=True,
         text=True,
     )
