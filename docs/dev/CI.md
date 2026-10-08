@@ -73,7 +73,75 @@ manual `mullvad_version` input. It installs the official daemon, runs
 disconnects and logs out in teardown. It never runs automatically because it
 uses a paid account and mutates runner network state.
 
+## Windows private filesystem validation gates
+
+The [WF0–WF5 plan](PLAN.md#windows-private-filesystem-implementation-plan) is
+approved and in progress as of 2026-10-08. WF0 assumption-probe evidence is
+recorded below; full foundation acceptance is not complete. Helper PR #190's 16 successful checks at `441083f61`
+are helper/regression evidence, not private-filesystem or whole-Windows acceptance.
+
+The future scoped `windows-private-fs` job must use Server 2022 and Python
+3.11–3.13 with `.[dev,keyvault,extension]`; this document does not claim that job
+already exists. Native ACL/junction/lock/publication tests run there without a
+TPM. Separate faults injected into the binding layer from real native calls.
+The existing macOS/Linux suite, coverage floor and reduced-extras typing stay
+required. Do not turn the recorded Windows baseline failures into blanket skips.
+
+Actual-host acceptance uses the retained Server 2025 instance
+`i-00f4db5c3a204906b` in `ap-southeast-1`, a fresh synthetic test root and a
+credentialed ordinary-user process. Record token/elevation, Python/package
+location, commit/wheel hashes, NTFS volume, test commands/counts and fixture hashes.
+Provision adversarial ACL/junction/second-user fixtures separately from the
+ordinary-user assertions. Keep test credentials and existing private harness
+files out of repository changes and tool output. Leave TPM fixtures and Linux
+validation resources untouched; no additional instance/clone is required.
+
+Before starting compute, verify the retained host identity/state and install a
+bounded auto-stop deadline for this run. Use the existing SSM path without new
+inbound rules. After validation, stop compute and verify state; retain only the
+identified development host/storage and record residual resources. Reboot and
+stop/start persistence are not sudden power-loss proof. Do not modify production
+homes or request live Telegram/model credentials for this filesystem slice.
+
+Report independent outcomes for native ACLs and second-user exclusion, ancestor
+trust/reparse/hardlink refusal, process/thread locking and crash release,
+publication/held-target refusal, injected post-commit failure, out-of-checkout
+wheel use, and reboot/stop-start persistence. Any missing requested live gate
+stays not-run/failed; an elevated or mocked pass cannot replace it. Only record a
+new dated entry under the manual log after executing the corresponding checks.
+
 ## Manual live-device validation log
+
+- **2026-10-08 — Windows private filesystem assumptions (WF0).**
+  Retained Server 2025 build 26100 on fixed local NTFS was resumed with a
+  four-hour shutdown deadline. Under the credentialed non-administrator
+  `mordred` token, create-time protected user/SYSTEM/Administrators DACLs were
+  observed independently through Get-Acl. A disposable second ordinary user
+  was denied access. Its first scheduled runs failed with logon error 1385;
+  granting only that disposable SID SeBatchLogonRight enabled the actual check.
+  The test account, task and granted right were removed afterward. No existing
+  user's password, TPM fixture or Linux validation resource was changed.
+
+  SDK 26100/MSVC confirmed x64 FILE_RENAME_INFO size 24/name offset 20,
+  OVERLAPPED size 32 and FILE_ID_INFO size 24. Relative-name publication with a
+  non-NULL RootDirectory failed with WinError 87. A NULL RootDirectory and
+  NUL-terminated absolute volume-GUID destination derived from the pinned
+  directory succeeded, including flush and complete payload reopen. A separate
+  unterminated disposable buffer produced a wrongly suffixed filename; production
+  tests must pin termination, byte length and non-ASCII names. Held-target
+  publication returned access denied without changing old bytes; renaming a
+  pinned parent returned sharing violation. Real subprocess byte locks excluded
+  a second process and released after owner termination. OPEN_REPARSE_POINT
+  inspection identified an actual junction tag without following it.
+
+  Default volume/profile ancestor descriptors were recorded without modifying
+  them. These are disposable native API probes, not a shipped-foundation pass;
+  production ACL parser, all-path refusal, failure injection, wheel, scoped CI
+  and restart persistence acceptance remain WF2–WF5. Evidence is private under
+  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`. Compute remains
+  task-owned within the deadline while implementation continues; final stop
+  verification is still required.
+
 
 - **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**
   Installed the wheel built from `52e69d7fc` in the actual Hermes Desktop

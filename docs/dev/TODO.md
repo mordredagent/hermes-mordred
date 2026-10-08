@@ -258,3 +258,14 @@ the source remains usable, and failure paths leave no partial destination.
   record the result in [`CI.md`](./CI.md).
 - Keep each implementation PR scoped to one plugin; land cross-plugin contract
   documentation first.
+
+## Windows shared private filesystem
+
+- [x] Draft the shared filesystem contract and executable WF0–WF5 plan in SPEC/PLAN.
+- [x] Prove native filesystem assumptions on the retained AWS host (WF0).
+- [ ] Review and land the shared filesystem contract before merging the foundation PR.
+- [ ] Finish independent private filesystem acceptance (WF1–WF5), including scoped CI.
+- [ ] Migrate callers in separate component PRs; preserve transaction domains and
+  design append/delete/rotation before adoption.
+- [ ] Complete later Windows component and Windows 11 Desktop acceptance before
+  advertising general native Windows product support. Helper PR #190 is separate.
