@@ -97,3 +97,57 @@ confidential transaction from a private one. C2 has no audit callers and exposes
 accessor yet. A future explicit session method can lend its live policy capability
 without reacquiring or releasing it. Do not use global lock lookup or acquire
 home from an independent mordred/audit transaction.
+
+## Wizard consumers (C3)
+
+The Windows wizard holds one canonical session across each complete read,
+parse, transform and publication. Every public policy writer validates both
+whole documents, preserves round-trip YAML and opaque provider overrides, and
+stages the complete intended pair before one explicit commit. Only the full
+`write` operation requests stale-marker recovery. Standalone section edits,
+identity migration and policy emission refuse a pending marker. POSIX behavior
+remains on its existing implementation. Unsupported split roots are rejected.
+
+Dotenv updates use the canonical home lock across bounded UTF-8 reads and
+transforms. Credentials use home, policy, then the checked private credentials
+child, in that order. Cleanup re-reads under its owning session; checked private
+create-no-replace backups must be verified before removing source content.
+Explicit secret-backup directories retain their published path.
+
+Verification plan: exercise public writers through the real coordinator with
+injected checked filesystem capabilities on POSIX, then native Windows fixtures.
+Cover YAML preservation, plugin migration, opaque overrides, all standalone
+entry points, malformed pair refusal, explicit recovery, unchanged identities,
+marker/publication/cleanup faults, dotenv export syntax and invalid UTF-8 or
+size, backup collisions, stale cleanup plans and custom canonical leaf names.
+Native acceptance additionally runs configure twice in a Hermes-created home,
+fresh-process contention, interrupted pair publication, private credential and
+backup descriptors, and paths containing spaces and Unicode. Controller records
+native acceptance separately from the host unit suite.
+
+`CanonicalSession.create_policy_backup(name, data)` creates only bounded
+`env-removed-[safe stamp].env` backup leaves in the live exact-private policy
+scope, after the marker guard. It rejects the actual canonical policy name and
+marker case-insensitively, even with custom canonical leaves. Creation never
+replaces an existing entry; verified reads establish publication and failures
+retain classified uncertainty. Explicit different backup directories use a
+checked private child capability after the canonical locks. Backup child locks
+are always nonblocking: a busy explicit destination raises classified `busy`
+without modifying the source, avoiding cross-profile lock cycles while keeping
+the requested destination. The component
+promotes subsequent cleanup failures to uncertain after child publication.
+
+Generic legacy `_atomic_write_text`, `_read_regular_text` and
+`_policy_write_lock` remain explicitly unsupported on Windows: every migrated
+consumer uses its complete checked transaction instead. Memory/OpenClaw and
+other later lifecycle consumers must migrate their whole read/modify/write
+before using Windows storage; this change does not enable them incidentally.
+No compatibility guarantee extends to old Windows writers or noncooperating
+upstream writers. Flag-only configure resolves its defaults from the checked
+pair inside the same update; prompts and upstream setup remain outside locks.
+
+Native consumer selection is `tests/test_wizard_config_native_windows.py`:
+configure rerun, credential and backup ACLs, no-overwrite collision, concurrent
+fresh-process config/dotenv changes, public-writer crash/recovery and unsafe ACL
+refusal. Its profile-style fixture does not establish actual Hermes-generated
+home acceptance; the controller's separate installed-runtime run covers that.
