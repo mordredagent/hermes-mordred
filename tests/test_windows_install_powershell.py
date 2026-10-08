@@ -292,3 +292,35 @@ def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PARENT=Restricted" in result.stdout
     assert (target / "entered.txt").read_text() == "Bypass"
+
+
+def test_installer_removes_scrubbed_keys_from_native_python_environment(native_fixture, tmp_path):
+    from mordred_hermes._windows_runtime import SCRUBBED_ENV
+
+    argv, env, _home, _log, python, _source = native_fixture
+    observed = tmp_path / "child environment keys.jsonl"
+    spy = python.parent.parent / "Lib/site-packages/fixture_env_probe.py"
+    spy.write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        f"keys = {SCRUBBED_ENV!r}\n"
+        "present = sorted(set(keys).intersection(os.environ))\n"
+        "with Path(os.environ['MORDRED_FIXTURE_ENV_LOG']).open('a', encoding='utf-8') as stream:\n"
+        " stream.write(json.dumps(present) + '\\n')\n",
+        encoding="utf-8",
+    )
+    (spy.parent / "env-probe.pth").write_text("import fixture_env_probe\n", encoding="utf-8")
+    result = subprocess.run(
+        [*argv, "-InstallOnly"],
+        env={**env, "MORDRED_FIXTURE_ENV_LOG": str(observed), "UV_SYSTEM_PYTHON": "1"},
+        capture_output=True,
+        encoding="utf-8",
+        errors="strict",
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    import json
+
+    records = [json.loads(line) for line in observed.read_text(encoding="utf-8").splitlines()]
+    assert records
+    assert all(record == [] for record in records), records

@@ -95,7 +95,12 @@ try {
         'UV_INDEX_STRATEGY', 'UV_NO_SOURCES', 'UV_OFFLINE', 'UV_CONFIG_FILE', 'UV_INSECURE_HOST',
         'UV_NO_VERIFY_HASHES', 'UV_SYSTEM_CERTS', 'UV_PRERELEASE', 'UV_EXCLUDE_NEWER',
         'UV_SYSTEM_PYTHON', 'UV_BREAK_SYSTEM_PACKAGES')
-    foreach ($name in $scrub) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+    foreach ($name in $scrub) {
+        $environmentPath = 'Env:' + $name
+        if (Test-Path -LiteralPath $environmentPath) {
+            Remove-Item -LiteralPath $environmentPath -ErrorAction Stop
+        }
+    }
     $env:UV_NO_CONFIG = '1'
     $homePath = $env:HERMES_HOME
     if (-not $homePath) { $homePath = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.hermes' }
