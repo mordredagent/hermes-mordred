@@ -566,3 +566,22 @@ classification gave **6 passed**. The analogous directory-close case already
 preserved uncertainty and remains covered. Final focused suite: **190 passed,
 47 skipped**; Ruff check/format and reduced-extras strict mypy (205 files) passed.
 The full suite was not repeated for this bounded review fix.
+
+Actual Windows Server 2025 ordinary-user validation on 2026-10-08 used Python
+3.11.17, a disposable home and separate source/wheel directories on the retained
+AWS host. Source commit `15ccec45b` passed **193 tests, 38 platform skips**.
+An sdist-derived wheel from reviewed commit `d2db7b5d3`, installed with no package
+dependencies in a fresh venv (plus pytest), passed **193 tests, 44 platform
+skips**. The six additional skips are the new POSIX-only raw-error regressions;
+the review fix did not change Windows product code. Module paths were verified
+inside the new wheel venv, with no source path injection. Wheel SHA-256:
+`02c57837fc35d6aa9476d4bcafc01d3defedef0453ace6b34ccde0696ae6245e`.
+
+The actual native cases cover metadata/prefix/enumeration, checked deletion,
+no-replace rename, append, hostile ACLs/junctions/hard links, held handles and
+cross-process append contention. Injected cleanup failures are separately
+identified in test names. Independent review found one POSIX classification
+defect, fixed and re-reviewed with no remaining important findings. Shellcheck
+also passed. This slice did not repeat reboot/stop-start or TPM custody tests;
+it adds no Windows 11 or whole-product acceptance claim. Host shutdown remains
+the responsibility of the ongoing completion task's bounded auto-stop controls.
