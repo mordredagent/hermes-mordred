@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ._types import PrivateFSError
 
@@ -24,6 +24,11 @@ ADMINISTRATORS = _sid(5, 32, 544)
 TRUSTED_INSTALLER = _sid(5, 80, 956008885, 3418522649, 1831038044, 1853292631, 2271478464)
 OWNER_RIGHTS = _sid(3, 4)
 FULL_CONTROL = 0x1F01FF
+
+# Position of an inspected object relative to the managed image: the image
+# file, its immediate parent directory, or any directory strictly above that
+# parent (including the volume root unless the root is the parent).
+ManagedImageRole = Literal["image", "image_parent", "upper_ancestor"]
 
 
 @dataclass(frozen=True)
@@ -97,20 +102,31 @@ def _check_mutation_grants(
             raise PrivateFSError("unsafe", operation)
 
 
-def check_managed_image(descriptor: Descriptor, user: bytes, service_sid: bytes, *, directory: bool) -> None:
-    """Separate installation policy: the current principal is never a writer.
+def check_managed_image(descriptor: Descriptor, user: bytes, service_sid: bytes, *, role: ManagedImageRole) -> None:
+    """Separate role-based installation policy; the current principal is never a writer.
 
     service_sid must come from the bounded native fixed-account validation.
-    Directory ADD_SUBDIRECTORY creates siblings; it cannot replace an existing
-    selected child. ADD_FILE also represents directory reparse-data mutation,
-    so it is refused together with every other namespace mutation route.
+    Every role requires a trusted owner, refuses unknown ACE kinds/flags/rights
+    and refuses untrusted DELETE, FILE_DELETE_CHILD, WRITE_DAC and WRITE_OWNER,
+    the rights that replace, rename or re-secure an existing component.
+
+    The image and its immediate parent also refuse untrusted write-data/add-file,
+    append/add-subdirectory, write-EA and write-attributes: the application
+    directory leads the DLL search order, so a planted DLL or ``<image>.local``
+    folder would run inside the admitted image. Upper ancestors admit those
+    entry-creation rights (the Windows default ProgramData ACL): new entries are
+    creator-owned and cannot collide with an existing child, and every component
+    is separately verified to be a non-reparse directory on pinned handles and
+    named reopens. Storage admission (check_ancestor) is deliberately unchanged.
     """
     if service_sid != TRUSTED_INSTALLER:
         raise PrivateFSError("unsafe", "managed_service_sid")
+    forbidden = 0x10000 | 0x40000 | 0x80000 | 0x40
+    if role in ("image", "image_parent"):
+        forbidden |= 0x2 | 0x4 | 0x10 | 0x100
+    elif role != "upper_ancestor":
+        raise PrivateFSError("unsafe", "managed_image_role")
     trusted = {SYSTEM, ADMINISTRATORS, service_sid} - {user}
-    forbidden = 0x10000 | 0x40000 | 0x80000 | 0x100 | 0x40 | 0x10 | 0x2
-    if not directory:
-        forbidden |= 0x4
     _check_mutation_grants(descriptor, trusted, forbidden, "managed_image_acl", strict=True)
 
 

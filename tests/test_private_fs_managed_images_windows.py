@@ -114,7 +114,7 @@ def test_native_current_user_owned_readonly_image_is_refused_without_changes(tmp
     assert before.owner == api.user_sid()
     try:
         with pytest.raises(PrivateFSError):
-            check_managed_image(before, api.user_sid(), api.managed_service_sid(), directory=False)
+            check_managed_image(before, api.user_sid(), api.managed_service_sid(), role="image")
         with pytest.raises(PrivateFSError):
             inspect_managed_installation_image(image)
         assert acl(image) == before
