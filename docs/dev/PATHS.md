@@ -441,3 +441,8 @@ Unpublished staging files may remain after a process crash; opening a directory
 never glob-deletes them. No default component root or Hermes home changes in this
 foundation slice. Existing component lock names remain authoritative until their
 separate migration PRs define mixed-version behavior.
+
+C1a lifecycle methods operate only on validated sibling names in the caller's
+checked directory. Enumeration hides the reserved lock/staging names but counts
+staging entries toward its scan budget. Delete/rename never accept those names;
+there is no implicit stale-staging cleanup or recursive directory removal.

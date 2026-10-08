@@ -6,9 +6,16 @@ import os
 from contextlib import AbstractContextManager
 from pathlib import Path
 
-from ._types import FileIdentity, PrivateDirectory, PrivateFSError, PrivateTransaction
+from ._types import FileIdentity, FileMetadata, PrivateDirectory, PrivateFSError, PrivateTransaction
 
-__all__ = ["FileIdentity", "PrivateDirectory", "PrivateFSError", "PrivateTransaction", "open_private_directory"]
+__all__ = [
+    "FileIdentity",
+    "FileMetadata",
+    "PrivateDirectory",
+    "PrivateFSError",
+    "PrivateTransaction",
+    "open_private_directory",
+]
 _platform = os.name
 
 

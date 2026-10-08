@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import secrets
 import threading
 from collections.abc import Iterator
 from pathlib import Path
 
-from ._types import PrivateDirectory, PrivateFSError, PrivateTransaction
+from ._types import (
+    FileIdentity,
+    FileMetadata,
+    PrivateDirectory,
+    PrivateFSError,
+    PrivateTransaction,
+    reserved,
+    validate_limit,
+)
 from ._windows_api import OwnedHandle
 from ._windows_lock import exclusive_lock
 from ._windows_paths import CheckedDirectory, checked_directory, windows_leaf
@@ -18,17 +27,15 @@ from ._windows_security import validate_private
 @contextlib.contextmanager
 def open_private_directory(path: str | Path, *, create: bool = False) -> Iterator[PrivateDirectory]:
     directory: _Directory | None = None
-    body_finished = False
     try:
         with checked_directory(path, create=create) as checked:
             directory = _Directory(checked)
             try:
                 yield directory
-                body_finished = True
             finally:
                 directory.active = False
     except PrivateFSError as exc:
-        if body_finished and directory is not None and directory.published:
+        if directory is not None and directory.published:
             exc.commit_state = "uncertain"
         raise
 
@@ -38,9 +45,11 @@ class _Directory:
         self.checked = checked
         self.active = True
         self.published = False
+        self.pid = os.getpid()
+        self.thread = threading.get_ident()
 
     def check(self) -> None:
-        if not self.active:
+        if not self.active or self.pid != os.getpid() or self.thread != threading.get_ident():
             raise RuntimeError("private directory is closed")
         validate_private(self.checked.handle, directory=True)
         if self.checked.handle.api.metadata(self.checked.handle).identity != self.checked.identity:
@@ -51,14 +60,57 @@ class _Directory:
         return self.checked.path + "\\" + name
 
     @contextlib.contextmanager
-    def opened(self, name: str) -> Iterator[OwnedHandle]:
+    def opened(self, name: str, *, access: int = 0x120089, share: int = 7) -> Iterator[OwnedHandle]:
+        path = self.path(name)
         self.check()
         api = self.checked.handle.api
-        with api.open(self.path(name), access=0x120089, share=7) as handle:
+        with api.open(path, access=access, share=share) as handle:
             validate_private(handle, directory=False)
+            if api.final_path(handle).casefold() != path.casefold():
+                raise PrivateFSError("unsafe", "file_path")
             yield handle
 
+    def stat(self, name: str) -> FileMetadata:
+        self.path(name)
+        self.check()
+        with self.opened(name) as handle:
+            metadata = handle.api.metadata(handle)
+            return FileMetadata(metadata.identity, metadata.size, handle.api.mtime_ns(handle))
+
+    def read_prefix(self, name: str, *, max_bytes: int) -> bytes:
+        self.path(name)
+        validate_limit(max_bytes)
+        self.check()
+        with self.opened(name) as handle:
+            remaining = max_bytes
+            chunks: list[bytes] = []
+            while remaining:
+                data = handle.api.read(handle, min(65536, remaining))
+                if not data:
+                    break
+                chunks.append(data)
+                remaining -= len(data)
+            return b"".join(chunks)
+
+    def list_names(self, *, max_entries: int) -> tuple[str, ...]:
+        validate_limit(max_entries)
+        self.check()
+        names: list[str] = []
+        for examined, name in enumerate(self.checked.handle.api.names(self.checked.handle), 1):
+            if examined > max_entries + 1:
+                raise PrivateFSError("unsafe", "list_limit")
+            if reserved(name):
+                continue
+            windows_leaf(name)
+            if len(names) == max_entries:
+                raise PrivateFSError("unsafe", "list_limit")
+            names.append(name)
+        self.check()
+        return tuple(sorted(names))
+
     def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+        windows_leaf(name)
+        validate_limit(max_bytes)
         self.check()
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
@@ -77,16 +129,14 @@ class _Directory:
     def transaction(self, *, blocking: bool = True) -> Iterator[PrivateTransaction]:
         self.check()
         transaction = _Transaction(self)
-        body_finished = False
         try:
             with exclusive_lock(self.checked, blocking=blocking):
                 try:
                     yield transaction
-                    body_finished = True
                 finally:
                     transaction.active = False
         except PrivateFSError as exc:
-            if body_finished and transaction.published:
+            if transaction.published:
                 exc.commit_state = "uncertain"
             raise
 
@@ -99,13 +149,133 @@ class _Transaction:
         self.published = False
 
     def check(self) -> None:
-        self.directory.check()
         if not self.active or self.thread != threading.get_ident():
             raise RuntimeError("private transaction is closed or belongs to another thread")
+        self.directory.check()
 
     def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+        windows_leaf(name)
+        validate_limit(max_bytes)
         self.check()
         return self.directory.read_bytes(name, max_bytes=max_bytes)
+
+    def stat(self, name: str) -> FileMetadata:
+        windows_leaf(name)
+        self.check()
+        return self.directory.stat(name)
+
+    def read_prefix(self, name: str, *, max_bytes: int) -> bytes:
+        windows_leaf(name)
+        validate_limit(max_bytes)
+        self.check()
+        return self.directory.read_prefix(name, max_bytes=max_bytes)
+
+    def list_names(self, *, max_entries: int) -> tuple[str, ...]:
+        validate_limit(max_entries)
+        self.check()
+        return self.directory.list_names(max_entries=max_entries)
+
+    def _mark_mutated(self) -> None:
+        self.published = self.directory.published = True
+
+    def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        self.directory.path(name)
+        self.check()
+        attempted = False
+        try:
+            with self.directory.opened(name, access=0x130089, share=0) as handle:
+                _check_identity(handle, expected_identity)
+                attempted = True
+                handle.api.discard(handle)
+            self._absent(name)
+        except PrivateFSError as exc:
+            if attempted:
+                exc.commit_state = "uncertain"
+            raise
+        finally:
+            if attempted:
+                self._mark_mutated()
+
+    def _absent(self, name: str) -> None:
+        self.directory.check()
+        api = self.directory.checked.handle.api
+        try:
+            handle = api.open(self.directory.path(name), share=0)
+        except PrivateFSError as exc:
+            if exc.reason == "missing":
+                return
+            raise
+        with handle:
+            raise PrivateFSError("unsafe", "expected_absent")
+
+    def rename_file(self, name: str, destination: str, *, expected_identity: FileIdentity | None = None) -> None:
+        source_path = self.directory.path(name)
+        destination_path = self.directory.path(destination)
+        self.check()
+        changed = False
+        try:
+            with self.directory.opened(name, access=0x130089, share=0) as handle:
+                identity = _check_identity(handle, expected_identity)
+                changed = True
+                try:
+                    handle.api.rename(handle, destination_path, replace=False)
+                except PrivateFSError as exc:
+                    try:
+                        _check_identity(handle, identity)
+                        unchanged = handle.api.final_path(handle).casefold() == source_path.casefold()
+                    except OSError:
+                        unchanged = False
+                    if unchanged:
+                        changed = False
+                    else:
+                        exc.commit_state = "uncertain"
+                    raise
+                _check_identity(handle, identity)
+                if handle.api.final_path(handle).casefold() != destination_path.casefold():
+                    raise PrivateFSError("unsafe", "renamed_identity")
+            self._absent(name)
+            if self.directory.stat(destination).identity != identity:
+                raise PrivateFSError("unsafe", "renamed_identity")
+        except PrivateFSError as exc:
+            if changed:
+                exc.commit_state = "uncertain"
+            raise
+        finally:
+            if changed:
+                self._mark_mutated()
+
+    def append_bytes(self, name: str, data: bytes) -> None:
+        path = self.directory.path(name)
+        self.check()
+        changed = False
+        try:
+            with self.directory.opened(name, access=0xC0020000, share=0) as handle:
+                api = handle.api
+                identity = _check_identity(handle, None)
+                length = api.metadata(handle).size
+                api.seek(handle, length)
+                changed = True
+                try:
+                    _write_staging(handle, data)
+                    _check_identity(handle, identity)
+                except PrivateFSError as exc:
+                    try:
+                        _check_identity(handle, identity)
+                        if api.final_path(handle).casefold() != path.casefold():
+                            raise PrivateFSError("unsafe", "append_identity")
+                        api.truncate(handle, length)
+                        api.flush(handle)
+                        changed = False
+                    except OSError as rollback:
+                        exc.add_note(f"append rollback failed: {type(rollback).__name__}")
+                    raise
+        except PrivateFSError as exc:
+            if changed:
+                exc.commit_state = "uncertain"
+            raise
+        finally:
+            if changed:
+                self._mark_mutated()
 
     def create_bytes(self, name: str, data: bytes) -> None:
         self.write(name, data, replace=False)
@@ -154,9 +324,7 @@ class _Transaction:
                             api.discard(staging)
         except PrivateFSError as exc:
             if not safe_to_discard and exc.commit_state != "uncertain":
-                raise PrivateFSError(
-                    exc.reason, exc.operation, native_code=exc.native_code, commit_state="uncertain"
-                ) from exc
+                exc.commit_state = "uncertain"
             raise
 
 
@@ -187,3 +355,11 @@ def _write_staging(staging: OwnedHandle, data: bytes) -> None:
             raise PrivateFSError("io", "zero_write")
         offset += count
     staging.api.flush(staging)
+
+
+def _check_identity(handle: OwnedHandle, expected: FileIdentity | None) -> FileIdentity:
+    validate_private(handle, directory=False)
+    identity = handle.api.metadata(handle).identity
+    if expected is not None and identity != expected:
+        raise PrivateFSError("unsafe", "identity")
+    return identity

@@ -528,3 +528,33 @@ Add a documentation publishing workflow only when the project has a hosted docs
 site. Add broader E2E automation only when it can run without production
 credentials or state. Until then, keep the current workflows small and
 purpose-specific.
+
+### C1a lifecycle validation (2026-10-08)
+
+The checked lifecycle slice extends the scoped `windows-private-fs` invocation
+with `tests/test_private_fs_lifecycle.py` and
+`tests/test_private_fs_lifecycle_faults.py`. Existing native Windows tests now
+also cover lifecycle ACL/junction refusal and exclusive-handle sharing failures;
+process tests include concurrent checked append with every record retained.
+
+Local macOS Python 3.13.12 validation: the focused shared-filesystem suite has
+**184 passed, 47 platform-specific skips**. Ruff check/format passed. Strict mypy
+passed for 205 source files in a separate `.venv-ci` installed with only
+`dev,keyvault,extension,macos` extras. Native Windows execution belongs to the
+controller's final-commit acceptance run, not these local results.
+
+Regression development observed 43 lifecycle cases fail on missing APIs, then
+13 portable Windows cases fail on missing backend methods. Three native ABI
+cases failed before adding time/seek/truncation/enumeration bindings. Subsequent
+RED/GREEN cases caught prevalidation metadata access, unbounded reserved staging
+scans and replaced exceptions after Windows publication. Fault seams exercise
+partial append/rollback, partial POSIX rename, native deletion/rename ambiguity,
+close/unlock/directory cleanup and original-error preservation. These are
+injected failures, not physical disk-failure or power-loss durability evidence.
+
+The full default `uv run pytest -q` run exited 0: **5,425 passed, 52 skipped,
+34 integration deselected** (counts from progress output and collection).
+Twelve final cleanup regressions added while that run was active were verified
+by the subsequent focused run above; product code was unchanged. Warnings were
+upstream Starlette/httpx deprecation, an installed Hermes invalid-escape warning,
+and existing Python multi-threaded-fork deprecations. No test failed.

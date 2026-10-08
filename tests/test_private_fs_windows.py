@@ -371,3 +371,55 @@ def test_short_name_alias_cannot_replace_held_sidecar(tmp_path: Path) -> None:
         assert err.value.commit_state == "not_committed"
         assert err.value.reason in ("busy", "access_denied", "unsafe")
         assert lock.stat().st_ino == identity
+
+
+@pytest.mark.parametrize("operation", ["stat", "prefix", "delete", "rename", "append"])
+@pytest.mark.parametrize("unsafe", ["acl", "junction"])
+def test_native_lifecycle_refuses_unsafe_objects(tmp_path: Path, operation: str, unsafe: str) -> None:
+    root = tmp_path / "private"
+    with open_private_directory(root, create=True) as d, d.transaction() as tx:
+        tx.create_bytes("source", b"keep")
+        if unsafe == "acl":
+            subprocess.run(
+                ["icacls.exe", str(root / "source"), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True
+            )
+            name = "source"
+        else:
+            target = tmp_path / "target"
+            target.mkdir()
+            subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(root / "junction"), str(target)], check=True, capture_output=True
+            )
+            name = "junction"
+        with pytest.raises(PrivateFSError) as err:
+            if operation == "stat":
+                tx.stat(name)
+            elif operation == "prefix":
+                tx.read_prefix(name, max_bytes=1)
+            elif operation == "delete":
+                tx.delete_file(name)
+            elif operation == "rename":
+                tx.rename_file(name, "destination")
+            else:
+                tx.append_bytes(name, b"new")
+        assert err.value.reason == "unsafe"
+        assert (root / "source").read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("operation", ["delete", "rename", "append"])
+def test_native_lifecycle_held_handle_refuses_before_mutation(tmp_path: Path, operation: str) -> None:
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    root = tmp_path / "private"
+    with open_private_directory(root, create=True) as d, d.transaction() as tx:
+        tx.create_bytes("source", b"keep")
+        with get_api().open(str(root / "source"), share=7), pytest.raises(PrivateFSError) as err:
+            if operation == "delete":
+                tx.delete_file("source")
+            elif operation == "rename":
+                tx.rename_file("source", "destination")
+            else:
+                tx.append_bytes("source", b"new")
+        assert err.value.reason == "busy"
+        assert err.value.commit_state == "not_committed"
+        assert tx.read_bytes("source", max_bytes=4) == b"keep"

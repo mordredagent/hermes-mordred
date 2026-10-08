@@ -224,3 +224,36 @@ def test_reserved_case_alias_cannot_replace_live_lock(root: Path) -> None:
         assert (root / ".mordred-fs.lock").stat().st_ino == before
         with _child(root, "try") as child:
             assert _line(child) == "error busy"
+
+
+def test_concurrent_checked_append_preserves_every_record(root: Path) -> None:
+    program = """
+import sys
+from mordred_hermes._private_fs import open_private_directory
+with open_private_directory(sys.argv[1]) as d:
+    for _ in range(10):
+        with d.transaction() as tx:
+            tx.append_bytes("records", (sys.argv[2] + "\\n").encode())
+"""
+    with open_private_directory(root) as d, d.transaction() as tx:
+        tx.create_bytes("records", b"")
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", program, str(root), str(i)], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        for i in range(4)
+    ]
+    try:
+        for child in children:
+            _stdout, stderr = child.communicate(timeout=30)
+            assert child.returncode == 0, stderr.decode()
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.communicate(timeout=15)
+    with open_private_directory(root) as d:
+        records = d.read_bytes("records", max_bytes=100).splitlines()
+    assert len(records) == 40
+    for i in range(4):
+        assert records.count(str(i).encode()) == 10

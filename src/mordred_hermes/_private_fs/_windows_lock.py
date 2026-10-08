@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Iterator
 
-from ._types import FileIdentity, PrivateFSError
+from ._types import FileIdentity, PrivateFSError, cleanup_failure
 from ._windows_api import OwnedHandle
 from ._windows_paths import CheckedDirectory
 from ._windows_security import validate_private
@@ -43,11 +43,11 @@ def exclusive_lock(directory: CheckedDirectory, *, blocking: bool) -> Iterator[N
                         raise PrivateFSError("unsafe", "lock_identity")
                 yield
             finally:
-                if sys.exc_info()[0] is not None:
-                    with contextlib.suppress(OSError):
-                        api.unlock(handle)
-                else:
+                original = sys.exception()
+                try:
                     api.unlock(handle)
+                except OSError as exc:
+                    cleanup_failure(original, exc, committed=False)
     finally:
         with _guard:
             _owners.remove(owner)
