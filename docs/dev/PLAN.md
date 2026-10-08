@@ -697,4 +697,6 @@ C2 integration adds `directory_identity()` to both directory protocols, using
 Windows checked-directory revalidation and POSIX pinned descriptor/name-chain
 validation. Test closed/foreign thread/process lifetimes, unsafe ACL/mode,
 identity/path replacement and consistent repeated identities. Keep private and
-confidential admission policies distinct; no identity API on transactions.
+confidential admission policies distinct. Transactions expose the same method
+for borrowed audit-session validation, checking their own lifetime before
+delegating to their directory without reacquiring a lock.

@@ -300,3 +300,17 @@ def test_directory_identity_revalidates_descriptor_and_path(fs, tmp_path, monkey
             root.symlink_to(parent / "moved", target_is_directory=True)
         with pytest.raises(RuntimeError if change == "process" else fs.PrivateFSError):
             directory.directory_identity()
+
+
+@pytest.mark.parametrize("change", ["mode", "rename"])
+def test_transaction_identity_rechecks_posix_directory(fs, tmp_path, change):
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as directory, directory.transaction() as transaction:
+        assert transaction.directory_identity() == directory.directory_identity()
+        if change == "mode":
+            root.chmod(0o755)
+        else:
+            root.rename(root.with_name("moved"))
+            root.mkdir(mode=0o700)
+        with pytest.raises(fs.PrivateFSError):
+            transaction.directory_identity()

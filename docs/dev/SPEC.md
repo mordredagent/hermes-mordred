@@ -1250,3 +1250,9 @@ validates active context, originating process/thread, pinned directory and
 ancestor security, identity and path binding before returning the checked
 handle identity. There is no path-only or raw-stat fallback. POSIX private
 directories revalidate descriptor-relative names throughout the pinned chain.
+
+
+`PrivateTransaction` and `ConfidentialTransaction` also expose
+`directory_identity() -> FileIdentity`. A borrowed transaction must be active
+and belong to the current thread/process, then revalidate its owning directory
+with the same checked identity contract. This method never reacquires a lock.
