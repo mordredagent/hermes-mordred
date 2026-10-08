@@ -1225,6 +1225,27 @@ user-owned/writable lookalikes, ancestor replacement, junctions, held mutation
 handles and failure classification in native tests. Existing private and
 confidential admission rules must remain unchanged.
 
+The implementation uses `READ_CONTROL | FILE_READ_ATTRIBUTES` (`0x20080`)
+for ancestor handles and additionally `FILE_READ_DATA` (`0x20081`) for the
+image, with share-read only, open-reparse-point and backup-semantics flags.
+It reads metadata rather than image contents. Paths have at most 32,767 UTF-16
+code units and 256 components, all objects must remain on one local NTFS volume,
+and fresh named observations must match the pinned handles. Metadata, descriptor,
+path, timestamp and effective-principal checks finish before successful cleanup
+allows the `FileMetadata` to return.
+
+The separate managed-image policy trusts SYSTEM, Builtin Administrators and
+only the fixed native-validated TrustedInstaller service SID; it removes the
+current effective SID from that writer set. A bounded two-call local
+`LookupAccountNameW` must produce the exact service SID, `NT SERVICE` domain and
+`SidTypeWellKnownGroup`. Inherited public reads are allowed. Untrusted/current
+write-data, write-EA, write-attributes, delete, delete-child, write-DACL and
+write-owner grants refuse. Directory add-subdirectory alone can create siblings
+without replacing a checked existing child; it is allowed only on ancestors.
+Add-file also grants directory reparse-data access and remains refused. Denies
+do not excuse an unsafe allow; inherit-only grants do not apply to the object.
+This policy does not alter private, confidential or public-build admission.
+
 C5c keeps all positively current-owned argv inspection. Plausible interpreter,
 Hermes/Desktop, generic-host and hinted records stay unknown when denied; only
 stable, noncandidate images admitted by the new capability are outside the

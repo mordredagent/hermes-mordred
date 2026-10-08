@@ -74,21 +74,44 @@ def check_private(descriptor: Descriptor, user: bytes) -> None:
 
 def check_ancestor(descriptor: Descriptor, user: bytes, *, creating_child: bool) -> None:
     trusted = {user, SYSTEM, ADMINISTRATORS, TRUSTED_INSTALLER}
-    if descriptor.owner not in trusted or descriptor.aces is None:
-        raise PrivateFSError("unsafe", "ancestor_acl")
     # Directory FILE_ADD_FILE also permits reparse-relevant data mutation.
     forbidden = 0x10000 | 0x40000 | 0x80000 | 0x100 | 0x40 | 0x10 | 0x2
     if creating_child:
         forbidden |= 0x4
+    _check_mutation_grants(descriptor, trusted, forbidden, "ancestor_acl")
+
+
+def _check_mutation_grants(
+    descriptor: Descriptor, trusted: set[bytes], forbidden: int, operation: str, *, strict: bool = False
+) -> None:
+    if descriptor.owner not in trusted or descriptor.aces is None:
+        raise PrivateFSError("unsafe", operation)
     for ace in descriptor.aces:
-        if ace.kind not in (0, 1) or ace.flags & ~0x1F:
-            raise PrivateFSError("unsafe", "ancestor_acl")
+        if ace.kind not in (0, 1) or ace.flags & ~0x1F or (strict and _mapped(ace.mask) & ~FULL_CONTROL):
+            raise PrivateFSError("unsafe", operation)
         if ace.flags & 0x08 or ace.kind == 1:
             continue  # Deny ACEs cannot excuse an unsafe allow ACE.
         mask = _mapped(ace.mask)
         principal = descriptor.owner if ace.sid == OWNER_RIGHTS else ace.sid
         if mask & ~FULL_CONTROL or (principal not in trusted and mask & forbidden):
-            raise PrivateFSError("unsafe", "ancestor_acl")
+            raise PrivateFSError("unsafe", operation)
+
+
+def check_managed_image(descriptor: Descriptor, user: bytes, service_sid: bytes, *, directory: bool) -> None:
+    """Separate installation policy: the current principal is never a writer.
+
+    service_sid must come from the bounded native fixed-account validation.
+    Directory ADD_SUBDIRECTORY creates siblings; it cannot replace an existing
+    selected child. ADD_FILE also represents directory reparse-data mutation,
+    so it is refused together with every other namespace mutation route.
+    """
+    if service_sid != TRUSTED_INSTALLER:
+        raise PrivateFSError("unsafe", "managed_service_sid")
+    trusted = {SYSTEM, ADMINISTRATORS, service_sid} - {user}
+    forbidden = 0x10000 | 0x40000 | 0x80000 | 0x100 | 0x40 | 0x10 | 0x2
+    if not directory:
+        forbidden |= 0x4
+    _check_mutation_grants(descriptor, trusted, forbidden, "managed_image_acl", strict=True)
 
 
 def current_user_sid() -> bytes:

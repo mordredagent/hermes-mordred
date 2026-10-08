@@ -990,3 +990,41 @@ acquisition, caught uncertain admission failures and child outcome loss when
 parent security revalidation happened before receipt reporting. Native Server
 source/wheel validation, independent review, Windows 11 and production caller
 adoption remain separate gates controlled by the completion run.
+
+### Managed installation image foundation validation (2026-10-08)
+
+The read-only Windows prerequisite adds
+`inspect_managed_installation_image(path) -> FileMetadata`; it does not change
+keyvault process inventory. Scoped Windows CI selects
+`tests/test_private_fs_managed_images.py` and
+`tests/test_private_fs_managed_images_windows.py`. Native cases observe a real
+protected Windows binary unchanged, refuse current-user-owned read-only
+lookalikes, and exercise administrator-owned public hardlinks, file/ancestor
+writes, delete-child, junctions, held writers and descriptor changes. Elevated
+CI creates only a new nonce-named fixture at the local volume root. An ordinary
+token can use an explicitly newly provisioned fixture via
+`MORDRED_MANAGED_IMAGE_TEST_ROOT`; this test input establishes no product trust.
+The supplied fixture is only observed, and administrative held-writer and
+descriptor-change cases report explicit skips under that ordinary token.
+
+Local macOS Python 3.13.12 verification: the focused foundation/docs run passed
+**424 tests with 77 native/platform skips**; the full default suite passed
+**6,211 tests with 141 skips and 38 integration cases deselected**. Its five
+warnings are existing dependency, upstream-source and fork deprecations.
+Ruff check/format, ShellCheck and strict mypy for 217 source files passed; mypy
+used a separate `dev,keyvault,extension,macos` environment. Portable new policy
+and boundary faults account for 109 passed cases; all 11 new native cases skip
+on this macOS host. These skips are not Windows execution evidence.
+
+Controller-run precommit read-only ordinary-token Server diagnostics verified
+the proposed OS handle access and native TrustedInstaller SID resolution, and
+admitted the tested System32, OpenSSH, Edge Update and Amazon SSM images.
+Defender images under ProgramData were refused: that ancestor has effective
+Builtin Users file-creation, write-EA and write-attributes grants. This is a
+recorded admission limitation, not a positive immutability result. A protected
+existing child alone cannot justify ignoring these grants: modern Windows
+documents [nonempty-directory reparse behavior](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_open_reparse_list_entry),
+and [setting reparse data](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165)
+uses write-data or write-attributes access. No existing OS permissions were
+changed. Final committed source/wheel native acceptance, independent review,
+the ordinary-user known-empty runtime gate and Windows 11 remain separate.

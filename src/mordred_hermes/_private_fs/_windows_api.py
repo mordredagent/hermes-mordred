@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._types import FileIdentity, PrivateFSError, Reason, cleanup_failure
-from ._windows_security import ADMINISTRATORS, SYSTEM, Ace, Descriptor
+from ._windows_security import ADMINISTRATORS, SYSTEM, TRUSTED_INSTALLER, Ace, Descriptor
 
 DWORD = c.c_uint32
 BOOL = c.c_int32
@@ -159,6 +159,9 @@ class NativeAPI:
         self.SecurityInfo = self._bind(a, "GetSecurityInfo", [HANDLE, c.c_int, DWORD, PTR, PTR, PTR, PTR, PTR], DWORD)
         self.SDControl = self._bind(a, "GetSecurityDescriptorControl", [PTR, PTR, PTR], BOOL)
         self.GetAce = self._bind(a, "GetAce", [PTR, DWORD, PTR], BOOL)
+        self.LookupAccountName = self._bind(
+            a, "LookupAccountNameW", [c.c_wchar_p, c.c_wchar_p, PTR, PTR, c.c_wchar_p, PTR, PTR], BOOL
+        )
 
     def last_error(self) -> int:
         return int(c.get_last_error())  # type: ignore[attr-defined]
@@ -189,6 +192,35 @@ class NativeAPI:
         if not pointer.value or not self.ValidSid(pointer):
             raise PrivateFSError("unsafe", "invalid_sid")
         return c.string_at(pointer, self.SidLength(pointer))
+
+    def managed_service_sid(self) -> bytes:
+        """Validate only the fixed local OS service account, without caching."""
+        size, domain_size, kind = DWORD(), DWORD(), DWORD()
+        name = "NT SERVICE\\TrustedInstaller"
+        if self.LookupAccountName(None, name, None, c.byref(size), None, c.byref(domain_size), c.byref(kind)):
+            raise PrivateFSError("unsafe", "managed_service_size")
+        code = self.last_error()
+        if code != 122:
+            raise native_error(code, "managed_service_lookup")
+        if not 8 <= size.value <= 68 or not 0 < domain_size.value <= 256:
+            raise PrivateFSError("unsafe", "managed_service_size")
+        sid = c.create_string_buffer(size.value)
+        domain = c.create_unicode_buffer(domain_size.value)
+        self.checked(
+            self.LookupAccountName(None, name, sid, c.byref(size), domain, c.byref(domain_size), c.byref(kind)),
+            "managed_service_lookup",
+        )
+        if (
+            not 8 <= size.value <= len(sid)
+            or not 0 < domain_size.value < len(domain)
+            or kind.value != 5  # SidTypeWellKnownGroup: native service SIDs.
+            or domain.value.casefold() != "nt service"
+            or not self.ValidSid(sid)
+            or self.SidLength(sid) != size.value
+            or sid.raw[: size.value] != TRUSTED_INSTALLER
+        ):
+            raise PrivateFSError("unsafe", "managed_service_sid")
+        return sid.raw[: size.value]
 
     def sid_text(self, sid: bytes) -> str:
         output = PTR()
@@ -276,6 +308,7 @@ class NativeAPI:
         code = self.SecurityInfo(handle.value, 1, 5, c.byref(owner), None, c.byref(dacl), None, c.byref(sd))
         if code:
             raise native_error(code, "security_info")
+        original: BaseException | None = None
         try:
             control = c.c_uint16()
             revision = DWORD()
@@ -285,8 +318,12 @@ class NativeAPI:
                 bool(control.value & 0x1000),
                 self._aces(dacl) if control.value & 4 and dacl.value else None,
             )
+        except BaseException as exc:
+            original = exc
+            raise
         finally:
-            self.LocalFree(sd)
+            if self.LocalFree(sd):
+                cleanup_failure(original, native_error(self.last_error(), "free_descriptor"), committed=False)
 
     def _aces(self, acl: PTR) -> list[Ace]:
         header = c.string_at(acl, 8)
