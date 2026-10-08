@@ -763,3 +763,26 @@ post-probe generation revalidation. Preserve POSIX tests and run reduced-extras
 checks, ordinary-user Server source/sdist-wheel tests and separate Windows 11
 installation-to-use checks. Native memory/audit evidence does not establish
 Telegram account/model, Desktop or recursive uninstall acceptance.
+
+### Managed installation image prerequisite for gateway inventory
+
+Add a separate shared filesystem slice implementing
+`inspect_managed_installation_image(path) -> FileMetadata` before revising C5c
+ordinary-user gateway exclusions. Reuse native pinned path, security descriptor
+and handle operations; require OS/administrator-managed ownership and absence
+of current-user/untrusted mutation grants on the executable and relevant
+ancestor namespace. Check identities and security before return, retain cleanup
+failures, and never modify descriptors or files. Include public-image hardlinks,
+user-owned/writable lookalikes, ancestor replacement, junctions, held mutation
+handles and failure classification in native tests. Existing private and
+confidential admission rules must remain unchanged.
+
+C5c keeps all positively current-owned argv inspection. Plausible interpreter,
+Hermes/Desktop, generic-host and hinted records stay unknown when denied; only
+stable, noncandidate images admitted by the new capability are outside the
+supported inventory. Test the exclusions against ordinary Server source and
+sdist-wheel runs, including known-empty after the controlled gateway exits.
+Run these machine-wide gateway fixtures sequentially. C5b/C5c managed-hook and
+runtime-proof admission must enforce the same supported interpreter boundary.
+Record the unsupported opaque-runtime limitation and retain Windows 11 as a
+separate acceptance gate.
