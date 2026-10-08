@@ -1557,3 +1557,11 @@ permanent directory lock after purge. Recursive uninstall of Telegram/archive
 or legacy vault trees remains a later shared-foundation prerequisite requiring
 checked traversal, an outer lifecycle lock and quiescent directory removal;
 raw recursive deletion does not satisfy this contract.
+
+C5 profile binding uses `CanonicalSession.home_directory_identity()` to obtain
+`FileIdentity | None` for its checked, currently owned home. The method validates
+session process/thread/lifetime and existing home identity without reacquiring
+locks; `None` means only the already checked absent home. It grants no raw
+handle or transaction access. A supplied custody home must resolve through a
+checked directory capability to that same identity before borrowing custody
+state; string spelling and private coordinator attributes are not authority.
