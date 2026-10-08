@@ -28,7 +28,7 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has eight jobs:
+The workflow has nine job definitions:
 
 1. **`test`** — Python/OS matrix; Ruff, shellcheck (one Linux cell), strict
    mypy, pytest, coverage, and the status-skill drift guard.
@@ -50,6 +50,9 @@ The workflow has eight jobs:
 7. **`tpmkey-helper`** — checks the Rust crate, locked dependencies, MSRV, and
    `tss-esapi` build.
 8. **`tpmkey-helper-tpm`** — runs the TPM backend against `swtpm` on Linux.
+9. **`windows-private-fs`** — scoped native ACL/path/publication/process tests on
+   Server 2022 with Python 3.11–3.13, plus an sdist-derived wheel smoke outside
+   the checkout. This is foundation coverage, not whole-Windows product support.
 
 Key policy:
 
