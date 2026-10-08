@@ -53,6 +53,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -135,6 +136,7 @@ __all__ = [
 _log = logging.getLogger(__name__)
 _KEY_ID_DEFAULT = "default"
 _WALLET_THREAD_LOCK = threading.RLock()
+_WINDOWS_WALLET_STORAGE = sys.platform == "win32"
 
 # Public fallback RPC endpoints; users should set their own via wallet.json.
 _DEFAULT_RPC: dict[int, str] = {
@@ -240,6 +242,11 @@ def _load_wallet_cfg() -> dict[str, Any]:
     """Load an explicit wallet, allowing discovery only when it is absent."""
     with _WALLET_THREAD_LOCK:
         directory = _ext_dir()
+        if _WINDOWS_WALLET_STORAGE:
+            from ._wallet_storage import read_wallet_bytes
+
+            raw = read_wallet_bytes(directory)
+            return {} if raw is None else _decode_wallet_cfg(raw)
         if not _validate_extension_dir(directory, create=False):
             return {}
         with _wallet_file_lock(directory):
@@ -249,16 +256,17 @@ def _load_wallet_cfg() -> dict[str, Any]:
                 return {}
             except OSError:
                 _raise_wallet_config_error()
-            if len(raw) > _WALLET_CONFIG_MAX_BYTES:
-                _raise_wallet_config_error()
-            try:
-                data = json.loads(
-                    raw.decode("utf-8"),
-                    object_pairs_hook=_wallet_json_object,
-                )
-            except (UnicodeDecodeError, ValueError):
-                _raise_wallet_config_error()
-            return _validate_wallet_cfg(data)
+            return _decode_wallet_cfg(raw)
+
+
+def _decode_wallet_cfg(raw: bytes) -> dict[str, Any]:
+    if len(raw) > _WALLET_CONFIG_MAX_BYTES:
+        _raise_wallet_config_error()
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_wallet_json_object)
+    except (UnicodeDecodeError, ValueError):
+        _raise_wallet_config_error()
+    return _validate_wallet_cfg(data)
 
 
 def set_wallet(cfg: dict[str, Any]) -> None:
@@ -269,6 +277,11 @@ def set_wallet(cfg: dict[str, Any]) -> None:
         _raise_wallet_config_error()
     with _WALLET_THREAD_LOCK:
         directory = _ext_dir()
+        if _WINDOWS_WALLET_STORAGE:
+            from ._wallet_storage import write_wallet_bytes
+
+            write_wallet_bytes(directory, payload)
+            return
         _validate_extension_dir(directory, create=True)
         with _wallet_file_lock(directory):
             try:

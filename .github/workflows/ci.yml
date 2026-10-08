@@ -74,6 +74,7 @@ jobs:
           tests/test_private_fs.py tests/test_private_fs_posix.py
           tests/test_private_fs_windows.py tests/test_private_fs_windows_faults.py
           tests/test_private_fs_processes.py
+          tests/test_keyvault_wallet_storage.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
@@ -92,11 +93,18 @@ jobs:
           from pathlib import Path
           import mordred_hermes
           from mordred_hermes._private_fs import open_private_directory
+          from mordred_hermes.keyvault import extension_sign
           assert 'site-packages' in Path(mordred_hermes.__file__).parts
           with open_private_directory(Path.cwd() / 'private', create=True) as d, d.transaction() as tx:
               tx.create_bytes('secret', b'old')
               tx.replace_bytes('secret', b'new')
               assert d.read_bytes('secret', max_bytes=3) == b'new'
+          extension_sign._ext_dir = lambda: Path.cwd() / 'wallet'
+          selection = {'kind': 'raw', 'key_id': 'synthetic', 'envelope_id': 'test'}
+          extension_sign.set_wallet(selection)
+          assert extension_sign._load_wallet_cfg() == selection
+          extension_sign.set_wallet(selection | {'envelope_id': 'replacement'})
+          assert extension_sign._load_wallet_cfg()['envelope_id'] == 'replacement'
           print(mordred_hermes.__file__)
           '@ | Set-Content -LiteralPath "$smoke/check.py" -Encoding utf8
           Set-Location $smoke
