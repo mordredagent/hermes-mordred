@@ -664,10 +664,11 @@ without a separate instruction. Documentation is English.
 
 | Task | Depends on | Files / responsibility | Verification before PR |
 | --- | --- | --- | --- |
-| C1: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
+| C1a: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
+| C1b: confidential shared parent | C1a | distinct `_private_fs` directory/file admission and checked absence | safe inherited ACLs accepted, private boundary unchanged, unsafe grants/owners/reparse/ancestor absence refused, new files private before bytes |
 | C2: shared policy transaction | C1 | `_policy_io.py`, `_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
 | C3: wizard configuration | C2 | `wizard/policy_writer.py`, `env_file_writer.py`, `credentials_writer.py`, cleanup backups | concurrent policy/config/dotenv updates, preserved YAML, unsafe-state refusal, native configure rerun |
-| C4: native install/helper | #190 | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
+| C4: native install/helper | #190, C1b | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
 | C7a: shared audit operations | C1 | `_audit_io.py`, `_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
 | C5: keyvault lifecycle/runtime | C1, C7a, #190, #194 | keyvault memory storage, markers, capture/export, runtime discovery/hooks, encrypted audit and file-vault gates | real CNG custody, failure preservation, runtime discovery refusal, foreign-user denial, restart/reboot, isolated reset and excluded recovery refusal |
 | C6: wizard encryption lifecycle | C3–C5 | wizard memory/Telegram/export/reset/uninstall orchestration and excluded seal/recovery gates | installed Hermes runtime consumes encrypted memory, no plaintext removal before verified runtime, verified backups and honest status |
@@ -678,7 +679,10 @@ without a separate instruction. Documentation is English.
 | C11: Desktop/gateway | C4–C6, C10 | extension Desktop install/API/UI and process/shutdown handling | actual Desktop launch, local-model prerequisite, CNG memory enable, gateway Ctrl-C/port release and restart |
 | C12: integrated acceptance | C3–C11 | CI, packaging and documentation | source and sdist-derived wheel, ordinary-user Server and Windows 11 virtual environment, full installation-to-use matrix |
 
-C4 can run independently while C1/C2 are developed. C8 and C9 are separate
+C1 means C1a and C1b together. C4's interpreter/PowerShell work can proceed while
+C1/C2 are developed, but its executable publication depends on C1b's trusted
+parent checks; do not duplicate an ACL implementation in the installer.
+C8 and C9 are separate
 network changes and must not race in one checkout. Shared audit changes precede
 both privacy and keyvault callers. Write each task's detailed interfaces and
 regression cases before changing its product code; do not invent caller APIs
