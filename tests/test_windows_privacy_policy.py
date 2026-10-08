@@ -343,3 +343,45 @@ def test_integrity_mode_and_enabled_list_share_one_generation(profile: Path, mon
     assert len(reads) == 1
     with pytest.raises(MordredIntegrityRefused):
         hooks.check_plugin_integrity()
+
+
+def test_session_start_reuses_integrity_generation_before_audit_marker(
+    profile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.privacy_check import _checked_policy
+
+    original = _checked_policy.read_canonical_snapshot
+    entries = []
+    swallowed = []
+    reads = []
+
+    class RecordingAudit(Audit):
+        def append(self, entry):
+            entries.append(entry)
+
+    monkeypatch.setattr(_runtime, "build_audit_writer", lambda *a, **kw: RecordingAudit())
+
+    def read(paths):
+        snapshot = original(paths)
+        reads.append(snapshot)
+        (profile / "mordred" / POLICY_TRANSACTION_MARKER).write_bytes(b"pending")
+        return snapshot
+
+    monkeypatch.setattr(_checked_policy, "read_canonical_snapshot", read)
+
+    def invoke_like_hermes():
+        try:
+            hooks.on_session_start()
+        except Exception as exc:
+            swallowed.append(exc)
+
+    invoke_like_hermes()
+    assert swallowed == []
+    assert len(reads) == 1
+    assert [entry["reason"] for entry in entries] == ["mordred.degraded.no_origin_skill"]
+    # A later invocation must refresh and hard-refuse the now-pending pair,
+    # propagating past Hermes's ordinary-exception handler and poisoning tools.
+    with pytest.raises(MordredIntegrityRefused):
+        invoke_like_hermes()
+    assert _runtime.is_poisoned()
+    assert swallowed == []

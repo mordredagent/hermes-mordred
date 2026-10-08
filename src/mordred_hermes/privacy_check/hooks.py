@@ -67,6 +67,11 @@ def check_plugin_integrity(**kwargs: Any) -> None:
     manager in hand it also reports each failed component as
     ``mordred/<component>``.
     """
+    _check_plugin_integrity_state(**kwargs)
+
+
+def _check_plugin_integrity_state(**kwargs: Any) -> _runtime.PluginState:
+    """Return the state that passed the gate without another canonical read."""
     try:
         state = _runtime.ensure_state()
     except Exception:
@@ -127,6 +132,7 @@ def check_plugin_integrity(**kwargs: Any) -> None:
         _LOG.warning(
             "Mordred plugin not loaded or incomplete in %s mode: %s.%s", state.policy_mode, sorted(disabled), hint
         )
+    return state
 
 
 def _legacy_names_hint(config_path: Any) -> str:
@@ -149,8 +155,14 @@ def on_session_start(**kwargs: Any) -> None:
     Always emits ``mordred.degraded.no_origin_skill`` once per process
     (HOOK_PAYLOADS §4: ``origin_skill`` absent from ``pre_tool_call`` payload).
     """
-    check_plugin_integrity(**kwargs)
-    state = _runtime.ensure_state()
+    if _runtime._platform == "nt":
+        # The marker belongs to the already checked startup decision. A second
+        # read here could fail outside the hard-refusal gate and be swallowed
+        # by Hermes's ordinary-exception hook wrapper.
+        state = _check_plugin_integrity_state(**kwargs)
+    else:
+        check_plugin_integrity(**kwargs)
+        state = _runtime.ensure_state()
     if _runtime.claim_no_origin_skill_emit():
         safe_audit_append(
             state.audit,
