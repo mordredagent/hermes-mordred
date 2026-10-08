@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import shutil
 import stat
 from collections.abc import Iterator, MutableMapping
@@ -42,7 +43,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .._config_io import DOTENV_LIMIT, CanonicalPaths, canonical_session, read_canonical_snapshot
 from .._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
+from .._policy_io import policy_mapping_from_snapshot
+from .._private_fs import PrivateFSError
+from .._yaml_io import yaml_mapping_from_snapshot
+from .policy_writer import _bounded_utf8, _canonical_paths, _checked_policy_edit, _windows, _write_checked_private
 
 __all__ = [
     "ConfigCleanup",
@@ -148,6 +154,11 @@ def _load(path: Path) -> tuple[Any, Any, str | None, str | None]:
     from .policy_writer import _read_regular_text, _round_trip_yaml
 
     yaml = _round_trip_yaml()
+    if _windows():
+        pair = read_canonical_snapshot(CanonicalPaths(path.parent, config_name=path.name))
+        policy_mapping_from_snapshot(pair)
+        root = yaml_mapping_from_snapshot(pair, round_trip=True)
+        return yaml, root, pair.config.data.decode("utf-8") if pair.config else None, None
     try:
         text = _read_regular_text(path)
     except (OSError, UnicodeDecodeError) as exc:
@@ -192,6 +203,21 @@ def apply_config_cleanup(path: Path, *, lock_dir: Path, stamp: str) -> ConfigCle
     from .policy_writer import _atomic_write_text
 
     result = ConfigCleanup(path)
+    if _windows():
+        _validate_stamp(stamp)
+        paths = _canonical_paths(path, lock_dir / "policy.json", lock_dir)
+        with _checked_policy_edit(paths) as edit:
+            result.removed, result.unknowns = _strip(edit.root)
+            if not result.removed:
+                return result
+            source = edit.session.read_pair().config
+            if source is None:
+                raise ValueError("config disappeared during cleanup")
+            edit.dump_config()
+            backup = path.with_name(f"{path.name}.mordred-uninstall-{stamp}.bak")
+            edit.session.write_home(backup.name, source.data)
+            result.backup = backup
+        return result
     with _maybe_policy_lock(lock_dir):
         yaml, root, text, error = _load(path)
         if error is not None:
@@ -244,6 +270,11 @@ def _split_env(text: str) -> tuple[str, str, list[str]]:
 
 
 def _read_env(path: Path) -> tuple[str | None, str | None]:
+    if _windows():
+        with canonical_session(CanonicalPaths(path.parent), scope="home") as session:
+            source = session.read_home(path.name, max_bytes=DOTENV_LIMIT)
+            text = source.data.decode("utf-8") if source else None
+        return text, None
     if path.is_symlink():
         return None, f"{path} is a symlink; not editing it"
     try:
@@ -266,6 +297,8 @@ def apply_env_cleanup(path: Path, *, save_dir: Path, stamp: str) -> EnvCleanup:
     """Move Mordred's variables out of ``path`` into ``save_dir`` (mode 0600)."""
     from .policy_writer import _atomic_write_text
 
+    if _windows():
+        return _apply_checked_env_cleanup(path, save_dir=save_dir, stamp=stamp)
     result = EnvCleanup(path)
     text, result.error = _read_env(path)
     if text is None:
@@ -279,4 +312,48 @@ def apply_env_cleanup(path: Path, *, save_dir: Path, stamp: str) -> EnvCleanup:
     _atomic_write_text(saved, header + removed + ("" if removed.endswith("\n") else "\n"), mode=0o600)
     result.saved_to = saved
     _atomic_write_text(path, kept, mode=stat.S_IMODE(os.stat(path).st_mode))
+    return result
+
+
+def _validate_stamp(stamp: str) -> None:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", stamp) is None:
+        raise ValueError("invalid backup stamp")
+
+
+def _apply_checked_env_cleanup(path: Path, *, save_dir: Path, stamp: str) -> EnvCleanup:
+    _validate_stamp(stamp)
+    if path.name != ".env":
+        raise ValueError("canonical dotenv filename must be .env")
+    result = EnvCleanup(path)
+    paths = CanonicalPaths(path.parent)
+    published = False
+    try:
+        with canonical_session(paths, scope="policy", create=True) as session:
+            source = session.read_home(".env", max_bytes=DOTENV_LIMIT)
+            if source is None:
+                return result
+            kept, removed, result.names = _split_env(source.data.decode("utf-8"))
+            if not result.names:
+                return result
+            header = "# Lines hermes-mordred uninstall removed from .env (Mordred-owned variables).\n"
+            backup_data = _bounded_utf8(header + removed + ("" if removed.endswith("\n") else "\n"), DOTENV_LIMIT)
+            kept_data = _bounded_utf8(kept, DOTENV_LIMIT)
+            saved = save_dir / f"env-removed-{stamp}.env"
+            if save_dir == paths.home / paths.mordred_name:
+                session.create_policy_backup(saved.name, backup_data)
+            else:
+                if (
+                    not save_dir.is_absolute()
+                    or save_dir == paths.home
+                    or save_dir in paths.home.parents
+                    or any("~" in part for part in save_dir.parts)
+                ):
+                    raise ValueError("backup directory must be a distinct checked private location")
+                published = _write_checked_private(saved, backup_data, backup=True)
+            result.saved_to = saved
+            session.write_home(".env", kept_data)
+    except PrivateFSError as exc:
+        if published:
+            exc.commit_state = "uncertain"
+        raise
     return result

@@ -326,6 +326,30 @@ class CanonicalSession:
             state.remember_mutation_failure(exc, published=published)
             raise
 
+    def create_policy_backup(self, name: str, data: bytes) -> None:
+        """Create and verify an exact-private uninstall secret backup, never replace."""
+        state = self._check(policy=True)
+        validate_leaf(name)
+        if name.casefold() in {state.paths.policy_name.casefold(), POLICY_TRANSACTION_MARKER}:
+            raise ValueError("canonical policy mutations require the pair protocol")
+        if re.fullmatch(r"env-removed-[A-Za-z0-9_-]+\.env", name) is None:
+            raise ValueError("invalid policy backup leaf")
+        if not isinstance(data, bytes) or len(data) > DOTENV_LIMIT:
+            raise ValueError("backup must be bounded bytes")
+        self._guard()
+        if state.policy_tx is None:
+            raise PrivateFSError("missing", "policy")
+        published = False
+        try:
+            state.policy_tx.create_bytes(name, data)
+            published = state.published = True
+            result = _read(state.policy_tx, name, DOTENV_LIMIT)
+            if result is None or result.data != data:
+                raise PrivateFSError("unsafe", "backup_verification", commit_state="uncertain")
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=published)
+            raise
+
     def delete_home(self, name: str, *, expected_identity: FileIdentity) -> None:
         state = self._check()
         self._home_leaf(name)

@@ -84,6 +84,7 @@ jobs:
           tests/test_audit_session.py tests/test_audit_session_faults.py
           tests/test_audit_rotation.py tests/test_audit_session_processes.py
           tests/test_audit_session_windows.py
+          tests/test_wizard_config_windows.py tests/test_wizard_config_native_windows.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
