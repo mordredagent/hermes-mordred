@@ -78,6 +78,40 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Native Windows installer and owned TPM helper (C4).**
+  Code `f9c15a72ac060486e14f08f730e1021843a6a330` passed ordinary-user
+  Windows Server 2025 source-editable and isolated sdist-derived wheel tests:
+  **91 passed each**. Both module origins were verified. The source harness
+  initially ordered borrowed dependency paths ahead of the editable checkout;
+  fixing only that task-local `.pth` order restored the intended source import.
+  The exact wheel SHA-256 was
+  `d53a23698c0d6f5a20571d67015e7553254b434e1d6494f6acbe45707cf2d4e2`.
+  Tests include PowerShell 5.1/7.6.6 environment selection, Unicode owned
+  launchers, restricted-parent helper launch, retained unknown destinations,
+  and bounded public Cargo-source reads with hardlink/ACL/identity checks.
+  The controller SSH stream was interrupted after completion; the retained
+  native test log was independently recovered through SSM and showed 91 passed.
+
+  A separate fresh environment installed Hermes 0.19.0 and real uv 0.12.23.
+  Both PowerShell 5.1 installation and PowerShell 7.6.6 reinstall passed with
+  verified module origins, console entry point and unchanged Hermes version.
+  The installed wheel's packaged Rust sources built into a custom Unicode,
+  space and metacharacter destination; owned publication and the actual
+  current-user TPM hardware probe succeeded. Existing TPM fixtures and the
+  released Hermes environment were not modified. Profiles were task-isolated.
+
+  Native acceptance found and fixed UTF-8 child output, PowerShell 7.5+ empty
+  environment-variable deletion, and Cargo release-output hardlinks. The
+  public build-input capability permits checked read-only hardlinks without
+  weakening private destination/receipt checks. Independent scoped reviews
+  approved each fix. Configure/setup consumer migration, memory encryption,
+  full-product use and Windows 11 remain separate acceptance gates.
+  Final supported-host Python 3.13 all-extras unit suite passed (exit 0);
+  focused shared/installer coverage was 443 passed, 95 native skips. Ruff,
+  formatting, reduced-extras strict mypy (208 files), shellcheck and 12
+  documentation-link checks passed.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c4-*`.
+
 - **2026-10-07 — Windows CNG helper implementation (W1–W4).**
   The dedicated Phase 0 Windows Server 2025/NitroTPM host was reused under the
   ordinary `mordred` account with password-authenticated SSH through SSM. MSVC
