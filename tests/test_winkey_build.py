@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,25 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def source() -> Path:
     return Path(os.environ.get("MORDRED_WINKEY_SOURCE", Path(__file__).resolve().parents[1] / "native/winkey-helper"))
+
+
+@pytest.fixture(scope="module")
+def owned_build_source(source: Path):
+    from mordred_hermes._private_fs import open_private_directory
+
+    # Hosted CI checkouts (D:\a) grant foreign mutation rights. Exercise owned
+    # publication under the real trusted profile instead of weakening admission.
+    root = Path(os.environ["USERPROFILE"]) / ("mordred-ci-" + uuid.uuid4().hex)
+    with open_private_directory(root, create=True):
+        pass
+    try:
+        copied = root / "source"
+        with open_private_directory(copied, create=True):
+            pass
+        shutil.copytree(source, copied, dirs_exist_ok=True, ignore=shutil.ignore_patterns("target"))
+        yield copied
+    finally:
+        shutil.rmtree(root)  # Only this fixture's newly created private namespace.
 
 
 def install(
@@ -48,18 +68,21 @@ def install(
 
 
 @pytest.mark.parametrize("powershell", ["powershell.exe", "pwsh.exe"])
-def test_windows_real_build_owned_publication(source: Path, tmp_path: Path, powershell: str) -> None:
+def test_windows_real_build_owned_publication(owned_build_source: Path, powershell: str) -> None:
     if shutil.which(powershell) is None:
         pytest.skip(f"{powershell} unavailable")
+    from mordred_hermes._private_fs import open_private_directory
     from mordred_hermes.wizard._windows_install import is_owned
 
-    destination = tmp_path / "owned Hermes 日本語 bin"
-    result = install(source, destination, powershell=powershell, owned=True)
+    destination = owned_build_source.parent / f"owned {powershell} 日本語 bin"
+    with open_private_directory(destination, create=True):
+        pass
+    result = install(owned_build_source, destination, powershell=powershell, owned=True)
     assert result.returncode == 0, result.stdout + result.stderr
     binary = destination / "mordred-hermes-winkey.exe"
     assert binary.read_bytes().startswith(b"MZ")
     assert binary.stat().st_nlink == 1 and is_owned(binary)
-    result = install(source, destination, powershell=powershell, owned=True)
+    result = install(owned_build_source, destination, powershell=powershell, owned=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert is_owned(binary)
 
