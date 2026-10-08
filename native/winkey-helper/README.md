@@ -81,3 +81,11 @@ set `MORDRED_WINKEY_HELPER` to the compiled executable and use `pytest -m integr
 Build/install tests use `MORDRED_WINKEY_BUILD_TEST=1` and `tests/test_winkey_build.py`.
 Use an isolated Hermes home for every test. Actual AWS validation and remaining
 Windows limits are recorded in `docs/dev/CI.md` and `WINDOWS_FEASIBILITY.md`.
+
+Wizard-owned builds read Cargo's release image through the shared bounded
+public-source capability, which permits Cargo hardlinks while rejecting reparse
+paths and foreign mutation rights. The source is unchanged. Its SHA256 must
+match the build script's digest before publication; installed helpers and their
+ownership receipts keep the stricter single-link destination policy. Standalone
+builds with an explicit install directory retain their existing publication
+behavior without requiring an installed wizard package.

@@ -50,7 +50,7 @@ try {
     $expected = (Get-FileHash -LiteralPath $built -Algorithm SHA256).Hash
     if ($OwnedInstall) {
         # The installed package owns publication and refuses unknown/reparse destinations.
-        $publishArgs = @('-m', 'mordred_hermes.wizard._windows_install', 'helper', $built, $InstallDir)
+        $publishArgs = @('-m', 'mordred_hermes.wizard._windows_install', 'helper', $built, $InstallDir, '--expected-sha256', $expected)
         & $Python @publishArgs
         if ($LASTEXITCODE -ne 0) { throw 'Helper publication failed; no verified installation is claimed.' }
         $destination = Join-Path $InstallDir $name

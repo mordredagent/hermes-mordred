@@ -28,6 +28,7 @@ __all__ = [
     "open_optional_confidential_directory",
     "open_optional_private_directory",
     "open_private_directory",
+    "read_public_build_output",
 ]
 _platform = os.name
 
@@ -69,3 +70,12 @@ def open_optional_private_directory(path: str | Path) -> AbstractContextManager[
     from ._windows_io import open_optional_private_directory as opener
 
     return opener(path)
+
+
+def read_public_build_output(path: str | Path, *, max_bytes: int) -> bytes:
+    """Bounded immutable Windows build-source read; allows source-only hardlinks."""
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "read_public_build_output")
+    from ._windows_public import read_public_build_output as reader
+
+    return reader(path, max_bytes=max_bytes)

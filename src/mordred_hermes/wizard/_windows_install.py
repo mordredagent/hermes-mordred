@@ -12,7 +12,6 @@ import argparse
 import hashlib
 import importlib
 import json
-import stat
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,12 +20,6 @@ from typing import Any, cast
 _OWNER = "hermes-mordred-windows-installer-v1"
 _WINKEY = "mordred-hermes-winkey.exe"
 _LAUNCHER = "hermes-mordred.ps1"
-
-
-def _check_regular(path: Path) -> None:
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400:
-        raise OSError(f"unsafe regular file (reparse/hardlink): {path}")
 
 
 def _confidential_opener() -> Callable[..., Any]:
@@ -106,13 +99,14 @@ def _publish(path: Path, content: bytes) -> Path:
     return result
 
 
-def publish_helper(source: Path, install_dir: Path) -> Path:
-    _check_regular(source)
-    if source.stat().st_size > 64 * 1024 * 1024:
-        raise OSError("helper build output exceeds size limit")
-    content = source.read_bytes()
+def publish_helper(source: Path, install_dir: Path, *, expected_sha256: str | None = None) -> Path:
+    from .._private_fs import read_public_build_output
+
+    content = read_public_build_output(source, max_bytes=64 * 1024 * 1024)
     if len(content) > 64 * 1024 * 1024 or not content.startswith(b"MZ"):
         raise OSError("helper build output must be a bounded Windows executable")
+    if expected_sha256 is not None and hashlib.sha256(content).hexdigest() != expected_sha256.casefold():
+        raise OSError("helper build output hash changed before publication")
     return _publish(install_dir / _WINKEY, content)
 
 
@@ -169,10 +163,11 @@ def main() -> int:
     parser.add_argument("kind", choices=("helper", "launcher"))
     parser.add_argument("source", type=Path)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--expected-sha256")
     args = parser.parse_args()
     try:
         result = (
-            publish_helper(args.source, args.directory)
+            publish_helper(args.source, args.directory, expected_sha256=args.expected_sha256)
             if args.kind == "helper"
             else install_launcher(args.source, args.directory)
         )

@@ -17,6 +17,18 @@ def require_native_foundation(request, monkeypatch):
             pytest.skip("Windows publisher acceptance pending shared C1b ACL capability")
     elif os.name != "nt":
         monkeypatch.setattr(install, "_confidential_opener", lambda: _local_checked_fixture)
+        import mordred_hermes._private_fs as fs
+
+        monkeypatch.setattr(fs, "read_public_build_output", _local_public_source_fixture)
+
+
+def _local_public_source_fixture(path, *, max_bytes):
+    import stat
+
+    with path.open("rb") as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_size <= max_bytes
+        return stream.read(max_bytes + 1)
 
 
 def _local_checked_fixture(directory, *, create=False):
@@ -108,6 +120,35 @@ def test_helper_needs_hash_bound_manifest(tmp_path):
     with pytest.raises(OSError, match="owned"):
         install.publish_helper(source, target)
     assert path.read_bytes() == b"MZ foreign helper"
+
+
+def test_helper_digest_mismatch_preserves_source_and_owned_helper(tmp_path):
+    source = tmp_path / "build.exe"
+    source.write_bytes(b"MZ original")
+    path = install.publish_helper(source, tmp_path / "bin")
+    receipt = install.receipt_path(path).read_bytes()
+    source.write_bytes(b"MZ changed after build hash")
+    with pytest.raises(OSError, match="hash"):
+        install.publish_helper(source, path.parent, expected_sha256="0" * 64)
+    assert source.read_bytes() == b"MZ changed after build hash"
+    assert path.read_bytes() == b"MZ original"
+    assert install.receipt_path(path).read_bytes() == receipt
+
+
+def test_hardlinked_public_build_preserves_source_but_stored_helper_refuses_links(tmp_path):
+    source = tmp_path / "build.exe"
+    source.write_bytes(b"MZ Cargo public image")
+    alias = tmp_path / "Cargo-deps.exe"
+    os.link(source, alias)
+    path = install.publish_helper(source, tmp_path / "bin")
+    assert source.stat().st_nlink == alias.stat().st_nlink == 2
+    assert source.read_bytes() == alias.read_bytes() == path.read_bytes()
+    receipt = install.receipt_path(path).read_bytes()
+    os.link(path, path.with_name("stored-alias.exe"))
+    with pytest.raises(OSError):
+        install.publish_helper(source, path.parent)
+    assert path.read_bytes() == source.read_bytes()
+    assert install.receipt_path(path).read_bytes() == receipt
 
 
 def test_reparse_and_hardlink_destinations_refuse(tmp_path):
