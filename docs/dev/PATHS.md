@@ -430,3 +430,14 @@ legacy audit log, policy snapshot/config, keyvault tree, and credentials tree.
 - Hermes core contains no Mordred path knowledge. Optional future vendored
   enforcement remains separately specified under [`UPSTREAM.md`](./UPSTREAM.md).
 - This document, not package-local READMEs, is the path ownership authority.
+
+
+## Shared private filesystem staging and lock paths
+
+The opt-in `_private_fs` foundation reserves `.mordred-fs.lock` and
+`.mordred-fs-tmp-<128-bit random hex>` inside caller-selected private directories.
+The lock file is permanent and is never rotated/replaced/deleted by transactions.
+Unpublished staging files may remain after a process crash; opening a directory
+never glob-deletes them. No default component root or Hermes home changes in this
+foundation slice. Existing component lock names remain authoritative until their
+separate migration PRs define mixed-version behavior.
