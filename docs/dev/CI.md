@@ -140,6 +140,25 @@ uses a paid account and mutates runner network state.
   These are shared-boundary checks; production caller migration, full product,
   Windows 11 and new reboot/TPM validation are not established by this entry.
 
+- **2026-10-08 — Canonical Windows configuration coordination (C2).**
+  Code `c5d4e871c9b9b1846c95b1c22a2876179fa7f47e` passed ordinary-user
+  Server 2025 source and fresh sdist-derived wheel suites: **357 passed,
+  54 skipped** each. Skips are POSIX-specific or require an elevated owner
+  fixture. The wheel environment installed only pytest and ruamel.yaml for
+  these shared-boundary tests; this is not a full product dependency smoke.
+  Native cases include inherited-descriptor no-op preservation, case aliases,
+  fresh-process busy refusal, and a killed writer between config/policy members
+  retaining a pending marker until explicit reconciliation. Wheel import origin
+  was verified inside its new virtual environment.
+  Independent review findings on caught uncertainty, nested nonblocking scope
+  extension and custom config-name bypass were fixed and scoped re-review passed.
+  Full host regression before the final narrow nested-cleanup guard: 5,603 passed,
+  63 skipped, 35 deselected; final complete focused suite: 111 passed, three
+  native skips. Ruff/format, reduced-extras strict mypy, shellcheck and docs checks
+  passed. Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c2-*`.
+  Canonical wizard writer adoption, enforcement decisions/caches, Windows 11 and
+  installation-to-normal-use remain separate component gates.
+
 - **2026-10-08 — Private filesystem review fixes on macOS.**
   Review reproduced inherited extended-ACL grants despite mode 0700/0600 and
   stale exception text after promotion to an uncertain commit. Before the fix,
