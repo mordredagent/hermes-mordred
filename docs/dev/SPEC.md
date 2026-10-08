@@ -1175,7 +1175,8 @@ is in-session because the small sequence has tightly coupled interfaces.
 
 ## Windows private filesystem contract (2026-10-08)
 
-Status: approved design; WF0 native assumptions validated on 2026-10-08.
+Status: approved contract; native assumptions and foundation behavior validated
+on 2026-10-08. Foundation implementation/acceptance is tracked separately in PR #192.
 Foundation implementation and full acceptance are in progress. The broader Windows feasibility and helper work is tracked in PRs #189/#190. The
 implementation sequence is [WF0–WF5 in PLAN](PLAN.md#windows-private-filesystem-implementation-plan).
 

@@ -761,13 +761,13 @@ probe/evidence files go under
 ordinary-user private creation, ancestor trust, byte locking and handle rename.
 This is a prerequisite to production implementation, not product code.
 
-- [ ] Resume only retained instance `i-00f4db5c3a204906b` in `ap-southeast-1`;
+- [x] Resume only retained instance `i-00f4db5c3a204906b` in `ap-southeast-1`;
   set a fresh bounded shutdown deadline before running probes. Use existing SSM
   access and the ordinary-user harness without logging credentials.
-- [ ] Record actual OS, Python, token/elevation, NTFS volume and ordinary profile
+- [x] Record actual OS, Python, token/elevation, NTFS volume and ordinary profile
   ancestor descriptors. Prove private descriptor creation on a new directory and
   file, no inherited ACEs, and rejection from a second ordinary user.
-- [ ] SDK-check x64 structure sizes/offsets, especially variable-length
+- [x] SDK-check x64 structure sizes/offsets, especially variable-length
   `FILE_RENAME_INFO`, `OVERLAPPED` and file-ID information. Demonstrate rename
   using a pinned parent and still-open source handle; check post-rename identity,
   DACL and flush under the standard user. Record the observed relative-name
@@ -775,9 +775,9 @@ This is a prerequisite to production implementation, not product code.
   RootDirectory, a byte-counted UTF-16 name and an explicit NUL terminator.
   Preserve old bytes when a second
   process opens the target without delete sharing.
-- [ ] Demonstrate parent-junction refusal and the absence of a delete/rename
+- [x] Demonstrate parent-junction refusal and the absence of a delete/rename
   window with pinned ancestors. Test two-process byte locks and crash release.
-- [ ] Record go/replan for each assumption. Any unsupported sharing/ABI/trust
+- [x] Record go/replan for each assumption. Any unsupported sharing/ABI/trust
   behavior blocks implementation of the dependent operation; no permissive
   fallback. Stop compute after the session unless continuing WF1–WF5 within the
   same bounded deadline; record residual resources and commit sanitized evidence.
@@ -793,13 +793,13 @@ private directories (no new default Hermes home or component root).
 `_windows_io.open_private_directory` only on `os.name == "nt"`; unknown platforms
 raise `PrivateFSError(reason="unsupported", ...)`.
 
-- [ ] Write tests `test_private_create_read_replace` (exact payloads and 0700/0600),
+- [x] Write tests `test_private_create_read_replace` (exact payloads and 0700/0600),
   `test_create_preserves_existing`, `test_replace_requires_existing`,
   `test_read_limit_refuses_oversize`, `test_context_use_after_close`,
   `test_reserved_leaf_refused`, `test_symlink_and_hardlink_refused`,
   `test_posix_import_does_not_load_windows` and
   `test_unsupported_os_never_falls_back`. Errors must match reason/commit state.
-- [ ] Run `uv run pytest -q tests/test_private_fs.py tests/test_private_fs_posix.py`;
+- [x] Run `uv run pytest -q tests/test_private_fs.py tests/test_private_fs_posix.py`;
   confirm failures exercise absent API/contracts, then implement minimal types,
   dispatch and POSIX backend. Use dir-relative exclusive staging, complete writes,
   durable file flush and parent fsync. Publish creation using no-clobber
@@ -808,7 +808,7 @@ raise `PrivateFSError(reason="unsupported", ...)`.
   after a successful link is uncertain, never a reason to remove the target;
   readers refuse the temporary two-link state. Classify all post-publication
   errors uncertain, including a failed parent fsync.
-- [ ] Run those tests plus `tests/test_file_lock.py`,
+- [x] Run those tests plus `tests/test_file_lock.py`,
   `tests/test_keyvault_api_storage.py`, `tests/test_keyvault_storage_lock_retry.py`
   and `tests/test_audit.py`; require no regressions. Commit the isolated API slice.
 
@@ -827,22 +827,22 @@ the two distinct ACL policies. `_windows_paths.checked_directory(path: str | Pat
 and pinned ancestors; `CheckedDirectory.identity: FileIdentity` and
 `CheckedDirectory.handle: OwnedHandle` are backend-only.
 
-- [ ] Write failing native tests for exact ACL/owner, broad/inherited/NULL/empty
+- [x] Write failing native tests for exact ACL/owner, broad/inherited/NULL/empty
   DACL rejection, unsafe existing objects left unchanged, first-open creation
   security, normal profile ancestors, unsafe writable parent, hard links, each
   reparse depth, mapped/UNC/non-NTFS refusal, Unicode/spaces, and invalid raw path
   spellings from SPEC. Check the outside target's bytes/ACL remain unchanged.
-- [ ] Add injected-fault tests for failed descriptor queries, partial native
+- [x] Add injected-fault tests for failed descriptor queries, partial native
   initialization, unknown ACEs, generic rights, inherit-only entries, failed
   identity queries and cleanup. Every acquired resource closes exactly once;
   unexpected errors cannot run an operation body. Use native-independent fake
   API objects for these tests, not `os.name` monkeypatching of the whole interpreter.
-- [ ] Run `uv run pytest -q tests/test_private_fs_windows_faults.py`; on Windows
+- [x] Run `uv run pytest -q tests/test_private_fs_windows_faults.py`; on Windows
   run `.venv\Scripts\python.exe -m pytest -q tests/test_private_fs_windows.py`.
   Observe contract failures, then implement the narrow bindings and policies
   established by WF0. Give every ctypes function explicit argtypes/restype and
   immediate last-error capture; validate security on existing opens separately.
-- [ ] Repeat those suites and the WF1 open/read tests on both OS families;
+- [x] Repeat those suites and the WF1 open/read tests on both OS families;
   defer the full Windows mutation API suite until WF4. Commit only
   after native path/ACL checks pass. Do not mark mocked ACL tests as device proof.
 
@@ -856,20 +856,20 @@ blocking: bool) -> AbstractContextManager[None]` owns byte `[0, 1)` of the
 permanent sidecar; the directory implementation yields a `PrivateTransaction`.
 Track same-thread recursion by directory identity, not path spelling.
 
-- [ ] Write subprocess tests `test_second_process_busy`,
+- [x] Write subprocess tests `test_second_process_busy`,
   `test_waiter_enters_after_release`, `test_crashed_owner_releases_lock`,
   `test_child_does_not_inherit_lock`, `test_case_alias_serializes`,
   `test_recursive_transaction_refused` and `test_two_threads_serialize`.
   A ready/release handshake establishes order; subprocess waits have 15-second
   deadlines and guaranteed cleanup. Assert guarded bodies never overlap.
-- [ ] Run `uv run pytest -q tests/test_private_fs_processes.py` on POSIX and the
+- [x] Run `uv run pytest -q tests/test_private_fs_processes.py` on POSIX and the
   corresponding venv Python command on Windows; confirm missing lock behavior.
-- [ ] Implement non-inheritable validated sidecar handles, identity recheck,
+- [x] Implement non-inheritable validated sidecar handles, identity recheck,
   `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`, and 50 ms interruptible
   retry only on lock contention for blocking mode. No retry on unsafe ACL,
   access denial or other I/O failures. Unlock explicitly, then close in `finally`;
   cleanup must preserve an active body exception.
-- [ ] Repeat process/thread tests and inject acquisition/unlock exceptions;
+- [x] Repeat process/thread tests and inject acquisition/unlock exceptions;
   require busy/error classification, no handle leak and unchanged sidecar identity.
   Commit the transaction slice.
 
@@ -884,7 +884,7 @@ consumes WF2 checked handles and WF3 lock ownership. Internal
 `publish(staging: OwnedHandle, directory: CheckedDirectory, name: str, *,
 replace: bool) -> None` owns the rename commit-state transition.
 
-- [ ] Write tests for short/zero writes, empty payload, pre-rename flush failure,
+- [x] Write tests for short/zero writes, empty payload, pre-rename flush failure,
   target missing/existing mismatch, held-target sharing refusal, readonly target,
   post-rename flush/verification failure, staging cleanup identity, a process
   killed before/after rename, and concurrent transactional read-modify-write.
@@ -892,14 +892,14 @@ replace: bool) -> None` owns the rename commit-state transition.
   new bytes and `commit_state == "uncertain"` on failure. Creation must never
   overwrite a concurrent existing target. Reserve test hooks at stage boundaries
   through the injected API, not public product environment variables.
-- [ ] Run the focused tests and observe the intended failures; implement
+- [x] Run the focused tests and observe the intended failures; implement
   unpredictable 128-bit staging names, create-time DACL, complete writes, checked
   handle publication and flush as specified. No ReplaceFileW/os.replace fallback.
-- [ ] Native reader/writer processes must observe only a complete old/new file
+- [x] Native reader/writer processes must observe only a complete old/new file
   or a classified refusal, never partial/missing replacement. Repeat interrupted
   write tests with deterministic ready/kill handshakes. Validate orphan privacy
   without automatically deleting files left by another operation.
-- [ ] Run all `tests/test_private_fs*.py` on Windows and POSIX; commit after
+- [x] Run all `tests/test_private_fs*.py` on Windows and POSIX; commit after
   native rename/lock behavior and injected uncertain-commit tests pass.
 
 ### Task WF5: Run scoped CI, packaged-wheel and actual-host acceptance
@@ -913,24 +913,24 @@ absolute synthetic-fixture directory. It never reads production `HERMES_HOME`
 or keyvault state. Missing prerequisites are explicit skips in ordinary CI and
 an acceptance failure in the requested live run.
 
-- [ ] Add a `windows-private-fs` CI job on `windows-2022`, Python 3.11/3.12/3.13,
+- [x] Add a `windows-private-fs` CI job on `windows-2022`, Python 3.11/3.12/3.13,
   reduced extras `.[dev,keyvault,extension]`. Run common/native/process/fault
   filesystem suites and an out-of-checkout wheel smoke. Keep the scoped helper
   job and all existing POSIX checks; do not enable the whole Windows test suite
   or remove POSIX security assertions to make it green.
-- [ ] Run Ruff check/format, reduced-extras strict mypy and full default pytest
+- [x] Run Ruff check/format, reduced-extras strict mypy and full default pytest
   with coverage >=80%, using AGENTS.md commands. Require Linux/macOS CI results
   and the new Windows matrix; record actual commands, counts and skipped gates.
-- [ ] Build a wheel from the sdist, install into a fresh host venv outside the
+- [x] Build a wheel from the sdist, install into a fresh host venv outside the
   checkout, and record imported `mordred_hermes.__file__`, package hash and commit.
   Run integration with `.venv\Scripts\python.exe -m pytest -q -o addopts=
   -m integration tests/integration/test_private_fs_windows.py` under the ordinary
   user. Use a separately credentialed second user for real access-denial attempts;
   the product never captures passwords or impersonates tokens.
-- [ ] Exercise WF2–WF4 assertions on AWS, preserve synthetic complete-file hashes
+- [x] Exercise WF2–WF4 assertions on AWS, preserve synthetic complete-file hashes
   across Windows reboot and EC2 stop/start, and record distinct pass/fail/not-run
   results. Keep API fault injection separate from actual disk/power-failure claims.
-- [ ] Stop task-owned compute, verify stop state and record retained storage.
+- [x] Stop task-owned compute, verify stop state and record retained storage.
   Update the manual validation log and mark only completed WF tasks. Review the
   foundation diff and prepare its own PR targeting `dev`, after the docs contract
   PR. Add one-line entries under `### Changes` / `### Fixes` in the PR body.

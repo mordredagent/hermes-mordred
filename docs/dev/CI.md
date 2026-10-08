@@ -76,8 +76,8 @@ uses a paid account and mutates runner network state.
 ## Windows private filesystem validation gates
 
 The [WF0–WF5 plan](PLAN.md#windows-private-filesystem-implementation-plan) is
-approved and in progress as of 2026-10-08. WF0 assumption-probe evidence is
-recorded below; full foundation acceptance is not complete. Helper PR #190's 16 successful checks at `441083f61`
+approved as of 2026-10-08. WF0 assumption-probe evidence is recorded below;
+foundation execution and acceptance results are tracked in PR #192. Helper PR #190's 16 successful checks at `441083f61`
 are helper/regression evidence, not private-filesystem or whole-Windows acceptance.
 
 The scoped `windows-private-fs` job must use Server 2022 and Python
@@ -137,10 +137,10 @@ new dated entry under the manual log after executing the corresponding checks.
   Default volume/profile ancestor descriptors were recorded without modifying
   them. These are disposable native API probes, not a shipped-foundation pass;
   production ACL parser, all-path refusal, failure injection, wheel, scoped CI
-  and restart persistence acceptance remain WF2–WF5. Evidence is private under
-  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`. Compute remains
-  task-owned within the deadline while implementation continues; final stop
-  verification is still required.
+  and restart persistence acceptance belong to WF2–WF5 in PR #192. Evidence is private under
+  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`. Compute was retained
+  within the deadline while implementation continued; final stopped-host evidence
+  is recorded in foundation PR #192.
 
 
 - **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**

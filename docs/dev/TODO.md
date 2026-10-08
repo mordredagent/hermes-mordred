@@ -264,7 +264,9 @@ the source remains usable, and failure paths leave no partial destination.
 - [x] Draft the shared filesystem contract and executable WF0–WF5 plan in SPEC/PLAN.
 - [x] Prove native filesystem assumptions on the retained AWS host (WF0).
 - [ ] Review and land the shared filesystem contract before merging the foundation PR.
-- [ ] Finish independent private filesystem acceptance (WF1–WF5), including scoped CI.
+- [x] Implement and actual-host validate independent primitives (WF1–WF4).
+- [x] Finish the scoped hosted CI matrix and foundation PR #192 acceptance (WF5).
+- [ ] Review and merge the separate foundation PR #192 after the contract PR.
 - [ ] Migrate callers in separate component PRs; preserve transaction domains and
   design append/delete/rotation before adoption.
 - [ ] Complete later Windows component and Windows 11 Desktop acceptance before
