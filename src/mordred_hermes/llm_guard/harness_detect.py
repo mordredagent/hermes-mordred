@@ -36,6 +36,7 @@ from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
 from .._yaml_io import load_plugin_section
 from ._exceptions import MordredHarnessRefused
+from ._windows_policy import read_decision
 
 _LOG = logging.getLogger("mordred.llm_guard.harness_detect")
 
@@ -81,6 +82,7 @@ def check_harness_primary(
     policy_mode: str,
     config_path: Path,
     audit: _AuditWriter,
+    policy_json_path: Path | None = None,
 ) -> None:
     """Inspect the declared harness primary and act according to ``policy_mode``.
 
@@ -92,7 +94,12 @@ def check_harness_primary(
     observable even when the BaseException propagates past
     ``except Exception:`` wrappers.
     """
-    harness = _read_harness_primary(config_path)
+    checked = read_decision(policy_json_path or config_path.parent / "mordred" / "policy.json", config_path)
+    if checked is not None:
+        policy_mode = checked.mode
+        harness = checked.config.get("plugins", {}).get("mordred_llm_guard", {}).get("harness_primary")
+    else:
+        harness = _read_harness_primary(config_path)
     if harness is None:
         return  # nothing to check
 
