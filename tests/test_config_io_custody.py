@@ -276,3 +276,47 @@ def test_receipt_retains_child_uncertainty_before_parent_revalidation(loan_fs):
         b.home.ident = b.identity()
         receipt.mark_uncertain(original)
     assert caught.value is original
+
+
+def test_home_identity_returns_checked_binding_without_reacquiring_lock(fs):
+    backend, paths = fs
+    with cio.canonical_session(paths, scope="home") as session:
+        assert session.home_directory_identity() == backend.home.ident
+        assert session.home_directory_identity() == backend.home.ident
+    assert [event for event in backend.events if event.endswith((":lock", ":unlock"))] == ["home:lock", "home:unlock"]
+    with pytest.raises(RuntimeError):
+        session.home_directory_identity()
+
+
+def test_home_identity_returns_none_only_for_checked_absence(fs):
+    backend, paths = fs
+    backend.home_present = False
+    with cio.canonical_session(paths, scope="home") as session:
+        assert session.home_directory_identity() is None
+    assert not backend.home_present
+    assert not [event for event in backend.events if event.endswith(":lock")]
+    with pytest.raises(RuntimeError):
+        session.home_directory_identity()
+
+
+@pytest.mark.parametrize("boundary", ["thread", "process", "identity"])
+def test_home_identity_rechecks_owner_and_directory_binding(fs, monkeypatch, boundary):
+    backend, paths = fs
+    with cio.canonical_session(paths, scope="home") as session:
+        if boundary == "thread":
+            with ThreadPoolExecutor(1) as executor, pytest.raises(RuntimeError):
+                executor.submit(session.home_directory_identity).result()
+        elif boundary == "process":
+            with monkeypatch.context() as child:
+                child.setattr(cio.os, "getpid", lambda: -1)
+                with pytest.raises(RuntimeError):
+                    session.home_directory_identity()
+        else:
+            original = backend.home.ident
+            backend.home.ident = backend.identity()
+            try:
+                with pytest.raises(PrivateFSError) as caught:
+                    session.home_directory_identity()
+                assert caught.value.operation == "home_identity"
+            finally:
+                backend.home.ident = original

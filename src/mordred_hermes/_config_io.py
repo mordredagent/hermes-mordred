@@ -267,6 +267,10 @@ class CanonicalSession:
             raise RuntimeError("policy scope required")
         return self._state
 
+    def home_directory_identity(self) -> FileIdentity | None:
+        """Return the live checked home binding, or its already-checked absence."""
+        return self._check().home_identity
+
     @contextmanager
     def borrow_mordred_transaction(self) -> Iterator[PrivateTransaction]:
         """Lend non-policy leaves under existing home -> mordred locks."""
