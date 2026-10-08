@@ -367,3 +367,48 @@ def test_new_directory_must_verify_private_creation_descriptor(native, monkeypat
     monkeypatch.setattr(native, "mkdir", unsafe_creation)
     with pytest.raises(fs.PrivateFSError), fs.open_confidential_directory("C:\\home\\new", create=True):
         pass
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_windows_directory_identity_uses_live_checked_capability(native, private):
+    if private:
+        native.nodes["C:\\home"].descriptor = PRIVATE
+    opener = fs.open_private_directory if private else fs.open_confidential_directory
+    with opener("C:\\home") as directory:
+        identity = directory.directory_identity()
+        assert identity == fs.FileIdentity(1, str(id(native.nodes["C:\\home"])).encode())
+        assert directory.directory_identity() == identity
+    with pytest.raises(RuntimeError):
+        directory.directory_identity()
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("change", ["thread", "process", "acl", "identity", "path", "ancestor"])
+def test_windows_directory_identity_revalidates_all_boundaries(native, monkeypatch, private, change):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mordred_hermes._private_fs import _windows_io as win
+
+    if private:
+        native.nodes["C:\\home"].descriptor = PRIVATE
+    opener = fs.open_private_directory if private else fs.open_confidential_directory
+    with opener("C:\\home") as directory:
+        assert directory.directory_identity()
+        if change == "thread":
+            with ThreadPoolExecutor(max_workers=1) as executor, pytest.raises(RuntimeError):
+                executor.submit(directory.directory_identity).result()
+            return
+        if change == "process":
+            monkeypatch.setattr(win.os, "getpid", lambda: -1)
+        elif change == "acl":
+            native.nodes["C:\\home"].descriptor = security.Descriptor(USER, False, [security.Ace(0, 0, 2, b"outside")])
+        elif change == "ancestor":
+            native.nodes["C:\\"].descriptor = security.Descriptor(USER, False, [security.Ace(0, 0, 2, b"outside")])
+        else:
+            value = directory.checked.handle.value
+            path, node = native.handles[value]
+            native.handles[value] = (
+                (path, Node(True, PRIVATE if private else SAFE)) if change == "identity" else ("C:\\elsewhere", node)
+            )
+        with pytest.raises(RuntimeError if change == "process" else fs.PrivateFSError):
+            directory.directory_identity()

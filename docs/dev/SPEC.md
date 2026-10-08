@@ -1242,3 +1242,11 @@ sentinel crosses cleanup. The endpoint is checked as a trusted parent with
 new exact-private descriptor. Each operation
 rechecks the directory security/identity and successful observations recheck
 the file binding and security. Failed lock creation never permits unlocked IO.
+
+
+Both `PrivateDirectory` and `ConfidentialDirectory` expose
+`directory_identity() -> FileIdentity` for coordinator identity binding. It
+validates active context, originating process/thread, pinned directory and
+ancestor security, identity and path binding before returning the checked
+handle identity. There is no path-only or raw-stat fallback. POSIX private
+directories revalidate descriptor-relative names throughout the pinned chain.
