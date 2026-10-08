@@ -1227,7 +1227,12 @@ confidential admission rules must remain unchanged.
 
 The implementation uses `READ_CONTROL | FILE_READ_ATTRIBUTES` (`0x20080`)
 for ancestor handles and additionally `FILE_READ_DATA` (`0x20081`) for the
-image, with share-read only, open-reparse-point and backup-semantics flags.
+image, with share-read, open-reparse-point and backup-semantics flags. Only the
+image handle holds `FILE_READ_DATA`, so only it refuses preexisting writer or
+deleter handles and blocks new ones while pinned. Directory pins hold no data
+or `DELETE` access; NT share checking ignores them and they do not block a
+later rename or delete. Pins are not a namespace lock: safety comes from the
+DACL policy plus final-path and identity rechecks.
 It reads metadata rather than image contents. Paths have at most 32,767 UTF-16
 code units and 256 components, all objects must remain on one local NTFS volume,
 and fresh named observations must match the pinned handles. Metadata, descriptor,
@@ -1238,11 +1243,14 @@ The separate managed-image policy trusts SYSTEM, Builtin Administrators and
 only the fixed native-validated TrustedInstaller service SID; it removes the
 current effective SID from that writer set. A bounded two-call local
 `LookupAccountNameW` must produce the exact service SID, `NT SERVICE` domain and
-`SidTypeWellKnownGroup`. Inherited public reads are allowed. Untrusted/current
-write-data, write-EA, write-attributes, delete, delete-child, write-DACL and
-write-owner grants refuse. Directory add-subdirectory alone can create siblings
-without replacing a checked existing child; it is allowed only on ancestors.
-Add-file also grants directory reparse-data access and remains refused. Denies
+`SidTypeWellKnownGroup`. Inherited public reads are allowed. Each observed
+object carries a role from the walk: `image`, `image_parent` (the immediate
+parent, which is the volume root when the image sits directly in it) or
+`upper_ancestor`; every recheck and named reopen reuses the stored role.
+Untrusted/current delete, delete-child, write-DACL and write-owner grants refuse
+for every role. The image and its immediate parent also refuse write-data or
+add-file, append or add-subdirectory, write-EA and write-attributes; upper
+ancestors admit those entry-creation rights (controller ruling below). Denies
 do not excuse an unsafe allow; inherit-only grants do not apply to the object.
 This policy does not alter private, confidential or public-build admission.
 
