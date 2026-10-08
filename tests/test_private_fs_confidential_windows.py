@@ -45,7 +45,30 @@ def shared_home(tmp_path):
     Set-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE -AclObject $a
     """,
     )
-    (root / "config.yaml").write_bytes(b"old")
+    target = root / "config.yaml"
+    target.write_bytes(b"old")
+    # An elevated token may default new-file ownership to Administrators.
+    # Set only the fixture's owner; retain the profile-style inherited DACL.
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    api = get_api()
+    with api.open(str(target)) as handle:
+        before = api.descriptor(handle)
+    powershell(
+        target,
+        """
+    $u=[Security.Principal.WindowsIdentity]::GetCurrent().User;
+    $a=Get-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE;
+    $a.SetOwner($u);
+    Set-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE -AclObject $a
+    """,
+    )
+    with api.open(str(target)) as handle:
+        after = api.descriptor(handle)
+    assert after.owner == api.user_sid()
+    assert after.protected is before.protected is False
+    assert after.aces == before.aces
+    assert after.aces and all(ace.flags & 0x10 for ace in after.aces)
     return root
 
 
@@ -103,6 +126,47 @@ def test_native_explicit_file_dacl_cases(shared_home, acl):
             with pytest.raises(PrivateFSError):
                 directory.read_bytes("config.yaml", max_bytes=3)
     assert descriptor(path) == before
+
+
+def test_native_administrators_owned_file_is_refused_unchanged(shared_home):
+    import ctypes
+
+    from mordred_hermes._private_fs._windows_api import get_api
+    from mordred_hermes._private_fs._windows_security import ADMINISTRATORS
+
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        pytest.skip("setting an Administrators file owner requires an elevated token")
+    target = shared_home / "config.yaml"
+    api = get_api()
+    with api.open(str(target)) as handle:
+        current_user_owned = api.descriptor(handle)
+    powershell(
+        target,
+        """
+    $a=Get-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE;
+    $owner=New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544');
+    $a.SetOwner($owner);
+    Set-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE -AclObject $a
+    """,
+    )
+    with api.open(str(target)) as handle:
+        foreign_owned = api.descriptor(handle)
+    assert foreign_owned.owner == ADMINISTRATORS != api.user_sid()
+    assert foreign_owned.protected is current_user_owned.protected is False
+    assert foreign_owned.aces == current_user_owned.aces
+    parent_before = descriptor(shared_home)
+    file_before = descriptor(target)
+    with open_confidential_directory(shared_home) as directory:
+        with pytest.raises(PrivateFSError) as read_error:
+            directory.read_bytes("config.yaml", max_bytes=3)
+        assert read_error.value.reason == "unsafe"
+        with directory.transaction() as transaction, pytest.raises(PrivateFSError) as write_error:
+            transaction.replace_bytes("config.yaml", b"wrong")
+        assert write_error.value.reason == "unsafe"
+        assert write_error.value.commit_state == "not_committed"
+    assert target.read_bytes() == b"old"
+    assert descriptor(target) == file_before
+    assert descriptor(shared_home) == parent_before
 
 
 @pytest.mark.parametrize("kind", ["hardlink", "junction"])
