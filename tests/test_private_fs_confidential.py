@@ -158,6 +158,12 @@ class Native:
         self.nodes[destination] = self.nodes.pop(path)
         self.handles[handle.value] = (destination, node)
 
+    def names(self, handle):
+        prefix = self.handles[handle.value][0] + "\\"
+        return (
+            name[len(prefix) :] for name in self.nodes if name.startswith(prefix) and "\\" not in name[len(prefix) :]
+        )
+
     def discard(self, handle):
         del self.nodes[self.handles[handle.value][0]]
 
@@ -469,3 +475,39 @@ def test_transaction_asserts_immutable_private_admission(native, private):
             directory.checked.confidential = not private
     with pytest.raises(RuntimeError):
         tx.assert_private_admission()
+
+
+@pytest.mark.parametrize("transaction", [False, True])
+def test_confidential_inventory_bounds_namespace_and_preserves_parent(native, transaction):
+    from contextlib import nullcontext
+
+    native.nodes["C:\\home\\memory.md"] = Node(False, data=b"memory")
+    original = native.nodes["C:\\home"].descriptor
+    with fs.open_confidential_directory("C:\\home") as directory:
+        with directory.transaction() if transaction else nullcontext(directory) as view:
+            assert view.list_names(max_entries=2) == ("config.yaml", "memory.md")
+            with pytest.raises(fs.PrivateFSError) as caught:
+                view.list_names(max_entries=1)
+            assert caught.value.operation == "list_limit"
+            with pytest.raises(ValueError):
+                view.list_names(max_entries=True)
+        assert native.nodes["C:\\home"].descriptor is original
+    with pytest.raises(RuntimeError):
+        view.list_names(max_entries=2)
+
+
+@pytest.mark.parametrize("change", ["acl", "identity", "failure"])
+def test_confidential_inventory_revalidates_after_enumeration(native, monkeypatch, change):
+    def names(handle):
+        yield "config.yaml"
+        if change == "acl":
+            native.nodes["C:\\home"].descriptor = security.Descriptor(USER, False, [security.Ace(0, 0, 2, b"outside")])
+        elif change == "identity":
+            path, _ = native.handles[handle.value]
+            native.handles[handle.value] = (path, Node(True))
+        else:
+            raise fs.PrivateFSError("access_denied", "enumeration")
+
+    monkeypatch.setattr(native, "names", names)
+    with fs.open_confidential_directory("C:\\home") as directory, pytest.raises(fs.PrivateFSError):
+        directory.list_names(max_entries=2)

@@ -1573,8 +1573,10 @@ invalid closed/thread/fork lifetimes before touching filesystem state.
 
 Windows-only `open_confidential_directory(path, *, create=False)` admits a
 trusted shared parent while preserving exact-private `open_private_directory`.
-`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, and `transaction`;
-`ConfidentialTransaction` adds `create_bytes`, `replace_bytes`, and
+`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, bounded
+`list_names(max_entries=...)`, and `transaction`;
+`ConfidentialTransaction` exposes the same bounded `list_names` and adds
+`create_bytes`, `replace_bytes`, and
 `delete_file(name, *, expected_identity=None)`. Existing files must be owned by
 the current user, regular, non-reparse and single-linked. Ordinary allow/deny
 ACEs with known inheritance flags and masks are accepted only if every
@@ -1613,6 +1615,18 @@ with the same checked identity contract. This method never reacquires a lock.
 
 
 
+The confidential inventory uses the same handle-bound checked enumeration,
+namespace validation and entry budget as private inventory. It filters only
+foundation-reserved entries and does not admit listed children as safe files;
+callers must use checked file operations for each selected name. Enumeration
+rechecks directory binding/security before returning and respects directory and
+transaction process/thread/lifetime boundaries.
+
+`current_principal_id() -> bytes` returns the effective Windows token's validated
+canonical binary SID through the existing token capability. It has no account-name,
+path or environment fallback; token and cleanup failures propagate. Other platforms
+raise classified `unsupported`. This is identity data, not a secret or a key.
+
 ### Checked Windows audit sessions
 
 Shared audit operations use one exact-private directory transaction across
@@ -1643,6 +1657,30 @@ made. Consumers own encryption formats, generation leases and key authorization;
 uncertain writes invalidate their cached active identity/header/DEK and require
 explicit reconciliation. Shared audit operations do not enable those consumers.
 
+
+### Windows custody coordination capabilities
+
+`CanonicalSession.borrow_mordred_transaction()` lends a lifetime-bound protected
+`PrivateTransaction` proxy under home-before-mordred coordination. It requires
+exact-private admission and matching checked directory identity, extends scope
+without reacquiring the home lock, honors nonblocking mode, and creates only
+when the owning outer session authorized creation. Pending policy state refuses
+borrowing. Configured/canonical policy leaves, pending/legacy locks, their
+legacy temporary files and foundation-reserved names cannot be read or mutated;
+both rename operands are checked and bounded enumeration filters protected names.
+The proxy never exposes or releases the underlying transaction. Successful
+mutations join outer publication tracking and classified uncertainty is sticky,
+even when caught by a caller. No unrelated policy marker is manufactured.
+
+`CanonicalSession.publication_receipt()` lends no filesystem authority. Its
+`mark_published()` and `mark_uncertain(error: PrivateFSError)` methods validate
+process/thread/owner/receipt lifetime, then monotonically record child outcome
+before any parent filesystem revalidation. A child writer must report each
+successful mutation and each uncertain primitive/cleanup outcome. Escaping
+errors after reported publication also poison the owner. Original uncertainty
+survives later outer cleanup; reports cannot reset state. See
+[the coordinator API](WINDOWS_CONFIG_IO.md#future-audit-integration) for the exact
+caller obligations. These capabilities do not activate production custody.
 
 ### Native Windows installation and helper (C4)
 
@@ -1696,3 +1734,391 @@ The wizard checks the PE header and any supplied build-script SHA256 against
 these bytes before publishing. Executable and receipt remain separate checked
 publications; failure may leave an unowned artifact requiring inspection, and
 never constitutes a successful installation.
+
+
+C3 may create a verified, create-no-replace `env-removed-[safe stamp].env`
+backup directly in the already-held exact-private policy directory through
+`CanonicalSession.create_policy_backup`. It rejects canonical policy and pending
+marker names before matching backup names, including custom canonical leaves.
+The method uses existing coordinator bounds, marker guards and classified
+publication/failure tracking. Explicit backup child directories retain their
+checked private capabilities and lock order; a successful child publication
+followed by outer coordination cleanup failure remains uncertain.
+
+### Windows dedicated custody and memory lifecycle
+
+C5 implements the Linux-equivalent Windows tier: CNG-backed memory custody,
+independent encrypted audit-key custody, and shared role identity/lifecycle
+services for Private Telegram. Preserve MRKW, memory AES-GCM and MRAL wire
+formats and existing Linux/macOS identifiers. This does not require a port of
+all `_storage` file-vault layouts. Windows file-vault freshness anchors,
+env/config/workspace seals, TPM recovery and per-use presence remain excluded.
+Their public APIs and runtime bootstrap paths must refuse before state mutation,
+anchor substitution or plaintext deletion. Ordinary configuration editing is
+supported independently of configuration encryption.
+
+#### Custody coordinator interfaces
+
+`CanonicalSession.borrow_mordred_transaction()` is a context-managed,
+lifetime-bound proxy over the already-owned exact-private Mordred transaction;
+it is not a raw transaction accessor. It validates process/thread/lifetime,
+checked directory identity and `assert_private_admission()`. Acquiring or
+extending scope follows home before mordred; borrowers never release the
+underlying lock. Reject another home, an unauthorized absent directory or a
+confidential-admission transaction.
+
+The proxy rejects canonical `policy.json`, the configured policy leaf,
+`.policy-write.pending`, permanent foundation lock/staging names and legacy
+coordinator lock names on every operation. Rename checks both operands;
+enumeration excludes these protected names. Thus callers cannot bypass the
+pair protocol, read through its marker or clear coordination state. A closed
+loan or outer session invalidates the proxy. C3 keeps its narrower
+`create_policy_backup` interface.
+
+The coordinator records successful proxy mutations and uncertain failures
+before returning to the borrower. Uncertainty poisons the owning session even
+if the borrower catches the exception; it cannot subsequently report success
+or clear a pending policy marker. Known unchanged collisions may be handled
+without erasing earlier publication tracking. Outer cleanup failure after a
+recorded mutation is a compound uncertain result, without automatic rollback.
+
+`CanonicalSession.publication_receipt()` supplies a lifetime-bound receipt
+with monotonic `mark_published()` and `mark_uncertain(exc)` methods for an
+independently locked memories child transaction. It provides no filesystem
+authority and no method to clear recorded state. The memory adapter reports
+each successful mutation and uncertain primitive/child-cleanup failure before
+leaving that child scope; escaping classified uncertainty is also recorded.
+The outer coordinator retains this outcome after a caller catches the error.
+No independent child publication may evade the owner's cleanup accounting.
+
+C5 lifecycle order is home, mordred, then memories; every Windows memory write,
+including a disarmed plaintext write, joins it. C7a audit operations receive
+the protected loan when their directory is mordred. A custom audit directory
+is acquired after custody locks. Audit providers resolve ownership first and
+must not recursively acquire home under an audit/mordred lock. Synchronous
+audit sinks reuse an explicitly lent transaction or emit after the scope;
+there is no cross-module implicit transaction lookup.
+
+The confidential capability is narrowly extended to canonical
+`<home>/memories`, including bounded `list_names(max_entries=...)` on both its
+directory and transaction. Existing inherited-safe files retain current-user
+ownership and confidential admission; broad grants, hardlinks, reparse points
+and inaccessible state refuse without ACL repair. New ciphertext, restored
+plaintext and backups are exact-private before content. The foundation exposes
+Windows `current_principal_id() -> bytes`, returning the validated current
+token's canonical binary SID; callers do not duplicate token/ACL code or use
+localized account names for identity.
+
+#### Physical profile binding and flat ownership
+
+New Windows native selectors are versioned and fully domain-separated by role.
+They bind the checked physical home `FileIdentity`, current binary SID and a
+persisted random profile nonce, plus an independent role-generation nonce.
+Derive a full SHA-256 identifier from validated, unambiguous field encodings;
+never authorize native use/deletion through a path string's casefold or an
+arbitrary persisted tag. The helper retains its bounded hashed CNG key naming.
+
+Aliases reaching the same checked physical home use the same ownership state.
+A safe rename/relocation preserving its FileIdentity, current SID and nonce is
+allowed. A copied, restored or recreated home with a different identity refuses
+without generating a key or automatically adopting retained material. Cost:
+movement to a new physical directory requires decrypt-before-move or explicit
+future migration; transparent encrypted portability is not promised. Existing
+Linux/macOS IDs and preliminary Windows artifacts are not silently reinterpreted.
+
+`<home>/mordred/windows-custody.json` is a flat, exact-private ownership
+manifest, bounded to 64 KiB and at most 64 retained role generations across
+roles. Roles are fixed to memory, audit and Telegram; current and retained
+records, version, profile binding and lifecycle epoch use an exact validated
+schema frozen by C5a before implementation. Role-specific pending journals
+record enrollment or deletion intent before the native operation. These are
+custody journals, not a new vault freshness anchor or whole-disk rollback
+protection. Memory purge does not delete independent audit or Telegram roles;
+retained audit generations remain owned while their history is retained.
+
+##### Dedicated Windows custody v1 schema
+
+The manifest has exactly `version: 1`, `home: {volume, file_id}`, `sid`,
+`profile_nonce`, `epoch`, and `roles`. Volume is an unsigned 64-bit integer;
+file ID is 16 bytes encoded as lowercase hex; SID is canonical revision-1
+binary SID encoded as lowercase hex. Nonces are independent random 32-byte
+lowercase hex values. Epoch is an integer from 0 through 2^53-1, never a
+boolean. `roles` contains exactly `memory`, `audit`, and `telegram`, each with
+`current` (null or record) and `retained` (record array). A record has exactly
+`generation`, `epoch`, `key_id`, `native_key_id`, and `public_sha256`.
+Logical IDs are respectively `mordred.memory`, `mordred.audit-log`, and
+`mordred-hermes.telegram.credentials.v1`. Public fingerprints are full SHA-256
+over validated uncompressed P-256 public bytes. Generation nonces are unique across all
+records. A current record's epoch does not change when another role changes.
+Duplicate JSON keys, unknown fields, invalid UTF-8, noncanonical hex, malformed
+SID/identity, record mismatch, overflow, and more than 64 retained generations
+refuse. Encoded manifests and journals are each bounded to 64 KiB.
+
+`windows-{role}.pending.json` has exactly `version`, `profile_nonce`, `role`,
+`operation`, `phase`, and `record`. Operation is `create` or `delete`; create
+phases are `intent` and `verified`, delete phases `intent` and `deleted`.
+Only create intent permits a null public fingerprint. Journal identity and
+generation are checked against the bound manifest. Create intent is durable
+before native creation, verified fingerprint before memory-wrapper publication,
+current ownership before final journal deletion. Delete intent precedes native
+deletion, and positive deletion is durably recorded before artifact cleanup.
+An interrupted native delete with only intent remains ambiguous even if the
+key subsequently cannot be opened. Explicit reconciliation never generates.
+Retained audit/Telegram records can be selected only by a validated generation
+lease; a new current role may retain its predecessor without deleting it.
+
+The native selector is `mordred-hermes.windows.v1.` plus full lowercase SHA-256
+of the domain `mordred-hermes.windows-custody.v1\0` followed by length-prefixed
+binary fields: big-endian 64-bit volume, 16-byte file ID, SID, profile nonce,
+ASCII role, and generation nonce. Each length is unsigned big-endian 32-bit.
+No pathname participates in native authority.
+
+`windows_custody_session(home, create=False, canonical=None, backend=None)`
+owns home then mordred, or joins an explicit C2 session after checking the
+physical home identity without reacquiring its lock. `WindowsCustodySession`
+provides immutable `GenerationLease` values (profile nonce, role, generation,
+epoch, logical/native IDs and fingerprint), current/retained `lease()` selection,
+`validate_lease()` and `backend_for()` exact-public verification. Leases are
+observations, not perpetual authority: consumers validate them inside a fresh
+custody scope before mutation. The session's checked `canonical` coordinator
+supports subsequent memory/audit adapters; use ends when either scope closes.
+
+`enroll_memory(adopted_key=None)` provisions inert memory custody;
+`enroll_role(role, retain_current=False)` explicitly provisions audit/Telegram.
+Runtime `resolve_windows_memory_key` is load-only. A valid manifest containing
+only other roles is not broken memory custody; no memory role/journal/blob,
+marker/opt-out or seal evidence means an unmanaged result without creation.
+Helper discovery happens before enrollment intent, but native creation failures
+retain the intent journal. `reconcile_pending()` never creates a native key.
+
+`delete_role(lease, erase_authorized=False)` validates ownership and journals
+irreversible deletion. Memory requires explicit opt-out, no opt-in/seals and a
+known stopped Windows gateway inventory. Audit/Telegram require a future caller
+ceremony proving history removal or explicitly authorizing erasure. Only a
+positively recorded `deleted` phase permits checked wrapper/opt-out removal,
+role cleanup and journal removal last; recovery may encounter already-removed
+cleanup members, but still refuses opt-in, seals or unsafe objects. Independent
+roles and permanent directory locks survive. Successful memory purge returns
+to unmanaged state; a later explicit enrollment obtains a fresh generation.
+An intent with an ambiguous native deletion result remains unresolved. Native
+create/delete scopes mark the owning publication receipt before the call, so
+later ledger failures remain sticky even if a borrower catches them; classified
+filesystem failures retain their identity and are promoted to uncertain.
+
+#### Enrollment, loading and lifecycle failures
+
+Separate explicit create-only enrollment from load-only key resolution.
+Enrollment first validates checked fresh state or an explicit in-memory
+adoption request, then persists its role journal, invokes native generation
+without overwrite, verifies the exact public key and wrap/unwrap roundtrip,
+publishes the wrapped memory key without replacement, and commits checked
+ownership. The arm marker is a later step. A generation collision or any
+uncertain step retains evidence and requires explicit reconciliation.
+
+`NTE_BAD_KEYSET`, `WrapKeyNotFound`, failed lookup or enumeration omission never
+proves hardware-key absence. Neither runtime loading nor enrollment recovery
+may generate a replacement after such a result. Wrapped keys, markers,
+opt-outs, pending ownership and any existing/broken memory seal preclude a
+fresh-state inference. Explicit pending recovery can reuse only the journaled
+key after positive exact-key verification; a probe of another key is no proof.
+No ambient plaintext key or software backend is a runtime fallback.
+
+Checked flat memory inventory includes `.md` files and `.md.bak.*` backups;
+initial limits are 4,096 entries, 8 MiB per file and 64 MiB aggregate. Errors
+and overflow are not an empty inventory. Explicit adoption authenticates every
+seal before native creation. Windows hook reads, writes, journey checks and
+drift backups use the shared checked adapter, not upstream raw publication.
+Preserve basename-bound AEAD, broken-seal refusal and sticky sealing while
+disarmed/in safe mode. Unreadable sealed state cannot become an empty successful
+memory read. No process-global plaintext key cache is introduced.
+
+Disable decrypts and verifies all selected memories before final disarm;
+partial failure preserves custody, remaining ciphertext and armed state.
+Purge requires a complete rescan proving no seal or broken seal remains and a
+positive exact-key native deletion under a persisted deletion journal. Failure
+after deletion but before recording success remains ambiguous; a later failed
+open cannot turn it into confirmed absence or permission to recreate the key.
+Classified uncertainty survives wrapper exceptions and outer cleanup.
+
+#### Runtime proof and audit enrollment
+
+The first Windows release requires installed-runtime proof; there is no
+force-runtime-unverified override. Reuse C4's `_windows_runtime` resolver,
+validator and scrubbed environment rather than copying launcher logic.
+An authoritative interpreter/launcher failure does not fall through to another
+runtime. Check the actual installed memory hook and perform a synthetic
+in-memory roundtrip through its CNG-backed provider under the application token.
+Release custody locks before launching that subprocess, then reacquire and
+revalidate the same profile/generation/wrapped key before arming. A failed proof
+preserves real files and markers; an inert enrolled key may remain for retry.
+
+Windows gateway discovery returns explicit known/unknown state and observed
+runtimes. Use viable native/psutil process inspection, preserving AccessDenied,
+process-exit and PID-reuse distinctions. An inaccessible plausible gateway or
+failed inventory is unknown, never an empty list proving safety. The observed
+ordinary-user CIM denial must not become an empty-success fallback. Unknown
+or running relevant gateways refuse destructive lifecycle transitions; a new
+subprocess cannot prove which hook an existing process loaded. Process discovery
+supplements lifecycle locks and does not guarantee that a new process cannot
+start after the scan.
+
+Audit enrollment is an explicit native-custody initialization ceremony. Memory
+enable may call that ceremony explicitly; an audit callback never provisions
+a key. Audit load/writer construction uses a checked independent role lease,
+without a full file-vault/main-key metadata dependency. C7a supplies checked
+append, rotation and bounded snapshots. Uncertain outcomes invalidate cached
+active identity/header/DEK and require reconciliation. Existing audit downgrade
+policy remains a separate consumer decision; unsafe/uncertain storage never
+permits overwriting retained ciphertext or silently creating replacement keys.
+
+The opt-in C5d API is `keyvault.windows_audit.WindowsAuditProvider(home,
+backend=None)`. `lease(custody=None)` resolves the current independent audit
+role and verifies its native public fingerprint. `writer(path,
+rotate_bytes=10485760, retention_days=30, custody=None)` returns a
+`WindowsEncryptedWriter` containing an immutable lease and backend, never a
+live custody session. Construction is load-only; missing ownership, helper or
+native key never causes enrollment. `enroll_role("audit")` remains an explicit
+ceremony. Product factory/CLI routing belongs to C7b.
+
+`WindowsEncryptedWriter.append(entry)` owns a fresh custody scope. A synchronous
+nested callback uses `append_in_custody(entry, custody=session,
+transaction=None)`; an optional transaction must be a live, matching protected
+Mordred loan. Lock order is home, mordred, writer mutex, then audit. The default
+physical Mordred directory borrows its C2 transaction even through safe path
+aliases. A custom exact-private directory must already exist and obtains a
+nonblocking lock after custody, so cross-profile custom paths cannot form a
+waiting lock cycle. A custom path equal to the physical home is refused.
+Every successful or uncertain mutation and child-exit failure is immediately
+reported through the owning monotonic publication receipt. After publication,
+ordinary failures become classified uncertainty; interrupts keep their type and
+are recorded as uncertain. Caught errors cannot acknowledge success at the
+outer exit. A new generation's DEK is wrapped, its complete header built and the
+entry sealed before rotation, so only checked filesystem primitives follow the
+first mutation: a definite native wrap failure publishes nothing, poisons no
+writer and leaves the outer exit definite. Uncertain outcomes and a missing
+previously owned active file permanently poison that writer. Definite failures
+and close wipe the DEK but keep poison and the owned active-file identity, which
+only the writer's own rotation clears. Header/identity changes wipe the prior
+DEK before validating and rotating only checked recognized plaintext or owned
+MRAL history; any other active header is a classified write refusal.
+
+`decrypt_windows_log_file(path, home=..., audit_sink=..., backend=None,
+custody=None, max_file_bytes=16842752, max_output_bytes=16777216)` takes a bounded
+immutable C7a snapshot and releases its audit context/custom lock before native
+unwrap or its synchronous audit callback. The retained custody scope excludes
+reset through entry authentication. The default borrowed Mordred lock belongs
+to that lifecycle, not to an additional audit sidecar. Nested sinks explicitly
+borrow the caller's custody; they must never recursively resolve a fresh
+provider/home. Raw caller snapshots are not accepted. Gzip output, exact MRAL
+schema and MRKW structure are checked before native I/O. Shared MRAL header/AAD,
+entry encoding and crypto remain byte-for-byte unchanged; Windows requires the
+scoped native field. `WindowsCustodySession.lease_for_native(role,
+native_key_id)` resolves only exact owned current/retained records in the checked
+physical profile, then uses normal lease/journal validation. An arbitrary tag,
+another role/profile, or a legacy global native selector grants no lookup
+permission. Memory purge/re-enrollment does not invalidate retained audit roles.
+Destructive audit-key/history purge remains a later explicit caller ceremony.
+
+Flat memory/audit lifecycle needs no recursive filesystem API. Keep its
+permanent directory lock after purge. Recursive uninstall of Telegram/archive
+or legacy vault trees remains a later shared-foundation prerequisite requiring
+checked traversal, an outer lifecycle lock and quiescent directory removal;
+raw recursive deletion does not satisfy this contract.
+
+C5 profile binding uses `CanonicalSession.home_directory_identity()` to obtain
+`FileIdentity | None` for its checked, currently owned home. The method validates
+session process/thread/lifetime and existing home identity without reacquiring
+locks; `None` means only the already checked absent home. It grants no raw
+handle or transaction access. A supplied custody home must resolve through a
+checked directory capability to that same identity before borrowing custody
+state; string spelling and private coordinator attributes are not authority.
+
+Managed-memory evidence is role-specific after validating the complete physical
+profile manifest. Valid audit/Telegram ownership alone does not imply a missing
+memory wrapper. Confirmed memory deletion first records its durable deleted
+phase, then removes the checked wrapper and opt-out, clears only the memory
+role, and removes its journal last. Recovery of that recorded phase may finish
+already-partial cleanup, but still refuses unexpected opt-in, seals or unsafe
+objects. Successful purge leaves an unmanaged memory role while preserving
+independent audit/Telegram roles. A missing wrapper with retained memory-role,
+marker, opt-out, seal or ambiguous pending evidence remains broken, never fresh.
+
+### Windows supported gateway inventory boundary
+
+Ordinary Windows tokens cannot necessarily open foreign process tokens, even
+with minimum query rights. WTS NULL SIDs, access denial, service accounts,
+process-object owners and image publishers do not prove foreign ownership.
+The lifecycle gate therefore describes the supported Windows runtime inventory,
+not universal absence of arbitrary interpreters embedded in native applications.
+
+C4-admitted Python/pythonw environments, recognizable Python and Hermes/Desktop
+launchers, generic execution hosts and every hinted PID remain plausible.
+Denied or unstable plausible records remain unknown. Every positively
+current-owned process still receives the full argv/identity scan, regardless of
+its image name; custom scripts executed by supported Python are included.
+Unknown images in user-writable or untrusted locations remain unknown.
+
+A denied noncandidate image may be outside this supported set only after a
+shared foundation capability positively validates its file and ancestor
+namespace as administrator/OS-managed and not mutable by the current ordinary
+user or other untrusted principals. This is a support-boundary exclusion, not
+foreign-owner proof. Stable native PID, creation time and image revalidation
+remain required. No vendor basename list, environment-derived trusted root,
+signed-file shortcut, missing SID or failed query grants this exclusion.
+
+The new read-only Windows foundation operation
+`inspect_managed_installation_image(path) -> FileMetadata` pins and checks the
+local NTFS image and ancestor identities, rejects reparse points and unsafe
+ownership/ACLs, and returns only after revalidation and successful cleanup.
+It grants no mutation authority and changes no permissions. Current-user-owned
+or writable installation namespaces cannot qualify. OS/administrative writers
+remain trusted under the existing threat model; service ownership such as
+TrustedInstaller requires explicit native SID validation. Source hardlinks may
+be admitted because this operation only observes a protected executable; stored
+private/confidential-file single-link rules remain unchanged. Implement this
+separate policy through shared native descriptor/handle primitives, never by
+weakening existing confidential or public-build admission.
+
+An opaque renamed or embedded interpreter inside such an admitted managed
+namespace is outside the supported set and can be omitted. Its operator must
+stop it before lifecycle migration or use a supported launcher. Windows managed
+memory hooks and installed-runtime proof must require the supported C4 runtime
+boundary; no universal quiescence claim or force-proof bypass is introduced.
+
+Image inspection applies a role-based mutation policy that is separate from
+storage admission. The inspected image and its immediate parent directory
+refuse every untrusted data, append, extended-attribute, attribute, delete,
+delete-child, DACL and owner grant; the immediate parent additionally refuses
+untrusted subdirectory creation because the application directory leads the
+DLL search order. Directories strictly above the immediate parent refuse only
+untrusted DELETE, FILE_DELETE_CHILD, WRITE_DAC and WRITE_OWNER: adding new
+entries, extended attributes or attributes cannot rename, delete or replace an
+existing child component or change its security, and every component is
+verified to be a non-reparse NTFS directory on pinned handles and named
+reopens. This admits the Windows default `ProgramData` ACL
+(`BUILTIN\Users` container-inherit ADD_FILE, ADD_SUBDIRECTORY, WRITE_EA,
+WRITE_ATTRIBUTES) above vendor-protected subtrees such as the Defender
+platform directory. Private, confidential and public-build storage admission
+keeps refusing untrusted ADD_FILE on ancestors; the relaxation applies to
+read-only image inspection only.
+
+Accepted residual: a directory-bit reparse tag set by an untrusted principal
+on such an upper ancestor outside the inspection window, combined with a
+filter that shadows existing on-disk children, could cause a denied process to
+be omitted from the supported inventory. Such an omission never admits a
+plausible interpreter, generic execution host, hinted PID or positively
+current-owned process, and the inventory only gates destructive memory
+migration. No vendor list, service-manager query, session classification or
+privileged broker is introduced.
+
+The inventory classifies a denied, non-hinted record in this order: literal
+kernel pseudo images (`Registry`, `MemCompression`) are outside the supported
+set; plausible basenames (`python*`, `pythonw*`, `py`, `pyw`, any basename
+containing `hermes` or `mordred`, and the generic hosts `cmd`, `powershell`,
+`powershell_ise`, `pwsh`, `rundll32`, `mshta`, `wscript`, `cscript`) remain
+unknown; every other image is submitted to
+`inspect_managed_installation_image` and is outside the supported set only
+when admitted and after fresh PID, creation-time, name and image
+revalidation. Any refusal, unsupported result or query failure keeps the
+record unknown. The fixed OS-image list and `GetSystemDirectoryW` lookup are
+removed; `System32` images are admitted by the same capability.

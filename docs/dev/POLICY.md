@@ -254,3 +254,72 @@ not-yet-created cookie uses the shallow child-process check; authentication,
 ControlPort, malformed-response, and known terminal-state failures are
 unhealthy. The optional dependency bounds the risk of the old, lightly
 maintained Stem package.
+
+### Windows canonical privacy decisions
+
+On Windows, each privacy hook reads one checked canonical generation of
+`config.yaml` and `mordred/policy.json` before authorizing a tool or accepting
+plugin integrity. The mode, cloud permission and allowlist, tool-egress settings,
+and enabled/disabled plugin lists are derived from that generation. The shared
+mode, cloud permission, allowlist and audit path must agree when both mirror
+files exist. A policy-only installation uses its checked policy values; checked
+absence of both documents retains fresh-install defaults.
+
+Pending updates, unsafe permissions, hardlinks/reparse points, lock contention,
+failed cleanup, oversized or malformed documents, invalid permission fields,
+and conflicting mirrors refuse the decision. A previously cached permissive
+state never overrides these failures, including for local tools. Session
+integrity uses the existing `MordredIntegrityRefused` hard refusal because Hermes
+swallows ordinary hook exceptions. Tool hooks return the existing block action.
+The install wrapper also refreshes the canonical generation; a supplied mode
+may strengthen but cannot weaken it. Its optional `config_path` selects an
+explicit canonical config leaf.
+
+Snapshots release all filesystem capabilities before audit writer construction,
+network status resolution, keyvault probes, approvals or installer execution.
+Standalone Windows egress reads use the same checked parser and propagate
+failure; callers must refuse rather than substitute permissive defaults.
+POSIX policy loading and pure policy evaluators retain their existing behavior.
+Audit storage migration is tracked separately from these readers.
+
+## Native Windows LLM policy decisions
+
+The `llm_guard` component reads `config.yaml` and `mordred/policy.json` as one
+checked canonical snapshot before each Windows enforcement decision. This
+includes off/lenient early returns, local provider registration, harness checks,
+auxiliary client cache hits, declared auxiliary routes and the authoritative
+`pre_api_request` hook. A pending transaction, unsafe descriptor/owner/link,
+identity change, read or cleanup failure, oversized file, invalid document or
+invalid consumed field refuses the operation with `MordredSessionRefused`.
+This `BaseException` refusal escapes Hermes' ordinary exception handlers.
+Checked absence retains the fresh-install lenient default. Existing POSIX
+readers and their behavior are unchanged.
+
+Filesystem locks and handles are released before provider construction, health
+probes, prompts or audit initialization/writes. The internal cached-client resolver can borrow its synchronous caller's
+snapshot; public resolver entries always re-admit. Ownership includes process,
+thread, task and active lifetime, and reuse is suspended during guard callbacks.
+A copied context cannot retain admission after that lifetime. The next request always
+checks the filesystem again. Stat-based policy memoization is disabled for
+Windows. A prompt-once grant is bound to the checked profile paths, both file
+identities and both documents' bytes; a different generation requires a new
+grant. The short endpoint-health cache remains a health optimization after
+fresh policy admission.
+
+The session disk pre-check remains advisory for a provider mismatch, because
+runtime overrides are authoritative. Unsafe Windows configuration is refused
+before that advisory exception boundary. The pre-check uses the provider from
+checked config; absent/automatic selection is treated as unknown rather than
+using an unchecked `auth.json` grant. Actual runtime provider and endpoint
+checks remain mandatory. Audit initialization failures on Windows also refuse
+instead of becoming a swallowed hook error. Failure messages omit document
+contents and parser diagnostics.
+
+Custom canonical policy leaves are passed into `CanonicalPaths`; the enforcement
+functions also accept an explicit sibling `config_path`. No custom leaf is
+routed through a generic unchecked loader. This component change does not
+migrate the audit writer, implement Windows LLM hosting, validate live model
+services, or establish whole-product Windows support. Native regression cases
+cover inherited profile descriptors and cached grants followed by ACL,
+hardlink and pending-marker changes, without repairing ACLs or rewriting
+retained documents.

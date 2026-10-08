@@ -78,12 +78,21 @@ jobs:
           tests/test_private_fs_lifecycle.py tests/test_private_fs_lifecycle_faults.py
           tests/test_private_fs_confidential.py tests/test_private_fs_confidential_windows.py
           tests/test_private_fs_public_build.py tests/test_private_fs_public_build_windows.py
+          tests/test_private_fs_managed_images.py tests/test_private_fs_managed_images_windows.py
           tests/test_windows_runtime.py tests/test_windows_installer.py
           tests/test_windows_install_ownership.py tests/test_windows_install_powershell.py
+          tests/test_private_fs_principal.py tests/test_config_io_custody.py
           tests/test_config_io.py tests/test_config_readers.py tests/test_config_io_windows.py
+          tests/test_keyvault_windows_processes.py
           tests/test_audit_session.py tests/test_audit_session_faults.py
           tests/test_audit_rotation.py tests/test_audit_session_processes.py
           tests/test_audit_session_windows.py
+          tests/test_wizard_config_windows.py tests/test_wizard_config_native_windows.py
+          tests/test_windows_custody_profile.py tests/test_windows_custody.py
+          tests/test_windows_encrypted_audit.py tests/test_windows_encrypted_audit_processes.py
+          tests/test_windows_encrypted_audit_windows.py
+          tests/test_windows_privacy_policy.py
+          tests/test_llm_windows_policy.py tests/test_llm_windows_policy_native.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs

@@ -24,6 +24,8 @@ __all__ = [
     "PrivateDirectory",
     "PrivateFSError",
     "PrivateTransaction",
+    "current_principal_id",
+    "inspect_managed_installation_image",
     "open_confidential_directory",
     "open_optional_confidential_directory",
     "open_optional_private_directory",
@@ -79,3 +81,21 @@ def read_public_build_output(path: str | Path, *, max_bytes: int) -> bytes:
     from ._windows_public import read_public_build_output as reader
 
     return reader(path, max_bytes=max_bytes)
+
+
+def current_principal_id() -> bytes:
+    """Return the validated effective Windows token SID, without name lookup."""
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "current_principal_id")
+    from ._windows_security import current_user_sid
+
+    return current_user_sid()
+
+
+def inspect_managed_installation_image(path: str | Path) -> FileMetadata:
+    """Read-only checked Windows installation metadata; no process-owner proof."""
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "inspect_managed_installation_image")
+    from ._windows_managed import inspect_managed_installation_image as inspector
+
+    return inspector(path)

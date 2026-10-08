@@ -11,11 +11,11 @@ import os
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 from ._private_fs import (
     ConfidentialDirectory,
@@ -24,15 +24,17 @@ from ._private_fs import (
     FileMetadata,
     PrivateDirectory,
     PrivateFSError,
+    PrivateTransaction,
     open_confidential_directory,
     open_optional_confidential_directory,
     open_optional_private_directory,
     open_private_directory,
 )
-from ._private_fs._types import validate_leaf, validate_limit
+from ._private_fs._types import reserved, validate_leaf, validate_limit
 
 CONFIG_LIMIT = POLICY_LIMIT = DOTENV_LIMIT = 8 * 1024 * 1024
 MARKER_LIMIT = 4096
+_Result = TypeVar("_Result")
 POLICY_TRANSACTION_MARKER = ".policy-write.pending"
 
 
@@ -124,7 +126,8 @@ class _State:
         self.home: ConfidentialDirectory | None = None
         self.policy: PrivateDirectory | None = None
         self.home_tx: ConfidentialTransaction | None = None
-        self.policy_tx: ConfidentialTransaction | None = None
+        self.policy_tx: PrivateTransaction | None = None
+        self.create = False
         self.home_identity: FileIdentity | None = None
         self.policy_identity: FileIdentity | None = None
         self.policy_opened = False
@@ -143,7 +146,9 @@ class _State:
     def remember_mutation_failure(self, exc: BaseException, *, published: bool) -> None:
         if published and isinstance(exc, PrivateFSError):
             exc.commit_state = "uncertain"
-        if published or (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain"):
+        if self.failure is None and (
+            published or (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain")
+        ):
             self.failure = exc
 
     def extend(self, create: bool, *, blocking: bool) -> None:
@@ -187,7 +192,7 @@ def _nested_session(
             raise ValueError("cannot create inside a checked-absent session")
         if scope == "policy":
             active.extend(create, blocking=blocking)
-        session = CanonicalSession(active)
+        session = CanonicalSession(active, blocking=blocking)
         try:
             yield session
             active.check()
@@ -215,6 +220,7 @@ def canonical_session(
     try:
         with ExitStack() as stack:
             state = _State(paths, stack)
+            state.create = create
             directory = stack.enter_context(
                 open_confidential_directory(paths.home, create=True)
                 if create
@@ -227,7 +233,7 @@ def canonical_session(
             if scope == "policy":
                 state.extend(create, blocking=blocking)
             _local.state = state
-            session = CanonicalSession(state)
+            session = CanonicalSession(state, blocking=blocking)
             try:
                 yield session
                 state.check()
@@ -248,8 +254,9 @@ def canonical_session(
 
 
 class CanonicalSession:
-    def __init__(self, state: _State) -> None:
+    def __init__(self, state: _State, *, blocking: bool = True) -> None:
         self._state = state
+        self._blocking = blocking
         self._live = True
 
     def _check(self, *, policy: bool = False) -> _State:
@@ -259,6 +266,41 @@ class CanonicalSession:
         if policy and not self._state.policy_opened:
             raise RuntimeError("policy scope required")
         return self._state
+
+    def home_directory_identity(self) -> FileIdentity | None:
+        """Return the live checked home binding, or its already-checked absence."""
+        return self._check().home_identity
+
+    @contextmanager
+    def borrow_mordred_transaction(self) -> Iterator[PrivateTransaction]:
+        """Lend non-policy leaves under existing home -> mordred locks."""
+        state = self._check()
+        state.extend(state.create, blocking=self._blocking)
+        self._guard(recovery=False)
+        if state.policy_tx is None:
+            raise PrivateFSError("missing", "mordred_transaction")
+        loan = _MordredTransaction(self, state.policy_tx)
+        try:
+            loan.assert_private_admission()
+            yield loan
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=False)
+            raise
+        finally:
+            loan._live = False
+
+    @contextmanager
+    def publication_receipt(self) -> Iterator[PublicationReceipt]:
+        """Track child publication without lending filesystem or lock authority."""
+        state = self._check()
+        receipt = PublicationReceipt(self)
+        try:
+            yield receipt
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=receipt._published)
+            raise
+        finally:
+            receipt._live = False
 
     def _marker(self) -> CheckedContents | None:
         state = self._check(policy=True)
@@ -326,6 +368,30 @@ class CanonicalSession:
             state.remember_mutation_failure(exc, published=published)
             raise
 
+    def create_policy_backup(self, name: str, data: bytes) -> None:
+        """Create and verify an exact-private uninstall secret backup, never replace."""
+        state = self._check(policy=True)
+        validate_leaf(name)
+        if name.casefold() in {state.paths.policy_name.casefold(), POLICY_TRANSACTION_MARKER}:
+            raise ValueError("canonical policy mutations require the pair protocol")
+        if re.fullmatch(r"env-removed-[A-Za-z0-9_-]+\.env", name) is None:
+            raise ValueError("invalid policy backup leaf")
+        if not isinstance(data, bytes) or len(data) > DOTENV_LIMIT:
+            raise ValueError("backup must be bounded bytes")
+        self._guard()
+        if state.policy_tx is None:
+            raise PrivateFSError("missing", "policy")
+        published = False
+        try:
+            state.policy_tx.create_bytes(name, data)
+            published = state.published = True
+            result = _read(state.policy_tx, name, DOTENV_LIMIT)
+            if result is None or result.data != data:
+                raise PrivateFSError("unsafe", "backup_verification", commit_state="uncertain")
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=published)
+            raise
+
     def delete_home(self, name: str, *, expected_identity: FileIdentity) -> None:
         state = self._check()
         self._home_leaf(name)
@@ -367,6 +433,147 @@ class CanonicalSession:
         finally:
             update._live = False
             state.update = None
+
+
+class _MordredTransaction:
+    """Lifetime-bound loan; the underlying transaction never leaves C2."""
+
+    def __init__(self, session: CanonicalSession, transaction: PrivateTransaction) -> None:
+        self._session = session
+        self._transaction = transaction
+        self._live = True
+
+    def _check(self) -> _State:
+        if not self._live:
+            raise RuntimeError("mordred transaction loan is closed")
+        state = self._session._state
+        try:
+            self._session._check(policy=True)
+            self._session._guard(recovery=False)
+            self._transaction.assert_private_admission()
+            if self._transaction.directory_identity() != state.policy_identity:
+                raise PrivateFSError("unsafe", "loan_directory_identity")
+            return state
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=False)
+            raise
+
+    def _protected(self, name: str) -> bool:
+        folded = name.casefold()
+        leaves = {
+            self._session._state.paths.policy_name.casefold(),
+            "policy.json",
+            POLICY_TRANSACTION_MARKER,
+            ".policy-write.lock",
+        }
+        return (
+            folded in leaves
+            or reserved(name)
+            or any(folded.startswith(leaf + ".") and folded.endswith(".tmp") for leaf in leaves)
+        )
+
+    def _leaf(self, name: str) -> None:
+        validate_leaf(name)
+        if self._protected(name):
+            raise ValueError("coordinator-owned leaf cannot be borrowed")
+
+    def _invoke(self, operation: Callable[[], _Result], *, mutation: bool = False) -> _Result:
+        state = self._check()
+        published = False
+        try:
+            result = operation()
+            if mutation:
+                published = state.published = True
+            self._check()
+            return result
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=published)
+            raise
+
+    def assert_private_admission(self) -> None:
+        self._check()
+
+    def directory_identity(self) -> FileIdentity:
+        return self._invoke(self._transaction.directory_identity)
+
+    def stat(self, name: str) -> FileMetadata:
+        self._leaf(name)
+        return self._invoke(lambda: self._transaction.stat(name))
+
+    def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+        self._leaf(name)
+        return self._invoke(lambda: self._transaction.read_bytes(name, max_bytes=max_bytes))
+
+    def read_prefix(self, name: str, *, max_bytes: int) -> bytes:
+        self._leaf(name)
+        return self._invoke(lambda: self._transaction.read_prefix(name, max_bytes=max_bytes))
+
+    def list_names(self, *, max_entries: int) -> tuple[str, ...]:
+        validate_limit(max_entries)
+        return self._invoke(
+            lambda: tuple(
+                name for name in self._transaction.list_names(max_entries=max_entries) if not self._protected(name)
+            )
+        )
+
+    def create_bytes(self, name: str, data: bytes) -> None:
+        self._leaf(name)
+        self._invoke(lambda: self._transaction.create_bytes(name, data), mutation=True)
+
+    def replace_bytes(self, name: str, data: bytes) -> None:
+        self._leaf(name)
+        self._invoke(lambda: self._transaction.replace_bytes(name, data), mutation=True)
+
+    def append_bytes(self, name: str, data: bytes) -> None:
+        self._leaf(name)
+        self._invoke(lambda: self._transaction.append_bytes(name, data), mutation=True)
+
+    def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        self._leaf(name)
+        self._invoke(lambda: self._transaction.delete_file(name, expected_identity=expected_identity), mutation=True)
+
+    def rename_file(self, name: str, destination: str, *, expected_identity: FileIdentity | None = None) -> None:
+        self._leaf(name)
+        self._leaf(destination)
+        self._invoke(
+            lambda: self._transaction.rename_file(name, destination, expected_identity=expected_identity), mutation=True
+        )
+
+
+class PublicationReceipt:
+    """Monotonic outcome reporting for a separately locked child; no IO authority."""
+
+    def __init__(self, session: CanonicalSession) -> None:
+        self._session = session
+        self._live = True
+        self._published = False
+
+    def _check(self) -> _State:
+        state = self._session._state
+        if (
+            not self._live
+            or not self._session._live
+            or not state.live
+            or state.pid != os.getpid()
+            or state.thread != threading.get_ident()
+        ):
+            raise RuntimeError("publication receipt is closed or foreign")
+        if state.failure is not None:
+            raise state.failure
+        # Reporting must precede parent filesystem revalidation: a child may
+        # already have published when a parent identity/security check fails.
+        return state
+
+    def mark_published(self) -> None:
+        state = self._check()
+        self._published = state.published = True
+
+    def mark_uncertain(self, error: PrivateFSError) -> None:
+        state = self._check()
+        if not isinstance(error, PrivateFSError):
+            raise TypeError("uncertain receipt requires a classified filesystem failure")
+        self._published = state.published = True
+        state.remember_mutation_failure(error, published=True)
 
 
 class PolicyUpdate:

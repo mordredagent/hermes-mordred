@@ -465,6 +465,16 @@ never glob-deletes them. No default component root or Hermes home changes in thi
 foundation slice. Existing component lock names remain authoritative until their
 separate migration PRs define mixed-version behavior.
 
+`inspect_managed_installation_image(path)` is a read-only Windows observation
+of a caller-selected local NTFS image. It creates no lock, staging file or
+directory alongside OS or vendor executables, reads no executable contents,
+changes no ACL and grants no mutation capability. No environment variable,
+known folder or vendor basename establishes a trusted installation root.
+Checked descriptors and pinned file/ancestor identities establish admission;
+source-only hardlinks are permitted. The existing stored private/confidential
+single-link requirements are unchanged. Process ownership and supported-runtime
+classification belong to their consumers, never this metadata operation.
+
 ## Windows wallet storage boundary
 
 The keyvault caller migration uses `<home>/extension/wallet.json` and a permanent
@@ -505,3 +515,38 @@ C1a lifecycle methods operate only on validated sibling names in the caller's
 checked directory. Enumeration hides the reserved lock/staging names but counts
 staging entries toward its scan budget. Delete/rename never accept those names;
 there is no implicit stale-staging cleanup or recursive directory removal.
+
+
+### Windows dedicated custody paths
+
+These paths belong to the approved C5 contract; C5a implements flat ownership
+and inert custody while hooks and user ceremonies remain separate. All resolve beneath the selected `HERMES_HOME`.
+
+| Path | Owner and contract |
+| --- | --- |
+| `mordred/windows-custody.json` | Keyvault; exact-private flat versioned ownership manifest, at most 64 KiB and 64 retained role generations; exact current/retained field schema frozen by C5a |
+| `mordred/windows-{memory,audit,telegram}.pending.json` | Keyvault; record enrollment/deletion intent before native action; exact v1 role schemas frozen by C5a, never inferred from a native missing result |
+| `mordred/memory-key.wrapped` | Keyvault; existing 127-byte MRKW container, create-no-replace enrollment and checked role binding |
+| `mordred/memory-vault.marker` and `mordred/memory-vault.optout` | Memory lifecycle; checked markers, no raw writes/unlinks or uncertainty-to-absence conversion |
+| `memories/*.md` and `memories/*.md.bak.*` | Upstream memory names through Mordred's checked Windows adapter; trusted/confidential existing parent/files, private new ciphertext/restored plaintext/backups, bounded flat inventory |
+| `mordred/audit.log` and dated siblings, or the explicitly configured audit path | Audit consumer through C7a; exact-private storage and an independent retained audit-key role |
+
+The home remains a shared trusted parent. Lock order is home, mordred, memories;
+custom audit storage follows custody locks, using a nonblocking directory lock.
+The C5d adapter reuses the permanent `.mordred-fs.lock`, never the POSIX
+`.audit.log.lock`; custom exact-private audit directories must already exist. The protected C2 loan excludes policy,
+pending-marker and coordinator-lock names. Independent memory and C5d audit publications report
+through the owning coordinator's monotonic publication receipt. Permanent locks
+remain after flat purge while their namespaces are live.
+
+Windows CNG keys live in the user-scoped Platform Crypto Provider, not in a new
+file-vault blob tree. Native role IDs bind checked home FileIdentity, current
+binary SID and persisted profile/role nonces. A safe same-identity rename is
+allowed; a copy/restore/recreation into another physical directory is refused
+without automatic adoption. Decrypt before such a move or await explicit future
+migration. The legacy migration/export guidance above does not authorize Windows
+TPM recovery or the excluded Windows file vault.
+
+No recursive removal is implied by these flat paths. Unknown legacy vault trees
+and retained ciphertext stay intact until a separately checked lifecycle supports
+that operation; never remove live directory locks to force cleanup.

@@ -1126,6 +1126,85 @@ helper builds compatible. Exercise real owned build/reinstall under available
 PowerShell runtimes; include C4 installer and public-reader tests in the scoped
 Windows filesystem CI job alongside the existing foundation selectors.
 
+
+### Windows C5 dedicated custody implementation
+
+C5a freezes the exact v1 manifest and role journals in SPEC before implementation.
+Build strict immutable profile/role parsing first, then checked read-only memory
+inventory and the owned/nested custody coordinator. Exercise real MRKW crypto
+against an injected P-256 native boundary; journal creation, native generation,
+fingerprint verification, wrapper publication, ownership commit and final journal
+cleanup are separate failure points. Implement explicit positive-proof recovery
+and role deletion last. Runtime arming, memory mutation hooks, process proof,
+audit consumers and user ceremonies remain subsequent slices.
+
+Follow SPEC.md §Windows dedicated custody and memory lifecycle. These are
+separate implementation slices, not a claim that Windows support is complete.
+
+| Slice | Scope | Dependencies and exit evidence |
+| --- | --- | --- |
+| Shared prerequisite | Confidential bounded enumeration and public binary-SID principal seam; C2 protected Mordred loan and monotonic publication receipt | C1b/C2; reject protected names and confidential loans; caught uncertainty and child/outer cleanup tests |
+| C5a: custody/lifecycle | Flat Windows ownership schema, profile/role IDs, explicit create-only enrollment, load-only provider and role journals | Shared prerequisite, native CNG helper; freeze exact current/retained records first; alias/copy, concurrent enrollment and native failure tests |
+| C5b: memory storage/hooks | Checked inherited-safe memory adapter, markers, ciphertext writes and drift backups | C5a; no raw upstream Windows publication; adoption, broken seals, partial disable/purge and lifecycle race tests |
+| C5c: runtime discovery/proof | Reuse C4 interpreter resolver; typed known/unknown process inventory; installed hook and CNG memory proof | C4, C5a/b for final proof; ordinary-user denied/working inventory, actual interpreter and no subprocess-under-lock tests |
+| C5d: encrypted audit adapter | Independent audit role/generation lease and checked encrypted writer/reader | C5a, C7a; retained history, borrowed callback, DEK invalidation and uncertainty tests |
+| C5e: capability/reset boundaries | Truthful excluded file-vault gates and flat role-specific reset/purge | C5a/b/d; no mutation on excluded paths, retained audit/Telegram ownership and ambiguous deletion journals |
+| C6: wizard consumers | Explicit native-custody init, proven memory enable/disable/purge and unsupported-path guidance | C3/C4 and relevant C5 slices; no force-proof bypass; real installed flow and failure preservation |
+
+C5c inventory work may proceed against its typed contract while custody is
+implemented; its final key proof waits for C5a/b. C7b privacy/CLI and C10 Telegram
+remain separate component PRs and consume the shared identity/lifecycle services.
+Do not turn audit callbacks into initialization paths or implement another
+native-key selector scheme in Telegram.
+
+Keep the full macOS file-vault `_storage` rewrite out of these Linux-tier slices.
+Flat custody does not require recursive deletion. Schedule checked tree lifecycle
+as a separate foundation dependency before recursive C6/C10 cleanup; preserve
+unknown retained trees rather than substituting `shutil.rmtree`.
+
+Acceptance includes wrong-user/token refusal, same-identity rename, copied-home
+refusal, no key generation after BAD_KEYSET, all publication/delete journal
+failure points, bounded memory backup enumeration, unknown-process refusal and
+post-probe generation revalidation. Preserve POSIX tests and run reduced-extras
+checks, ordinary-user Server source/sdist-wheel tests and separate Windows 11
+installation-to-use checks. Native memory/audit evidence does not establish
+Telegram account/model, Desktop or recursive uninstall acceptance.
+
+
+### Windows encrypted audit adapter (C5d)
+
+The keyvault-only opt-in implementation is `keyvault/windows_audit.py`, sharing
+MRAL header serialization, validation, AAD and entry crypto with
+`log_encryption.py`; its Unix writer/decrypt interfaces stay unchanged. Public
+provider/writer/read signatures are frozen in SPEC.md §Windows dedicated custody
+and memory lifecycle. The only custody addition is exact current/retained
+`lease_for_native`; no file-vault or memory storage mutation is needed.
+
+Validate current generation before taking the writer mutex and C7a session.
+Default storage borrows C2's protected loan; custom preexisting directories use
+nonblocking child locks and immediate publication receipts for create, append,
+rename, delete, promoted generic post-publication failures and child cleanup.
+Wrap the new DEK, build its header and seal the entry before rotation, so only
+checked filesystem primitives follow the first mutation. The child audit lock
+must hold the checked directory identity. Settle failures under the writer mutex
+(a late custody-exit outcome settles before another thread reuses the writer):
+wipe the DEK but keep the owned active-file identity across definite failures
+and close; uncertain writes and lost owned active files poison the instance
+permanently. An interrupted settlement poisons yet always clears the in-flight
+latch; a latch still set after 30 s is a definite busy refusal, never a hang.
+Read bounded snapshots before native unwrap callbacks,
+retain lifecycle through authentication, and require explicit custody borrowing
+for synchronous nested appends. Do not resolve providers or prompt under audit
+locks, provision keys on lookup failure, or use a retry as reconciliation.
+
+Portable real-file/MRKW/MRAL suites cover independent roles, retained history
+across memory purge, copied/wrong-home/header selectors, stale leases, active
+identity drift, caught uncertainty, bounded/malformed crypto, explicit nested
+callbacks and independent writer processes. Native ACL/hardlink/junction/case
+fixtures join scoped Windows CI. The opt-in UUID audit-only CNG fixture and its
+fresh-process check remain controller-owned source/sdist-wheel acceptance; local
+fake-native success does not satisfy TPM, Windows 11 or product acceptance.
+
 ### Windows gateway inventory (C5c)
 
 The keyvault runtime inventory uses psutil's native Windows process APIs.
@@ -1142,7 +1221,10 @@ PID, creation time, name and image are rechecked through a fresh process object.
 Hinted PIDs never use this exclusion. Unknown images, executable copies outside
 the system directory, and generic hosts such as PowerShell/cmd/rundll32 remain
 unknown when ownership cannot be read. The existing PID 0 / PID 4 kernel
-pseudo-process exceptions remain narrow.
+pseudo-process exceptions remain narrow. The later managed installation
+prerequisite below defines the additional supported-runtime boundary for denied
+noncandidate images. It must be implemented before native known-empty
+acceptance can pass.
 A current-user gateway blocks a transition even when its profile is uncertain.
 The adjacent `gateway run` argv pair is conservative: custom script launchers
 are included, and unrelated current-user apps using that pair can over-block.
@@ -1171,3 +1253,78 @@ argv, verifies live native discovery and lifecycle refusal, then terminates only
 that test child and requires a known-empty inventory and successful stopped gate. No gateway/network service or user profile is modified. Record
 ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
 are not evidence of a successful native inventory.
+### Managed installation image prerequisite for gateway inventory
+
+Add a separate shared filesystem slice implementing
+`inspect_managed_installation_image(path) -> FileMetadata` before revising C5c
+ordinary-user gateway exclusions. Reuse native pinned path, security descriptor
+and handle operations; require OS/administrator-managed ownership and absence
+of current-user/untrusted mutation grants on the executable and relevant
+ancestor namespace. Check identities and security before return, retain cleanup
+failures, and never modify descriptors or files. Include public-image hardlinks,
+user-owned/writable lookalikes, ancestor replacement, junctions, held mutation
+handles and failure classification in native tests. Existing private and
+confidential admission rules must remain unchanged.
+
+The implementation uses `READ_CONTROL | FILE_READ_ATTRIBUTES` (`0x20080`)
+for ancestor handles and additionally `FILE_READ_DATA` (`0x20081`) for the
+image, with share-read, open-reparse-point and backup-semantics flags. Only the
+image handle holds `FILE_READ_DATA`, so only it refuses preexisting writer or
+deleter handles and blocks new ones while pinned. Directory pins hold no data
+or `DELETE` access; NT share checking ignores them and they do not block a
+later rename or delete. Pins are not a namespace lock: safety comes from the
+DACL policy plus final-path and identity rechecks.
+It reads metadata rather than image contents. Paths have at most 32,767 UTF-16
+code units and 256 components, all objects must remain on one local NTFS volume,
+and fresh named observations must match the pinned handles. Metadata, descriptor,
+path, timestamp and effective-principal checks finish before successful cleanup
+allows the `FileMetadata` to return.
+
+The separate managed-image policy trusts SYSTEM, Builtin Administrators and
+only the fixed native-validated TrustedInstaller service SID; it removes the
+current effective SID from that writer set. A bounded two-call local
+`LookupAccountNameW` must produce the exact service SID, `NT SERVICE` domain and
+`SidTypeWellKnownGroup`. Inherited public reads are allowed. Each observed
+object carries a role from the walk: `image`, `image_parent` (the immediate
+parent, which is the volume root when the image sits directly in it) or
+`upper_ancestor`; every recheck and named reopen reuses the stored role.
+Untrusted/current delete, delete-child, write-DACL and write-owner grants refuse
+for every role. The image and its immediate parent also refuse write-data or
+add-file, append or add-subdirectory, write-EA and write-attributes; upper
+ancestors admit those entry-creation rights (controller ruling below). Denies
+do not excuse an unsafe allow; inherit-only grants do not apply to the object.
+This policy does not alter private, confidential or public-build admission.
+
+C5c keeps all positively current-owned argv inspection. Plausible interpreter,
+Hermes/Desktop, generic-host and hinted records stay unknown when denied; only
+stable, noncandidate images admitted by the new capability are outside the
+supported inventory. Test the exclusions against ordinary Server source and
+sdist-wheel runs, including known-empty after the controlled gateway exits.
+Run these machine-wide gateway fixtures sequentially. C5b/C5c managed-hook and
+runtime-proof admission must enforce the same supported interpreter boundary.
+Record the unsupported opaque-runtime limitation and retain Windows 11 as a
+separate acceptance gate.
+
+Controller ruling (2026-10-08): `check_managed_image` takes a role
+(`image`, `image_parent`, `upper_ancestor`) stored on each observation and
+reused by every recheck. Upper ancestors admit untrusted ADD_FILE,
+ADD_SUBDIRECTORY, WRITE_EA and WRITE_ATTRIBUTES; the image and its immediate
+parent stay strict and the parent also refuses ADD_SUBDIRECTORY. Directory
+pins opened with READ_CONTROL and FILE_READ_ATTRIBUTES do not conflict with
+later rename or delete opens; safety comes from the DACL policy plus
+final-path and identity rechecks, and no later change may rely on pinning
+alone. Required tests: the existing ancestor-mutation case split by role; an
+explicit lock that storage `check_ancestor` still refuses 0x2, 0x10, 0x100
+and 0x116 for both `creating_child` values; a full-flow upper ancestor with
+the exact ProgramData ACE admitted while the same ACE on the parent, the
+image or a root that is the parent refuses; reparse appearing only at recheck
+or named reopen refuses; the native `writable-parent` fixture keeps refusing;
+a new elevated fixture `relaxed/parent/image.exe` with the ProgramData ACE on
+`relaxed` is admitted and the same ACE on `parent` refuses; ordinary-token
+probes record CreateHardLinkW, mount-point-tag-on-non-empty-directory and
+cloud/WCI tag outcomes; a real Defender image is admitted with its
+descriptors unchanged. C5c R2 then replaces the fixed OS-image list with this
+capability, keeps plausible basenames unknown, and must pass source and
+sdist-wheel native runs including known-empty after the controlled child
+exits, executed through the ordinary SSH path (SSM commands run PowerShell as
+SYSTEM and correctly produce unknown).

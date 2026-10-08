@@ -312,3 +312,40 @@ required.
 - [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
 - [ ] C12: integrated source/wheel CI, ordinary-user Server tests, virtual
   Windows 11 installation-to-use acceptance, and required live service gates.
+
+### Windows C5 custody execution order
+
+The approved contract is in [SPEC.md](SPEC.md#windows-dedicated-custody-and-memory-lifecycle)
+and the scoped sequence is in [PLAN.md](PLAN.md#windows-c5-dedicated-custody-implementation).
+Implementation and acceptance remain open:
+
+- [ ] Shared prerequisite: confidential memory enumeration and binary-SID
+  principal API; protected C2 transaction proxy and publication receipts.
+- [ ] C5a: freeze exact flat current/retained ownership and pending-journal
+  schemas; implement identity-bound create-only custody and load-only providers.
+  C5a now supplies the exact v1 schema, inert enrollment/load, retained role
+  leases, read-only memory inventory and positive-deletion cleanup. Local tests
+  and the explicit native fixture are implemented; independent review and
+  ordinary-user Server/Windows 11 acceptance remain required before completion.
+- [ ] C5b: checked memory storage/hooks, markers, adoption and flat lifecycle.
+- [ ] C5c: reuse C4 runtime selection, implement known/unknown process inventory,
+  and require actual installed-runtime memory proof without a force override.
+- [ ] C5d: independent audit role leases and C7a encrypted writer integration.
+  The opt-in provider/writer/reader, exact retained-selector lookup and checked
+  publication receipts are implemented. Independent review, native source/wheel
+  CNG and Windows 11 acceptance remain; C7b factory/CLI adoption is separate.
+- [ ] C5e: excluded file-vault refusal and flat role reset/deletion journals.
+- [ ] C6: explicit native-custody/audit initialization and wizard memory flows;
+  preserve separate C7b privacy/CLI and C10 Telegram migrations.
+- [ ] Design and implement checked tree lifecycle before recursive cleanup;
+  do not make it an implicit requirement for flat memory enrollment/purge.
+- [ ] Verify ordinary-user Server and Windows 11 installed flows, preserving
+  ciphertext after missing hardware, token denial and uncertain operations.
+
+- [ ] Managed image admission fix round: role-based ancestor policy (upper
+  ancestors admit entry-creation rights, parent and image stay strict),
+  storage-admission lock test, native fixture/probe evidence.
+- [ ] C5c R2: managed-image classification of denied non-plausible images,
+  removal of the fixed OS list, ordinary-user source/wheel known-empty proof.
+- [ ] Enforce the same supported C4 interpreter boundary in Windows managed
+  memory hooks and installed-runtime proof; document opaque-runtime limits.
