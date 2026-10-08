@@ -78,6 +78,26 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — Windows privacy canonical decisions (C8).**
+  Component revision `31845b8b4` follows the shared canonical coordinator.
+  Ordinary non-administrator Server 2025 / Python 3.11.17 runs passed all
+  **35 tests** in `tests/test_windows_privacy_policy.py` for both source and
+  a fresh sdist-derived wheel environment. Module origins were verified;
+  all profiles were task-owned. Native cases cover inherited ACL preservation,
+  broadened ACL/hardlink/junction refusal after a cached allow, and another
+  process holding the canonical locks. The session-start regression verifies
+  one checked generation and a later pending-state hard refusal.
+  Wheel SHA-256: `2c052e6e4f4922dac7977e944f06f81fdfb2ecceecce9293c9b1abd875808403`.
+
+  Independent review found an unguarded second session-start read; the final
+  revision reuses the integrity gate's checked state and passed scoped review.
+  Host full regression at the pre-fix revision: 6,039 passed, 130 skipped,
+  37 integration cases excluded, coverage 89.16%. Final focused regression:
+  174 passed, four native-only skips. Reduced-extras types, lint, formatting,
+  shellcheck and documentation checks passed; existing dependency/fork warnings
+  remain. Production audit storage, other components, Windows 11 and the full
+  installation-to-use flow remain separate acceptance gates.
+
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
   #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
