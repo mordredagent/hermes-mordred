@@ -2248,3 +2248,62 @@ while pytest runs (`PYTEST_CURRENT_TEST`), the package runs from a source
 checkout (`src/mordred_hermes` beside `pyproject.toml` and `tests/__init__.py`),
 and the value is an absolute, non-symlink, non-traversing `.py` file resolving
 under that `tests/` directory. Every other case drops it.
+
+##### Windows proof-bound memory lifecycle (C5b-2)
+
+`keyvault._memory_storage` adds `enable_memory_encryption(home, proof) ->
+EnableReport(sealed, already_sealed, reconciled, armed)`,
+`disable_memory_encryption(home, proof, *, keep_key=True) ->
+DisableReport(decrypted, already_plaintext, reconciled, opted_out)`,
+`verify_memory_purge_candidates(home) -> PurgeReport(managed, armed,
+opted_out, sealed, broken, plaintext, backups, pending, reasons, may_purge)`
+and `MemoryLifecycleError(MemoryStorageError)` with `operation`, `completed`,
+`remaining` and `uncertain`. Reports carry counts or file names only.
+
+Enable and disable check the issued proof and its TTL before any lock, own
+`windows_custody_session(home)` and join it with
+`windows_memory_session(home, custody=...)` (home -> mordred -> memories),
+then revalidate the proof with `validate_windows_runtime_proof` and run
+`require_stopped_windows_gateways` before any mutation. They launch no
+subprocess. Before the first mutation they refuse unrecognized lifecycle
+siblings or siblings without a target, authenticate every existing seal under
+its basename, refuse broken seals, non-UTF-8 files, decrypted text starting with
+the seal magic, per-file or aggregate bound overflow and a directory with no
+room for a staging entry, and prepare every replacement in RAM. Converted text
+is what the Windows hook reads (UTF-8 with normalized newlines), so disable
+publishes LF-normalized plaintext and enable seals exactly that text.
+
+Each file is converted by a C1 create-no-replace staging sibling
+`.mordred-memory-{seal|open}-<hex of the UTF-8 name>` (never a memory leaf),
+read-back verification, a recheck of the target's identity, size and mtime,
+an atomic checked `replace_bytes` of the target with the same verified bytes,
+read-back verification that authenticates seals, and identity-bound sibling
+deletion. The confidential transaction contract has no rename and a no-replace
+rename cannot replace an existing file, so the target is never absent: it
+holds its old form or the verified new form, and plaintext is never removed
+before its sealed replacement authenticates. Each mutation reports to the
+canonical publication receipt; post-publication failures are uncertain. The
+next transition removes leftover siblings whose target exists, because the
+target is authoritative. A final rescan requires every file converted and no
+staging entry left.
+
+With the memories lock released and home and mordred still held, the proof and
+gateway gate are checked again and the markers transition. These are the only
+Windows writers of `memory-vault.marker` (`memory-encryption enabled\n`) and
+`memory-vault.optout` (`opt-out\n`): the opposite marker is deleted by expected
+identity first, then the requested marker is created no-replace and verified
+(an existing marker of at most 4 KiB is kept), so both never coexist. Enable
+removes the opt-out and creates the marker; disable removes the marker and
+creates the opt-out. After the first mutation any failure raises
+`MemoryLifecycleError`: every file stays plaintext or an authenticated seal,
+enable failures leave the profile unarmed, and disable file failures keep
+custody, remaining ciphertext and the armed marker. Reruns validate every
+seal and finish the transition.
+
+`keep_key=False` refuses before any lock; disable never deletes the key.
+`verify_memory_purge_candidates` takes no proof and performs no native call or
+mutation: it reads custody state and a complete bounded checked scan of the
+memories directory. `may_purge` requires managed custody, no opt-in marker,
+an opt-out marker and no sealed, broken or staging entry. The purge itself stays
+C5e `reset_role` plus C5a `delete_role`, invoked by C6 after this report and a
+fresh stopped-gateway gate.

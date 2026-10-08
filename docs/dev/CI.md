@@ -1205,3 +1205,33 @@ C4 validation, C1 private probe directory and bounded protocol natively; only
 the CNG boundary, principal and checked-directory admission are injected
 through the test-only backend module. This is not TPM or installed-product
 evidence. The explicit real-CNG recipe is recorded with the lifecycle below.
+
+### Windows proof-bound memory lifecycle validation (C5b-2)
+
+The scoped Windows job also runs `test_windows_memory_lifecycle.py`, whose
+proofs come from the real probe child above and whose files use real checked
+transactions, MRKW and AES-GCM with the injected CNG boundary.
+
+Explicit ordinary-user acceptance uses `tests/test_windows_memory_proof_live.py`.
+Use the installed Hermes 0.19 venv from the controller artifact notes
+(`completion-c4-real-20261008`) after installing, with pytest, a wheel built
+from this branch's sdist; an editable install cannot prove. Verify
+`mordred_hermes.__file__` there first. Set `MORDRED_TEST_WINDOWS_PROOF_LIVE=1`,
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` to an existing retained isolated root,
+`MORDRED_HERMES_PYTHON` to that venv's `Scripts\python.exe` and
+`MORDRED_WINKEY_HELPER` to the owned helper, stop every Hermes gateway, then run
+from the checkout with that same interpreter:
+
+```powershell
+& $env:MORDRED_HERMES_PYTHON -m pytest -q -s -o addopts= -m integration tests/test_windows_memory_proof_live.py
+```
+
+The run passes the real stopped-gateway gate, creates a new UUID profile and a
+fresh CNG key, then proves the installed runtime, enables, reads in a fresh
+installed-runtime process, disables, reads again, requires a purgeable report
+and deletes only its own key through the C5a journal. It prints only the
+interpreter, module and helper paths and the seam. A failure keeps the profile
+and journals and names the profile path; the root is never removed
+recursively. Record source and sdist-wheel results separately in the Manual
+live-device validation log. Neither run establishes Windows 11 or C6 product
+acceptance.

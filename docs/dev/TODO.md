@@ -364,6 +364,12 @@ Implementation and acceptance remain open:
   disable/decrypt, marker transitions and purge verification with exact
   physical-home/SID/generation/epoch/wrapped-digest proof preconditions.
   Expose no bool/callback proof bypass; C5a continues to own deletion journals.
+- [ ] C5b-2 lifecycle: `enable_memory_encryption`,
+  `disable_memory_encryption`, marker transitions and
+  `verify_memory_purge_candidates` are implemented with portable real-proof
+  tests. Independent review, scoped Windows CI, the explicit real-CNG
+  `test_windows_memory_proof_live.py` source and sdist-wheel runs, C6 routing
+  of the ceremonies and Windows 11 acceptance remain.
 - [ ] Implement checked atomic Windows plaintext Journey memory mutations;
   first-slice refusal is a preserved functional gap, not complete integration.
 - [ ] Complete separate C6 ceremony consumers and ordinary-user Windows 11

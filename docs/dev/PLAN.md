@@ -1414,3 +1414,26 @@ without fallback, running/unknown inventory before the child, every malformed,
 oversized, extra-output, wrong-digest, wrong-custody, outside-root,
 helper and non-zero report, timeout, custody change during the child,
 missing bootstrap, locks held, and the injection scrub.
+
+### Windows proof-bound memory lifecycle (C5b-2)
+
+The lifecycle lives beside the checked storage in `keyvault/_memory_storage.py`
+and shares one receipt-reporting helper with ordinary memory publication. Plan
+first, mutate second: classify and authenticate the complete bounded inventory,
+validate staging leftovers and build every replacement in RAM before the first
+write, so refusals leave files and markers untouched. Convert through the C1
+create-no-replace sibling and atomic checked replacement, because confidential
+transactions expose no rename and a no-replace rename cannot replace a file.
+Markers transition last under the still-held custody locks after the proof and
+gateway gate are checked again. Purge verification is a load-only report; the
+native purge remains C5e/C5a work driven by C6.
+
+Tests use real proofs from the installed-runtime child and fault injection at
+the checked primitives: sibling create, publish, read-back verify, sibling
+cleanup, opt-out or marker removal and marker or opt-out creation, each followed
+by a coherence check (original plaintext or authenticated seal, markers never
+both) and a successful rerun. Stale epoch, wrapper and generation, another
+profile, copied or expired proofs, running or unknown gateways, forged seals,
+broken seals, impersonating plaintext, orphan siblings, marker exclusivity,
+purge reports and a fresh-process read through `windows_memory_session` are
+covered; `test_windows_memory_proof_live.py` is the gated real-CNG recipe.
