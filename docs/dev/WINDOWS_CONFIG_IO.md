@@ -38,7 +38,10 @@ descriptors, and pending recovery still verifies/finalizes a complete pair.
 Marker creation/verification precedes any member mutation. Exact intended pair
 verification precedes identity-bound marker deletion and checked absence.
 Publication errors retain the marker; deletion/cleanup uncertainty can leave a
-verified pair marker-free but must raise. There is no rollback, automatic retry,
+verified pair marker-free but must raise. Caught uncertain mutation errors remain
+on the session: subsequent operations and outer exit re-raise the original
+classified failure, even if cleanup also fails. A nested nonblocking reader uses
+nonblocking acquisition when extending a home scope to policy scope. There is no rollback, automatic retry,
 or finally-block marker deletion. Recovery is available only through the live
 owning full policy update. Callers parse and validate whole source documents
 before commit: this module deliberately transports bytes without YAML/JSON

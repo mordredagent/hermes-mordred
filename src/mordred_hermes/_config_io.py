@@ -115,11 +115,11 @@ def _read(tx: ConfidentialTransaction | None, name: str, limit: int) -> CheckedC
 
 
 class _State:
-    def __init__(self, paths: CanonicalPaths, stack: ExitStack, blocking: bool) -> None:
-        self.paths, self.stack, self.blocking = paths, stack, blocking
+    def __init__(self, paths: CanonicalPaths, stack: ExitStack) -> None:
+        self.paths, self.stack = paths, stack
         self.pid, self.thread = os.getpid(), threading.get_ident()
         self.live = True
-        self.failed = False
+        self.failure: BaseException | None = None
         self.published = False
         self.home: ConfidentialDirectory | None = None
         self.policy: PrivateDirectory | None = None
@@ -131,14 +131,22 @@ class _State:
         self.update: PolicyUpdate | None = None
 
     def check(self) -> None:
-        if not self.live or self.failed or self.pid != os.getpid() or self.thread != threading.get_ident():
-            raise RuntimeError("canonical session is closed, foreign, or failed")
+        if not self.live or self.pid != os.getpid() or self.thread != threading.get_ident():
+            raise RuntimeError("canonical session is closed or foreign")
+        if self.failure is not None:
+            raise self.failure
         if self.home is not None and self.home.directory_identity() != self.home_identity:
             raise PrivateFSError("unsafe", "home_identity")
         if self.policy is not None and self.policy.directory_identity() != self.policy_identity:
             raise PrivateFSError("unsafe", "policy_identity")
 
-    def extend(self, create: bool) -> None:
+    def remember_mutation_failure(self, exc: BaseException, *, published: bool) -> None:
+        if published and isinstance(exc, PrivateFSError):
+            exc.commit_state = "uncertain"
+        if published or (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain"):
+            self.failure = exc
+
+    def extend(self, create: bool, *, blocking: bool) -> None:
         self.check()
         if self.policy_opened:
             if create and self.policy is None:
@@ -155,35 +163,39 @@ class _State:
             self.policy = directory
             if directory is not None:
                 self.policy_identity = directory.directory_identity()
-                self.policy_tx = self.stack.enter_context(directory.transaction(blocking=self.blocking))
-        except BaseException:
+                self.policy_tx = self.stack.enter_context(directory.transaction(blocking=blocking))
+        except BaseException as exc:
             # A failed extension must never masquerade as an absent policy scope.
-            self.failed = True
+            self.failure = exc
             raise
 
 
 @contextmanager
 def _nested_session(
-    active: _State, paths: CanonicalPaths, scope: Literal["home", "policy"], create: bool
+    active: _State, paths: CanonicalPaths, scope: Literal["home", "policy"], create: bool, blocking: bool
 ) -> Iterator[CanonicalSession]:
     active.check()
-    if active.paths._key() != paths._key():
-        raise ValueError("nested canonical sessions must use the same home and leaves")
-    # Opening checked handles revalidates this spelling; never reacquire a lock.
-    with open_optional_confidential_directory(paths.home) as alias:
-        identity = alias.directory_identity() if alias is not None else None
-        if identity != active.home_identity:
-            raise PrivateFSError("unsafe", "nested_home_identity")
-    if create and active.home is None:
-        raise ValueError("cannot create inside a checked-absent session")
-    if scope == "policy":
-        active.extend(create)
-    session = CanonicalSession(active)
     try:
-        yield session
-        active.check()
-    finally:
-        session._live = False
+        if active.paths._key() != paths._key():
+            raise ValueError("nested canonical sessions must use the same home and leaves")
+        # Opening checked handles revalidates this spelling; never reacquire a lock.
+        with open_optional_confidential_directory(paths.home) as alias:
+            identity = alias.directory_identity() if alias is not None else None
+            if identity != active.home_identity:
+                raise PrivateFSError("unsafe", "nested_home_identity")
+        if create and active.home is None:
+            raise ValueError("cannot create inside a checked-absent session")
+        if scope == "policy":
+            active.extend(create, blocking=blocking)
+        session = CanonicalSession(active)
+        try:
+            yield session
+            active.check()
+        finally:
+            session._live = False
+    except PrivateFSError as exc:
+        active.remember_mutation_failure(exc, published=False)
+        raise
 
 
 @contextmanager
@@ -194,7 +206,7 @@ def canonical_session(
         raise ValueError("unknown canonical scope")
     active: _State | None = getattr(_local, "state", None)
     if active is not None:
-        with _nested_session(active, paths, scope, create) as session:
+        with _nested_session(active, paths, scope, create, blocking) as session:
             yield session
         return
     if not _lock.acquire(blocking=blocking):
@@ -202,7 +214,7 @@ def canonical_session(
     state: _State | None = None
     try:
         with ExitStack() as stack:
-            state = _State(paths, stack, blocking)
+            state = _State(paths, stack)
             directory = stack.enter_context(
                 open_confidential_directory(paths.home, create=True)
                 if create
@@ -213,7 +225,7 @@ def canonical_session(
                 state.home_identity = directory.directory_identity()
                 state.home_tx = stack.enter_context(directory.transaction(blocking=blocking))
             if scope == "policy":
-                state.extend(create)
+                state.extend(create, blocking=blocking)
             _local.state = state
             session = CanonicalSession(state)
             try:
@@ -223,9 +235,13 @@ def canonical_session(
                 session._live = False
                 state.live = False
                 _local.state = None
-    except PrivateFSError as exc:
-        if state is not None and state.published:
-            exc.commit_state = "uncertain"
+    except BaseException as exc:
+        failure = state.failure if state is not None and state.failure is not None else exc
+        if state is not None and state.published and isinstance(failure, PrivateFSError):
+            failure.commit_state = "uncertain"
+        if failure is not exc:
+            failure.add_note(f"canonical session cleanup also failed: {type(exc).__name__}")
+            raise failure from exc
         raise
     finally:
         _lock.release()
@@ -275,6 +291,8 @@ class CanonicalSession:
 
     def _home_leaf(self, name: str) -> bool:
         validate_leaf(name)
+        if name.casefold() == self._state.paths.config_name.casefold():
+            raise ValueError("canonical config mutations require the policy pair protocol")
         if name == ".env":
             return False
         patterns = (self._state.paths.config_name, ".env")
@@ -294,24 +312,34 @@ class CanonicalSession:
         original = _read(state.home_tx, name, DOTENV_LIMIT)
         if not backup and original is not None and original.data == data:
             return
-        if backup or original is None:
-            state.home_tx.create_bytes(name, data)
-        else:
-            state.home_tx.replace_bytes(name, data)
-        state.published = True
-        result = _read(state.home_tx, name, DOTENV_LIMIT)
-        if result is None or result.data != data:
-            raise PrivateFSError("unsafe", "home_verification", commit_state="uncertain")
+        published = False
+        try:
+            if backup or original is None:
+                state.home_tx.create_bytes(name, data)
+            else:
+                state.home_tx.replace_bytes(name, data)
+            published = state.published = True
+            result = _read(state.home_tx, name, DOTENV_LIMIT)
+            if result is None or result.data != data:
+                raise PrivateFSError("unsafe", "home_verification", commit_state="uncertain")
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=published)
+            raise
 
     def delete_home(self, name: str, *, expected_identity: FileIdentity) -> None:
         state = self._check()
         self._home_leaf(name)
         if state.home_tx is None:
             raise PrivateFSError("missing", "home")
-        state.home_tx.delete_file(name, expected_identity=expected_identity)
-        state.published = True
-        if _read(state.home_tx, name, DOTENV_LIMIT) is not None:
-            raise PrivateFSError("unsafe", "home_delete_verification", commit_state="uncertain")
+        published = False
+        try:
+            state.home_tx.delete_file(name, expected_identity=expected_identity)
+            published = state.published = True
+            if _read(state.home_tx, name, DOTENV_LIMIT) is not None:
+                raise PrivateFSError("unsafe", "home_delete_verification", commit_state="uncertain")
+        except BaseException as exc:
+            state.remember_mutation_failure(exc, published=published)
+            raise
 
     def _pair(self, *, recovery: bool) -> CanonicalSnapshot:
         state = self._check(policy=True)
@@ -394,7 +422,7 @@ class PolicyUpdate:
         try:
             self._commit(state)
         except BaseException as exc:
-            state.failed = True
+            state.failure = exc
             if state.published and isinstance(exc, PrivateFSError):
                 exc.commit_state = "uncertain"
             raise
