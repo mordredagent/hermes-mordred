@@ -689,14 +689,14 @@ modify `keyvault/extension_sign.py`; create `tests/test_keyvault_wallet_storage.
 The adapter consumes `open_private_directory`, `read_bytes(max_bytes=1048576)`
 and `transaction().create_bytes/replace_bytes`; the facade keeps schema checks.
 
-- [ ] Write regressions exercising the facade's Windows dispatch against real
+- [x] Write regressions exercising the facade's Windows dispatch against real
   checked storage: absent read creates nothing; create/replace round trips;
   malformed/duplicate/oversized input refuses without fallback or mutation;
   unsafe file/lock refuses without repair. Run and record the expected RED.
-- [ ] Implement the adapter, narrow missing handlers and Windows dispatch;
+- [x] Implement the adapter, narrow missing handlers and Windows dispatch;
   inject pre/post-publication and context-exit errors to prove error state and
   preserved bytes. Run focused tests and existing POSIX wallet tests to GREEN.
-- [ ] Commit the implementation and regressions.
+- [x] Commit the implementation and regressions.
 
 ### Task WW2: Validate native Windows and delivery
 
@@ -706,16 +706,16 @@ record evidence in `docs/dev/CI.md`, `PLAN.md`, `TODO.md` and `PATHS.md`.
 **Interfaces:** Exercise `extension_sign.set_wallet`, `_load_wallet_cfg` and
 `_resolve_account` with synthetic configuration and isolated profile paths.
 
-- [ ] Add native Windows ACL/junction/hard-link refusal, actual process
+- [x] Add native Windows ACL/junction/hard-link refusal, actual process
   serialization and post-publication failure coverage. Add the suite to the
   scoped Windows matrix and an out-of-checkout sdist-derived wheel smoke.
-- [ ] Run full local pytest/coverage, Ruff/format, reduced-extras strict mypy,
+- [x] Run full local pytest/coverage, Ruff/format, reduced-extras strict mypy,
   shellcheck and documentation-link checks; inspect all results.
-- [ ] Reuse only the retained Windows host after checking state and setting an
+- [x] Reuse only the retained Windows host after checking state and setting an
   automatic stop deadline. Run source and wheel suites as the ordinary user,
   verify fresh-process retention and second-user denial using new synthetic
   fixtures, then stop and verify the host. Leave TPM/Linux fixtures unchanged.
-- [ ] Obtain an independent whole-branch review, reproduce/fix findings, create
+- [x] Obtain an independent whole-branch review, reproduce/fix findings, create
   the dependent `dev` PR and record final CI results and remaining Windows work.
 
 ### Remaining Windows caller sequence

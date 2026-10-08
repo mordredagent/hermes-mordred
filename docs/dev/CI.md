@@ -78,6 +78,52 @@ uses a paid account and mutates runner network state.
 
 ## Manual live-device validation log
 
+- **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
+  Component contract PR #193 follows the shared contract/foundation PRs
+  #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
+  wallet selection document; `be87acf06` fixes Windows pytest IDs and extends
+  cleanup-error coverage. Signing, key custody, memory/reset/purge, audit,
+  installer and Desktop support remain separate, incomplete gates.
+
+  Reused `i-00f4db5c3a204906b` in `ap-southeast-1`; verified it stopped before
+  startup and armed a two-hour controller stop deadline plus a Windows scheduled
+  shutdown. Tests ran as the credentialed, non-administrator `mordred` user on
+  Server 2025, Python 3.11.17, fixed local NTFS, using new synthetic paths.
+  Neither TPM fixtures nor Linux validation resources were changed.
+
+  Final source and out-of-checkout wheel suites each produced **121 passed,
+  2 POSIX-fork skips** across the wallet suite and four shared filesystem/process
+  test modules (the POSIX-only module was not selected). The wheel was built
+  from the sdist and installed without dependencies into a fresh venv, with
+  pytest installed separately. Its imported module was under
+  `C:\Users\mordred.000\wallet-wheel-20261008\venv\Lib\site-packages`;
+  SHA-256: `6871af48f413c7270962705b3127e5c0138d1bd90f2d63a166b5cae4f5ee5b3e`.
+  The source run used the separate `wallet-validation-20261008` tree.
+
+  Native cases prove ACL/junction/hard-link refusal without repair, read/write
+  process exclusion, bounded file reads, and pre/post-publication error handling.
+  Synthetic selection survived a fresh process and a Windows reboot with SHA-256
+  `34fee0fee72b07ef4640a7638737e5d20c72aa7bd74d6ee688aa23f9e6a8ea5f`.
+  A separate ordinary account was denied access; its temporary account, task and
+  logon rights were removed. This slice did not repeat EC2 stop/start persistence,
+  sudden power-loss testing, TPM operations, Windows 11 or whole-product flows.
+
+  The initial source/wheel runs each had **117 passed, 2 skips, 2 setup/teardown
+  errors**: pytest expanded a 1 MiB parameter into `PYTEST_CURRENT_TEST`, exceeding
+  Windows' 32767-character environment limit. Short explicit parameter IDs fixed
+  the harness; no product-code change was needed. Independent review found no
+  product defect, confirmed that harness issue and suggested the additional
+  absent-wallet transaction-cleanup regression, which now passes.
+  Final local Python 3.13 full regression: **5,362 passed, 45 skipped,
+  34 integration deselected; 88.48% coverage**. Five warnings came from the
+  existing FastAPI/Starlette, Hermes escape-sequence and POSIX fork checks.
+  Ruff/format, reduced-extras strict mypy (206 files), shellcheck and all
+  12 documentation-link tests passed. The final hosted CI results are tracked
+  on the component PR; local/native acceptance does not replace that matrix.
+  The host was verified stopped after acceptance; both task-specific automatic
+  stop mechanisms were disarmed. Its retained disk and synthetic wallet remain.
+  Evidence is retained under `~/.codex/artifacts/mordred-windows-wallet-20261008/`.
+
 - **2026-10-08 — Private filesystem review fixes on macOS.**
   Review reproduced inherited extended-ACL grants despite mode 0700/0600 and
   stale exception text after promotion to an uncertain commit. Before the fix,

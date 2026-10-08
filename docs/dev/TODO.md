@@ -261,7 +261,7 @@ the source remains usable, and failure paths leave no partial destination.
 ## Windows keyvault wallet storage
 
 - [ ] Land the wallet storage contract before its dependent keyvault PR.
-- [ ] Complete WW1–WW2 in [PLAN.md](PLAN.md#windows-wallet-storage-implementation-plan).
+- [x] Complete WW1–WW2 in [PLAN.md](PLAN.md#windows-wallet-storage-implementation-plan).
 - [ ] Design shared safe deletion/lifecycle contracts before remaining keyvault
   storage, memory provision/reset/purge and plaintext capture migration.
 - [ ] Finish wizard/install, network, policy/LLM guard, privacy/audit and
