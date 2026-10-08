@@ -123,6 +123,24 @@ uses a paid account and mutates runner network state.
   The host was verified stopped after acceptance; both task-specific automatic
   stop mechanisms were disarmed. Its retained disk and synthetic wallet remain.
   Evidence is retained under `~/.codex/artifacts/mordred-windows-wallet-20261008/`.
+- **2026-10-08 — Checked Windows audit sessions (C7a).**
+  Shared implementation `b39a064379038bcce99fb021fe7418f326c1d105`, with the
+  already-reviewed elevated-owner fixture correction at `b9332e64d`, passed
+  ordinary-user Server 2025 source and isolated sdist-derived wheel suites:
+  **356 passed, 54 skipped** each. Native checks include process serialization,
+  hostile ACL/hardlink/junction refusal and case aliases. Wheel origin was
+  verified inside a fresh test-only environment. Host all-extras regression:
+  5,603 passed, 63 skipped, 35 deselected; independent reviewer focused run:
+  165 passed, four native skips. Ruff/format, reduced-extras strict mypy and
+  shellcheck passed; independent review found no actionable issues.
+  An intentionally broader Windows diagnostic also selected legacy POSIX
+  `test_log_rotation.py`: 373 passed, 54 skipped, one existing fchmod-path
+  failure. Legacy audit APIs remain POSIX; C7a's new explicit session APIs do
+  not migrate production consumers. That diagnostic exclusion is not a waiver
+  for the later C5/C7b consumer and whole-product gates.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c7a-*`.
+  Windows 11, encrypted-writer key leases, CLI and production caller adoption
+  remain separate gates.
 
 - **2026-10-08 — Windows confidential-file and coordinator identity capabilities.**
   Code `fc5db88455592badb638ca400507866b53328450` passed ordinary-user

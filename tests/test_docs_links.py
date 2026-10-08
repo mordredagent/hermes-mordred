@@ -44,6 +44,7 @@ _MAINTAINED_DEV_DOCS = {
     "UPSTREAM.md",
     "WINDOWS_FEASIBILITY.md",
     "WINDOWS_CONFIG_IO.md",
+    "WINDOWS_AUDIT_IO.md",
     "setup.md",
 }
 

@@ -335,6 +335,11 @@ class _Transaction:
             raise RuntimeError("private transaction is closed or belongs to another thread")
         self.directory._check()
 
+    def assert_private_admission(self) -> None:
+        """Validate lifetime/security and require exact-private admission."""
+        self._check()
+        self.directory.directory_identity()
+
     def directory_identity(self) -> FileIdentity:
         self._check()
         return self.directory.directory_identity()
