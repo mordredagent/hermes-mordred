@@ -82,7 +82,8 @@ jobs:
           .\.venv\Scripts\uv.exe build --wheel $source --out-dir dist-private-fs
           if ($LASTEXITCODE -ne 0) { throw 'wheel build failed' }
           $wheel = (Get-ChildItem dist-private-fs/*.whl).FullName
-          $smoke = Join-Path $env:RUNNER_TEMP 'mordred-private-fs-wheel'
+          # RUNNER_TEMP is on a broadly writable data volume; use the checked profile.
+          $smoke = Join-Path $env:USERPROFILE 'mordred-private-fs-wheel'
           python -m venv "$smoke/venv"
           & "$smoke/venv/Scripts/python.exe" -m pip install --no-deps $wheel
           if ($LASTEXITCODE -ne 0) { throw 'wheel install failed' }
