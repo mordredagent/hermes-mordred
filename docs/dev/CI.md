@@ -558,3 +558,11 @@ Twelve final cleanup regressions added while that run was active were verified
 by the subsequent focused run above; product code was unchanged. Warnings were
 upstream Starlette/httpx deprecation, an installed Hermes invalid-escape warning,
 and existing Python multi-threaded-fork deprecations. No test failed.
+
+C1a review follow-up: ordinary `OSError` bodies after successful deletion exposed
+uncertainty loss when POSIX unlock or lock-close also failed. Regression RED was
+**2 failed, 4 passed**; retaining the transaction mutation state during error
+classification gave **6 passed**. The analogous directory-close case already
+preserved uncertainty and remains covered. Final focused suite: **190 passed,
+47 skipped**; Ruff check/format and reduced-extras strict mypy (205 files) passed.
+The full suite was not repeated for this bounded review fix.

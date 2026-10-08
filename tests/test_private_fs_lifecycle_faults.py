@@ -443,3 +443,60 @@ def test_windows_lifecycle_cleanup_retains_uncertainty(windows_fs, monkeypatch, 
     assert err.value.commit_state == "uncertain"
     if body_error:
         assert original.__notes__
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX failure injection")
+@pytest.mark.parametrize("cleanup", ["unlock", "lock_close", "directory_close"])
+@pytest.mark.parametrize("mutate", [False, True])
+def test_posix_raw_body_error_retains_cleanup_uncertainty(tmp_path: Path, monkeypatch, cleanup, mutate):
+    import fcntl
+    import stat
+
+    root = tmp_path.resolve() / "private"
+    with fs.open_private_directory(root, create=True) as d, d.transaction() as tx:
+        tx.create_bytes("source", b"keep")
+    original = OSError(errno.EIO, "body failure")
+    close, flock = os.close, fcntl.flock
+    armed = False
+    injected = False
+
+    def fail_close(fd):
+        nonlocal injected
+        selected = (
+            armed
+            and not injected
+            and (
+                (cleanup == "directory_close" and fd == directory_fd)
+                or (cleanup == "lock_close" and stat.S_ISREG(os.fstat(fd).st_mode))
+            )
+        )
+        close(fd)
+        if selected:
+            injected = True
+            raise OSError(errno.EIO, "close failure")
+
+    def fail_unlock(fd, operation):
+        nonlocal injected
+        flock(fd, operation)
+        if armed and cleanup == "unlock" and operation == fcntl.LOCK_UN:
+            injected = True
+            raise OSError(errno.EIO, "unlock failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "close", fail_close)
+        scoped.setattr(fcntl, "flock", fail_unlock)
+        with pytest.raises(fs.PrivateFSError) as err, fs.open_private_directory(root) as d:
+            directory_fd = d.fd
+            with d.transaction() as tx:
+                if mutate:
+                    tx.delete_file("source")
+                if cleanup != "directory_close":
+                    armed = True
+                    raise original
+            armed = True
+            raise original
+    assert injected
+    assert err.value.commit_state == ("uncertain" if mutate else "not_committed")
+    assert err.value.__cause__ is original
+    assert getattr(original, "__notes__", None) or getattr(err.value, "__notes__", None)
+    assert (root / "source").exists() is not mutate

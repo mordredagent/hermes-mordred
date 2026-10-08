@@ -267,6 +267,7 @@ class _Directory:
             if owner in _owners:
                 raise RuntimeError("recursive private transaction")
             _owners.add(owner)
+        tx = _Transaction(self)
         try:
             with self._open(".mordred-fs.lock", lock=True) as fd:
                 while True:
@@ -277,7 +278,6 @@ class _Directory:
                         if not blocking:
                             raise PrivateFSError("busy", "lock") from None
                         time.sleep(0.05)
-                tx = _Transaction(self)
                 try:
                     _private(fd)
                     named = os.stat(".mordred-fs.lock", dir_fd=self.fd, follow_symlinks=False)
@@ -292,7 +292,7 @@ class _Directory:
         except PrivateFSError:
             raise
         except OSError as exc:
-            raise _error(exc, "transaction") from exc
+            raise _error(exc, "transaction", committed=tx.published) from exc
         finally:
             if self.pid == os.getpid():
                 with _guard:
