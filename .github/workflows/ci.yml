@@ -82,6 +82,7 @@ jobs:
           tests/test_windows_install_ownership.py tests/test_windows_install_powershell.py
           tests/test_private_fs_principal.py tests/test_config_io_custody.py
           tests/test_config_io.py tests/test_config_readers.py tests/test_config_io_windows.py
+          tests/test_keyvault_windows_processes.py
           tests/test_audit_session.py tests/test_audit_session_faults.py
           tests/test_audit_rotation.py tests/test_audit_session_processes.py
           tests/test_audit_session_windows.py
