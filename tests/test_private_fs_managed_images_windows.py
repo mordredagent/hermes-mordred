@@ -6,9 +6,10 @@ delete-child/image.exe, current-owned/image.exe, relaxed/parent/image.exe (the
 ProgramData-shaped Users ACE on the upper ancestor ``relaxed``) and
 relaxed-parent/parent/image.exe (the same ACE on the immediate parent). The
 admission tests never modify that supplied root. The ``probe`` tests attempt
-ordinary-token mutation of ``relaxed`` only (hardlink, mount-point tag and
-directory-bit reparse tags), record each outcome as a ``managed-image-probe``
-line, and remove any tag they managed to set; an ordinary token may be unable
+ordinary-token mutation of ``relaxed`` (hardlink, mount-point tag and
+directory-bit reparse tags); a successful hardlink also raises the link count
+of ``safe/image.exe``. They record each outcome as a ``managed-image-probe``
+line and remove any tag they managed to set; an ordinary token may be unable
 to remove a hardlink it created, so the elevated controller removes the whole
 nonce root afterwards. Elevated CI creates and removes only its own nonce root.
 """
@@ -380,8 +381,14 @@ def test_native_probe_mount_point_tag_on_nonempty_relaxed_directory_fails(manage
     code, stage = fsctl(relaxed, FSCTL_SET_REPARSE_POINT, mount_point(managed_root / "safe"))
     values: dict[str, object] = {"code": code, "stage": stage}
     try:
-        # ERROR_DIR_NOT_EMPTY (145) is the expected NTFS refusal; ERROR_ACCESS_DENIED
-        # (5) is also acceptable. Success would invalidate the R-C5c-1 premise.
+        if stage != "fsctl":
+            pytest.fail(
+                f"mount-point probe did not run: opening relaxed for reparse data failed with {code}; "
+                "the fixture must grant BUILTIN\\Users write-data/write-attributes on relaxed"
+            )
+        # The probe must reach FSCTL_SET_REPARSE_POINT and fail there with
+        # ERROR_DIR_NOT_EMPTY (145); ERROR_ACCESS_DENIED (5) at that stage is
+        # accepted and recorded. Success would invalidate the R-C5c-1 premise.
         assert code in (145, 5)
     finally:
         if code == 0:
@@ -398,15 +405,19 @@ def test_native_probe_directory_bit_tag_on_relaxed_directory(managed_root, recor
     values: dict[str, object] = {"tag": hex(tag), "code": code, "stage": stage}
     try:
         if code == 0:
-            # The outcome is OS/filter behaviour we only record; while the tag
-            # is present the inspection must refuse.
-            with pytest.raises(PrivateFSError) as err:
+            # Whether the tag can be set is OS/filter behaviour we only record;
+            # while it is present the inspection must refuse on the reparse
+            # attribute of relaxed. The outcome is recorded either way.
+            try:
                 inspect_managed_installation_image(image)
-            values["refusal"] = [err.value.reason, err.value.operation]
+                values["refusal"] = None
+            except PrivateFSError as exc:
+                values["refusal"] = [exc.reason, exc.operation]
     finally:
         if code == 0:
             values["removed"] = remove_tag(relaxed, tag)
         record(record_property, capsys, "directory_bit_tag", **values)
     if code == 0:
         assert values["removed"] == 0, "probe tag must be removed before the fixture root is reused"
+        assert values["refusal"] == ["unsafe", "managed_image_metadata"]
         assert inspect_managed_installation_image(image).size > 0

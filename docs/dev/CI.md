@@ -1066,15 +1066,18 @@ directory. Native cases also admit every real
 `ProgramData\Microsoft\Windows Defender\Platform\*\MsMpEng.exe` (skipped when
 absent) and compare the security descriptors of the image and each ancestor
 before and after; ProgramData is never modified. Probe cases attempt
-ordinary-token mutation of `relaxed` only and print one
+ordinary-token mutation of `relaxed` and print one
 `managed-image-probe {json}` line each: `CreateHardLinkW` of `safe/image.exe`
 into `relaxed` (if it succeeds, the link must refuse because `relaxed` is its
-immediate parent), a mount-point tag on the non-empty `relaxed` (must fail
-with `ERROR_DIR_NOT_EMPTY` 145 or `ERROR_ACCESS_DENIED` 5) and the
-directory-bit cloud (`0x9000001A`) and WCI (`0x90001018`) tags (outcome
-recorded; if set, inspection must refuse while present and the tag is removed
-in teardown). A hardlink an ordinary token cannot delete stays inside the
-fixture root until the elevated controller removes that nonce root.
+immediate parent, and the link count of `safe/image.exe` also rises), a
+mount-point tag on the non-empty `relaxed` (the probe must open `relaxed` and
+reach `FSCTL_SET_REPARSE_POINT`, failing there with `ERROR_DIR_NOT_EMPTY` 145;
+`ERROR_ACCESS_DENIED` 5 at that stage is accepted and recorded, while a failed
+open means the probe did not run and fails the test) and the directory-bit
+cloud (`0x9000001A`) and WCI (`0x90001018`) tags (outcome recorded; if set,
+inspection must refuse with `managed_image_metadata` while present and the tag
+is removed in teardown). A hardlink an ordinary token cannot delete stays
+inside the fixture root until the elevated controller removes that nonce root.
 
 Ordinary-token selectors on the committed source (repeat on a wheel built from
 the committed sdist, invoked from outside the checkout):
