@@ -444,3 +444,31 @@ Add a documentation publishing workflow only when the project has a hosted docs
 site. Add broader E2E automation only when it can run without production
 credentials or state. Until then, keep the current workflows small and
 purpose-specific.
+# Windows completion acceptance matrix
+
+Windows completion is tracked by SPEC.md §Windows product completion contract
+and PLAN.md §Windows product completion execution. This matrix is a release
+gate, not a new claim that the existing platform jobs test the entire product.
+
+| Evidence layer | Environment | Required evidence |
+| --- | --- | --- |
+| Regression | supported local Python and existing POSIX CI | component tests, formatting, reduced-extras strict typing, packaging and integrated coverage |
+| Native portable behavior | Windows CI, supported Python matrix | real Win32 filesystem calls, PowerShell installer, process locks, unsafe object refusal and non-hardware flows |
+| TPM and persistence | ordinary-user Windows Server 2025 on existing AWS host | compiled production CNG helper, source and fresh wheel, separate-user denial, process restart/reboot/stop-start retention |
+| Client product workflow | Windows 11 x64 VM/Cloud PC or physical PC | native install through normal use, Desktop and gateway, lifecycle/backup/upgrade/uninstall, actual runtime paths and token/provider |
+| External integrations | explicitly available route/account/model services | real applicable VPN/Tor transport and authenticated flows; synthetic fixtures recorded separately |
+
+Physical Windows hardware is not required. Windows 365 provides a virtual TPM
+([Microsoft security documentation](https://learn.microsoft.com/windows-365/enterprise/security));
+Azure Windows 11 VM use requires eligible licenses
+([Microsoft deployment guidance](https://learn.microsoft.com/en-us/azure/virtual-machines/windows/windows-desktop-multitenant-hosting-deployment)).
+These are environment options, not evidence that Mordred's CNG provider or
+product flow has passed there. Test the actual provider/token and record any
+refusal. ARM virtualization does not replace x64 helper acceptance.
+
+For each component record commit, command, interpreter/module path, OS/CPU,
+ordinary/admin user status, result and exclusions. Report implementation,
+unit tests, native Server checks, Windows 11 checks and live-service checks
+separately. Keep unchecked gates visible; never count a skipped hardware or
+account-dependent test as a pass. No Windows-ready release claim follows from
+green foundation/helper/wallet jobs alone.
