@@ -484,3 +484,20 @@ def test_another_thread_cannot_borrow_active_resolver_admission(profile, monkeyp
         )
     with pytest.raises(MordredSessionRefused):
         module.resolve_provider_client("openai")
+
+
+@pytest.mark.parametrize(
+    "bad_config",
+    [
+        b"auxiliary: {vision: {provider: true}}",
+        b'auxiliary: {vision: {enabled: "false"}}',
+        b"auxiliary: {vision: {fallback_chain: [{base_url: []}]}}",
+        b"fallback_providers: [{provider: openai, model: []}]",
+    ],
+    ids=["route-provider", "route-enabled", "route-chain", "fallback-model"],
+)
+def test_malformed_route_fields_cannot_bypass_admission_in_off_mode(profile, bad_config):
+    (profile.home / "mordred" / "policy.json").write_bytes(b'{"policy":"off"}')
+    (profile.home / "config.yaml").write_bytes(bad_config)
+    with pytest.raises(MordredSessionRefused):
+        run_provider(profile)

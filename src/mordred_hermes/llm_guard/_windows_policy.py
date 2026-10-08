@@ -102,15 +102,40 @@ def _validate_config(config: dict[str, Any]) -> None:
     model = config.get("model")
     if isinstance(model, dict) and "provider" in model and not isinstance(model["provider"], str):
         raise ValueError("invalid model provider")
+    _validate_routes(config)
+
+
+def _validate_routes(config: dict[str, Any]) -> None:
     for key in ("fallback_providers", "fallback_model"):
-        value = config.get(key)
-        if value is not None:
-            entries = [value] if isinstance(value, dict) else value
-            if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
-                raise ValueError("invalid fallback configuration")
+        _validate_route_chain(config.get(key), allow_single=True)
     auxiliary = config.get("auxiliary", {})
-    if not isinstance(auxiliary, dict) or any(not isinstance(value, dict) for value in auxiliary.values()):
+    if not isinstance(auxiliary, dict) or any(
+        not isinstance(key, str) or not isinstance(value, dict) for key, value in auxiliary.items()
+    ):
         raise ValueError("invalid auxiliary mapping")
+    for route in auxiliary.values():
+        _validate_route(route)
+        _validate_route_chain(route.get("fallback_chain"))
+
+
+def _validate_route_chain(value: Any, *, allow_single: bool = False) -> None:
+    if value is None:
+        return
+    entries = [value] if allow_single and isinstance(value, dict) else value
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise ValueError("invalid fallback chain")
+    for entry in entries:
+        _validate_route(entry)
+
+
+def _validate_route(route: dict[str, Any]) -> None:
+    for field in ("provider", "model", "base_url"):
+        value = route.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError("invalid route field")
+    enabled = route.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("invalid route enabled flag")
 
 
 _Audit = TypeVar("_Audit")
