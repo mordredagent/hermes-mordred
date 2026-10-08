@@ -2180,3 +2180,71 @@ A `KeyboardInterrupt` or `SystemExit` during a Windows memory publication is
 recorded as uncertain and surfaces at the hook boundary as
 `MemoryEncryptionUnavailable`, trading interrupt responsiveness for retained
 uncertainty (fail-closed).
+
+##### Windows installed-runtime memory proof (C5c phase 2)
+
+`keyvault._windows_proof.prove_windows_memory_runtime(home, *, python=None,
+timeout=20.0) -> WindowsRuntimeProof` runs outside every custody and memory
+lock; a canonical session live in the calling thread refuses (`locks-held`).
+It is the only way to obtain a proof. `WindowsRuntimeProof` is a frozen
+dataclass with exactly `python: Path`, `module_path: str`, `helper_path: str`,
+`seam: str`, `home_identity: FileIdentity`, `principal_sid: bytes`,
+`profile_nonce: bytes`, `memory_generation: str`, `wrapped_digest: bytes`,
+`challenge: bytes`, `epoch: int` and `proved_at: float` (monotonic). Direct
+construction and `dataclasses.replace()` raise `TypeError`, and consumers
+accept only the exact issued object, so copies and pickles refuse. Refusals
+raise `WindowsRuntimeProofError` with a stable sanitized `reason`;
+`GatewayDiscoveryUnavailable`, `CustodyError` and classified `PrivateFSError`
+propagate unchanged. There is no force, bool or callback substitute.
+
+1. Capture, load-only: a `windows_custody_session(home)` closed before any
+   launch must show committed memory ownership with a wrapper
+   (`custody-not-enrolled`) and no unresolved journal for any role
+   (`custody-pending`). The read-only
+   `WindowsCustodySession.profile_binding() -> ProfileBinding(home, sid,
+   profile_nonce, epoch, pending)` returns the bound manifest identity, SID,
+   nonce, existing v1 manifest `epoch` and roles with journals, without
+   inventory or native calls. No schema change is needed.
+2. Interpreter: `python`, else `MORDRED_HERMES_PYTHON`, is an authoritative
+   override for C4 `resolve_windows_python`; failure refuses
+   (`interpreter-invalid`) without fallback. An override naming `pythonw.exe`
+   must exist and maps to its `python.exe` sibling. Without an override the C4
+   home-venv candidates apply; launcher selection belongs to C6 routing.
+3. `require_stopped_windows_gateways(home)` runs before the child starts.
+4. Child: C4 `scrubbed_environment`, then every `PYTHON*` variable, every
+   `MORDRED_*` variable except the runtime's own `MORDRED_WINKEY_HELPER`
+   selector, `HERMES_MEMORY_KEY` and the inherited `HERMES_HOME` are removed;
+   the child receives `HERMES_HOME=<home>`, `MORDRED_CONFIG_DECRYPT=0`,
+   `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONNOUSERSITE=1` and
+   `PYTHONDONTWRITEBYTECODE=1`. The probe is a C1 create-no-replace file in a
+   new exact-private `mordred-proof-<random>` directory under the user temp
+   directory, named `hermes` so the installed runtime `.pth` engages its real
+   startup bootstrap, and is removed afterwards. The 32-byte challenge is one
+   hex line on stdin; at most 4 KiB of stdout and 2 KiB of stderr are kept; the
+   timeout kills the child. The child moves its stdout descriptor to stderr,
+   then requires `mordred_hermes.__file__` physically under its C4
+   environment root, `memory_hook_installed()` after the installed bootstrap
+   wrapped every seam of a supported shape, a resolved winkey helper,
+   committed custody, `load_memory_key()` and an in-RAM `seal`/`unseal` of the
+   challenge as `MEMORY.md`. It writes nothing and prints one JSON line with
+   exactly `module`, `helper`, `seam`, `generation`, `wrapped_sha256` and
+   `challenge_sha256 = SHA-256(challenge || "proof")`. Failures print only
+   `mordred-proof:<code>:<exception type>`; no key bytes are ever printed.
+5. Verification: exit status 0; exactly one newline-terminated strict JSON
+   object with no duplicate or extra keys and non-empty string values; a
+   constant-time challenge digest match; the captured generation and wrapped
+   digest; seam `A`, `B` or `C`; a module path physically under the validated
+   environment root, so an editable source checkout cannot prove; and an
+   existing absolute helper equal to `MORDRED_WINKEY_HELPER` when that is set.
+   A fresh load-only capture must equal the first (`proof-stale`).
+
+`validate_windows_runtime_proof(custody, proof)` is the consumption check under
+caller-held locks: the issued, unexpired proof (age 0 to 600 monotonic seconds)
+must match the live identity, SID, nonce, manifest epoch, memory generation and
+wrapper digest, with no pending journal (`proof-stale`, `proof-expired`,
+`proof-not-issued`). `require_issued_proof(proof)` is its lock-free issued/TTL
+part. Test-only `MORDRED_TEST_INJECT_BACKEND` survives the child scrub only
+while pytest runs (`PYTEST_CURRENT_TEST`), the package runs from a source
+checkout (`src/mordred_hermes` beside `pyproject.toml` and `tests/__init__.py`),
+and the value is an absolute, non-symlink, non-traversing `.py` file resolving
+under that `tests/` directory. Every other case drops it.

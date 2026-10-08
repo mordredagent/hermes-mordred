@@ -1196,3 +1196,12 @@ a worker thread. They prove that broken or unproven custody with an unsupported
 seam ends the process through `os._exit(1)`, and that a fresh unmanaged
 profile continues in plaintext. The native junction case asserts the
 foundation's classified `unsafe`/`ancestor_identity` refusal.
+
+### Windows installed-runtime memory proof validation (C5c phase 2)
+
+The scoped Windows job runs `test_windows_memory_proof.py`. It builds a real
+non-editable venv from the job's interpreter and runs the actual probe child,
+C4 validation, C1 private probe directory and bounded protocol natively; only
+the CNG boundary, principal and checked-directory admission are injected
+through the test-only backend module. This is not TPM or installed-product
+evidence. The explicit real-CNG recipe is recorded with the lifecycle below.

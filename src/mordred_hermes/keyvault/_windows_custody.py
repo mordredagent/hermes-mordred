@@ -64,6 +64,17 @@ class GenerationLease:
 
 
 @dataclass(frozen=True)
+class ProfileBinding:
+    """Checked physical profile binding plus roles with unresolved journals."""
+
+    home: FileIdentity
+    sid: bytes
+    profile_nonce: str
+    epoch: int
+    pending: tuple[Role, ...]
+
+
+@dataclass(frozen=True)
 class WindowsMemoryState:
     lease: GenerationLease | None
     marker: bytes | None
@@ -305,6 +316,14 @@ class WindowsCustodySession:
     def validate_lease(self, lease: GenerationLease) -> None:
         if self.lease(lease.role, generation=lease.generation) != lease:
             raise CustodyError("custody generation lease changed")
+
+    def profile_binding(self) -> ProfileBinding:
+        """Bound manifest identity, SID, nonce and epoch; no inventory or native call."""
+        manifest = self._manifest()
+        if manifest is None:
+            raise CustodyError("custody ownership is absent")
+        pending = tuple(role for role in ROLES if self._pending(manifest, role) is not None)
+        return ProfileBinding(manifest.home, manifest.sid, manifest.profile_nonce, manifest.epoch, pending)
 
     def memory_state(self) -> WindowsMemoryState:
         """Checked flat state only; no inventory, enrollment or native operation."""

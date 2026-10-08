@@ -1391,3 +1391,26 @@ main-thread `SystemExit` and in a child process for the worker-thread
 An interrupt during a Windows memory publication is deliberately recorded as
 uncertain and surfaces at the hook as `MemoryEncryptionUnavailable`
 (fail-closed, at the cost of interrupt responsiveness).
+
+### Windows installed-runtime memory proof (C5c phase 2)
+
+`keyvault/_windows_proof.py` implements the SPEC protocol with C4
+`resolve_windows_python`, `environment_root` and `scrubbed_environment`, the
+C5c `require_stopped_windows_gateways` gate and C5a load-only custody plus the
+new read-only `profile_binding()`. No custody or memory lock is held while
+validation or proof subprocesses run; a live canonical session refuses first.
+The probe source travels with the parent so its protocol cannot drift, while
+every import, hook and custody call exercises the installed runtime's own
+package. Proofs are minted by a module-private factory and tracked by identity.
+
+Portable tests use a real non-editable environment created from the test
+venv's interpreter: a fresh venv whose site-packages holds a copy of the
+package and the packaged `.pth` bootstrap lines, with the test venv's
+site-packages as a path line for dependencies. The native boundary is the
+file-backed P-256 module `tests/_windows_proof_runtime.py`, selected through
+the guarded test variable. Cases cover the bound happy path, constructor and
+copy refusal, unenrolled and pending custody before launch, override failure
+without fallback, running/unknown inventory before the child, every malformed,
+oversized, extra-output, wrong-digest, wrong-custody, outside-root,
+helper and non-zero report, timeout, custody change during the child,
+missing bootstrap, locks held, and the injection scrub.

@@ -349,6 +349,11 @@ Implementation and acceptance remain open:
   removal of the fixed OS list, ordinary-user source/wheel known-empty proof.
 - [ ] Enforce the same supported C4 interpreter boundary in Windows managed
   memory hooks and installed-runtime proof; document opaque-runtime limits.
+- [ ] C5c phase 2: `prove_windows_memory_runtime` and
+  `validate_windows_runtime_proof` are implemented with portable real-child
+  tests. Independent review, scoped Windows CI, explicit real-CNG source and
+  sdist-wheel runs and Windows 11 acceptance remain; C6 must route Desktop
+  launchers by passing the authoritative interpreter.
 
 ### Windows memory storage follow-up (C5b)
 
