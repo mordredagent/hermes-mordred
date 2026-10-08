@@ -151,3 +151,10 @@ configure rerun, credential and backup ACLs, no-overwrite collision, concurrent
 fresh-process config/dotenv changes, public-writer crash/recovery and unsafe ACL
 refusal. Its profile-style fixture does not establish actual Hermes-generated
 home acceptance; the controller's separate installed-runtime run covers that.
+
+Child writers retain the original classified failure before unwinding the
+canonical session, including when child verification or child cleanup raises
+before returning. A later canonical cleanup failure cannot replace that error
+or downgrade publication uncertainty; successful child writes also retain their
+publication evidence. Interactive configure collects prompts first, then resolves
+operator-owned provider overrides from the owning transaction's current pair.

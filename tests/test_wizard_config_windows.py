@@ -307,3 +307,88 @@ def test_busy_explicit_backup_destination_refuses_without_wait_or_source_change(
         cleanup.apply_env_cleanup(w.config_path.parent / ".env", save_dir=w.mordred_dir / "custom-backup", stamp="now")
     assert b.home.files[".env"][0] == b"MORDRED_TOKEN=secret\n"
     assert d.files == {}
+
+
+@pytest.mark.parametrize("operation", ["credentials", "backup"])
+@pytest.mark.parametrize("child_stage", ["verify", "unlock", "close"])
+def test_child_uncertainty_survives_canonical_cleanup_failure(child, monkeypatch, operation, child_stage):
+    from contextlib import contextmanager
+
+    b, w, d = child
+    leaf = "network.json" if operation == "credentials" else "env-removed-now.env"
+    original_failure = cio.PrivateFSError("unsafe", f"child_{child_stage}")
+    cleanup_failure = cio.PrivateFSError("io", "canonical_close")
+    put(b.home, ".env", b"MORDRED_TOKEN=secret\n")
+
+    def fail(event):
+        if event == "home:close":
+            raise cleanup_failure
+        if (child_stage == "verify" and event == f"child:read:{leaf}") or (
+            child_stage == "unlock" and event == "child:unlock"
+        ):
+            raise original_failure
+
+    b.hook = fail
+    if child_stage == "close":
+
+        @contextmanager
+        def opener(path, *, create=False):
+            assert b.home.locked and b.policy.locked
+            yield d
+            raise original_failure
+
+        monkeypatch.setattr(pw, "open_private_directory", opener)
+
+    with pytest.raises(cio.PrivateFSError) as error:
+        if operation == "credentials":
+            credentials.JSONCredentialsWriter().write_network(
+                w.mordred_dir / "credentials" / "network.json",
+                mullvad_account_id_env="MORDRED_ACCOUNT",
+                mullvad_relay_country="auto",
+                mullvad_killswitch=True,
+            )
+        else:
+            cleanup.apply_env_cleanup(w.config_path.parent / ".env", save_dir=w.mordred_dir / "uninstall", stamp="now")
+    assert leaf in d.files
+    assert error.value is original_failure
+    assert error.value.commit_state == "uncertain"
+    assert b.home.files[".env"][0] == b"MORDRED_TOKEN=secret\n"
+
+
+def test_interactive_configure_preserves_overrides_at_owning_transaction(writer, monkeypatch):
+    from contextlib import contextmanager
+
+    from mordred_hermes import _policy_io
+    from tests.test_configure import _core_answers, _ScriptedPromptIO, _SetupRunnerSpy
+
+    b, w = writer
+    put(b.home, "config.yaml", b"{}")
+    put(b.policy, "policy.json", b'{"provider_overrides": {"operator":"old"}}')
+    monkeypatch.setattr(configure, "_windows", lambda: True)
+    monkeypatch.setattr(_policy_io, "_platform", "nt")
+    original_session = pw.canonical_session
+
+    @contextmanager
+    def concurrent_update(paths, **kwargs):
+        # Another cooperating writer commits after any preflight read, before
+        # this writer acquires its session. Both operations use the real C2 API.
+        with original_session(paths, scope="policy", create=True) as operator, operator.policy_update() as update:
+            update.put_policy(b'{"provider_overrides": ["new-invalid-but-opaque"]}')
+            update.commit()
+        with original_session(paths, **kwargs) as session:
+            yield session
+
+    monkeypatch.setattr(pw, "canonical_session", concurrent_update)
+
+    class Prompts(_ScriptedPromptIO):
+        def _pop(self, kind, label, default):
+            assert not b.home.locked and not b.policy.locked
+            return super()._pop(kind, label, default)
+
+    result = configure.run(
+        setup_runner=_SetupRunnerSpy(),
+        prompt_io=Prompts(_core_answers(policy="strict")),
+        policy_writer=w,
+    )
+    assert json.loads(b.policy.files["policy.json"][0])["provider_overrides"] == ["new-invalid-but-opaque"]
+    assert result.snapshot.provider_overrides == ["new-invalid-but-opaque"]

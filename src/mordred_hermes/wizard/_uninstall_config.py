@@ -46,9 +46,8 @@ from typing import Any
 from .._config_io import DOTENV_LIMIT, CanonicalPaths, canonical_session, read_canonical_snapshot
 from .._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
 from .._policy_io import policy_mapping_from_snapshot
-from .._private_fs import PrivateFSError
 from .._yaml_io import yaml_mapping_from_snapshot
-from .policy_writer import _bounded_utf8, _canonical_paths, _checked_policy_edit, _windows, _write_checked_private
+from .policy_writer import _bounded_utf8, _canonical_paths, _checked_policy_edit, _PrivateWriteOutcome, _windows
 
 __all__ = [
     "ConfigCleanup",
@@ -326,7 +325,7 @@ def _apply_checked_env_cleanup(path: Path, *, save_dir: Path, stamp: str) -> Env
         raise ValueError("canonical dotenv filename must be .env")
     result = EnvCleanup(path)
     paths = CanonicalPaths(path.parent)
-    published = False
+    outcome = _PrivateWriteOutcome()
     try:
         with canonical_session(paths, scope="policy", create=True) as session:
             source = session.read_home(".env", max_bytes=DOTENV_LIMIT)
@@ -349,11 +348,9 @@ def _apply_checked_env_cleanup(path: Path, *, save_dir: Path, stamp: str) -> Env
                     or any("~" in part for part in save_dir.parts)
                 ):
                     raise ValueError("backup directory must be a distinct checked private location")
-                published = _write_checked_private(saved, backup_data, backup=True)
+                outcome.write(saved, backup_data, backup=True)
             result.saved_to = saved
             session.write_home(".env", kept_data)
-    except PrivateFSError as exc:
-        if published:
-            exc.commit_state = "uncertain"
-        raise
+    except BaseException as exc:
+        outcome.reraise(exc)
     return result
