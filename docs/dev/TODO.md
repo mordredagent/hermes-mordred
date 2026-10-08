@@ -287,3 +287,28 @@ the source remains usable, and failure paths leave no partial destination.
   Desktop/extension through their respective plans and Windows acceptance gates.
 - [ ] Add the Windows CI/packaging matrix and a separate Windows 11 Desktop
   acceptance run before advertising general native Windows product support.
+
+# Windows product completion backlog
+
+The full Windows port is **incomplete**. The helper (#190), private filesystem
+(#192) and wallet caller (#194) have bounded evidence; they do not complete the
+tasks below. Follow PLAN.md §Windows product completion execution and keep
+component PRs separate. Virtual Windows 11 is acceptable; a physical PC is not
+required.
+
+- [ ] C1: checked file lifecycle and audit primitives, with native failure tests.
+- [ ] C2: shared canonical policy/config read and transaction coordination.
+- [ ] C3: wizard policy/config/dotenv/credentials and safe cleanup backups.
+- [ ] C4: native Windows installer, interpreter/launcher resolution and CNG
+  helper CLI/setup/status integration.
+- [ ] C5: keyvault memory/custody, runtime hooks/discovery, capture/export,
+  generation/reset, encrypted audit and excluded file-vault recovery gates.
+- [ ] C6: wizard encryption/Telegram/vault lifecycle, upgrade and uninstall.
+- [ ] C7a: shared audit append/rotation/compression/retention prerequisites.
+- [ ] C7b: audit privacy and CLI migration after keyvault integration.
+- [ ] C8: network/LLM/privacy checked readers and fail-closed cache decisions.
+- [ ] C9: native Tor/VPN route behavior and process cleanup.
+- [ ] C10: extension pairing/history/Telegram storage and lifecycle.
+- [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
+- [ ] C12: integrated source/wheel CI, ordinary-user Server tests, virtual
+  Windows 11 installation-to-use acceptance, and required live service gates.

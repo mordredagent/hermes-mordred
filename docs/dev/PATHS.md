@@ -473,3 +473,30 @@ begin `.mordred-fs-tmp-`; consumers must never remove them by glob. The POSIX
 wallet still uses `.wallet.lock`. Stop older Windows writers before adoption;
 there is no automatic ACL repair or mixed-version lock compatibility.
 See [the component contract](SPEC.md#windows-keyvault-wallet-configuration-2026-10-08).
+
+# Windows completion path contract
+
+The Windows completion work in PLAN.md uses native absolute local NTFS paths.
+Keep the existing Hermes-home resolution and explicit `HERMES_HOME` override;
+do not add a second hidden Windows state root. Tests always set a disposable
+home. Drive-relative, UNC/device paths, reparse ancestors and untrusted mutation
+rights remain refused at sensitive storage boundaries.
+
+The Hermes venv uses `Scripts/python.exe` and native console entry points;
+do not infer the selected runtime from a Unix `bin/python` path or a package
+version string. Check actual module locations in a subprocess. The CNG helper
+default remains `<HERMES_HOME>/bin/mordred-hermes-winkey.exe`, with the explicit
+`MORDRED_WINKEY_HELPER` override provided by the helper slice. Installer-owned
+launchers must carry verifiable ownership before upgrade or removal.
+
+Mordred-private directories retain the private DACL contract. Shared Hermes
+home is a distinct trusted-parent boundary for `config.yaml` and `.env`; it is
+not automatically adopted or repaired. Policy snapshots and pending markers
+remain under `<HERMES_HOME>/mordred`. Document and test the canonical lock order
+before combining transactions across these directories.
+
+Private directory `.mordred-fs.lock` files remain permanent while their
+namespace is live. Archive reset/purge cannot remove an active lock and then
+recreate a competing lock namespace. Rotated audit targets and backup exports
+publish without overwriting an existing path. Every recursive lifecycle action
+must check each traversed entry and stay inside its declared root.

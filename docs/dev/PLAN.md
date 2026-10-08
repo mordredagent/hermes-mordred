@@ -959,3 +959,59 @@ none may skip its actual-device acceptance because the helper works.
 The immediate implementation review is for W1–W4, not approval to combine all
 components into one PR. No native production code was changed in the planning
 and baseline-validation branch.
+
+# Windows product completion execution
+
+Execute the remaining work continuously in isolated component worktrees. This
+plan extends the unmerged Windows design/helper/filesystem/wallet slices
+(#189–#194); those slices are prerequisites, not completion. The binding
+requirements are SPEC.md §Windows product completion contract. Each component
+must receive its own tested implementation PR targeting `dev`; do not merge
+without a separate instruction. Documentation is English.
+
+## Completion dependencies and implementation order
+
+| Task | Depends on | Files / responsibility | Verification before PR |
+| --- | --- | --- | --- |
+| C1: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
+| C2: shared policy transaction | C1 | `_policy_io.py`, `_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
+| C3: wizard configuration | C2 | `wizard/policy_writer.py`, `env_file_writer.py`, `credentials_writer.py`, cleanup backups | concurrent policy/config/dotenv updates, preserved YAML, unsafe-state refusal, native configure rerun |
+| C4: native install/helper | #190 | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
+| C7a: shared audit operations | C1 | `_audit_io.py`, `_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
+| C5: keyvault lifecycle/runtime | C1, C7a, #190, #194 | keyvault memory storage, markers, capture/export, runtime discovery/hooks, encrypted audit and file-vault gates | real CNG custody, failure preservation, runtime discovery refusal, foreign-user denial, restart/reboot, isolated reset and excluded recovery refusal |
+| C6: wizard encryption lifecycle | C3–C5 | wizard memory/Telegram/export/reset/uninstall orchestration and excluded seal/recovery gates | installed Hermes runtime consumes encrypted memory, no plaintext removal before verified runtime, verified backups and honest status |
+| C7b: audit and privacy callers | C7a, C5 | privacy writer, then wizard audit CLI in separate PRs | multi-process NDJSON/MRAL append, rollback, rotation/compression, retention/purge identity and uncertain outcomes |
+| C8: policy consumers | C2 | network, llm_guard, privacy readers in separate component PRs | pending marker and ACL changes invalidate previously allowed cached decisions, safe defaults only for clean absence |
+| C9: network routes | C1 | network Tor/VPN discovery, private daemon state and process lifecycle | quoted paths, startup cleanup, native Tor transport, real applicable VPN route, strict refusal without clearnet fallback |
+| C10: extension state | C1, C5 | pairing/history/Telegram custody and archive lifecycle | concurrent one-use/replay/revoke, corrupt state refusal, encrypted restart/import/search/logout/reset |
+| C11: Desktop/gateway | C4–C6, C10 | extension Desktop install/API/UI and process/shutdown handling | actual Desktop launch, local-model prerequisite, CNG memory enable, gateway Ctrl-C/port release and restart |
+| C12: integrated acceptance | C3–C11 | CI, packaging and documentation | source and sdist-derived wheel, ordinary-user Server and Windows 11 virtual environment, full installation-to-use matrix |
+
+C4 can run independently while C1/C2 are developed. C8 and C9 are separate
+network changes and must not race in one checkout. Shared audit changes precede
+both privacy and keyvault callers. Write each task's detailed interfaces and
+regression cases before changing its product code; do not invent caller APIs
+independently in parallel worktrees. Review each component against its contract,
+then perform an integrated review of all combined dependencies.
+
+## Completion execution constraints
+
+1. Preserve existing POSIX behavior and data formats. Add failing regression
+   cases for changed security behavior, then implement and run relevant tests.
+2. Build a combined local integration branch from the unmerged prerequisites;
+   do not merge any PR to `dev`. Keep each component's incremental diff clear.
+3. Native tests use fresh synthetic state and the selected `.venv` interpreter.
+   Keep production `~/.hermes`, the production extension port, Linux validation
+   fixtures and earlier TPM fixtures unchanged.
+4. Reuse the existing AWS host only after checking its state. Set bounded local
+   and remote auto-stop deadlines before expensive validation, and confirm
+   stopped state afterward. Do not provision a new paid Cloud PC implicitly.
+5. Use virtual Windows 11 x64 where no physical PC is available. Record license
+   eligibility and provisioning separately from product acceptance. Windows
+   on ARM is a separate target and does not validate the x64 native helper.
+6. Run repository formatting/lint/type/package checks and relevant native
+   suites for each component. Run the integrated coverage suite after combining
+   the reviewed component commits; CI's reduced extras remain mandatory.
+7. Finish by recording actual evidence, remaining external gates and PR
+   dependencies. A plan, green helper CI, or one migrated caller is not Windows
+   product completion.

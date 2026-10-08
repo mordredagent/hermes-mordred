@@ -68,8 +68,9 @@ compatibility policy.
 - File-vault `vault recover` is supported only on macOS. The Linux TPM helper
   implements native wrapping, but the file vault has no Linux device-anchor
   store and must not claim a working recovery hot path there.
-- Windows and mobile support are deferred. Pure cryptographic and storage
-  modules remain testable with injected backends on other platforms.
+- Windows product support is in development under the completion contract
+  below; it is not yet a supported end-to-end workflow. Mobile support remains
+  deferred. Injected-backend tests alone do not establish platform support.
 
 ### License Note
 
@@ -912,8 +913,9 @@ and interactive unless a narrowly scoped confirmation flag exists.
 - automatic rerouting of a resolved cloud LLM request to a local provider;
 - trusted per-skill runtime provenance without a new host seam;
 - hard prevention of plugin disable/uninstall by the local user;
-- Windows/mobile product support and a supported Windows helper workflow;
-- transparent env/config/memory/workspace lifecycle outside macOS;
+- mobile product support (Windows completion is tracked below);
+- transparent env/config/workspace lifecycle outside macOS (the Windows
+  memory lifecycle is required by the completion contract below);
 - audit hash chains, external anchoring, or same-UID tamper resistance;
 - isolated signer/payment authorization;
 - automatic migration of native-key protection tiers.
@@ -921,6 +923,106 @@ and interactive unless a narrowly scoped confirmation flag exists.
 Future candidates and their release gates live in
 [`ROADMAP.md`](./ROADMAP.md); actionable unfinished work lives in
 [`TODO.md`](./TODO.md).
+
+## Windows product completion contract
+
+This section defines the remaining native Windows work after the helper,
+private-filesystem and wallet slices (PRs #189–#194). It supplements their
+contracts; it does not turn their successful checks into product acceptance.
+The port retains the Linux-equivalent scope of the Windows native support
+proposal: Windows memory and Private Telegram custody are required; new
+macOS-equivalent env/config/workspace seals, Windows Hello, per-use presence,
+ARM64 and TPM-key recovery remain excluded. Completing every component means
+completing that native port, not silently broadening those security promises.
+The initial target is Windows 11 x64 with local NTFS and an ordinary user.
+Windows Server 2025 is a development and hardware-validation environment.
+Virtual machines are acceptable: record the OS, architecture, token and TPM
+provider, and qualify evidence from a virtual TPM accordingly. A physical PC
+is not an acceptance prerequisite. Server or hosted-CI results do not establish
+Windows 11 compatibility.
+
+### Shared storage and coordination
+
+- Preserve the checked filesystem boundary: no reparse traversal, hard-linked
+  sensitive files, ACL repair on reads, unbounded reads or implicit adoption of
+  unsafe existing state. Preserve classified failures and uncertain commit
+  outcomes through every caller. Only a checked, pre-mutation missing result
+  can select a fresh-state path. Permission errors are not absence.
+- Add checked metadata, bounded enumeration, prefix reads, deletion, append
+  and no-replace sibling rename before migrating consumers that need them.
+  Files remain bound to validated identities throughout mutations. A delete
+  removes a namespace entry, not the underlying media securely. Mutations
+  cannot promise power-loss atomicity; post-mutation cleanup errors remain
+  uncertain and must not cause automatic retry, rollback or key recreation.
+- Append holds the stable directory transaction across size capture, write,
+  flush and any rollback. A failed rollback is uncertain. Rotation publishes
+  without replacing existing history; compression retains the raw source
+  until its replacement is verified. Retention deletes only validated files.
+- Keep the permanent directory lock while the directory is a live shared
+  namespace. Recursive deletion requires an outer lifecycle lock and checked
+  traversal; never delete a live lock to make a busy operation succeed.
+- Existing Hermes home directories are shared upstream state. Define a
+  separate trusted-parent boundary for canonical config and dotenv files;
+  do not silently relax the private-directory contract or rewrite the home's
+  ACL. New sensitive files receive a private ACL before content is written.
+  Existing unsafe files require an explicit migration with verified recovery.
+- Canonical policy writes serialize the complete config/policy pair, including
+  nested writer calls. Use one caller coordinator and documented lock order;
+  do not recursively acquire the non-reentrant foundation lock. Retain a
+  pending marker after interrupted or uncertain publication. Readers reject
+  pending/unsafe state, including cache hits. Windows caches must revalidate
+  security metadata or remain disabled.
+
+### Component acceptance boundaries
+
+| Component | Required Windows behavior |
+| --- | --- |
+| keyvault | CNG-backed memory and Private Telegram custody, checked state/markers/plaintext capture, generation leases, reset/export, runtime probes, retained encrypted audit keys and truthful file-vault capability gates |
+| wizard | Native installer, actual Hermes interpreter discovery, helper installation/probe, configure/setup/status, lifecycle commands, upgrade and uninstall with verified backups |
+| network | Native executable discovery and safe process lifecycle, Tor private state and quoted paths, explicit VPN capabilities, enforced no-clearnet fallback in strict mode |
+| llm_guard | Checked policy/config reads and fail-closed pending-state checks on every decision, including previously cached provider decisions |
+| privacy_check | Checked plaintext/encrypted audit publication, process serialization, rotation/compression/retention and recoverable failures |
+| extension | Pairing, attestation, replay and revocation serialization; encrypted history and Telegram custody; process-safe archive lifecycle; gateway shutdown and runtime discovery |
+| Desktop integration | Native installation/removal, truthful Windows capability/status output, CNG-backed memory flow, local-model checks and restart behavior |
+
+These are separate implementation PR boundaries, not permission to combine
+plugins in one PR. Shared contracts land in documentation first; shared
+primitives get their own implementation PR. Dependencies may be stacked, but
+each PR identifies the incremental component changes and targets `dev`.
+
+Do not infer CNG key absence from an inaccessible keyset, regenerate keys after
+unwrap failure, or claim that a vTPM provides biometric/per-operation presence.
+Windows reset journals preserve ambiguous native deletion outcomes. Enabling
+memory encryption must prove that the actual installed Hermes runtime consumes
+it before removing any plaintext. Unknown process discovery is not an empty
+process list. File-vault recovery and excluded env/config seals remain explicitly
+unavailable on Windows and must refuse before changing retained state; safe
+unsupported refusal satisfies the gate for these excluded capabilities only.
+
+APFS workspace images and Secure Enclave/Touch ID remain explicitly
+macOS-specific. A Windows setup may skip that optional target with a concrete
+explanation; it may not skip every encryption target or report an ordinary
+directory as an encrypted workspace. External route/account/model dependencies
+are reported per capability, not hidden behind a general Windows-ready flag.
+
+### Product completion evidence
+
+Acceptance requires a wheel built from the sdist, installed outside the source
+tree through the native installer, with a disposable `HERMES_HOME`. Record the
+actual Python/module/helper paths. Exercise install, registration with Hermes,
+configure, setup, status, gateway/extension use, memory sealing and reopening,
+applicable export, excluded recovery refusal, upgrade, uninstall and reinstall.
+Include separate users,
+concurrent processes, spaces/non-ASCII paths, restart, reboot, unavailable TPM,
+corruption and unsafe filesystem objects. Verify no plaintext fallback or lost
+retained ciphertext on failures. Real network routes and externally authenticated
+flows need their own explicit acceptance evidence; synthetic fixtures are
+regression tests, not substitutes for those claims.
+
+Publish a matrix distinguishing implemented, unit-tested, native-server-tested,
+Windows-11-tested and externally unverified. Until the applicable Windows 11
+installation-to-use and security gates pass, Windows product support remains
+incomplete even if every component PR has been created.
 
 ## MVP Phasing
 
