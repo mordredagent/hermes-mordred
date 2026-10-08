@@ -430,3 +430,11 @@ legacy audit log, policy snapshot/config, keyvault tree, and credentials tree.
 - Hermes core contains no Mordred path knowledge. Optional future vendored
   enforcement remains separately specified under [`UPSTREAM.md`](./UPSTREAM.md).
 - This document, not package-local READMEs, is the path ownership authority.
+## Windows wallet storage boundary
+
+The keyvault caller migration uses `<home>/extension/wallet.json` and a permanent
+`<home>/extension/.mordred-fs.lock` on Windows. Foundation-owned staging names
+begin `.mordred-fs-tmp-`; consumers must never remove them by glob. The POSIX
+wallet still uses `.wallet.lock`. Stop older Windows writers before adoption;
+there is no automatic ACL repair or mixed-version lock compatibility.
+See [the component contract](SPEC.md#windows-keyvault-wallet-configuration-2026-10-08).

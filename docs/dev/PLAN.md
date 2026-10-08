@@ -651,3 +651,78 @@ across component boundaries. One independent whole-branch review found four
 security/compatibility issues; regression tests reproduced each before the
 fixes. The final validation log distinguishes actual NitroTPM, swtpm, synthetic
 Telegram, and the pending operator-assisted live-account gate.
+## Windows Wallet Storage Implementation Plan
+
+> **For agentic workers:** Use `superpowers:executing-plans` for inline execution
+> and a fresh whole-branch review after validation.
+
+**Goal:** Migrate the keyvault-owned wallet selection document to checked native
+Windows storage without changing POSIX behavior or enabling other Windows flows.
+
+**Architecture:** A small keyvault adapter owns checked directory/transaction
+lifetimes and filesystem error translation. The existing signer facade dispatches
+Windows I/O to that adapter and retains document validation and its thread lock.
+
+**Tech Stack:** Python 3.11–3.13, existing `_private_fs`, pytest, scoped Windows CI.
+
+**Spec:** [Windows keyvault wallet configuration](SPEC.md#windows-keyvault-wallet-configuration-2026-10-08).
+
+### Wallet storage constraints and review focus
+
+- One keyvault component PR, after this contract and PR #192; target `dev`.
+- Preserve POSIX writers/locks; Windows uses `.mordred-fs.lock` only.
+- Only checked missing directory/file errors permit absence; missing lock or
+  cleanup errors refuse, including uncertain errors with a `missing` reason.
+- Unsafe existing ACLs must remain unchanged, including failed writes.
+- Uncertain publication must preserve the complete file and reach the caller.
+- A fresh process must use the same lock; invalid JSON must not discover a key.
+- Ordinary-user source/wheel execution is distinct from hosted admin CI.
+
+### Task WW1: Implement the bounded keyvault adapter
+
+**Files:** Create `keyvault/_wallet_storage.py` under `src/mordred_hermes`;
+modify `keyvault/extension_sign.py`; create `tests/test_keyvault_wallet_storage.py`.
+
+**Interfaces:** `read_wallet_bytes(directory: Path) -> bytes | None` and
+`write_wallet_bytes(directory: Path, payload: bytes) -> None`; a
+`WalletStorageError(WalletConfigError)` preserves filesystem classification.
+The adapter consumes `open_private_directory`, `read_bytes(max_bytes=1048576)`
+and `transaction().create_bytes/replace_bytes`; the facade keeps schema checks.
+
+- [ ] Write regressions exercising the facade's Windows dispatch against real
+  checked storage: absent read creates nothing; create/replace round trips;
+  malformed/duplicate/oversized input refuses without fallback or mutation;
+  unsafe file/lock refuses without repair. Run and record the expected RED.
+- [ ] Implement the adapter, narrow missing handlers and Windows dispatch;
+  inject pre/post-publication and context-exit errors to prove error state and
+  preserved bytes. Run focused tests and existing POSIX wallet tests to GREEN.
+- [ ] Commit the implementation and regressions.
+
+### Task WW2: Validate native Windows and delivery
+
+**Files:** Extend `tests/test_keyvault_wallet_storage.py` and `.github/workflows/ci.yml`;
+record evidence in `docs/dev/CI.md`, `PLAN.md`, `TODO.md` and `PATHS.md`.
+
+**Interfaces:** Exercise `extension_sign.set_wallet`, `_load_wallet_cfg` and
+`_resolve_account` with synthetic configuration and isolated profile paths.
+
+- [ ] Add native Windows ACL/junction/hard-link refusal, actual process
+  serialization and post-publication failure coverage. Add the suite to the
+  scoped Windows matrix and an out-of-checkout sdist-derived wheel smoke.
+- [ ] Run full local pytest/coverage, Ruff/format, reduced-extras strict mypy,
+  shellcheck and documentation-link checks; inspect all results.
+- [ ] Reuse only the retained Windows host after checking state and setting an
+  automatic stop deadline. Run source and wheel suites as the ordinary user,
+  verify fresh-process retention and second-user denial using new synthetic
+  fixtures, then stop and verify the host. Leave TPM/Linux fixtures unchanged.
+- [ ] Obtain an independent whole-branch review, reproduce/fix findings, create
+  the dependent `dev` PR and record final CI results and remaining Windows work.
+
+### Remaining Windows caller sequence
+
+The wallet adapter is a leaf of the planned keyvault runtime migration. Before
+moving `_storage.py` and memory custody, specify lifecycle locks outside removable
+roots, safe deletion, reset journals, generation leases and plaintext capture.
+Then complete keyvault runtime/memory, wizard/install, network, policy/LLM guard,
+privacy/audit and extension/Desktop in separate component PRs. Existing shared
+append/rotation/delete gaps must be designed before their consumers migrate.
