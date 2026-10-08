@@ -1214,10 +1214,23 @@ codes. A checked, bounded `gateway_state.json` supplies only a PID locator;
 its recorded command line never selects an interpreter. Access denial, unstable
 PID creation time, unreadable state and unresolved launchers are uncertainty,
 not evidence that a gateway stopped. Positive foreign ownership excludes a
-process. Kernel pseudo-processes have narrow exceptions; the later managed
-installation prerequisite below defines the additional supported-runtime
-boundary for denied noncandidate images. It must be implemented before native
-known-empty acceptance can pass.
+process. After ownership AccessDenied a non-hinted record is classified in the
+SPEC order: literal native Registry/MemCompression pseudo-images are outside
+the supported set; a plausible reported name or image basename (one frozen
+rule: a `python*` basename or one containing `hermes` or `mordred`, and the
+stems `py`, `pyw` and the generic hosts cmd, powershell, powershell_ise, pwsh,
+rundll32, mshta, wscript and cscript under any extension) stays unknown
+(`owner-denied-plausible`); an empty reported name or one that differs from the
+image basename stays unknown (`image-name-mismatch`); every other image string
+from psutil is submitted to `inspect_managed_installation_image` (managed
+installation prerequisite below). PID, creation time, name and image are then
+rechecked through a fresh process object. Any capability refusal (including
+unsupported, rooted and NT-device-form paths), OSError/ValueError, changed or
+denied recheck, or an admission that returns after the scan deadline keeps the
+record unknown (`image-unverified`, `process-changed`, `inventory-limit`). Hinted PIDs and
+positively owned processes never reach the capability. There is no fixed
+OS-image list or system-directory lookup. The existing PID 0 / PID 4 kernel
+pseudo-process exceptions remain narrow.
 A current-user gateway blocks a transition even when its profile is uncertain.
 The adjacent `gateway run` argv pair is conservative: custom script launchers
 are included, and unrelated current-user apps using that pair can over-block.
@@ -1243,7 +1256,11 @@ Validation: run `tests/test_keyvault_windows_processes.py` in both the source
 checkout and an installed sdist-built wheel with Hermes present. Its ordinary
 Windows native test launches a short-lived sleeping Python child with gateway
 argv, verifies live native discovery and lifecycle refusal, then terminates only
-that test child. No gateway/network service or user profile is modified. Record
+that test child and requires a known-empty inventory and successful stopped gate.
+A second native case prints one `gateway-inventory-image` line per sanitized
+basename and capability result, plus the elapsed scan seconds, for comparison
+with the managed-image probe log.
+No gateway/network service or user profile is modified. Record
 ordinary-user Server and Windows 11 acceptance separately; mocked fault cases
 are not evidence of a successful native inventory.
 ### Managed installation image prerequisite for gateway inventory
