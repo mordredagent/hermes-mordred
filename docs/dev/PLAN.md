@@ -710,3 +710,16 @@ then perform an integrated review of all combined dependencies.
 7. Finish by recording actual evidence, remaining external gates and PR
    dependencies. A plan, green helper CI, or one migrated caller is not Windows
    product completion.
+
+
+### Checked Windows audit session implementation
+
+C7a depends on C1b identities/checked absence as well as C1a lifecycle primitives.
+Add a checked private-admission assertion to the transaction capability, then
+implement shared `audit_session(path, transaction=None)` and immutable bounded
+snapshots/probes in a root module. Keep existing POSIX audit functions unchanged.
+Add session-taking rotation/name enumeration/retention helpers with no hidden
+lock acquisition. Require no-overwrite, checked raw retention, bounded gzip,
+identity-bound deletion and compound uncertainty tests, plus ordinary-user
+Windows process contention and source/wheel checks. Migrate encrypted keyvault
+and plaintext/CLI consumers only in their later component PRs.

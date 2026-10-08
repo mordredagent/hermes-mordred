@@ -1337,3 +1337,34 @@ implementation or published PRs.
 Review decisions: approve the dedicated-key scope and its recovery limitation;
 choose in-session execution or subagent-driven execution. Recommended execution
 is in-session because the small sequence has tightly coupled interfaces.
+
+
+### Checked Windows audit sessions
+
+Shared audit operations use one exact-private directory transaction across
+format probes, append, rotation, compression and retention. Borrowing an existing
+transaction requires a checked `assert_private_admission()` capability as well
+as matching checked directory identity; confidential admission is rejected even
+when its parent is exact-private. No independent global mutex may be held while
+waiting for this filesystem lock. Nested sessions reuse an explicitly owned
+same-directory transaction; different-directory nesting refuses.
+
+Snapshots and gzip decoding have explicit finite limits: initial defaults are
+16 MiB per file/decompressed output, 64 MiB aggregate, 4,096 entries and 4,096
+first-line bytes. Compression may retain an oversize raw file; readers never
+silently truncate. Rotation uses no-replace publication and recognizes only
+valid dated rotation names, with optional numeric suffix and gzip extension.
+Automatic retention uses checked mtime and excludes the current operation's
+new raw/gzip artifacts from that immediate sweep. It never selects unrelated
+prefix-matching files or permanent locks.
+
+Compression may report a degraded raw-retained result only for a known
+not-committed I/O/access/busy publication failure after verifying the original
+raw identity remains intact. Unsafe, identity, unsupported and uncertain errors
+propagate. Published gzip is verified before identity-bound raw deletion;
+failed deletion may leave both copies. Fatal compound failures after prior
+persistent mutation are reported uncertain, preserving underlying diagnostics.
+No automatic retry, guessed rollback, secure-erasure or power-loss claim is
+made. Consumers own encryption formats, generation leases and key authorization;
+uncertain writes invalidate their cached active identity/header/DEK and require
+explicit reconciliation. Shared audit operations do not enable those consumers.
