@@ -779,3 +779,61 @@ unit tests, native Server checks, Windows 11 checks and live-service checks
 separately. Keep unchecked gates visible; never count a skipped hardware or
 account-dependent test as a pass. No Windows-ready release claim follows from
 green foundation/helper/wallet jobs alone.
+
+
+### C1a lifecycle validation (2026-10-08)
+
+The checked lifecycle slice extends the scoped `windows-private-fs` invocation
+with `tests/test_private_fs_lifecycle.py` and
+`tests/test_private_fs_lifecycle_faults.py`. Existing native Windows tests now
+also cover lifecycle ACL/junction refusal and exclusive-handle sharing failures;
+process tests include concurrent checked append with every record retained.
+
+Local macOS Python 3.13.12 validation: the focused shared-filesystem suite has
+**184 passed, 47 platform-specific skips**. Ruff check/format passed. Strict mypy
+passed for 205 source files in a separate `.venv-ci` installed with only
+`dev,keyvault,extension,macos` extras. Native Windows execution belongs to the
+controller's final-commit acceptance run, not these local results.
+
+Regression development observed 43 lifecycle cases fail on missing APIs, then
+13 portable Windows cases fail on missing backend methods. Three native ABI
+cases failed before adding time/seek/truncation/enumeration bindings. Subsequent
+RED/GREEN cases caught prevalidation metadata access, unbounded reserved staging
+scans and replaced exceptions after Windows publication. Fault seams exercise
+partial append/rollback, partial POSIX rename, native deletion/rename ambiguity,
+close/unlock/directory cleanup and original-error preservation. These are
+injected failures, not physical disk-failure or power-loss durability evidence.
+
+The full default `uv run pytest -q` run exited 0: **5,425 passed, 52 skipped,
+34 integration deselected** (counts from progress output and collection).
+Twelve final cleanup regressions added while that run was active were verified
+by the subsequent focused run above; product code was unchanged. Warnings were
+upstream Starlette/httpx deprecation, an installed Hermes invalid-escape warning,
+and existing Python multi-threaded-fork deprecations. No test failed.
+
+C1a review follow-up: ordinary `OSError` bodies after successful deletion exposed
+uncertainty loss when POSIX unlock or lock-close also failed. Regression RED was
+**2 failed, 4 passed**; retaining the transaction mutation state during error
+classification gave **6 passed**. The analogous directory-close case already
+preserved uncertainty and remains covered. Final focused suite: **190 passed,
+47 skipped**; Ruff check/format and reduced-extras strict mypy (205 files) passed.
+The full suite was not repeated for this bounded review fix.
+
+Actual Windows Server 2025 ordinary-user validation on 2026-10-08 used Python
+3.11.17, a disposable home and separate source/wheel directories on the retained
+AWS host. Source commit `15ccec45b` passed **193 tests, 38 platform skips**.
+An sdist-derived wheel from reviewed commit `d2db7b5d3`, installed with no package
+dependencies in a fresh venv (plus pytest), passed **193 tests, 44 platform
+skips**. The six additional skips are the new POSIX-only raw-error regressions;
+the review fix did not change Windows product code. Module paths were verified
+inside the new wheel venv, with no source path injection. Wheel SHA-256:
+`02c57837fc35d6aa9476d4bcafc01d3defedef0453ace6b34ccde0696ae6245e`.
+
+The actual native cases cover metadata/prefix/enumeration, checked deletion,
+no-replace rename, append, hostile ACLs/junctions/hard links, held handles and
+cross-process append contention. Injected cleanup failures are separately
+identified in test names. Independent review found one POSIX classification
+defect, fixed and re-reviewed with no remaining important findings. Shellcheck
+also passed. This slice did not repeat reboot/stop-start or TPM custody tests;
+it adds no Windows 11 or whole-product acceptance claim. Host shutdown remains
+the responsibility of the ongoing completion task's bounded auto-stop controls.

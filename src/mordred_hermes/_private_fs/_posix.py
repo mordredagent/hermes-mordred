@@ -14,7 +14,19 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from ._types import CommitState, PrivateDirectory, PrivateFSError, PrivateTransaction, Reason, validate_leaf
+from ._types import (
+    CommitState,
+    FileIdentity,
+    FileMetadata,
+    PrivateDirectory,
+    PrivateFSError,
+    PrivateTransaction,
+    Reason,
+    cleanup_failure,
+    reserved,
+    validate_leaf,
+    validate_limit,
+)
 
 _NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _guard = threading.Lock()
@@ -48,6 +60,7 @@ def _error(exc: OSError, operation: str, committed: bool = False) -> PrivateFSEr
         errno.ENOENT: "missing",
         errno.EEXIST: "exists",
         errno.ELOOP: "unsafe",
+        errno.EISDIR: "unsafe",
         errno.ENOTDIR: "unsafe",
         errno.EACCES: "access_denied",
         errno.EPERM: "access_denied",
@@ -137,17 +150,20 @@ class _Directory:
         self.fd = fd
         self.active = True
         self.pid = os.getpid()
+        self.thread = threading.get_ident()
         self.published = False
 
     def _check(self) -> None:
-        if not self.active or self.pid != os.getpid():
+        if not self.active or self.pid != os.getpid() or self.thread != threading.get_ident():
             raise RuntimeError("private directory is closed or inherited across fork")
         _private(self.fd, directory=True)
 
     @contextlib.contextmanager
-    def _open(self, name: str, *, lock: bool = False) -> Iterator[int]:
+    def _open(
+        self, name: str, *, lock: bool = False, writable: bool = False, mutated: list[bool] | None = None
+    ) -> Iterator[int]:
         self._check()
-        flags = os.O_RDWR | os.O_CREAT if lock else os.O_RDONLY
+        flags = os.O_RDWR | os.O_CREAT if lock else (os.O_RDWR if writable else os.O_RDONLY)
         with _guard:
             fd = os.open(name, flags | _NOFOLLOW, 0o600, dir_fd=self.fd)
             if lock:
@@ -162,11 +178,66 @@ class _Directory:
             if not lock or self.pid == os.getpid():
                 with _guard:
                     try:
-                        _close_fds(iter((fd,)), committed=lock and self.published)
+                        _close_fds(iter((fd,)), committed=(lock and self.published) or bool(mutated and mutated[0]))
                     finally:
                         _lock_fds.discard(fd)
 
+    def stat(self, name: str) -> FileMetadata:
+        validate_leaf(name)
+        self._check()
+        try:
+            with self._open(name) as fd:
+                info = _private(fd)
+                return FileMetadata(_identity(info), info.st_size, info.st_mtime_ns)
+        except PrivateFSError:
+            raise
+        except OSError as exc:
+            raise _error(exc, "stat") from exc
+
+    def read_prefix(self, name: str, *, max_bytes: int) -> bytes:
+        validate_leaf(name)
+        validate_limit(max_bytes)
+        self._check()
+        try:
+            with self._open(name) as fd:
+                chunks: list[bytes] = []
+                remaining = max_bytes
+                while remaining:
+                    data = os.read(fd, min(65536, remaining))
+                    if not data:
+                        break
+                    chunks.append(data)
+                    remaining -= len(data)
+                return b"".join(chunks)
+        except PrivateFSError:
+            raise
+        except OSError as exc:
+            raise _error(exc, "read_prefix") from exc
+
+    def list_names(self, *, max_entries: int) -> tuple[str, ...]:
+        validate_limit(max_entries)
+        self._check()
+        try:
+            names: list[str] = []
+            with os.scandir(self.fd) as entries:
+                for examined, entry in enumerate(entries, 1):
+                    if examined > max_entries + 1:
+                        raise PrivateFSError("unsafe", "list_limit")
+                    if reserved(entry.name):
+                        continue
+                    validate_leaf(entry.name)
+                    if len(names) == max_entries:
+                        raise PrivateFSError("unsafe", "list_limit")
+                    names.append(entry.name)
+            return tuple(sorted(names))
+        except PrivateFSError:
+            raise
+        except OSError as exc:
+            raise _error(exc, "list") from exc
+
     def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+        validate_leaf(name)
+        validate_limit(max_bytes)
         self._check()
         validate_leaf(name)
         if max_bytes <= 0:
@@ -196,6 +267,7 @@ class _Directory:
             if owner in _owners:
                 raise RuntimeError("recursive private transaction")
             _owners.add(owner)
+        tx = _Transaction(self)
         try:
             with self._open(".mordred-fs.lock", lock=True) as fd:
                 while True:
@@ -206,7 +278,6 @@ class _Directory:
                         if not blocking:
                             raise PrivateFSError("busy", "lock") from None
                         time.sleep(0.05)
-                tx = _Transaction(self)
                 try:
                     _private(fd)
                     named = os.stat(".mordred-fs.lock", dir_fd=self.fd, follow_symlinks=False)
@@ -217,12 +288,11 @@ class _Directory:
                     tx.active = False
                     # Closing the descriptor also releases the lock if unlock fails.
                     if self.pid == os.getpid():
-                        with contextlib.suppress(OSError):
-                            fcntl.flock(fd, fcntl.LOCK_UN)
+                        _unlock(fd, committed=tx.published)
         except PrivateFSError:
             raise
         except OSError as exc:
-            raise _error(exc, "transaction") from exc
+            raise _error(exc, "transaction", committed=tx.published) from exc
         finally:
             if self.pid == os.getpid():
                 with _guard:
@@ -234,15 +304,108 @@ class _Transaction:
         self.directory = directory
         self.active = True
         self.thread = threading.get_ident()
+        self.published = False
 
     def _check(self) -> None:
-        self.directory._check()
         if not self.active or self.thread != threading.get_ident():
             raise RuntimeError("private transaction is closed or belongs to another thread")
+        self.directory._check()
 
     def read_bytes(self, name: str, *, max_bytes: int) -> bytes:
+        validate_leaf(name)
+        validate_limit(max_bytes)
         self._check()
         return self.directory.read_bytes(name, max_bytes=max_bytes)
+
+    def stat(self, name: str) -> FileMetadata:
+        validate_leaf(name)
+        self._check()
+        return self.directory.stat(name)
+
+    def read_prefix(self, name: str, *, max_bytes: int) -> bytes:
+        validate_leaf(name)
+        validate_limit(max_bytes)
+        self._check()
+        return self.directory.read_prefix(name, max_bytes=max_bytes)
+
+    def list_names(self, *, max_entries: int) -> tuple[str, ...]:
+        validate_limit(max_entries)
+        self._check()
+        return self.directory.list_names(max_entries=max_entries)
+
+    def _mark_mutated(self) -> None:
+        self.published = self.directory.published = True
+
+    def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        self._move(name, None, expected_identity)
+
+    def rename_file(self, name: str, destination: str, *, expected_identity: FileIdentity | None = None) -> None:
+        validate_leaf(destination)
+        self._move(name, destination, expected_identity)
+
+    def _move(self, name: str, destination: str | None, expected: FileIdentity | None) -> None:
+        validate_leaf(name)
+        self._check()
+        changed = [False]
+        directory = self.directory
+        try:
+            with directory._open(name, mutated=changed) as fd:
+                identity = _identity(_private(fd))
+                if expected is not None and identity != expected:
+                    raise PrivateFSError("unsafe", "identity")
+                _same_named(directory.fd, name, fd, identity)
+                if destination is not None:
+                    os.link(name, destination, src_dir_fd=directory.fd, dst_dir_fd=directory.fd, follow_symlinks=False)
+                    changed[0] = True
+                os.unlink(name, dir_fd=directory.fd)
+                changed[0] = True
+                if destination is not None:
+                    with directory._open(destination) as renamed:
+                        if _identity(_private(renamed)) != identity:
+                            raise PrivateFSError("unsafe", "renamed_identity")
+                _absent(directory.fd, name)
+                _flush(directory.fd)
+        except PrivateFSError as exc:
+            if changed[0]:
+                exc.commit_state = "uncertain"
+            raise
+        except OSError as exc:
+            raise _error(exc, "delete" if destination is None else "rename", changed[0]) from exc
+        finally:
+            if changed[0]:
+                self._mark_mutated()
+
+    def append_bytes(self, name: str, data: bytes) -> None:
+        validate_leaf(name)
+        self._check()
+        changed = [False]
+        try:
+            with self.directory._open(name, writable=True, mutated=changed) as fd:
+                original = _private(fd)
+                identity = _identity(original)
+                os.lseek(fd, original.st_size, os.SEEK_SET)
+                changed[0] = True
+                try:
+                    _write_staging(fd, data)
+                    _same_named(self.directory.fd, name, fd, identity)
+                except OSError as exc:
+                    try:
+                        _same_named(self.directory.fd, name, fd, identity)
+                        os.ftruncate(fd, original.st_size)
+                        _flush(fd)
+                        changed[0] = False
+                    except OSError as rollback:
+                        exc.add_note(f"append rollback failed: {type(rollback).__name__}")
+                    raise
+        except PrivateFSError as exc:
+            if changed[0]:
+                exc.commit_state = "uncertain"
+            raise
+        except OSError as exc:
+            raise _error(exc, "append", changed[0]) from exc
+        finally:
+            if changed[0]:
+                self._mark_mutated()
 
     def create_bytes(self, name: str, data: bytes) -> None:
         self._write(name, data, replace=False)
@@ -294,7 +457,7 @@ class _Transaction:
             raise _error(exc, "replace" if replace else "create", committed) from exc
         finally:
             if committed:
-                directory.published = True
+                self._mark_mutated()
             if staged and not committed:
                 _cleanup_staging(directory.fd, tmp, identity)
             if fd is not None:
@@ -304,7 +467,7 @@ class _Transaction:
 def _close_fds(fds: Iterator[int], *, committed: bool) -> None:
     # Close every descriptor once and preserve an active body error. A close
     # failure after publication cannot make the enclosing with-block retry-safe.
-    active_error = sys.exc_info()[0] is not None
+    active_error = sys.exception()
     failure: OSError | None = None
     for fd in fds:
         try:
@@ -312,8 +475,8 @@ def _close_fds(fds: Iterator[int], *, committed: bool) -> None:
         except OSError as exc:
             if failure is None:
                 failure = exc
-    if failure is not None and not active_error:
-        raise _error(failure, "close", committed) from failure
+    if failure is not None:
+        cleanup_failure(active_error, _error(failure, "close", committed), committed=committed)
 
 
 def _cleanup_staging(directory_fd: int, name: str, identity: tuple[int, int] | None) -> None:
@@ -333,3 +496,31 @@ def _write_staging(fd: int, data: bytes) -> None:
             raise OSError(errno.EIO, "zero-length write")
         view = view[written:]
     _flush(fd)
+
+
+def _identity(info: os.stat_result) -> FileIdentity:
+    return FileIdentity(info.st_dev, info.st_ino.to_bytes(16, "little"))
+
+
+def _same_named(directory: int, name: str, fd: int, identity: FileIdentity) -> None:
+    if (
+        _identity(_private(fd)) != identity
+        or _identity(os.stat(name, dir_fd=directory, follow_symlinks=False)) != identity
+    ):
+        raise PrivateFSError("unsafe", "identity")
+
+
+def _absent(directory: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise PrivateFSError("unsafe", "expected_absent")
+
+
+def _unlock(fd: int, *, committed: bool) -> None:
+    original = sys.exception()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as exc:
+        cleanup_failure(original, exc, committed=committed)

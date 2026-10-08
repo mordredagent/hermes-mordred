@@ -1524,3 +1524,47 @@ account/model and Desktop UI results separately in the CI validation log.
 The execution environment must contain only synthetic fixtures until a separate
 live-account test is requested. Stop task-owned compute, retain only explicitly
 identified development resources, and record residual storage costs.
+
+
+## Checked private file lifecycle (C1a)
+
+The opt-in `_private_fs` API retains checked private directories, single-link
+regular files, platform ACL validation and its permanent cooperative transaction
+lock. No component callers migrate in this slice. `FileMetadata` is a frozen
+record of `identity: FileIdentity`, `size: int`, and Unix-epoch `mtime_ns: int`.
+Both directory and transaction expose `stat(name)`, `read_prefix(name,
+max_bytes=...)`, and `list_names(max_entries=...)`. Stat always opens and validates
+the object; missing is an error. Prefix reads return up to the positive integer
+limit, including from longer files. Full reads still refuse oversized files.
+Enumeration returns sorted names as a bounded tuple, omitting only the reserved
+permanent lock and staging names. At most max_entries names are returned; at
+most max_entries + 1 non-dot entries fit the scan budget (one permanent-lock
+allowance); one additional entry may be fetched to detect overflow.
+Abandoned staging entries consume this scan budget. It never follows links or recurses, applies
+the filename contract, and refuses overflow. Names remain untrusted until
+opened. The transaction protects the snapshot from cooperating writers;
+ordinary directory enumeration has no snapshot atomicity promise.
+
+Transactions additionally expose `delete_file(name, expected_identity=None)`,
+`rename_file(name, destination, expected_identity=None)` and
+`append_bytes(name, data)`. They require existing checked regular files. Optional
+identity comparison precedes mutation. Rename is sibling-only and never
+replaces a destination, including an unsafe object. Windows uses an exclusive
+DELETE-capable checked handle and native no-replace rename/FileDispositionInfo;
+no checked-open/path-delete sequence is allowed. Deletion returns successfully
+only after close and checked absence. Any error after native deletion is
+attempted is uncertain. A rename error is retry-safe only after confirming the
+original checked identity and source name are retained. POSIX uses descriptor-
+relative unlink or no-replace link followed by unlink and directory flush;
+partial rename retains the recoverable duplicate and reports uncertain.
+
+Append holds the transaction, remembers original length, writes all bytes and
+flushes. On write/flush failure it truncates and flushes only the still-validated
+same file. Confirmed rollback reports not_committed; failed rollback reports
+uncertain. Cleanup after successful mutation is uncertain, including unlock
+and enclosing-directory close failures. Preserve original exceptions when
+cleanup also fails, promoting classified failures rather than replacing them.
+Never retry uncertain operations automatically. There is no secure-erasure,
+power-loss atomic append, or protection from hostile same-user code claim.
+All new operations reject invalid positive limits, reserved/path filenames and
+invalid closed/thread/fork lifetimes before touching filesystem state.

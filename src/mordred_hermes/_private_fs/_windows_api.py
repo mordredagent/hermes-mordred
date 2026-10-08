@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from ._types import FileIdentity, PrivateFSError, Reason
+from ._types import FileIdentity, PrivateFSError, Reason, cleanup_failure
 from ._windows_security import ADMINISTRATORS, SYSTEM, Ace, Descriptor
 
 DWORD = c.c_uint32
@@ -33,6 +33,16 @@ class StandardInfo(c.Structure):
         ("links", DWORD),
         ("deleted", c.c_ubyte),
         ("directory", c.c_ubyte),
+    ]
+
+
+class BasicInfo(c.Structure):
+    _fields_ = [
+        ("creation", c.c_int64),
+        ("access", c.c_int64),
+        ("write", c.c_int64),
+        ("change", c.c_int64),
+        ("attributes", DWORD),
     ]
 
 
@@ -76,8 +86,11 @@ class OwnedHandle:
 
     def __exit__(self, *args: object) -> None:
         if args and args[0] is not None:
-            with contextlib.suppress(OSError):
+            try:
                 self.close()
+            except OSError as exc:
+                original = args[1] if isinstance(args[1], BaseException) else None
+                cleanup_failure(original, exc, committed=False)
         else:
             self.close()
 
@@ -128,6 +141,8 @@ class NativeAPI:
         self.Read = self._bind(k, "ReadFile", [HANDLE, PTR, DWORD, PTR, PTR], BOOL)
         self.Write = self._bind(k, "WriteFile", [HANDLE, PTR, DWORD, PTR, PTR], BOOL)
         self.Flush = self._bind(k, "FlushFileBuffers", [HANDLE], BOOL)
+        self.Seek = self._bind(k, "SetFilePointerEx", [HANDLE, c.c_int64, PTR, DWORD], BOOL)
+        self.EndOfFile = self._bind(k, "SetEndOfFile", [HANDLE], BOOL)
         self.Lock = self._bind(k, "LockFileEx", [HANDLE, DWORD, DWORD, DWORD, DWORD, PTR], BOOL)
         self.Unlock = self._bind(k, "UnlockFileEx", [HANDLE, DWORD, DWORD, DWORD, PTR], BOOL)
         self.CurrentProcess = self._bind(k, "GetCurrentProcess", [], HANDLE)
@@ -228,6 +243,32 @@ class NativeAPI:
             standard.size,
         )
 
+    def mtime_ns(self, handle: OwnedHandle) -> int:
+        basic = BasicInfo()
+        self.checked(self.GetInfo(handle.value, 0, c.byref(basic), c.sizeof(basic)), "file_basic")
+        return (int(basic.write) - 116444736000000000) * 100
+
+    def seek(self, handle: OwnedHandle, offset: int) -> None:
+        self.checked(self.Seek(handle.value, offset, None, 0), "seek")
+
+    def truncate(self, handle: OwnedHandle, length: int) -> None:
+        self.seek(handle, length)
+        self.checked(self.EndOfFile(handle.value), "truncate")
+
+    def names(self, handle: OwnedHandle) -> Iterator[str]:
+        # FILE_FULL_DIR_INFO: fixed prefix 68 bytes, UTF-16 name, 8-byte
+        # aligned next-entry offsets. Native batches never grow allocations.
+        restart = True
+        while True:
+            buffer = c.create_string_buffer(65536)
+            if not self.GetInfo(handle.value, 15 if restart else 14, buffer, len(buffer)):
+                code = self.last_error()
+                if code == 18:  # ERROR_NO_MORE_FILES
+                    return
+                raise native_error(code, "list")
+            restart = False
+            yield from _directory_batch(buffer.raw)
+
     def descriptor(self, handle: OwnedHandle) -> Descriptor:
         owner = PTR()
         dacl = PTR()
@@ -320,7 +361,7 @@ class NativeAPI:
         self.checked(self.SetInfo(handle.value, 3, buffer, len(buffer)), "rename")
 
     def discard(self, handle: OwnedHandle) -> None:
-        delete = BOOL(1)
+        delete = c.c_ubyte(1)
         self.checked(self.SetInfo(handle.value, 4, c.byref(delete), c.sizeof(delete)), "discard_staging")
 
     def lock(self, handle: OwnedHandle) -> None:
@@ -340,3 +381,26 @@ def get_api() -> NativeAPI:
     if _api is None:
         _api = NativeAPI()
     return _api
+
+
+def _directory_batch(raw: bytes) -> Iterator[str]:
+    offset = 0
+    while True:
+        if offset + 68 > len(raw):
+            raise PrivateFSError("unsafe", "list_buffer")
+        following = int.from_bytes(raw[offset : offset + 4], "little")
+        length = int.from_bytes(raw[offset + 60 : offset + 64], "little")
+        end = offset + 68 + length
+        if length == 0 or length % 2 or end > len(raw):
+            raise PrivateFSError("unsafe", "list_buffer")
+        if following and (following % 8 or following < 68 + length or offset + following >= len(raw)):
+            raise PrivateFSError("unsafe", "list_buffer")
+        try:
+            name = raw[offset + 68 : end].decode("utf-16-le")
+        except UnicodeError as exc:
+            raise PrivateFSError("unsafe", "list_name") from exc
+        if name not in (".", ".."):
+            yield name
+        if following == 0:
+            break
+        offset += following

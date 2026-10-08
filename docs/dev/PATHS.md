@@ -500,3 +500,8 @@ namespace is live. Archive reset/purge cannot remove an active lock and then
 recreate a competing lock namespace. Rotated audit targets and backup exports
 publish without overwriting an existing path. Every recursive lifecycle action
 must check each traversed entry and stay inside its declared root.
+
+C1a lifecycle methods operate only on validated sibling names in the caller's
+checked directory. Enumeration hides the reserved lock/staging names but counts
+staging entries toward its scan budget. Delete/rename never accept those names;
+there is no implicit stale-staging cleanup or recursive directory removal.

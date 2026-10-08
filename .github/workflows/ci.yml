@@ -75,6 +75,7 @@ jobs:
           tests/test_private_fs_windows.py tests/test_private_fs_windows_faults.py
           tests/test_private_fs_processes.py
           tests/test_keyvault_wallet_storage.py
+          tests/test_private_fs_lifecycle.py tests/test_private_fs_lifecycle_faults.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |
           .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs

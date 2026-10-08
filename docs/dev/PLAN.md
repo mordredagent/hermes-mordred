@@ -1019,3 +1019,27 @@ then perform an integrated review of all combined dependencies.
 7. Finish by recording actual evidence, remaining external gates and PR
    dependencies. A plan, green helper CI, or one migrated caller is not Windows
    product completion.
+
+
+## C1a checked file lifecycle implementation
+
+1. Extend shared protocols and export frozen FileMetadata. Keep native imports
+   lazy. Add real cross-platform lifecycle regressions before implementation.
+2. Add checked stat/prefix and bounded nonrecursive enumeration. POSIX uses
+   descriptor-relative scandir; Windows queries a fixed 64 KiB buffer with
+   FileFullDirectoryRestartInfo/FileFullDirectoryInfo and validates every offset.
+3. Add identity-bound delete and no-replace rename. Windows keeps exclusive
+   handles through FileDispositionInfo/FileRenameInfo and reconciles failures;
+   POSIX checks identities immediately before unlink/link and flushes directory.
+4. Add same-handle append, partial-write loops, flush and validated truncation
+   rollback. Track all successful/uncertain mutations through transaction and
+   directory cleanup; never silently suppress unlock failure without preserving
+   it as exception context/note and promoting an existing classified error.
+5. Exercise POSIX failures and portable native seams, then native Windows ACL,
+   junction, held-handle and process locking tests. Controller performs real
+   Windows validation. Run focused/full pytest, Ruff and reduced-extras mypy.
+
+Native ABI references: Microsoft [FILE_BASIC_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_basic_info),
+[FILE_FULL_DIR_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_full_dir_info),
+[FILE_DISPOSITION_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_disposition_info),
+and [SetFilePointerEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex).
