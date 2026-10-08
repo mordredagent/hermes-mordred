@@ -101,9 +101,14 @@ def test_launcher_refuses_unknown_and_supports_verified_upgrade(tmp_path):
 
 
 def test_unknown_exe_blocks_launcher_install(tmp_path):
-    (tmp_path / "hermes-mordred.exe").write_bytes(b"MZ unknown")
+    # An elevated Windows token defaults raw new-file ownership to BA. This
+    # fixture intends a safely admitted current-user file without our receipt.
+    with install._native_transaction(tmp_path) as tx:
+        tx.create_bytes("hermes-mordred.exe", b"MZ unknown")
     with pytest.raises(OSError, match="existing"):
         install.install_launcher(tmp_path / "python.exe", tmp_path)
+    assert (tmp_path / "hermes-mordred.exe").read_bytes() == b"MZ unknown"
+    assert not (tmp_path / "hermes-mordred.ps1").exists()
 
 
 def test_helper_needs_hash_bound_manifest(tmp_path):
