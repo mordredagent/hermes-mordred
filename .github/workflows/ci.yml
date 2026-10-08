@@ -53,6 +53,55 @@ permissions:
   contents: read
 
 jobs:
+  windows-private-fs:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install scoped dependencies in an isolated venv
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension]" uv
+      - name: Native ACL, path, publication and process tests
+        run: >-
+          .\.venv\Scripts\python.exe -m pytest -q -o addopts=
+          tests/test_private_fs.py tests/test_private_fs_posix.py
+          tests/test_private_fs_windows.py tests/test_private_fs_windows_faults.py
+          tests/test_private_fs_processes.py
+      - name: Build a wheel from the sdist and smoke outside the checkout
+        run: |
+          .\.venv\Scripts\uv.exe build --sdist --out-dir dist-private-fs
+          if ($LASTEXITCODE -ne 0) { throw 'sdist build failed' }
+          $source = (Get-ChildItem dist-private-fs/*.tar.gz).FullName
+          .\.venv\Scripts\uv.exe build --wheel $source --out-dir dist-private-fs
+          if ($LASTEXITCODE -ne 0) { throw 'wheel build failed' }
+          $wheel = (Get-ChildItem dist-private-fs/*.whl).FullName
+          $smoke = Join-Path $env:RUNNER_TEMP 'mordred-private-fs-wheel'
+          python -m venv "$smoke/venv"
+          & "$smoke/venv/Scripts/python.exe" -m pip install --no-deps $wheel
+          if ($LASTEXITCODE -ne 0) { throw 'wheel install failed' }
+          $env:PYTHONPATH = ''
+          @'
+          from pathlib import Path
+          import mordred_hermes
+          from mordred_hermes._private_fs import open_private_directory
+          assert 'site-packages' in Path(mordred_hermes.__file__).parts
+          with open_private_directory(Path.cwd() / 'private', create=True) as d, d.transaction() as tx:
+              tx.create_bytes('secret', b'old')
+              tx.replace_bytes('secret', b'new')
+              assert d.read_bytes('secret', max_bytes=3) == b'new'
+          print(mordred_hermes.__file__)
+          '@ | Set-Content -LiteralPath "$smoke/check.py" -Encoding utf8
+          Set-Location $smoke
+          & "$smoke/venv/Scripts/python.exe" check.py
+          if ($LASTEXITCODE -ne 0) { throw 'private filesystem wheel smoke failed' }
+
   test:
     strategy:
       fail-fast: false
