@@ -8,7 +8,7 @@ and honors `HERMES_HOME` when set before plugin discovery.
 Most private Mordred state is under `<home>/mordred/`, but that is not an
 absolute containment rule. The extension uses Hermes's established
 `<home>/extension/` directory, the encryption facade manages selected
-Hermes-owned files, native helper executables live outside the profile, and
+Hermes-owned files, macOS/Linux native helper executables live outside the profile, and
 the optional workspace target has user-home paths of its own.
 
 ## Overview
@@ -23,6 +23,7 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/credentials/network.json` | wizard/network setup | non-secret network references |
 | `<home>/mordred/tor-data/` | Mordred-launched Tor | Tor runtime state |
 | `<home>/mordred/keyvault/` | keyvault | hardware-wrapped key records and envelopes |
+| `<home>/bin/mordred-hermes-winkey.exe` | Windows helper build script | native CNG keyvault bridge |
 | `<home>/mordred/.keyvault.*` | keyvault | lifecycle lock, reset journal, generation epoch |
 | `<home>/mordred/vault/` | vault/encryption CLI | at-rest file vault |
 | `<home>/mordred/env-vault.optout` | encryption CLI | disables runtime `.env` injection |
@@ -399,6 +400,28 @@ plugin by name. Holds no secrets.
   `~/.config/claude-private/passphrase.wrapped`, and
   `~/.claude-private-mnt`. `CLAUDE_PRIVATE_*` overrides can relocate them.
   External `claude-private` tooling owns the volume format and mount lifecycle.
+
+## Windows helper paths
+
+`native/winkey-helper/build.ps1` installs `mordred-hermes-winkey.exe` into
+`<home>/bin` by default, using the selected Python's shared Hermes home resolver.
+`-InstallDir` selects another absolute directory. A verified temporary
+`.winkey-<uuid>.tmp` in that directory is atomically published; failed builds and
+in-use destinations preserve the previous executable. Build artifacts remain
+under the helper source directory's `target/` and are excluded from distributions.
+
+`MORDRED_WINKEY_HELPER` is an authoritative executable override. Otherwise the
+bridge searches the selected home's `bin`, then absolute PATH directories,
+without implicit current-directory or script lookup. Operators must trust those
+installation directories; this is not executable signature verification.
+
+Private keys belong to the user's Microsoft Platform Crypto Provider under
+`mordred-hermes:<sha256(decoded_tag)>`, not to a Hermes-home blob directory.
+Windows manages the underlying PCPKSP files (observed under
+`%LOCALAPPDATA%\Microsoft\Crypto\PCPKSP`). Mordred accesses and deletes keys
+through CNG, never by editing those opaque files. Copying them is not TPM-key
+recovery. The native helper does not establish Windows support for the other
+private-file paths or POSIX permissions described in this document.
 
 ## Migration from legacy OpenClaw paths
 

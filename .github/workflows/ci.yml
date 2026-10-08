@@ -111,6 +111,33 @@ jobs:
           & "$smoke/venv/Scripts/python.exe" check.py
           if ($LASTEXITCODE -ne 0) { throw 'private filesystem wheel smoke failed' }
 
+  # Scoped helper validation. Hosted runners do not establish real TPM support;
+  # live_cng remains ignored unless explicitly run on an isolated hardware host.
+  winkey-helper:
+    # VS 2022 keeps linker discovery compatible with the Rust 1.85 MSRV.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install scoped Python dependencies
+        run: python -m pip install -e ".[dev,keyvault,extension]"
+      - name: Native formatting
+        run: cargo fmt --manifest-path native/winkey-helper/Cargo.toml --check
+      - name: Native lint
+        run: cargo clippy --manifest-path native/winkey-helper/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Native tests (hardware tests explicitly ignored)
+        run: cargo test --manifest-path native/winkey-helper/Cargo.toml --locked
+      - name: Install declared MSRV
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: MSRV tests
+        run: cargo +1.85.0 test --manifest-path native/winkey-helper/Cargo.toml --locked
+      - name: Windows discovery and real build/install tests
+        env:
+          MORDRED_WINKEY_BUILD_TEST: "1"
+        run: python -m pytest tests/test_keyvault_winkey_helper.py tests/test_winkey_build.py tests/integration/test_keyvault_windows.py -o addopts='' -q
+
   test:
     strategy:
       fail-fast: false
