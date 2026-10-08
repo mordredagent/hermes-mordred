@@ -24,6 +24,8 @@ const CHECKBOX_STYLE = { borderColor: 'CanvasText', borderWidth: 1.5, borderStyl
 const jobListeners = new Set()
 
 const MESSAGES = {
+  telegram_session_revoked:
+    'Telegram ended this login (for example it was terminated in Telegram → Settings → Devices, or Telegram signed it out). Log in again in step 4 — your imported messages are kept.',
   memory_encryption_required: 'Turn on memory encryption first (step 2).',
   memory_encryption_failed: 'Memory encryption could not be turned on. Check Touch ID and try again.',
   telegram_already_logged_in: 'Telegram is already connected.',
@@ -342,6 +344,11 @@ function ImportStep({ ready, refresh }) {
       /* ignore */
     }
   }, [])
+  // A revoked login flips step 4 back to "log in": re-read the setup status.
+  const lastError = sync && sync.last_error
+  useEffect(() => {
+    if (lastError === 'telegram_session_revoked') refresh()
+  }, [lastError, refresh])
   useEffect(() => {
     if (!ready) return undefined
     poll()

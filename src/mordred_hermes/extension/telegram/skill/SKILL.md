@@ -101,7 +101,7 @@ terminal (`hermes-mordred` may need its full venv path):
 | `tee_auth_cancelled` | Touch ID declined | Ask whether to try again |
 | `hermes_model_not_allowed`, `hermes_model_not_private` | This chat's model may not read Telegram text | Switch this chat to a Venice `private` model or a local model |
 | `venice_model_not_private` | The importer's Venice model is `anonymized` | Pick a private model: `hermes-mordred telegram venice --model <id>` |
-| `telegram_session_revoked` | Session terminated elsewhere | Run `hermes-mordred telegram logout`, then `telegram setup` |
+| `telegram_session_revoked` | Telegram ended this login | Ask the user to log in again on the "Mordred" page (step 4); imported messages are kept |
 | `routing_unavailable` | Tor/VPN route down | Fix the network route; nothing was sent |
 | `llm_policy_refused` | Strict policy blocks Venice | Allow-list `venice` in `policy.json` |
 
