@@ -24,6 +24,7 @@ __all__ = [
     "PrivateDirectory",
     "PrivateFSError",
     "PrivateTransaction",
+    "current_principal_id",
     "open_confidential_directory",
     "open_optional_confidential_directory",
     "open_optional_private_directory",
@@ -69,3 +70,12 @@ def open_optional_private_directory(path: str | Path) -> AbstractContextManager[
     from ._windows_io import open_optional_private_directory as opener
 
     return opener(path)
+
+
+def current_principal_id() -> bytes:
+    """Return the validated effective Windows token SID, without name lookup."""
+    if _platform != "nt":
+        raise PrivateFSError("unsupported", "current_principal_id")
+    from ._windows_security import current_user_sid
+
+    return current_user_sid()

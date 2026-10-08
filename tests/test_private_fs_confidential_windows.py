@@ -199,3 +199,46 @@ def test_ordinary_user_inherited_roundtrip(shared_home):
 
     assert not ctypes.windll.shell32.IsUserAnAdmin(), "Elevated run is not ordinary-user acceptance"
     test_native_inherited_safe_update_keeps_shared_parent(shared_home)
+
+
+def test_native_confidential_inventory_is_bounded_and_keeps_inherited_parent(shared_home):
+    from concurrent.futures import ThreadPoolExecutor
+
+    before = descriptor(shared_home)
+    with open_confidential_directory(shared_home) as directory:
+        assert directory.list_names(max_entries=1) == ("config.yaml",)
+        with directory.transaction() as tx:
+            tx.create_bytes("memory.md", b"synthetic memory")
+            assert tx.list_names(max_entries=2) == ("config.yaml", "memory.md")
+            with pytest.raises(PrivateFSError) as caught:
+                tx.list_names(max_entries=1)
+            assert caught.value.operation == "list_limit"
+            with ThreadPoolExecutor(1) as executor, pytest.raises(RuntimeError):
+                executor.submit(tx.list_names, max_entries=2).result()
+        with pytest.raises(RuntimeError):
+            tx.list_names(max_entries=2)
+    assert descriptor(shared_home) == before
+
+
+def test_native_principal_matches_token_and_is_stable_across_processes(shared_home):
+    import sys
+
+    from mordred_hermes._private_fs import current_principal_id
+    from mordred_hermes._private_fs._windows_api import get_api
+
+    principal = current_principal_id()
+    assert type(principal) is bytes
+    assert get_api().sid_text(principal) == powershell(
+        shared_home, "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from mordred_hermes._private_fs import current_principal_id; print(current_principal_id().hex())",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert bytes.fromhex(result.stdout.strip()) == principal

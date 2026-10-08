@@ -1573,8 +1573,10 @@ invalid closed/thread/fork lifetimes before touching filesystem state.
 
 Windows-only `open_confidential_directory(path, *, create=False)` admits a
 trusted shared parent while preserving exact-private `open_private_directory`.
-`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, and `transaction`;
-`ConfidentialTransaction` adds `create_bytes`, `replace_bytes`, and
+`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, bounded
+`list_names(max_entries=...)`, and `transaction`;
+`ConfidentialTransaction` exposes the same bounded `list_names` and adds
+`create_bytes`, `replace_bytes`, and
 `delete_file(name, *, expected_identity=None)`. Existing files must be owned by
 the current user, regular, non-reparse and single-linked. Ordinary allow/deny
 ACEs with known inheritance flags and masks are accepted only if every
@@ -1612,6 +1614,18 @@ with the same checked identity contract. This method never reacquires a lock.
 
 
 
+
+The confidential inventory uses the same handle-bound checked enumeration,
+namespace validation and entry budget as private inventory. It filters only
+foundation-reserved entries and does not admit listed children as safe files;
+callers must use checked file operations for each selected name. Enumeration
+rechecks directory binding/security before returning and respects directory and
+transaction process/thread/lifetime boundaries.
+
+`current_principal_id() -> bytes` returns the effective Windows token's validated
+canonical binary SID through the existing token capability. It has no account-name,
+path or environment fallback; token and cleanup failures propagate. Other platforms
+raise classified `unsupported`. This is identity data, not a secret or a key.
 
 ### Checked Windows audit sessions
 
