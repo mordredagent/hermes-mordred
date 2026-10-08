@@ -21,7 +21,13 @@ try {
         if ($LASTEXITCODE -ne 0 -or $resolved.Count -ne 1) { throw 'Cannot resolve the Hermes home with the selected Python.' }
         $InstallDir = [string]($resolved[0] | ConvertFrom-Json)
     }
-    if (-not [IO.Path]::IsPathRooted($InstallDir)) { throw 'InstallDir must be an absolute path.' }
+    # IsPathRooted also accepts C:relative and \relative. PowerShell 5.1's
+    # .NET Framework lacks IsPathFullyQualified, so require a drive root or
+    # a complete UNC server/share root before resolving the full path.
+    $root = [IO.Path]::GetPathRoot($InstallDir)
+    $driveRoot = $root -match '^[A-Za-z]:[\\/]$'
+    $uncRoot = $root -match '^[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/]?$'
+    if (-not ($driveRoot -or $uncRoot)) { throw 'InstallDir must be an absolute path.' }
     $InstallDir = [IO.Path]::GetFullPath($InstallDir)
     $version = @(& rustc -vV)
     if ($LASTEXITCODE -ne 0) { throw 'rustc failed. Install the Rust MSVC toolchain and Visual C++ build tools.' }

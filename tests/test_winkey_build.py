@@ -127,3 +127,16 @@ def test_windows_relative_destination_refused_before_build(source: Path, tmp_pat
     result = install(isolated, Path(destination))
     assert result.returncode != 0
     assert "InstallDir must be an absolute path." in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("destination", [r"C:\absolute-bin", r"\\server.invalid\share\absolute-bin"])
+def test_windows_absolute_destination_reaches_build(source: Path, tmp_path: Path, destination: str) -> None:
+    # Missing manifest stops before filesystem installation (including UNC I/O).
+    # Both supported absolute forms must pass validation and reach that failure.
+    isolated = tmp_path / "installer only"
+    isolated.mkdir()
+    shutil.copy2(source / "build.ps1", isolated / "build.ps1")
+    result = install(isolated, Path(destination))
+    assert result.returncode != 0
+    assert "Cargo build failed" in result.stdout + result.stderr
+    assert "InstallDir must be an absolute path." not in result.stdout + result.stderr
