@@ -249,3 +249,64 @@ def test_shared_transaction_unclassified_absence_never_creates(monkeypatch, tmp_
     monkeypatch.setattr(install, "_native_transaction", broken)
     with pytest.raises(FileNotFoundError, match="unchecked parent"):
         install._publish(tmp_path / "wrapper.ps1", b"wrapper")
+
+
+@pytest.mark.parametrize("phase", ["receipt", "scope_exit"])
+def test_shared_failure_after_artifact_publication_propagates_without_retry(monkeypatch, tmp_path, phase):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    files = {}
+    operations = []
+
+    class Failure(OSError):
+        reason = "io_error"
+        commit_state = "uncertain"
+
+    failure = Failure(phase)
+
+    class Missing(OSError):
+        reason = "missing"
+        commit_state = "not_committed"
+
+    class Transaction:
+        def stat(self, name):
+            if name not in files:
+                raise Missing(name)
+            return SimpleNamespace(identity=name)
+
+        def read_bytes(self, name, *, max_bytes):
+            self.stat(name)
+            return files[name]
+
+        def create_bytes(self, name, content):
+            operations.append(("create", name))
+            if phase == "receipt" and name.endswith(".mordred-owner.json"):
+                raise failure
+            files[name] = content
+
+        def delete_file(self, name, **kw):
+            pytest.fail("must not guess a rollback")
+
+    class Directory:
+        @contextmanager
+        def transaction(self):
+            yield Transaction()
+
+    @contextmanager
+    def opened(path, *, create=False):
+        yield Directory()
+        if phase == "scope_exit":
+            raise failure
+
+    monkeypatch.setattr(install, "_confidential_opener", lambda: opened)
+    source = tmp_path / "built.exe"
+    source.write_bytes(b"MZ retained fresh helper")
+    with pytest.raises(Failure) as captured:
+        install.publish_helper(source, tmp_path / "bin")
+    assert captured.value is failure and captured.value.commit_state == "uncertain"
+    artifact = "mordred-hermes-winkey.exe"
+    receipt = artifact + ".mordred-owner.json"
+    assert files[artifact] == source.read_bytes()
+    assert operations == [("create", artifact), ("create", receipt)]
+    assert (receipt in files) == (phase == "scope_exit")

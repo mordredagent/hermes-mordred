@@ -116,3 +116,14 @@ def test_winkey_source_never_searches_arbitrary_ancestors(monkeypatch, tmp_path)
     monkeypatch.setattr(importlib.resources, "files", lambda name: tmp_path / "missing-package")
     monkeypatch.setattr(native, "__file__", str(tmp_path / "unrelated/module/wizard/native.py"))
     assert native._locate_winkey_source() is None
+
+
+def test_winkey_build_has_process_only_policy_for_bound_script(monkeypatch, tmp_path):
+    def run(argv, **kw):
+        assert argv[argv.index("-ExecutionPolicy") + 1] == "Bypass"
+        assert argv[argv.index("-File") + 1] == str(tmp_path / "build.ps1")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr("shutil.which", lambda name: "/trusted/powershell.exe")
+    assert native._run_winkey_build(tmp_path, install_dir=tmp_path)[0] == 0

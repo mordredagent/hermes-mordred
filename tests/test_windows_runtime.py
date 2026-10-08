@@ -121,3 +121,31 @@ def test_resolver_requires_runtime_environment_not_only_directory_markers(tmp_pa
         return subprocess.CompletedProcess(argv, 0, json.dumps(data), "")
 
     assert not runtime.validate_windows_python(exe, runner=run)
+
+
+def test_windows_uninstall_honors_selected_uv_and_interpreter(monkeypatch, tmp_path):
+    from mordred_hermes.wizard import _uninstall_hermes_env as env
+
+    selected = fixture_python(tmp_path / "selected A")
+    ambient = fixture_python(tmp_path / "ambient B")
+    uv_a = tmp_path / "uv A.exe"
+    uv_b = tmp_path / "uv B.exe"
+    uv_a.touch()
+    uv_b.touch()
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setenv("MORDRED_HERMES_PYTHON", str(selected))
+    monkeypatch.setenv("MORDRED_HERMES_UV", str(uv_a))
+    calls = []
+
+    def run(argv):
+        calls.append(list(argv))
+        if argv[0] == str(selected):
+            return runner_for(selected)(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    found = env.detect_hermes_env(tmp_path, which=lambda name: str(uv_b) if name == "uv.exe" else None, runner=run)
+    assert found.python == selected and found.uv == uv_a
+    ok, _output = env.uninstall_packages(found, runner=run)
+    assert ok
+    assert calls[-1][:5] == [str(uv_a), "pip", "uninstall", "--python", str(selected)]
+    assert all(str(ambient) not in command for command in calls)

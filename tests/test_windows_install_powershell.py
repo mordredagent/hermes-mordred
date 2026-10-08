@@ -45,7 +45,7 @@ using System.Text;
 public class Fixture {
  public static int Main(string[] args) {
   File.AppendAllText(Environment.GetEnvironmentVariable("UV_FIXTURE_LOG"),
-                     String.Join("\t", args) + "\n", Encoding.UTF8);
+                     Environment.GetCommandLineArgs()[0] + "\t" + String.Join("\t", args) + "\n", Encoding.UTF8);
   if (args.Length > 1 && args[1] == "freeze") { Console.WriteLine("hermes-agent==0.19.0"); return 0; }
   string failure = Environment.GetEnvironmentVariable("UV_FIXTURE_FAIL");
   if (Array.IndexOf(args, "--dry-run") >= 0 && failure == "dry-run") return 37;
@@ -187,3 +187,82 @@ def test_exposed_launcher_executes_cli_and_propagates_exit(native_fixture, ps, t
         timeout=60,
     )
     assert invalid.returncode == 2
+
+
+def test_installer_explicit_uninstall_targets_environment_and_uv_a(native_fixture, tmp_path):
+    argv, env, home, log, python_a, _source = native_fixture
+    root_b = home / "hermes-agent/venv"
+    subprocess.run([sys.executable, "-m", "venv", str(root_b)], check=True, timeout=60)
+    python_b = root_b / "Scripts/python.exe"
+    (root_b / "Lib/site-packages/fixture.pth").write_text(
+        f"import site; site.addsitedir({sysconfig.get_path('purelib')!r})\n", encoding="utf-8"
+    )
+    uv_a = Path(argv[argv.index("-Uv") + 1])
+    uv_b = root_b / "Scripts/uv.exe"
+    shutil.copy2(uv_a, uv_b)
+    env = {
+        **env,
+        "MORDRED_HERMES_PYTHON": str(python_b),
+        "MORDRED_HERMES_UV": str(uv_b),
+        "PATH": str(uv_b.parent) + os.pathsep + env["PATH"],
+    }
+    result = subprocess.run(
+        [*argv, "-Action", "uninstall", "-CommandArgs", "--yes"],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.split("\t") for line in log.read_text(encoding="utf-8-sig").splitlines()]
+    uninstalls = [line for line in lines if line[1:3] == ["pip", "uninstall"]]
+    assert uninstalls
+    assert all(line[0] == str(uv_a) for line in uninstalls)
+    assert all(line[line.index("--python") + 1] == str(python_a) for line in uninstalls)
+    assert all(str(python_b) not in line for line in lines)
+
+
+def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture, tmp_path):
+    _argv, env, _home, _log, python, _source = native_fixture
+    source = tmp_path / "bound helper 日本 & $"
+    source.mkdir()
+    target = tmp_path / "probe target"
+    target.mkdir()
+    (source / "build.ps1").write_text(
+        "param([string]$InstallDir, [string]$Python, [switch]$OwnedInstall)\n"
+        "[IO.File]::WriteAllText((Join-Path $InstallDir 'entered.txt'), (Get-ExecutionPolicy -Scope Process))\n",
+        encoding="utf-8-sig",
+    )
+    code = (
+        "import os, sys; os.environ.pop('PSExecutionPolicyPreference', None); "
+        "from mordred_hermes.wizard import keyvault_native_cli as n; "
+        "from pathlib import Path; "
+        "import shutil; shutil.which = lambda name: os.environ['MORDRED_FIXTURE_PS']; "
+        "rc, output = n._run_winkey_build(Path(sys.argv[1]), install_dir=Path(sys.argv[2])); "
+        "print(output); raise SystemExit(rc)"
+    )
+    env = {
+        **env,
+        "MORDRED_FIXTURE_PYTHON": str(python),
+        "MORDRED_FIXTURE_CODE": code,
+        "MORDRED_FIXTURE_SOURCE": str(source),
+        "MORDRED_FIXTURE_TARGET": str(target),
+        "MORDRED_FIXTURE_PS": ps,
+    }
+    env.pop("PSExecutionPolicyPreference", None)
+    command = (
+        "Write-Output (Get-ExecutionPolicy); & $env:MORDRED_FIXTURE_PYTHON -c "
+        "$env:MORDRED_FIXTURE_CODE $env:MORDRED_FIXTURE_SOURCE $env:MORDRED_FIXTURE_TARGET; exit $LASTEXITCODE"
+    )
+    result = subprocess.run(
+        [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Restricted", "-Command", command],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Restricted" in result.stdout
+    assert (target / "entered.txt").read_text() == "Bypass"

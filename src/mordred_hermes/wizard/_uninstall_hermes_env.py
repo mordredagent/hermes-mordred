@@ -209,6 +209,9 @@ def find_hermes_python(home: Path, launcher: Path | None, *, runner: Runner) -> 
 
 
 def find_uv(home: Path, *, which: Which = shutil.which) -> Path | None:
+    if sys.platform == "win32" and "MORDRED_HERMES_UV" in os.environ:
+        override = Path(os.environ["MORDRED_HERMES_UV"])
+        return override if override.is_absolute() and override.suffix.lower() == ".exe" and override.is_file() else None
     on_path = which("uv.exe" if sys.platform == "win32" else "uv")
     if on_path:
         return Path(on_path)

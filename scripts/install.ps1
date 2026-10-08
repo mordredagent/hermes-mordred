@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$Python = $env:MORDRED_HERMES_PYTHON,
-    [string]$Uv,
+    [string]$Uv = $env:MORDRED_HERMES_UV,
     [string]$Version,
     [string]$Source,
     [switch]$InstallOnly,
@@ -102,6 +102,25 @@ try {
     $resolveHome = "import json; from hermes_constants import get_hermes_home; print(json.dumps(str(get_hermes_home())))"
     $homePath = [string](Read-PythonJson $Python $resolveHome)
     if ($InstallOnly -and $Action -ne 'install') { throw '-InstallOnly cannot claim configure/setup completion.' }
+    if (-not $Uv) {
+        $command = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue
+        if ($command) { $Uv = $command.Source }
+        else {
+            $bundled = @(Get-ChildItem -LiteralPath (Join-Path $homePath 'tools') -Filter 'uv-*' -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { Join-Path $_.FullName 'uv.exe' } | Where-Object { [IO.File]::Exists($_) } | Sort-Object)
+            if ($bundled.Count) { $Uv = $bundled[-1] }
+        }
+    }
+    if (-not $Uv) { throw 'uv.exe not found; install uv or pass -Uv.' }
+    $uvItem = Get-Item -LiteralPath $Uv -ErrorAction Stop
+    if ($uvItem.PSIsContainer -or [IO.Path]::GetExtension($uvItem.FullName) -ine '.exe') {
+        throw 'Selected uv must be a native executable file.'
+    }
+    $Uv = $uvItem.FullName
+    # The delegated CLI must target these validated selections, even when PATH,
+    # the profile venv or inherited resolver overrides name another environment.
+    $env:MORDRED_HERMES_PYTHON = $Python
+    $env:MORDRED_HERMES_UV = $Uv
     if ($Action -eq 'uninstall') {
         Invoke-Native $Python (@('-c', $cliCode, 'uninstall') + $CommandArgs)
         exit 0
@@ -116,17 +135,6 @@ try {
     } else {
         throw 'Specify an exact -Version release pin or -Source checkout/wheel. Unpublished port acceptance requires -Source.'
     }
-    if (-not $Uv) {
-        $command = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue
-        if ($command) { $Uv = $command.Source }
-        else {
-            $bundled = @(Get-ChildItem -LiteralPath (Join-Path $homePath 'tools') -Filter 'uv-*' -Directory -ErrorAction SilentlyContinue |
-                ForEach-Object { Join-Path $_.FullName 'uv.exe' } | Where-Object { [IO.File]::Exists($_) } | Sort-Object)
-            if ($bundled.Count) { $Uv = $bundled[-1] }
-        }
-    }
-    if (-not $Uv) { throw 'uv.exe not found; install uv or pass -Uv.' }
-    $Uv = (Get-Item -LiteralPath $Uv -ErrorAction Stop).FullName
     # Snapshot installed pins before changing Mordred; never re-resolve Hermes.
     $constraints = [IO.Path]::GetTempFileName()
     $freeze = @(Invoke-Native $Uv @('pip', 'freeze', '--python', $Python))

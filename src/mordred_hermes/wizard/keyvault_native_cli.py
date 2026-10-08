@@ -418,6 +418,10 @@ def _run_winkey_build(src: Path, *, install_dir: Path) -> tuple[int, str]:
                 powershell,
                 "-NoProfile",
                 "-NonInteractive",
+                # Applies only to this bound-script child process; no host
+                # execution policy is persisted or changed.
+                "-ExecutionPolicy",
+                "Bypass",
                 "-File",
                 str(src / "build.ps1"),
                 "-OwnedInstall",
