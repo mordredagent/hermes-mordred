@@ -43,6 +43,7 @@ _MAINTAINED_DEV_DOCS = {
     "TODO.md",
     "UPSTREAM.md",
     "WINDOWS_FEASIBILITY.md",
+    "WINDOWS_CONFIG_IO.md",
     "setup.md",
 }
 

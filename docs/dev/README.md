@@ -25,6 +25,7 @@ design diaries and upstream snapshots remain available through Git history.
 | Document | Purpose |
 |---|---|
 | [`setup.md`](./setup.md) | Development setup, the two venvs, and isolated validation |
+| [`WINDOWS_CONFIG_IO.md`](./WINDOWS_CONFIG_IO.md) | Canonical Windows configuration API, ownership and verification |
 
 When prose and code disagree, the typed implementation, tests, CLI parser, and
 machine contracts named by the relevant document take precedence. Correct the
