@@ -941,9 +941,11 @@ def _windows_custody_failure(home: Path | Callable[[], Path]) -> str:
     reported as a reason, never raised: callers sit under ``except Exception``
     wrappers and must stop instead of running upstream's raw seam.
     """
-    from ._windows_custody import windows_custody_session
-
     try:
+        # Inside the probe: a broken install (missing module or dependency) is a
+        # stop reason, not an ImportError for a caller's containment to swallow.
+        from ._windows_custody import windows_custody_session
+
         resolved = home() if callable(home) else home
         with windows_custody_session(resolved) as session:
             # No native operation: a lease short-circuits before key resolution.
@@ -1159,6 +1161,11 @@ _JOURNEY_SEAMS: Final = (("delete_node", ("node_id",)), ("edit_node", ("node_id"
 #: Upstream's own ``{"ok": False, ...}`` message for every refused Windows journey mutation.
 _WINDOWS_JOURNEY_REFUSAL: Final = "Windows journey memory mutation requires a checked atomic seam; use the memory tool."
 
+#: The stub's message: an unrecognised seam refuses skill nodes too, so it names both.
+_WINDOWS_JOURNEY_STUB_REFUSAL: Final = (
+    "Windows memory/skill node mutation refused: the journey mutation seam is unsupported; use the memory tool."
+)
+
 #: Stamped on a stub that replaced an unsupported Windows journey mutation.
 _JOURNEY_STUB_FLAG: Final = "_mordred_journey_refusal_stub"
 
@@ -1231,15 +1238,17 @@ def _install_windows_journey_guard(module: Any, home_factory: Callable[[], Path]
         for name, _expected in _JOURNEY_SEAMS:
             setattr(module, name, _journey_refusal_stub(name))
     except Exception as exc:
-        _stop_process(f"Windows journey memory mutations cannot be guarded: {reason}; {failure} ({type(exc).__name__})")
+        _stop_process(
+            f"Windows journey memory/skill node mutations cannot be guarded: {reason}; {failure} ({type(exc).__name__})"
+        )
         return False
-    logger.warning("Windows journey memory mutations are refused: %s; %s", reason, failure)
+    logger.warning("Windows journey memory/skill node mutations are refused: %s; %s", reason, failure)
     return True
 
 
 def _journey_refusal_stub(name: str) -> Callable[..., dict[str, Any]]:
     def refuse(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "message": _WINDOWS_JOURNEY_REFUSAL}
+        return {"ok": False, "message": _WINDOWS_JOURNEY_STUB_REFUSAL}
 
     refuse.__name__ = refuse.__qualname__ = name
     setattr(refuse, _JOURNEY_STUB_FLAG, True)
@@ -1335,7 +1344,7 @@ def warn_when_memory_is_locked(
             with windows_memory_session(resolved) as session:
                 for snapshot in session.inventory():
                     session.read_plaintext(snapshot.name)
-        except (OSError, RuntimeError, UnicodeError):
+        except (OSError, RuntimeError, ValueError):  # ValueError includes UnicodeError, as in _windows_operation
             _LOCKED_WARNED.add(str(resolved))
             sys.stderr.write(
                 "mordred: Windows memory storage or native custody unavailable; "

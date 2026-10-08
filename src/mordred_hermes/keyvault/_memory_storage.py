@@ -312,6 +312,11 @@ class WindowsMemorySession:
             # unknown: the owner learns that through a classified uncertain failure,
             # while the interrupt itself propagates unchanged. A receipt that cannot
             # take the report is already poisoned or closed; it must not replace it.
+            # Fail-closed trade-off: the owning canonical session's exit then raises
+            # that uncertain failure from the interrupt, so a KeyboardInterrupt or
+            # SystemExit during a hook publication surfaces at the hook boundary as
+            # MemoryEncryptionUnavailable. Retained uncertainty wins over interrupt
+            # responsiveness.
             with contextlib.suppress(Exception):
                 self._receipt.mark_uncertain(
                     PrivateFSError("unsafe", "memory_postpublication", commit_state="uncertain")

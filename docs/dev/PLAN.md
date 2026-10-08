@@ -1259,3 +1259,6 @@ inert on fresh unmanaged state, installs refusal stubs, or stops. The fail-open
 indeterminate custody. Regressions drive the real wrappers in-process for the
 main-thread `SystemExit` and in a child process for the worker-thread
 `os._exit`, with fresh unmanaged state as the positive control.
+An interrupt during a Windows memory publication is deliberately recorded as
+uncertain and surfaces at the hook as `MemoryEncryptionUnavailable`
+(fail-closed, at the cost of interrupt responsiveness).

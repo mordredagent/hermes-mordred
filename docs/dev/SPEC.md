@@ -2049,3 +2049,7 @@ that validate nothing, reach no I/O and log once; skill nodes are refused too.
 If the stubs cannot be installed, the process stops. Keyless unmanaged drift
 returns upstream's `BACKUP FAILED — file unchanged on disk` contract: no
 plaintext backup is published and no key is enrolled.
+A `KeyboardInterrupt` or `SystemExit` during a Windows memory publication is
+recorded as uncertain and surfaces at the hook boundary as
+`MemoryEncryptionUnavailable`, trading interrupt responsiveness for retained
+uncertainty (fail-closed).

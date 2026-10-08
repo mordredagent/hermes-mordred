@@ -211,6 +211,11 @@ def test_checked_session_diagnosis_reports_denial(windows, monkeypatch, capsys):
     assert "Windows memory" in capsys.readouterr().err
 
 
+def test_checked_session_diagnosis_reports_value_error(windows, capsys):
+    assert hook.warn_when_memory_is_locked(home=Path("relative-home"))
+    assert "Windows memory" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("shape", ["A", "B", "C"])
 def test_armed_plaintext_read_warns_once(windows, shape, monkeypatch, caplog):
     _, home, _ = windows
@@ -457,6 +462,15 @@ def test_fresh_unmanaged_unsupported_seam_stays_plaintext(windows, monkeypatch):
     assert not backend.calls
 
 
+def test_custody_import_failure_stops_register(windows, monkeypatch, capsys):
+    _, home, _ = windows
+    register = prepare_register(monkeypatch, home, unsupported_memory_tool())
+    monkeypatch.setitem(sys.modules, "mordred_hermes.keyvault._windows_custody", None)
+    with pytest.raises(SystemExit):
+        register()
+    assert "ModuleNotFoundError" in capsys.readouterr().err
+
+
 def test_unresolvable_home_unsupported_seam_stops(windows, monkeypatch):
     def unavailable():
         raise RuntimeError("profile unavailable")
@@ -508,6 +522,7 @@ def test_unsupported_journey_stubbed_through_register(windows, monkeypatch, stat
         module.delete_node("skill-name"),
     ):
         assert result["ok"] is False
+        assert result["message"].startswith("Windows memory/skill node mutation refused")
     assert module.calls == []
     assert hook.install_journey_guard(module, home=home)
 
