@@ -123,8 +123,13 @@ def test_reparse_and_hardlink_destinations_refuse(tmp_path):
         assert result.returncode == 0, result.stdout + result.stderr
     else:
         alias.symlink_to(real, target_is_directory=True)
-    with pytest.raises(OSError, match=r"reparse|symlink"):
+    with pytest.raises(OSError) as refused:
         install.install_launcher(tmp_path / "python.exe", alias)
+    if os.name == "nt":
+        # The shared filesystem exposes classified reasons, not path details.
+        assert refused.value.reason == "unsafe"
+    else:
+        assert "reparse" in str(refused.value) or "symlink" in str(refused.value)
     assert not list(real.iterdir())
 
 

@@ -1346,3 +1346,87 @@ C4 native executable/receipt publication depends on C1b's
 and identity-bound deletion. Missing C1b refuses; no weak native fallback is
 permitted. C4 cannot be finalized or advertised as native installation-ready
 until that dependency and its native acceptance pass.
+
+## Checked private file lifecycle (C1a)
+
+The opt-in `_private_fs` API retains checked private directories, single-link
+regular files, platform ACL validation and its permanent cooperative transaction
+lock. No component callers migrate in this slice. `FileMetadata` is a frozen
+record of `identity: FileIdentity`, `size: int`, and Unix-epoch `mtime_ns: int`.
+Both directory and transaction expose `stat(name)`, `read_prefix(name,
+max_bytes=...)`, and `list_names(max_entries=...)`. Stat always opens and validates
+the object; missing is an error. Prefix reads return up to the positive integer
+limit, including from longer files. Full reads still refuse oversized files.
+Enumeration returns sorted names as a bounded tuple, omitting only the reserved
+permanent lock and staging names. At most max_entries names are returned; at
+most max_entries + 1 non-dot entries fit the scan budget (one permanent-lock
+allowance); one additional entry may be fetched to detect overflow.
+Abandoned staging entries consume this scan budget. It never follows links or recurses, applies
+the filename contract, and refuses overflow. Names remain untrusted until
+opened. The transaction protects the snapshot from cooperating writers;
+ordinary directory enumeration has no snapshot atomicity promise.
+
+Transactions additionally expose `delete_file(name, expected_identity=None)`,
+`rename_file(name, destination, expected_identity=None)` and
+`append_bytes(name, data)`. They require existing checked regular files. Optional
+identity comparison precedes mutation. Rename is sibling-only and never
+replaces a destination, including an unsafe object. Windows uses an exclusive
+DELETE-capable checked handle and native no-replace rename/FileDispositionInfo;
+no checked-open/path-delete sequence is allowed. Deletion returns successfully
+only after close and checked absence. Any error after native deletion is
+attempted is uncertain. A rename error is retry-safe only after confirming the
+original checked identity and source name are retained. POSIX uses descriptor-
+relative unlink or no-replace link followed by unlink and directory flush;
+partial rename retains the recoverable duplicate and reports uncertain.
+
+Append holds the transaction, remembers original length, writes all bytes and
+flushes. On write/flush failure it truncates and flushes only the still-validated
+same file. Confirmed rollback reports not_committed; failed rollback reports
+uncertain. Cleanup after successful mutation is uncertain, including unlock
+and enclosing-directory close failures. Preserve original exceptions when
+cleanup also fails, promoting classified failures rather than replacing them.
+Never retry uncertain operations automatically. There is no secure-erasure,
+power-loss atomic append, or protection from hostile same-user code claim.
+All new operations reject invalid positive limits, reserved/path filenames and
+invalid closed/thread/fork lifetimes before touching filesystem state.
+
+### Confidential Windows directory capabilities
+
+Windows-only `open_confidential_directory(path, *, create=False)` admits a
+trusted shared parent while preserving exact-private `open_private_directory`.
+`ConfidentialDirectory` provides `stat`, bounded `read_bytes`, and `transaction`;
+`ConfidentialTransaction` adds `create_bytes`, `replace_bytes`, and
+`delete_file(name, *, expected_identity=None)`. Existing files must be owned by
+the current user, regular, non-reparse and single-linked. Ordinary allow/deny
+ACEs with known inheritance flags and masks are accepted only if every
+effective allow targets that user, SYSTEM or Administrators; OWNER_RIGHTS maps
+to the verified owner. Denies never excuse an outside grant. Inherited,
+duplicate and restricted safe grants need not match the private descriptor.
+New locks, staging files, backups and replacements are exact-private before
+content. Existing parent descriptors and no-op file descriptors stay unchanged.
+
+`open_optional_confidential_directory(path)` and
+`open_optional_private_directory(path)` are Windows-only, noncreating contexts
+yielding the corresponding capability or `None`. Only a checked missing final
+leaf yields `None`; missing intermediate ancestors and unsafe/inaccessible
+objects fail. All checked ancestor handles stay pinned through context exit;
+cleanup errors propagate, including after an absence observation. No missing
+sentinel crosses cleanup. The endpoint is checked as a trusted parent with
+`creating_child=True`; create permits only a missing final leaf and verifies its
+new exact-private descriptor. Each operation
+rechecks the directory security/identity and successful observations recheck
+the file binding and security. Failed lock creation never permits unlocked IO.
+
+
+Both `PrivateDirectory` and `ConfidentialDirectory` expose
+`directory_identity() -> FileIdentity` for coordinator identity binding. It
+validates active context, originating process/thread, pinned directory and
+ancestor security, identity and path binding before returning the checked
+handle identity. There is no path-only or raw-stat fallback. POSIX private
+directories revalidate descriptor-relative names throughout the pinned chain.
+
+
+`PrivateTransaction` and `ConfidentialTransaction` also expose
+`directory_identity() -> FileIdentity`. A borrowed transaction must be active
+and belong to the current thread/process, then revalidate its owning directory
+with the same checked identity contract. This method never reacquires a lock.
