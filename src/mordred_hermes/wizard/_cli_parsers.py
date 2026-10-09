@@ -14,7 +14,8 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``network {use,status,init}``                  — network-privacy path control + on-demand setup
 - ``policy {show,explain,dry-run,reload}``       — inspect / explain the active policy
 - ``audit {tail,grep,decrypt,purge}``            — read / maintain the audit log
-- ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,eth}`` — keyvault management
+- ``keyvault {init,list,verify-digest,export,recover,reset,enable-se,enable-tpm,enable-winkey,native,eth}`` —
+  keyvault management (``keyvault native init`` is the Windows CNG custody ceremony)
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
@@ -524,6 +525,20 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_enable_win = ksub.add_parser("enable-winkey", help="Build and probe the Windows CNG TPM helper")
     p_enable_win.add_argument("--install-dir", help="Helper directory (default: <HERMES_HOME>/bin)")
     p_enable_win.set_defaults(func=_handle_keyvault_enable_winkey)
+    p_native = ksub.add_parser("native", help="Windows native CNG custody (explicit initialization ceremony)")
+    nsub = p_native.add_subparsers(dest="keyvault_native_command", required=True, metavar="COMMAND")
+    p_native_init = nsub.add_parser(
+        "init",
+        help="Explicitly enroll Windows CNG custody roles (inert: nothing is sealed or armed)",
+    )
+    p_native_init.add_argument(
+        "--role",
+        dest="roles",
+        action="append",
+        choices=["memory", "audit"],
+        help="Role to enroll; repeatable (default: memory). Telegram custody belongs to Telegram setup.",
+    )
+    p_native_init.set_defaults(func=_handle_keyvault_native_init)
 
     from . import keyvault_eth_cli
 
@@ -1025,3 +1040,9 @@ def _handle_keyvault_enable_winkey(args: argparse.Namespace) -> int:
     from . import keyvault_native_cli
 
     return keyvault_native_cli.cli_enable_winkey(args)
+
+
+def _handle_keyvault_native_init(args: argparse.Namespace) -> int:
+    from . import keyvault_windows_cli
+
+    return keyvault_windows_cli.cli_native_init(args)

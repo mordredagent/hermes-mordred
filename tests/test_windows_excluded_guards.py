@@ -377,22 +377,28 @@ def test_secret_store_layout_and_lifecycle_primitives_refuse_before_any_creation
     assert not (tmp_path / "fresh-home").exists()
 
 
-def test_secret_store_reset_refuses_before_lock_journal_or_native_deletion(windows, retained, monkeypatch, no_mkdir):
+def test_secret_store_reset_refuses_before_lock_journal_or_native_deletion(
+    windows, retained, monkeypatch, no_mkdir, capsys
+):
     import shutil
 
+    from mordred_hermes.keyvault import _memory_key
     from mordred_hermes.wizard.keyvault_cli import reset_keyvault
 
     def tripwire(*args, **kwargs):
         raise Reached("reset mutation")
 
-    for name in ("ensure_lock_file", "write_reset_journal", "clear_reset_journal"):
+    for name in ("ensure_lock_file", "write_reset_journal", "clear_reset_journal", "keyvault_lifecycle_lock"):
         monkeypatch.setattr(_storage, name, tripwire)
+    monkeypatch.setattr(_memory_key, "memory_key_lock", tripwire)
     monkeypatch.setattr(shutil, "rmtree", tripwire)
     backend = FakeBackend()
     before = snapshot(retained)
-    with pytest.raises(windows.KeyvaultUnsupportedOnWindows) as refused:
-        reset_keyvault(home=retained, backend=backend, assume_yes=True)
-    assert (refused.value.capability, refused.value.reason) == ("secret_store", "not-ported-on-windows")
+    # The wizard refuses first (C6) with the classified reason, before the Linux
+    # memory-key lock or the keyvault lifecycle lock -- never a traceback.
+    assert reset_keyvault(home=retained, backend=backend, assume_yes=True) == 1
+    err = capsys.readouterr().err
+    assert "keyvault reset: secret_store is not yet ported to Windows" in err and "(not-ported-on-windows)" in err
     assert backend.calls == []
     assert snapshot(retained) == before
 

@@ -30,6 +30,7 @@ from ..keyvault._config_bootstrap import _marker_path, config_hook_installed
 from . import _term
 from ._runtime_gate import RuntimeProbe, runtime_gate
 from ._vault_open import _vault_present
+from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -133,6 +134,9 @@ def enable(
     ``flow_session`` (``encryption enable all``) shares the flow's passphrase,
     open vault and key policy (see :mod:`._flow_session`).
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption enable config")
+    if refusal is not None:
+        return refusal
     from . import vault_cli
 
     config_path = home / _CONFIG_NAME
@@ -202,6 +206,9 @@ def disable(
     and the vault cannot be opened to recover it. ``flow_session`` (``uninstall``)
     lends the flow's already open vault.
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption disable config")
+    if refusal is not None:
+        return refusal
     marker = _marker_path(home)
     config_path = home / _CONFIG_NAME
 
@@ -246,6 +253,9 @@ def purge(
     Returns 0 on success (an unmanaged home with no vault is a clean no-op), 1 when
     the vault is present but cannot be opened to recover / unenroll.
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption purge config")
+    if refusal is not None:
+        return refusal
     config_path = home / _CONFIG_NAME
 
     if _vault_present(root):

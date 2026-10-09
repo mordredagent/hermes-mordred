@@ -1664,3 +1664,54 @@ on a fresh UUID profile with synthetic credentials and archive. All but the
 live module join the scoped Windows CI job. Remaining gates: the wizard
 telegram enrollment/login/logout routing (C6-telegram), Desktop adoption of
 the seam and presence opt-out (C11), the live account gate and Windows 11.
+### Windows wizard routing and ceremonies (C6)
+
+The wizard-only slice consuming C5; SPEC.md §Windows dedicated custody and
+memory lifecycle (subsection "Windows wizard routing, ceremonies and uninstall
+(C6)") freezes the command name, ordering and remedies. New modules keep the
+existing files near their size: `wizard/_windows_gates.py` (reason/remedy
+vocabulary, the `host_platform()` seam and the excluded/unported refusals that
+call C5e's guards), `wizard/keyvault_windows_cli.py` (`keyvault native init`
+and the reusable `enroll_roles`), `wizard/_windows_memory.py` (enable/disable/
+purge orchestration, load-only `observe`, proof interpreter routing),
+`wizard/_windows_status.py` (status, encryption-status and setup lines) and
+`wizard/_uninstall_windows.py` (uninstall plan/restore/purge/kept report).
+Existing entry points only route: `memory_cli.enable/disable/purge` on `win32`,
+`runtime_gate`'s `win32` branch (memory caller only, no bypass),
+`encryption_cli` status/dispatch/`all`, `status_cli`, `setup_cli`,
+`uninstall_cli`, and first-statement guards in `_vault_lifecycle`,
+`_vault_open`, `env_decrypt_cli`, `config_decrypt_cli` and the keyvault-init
+preflight. The wizard never writes Windows memory files or markers.
+
+Tests are portable and reuse the proof slice's harness (real installed-runtime
+child, real checked files, MRKW and AES-GCM; injected CNG boundary, principal
+and platform admission): `test_wizard_windows_memory.py` (ceremony on fresh,
+managed, copied, retained-marker, helper-less and failing-native homes; enable
+end-to-end through the CLI with a fresh-process read; a refusal at each step —
+capabilities, force flag, gate, ceremony, proof, lifecycle before and during
+mutation — leaving state untouched or coherent; disable; purge refusals and
+success after disable; launcher routing), `test_wizard_windows_status.py`
+(every capability and memory state, retained secret store and excluded
+artifacts, copied profile, held lock, no native call, setup steps),
+`test_wizard_windows_excluded.py` (call accounting for vault/env/config/keyvault
+init refusals, runtime gate, `all`), `test_wizard_windows_uninstall.py` (plan,
+restore, purge-data, gate/proof refusals, erase refusal) and the host-skipped
+`test_wizard_windows_native.py`. `test_wizard_windows_memory_live.py` is the
+gated real-CNG recipe (ceremony -> enable -> fresh installed-runtime read ->
+status -> disable -> purge on a fresh UUID profile). Telegram setup/logout
+(C10b), the audit CLI (C7b part 2), Desktop launcher routing (C11), explicit
+journal reconciliation and checked recursive cleanup remain separate slices.
+
+Review fix round 1 keeps the module layout: `_uninstall_windows.restores`
+takes the `--purge-data` flag (inert custody gets the disable restore) and
+`restore_step` folds the memory purge into step a, so `uninstall_cli._execute`
+reaches step b only after the purge succeeded; `purge_warning` derives the
+confirmation text from the plan's step 5. `keyvault_windows_cli.CUSTODY_NOTICE`
+is the single notice text for the ceremony and the enable ceremony step.
+`keyvault_cli.reset_keyvault` starts with the unported secret-store refusal.
+Tests: inert-custody uninstall plan/dry-run, no-purge, end-to-end purge and
+refusals (proof child, broken seal, reset) leaving Hermes files, launchers and
+the package untouched; notice assertions for ceremony, enable and setup; the
+`keyvault reset` tripwire; `classify_exception` against C5e's classification;
+and a frame-filtered spy proving no wizard frame opens, writes, renames or
+unlinks anything under the home during enable/disable/purge.

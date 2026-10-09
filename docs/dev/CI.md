@@ -1428,3 +1428,37 @@ lock holder (the `tests/test_private_fs_processes.py` child) still refuses
 immediately. Host result 2026-10-09 (macOS arm64, Python 3.14.7): all pass,
 and C5e held-thread predicates now return within the bound; no native Windows
 rerun is recorded yet.
+### Windows wizard routing validation (C6)
+
+The scoped Windows job adds `test_wizard_windows_memory.py`,
+`test_wizard_windows_status.py`, `test_wizard_windows_excluded.py`,
+`test_wizard_windows_uninstall.py` and `test_wizard_windows_native.py`. The
+portable modules reuse the installed-runtime proof harness (a real non-editable
+venv child, real checked files, MRKW and AES-GCM) with the CNG boundary,
+principal and platform admission injected; the native module uses an
+inherited-safe NTFS home, its case alias and a copied home with the real
+`win32` platform decision, injecting only the CNG backend, helper presence,
+structural runtime admission and the gateway inventory. Neither is TPM or
+product evidence.
+
+Explicit ordinary-user acceptance uses `tests/test_wizard_windows_memory_live.py`
+in the same environment as the C5b-2 recipe above: the installed Hermes venv
+with a wheel built from this branch's sdist (verify `mordred_hermes.__file__`),
+`MORDRED_TEST_WINDOWS_WIZARD_LIVE=1`, `MORDRED_WINDOWS_CUSTODY_TEST_ROOT` set
+to an existing retained isolated root, `MORDRED_HERMES_PYTHON` set to that
+venv's `Scripts\python.exe` and `MORDRED_WINKEY_HELPER` set to the owned
+helper, with every Hermes gateway stopped:
+
+```powershell
+& $env:MORDRED_HERMES_PYTHON -m pytest -q -s -o addopts= -m integration tests/test_wizard_windows_memory_live.py
+```
+
+Through the real CLI it runs `keyvault native init`, `encryption enable
+memory` (real gate, installed-runtime proof and lifecycle on a new UUID profile
+with a fresh CNG key), a fresh installed-runtime read, `encryption status
+--json`, `encryption disable memory` and `encryption purge memory --yes`, which
+deletes only that profile's key through the C5a journal. A failure keeps the
+profile and journals and names the path; the root is never removed
+recursively. Record source and sdist-wheel results separately in the Manual
+live-device validation log. A real `hermes gateway` start, Desktop, Telegram
+and Windows 11 installed-product acceptance remain separate gates.

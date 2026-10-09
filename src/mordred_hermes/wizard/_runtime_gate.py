@@ -28,6 +28,12 @@ here; each module supplies only its target-specific guidance text (whole
 pre-wrapped lines, so the operator-facing messages stay byte-identical to the
 text they replaced).
 
+On Windows the gate has a different shape (only the agent-memory caller lists
+``win32``): there is no runtime-unverified bypass at all, so
+``force_runtime_unverified`` refuses for every caller, and the gate itself is
+``require_stopped_windows_gateways`` — unknown or running gateways refuse. The
+installed-runtime check is the separate proof the memory lifecycle consumes.
+
 Heavy imports stay function-local so this module imports on any platform,
 matching the wizard CLI convention.
 """
@@ -191,6 +197,36 @@ def _gateway_gate(
     return 0
 
 
+_WINDOWS = "win32"
+
+
+def _refuse_windows_bypass(target: str) -> int:
+    """Windows never accepts ``--force-runtime-unverified``."""
+    _term.emit_error(
+        f"refusing --force-runtime-unverified for {target} on Windows — Windows has no runtime-unverified "
+        "bypass: the installed Hermes runtime must prove it opens the sealed data, and unknown or running "
+        "gateways always refuse. Stop the gateways and re-run without the flag; nothing was changed."
+    )
+    return 1
+
+
+def _windows_gateway_gate(*, home: Path, target: str) -> int:
+    """The Windows lifecycle gate: a known, empty supported gateway inventory."""
+    from ..keyvault._runtime_probe import GatewayDiscoveryUnavailable, require_stopped_windows_gateways
+
+    try:
+        require_stopped_windows_gateways(home)
+    except (GatewayDiscoveryUnavailable, OSError, RuntimeError, ValueError) as exc:
+        # A failed inventory is unknown, never an empty process list.
+        _term.emit_error(
+            f"refusing to change {target} on Windows — {exc}.\n"
+            "  Stop every Hermes gateway and Hermes Desktop session for this profile, then re-run. An unknown\n"
+            "  process inventory is never treated as empty, and there is no force option. Nothing was changed."
+        )
+        return 1
+    return 0
+
+
 def runtime_gate(
     *,
     home: Path,
@@ -216,9 +252,16 @@ def runtime_gate(
     ``rerun_tail`` closes with its re-run / force guidance; both are
     newline-terminated-line blocks slotted verbatim into the message.
     ``gateway_discovery`` is injectable for tests.
+
+    On ``win32`` the flag always refuses, and a caller that lists ``win32``
+    gets only the stopped-gateway gate (see the module docstring).
     """
+    if platform == _WINDOWS and force_runtime_unverified:
+        return _refuse_windows_bypass(target)
     if platform not in supported_platforms or force_runtime_unverified:
         return 0
+    if platform == _WINDOWS:
+        return _windows_gateway_gate(home=home, target=target)
     probe = runtime_probe or default_probe
     ok, detail = probe(home=home)
     if not ok:

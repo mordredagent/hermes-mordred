@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from . import _term
 from ._defaults import resolve_backend, resolve_prompt_io, resolve_store
 from ._vault_open import _build_device_auth, _vault_identity
+from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
     from ..keyvault.anchor import AnchorStore
@@ -68,6 +69,9 @@ def init(
     - the freshly created vault stays open in the flow, so the flow's next
       steps enroll through it without unwrapping the master again (no Touch ID).
     """
+    refusal = excluded_refusal("file_vault", "vault init")
+    if refusal is not None:
+        return refusal
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
 
@@ -189,6 +193,9 @@ def ensure_initialised(
 
     ``flow_session`` is forwarded to :func:`init` (see there).
     """
+    refusal = excluded_refusal("file_vault", "vault init")
+    if refusal is not None:
+        return refusal
     from ..keyvault import anchor
 
     if flow_session is not None and flow_session.lend_vault(root) is not None:
@@ -238,6 +245,9 @@ def change_passphrase(
     Returns 0 on success, 1 on any failure (no vault, empty / mismatched new
     passphrase, wrong current passphrase, or an unrecoverable device error).
     """
+    refusal = excluded_refusal("recovery", "vault change-passphrase")
+    if refusal is not None:
+        return refusal
     from cryptography.exceptions import InvalidTag
 
     from ..keyvault import anchor, recovery, vault
@@ -341,6 +351,9 @@ def recover(
     wrong passphrase, a tampered manifest / sidecar, or a Secure-Enclave /
     Keychain failure) with a reason printed to stderr.
     """
+    refusal = excluded_refusal("recovery", "vault recover")
+    if refusal is not None:
+        return refusal
     from cryptography.exceptions import InvalidTag
 
     from ..keyvault import anchor, backup, manifest, recovery, vault

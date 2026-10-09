@@ -791,7 +791,7 @@ network     use | status | init
 policy      show | explain | dry-run | reload
 audit       tail | grep | decrypt | purge
 keyvault    init | list | verify-digest | export | recover | reset |
-            enable-se | enable-tpm | enable-winkey | eth
+            enable-se | enable-tpm | enable-winkey | native | eth
 vault       init | change-passphrase | recover | add | status | cat |
             migrate | set-memory-key | enable-config-decrypt |
             disable-config-decrypt
@@ -1175,7 +1175,7 @@ the keyvault's checked storage. History keeps its pairing-key envelope and
 `undecryptable` status, while storage refusals reach the chat/history caller.
 POSIX behavior is unchanged. Telegram custody/archive (C10b), gateway/Desktop
 lifecycle (C11), native validation and Windows 11 acceptance remain open.
-||||||| caa7ef45d
+
 ### Windows network routes and VPN capability (C9)
 
 Product limitation (controller ruling for this slice): Tor is the only
@@ -2831,3 +2831,120 @@ helper discovery is `custody_broken`. A telegram role rotation
 to the retained generation, so they and the archive (whose `store_key` they
 hold) become unreadable (`secrets_corrupt`): C6 must re-seal the credentials
 under the new generation before retiring the old one, or not offer rotation.
+
+#### Windows wizard routing, ceremonies and uninstall (C6)
+
+C6 is the wizard consumer of C5. It adds no keyvault API: every Windows
+keyvault or memory decision goes through `windows_capabilities` /
+`windows_capability`, the load-only `memory_state()` and
+`verify_memory_purge_candidates`, `require_stopped_windows_gateways`,
+`prove_windows_memory_runtime`, `enable_memory_encryption`,
+`disable_memory_encryption` and `reset_role`. macOS and Linux behavior is
+unchanged.
+
+Frozen command name: the explicit native custody initialization ceremony is
+`hermes-mordred keyvault native init [--role memory|audit ...]` (repeatable,
+default `memory`; Telegram custody stays with the Telegram setup ceremony). It
+lives under `keyvault` because it creates hardware custody keys, and in its own
+`native` group because `keyvault init` is the unported secret-store ceremony
+and `keyvault enable-winkey` only builds and probes the helper. The ceremony
+reads the capabilities first and refuses `custody-unsafe`, `custody-broken`,
+`custody-uncertain`, `helper-missing` and `helper-uncertain` with the
+classified remedy before any custody write; `runtime-*` does not block inert
+enrollment. Each requested role is enrolled in its own custody scope through
+C5a `enroll_memory()` / `enroll_role("audit")` only when it is absent; an
+enrolled role is reported unchanged and never re-created. A missing Hermes home
+refuses instead of being created. C5a still refuses any retained evidence
+without ownership before native generation. Output is metadata only (role,
+generation, public-key SHA-256) plus the no-presence/no-portable-recovery
+notice and the excluded/unported capability lines. `encryption enable memory`
+(and therefore `setup`) prints the same notice whenever its ceremony step
+creates the memory key, even if a later step refuses. Enrollment writes no
+marker and changes no memory file. An audit writer or callback never enrolls.
+
+Windows routing per entry point (each refusal names its step and reason, and
+says what is unchanged):
+
+| Entry point | Order |
+| --- | --- |
+| `encryption enable memory` | capabilities (`windows_capability(home, "memory_custody")`; custody/helper failures refuse, `runtime-*` warns) -> gate (`runtime_gate` on `win32`: `--force-runtime-unverified` refuses, then `require_stopped_windows_gateways`) -> ceremony (inert memory enrollment if absent) -> proof (`prove_windows_memory_runtime`, outside every lock) -> lifecycle (`enable_memory_encryption`) |
+| `encryption disable memory` | capabilities plus the load-only purge scan (an unmanaged clean profile is a no-op; sealed files without custody refuse as `custody-broken`; an already disabled clean profile is a no-op) -> helper check -> gate -> proof -> `disable_memory_encryption(keep_key=True)` |
+| `encryption purge memory --yes` | capabilities -> gate -> `verify_memory_purge_candidates` (any reason refuses with the remedy: disable first, finish interrupted staging, or restore broken seals by hand) -> `reset_role("memory", erase_authorized=False)` in a fresh custody scope |
+| `encryption status`, `status`, `setup` | `windows_capabilities` (non-blocking) and the purge scan joined to a non-blocking canonical session; no unwrap, backend, subprocess or lock wait |
+| `uninstall` | restore = the `disable` row (with `--purge-data` also for enrolled custody never explicitly disabled); `--purge-data` runs the `purge` row right after it, before any Hermes file, launcher or package step; `--erase-encrypted` refuses |
+| `vault init`/open/change-passphrase/recover, env/config seal verbs, `keyvault init`, `keyvault reset` | `refuse_excluded_on_windows` / `refuse_unported_on_windows` as the first statement, before any backend/store resolution, lock (including the Linux memory-key lock and the keyvault lifecycle lock), prompt, `_storage` read or key generation |
+
+Interpreter routing for the proof: `MORDRED_HERMES_PYTHON` remains
+authoritative inside the proof. Otherwise a Hermes launcher (`hermes.exe` on
+`PATH` or Hermes's managed launcher) is authoritative: its C4-validated
+interpreter is passed as `python=`, and a launcher without one refuses as
+`interpreter-invalid` rather than falling back. Without a launcher the proof
+uses the C4 home-venv candidates. Desktop launcher routing remains C11.
+
+`runtime_gate(..., supported_platforms=...)` lists `win32` only for the memory
+caller. On `win32` it never accepts a bypass: `force_runtime_unverified`
+refuses for every caller before any inventory, and a caller listing `win32`
+gets only the stopped-gateway gate, where an unknown, running or failed
+inventory refuses. The installed-runtime check is the separate proof.
+
+Lifecycle failures keep the keyvault guarantees: a refusal before mutation
+leaves files, markers and custody unchanged (after the ceremony step, the inert
+key is kept for a retry); a `MemoryLifecycleError` reports completed and
+remaining files, whether the last outcome is uncertain, that every file is
+plaintext or an authenticated seal and that enable left the profile unarmed
+(disable keeps custody, remaining seals and the armed marker), and asks for a
+rerun with a fresh proof. The wizard never writes memory files or markers
+itself. `erase_authorized` stays `False` for memory: no flag authorizes
+deleting memory custody while seals remain, and purge never deletes memory
+files. A reset failure after its intent journal keeps the journal, which blocks
+the next purge until explicit reconciliation (not yet exposed by the wizard).
+
+Status output on Windows: the `keyvault` line reports the secret store as
+`not-ported-on-windows` (a retained store is reported as preserved, never
+read), followed by one line per capability in the fixed C5e order with its own
+supported/available/reason and remedy; there is no aggregate readiness line.
+`encryption status` reports `env`, `config` and `workspace` as
+`excluded on Windows (excluded-on-windows)`, naming retained file-vault,
+`.env` opt-out and config-marker artifacts as preserved. The memory target is
+`off` (not enabled, or inert enrollment), `on` (armed, no plaintext, broken
+seal, staging or helper problem), `exposed` (armed with plaintext on disk),
+`paused` (opted out) or an `UNAVAILABLE (<reason>)` detail for unsafe, broken,
+uncertain or busy custody. The current interpreter's `runtime-*` reason is
+shown but does not make an armed profile inactive: the installed runtime is
+proven by enable, not by status.
+
+`setup` on Windows skips the keyvault step (secret store not ported) and the
+env step (excluded) without stopping; the memory step is `done` when armed and
+clean or opted out, `manual` without the helper or under `--non-interactive`,
+`blocked` (stopping the run) for unreadable/unsafe/broken custody, and
+otherwise runs `encryption enable memory`. `encryption enable all` skips the
+excluded env/config targets and runs the Windows memory flow.
+
+Uninstall on Windows restores memory only (the env/config seals are excluded;
+retained artifacts are reported). A refusing gate, proof or custody state stops
+it before anything is removed. `--purge-data` deletes only the memory custody
+key after the verified restore; audit and Telegram custody and history, a
+retained secret store or file vault, and the `<home>\mordred` and
+`<home>\extension` trees are kept and reported, because Windows has no checked
+recursive removal yet. The plan lists exactly that. `--erase-encrypted`
+refuses on Windows, including `--dry-run`.
+
+Purge ordering on Windows uninstall: purge requires an explicit disable (the
+opt-out marker) and no seal, broken seal or staging entry. With `--purge-data`
+the restore is therefore planned whenever memory custody is managed and not
+opted out, including inert enrollment (`keyvault native init`, or an enable
+that refused at the proof); without `--purge-data` inert custody needs no
+restore and no proof. The memory purge (stopped-gateway gate, purge
+verification, `reset_role`) runs as part of step a, immediately after the
+restore and before the Desktop page, `config.yaml`/`.env` cleanup, launcher
+removal, helper removal or package uninstall, so a refusing gate, proof
+(including a proof child that cannot start), verification or reset leaves
+Hermes's files, launchers and the package installed. Its custody read waits for
+the lock like the other lifecycle commands; the plan reads without waiting and,
+when custody is unreadable, says the purge will re-check and refuse. The
+typed-confirmation warning names the memory key only when step 5 lists its
+deletion. Recorded C6 gaps: an armed profile with a broken seal, staging
+entries or a missing helper renders `paused` in `encryption status` rather
+than `on` (the fix changes setup's rerun decision and is deferred), and
+`--purge-data` removes the owned CNG helper while kept audit/Telegram custody
+still needs it.
