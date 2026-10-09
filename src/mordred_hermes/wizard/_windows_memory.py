@@ -27,6 +27,7 @@ Heavy imports stay function-local so this module imports on any platform.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
     from ..keyvault._windows_capability import WindowsCapability
     from ..keyvault._windows_proof import WindowsRuntimeProof
 
-__all__ = ["MemoryObservation", "disable", "enable", "observe", "proof_python", "purge"]
+__all__ = ["MemoryObservation", "disable", "enable", "observe", "proof_python", "purge", "routed"]
 
 _UNCHANGED = "Memory files and markers are unchanged."
 _KEPT = " The inert memory custody key is kept for a retry."
@@ -61,6 +62,11 @@ class MemoryObservation:
     report: PurgeReport | None
     reason: str | None = None
     detail: str = ""
+
+
+def routed(platform: str | None) -> bool:
+    """Whether a ``memory_cli`` verb takes this Windows flow (``None`` means this host)."""
+    return (sys.platform if platform is None else platform) == WINDOWS
 
 
 def _refused(verb: str, step: str, reason: str, detail: str, hint: str, *, state: str = _UNCHANGED) -> int:

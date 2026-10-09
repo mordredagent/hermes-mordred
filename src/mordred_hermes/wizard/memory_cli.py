@@ -32,9 +32,7 @@ marker is the source of truth (no runtime ever read the flag). ``disable`` /
 ``purge`` still turn a flag an older build left behind off, and ``status``
 reports one that is set without a marker.
 
-On Windows (``win32``) all three verbs are the proof-bound CNG flow in
-:mod:`._windows_memory`: capabilities -> stopped-gateway gate -> (inert
-enrollment) -> installed-runtime proof -> checked keyvault lifecycle.
+On Windows (``win32``) every verb is the proof-bound CNG flow in :mod:`._windows_memory`.
 
 Heavy imports stay function-local so this module imports on any platform.
 """
@@ -48,7 +46,7 @@ from typing import TYPE_CHECKING
 
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
 from ..keyvault.memory_crypto import MAGIC
-from . import _term
+from . import _term, _windows_memory
 from ._runtime_gate import runtime_gate
 from ._vault_open import _vault_present
 from .vault_memory_key import _MEMORY_KEY_ENV
@@ -66,9 +64,7 @@ __all__ = ["disable", "enable", "purge"]
 
 _CONFIG_NAME = "config.yaml"
 _DARWIN = "darwin"
-_WINDOWS = "win32"
-#: Only this caller's runtime gate lists Windows (stopped gateways, never a bypass).
-_GATE_PLATFORMS = ("darwin", "linux", _WINDOWS)
+_GATE_PLATFORMS = ("darwin", "linux", "win32")  # only this caller's gate lists win32 (stopped gateways, no bypass)
 #: The sealed-file magic line, under the name ``keyvault/memory_crypto.py``
 #: cites when it documents the format's text-safety. That module owns the bytes.
 _ENC_HEADER = MAGIC
@@ -437,12 +433,9 @@ def enable(
     in that last case the marker is deliberately kept, so the hook seals each
     file on its next write instead of leaving the target off.
     """
-    resolved = sys.platform if platform is None else platform
-    if resolved == _WINDOWS:
-        from . import _windows_memory
-
+    if _windows_memory.routed(platform):
         return _windows_memory.enable(home=home, force_runtime_unverified=force_runtime_unverified)
-
+    resolved = sys.platform if platform is None else platform
     reason = _enable_gate_reason(home=home, root=root, platform=resolved)
     if reason is not None:
         return _refuse("enable", reason)
@@ -614,9 +607,7 @@ def disable(
 ) -> int:
     from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
 
-    if (sys.platform if platform is None else platform) == _WINDOWS:
-        from . import _windows_memory
-
+    if _windows_memory.routed(platform):
         return _windows_memory.disable(home=home)
     if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
         try:
@@ -720,9 +711,7 @@ def purge(
     """
     from ..keyvault._memory_key import MemoryKeyError, delete_linux_memory_key, memory_key_lock, memory_key_path
 
-    if (sys.platform if platform is None else platform) == _WINDOWS:
-        from . import _windows_memory
-
+    if _windows_memory.routed(platform):
         return _windows_memory.purge(home=home)
     if memory_key_path(home).exists() or memory_key_path(home).is_symlink() or sys.platform == "linux":
         try:
