@@ -1,6 +1,7 @@
 """Real Windows PowerShell argument/exit tests, without package/network installs.
 
-A disposable interpreter sees the current test package via a test-owned .pth.
+A disposable interpreter sees the current test package via a test-owned .pth
+(the package under test first, then the test site and its own .pth hooks).
 The uv executable is a compiled fixture that logs argv and never uses network.
 """
 
@@ -14,6 +15,8 @@ import sysconfig
 from pathlib import Path
 
 import pytest
+
+from tests._child_env import site_pth_for_package_under_test
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="native Windows PowerShell fixture gate")
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,9 +39,7 @@ def native_fixture(ps, tmp_path):
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root)], check=True, timeout=60)
     python = root / "Scripts/python.exe"
     site = root / "Lib/site-packages"
-    (site / "fixture.pth").write_text(
-        f"import site; site.addsitedir({sysconfig.get_path('purelib')!r})\n", encoding="utf-8"
-    )
+    (site / "fixture.pth").write_text(site_pth_for_package_under_test(sysconfig.get_path("purelib")), encoding="utf-8")
     shutil.copy2(python, python.parent / "hermes-mordred.exe")
     uv = tmp_path / "uv fixture.exe"
     code = r"""
@@ -218,7 +219,7 @@ def test_installer_explicit_uninstall_targets_environment_and_uv_a(native_fixtur
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root_b)], check=True, timeout=60)
     python_b = root_b / "Scripts/python.exe"
     (root_b / "Lib/site-packages/fixture.pth").write_text(
-        f"import site; site.addsitedir({sysconfig.get_path('purelib')!r})\n", encoding="utf-8"
+        site_pth_for_package_under_test(sysconfig.get_path("purelib")), encoding="utf-8"
     )
     uv_a = Path(argv[argv.index("-Uv") + 1])
     uv_b = root_b / "Scripts/uv.exe"

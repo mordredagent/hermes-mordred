@@ -1,8 +1,9 @@
 """Native Windows Tor route lifecycle with a stub ``tor.exe`` (and an optional real Tor).
 
 Host-skipped. The stub is a real console ``.exe``: pip's vendored distlib
-launcher with an appended zip whose ``__main__.py`` prints Tor's bootstrap
-lines and writes a control cookie, exactly like a console-script launcher.
+launcher (from pip, standalone distlib or ensurepip's bundled pip wheel)
+with an appended zip whose ``__main__.py`` prints Tor's bootstrap lines and
+writes a control cookie, exactly like a console-script launcher.
 It exercises the real resolver/admission, checked private ``tor-data``,
 ``CREATE_NO_WINDOW`` launch, kill-on-close job, psutil identities, startup
 cleanup and teardown. No network route is configured and no system setting
@@ -68,13 +69,26 @@ STUB_MAIN = textwrap.dedent(
 
 
 def _distlib_launcher() -> bytes:
-    spec = importlib.util.find_spec("pip._vendor.distlib")
-    locations = list(spec.submodule_search_locations or []) if spec is not None else []
-    for location in locations:
-        candidate = Path(location) / "t64.exe"
-        if candidate.is_file():
-            return candidate.read_bytes()
-    pytest.skip("pip's vendored distlib t64.exe launcher is unavailable in this environment")
+    # A uv-created venv has no pip; ensurepip's bundled pip wheel carries the
+    # same vendored launcher and is read in place, never installed.
+    for name in ("pip._vendor.distlib", "distlib"):
+        try:
+            spec = importlib.util.find_spec(name)
+        except ImportError:
+            spec = None
+        for location in list(spec.submodule_search_locations or []) if spec is not None else []:
+            candidate = Path(location) / "t64.exe"
+            if candidate.is_file():
+                return candidate.read_bytes()
+    try:
+        import ensurepip
+    except ImportError:
+        ensurepip = None
+    bundled = Path(ensurepip.__file__).parent / "_bundled" if ensurepip is not None else None
+    for wheel in sorted(bundled.glob("pip-*.whl")) if bundled is not None and bundled.is_dir() else []:
+        with zipfile.ZipFile(wheel) as archive, contextlib.suppress(KeyError):
+            return archive.read("pip/_vendor/distlib/t64.exe")
+    pytest.skip("no distlib t64.exe launcher (pip, distlib or ensurepip's bundled pip) in this environment")
 
 
 def stub_exe_bytes() -> bytes:
