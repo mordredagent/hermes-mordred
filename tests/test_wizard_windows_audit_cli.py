@@ -29,6 +29,7 @@ from mordred_hermes.keyvault import _seckey_helper, _storage, _windows_capabilit
 from mordred_hermes.keyvault import log_encryption as mral
 from mordred_hermes.privacy_check import audit as privacy_audit
 from mordred_hermes.wizard import _windows_gates, audit_cli, cli
+from tests._private_files import write_private
 from tests.test_windows_privacy_audit import custody_fixture as custody_fixture
 from tests.test_windows_privacy_audit import windows_fs as windows_fs
 
@@ -91,9 +92,7 @@ def private_dir(path: Path) -> Path:
 
 
 def private_write(path: Path, data: bytes) -> None:
-    path.write_bytes(data)
-    if os.name != "nt":
-        path.chmod(0o600)
+    write_private(path, data)
 
 
 def audit_files(directory: Path) -> dict[str, bytes]:
@@ -381,7 +380,7 @@ def copied_home(env, tmp_path: Path) -> Path:
     enroll(env)
     other = private_dir(tmp_path / "copied-home")
     private_dir(other / "mordred")
-    shutil.copy2(env.mordred / "windows-custody.json", other / "mordred" / "windows-custody.json")
+    private_write(other / "mordred" / "windows-custody.json", (env.mordred / "windows-custody.json").read_bytes())
     return other
 
 
