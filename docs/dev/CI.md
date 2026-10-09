@@ -1581,6 +1581,40 @@ an HTTP keep-alive client and an open WebSocket are connected, then restarts
 it on the same port (server-side TIME_WAIT on Windows without
 `SO_REUSEADDR`).
 
+C11 integration follow-up validation and the scoped Windows job add
+`tests/test_desktop_windows_logout.py`: real checked custody, MRKW/MTC1
+credentials and archive with the native/platform boundary and Telegram
+client injected. Regressions cover full snapshot reuse with one unwrap for
+logged-in and configured/session-less credentials, retained archive/roles,
+busy and custody preflight refusal without remote revoke, wipe-before-revoke,
+partial deletion with confirmed credential absence, unknown post-wipe state,
+failed revoke, pre-wipe metadata failure and the CLI recovery remedy.
+`tests/test_desktop_windows_page.py` executes page components and handlers
+through a synthetic SDK/React boundary to check ceremony command rendering,
+success/error outcomes and Devices advice, persistent results after refresh
+and disabled controls after logout. These are host regressions, not native
+Desktop or real-CNG acceptance evidence. Ceremony availability depends on
+C6 PR #222; the earlier blocked-at-custody note is superseded.
+
+R-C11-5 records the shutdown evidence and limit: an open WebSocket delayed
+SIGTERM about 46 seconds, so the all-platform listener stop and 3-second
+connection-handler grace followed by task cancellation are accepted. POSIX
+connections, including in-flight work, can be cancelled and need reconnect
+or retry. This is not a universal process-exit deadline: a separate isolated
+12-second default-executor worker probe returned from `_run_forever` around
+3.21 seconds, then waited until the worker finished at interpreter exit.
+This pre-existing bounded-worker lifecycle gap remains outside this slice.
+R-C11-6 aligns Desktop with the C6 checked-wipe-before-revoke contract;
+manual Telegram Settings → Devices revocation is required if remote revoke
+fails after local deletion or if credential deletion cannot be confirmed.
+
+The Desktop real-store suite also regresses metadata `[]` with an archive
+lock held: advisory flags say absent, but the seal remains and a busy
+forget must not revoke. It injects a failed checked seal-presence read after
+an observed absence to verify unknown state, no revoke and Devices advice.
+Shared `flags()` semantics remain a separate fix; Desktop corroborates
+observed absence through the existing checked transaction/presence API.
+
 ### Windows shared Telegram memory guard validation (C10c)
 
 The scoped Windows job adds

@@ -130,6 +130,7 @@ class CustodyStore(WindowsCustodySecretStore):
         return self.value
 
     def update_from_snapshot(self, snapshot: Any, mutate: Any) -> Any:
+        assert snapshot == self.load_snapshot(), "reuse the complete (value, token) snapshot"
         return self.update(mutate)
 
 
@@ -238,8 +239,8 @@ def test_windows_status_lists_each_capability_without_an_aggregate(desktop, monk
     assert result["telegram_custody"] == {
         "enrolled": False,
         "reason": "not-enrolled",
-        "ceremony_available": False,
-        "ceremony_command": None,
+        "ceremony_available": True,
+        "ceremony_command": "hermes-mordred keyvault native init --role telegram",
     }
     assert result["acknowledgements"] == {
         "memory_enable": ["acknowledge_cng_no_recovery", "acknowledge_no_presence"],
@@ -286,7 +287,7 @@ def test_windows_status_follows_memory_and_telegram_state_load_only(desktop_seed
     env.launches.argv.clear()
     env.backend.calls.clear()
     with env.custody.windows_custody_session(env.home, backend=env.backend) as owner:
-        owner.enroll_role("telegram")  # stands in for the (absent) wizard Telegram ceremony
+        owner.enroll_role("telegram")
     env.backend.calls.clear()
     desktop.store._flags = {"logged_in": True, "llm_backend": "local", "llm_model": "m", "api_configured": True}
 
@@ -723,9 +724,13 @@ class _Client:
 
 
 @pytest.fixture
-def telegram(windows_api, monkeypatch, tmp_path):
+def telegram(windows_api, fs, monkeypatch, tmp_path):
+    from mordred_hermes import _config_io
+    from mordred_hermes.extension.telegram import _windows_archive
     from mordred_hermes.extension.telegram.login_flow import LoginFlows
 
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(_windows_archive, "open_optional_private_directory", _config_io.open_optional_private_directory)
     state = {"telegram": "enrolled", "memory_active": True}
     real_capability = _windows_capability.windows_capability
 
@@ -773,7 +778,8 @@ def test_windows_login_refuses_until_the_telegram_role_is_enrolled(telegram, rea
     result = post(telegram.http, "/telegram/login/start", {**LOGIN, "acknowledge_no_presence": True})
     assert result["ok"] is False and result["error"] == code
     if code == "telegram_not_enrolled":
-        assert result["ceremony_available"] is False and result["ceremony_command"] is None
+        assert result["ceremony_available"] is True
+        assert result["ceremony_command"] == "hermes-mordred keyvault native init --role telegram"
     assert telegram.store.ensure_calls == [] and telegram.store.value is None
 
 
@@ -868,13 +874,19 @@ def test_windows_forget_runs_the_custody_wipe_and_no_delete_key(telegram, monkey
     from mordred_hermes.extension.telegram import store as tg_store
 
     wiped: list[dict[str, Any]] = []
-    monkeypatch.setattr(tg_store, "wipe_archive", lambda *a, **k: wiped.append(k))
+
+    def wipe(*args, **kwargs):
+        wiped.append(kwargs)
+        telegram.store.value = None
+
+    monkeypatch.setattr(tg_store, "wipe_archive", wipe)
     telegram.store.value = tg_secrets.TelegramSecrets(
         api_id=1, api_hash=SECRET_HASH, store_key=b"k" * 32, session="WINDOWS-SESSION"
     )
     assert not hasattr(telegram.store, "delete_key")
     result = post(telegram.http, "/telegram/logout", {"forget": True, "confirm": PURGE_PHRASE})
-    assert result == {"ok": True, "forgot": True, "revoked": True}
+    assert result["ok"] is True and result["forgot"] is True and result["revoked"] is True
+    assert "outcome" in result
     assert wiped == [{"forget": True}]
     assert telegram.store.updates == 0, "forget deletes through the validated wipe plan, not a rewrite"
 

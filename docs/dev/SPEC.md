@@ -3200,10 +3200,11 @@ then does the `NoPresenceStore` wrapper call
 no caller can request presence and receive an unattended check. Login also
 requires the load-only Windows memory state (`memory_encryption_required`)
 and the private model, and the import service receives the same memory guard.
-`POST /telegram/logout` (Windows only) revokes the session at Telegram on a
-best-effort basis. It then either drops the session and keeps the archive,
-or with `forget: true` runs `store.wipe_archive(forget=True)`: the archive,
-the sealed credentials, then only the `telegram` role. `delete_key` is never
+`POST /telegram/logout` (Windows only) ordinarily revokes the session at
+Telegram on a best-effort basis, then drops the session and keeps the archive;
+with `forget: true` it instead runs `store.wipe_archive(forget=True)` before
+revoking from the loaded session once the credentials are checked as gone:
+the archive, the sealed credentials, then only the `telegram` role. `delete_key` is never
 called, and a credential read refusal deletes nothing. No wizard verb enrolls
 the `telegram` role yet, so Windows Telegram setup stops at the custody step.
 
@@ -3266,6 +3267,46 @@ connected extension WebSocket cannot hold a stop (or the port) for up to
 aiohttp's 60 s shutdown timeout. A pre-C11 Windows placement with inherited
 ACLs is refused and logged with its exact path; the remedy is to delete the
 two Mordred folders by hand and run `hermes-mordred desktop install`.
+
+C11 integration follow-up (rulings R-C11-5 and R-C11-6). The Desktop now
+exposes the existing C6 Telegram enrollment command
+`hermes-mordred keyvault native init --role telegram` in status, login
+refusals and the page's command rendering; `ceremony_available` is true.
+This closes the earlier missing-command gap and depends on C6 ceremony PR
+#222. Ordinary logout reuses the complete `(credentials, token)` snapshot,
+preserving the archive, credentials and role with one native unwrap.
+
+R-C11-6 supersedes the earlier revoke-first Desktop forget contract with
+R-C6T-2: load -> checked wipe -> checked observation -> revoke from memory
+only when credentials are confirmed gone. Definite preflight refusal keeps
+the remote session untouched. Partial deletion still attempts revocation
+when credentials are confirmed gone, retaining the original classified
+failure and checked outcome; unknown credential state never revokes or
+retries automatically. The page preserves deleted/remaining/unknown state
+and manual Telegram Settings → Devices advice after either success or
+failure and a status refresh. Cost: local deletion may precede failed remote
+revocation, requiring manual Devices revocation. Desktop still refuses
+unreadable credentials before deletion; `hermes-mordred telegram logout
+--forget` is the existing checked recovery path for corrupt or role-less
+credentials, shown in the refusal remedy.
+
+R-C11-5 accepts the all-platform listener stop, 3-second connection-handler
+grace and remaining asyncio-task cancellation: an open WebSocket previously
+delayed SIGTERM by about 46 seconds. Cost: POSIX connections still open after
+3 seconds, including in-flight work, are cancelled; callers may reconnect
+or retry. This is a connection-handler grace, not a universal 3-second
+process-exit deadline. Existing chat calls run in default executor threads;
+task cancellation cannot stop those threads, and Python can wait for them at
+interpreter exit. An isolated 12-second worker probe returned from
+`_run_forever` around 3.21 seconds but the process exited only after the
+worker finished. This pre-existing worker lifecycle needs a separate bound.
+
+The post-wipe observation's advisory credential absence is corroborated by
+checked `credentials.sealed` presence before revoking: non-object metadata
+can currently make the shared store's `flags()` return `None` despite a
+retained seal. Retained or unreadable checked presence keeps the remote
+session untouched; unreadable presence reports unknown state and Devices
+advice. Repairing the shared flags contract remains a separate follow-up.
 
 ### Windows shared Telegram memory guard (C10c)
 

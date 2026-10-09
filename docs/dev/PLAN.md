@@ -1868,6 +1868,38 @@ approval warning, `disabled-incomplete`, unknown `found`, an end-to-end enable
 proving `sys.executable`, `tests/test_desktop_capture.py`, the logged refused
 placement and a native absent-folder case through C11 code.
 
+C11 integration follow-up: expose the C6 ceremony from PR #222 as
+`TELEGRAM_CEREMONY_COMMAND` without importing or duplicating wizard ceremony
+code. Preserve the complete snapshot when ordinary logout calls the real
+Windows store's `update_from_snapshot`; the unchanged seal costs one unwrap.
+For forget, use the existing C6 load-only `observe`/`outcome_lines` APIs
+around the C10b checked wipe. A loaded snapshot proves credentials existed
+even when pre-wipe metadata cannot be read. Only checked absence after wipe
+permits remote revocation; retained credentials do not revoke, and unknown
+state returns manual Devices advice. Return the original failure code with
+checked partial outcomes, and retain those outcomes and remedies in the
+Desktop component across status refresh, disabling logged-out controls.
+Corrupt or role-less credential refusals point to the existing CLI forget
+recovery; Desktop destructive recovery parity remains a separate gap.
+
+R-C11-6 aligns Desktop forget with R-C6T-2 (checked wipe before remote
+revocation); the cost is manual Settings → Devices revocation if Telegram
+cannot be reached after local deletion. R-C11-5 accepts the existing
+all-platform listener stop, 3-second handler grace and remaining task
+cancellation after an open WebSocket delayed SIGTERM about 46 seconds.
+POSIX in-flight connections can now be cancelled after the grace and may
+need reconnect/retry. This does not bound interpreter exit: an existing chat
+executor thread can outlive its cancelled asyncio task (the isolated worker
+probe returned from `_run_forever` around 3.21 seconds and exited after its
+12-second worker finished). Bound worker lifecycle in a separate follow-up.
+
+Post-wipe `observe` credential absence is additionally corroborated through
+the shared checked archive transaction and `credentials.sealed` presence.
+Valid non-object metadata can make shared `flags()` report `None` while the
+seal remains; a failed presence read remains unknown, never permission to
+revoke. This is Desktop-only corroboration; the shared flags contract is a
+separate follow-up, without extension or C6 product edits in this slice.
+
 ### Windows shared Telegram memory guard execution (C10c)
 
 Scope: the extension Telegram memory guard, its regression tests, the Windows
