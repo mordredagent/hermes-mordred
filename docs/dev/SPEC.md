@@ -2402,6 +2402,34 @@ retained generations decryptable; a read or purge briefly holds a custom audit
 directory's lock, during which a C5d custom-directory append fails with a
 recoverable `busy`.
 
+After decrypting every listed file, Windows `audit decrypt` re-lists the date
+through the same checked selection. A file added, removed or re-created (a
+different checked identity) since the first listing, or a re-check that fails,
+exits 1 with a message naming the change and asking for a re-run; appends that
+keep the active log's identity are not a change, so the rerun noted above is
+signalled rather than silent. Bound refusals name the bound and a workaround:
+the 64 MiB per-date selection (decrypt in parts by moving some of that date's
+rotated files out of the audit directory by hand), the 4,096-entry listing
+(move older rotated files out by hand) and the 16 MiB active-log read (the
+plaintext writer rotates at 10 MB by default; copy the file to inspect it). A
+`not-enrolled` refusal whose active log is checked plaintext NDJSON points to
+`audit tail` and `audit grep` instead of enrollment; any other state keeps the
+enroll remedy. Decrypted entries are written as UTF-8 for the duration of the
+command (stdout is reconfigured, then restored), so a stdout redirected under a
+legacy Windows code page such as cp932 cannot fail mid-output; stderr text
+relies on Python's `backslashreplace` error handler.
+
+Further recorded residuals: a POSIX or legacy-keyed MRAL header (no Windows
+native selector) reports C5d's own classified decrypt error ("requires an owned
+native selector"), not the C6 excluded wording, because C5d exposes no typed
+signal for it; a helper that the C5e predicate finds but C5d cannot use
+(`windows_backend()` raises `CustodyError`) is labelled `custody-broken` with
+the copied-home remedy for every file. Date mapping: C5d, like the POSIX
+encrypted writer, rotates a pre-existing active log aside under the restart day
+rather than its last entry's day, so after a writer restart on a later day
+`decrypt --date D` misses D's final entries, which are filed under the restart
+day.
+
 #### Windows capability predicates and flat role reset (C5e)
 
 `keyvault._windows_capability` exposes pure predicates. A frozen

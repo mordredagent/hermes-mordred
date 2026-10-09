@@ -1257,6 +1257,17 @@ writes, bounds, corrupt/foreign files, missing or denied keys, retained
 generations, checked purge, unsafe entries and uncertain stops. Native NTFS ACL,
 hard link and junction cases join scoped Windows CI; live CNG reuses the C5d gate.
 
+Review round 2 keeps the slice wizard-only: `decrypt_targets` returns the
+checked identities so `_history_change` can re-list after the per-file loop
+(added, removed or re-created files exit 1 with a re-run message), `_refused`
+substitutes bound-specific remedies for `audit_total_limit`, `list_limit` and
+the read bound, the not-enrolled refusal probes the active log through C7a and
+points plaintext users at `tail`/`grep`, and `_utf8_stdout` scopes UTF-8 output
+to the decrypt loop. `test_wizard_windows_audit_cli_decrypt.py` pins the
+per-file stop/continue matrix by failing the first of two targets, injects
+rotations between listing and decrypt, and covers the remaining absence and
+gate branches.
+
 ### Windows gateway inventory (C5c)
 
 The keyvault runtime inventory uses psutil's native Windows process APIs.

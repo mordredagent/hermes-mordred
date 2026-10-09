@@ -10,7 +10,9 @@ On ``win32`` the audit CLI never uses ``audit_cli``'s POSIX descriptor helpers
   refuses unavailable custody before any native call, then enumerates the
   date's dated siblings (plus the active log for today) through one checked,
   bounded C7a session, oldest first, and decrypts each with C5d
-  ``decrypt_windows_log_file``, which snapshots and validates the file itself;
+  ``decrypt_windows_log_file``, which snapshots and validates the file itself,
+  then re-lists the date so a concurrent rotation or purge is reported (exit 1,
+  "re-run") instead of silently omitting entries; entries are written as UTF-8;
 * ``purge`` deletes only enumerated, checked dated siblings through the C7a
   session's identity-bound ``delete`` under its directory transaction.
 
@@ -25,14 +27,18 @@ the ``[keyvault]`` crypto stack.
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import json
+import sys
+from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
 from .._audit_session import AuditSession, audit_session, read_audit_snapshot
 from .._log_rotation import audit_rotation_names
-from .._private_fs import PrivateFSError
+from .._private_fs import FileIdentity, PrivateFSError
 from . import _term, _windows_gates
 
 if TYPE_CHECKING:
@@ -68,8 +74,8 @@ _TRANSIENT: Final = frozenset({"busy", "io", "access_denied", "missing"})
 _STORAGE_REMEDIES: Final[dict[StorageReason, str]] = {
     "audit-unsafe": (
         "the audit directory or file is not private to this Windows account (broad ACL, foreign owner, "
-        "hard link, junction or reparse point) or exceeds a checked bound; Mordred never repairs ACLs, "
-        "follows links or truncates — fix it by hand, then retry"
+        "hard link, junction or reparse point); Mordred never repairs ACLs or follows links — fix it by hand, "
+        "then retry"
     ),
     "audit-unavailable": (
         "the audit storage is busy or could not be accessed — let other Hermes/Mordred processes finish, then retry"
@@ -95,6 +101,8 @@ _NATIVE_UNAVAILABLE: Final = (
 )
 
 PurgeOutcome = Literal["deleted", "absent", "refused"]
+_MIB: Final = 1024 * 1024
+_READ_BOUNDS: Final = frozenset({"audit_read_limit", "read_limit"})
 
 
 class WindowsAuditRefused(RuntimeError):
@@ -119,11 +127,37 @@ def _absent(exc: PrivateFSError) -> bool:
     return exc.reason == "missing" and exc.commit_state == "not_committed"
 
 
+def _bound(limit: int) -> str:
+    return f"{limit // _MIB} MiB" if limit >= _MIB and limit % _MIB == 0 else f"{limit}-byte"
+
+
+def _bound_remedy(exc: BaseException) -> str | None:
+    """A checked-bound refusal names its bound and a workaround, not the unsafe-object remedy."""
+    if not isinstance(exc, PrivateFSError) or exc.reason != "unsafe":
+        return None
+    if exc.operation in _READ_BOUNDS:
+        return (
+            f"the active log exceeds the {_bound(ACTIVE_READ_LIMIT)} read bound and readers never truncate; the "
+            "plaintext writer rotates it at 10 MB by default, so copy it elsewhere by hand to inspect it"
+        )
+    if exc.operation == "audit_total_limit":
+        return (
+            f"the files of this date exceed the {_bound(DECRYPT_TOTAL_LIMIT)} decrypt bound and readers never "
+            "truncate — decrypt in parts: move some of that date's rotated files out of the audit directory by "
+            "hand, re-run, then move them back and repeat with the others"
+        )
+    if exc.operation == "list_limit":
+        return (
+            f"the audit directory holds more than {MAX_ENTRIES} entries — move older rotated files out of the "
+            "audit directory by hand, then retry"
+        )
+    return None
+
+
 def _refused(action: str, path: Path, exc: BaseException, outcome: str) -> WindowsAuditRefused:
     reason = classify_storage(exc)
-    return WindowsAuditRefused(
-        reason, f"refusing audit {action} at {path}: {reason} ({exc}) — {_STORAGE_REMEDIES[reason]}. {outcome}"
-    )
+    remedy = _bound_remedy(exc) or _STORAGE_REMEDIES[reason]
+    return WindowsAuditRefused(reason, f"refusing audit {action} at {path}: {reason} ({exc}) — {remedy}. {outcome}")
 
 
 def default_home() -> Path:
@@ -156,10 +190,21 @@ def read_active_log(log_path: Path) -> bytes | None:
 # --- decrypt --------------------------------------------------------------------------
 
 
-def native_audit_refusal(home: Path) -> str | None:
+def _active_kind(directory: Path) -> str | None:
+    """The C7a probe kind of the active log, or ``None`` when it cannot be checked."""
+    try:
+        with audit_session(directory / ACTIVE_NAME) as session:
+            return session.probe(ACTIVE_NAME).kind
+    except (PrivateFSError, ValueError):
+        return None
+
+
+def native_audit_refusal(home: Path, directory: Path) -> str | None:
     """The C5e ``native_audit`` precondition; a refusal message unless available.
 
-    Pure observation: no native backend, unwrap, enrollment or lock wait.
+    Pure observation: no native backend, unwrap, enrollment or lock wait. An
+    unenrolled profile whose active log is checked plaintext (the C7b part-1
+    degraded mode) is pointed at ``audit tail``/``grep`` instead of enrollment.
     """
     from ..keyvault._windows_capability import windows_capability
     from ..keyvault._windows_profile import CustodyError
@@ -176,6 +221,12 @@ def native_audit_refusal(home: Path) -> str | None:
         )
     if capability.available:
         return None
+    if capability.reason == "not-enrolled" and _active_kind(directory) == "ndjson":
+        return (
+            f"audit decrypt refused: audit custody is not enrolled (not-enrolled) and the active audit log "
+            f"{directory / ACTIVE_NAME} is plaintext NDJSON (the degraded mode) — read it with "
+            f"`hermes-mordred audit tail` or `hermes-mordred audit grep`; it needs no decryption. {_NOT_DECRYPTED}"
+        )
     return f"audit decrypt refused: {_windows_gates.describe_capability(capability)}. {_NOT_DECRYPTED}"
 
 
@@ -183,13 +234,14 @@ def _today() -> date:
     return datetime.now(UTC).date()
 
 
-def decrypt_targets(directory: Path, target: date) -> list[Path]:
+def decrypt_targets(directory: Path, target: date) -> dict[str, FileIdentity]:
     """Checked, bounded selection of the files holding ``target``'s entries.
 
     Dated siblings come in C7a rotation order (date, then numeric suffix), so
     entries print oldest first; the active log is last and only for today.
     Each selected entry is checked (regular, private, single link) before any
-    native call, and the selection's combined size is bounded.
+    native call, and the selection's combined size is bounded. Returns names
+    in order with their checked identities.
     """
     with audit_session(directory / ACTIVE_NAME) as session:
         names = [
@@ -197,7 +249,7 @@ def decrypt_targets(directory: Path, target: date) -> list[Path]:
         ]
         if target == _today():
             names.append(ACTIVE_NAME)
-        selected: list[Path] = []
+        selected: dict[str, FileIdentity] = {}
         total = 0
         for name in names:
             metadata = session.stat(name)
@@ -206,8 +258,64 @@ def decrypt_targets(directory: Path, target: date) -> list[Path]:
             total += metadata.size
             if total > DECRYPT_TOTAL_LIMIT:
                 raise PrivateFSError("unsafe", "audit_total_limit")
-            selected.append(directory / name)
+            selected[name] = metadata.identity
     return selected
+
+
+def _history_change(directory: Path, target: date, before: dict[str, FileIdentity], date_text: str) -> str | None:
+    """Re-list after decrypting: a rotation or purge in between must not go unnoticed.
+
+    Appends to the active log keep its identity and are not a change; a new,
+    removed or replaced (re-created) file is.
+    """
+    try:
+        after = decrypt_targets(directory, target)
+    except (PrivateFSError, ValueError) as exc:
+        if not (isinstance(exc, PrivateFSError) and _absent(exc)):
+            return (
+                f"audit history for {date_text} could not be re-checked after decrypting "
+                f"({classify_storage(exc)}: {exc}); the output above may be incomplete — re-run the command"
+            )
+        after = {}
+    changes = [f"added {name}" for name in after if name not in before]
+    changes += [f"removed {name}" for name in before if name not in after]
+    changes += [f"replaced {name}" for name, identity in before.items() if name in after and after[name] != identity]
+    if not changes:
+        return None
+    return (
+        f"audit history for {date_text} changed during decrypt ({', '.join(changes)}): a concurrent rotation or "
+        "purge moved entries, so the output above may be incomplete — re-run the command"
+    )
+
+
+def _is_utf8(encoding: str) -> bool:
+    try:
+        return codecs.lookup(encoding).name == "utf-8"
+    except LookupError:
+        return False
+
+
+@contextlib.contextmanager
+def _utf8_stdout() -> Iterator[None]:
+    """Write this command's output as UTF-8, restoring the stream encoding after.
+
+    A redirected Windows stdout uses the ANSI code page (for example cp932)
+    with strict errors, which cannot encode every decrypted entry or the
+    em-dash header. Streams without ``reconfigure`` are left unchanged.
+    """
+    previous = getattr(sys.stdout, "encoding", None)
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    restore: Callable[..., object] | None = None
+    if isinstance(previous, str) and callable(reconfigure) and not _is_utf8(previous):
+        with contextlib.suppress(ValueError, OSError, LookupError):
+            reconfigure(encoding="utf-8")
+            restore = reconfigure
+    try:
+        yield
+    finally:
+        if restore is not None:
+            with contextlib.suppress(ValueError, OSError, LookupError):
+                restore(encoding=previous)
 
 
 def decrypt(
@@ -225,24 +333,33 @@ def decrypt(
     corrupt, denied or missing key. The caller validated the date (2).
     """
     custody_home = home if home is not None else default_home()
-    refusal = native_audit_refusal(custody_home)
+    refusal = native_audit_refusal(custody_home, directory)
     if refusal is not None:
         _term.emit_error(refusal)
         return 1
     try:
-        targets = decrypt_targets(directory, target)
+        listed = decrypt_targets(directory, target)
     except PrivateFSError as exc:
         if not _absent(exc):
             _term.emit_error(str(_refused("decrypt", directory, exc, _NOT_DECRYPTED)))
             return 1
-        targets = []
+        listed = {}
     except ValueError as exc:
         _term.emit_error(str(_refused("decrypt", directory, exc, _NOT_DECRYPTED)))
         return 1
-    if not targets:
+    if not listed:
         _term.emit_error(f"No audit log file found for {date_text} under {directory}")
         return 1
-    return _decrypt_files(targets, home=custody_home, backend=backend, sink=sink)
+    with _utf8_stdout():
+        rc, finished = _decrypt_files(
+            [directory / name for name in listed], home=custody_home, backend=backend, sink=sink
+        )
+    if finished:
+        change = _history_change(directory, target, listed, date_text)
+        if change is not None:
+            _term.emit_error(change)
+            rc = 1
+    return rc
 
 
 def _decrypt_failure(path: Path, exc: Exception) -> tuple[str, bool] | None:
@@ -279,7 +396,10 @@ def _decrypt_failure(path: Path, exc: Exception) -> tuple[str, bool] | None:
     return None
 
 
-def _decrypt_files(targets: list[Path], *, home: Path, backend: NativeBackend | None, sink: AuditSink) -> int:
+def _decrypt_files(
+    targets: list[Path], *, home: Path, backend: NativeBackend | None, sink: AuditSink
+) -> tuple[int, bool]:
+    """Decrypt each file in order; returns the exit code and whether every file was attempted."""
     from ..keyvault import windows_audit
 
     rc = 0
@@ -294,14 +414,14 @@ def _decrypt_files(targets: list[Path], *, home: Path, backend: NativeBackend | 
             message, stop = failure
             _term.emit_error(message)
             if stop:
-                return 1
+                return 1, False
             rc = 1
             continue
         plural = "entry" if len(entries) == 1 else "entries"
         print(f"# {path.name} — {len(entries)} {plural}")
         for entry in entries:
             print(json.dumps(entry, ensure_ascii=False, sort_keys=True))
-    return rc
+    return rc, True
 
 
 # --- purge ----------------------------------------------------------------------------

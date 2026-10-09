@@ -165,6 +165,13 @@ verifying `mordred_hermes.__file__` selects that wheel. Live CNG reuses the C5d
 audit live gate; this slice adds no new live test. Record native results in the
 validation log below.
 
+Review round 2 adds `test_wizard_windows_audit_cli_decrypt.py` to the same
+scoped job (portable; no POSIX-only stand-ins). Windows 11 acceptance for this
+slice also covers redirected output under a legacy code page: on a ja-JP
+(cp932) install, run `hermes-mordred audit decrypt --date <date> > out.txt`
+for a log holding characters outside cp932 and confirm `out.txt` is complete
+UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
+
 ## Manual live-device validation log
 
 - **2026-10-08 — Windows privacy canonical decisions (C8).**
