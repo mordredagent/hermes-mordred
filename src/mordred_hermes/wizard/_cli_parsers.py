@@ -130,6 +130,12 @@ def _add_egress(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> Non
     p_taint.set_defaults(func=_handle_egress)
 
 
+_MACHINE_BOUND_HELP = (
+    "Windows: acknowledge that the Telegram credentials are sealed by this profile's machine-bound CNG key, "
+    "without per-use presence or portable recovery (otherwise login asks)"
+)
+
+
 def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("telegram", help="Read-only import of your own Telegram account (optional extra)")
     tsub = p.add_subparsers(dest="telegram_command", required=True, metavar="COMMAND")
@@ -139,6 +145,7 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Create the Enclave key without a per-use Touch ID / passcode requirement",
     )
+    p_setup.add_argument("--acknowledge-machine-bound", action="store_true", help=_MACHINE_BOUND_HELP)
     p_setup.set_defaults(func=_handle_telegram)
     p_doctor = tsub.add_parser("doctor", help="Health check from metadata only (no Touch ID, no content)")
     p_doctor.add_argument("--json", action="store_true", help="Machine-readable output")
@@ -149,6 +156,7 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         action="store_true",
         help="Create the Enclave key without a per-use Touch ID / passcode requirement",
     )
+    p_login.add_argument("--acknowledge-machine-bound", action="store_true", help=_MACHINE_BOUND_HELP)
     p_login.set_defaults(func=_handle_telegram)
     p_sync = tsub.add_parser("sync", help="Import new messages from every dialog into the encrypted archive")
     p_sync.add_argument(
@@ -535,8 +543,8 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         "--role",
         dest="roles",
         action="append",
-        choices=["memory", "audit"],
-        help="Role to enroll; repeatable (default: memory). Telegram custody belongs to Telegram setup.",
+        choices=["memory", "audit", "telegram"],
+        help="Role to enroll; repeatable (default: memory). `telegram setup` offers --role telegram.",
     )
     p_native_init.set_defaults(func=_handle_keyvault_native_init)
 

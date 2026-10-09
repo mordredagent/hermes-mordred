@@ -1463,6 +1463,46 @@ recursively. Record source and sdist-wheel results separately in the Manual
 live-device validation log. A real `hermes gateway` start, Desktop, Telegram
 and Windows 11 installed-product acceptance remain separate gates.
 
+### Windows wizard Telegram validation (C6-telegram)
+
+The scoped Windows job adds `test_wizard_windows_telegram.py` and
+`test_wizard_windows_telegram_native.py`. The portable module reuses the C10b
+fixture (real checked transactions, MRKW, MTC1/MTG1 crypto, the real custody
+store and archive) with the native backend, token SID, helper presence and
+platform decisions injected, plus the C6 proof harness for one real Windows
+memory enable; a synthetic Telegram client replaces the network. The native
+module uses an inherited-safe NTFS home, its case alias and a copied home with
+the real `win32` decisions, injecting only the CNG backend, helper presence,
+structural runtime admission, the memory predicate and the synthetic client.
+Neither is TPM, account or product evidence.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_wizard_windows_telegram.py tests/test_wizard_windows_telegram_native.py
+```
+
+Optional real-CNG acceptance requires
+`MORDRED_TEST_WINDOWS_TELEGRAM_WIZARD_LIVE=1`, `MORDRED_WINDOWS_CUSTODY_TEST_ROOT`
+pointing to an existing isolated retained root and `MORDRED_WINKEY_HELPER` set
+to the owned helper, run by an ordinary user:
+
+```powershell
+python -m pytest -q -s -o addopts= -m integration tests/test_wizard_windows_telegram_live.py
+```
+
+On a new UUID profile it runs `keyvault native init --role telegram` (a fresh
+CNG telegram key), the acknowledged login with synthetic credentials and a
+synthetic client, a fresh-process reload of the sealed credentials, `telegram
+doctor --json`, `telegram logout` (a synthetic archive, the credentials and
+the role are kept) and `telegram logout --forget` with the typed confirmation,
+which deletes the credentials, the archive and that profile's telegram
+generation only. No Telegram account,
+phone number, network or model is used; a failure keeps the profile and its
+journals and names the path. The live account gate, Desktop login (C11) and
+Windows 11 remain separate; record results in the Manual live-device
+validation log.
 ### Windows Desktop and extension shutdown validation (C11)
 
 The scoped Windows job adds `tests/test_desktop_windows_api.py`,
