@@ -2308,3 +2308,143 @@ A `KeyboardInterrupt` or `SystemExit` during a Windows memory publication is
 recorded as uncertain and surfaces at the hook boundary as
 `MemoryEncryptionUnavailable`, trading interrupt responsiveness for retained
 uncertainty (fail-closed).
+
+##### Windows installed-runtime memory proof (C5c phase 2)
+
+`keyvault._windows_proof.prove_windows_memory_runtime(home, *, python=None,
+timeout=20.0) -> WindowsRuntimeProof` runs outside every custody and memory
+lock; a canonical session live in the calling thread refuses (`locks-held`).
+It is the only way to obtain a proof. `WindowsRuntimeProof` is a frozen
+dataclass with exactly `python: Path`, `module_path: str`, `helper_path: str`,
+`seam: str`, `home_identity: FileIdentity`, `principal_sid: bytes`,
+`profile_nonce: bytes`, `memory_generation: str`, `wrapped_digest: bytes`,
+`challenge: bytes`, `epoch: int` and `proved_at: float` (monotonic). Direct
+construction and `dataclasses.replace()` raise `TypeError`, and consumers
+accept only the exact issued object, so copies and pickles refuse. Refusals
+raise `WindowsRuntimeProofError` with a stable sanitized `reason`;
+`GatewayDiscoveryUnavailable`, `CustodyError` and classified `PrivateFSError`
+propagate unchanged. There is no force, bool or callback substitute.
+
+1. Capture, load-only: a `windows_custody_session(home)` closed before any
+   launch must show committed memory ownership with a wrapper
+   (`custody-not-enrolled`) and no unresolved journal for any role
+   (`custody-pending`). The read-only
+   `WindowsCustodySession.profile_binding() -> ProfileBinding(home, sid,
+   profile_nonce, epoch, pending)` returns the bound manifest identity, SID,
+   nonce, existing v1 manifest `epoch` and roles with journals, without
+   inventory or native calls. No schema change is needed.
+2. Interpreter: `python`, else `MORDRED_HERMES_PYTHON`, is an authoritative
+   override for C4 `resolve_windows_python`; failure refuses
+   (`interpreter-invalid`) without fallback. An override naming `pythonw.exe`
+   must exist and maps to its `python.exe` sibling. Without an override the C4
+   home-venv candidates apply; launcher selection belongs to C6 routing.
+3. `require_stopped_windows_gateways(home)` runs before the child starts.
+4. Child: C4 `scrubbed_environment`, then every `PYTHON*` variable, every
+   `MORDRED_*` variable except the runtime's own `MORDRED_WINKEY_HELPER`
+   selector, `HERMES_MEMORY_KEY` and the inherited `HERMES_HOME` are removed;
+   the child receives `HERMES_HOME=<home>`, `MORDRED_CONFIG_DECRYPT=0`,
+   `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`, `PYTHONNOUSERSITE=1` and
+   `PYTHONDONTWRITEBYTECODE=1`. The probe is a C1 create-no-replace file in a
+   new exact-private `mordred-proof-<random>` directory under the user temp
+   directory, named `hermes` so the installed runtime `.pth` engages its real
+   startup bootstrap, and is removed afterwards; that cleanup also covers a
+   failed or uncertain probe write. The 32-byte challenge is one hex line on
+   stdin; at most 4 KiB of stdout and 2 KiB of stderr are kept; the timeout
+   kills the child. A launch `OSError` refuses as `launch-failed`, and an
+   output stream still open after the child exits refuses as
+   `output-unterminated`. The child moves its stdout descriptor to stderr,
+   then requires `mordred_hermes.__file__` physically under its C4
+   environment root, `memory_hook_installed()` after the installed bootstrap
+   wrapped every seam of a supported shape, a resolved winkey helper,
+   committed custody, `load_memory_key()` and an in-RAM `seal`/`unseal` of the
+   challenge as `MEMORY.md`. It writes nothing and prints one JSON line with
+   exactly `module`, `helper`, `seam`, `generation`, `wrapped_sha256` and
+   `challenge_sha256 = SHA-256(challenge || "proof")`. Failures print only
+   `mordred-proof:<code>:<exception type>`; no key bytes are ever printed.
+5. Verification: exit status 0; exactly one newline-terminated strict JSON
+   object with no duplicate or extra keys and non-empty string values; a
+   constant-time challenge digest match; the captured generation and wrapped
+   digest; seam `A`, `B` or `C`; a module path physically under the validated
+   environment root, so an editable source checkout cannot prove; and an
+   existing absolute helper equal to `MORDRED_WINKEY_HELPER` when that is set.
+   A fresh load-only capture must equal the first (`proof-stale`).
+
+`validate_windows_runtime_proof(custody, proof)` is the consumption check under
+caller-held locks: the issued, unexpired proof (age 0 to 600 monotonic seconds)
+must match the live identity, SID, nonce, manifest epoch, memory generation and
+wrapper digest, with no pending journal (`proof-stale`, `proof-expired`,
+`proof-not-issued`). `require_issued_proof(proof)` is its lock-free issued/TTL
+part. Test-only `MORDRED_TEST_INJECT_BACKEND` survives the child scrub only
+while pytest runs (`PYTEST_CURRENT_TEST`), the package runs from a source
+checkout (`src/mordred_hermes` beside `pyproject.toml` and `tests/__init__.py`),
+and the value is an absolute, non-symlink, non-traversing `.py` file resolving
+under that `tests/` directory. Every other case drops it.
+
+##### Windows proof-bound memory lifecycle (C5b-2)
+
+`keyvault._memory_storage` adds `enable_memory_encryption(home, proof) ->
+EnableReport(sealed, already_sealed, reconciled, armed)`,
+`disable_memory_encryption(home, proof, *, keep_key=True) ->
+DisableReport(decrypted, already_plaintext, reconciled, opted_out)`,
+`verify_memory_purge_candidates(home) -> PurgeReport(managed, armed,
+opted_out, sealed, broken, plaintext, backups, pending, reasons, may_purge)`
+and `MemoryLifecycleError(MemoryStorageError)` with `operation`, `completed`,
+`remaining` and `uncertain`. Reports carry counts or file names only.
+
+Enable and disable check the issued proof and its TTL before any lock, own
+`windows_custody_session(home)` and join it with
+`windows_memory_session(home, custody=...)` (home -> mordred -> memories),
+then revalidate the proof with `validate_windows_runtime_proof` and run
+`require_stopped_windows_gateways` before any mutation. No installed-runtime
+or Python subprocess runs under lifecycle locks; native CNG helper operations
+remain under lifecycle locks as c5-design allows. Before the first mutation they refuse unrecognized lifecycle
+siblings or siblings without a target, authenticate every existing seal under
+its basename, refuse broken seals, non-UTF-8 files, decrypted text starting with
+the seal magic, per-file or aggregate bound overflow and a directory with no
+room for a staging entry, and prepare every replacement in RAM. Enable seals
+the text the Windows hook reads, normalizing newlines of UTF-8 plaintext before
+sealing; disable publishes the unsealed text as-is.
+
+Each file is converted by a C1 create-no-replace staging sibling
+`.mordred-memory-{seal|open}-<hex of the UTF-8 name>` (never a memory leaf),
+read-back verification, a recheck of the target's identity, size and mtime,
+an atomic checked `replace_bytes` of the target with the same verified bytes,
+read-back verification that authenticates seals, and identity-bound sibling
+deletion. The confidential transaction contract has no rename and a no-replace
+rename cannot replace an existing file, so the target is never absent: it
+holds its old form or the verified new form, and plaintext is never removed
+before its sealed replacement authenticates. Each mutation reports to the
+canonical publication receipt; post-publication failures are uncertain. The
+next transition removes leftover siblings whose target exists, because the
+target is authoritative. A final rescan requires every file converted and no
+staging entry left.
+
+With the memories lock released and home and mordred still held, the proof and
+gateway gate are checked again and the markers transition. These are the only
+Windows writers of `memory-vault.marker` (`memory-encryption enabled\n`) and
+`memory-vault.optout` (`opt-out\n`): the opposite marker is deleted by expected
+identity first, then the requested marker is created no-replace and verified
+(an existing marker of at most 4 KiB is kept), so both never coexist. Enable
+removes the opt-out and creates the marker; disable removes the marker and
+creates the opt-out. After the first mutation any failure raises
+`MemoryLifecycleError`: every file stays plaintext or an authenticated seal,
+enable failures leave the profile unarmed, and disable file failures keep
+custody, remaining ciphertext and the armed marker. Reruns validate every
+seal and finish the transition.
+
+`keep_key=False` refuses before any lock; disable never deletes the key.
+`verify_memory_purge_candidates` takes no proof and performs no native call or
+mutation: it reads custody state and a complete bounded checked scan of the
+memories directory. `may_purge` requires managed custody, no opt-in marker,
+an opt-out marker and no sealed, broken or staging entry. The purge itself stays
+C5e `reset_role` plus C5a `delete_role`, invoked by C6 after this report and a
+fresh stopped-gateway gate.
+
+`pending_lifecycle_siblings(home) -> tuple[str, ...]` is a read-only status
+helper returning only the names of lifecycle staging entries in the checked
+memories directory (an empty tuple when it is absent). An interrupted disable
+can leave a plaintext `open` sibling beside a still sealed target, and an
+interrupted enable a `seal` sibling beside its plaintext target; status must
+report them. Only the next `enable_memory_encryption` or
+`disable_memory_encryption` removes them, and purge verification reports them
+as blockers.

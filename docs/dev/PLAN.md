@@ -1467,3 +1467,51 @@ capability. Memory reset refusals name the C6 ceremony and never relax with
 erasure authorization; the reset failure note no longer claims a journal that
 was never written. A future Windows secret-store port needs its own checked
 `_storage` layout design before these refusals are lifted.
+### Windows installed-runtime memory proof (C5c phase 2)
+
+`keyvault/_windows_proof.py` implements the SPEC protocol with C4
+`resolve_windows_python`, `environment_root` and `scrubbed_environment`, the
+C5c `require_stopped_windows_gateways` gate and C5a load-only custody plus the
+new read-only `profile_binding()`. No custody or memory lock is held while
+validation or proof subprocesses run; a live canonical session refuses first.
+The probe source travels with the parent so its protocol cannot drift, while
+every import, hook and custody call exercises the installed runtime's own
+package. Proofs are minted by a module-private factory and tracked by identity.
+
+Portable tests use a real non-editable environment created from the test
+venv's interpreter: a fresh venv whose site-packages holds a copy of the
+package and the packaged `.pth` bootstrap lines, with the test venv's
+site-packages as a path line for dependencies. The native boundary is the
+file-backed P-256 module `tests/_windows_proof_runtime.py`, selected through
+the guarded test variable. Cases cover the bound happy path, constructor and
+copy refusal, unenrolled and pending custody before launch, override failure
+without fallback, running/unknown inventory before the child, every malformed,
+oversized, extra-output, wrong-digest, wrong-custody, outside-root,
+helper and non-zero report, timeout, custody change during the child,
+missing bootstrap, locks held, and the injection scrub.
+
+### Windows proof-bound memory lifecycle (C5b-2)
+
+The lifecycle lives beside the checked storage in `keyvault/_memory_storage.py`
+and shares one receipt-reporting helper with ordinary memory publication. Plan
+first, mutate second: classify and authenticate the complete bounded inventory,
+validate staging leftovers and build every replacement in RAM before the first
+write, so refusals leave files and markers untouched. Convert through the C1
+create-no-replace sibling and atomic checked replacement, because confidential
+transactions expose no rename and a no-replace rename cannot replace a file.
+Markers transition last under the still-held custody locks after the proof and
+gateway gate are checked again. No installed-runtime or Python subprocess runs
+under lifecycle locks; native CNG helper operations remain under lifecycle
+locks as c5-design allows. `pending_lifecycle_siblings` lets C6 status report
+interrupted staging without mutating it. Purge verification is a load-only report; the
+native purge remains C5e/C5a work driven by C6.
+
+Tests use real proofs from the installed-runtime child and fault injection at
+the checked primitives: sibling create, publish, read-back verify, sibling
+cleanup, opt-out or marker removal and marker or opt-out creation, each followed
+by a coherence check (original plaintext or authenticated seal, markers never
+both) and a successful rerun. Stale epoch, wrapper and generation, another
+profile, copied or expired proofs, running or unknown gateways, forged seals,
+broken seals, impersonating plaintext, orphan siblings, marker exclusivity,
+purge reports and a fresh-process read through `windows_memory_session` are
+covered; `test_windows_memory_proof_live.py` is the gated real-CNG recipe.
