@@ -66,6 +66,7 @@ def test_page_is_a_valid_es_module():
         input=source(),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=60,
         check=False,
     )
@@ -148,6 +149,7 @@ const find = (node, predicate) => {
         ["node", "--input-type=module"],
         input=harness + page + "\n" + script,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=60,
         check=False,

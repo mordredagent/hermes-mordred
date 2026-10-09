@@ -36,6 +36,7 @@ from mordred_hermes.keyvault import _seckey_helper, _windows_capability
 from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 from mordred_hermes.wizard import keyvault_windows_cli
 from mordred_hermes.wizard.uninstall_cli import PURGE_PHRASE
+from tests._private_files import write_private
 from tests.test_private_fs_processes import _child, _line
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_lifecycle import (
@@ -566,7 +567,7 @@ def test_windows_memory_enable_refuses_an_unadmitted_desktop_interpreter(desktop
 
 def test_windows_memory_enable_surfaces_the_pending_approval_queue(desktop_seeded):
     desktop = desktop_seeded
-    (desktop.env.home / "config.yaml").write_text("memory:\n  write_approval: true\n", encoding="utf-8")
+    write_private(desktop.env.home / "config.yaml", b"memory:\n  write_approval: true\n")
     result = post(desktop.http, "/memory/enable", ACKS)
     assert result["ok"] is True
     assert "memory-write-approval-plaintext" in result["warnings"]

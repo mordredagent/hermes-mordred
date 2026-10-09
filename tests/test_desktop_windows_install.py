@@ -143,6 +143,44 @@ def test_windows_install_places_assets_through_checked_primitives(windows_instal
     assert windows_install.spy.calls == []
 
 
+def test_windows_install_migrates_only_the_explicit_home(windows_install, monkeypatch):
+    from ruamel.yaml import YAML
+
+    from mordred_hermes import _config_io
+    from mordred_hermes.wizard import policy_writer
+
+    home = windows_install.home
+    ambient = policy_writer.PolicyWriter().mordred_dir.parent
+    assert ambient != home
+
+    def ambient_state():
+        return {
+            path.relative_to(ambient).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in ambient.rglob("*")
+        }
+
+    before = ambient_state()
+    home.chmod(0o700)  # Private POSIX stand-in for the canonical Windows profile.
+    put(
+        home,
+        "config.yaml",
+        b"plugins:\n  enabled: [other, mordred_network]\n"
+        b"  disabled: [unrelated, mordred_wizard]\n  mordred_network:\n    keep: true\n",
+    )
+    monkeypatch.setattr(policy_writer, "_windows", lambda: True)
+    monkeypatch.setattr(_config_io, "open_confidential_directory", open_private_directory)
+    monkeypatch.setattr(_config_io, "open_optional_confidential_directory", host_optional_private)
+
+    assert install.install(home) == 0
+    config = YAML(typ="safe").load((home / "config.yaml").read_bytes())
+    assert config["plugins"]["enabled"] == ["other", "mordred"]
+    assert config["plugins"]["disabled"] == ["unrelated"]
+    assert config["plugins"]["mordred_network"] == {"keep": True}
+    assert page(home).read_bytes() == asset("desktop/plugin.js")
+    assert ambient_state() == before, "the ambient profile is untouched"
+    assert windows_install.spy.calls == []
+
+
 def test_windows_ensure_page_rewrites_only_a_changed_file(windows_install):
     home = windows_install.home
     assert install.ensure_page(home) is True
