@@ -311,6 +311,11 @@ required.
   clean absence and fail-closed refusals otherwise. Independent review, native
   Windows CI, live CNG, C5e predicate adoption and the separate part 2 wizard
   audit CLI remain.
+  Part 2 (wizard audit CLI) routes Windows `tail`/`grep` through one bounded
+  C7a snapshot, `decrypt` through the `native_audit` capability and C5d
+  `decrypt_windows_log_file`, and `purge` through checked identity-bound
+  deletes, without enrollment or key deletion. Independent review, native
+  Windows CI, live CNG and Windows 11 acceptance remain.
 - [ ] C8: network/LLM/privacy checked readers and fail-closed cache decisions.
   The network slice routes every Windows network decision through one checked
   canonical generation (host-tested; native Windows source/wheel validation of

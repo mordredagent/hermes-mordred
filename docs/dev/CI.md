@@ -146,6 +146,25 @@ verifying `mordred_hermes.__file__` selects that wheel. Live CNG for a managed
 role reuses the C5d audit live gate above; this slice adds no new live test.
 Record native results in the validation log below.
 
+### Windows wizard audit CLI validation (C7b part 2)
+
+Scoped Windows CI also selects `test_wizard_windows_audit_cli.py` and
+`test_wizard_windows_audit_cli_native.py`. The first reuses the C7b part-1 host
+fixture (real custody, canonical coordination, C7a sessions and MRKW/MRAL with
+an injected native P-256 boundary) and covers every verb's routing, refusal and
+call accounting; its POSIX mode and symlink stand-ins skip on Windows. The
+second needs actual Windows: inherited-safe home reads without ACL repair,
+broadened ACL and hard-link refusals, junctioned custom-directory refusals for
+`tail` and `purge`, a decrypt and purge round trip, and a helper-missing
+refusal before native calls. Neither establishes CNG or product acceptance.
+
+The controller runs `uv run pytest -q -o addopts= tests/test_wizard_windows_audit_cli.py
+ tests/test_wizard_windows_audit_cli_native.py` (one command line) against the
+source, then with the isolated sdist-derived installed wheel interpreter after
+verifying `mordred_hermes.__file__` selects that wheel. Live CNG reuses the C5d
+audit live gate; this slice adds no new live test. Record native results in the
+validation log below.
+
 ## Manual live-device validation log
 
 - **2026-10-08 — Windows privacy canonical decisions (C8).**

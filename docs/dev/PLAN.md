@@ -1233,6 +1233,30 @@ backend call accounting and hook/install fail-closed wiring. Native inherited
 ACL and junction cases join scoped Windows CI. Part 2 (wizard audit CLI), C5e
 predicate adoption, native Windows runs and live CNG acceptance remain.
 
+### Windows wizard audit CLI (C7b part 2)
+
+Wizard-only slice: `wizard/audit_cli.py` keeps its POSIX body and dispatches
+`win32` (the C6 `host_platform` seam) to `wizard/_windows_audit_cli.py` from the
+read seam (`_read_log_bytes`), `decrypt` and `purge`, after the shared date and
+path validation. Reads use one bounded C7a `read_audit_snapshot`; decrypt gates
+on the C5e `native_audit` capability, enumerates through one checked C7a session
+(`audit_rotation_names`, per-entry `stat`, entry and aggregate bounds) and calls
+C5d `decrypt_windows_log_file` per file with the stderr sink; purge deletes the
+enumerated dated siblings through the session's identity-bound `delete`. No
+keyvault, privacy_check or extension change, no enrollment or key deletion, and
+keyvault imports stay function-local so minimal installs still import the CLI.
+
+TDD uses the C7b part-1 host fixture (real custody, canonical coordinator, C7a
+sessions, MRKW/MRAL; native P-256 boundary, SID and optional openers injected)
+with tripwires on every POSIX descriptor helper and on the POSIX keyvault
+decrypt route: plaintext tail/grep through the bound, MRAL hint, unsafe
+file/directory/hardlink/junction stand-ins, classified read failures, numeric
+oldest-first decrypt of rotated and active files, refusals before any native
+call (not enrolled, helper missing, copied, unsafe and busy custody), no audit
+writes, bounds, corrupt/foreign files, missing or denied keys, retained
+generations, checked purge, unsafe entries and uncertain stops. Native NTFS ACL,
+hard link and junction cases join scoped Windows CI; live CNG reuses the C5d gate.
+
 ### Windows gateway inventory (C5c)
 
 The keyvault runtime inventory uses psutil's native Windows process APIs.

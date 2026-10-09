@@ -93,6 +93,7 @@ jobs:
           tests/test_windows_encrypted_audit_windows.py
           tests/test_windows_privacy_policy.py
           tests/test_windows_privacy_audit.py tests/test_windows_privacy_audit_windows.py
+          tests/test_wizard_windows_audit_cli.py tests/test_wizard_windows_audit_cli_native.py
           tests/test_llm_windows_policy.py tests/test_llm_windows_policy_native.py
           tests/test_network_windows_policy.py tests/test_network_windows_policy_native.py
           tests/test_network_windows_tor.py tests/test_network_windows_tor_lifecycle.py

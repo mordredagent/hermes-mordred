@@ -2341,6 +2341,67 @@ canonical session, so a plain `append` never nests the home lock;
 `append_in_custody` serves callers that already own custody. The wizard audit
 CLI (C7b part 2) is separate.
 
+#### Windows wizard audit CLI (C7b part 2)
+
+On Windows, `hermes-mordred audit {tail,grep,decrypt,purge}` never uses the
+POSIX descriptor reader, directory-descriptor enumeration or descriptor-relative
+unlink of `wizard/audit_cli.py`. Routing follows the wizard's `host_platform`
+seam into `wizard/_windows_audit_cli.py`; macOS and Linux behavior is unchanged.
+Storage refusals use the closed vocabulary `audit-unsafe`, `audit-unavailable`
+(definite busy, I/O or access denied), `audit-uncertain` and `audit-invalid`,
+print a remedy, exit 1 and never echo file bytes or a traceback. A definite
+absence, including a missing ancestor, is reported as no log.
+
+`tail` and `grep` take one C7a `read_audit_snapshot(active, max_bytes=16 MiB)`
+under the checked audit-directory admission and lock; an oversized log refuses
+(`audit_read_limit`) rather than truncating. Checked plaintext NDJSON (the C7b
+part-1 degraded mode) is printed; an MRAL or non-JSON first line prints the
+existing hint naming `audit decrypt`.
+
+`decrypt --date` first reads `windows_capability(home, "native_audit")`, where
+home is the explicit keyvault home, else an explicit audit directory's parent,
+else the Hermes home. Anything but `enrolled` refuses with the C6 capability
+wording before any backend, lease lookup, unwrap or enrollment: `not-enrolled`
+(remedy `keyvault native init --role audit`), a missing or uncertain helper,
+unsafe, broken or uncertain custody (including a lock held elsewhere) or an
+invalid home. One checked C7a session then selects the date's dated siblings
+in C7a rotation order (date, then numeric suffix, so `.10` follows `.9`) and,
+for today's UTC date, the active log last. Every selected entry is checked
+(regular, private, single link) before any native call; enumeration is bounded
+to 4,096 entries and the selection to 64 MiB. Each file is decrypted by C5d
+`decrypt_windows_log_file(path, home=..., audit_sink=..., backend=...)`, which
+takes its own checked snapshot; raw bytes are never passed. Output and exit
+codes match POSIX (0 all decrypted, 1 refused/missing/corrupt/denied/missing
+key, 2 bad date). The default sink prints each unwrap decision to stderr and
+never appends to the audit log or re-enters custody. A missing native key or a
+denied key operation stops with Windows wording and never regenerates; a
+malformed or plaintext file, a header selector this profile does not own
+(`custody-broken`) or a file rotated away after listing is reported while the
+remaining files still decrypt; storage and pending-policy refusals stop.
+Decrypt never enrolls, creates or rotates a key or log.
+
+`purge --before --yes` deletes, inside one checked C7a session, only enumerated
+dated siblings strictly before the cutoff, re-checking each and using the
+session's identity-bound `delete`; there is no recursive removal. The active
+log, other names and custody files are untouched. An unsafe directory refuses
+before any deletion; an unsafe entry is reported and kept (exit 1) while other
+validated entries are deleted; an uncertain deletion stops at once and reports
+how many files were already purged. The verb has no key option: deleting the
+audit key stays the separate C5e `reset_role("audit")` ceremony.
+
+`audit_cli` prints no mode or status summary, so Windows audit custody status
+remains the C6 `status` capability line. No Windows audit verb reaches the
+secret-store keyvault decrypt route or a Secure Enclave prompt, so the CLI has
+no excluded entry point to refuse with the C6 `excluded_refusal` wording.
+Residuals: enumeration and each C5d snapshot are separate lock scopes, so a
+concurrent rotation can make a listed file vanish (reported) or leave a newly
+rotated file for a rerun; the capability gate never waits, so a busy custody
+refuses as `custody-uncertain` until retried; a retained-only audit role reports
+`not-enrolled` and refuses until a new generation is enrolled, which keeps
+retained generations decryptable; a read or purge briefly holds a custom audit
+directory's lock, during which a C5d custom-directory append fails with a
+recoverable `busy`.
+
 #### Windows capability predicates and flat role reset (C5e)
 
 `keyvault._windows_capability` exposes pure predicates. A frozen

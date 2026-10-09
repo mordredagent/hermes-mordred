@@ -10,6 +10,12 @@ garbage.
 
 Naive read implementation (``read().splitlines()``) is acceptable v1
 because :mod:`privacy_check.audit` enforces a 10 MB rotation cap.
+
+On native Windows every verb is routed to :mod:`._windows_audit_cli` (C7b
+part 2): reads take one bounded C7a checked snapshot, ``decrypt`` goes through
+the ``native_audit`` capability and C5d ``decrypt_windows_log_file``, and
+``purge`` deletes through the C7a session. The POSIX descriptor helpers below
+are never used there; macOS/Linux behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._audit_io import exclusive_audit_lock as _exclusive_audit_lock
 from ..privacy_check._runtime import get_active_audit_path
-from . import _term
+from . import _term, _windows_gates
 from ._defaults import resolve_backend
 from ._runtime import DEFAULT_AUDIT_LOG_PATH
 
@@ -159,6 +165,23 @@ def _read_audit_path(log_path: Path) -> bytes | None:
         os.close(directory_fd)
 
 
+def _on_windows() -> bool:
+    """Route on the wizard's platform seam (C6 ``host_platform``), never ``sys.platform``."""
+    return _windows_gates.host_platform() == _windows_gates.WINDOWS
+
+
+def _read_log_bytes(log_path: Path) -> bytes | None:
+    """POSIX descriptor read, or one checked Windows snapshot (C7b part 2)."""
+    if not _on_windows():
+        return _read_audit_path(log_path)
+    from ._windows_audit_cli import WindowsAuditRefused, read_active_log
+
+    try:
+        return read_active_log(log_path)
+    except WindowsAuditRefused as exc:
+        raise _UnsafeAuditFileError(str(exc)) from exc
+
+
 def _iter_lines(log_path: Path) -> Iterator[str] | None:
     """Yield non-empty lines from ``log_path``.
 
@@ -166,7 +189,7 @@ def _iter_lines(log_path: Path) -> Iterator[str] | None:
     The caller surfaces the appropriate stderr message + exit code.
     """
     try:
-        raw = _read_audit_path(log_path)
+        raw = _read_log_bytes(log_path)
     except (_UnsafeAuditDirectoryError, _UnsafeAuditFileError) as exc:
         _term.emit_error(str(exc))
         return None
@@ -355,6 +378,10 @@ def purge(*, before: str, audit_dir: Path | None = None) -> int:
         return 2
 
     directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
+    if _on_windows():
+        from . import _windows_audit_cli
+
+        return _windows_audit_cli.purge(cutoff=cutoff, directory=directory)
     deleted = 0
     failed = 0
 
@@ -456,6 +483,19 @@ def _stderr_unwrap_sink(entry: dict[str, Any]) -> None:
     print(f"[audit] {event} decision={decision}", file=sys.stderr)
 
 
+def _explicit_keyvault_home(audit_dir: Path | None, keyvault_home: Path | None) -> Path | None:
+    """``keyvault_home``, else the home an explicit ``audit_dir`` implies, else ``None`` (ambient).
+
+    A configured custom audit path does not move the ambient keyvault.
+    Only an explicit audit_dir override carries the direct-API
+    ``<home>/mordred`` convention.
+    """
+    resolved_keyvault_home = keyvault_home
+    if resolved_keyvault_home is None and audit_dir is not None:
+        resolved_keyvault_home = audit_dir.parent
+    return resolved_keyvault_home
+
+
 def decrypt(
     *,
     date: str,
@@ -476,6 +516,11 @@ def decrypt(
     home. An explicit ``audit_dir`` follows the direct-API
     ``<home>/mordred`` convention; ``keyvault_home`` overrides either case.
 
+    On Windows the same date/target rules and exit codes apply, but the home
+    is the native audit custody home (ambient: the Hermes home) and
+    ``backend=None`` means the custody session's CNG backend; see
+    :mod:`._windows_audit_cli`.
+
     Returns:
         0  every resolved file decrypted;
         1  no file for the date, a corrupt file, a denied Enclave
@@ -489,12 +534,18 @@ def decrypt(
         return 2
 
     directory = audit_dir if audit_dir is not None else _resolve_active_audit_path().parent
-    resolved_keyvault_home = keyvault_home
-    if resolved_keyvault_home is None and audit_dir is not None:
-        resolved_keyvault_home = audit_dir.parent
-    # A configured custom audit path does not move the ambient keyvault.
-    # Only an explicit audit_dir override carries the direct-API
-    # ``<home>/mordred`` convention.
+    resolved_keyvault_home = _explicit_keyvault_home(audit_dir, keyvault_home)
+    if _on_windows():
+        from . import _windows_audit_cli
+
+        return _windows_audit_cli.decrypt(
+            target=target,
+            date_text=date,
+            directory=directory,
+            home=resolved_keyvault_home,
+            backend=backend,
+            sink=audit_sink if audit_sink is not None else _stderr_unwrap_sink,
+        )
     try:
         targets = _read_decrypt_targets(directory, target)
     except (_UnsafeAuditDirectoryError, _UnsafeAuditFileError) as exc:
