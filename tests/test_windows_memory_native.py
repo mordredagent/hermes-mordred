@@ -10,6 +10,7 @@ from mordred_hermes._private_fs import PrivateFSError
 from mordred_hermes.keyvault import _memory_storage as storage
 from mordred_hermes.keyvault import _windows_custody as custody
 from mordred_hermes.keyvault.memory_crypto import is_sealed, seal, unseal
+from tests._child_env import with_package_under_test
 from tests._keyvault_fakes import FakeBackend
 from tests.test_private_fs_confidential_windows import descriptor, powershell
 from tests.test_private_fs_confidential_windows import shared_home as shared_home
@@ -122,7 +123,7 @@ print('done', flush=True)
 """
     from mordred_hermes._windows_runtime import scrubbed_environment
 
-    env = scrubbed_environment(os.environ)
+    env = with_package_under_test(scrubbed_environment(os.environ))
     env.update(HERMES_HOME=str(home), HERMES_SAFE_MODE="1", PYTHONUTF8="1")
     child = None
     try:

@@ -15,6 +15,7 @@ from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import log_encryption as log
 from mordred_hermes.keyvault._exceptions import WrapKeyNotFound, WrapNativeUnavailable
 from tests import test_windows_custody
+from tests._private_files import write_private
 
 custody_fixture = test_windows_custody.fs
 
@@ -218,8 +219,7 @@ def test_custom_path_caught_uncertain_mutation_poisons_outer_and_writer(fs, monk
 def test_bounded_malformed_read_never_calls_native(fs, payload):
     a, _, home, backend, _ = enrolled(fs)
     path = home / "mordred" / "audit.log"
-    path.write_bytes(payload)
-    path.chmod(0o600)
+    write_private(path, payload)
     before = len(backend.calls)
     with pytest.raises(log.AuditLogDecryptError):
         a.decrypt_windows_log_file(path, home=home, backend=backend, audit_sink=lambda event: None)
@@ -229,8 +229,7 @@ def test_bounded_malformed_read_never_calls_native(fs, payload):
 def test_gzip_and_snapshot_limits(fs):
     a, _, home, backend, _ = enrolled(fs)
     path = home / "mordred" / "audit.log"
-    path.write_bytes(gzip.compress(b"A" * 2048))
-    path.chmod(0o600)
+    write_private(path, gzip.compress(b"A" * 2048))
     with pytest.raises(PrivateFSError, match="audit_decode_limit"):
         a.decrypt_windows_log_file(
             path, home=home, backend=backend, audit_sink=lambda event: None, max_output_bytes=1024
@@ -309,8 +308,7 @@ def test_missing_active_identity_never_autorecreates(fs):
 def test_malformed_wrapped_dek_refuses_before_any_native_lookup(fs):
     a, _, home, backend, lease = enrolled(fs)
     path = home / "mordred" / "audit.log"
-    path.write_bytes(log._make_log_header(b"invalid wrapper", log.AUDIT_LOG_KEY_ID, lease.native_key_id) + b"\n")
-    path.chmod(0o600)
+    write_private(path, log._make_log_header(b"invalid wrapper", log.AUDIT_LOG_KEY_ID, lease.native_key_id) + b"\n")
     count = len(backend.calls)
     with pytest.raises(log.AuditLogDecryptError):
         a.decrypt_windows_log_file(path, home=home, backend=backend, audit_sink=lambda event: None)
@@ -320,8 +318,7 @@ def test_malformed_wrapped_dek_refuses_before_any_native_lookup(fs):
 def test_malformed_gzip_has_decrypt_error_contract(fs):
     a, _, home, backend, _ = enrolled(fs)
     path = home / "mordred" / "audit.log"
-    path.write_bytes(b"\x1f\x8bmalformed")
-    path.chmod(0o600)
+    write_private(path, b"\x1f\x8bmalformed")
     with pytest.raises(log.AuditLogDecryptError):
         a.decrypt_windows_log_file(path, home=home, backend=backend, audit_sink=lambda event: None)
 
@@ -715,8 +712,7 @@ def test_recorded_audit_forwards_every_public_session_operation():
 def test_append_unrecognized_active_header_is_classified_write_refusal(fs, payload):
     a, _, home, backend, _ = enrolled(fs)
     path = home / "mordred" / "audit.log"
-    path.write_bytes(payload)
-    path.chmod(0o600)
+    write_private(path, payload)
     w = provider(a, home, backend).writer(path)
     for _attempt in range(2):  # Definite: refuses identically, never poisons.
         with pytest.raises(PrivateFSError) as error:
