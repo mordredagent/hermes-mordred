@@ -219,6 +219,15 @@ class VaultSecretStore:
         return default_vault_root()
 
     def _open(self) -> Any:
+        from .store import _platform
+
+        if _platform() == "win32":
+            # The file vault is excluded on Windows (C5e); refuse before any path use.
+            from ...keyvault._windows_capability import KeyvaultUnsupportedOnWindows
+
+            raise TelegramSecretsError("vault_unavailable") from KeyvaultUnsupportedOnWindows(
+                "file_vault", "telegram_vault_secret_store"
+            )
         from ...keyvault import vault
         from ...keyvault._identity import resolve_backend_store, vault_identity
 

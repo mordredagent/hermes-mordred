@@ -2308,3 +2308,87 @@ A `KeyboardInterrupt` or `SystemExit` during a Windows memory publication is
 recorded as uncertain and surfaces at the hook boundary as
 `MemoryEncryptionUnavailable`, trading interrupt responsiveness for retained
 uncertainty (fail-closed).
+
+### Windows Telegram credential custody and checked archive (C10b)
+
+Windows Private Telegram mirrors the Linux security and persistence contract
+above with the independent C5a custody `telegram` role in place of the
+Enclave/TPM helper key. `extension.telegram.tee.default_secret_store()` is the
+selection seam: `win32` returns
+`extension.telegram.windows_secrets.WindowsCustodySecretStore(home=None,
+backend=None, audit_sink=None)`; macOS/Linux return the unchanged
+`TeeSecretStore()`. `TelegramService` and the Hermes tool status use the seam;
+wizard and Desktop callers adopt it in their own slices (C6-telegram, C11).
+
+The store keeps the `TeeSecretStore` duck-typed contract (`load(fresh=)`,
+`load_snapshot`, `update(mutate)`, `update_from_snapshot`, `store`, `flags`,
+`sync_scope`, `save_sync_scope`, `ensure_key`, `invalidate`), the
+`secrets.encode` payload and the file layout:
+`<home>/mordred/telegram/credentials.sealed` is
+`MTC1 || u16 len || wrap_blob || nonce(12) || AES-256-GCM` with the existing
+AAD, and `credentials.meta.json` holds the same non-secret flags and sync
+scope. `wrap_blob` is the 127-byte MRKW wrap of a fresh data key under the
+logical id `mordred-hermes.telegram.credentials.v1` and the current telegram
+generation's profile-scoped native selector. Every operation opens a load-only
+`windows_custody_session(home)`, refuses an unresolved telegram journal
+(`custody_uncertain`) or absent role (`telegram_not_enrolled`), validates the
+lease and the exact native public fingerprint, and never generates a key; the
+explicit enrollment ceremony (`enroll_role("telegram")`) is the wizard's. A
+failed native lookup or missing helper is `tee_unavailable`, never absence.
+Copied homes, another token SID or malformed ownership are `custody_broken`;
+a seal wrapped to another profile or role is `secrets_corrupt`. Nothing
+decrypted is cached and unwrap audit entries are emitted only after the
+custody scope exits. Retained telegram generations are not consulted for
+unsealing; credentials are bound to the current generation.
+
+Per-use presence is excluded: `ensure_key()` (default `require_presence=True`)
+refuses `presence_unsupported`, caused by `KeyvaultUnsupportedOnWindows`
+(`presence`), before any native call; `ensure_key(require_presence=False)`
+only verifies the enrolled role. The Windows store has no `delete_key`.
+
+Credential files are read bounded and identity-checked and published inside
+the checked exact-private Telegram directory transaction through staged
+create-no-replace (new) or checked replacement (existing), then verified;
+every publication is reported to the owning custody receipt. Lock order is the
+archive sync lock (non-blocking), canonical home, mordred, telegram, dialogs.
+Unsafe state refuses (`custody_unsafe`) without ACL repair; an unexpected
+concurrent change refuses rather than being overwritten.
+
+The archive (`index.enc`, `dialogs/<hmac>.enc`) keeps its MTG1 crypto, AAD and
+naming. On Windows `ArchiveStore` admits `telegram` and `dialogs` as checked
+private directories (with their `.gitignore`), reads at most 64 MiB per file
+with an unchanged-identity check, and publishes the same way. A missing file
+or directory is absence only for a definite uncommitted open/stat/read miss;
+corrupt, truncated or swapped ciphertext is `store_undecryptable`, never an
+empty index. Classified refusals map to `store_path_unsafe`,
+`store_write_uncertain` or `store_unavailable`. The one-sync-at-a-time lock
+is the permanent `.mordred-fs.lock` of the private `telegram/sync-lock`
+directory, taken non-blocking with an in-process registry: contention in any
+thread or process is `sync_in_progress` and `archive_busy` is true. Data
+transactions use other directory locks, so status, questions and credential
+updates never wait for a sync. `archive_updated(root)` replaces the raw
+`index.enc` stat used by the Hermes tool coverage.
+
+`store.wipe_archive(root=None, *, forget=False, backend=None)` on Windows
+takes the sync lock and holds the telegram then dialogs transactions while it
+enumerates (bounded to 65,536 entries per directory) and validates every leaf
+before the first checked deletion: segments, then `index.enc`. Unknown names,
+`.gitignore`, locks and directories stay; there is no recursive removal.
+`forget=True` requires the profile's `<home>/mordred/telegram`, validates the
+custody manifest and refuses an unresolved telegram journal before deleting
+anything, adds `credentials.sealed` and `credentials.meta.json` to the same
+validated plan, and only then calls `reset_role("telegram",
+erase_authorized=True)` when the role owns a generation. Nothing is unsealed;
+memory and audit roles are untouched. An ambiguous native deletion keeps its
+intent journal and refuses the next forget until explicit reconciliation.
+Without `forget` the credentials and role are kept. On macOS/Linux
+`forget=True` is refused (`forget_unsupported`); their existing
+`update(None)`/`delete_key` path is unchanged.
+
+On Windows the raw POSIX helpers fail closed: `store._ensure_private_dir`
+raises `store_path_unsafe` (so a directly constructed `TeeSecretStore` refuses
+before any filesystem use) and `VaultSecretStore` refuses `vault_unavailable`
+(caused by the excluded `file_vault` capability) before any path use. The
+Telethon session never appears in logs, exceptions or metadata. Wizard
+telegram ceremonies, a live Telegram account gate and Windows 11 acceptance
+remain separate gates.

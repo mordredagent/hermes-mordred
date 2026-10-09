@@ -18,6 +18,12 @@ Two subkeys are derived from the vault-held ``store_key`` with HKDF-SHA256:
 one encrypts, the other names files — ``HMAC(name_key, "dialog:<id>:<n>")`` —
 so the directory listing does not reveal which chats exist. File count and
 sizes remain observable; that is an accepted leak.
+
+On Windows (C10b) the same files and crypto go through checked private
+storage instead: ``_windows_archive`` admits the directories, performs bounded
+identity-checked reads and staged publication, and the one-sync-at-a-time lock
+is the permanent ``.mordred-fs.lock`` of a dedicated ``sync-lock`` directory,
+always taken non-blocking. macOS/Linux behaviour below is unchanged.
 """
 
 from __future__ import annotations
@@ -30,10 +36,16 @@ import json
 import os
 import secrets
 import stat
-from collections.abc import Iterator
+import sys
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from ..._private_fs import PrivateFSError
+
+if TYPE_CHECKING:
+    from ...keyvault.wrap import NativeBackend
 
 _MAGIC = b"MTG1"
 _NONCE_LEN = 12
@@ -42,6 +54,7 @@ _HKDF_SALT = b"mordred-telegram-store-v1"
 _INDEX_NAME = "index"
 _INDEX_VERSION = 1
 SEGMENT_SIZE = 2000
+_T = TypeVar("_T")
 
 
 class StoreError(RuntimeError):
@@ -50,6 +63,35 @@ class StoreError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _platform() -> str:
+    return sys.platform
+
+
+def _windows() -> bool:
+    return _platform() == "win32"
+
+
+def _store_error(exc: PrivateFSError, *, lock: bool = False) -> StoreError:
+    """Map a classified Windows refusal to a content-free archive code."""
+    if lock and exc.reason == "busy" and exc.commit_state == "not_committed":
+        code = "sync_in_progress"
+    elif exc.commit_state == "uncertain":
+        code = "store_write_uncertain"
+    elif exc.reason in ("unsafe", "access_denied", "unsupported"):
+        code = "store_path_unsafe"
+    else:
+        code = "store_unavailable"
+    return StoreError(code)
+
+
+def _checked(call: Callable[[], _T], *, lock: bool = False) -> _T:
+    """Translate after the checked call has exited every context."""
+    try:
+        return call()
+    except PrivateFSError as exc:
+        raise _store_error(exc, lock=lock) from exc
 
 
 @dataclass
@@ -92,6 +134,9 @@ _GITIGNORE = b"# Mordred Telegram archive: encrypted, never version-controlled.\
 
 
 def _ensure_private_dir(path: Path) -> Path:
+    if _windows():
+        # Raw POSIX mkdir/chmod/atomic_write is never a Windows path (C10b).
+        raise StoreError("store_path_unsafe")
     if path.is_symlink():
         raise StoreError("store_path_unsafe")
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -163,7 +208,20 @@ class ArchiveStore:
         except InvalidTag as exc:
             raise StoreError("store_undecryptable") from exc
 
+    def _decode(self, name: str, blob: bytes) -> Any:
+        try:
+            return json.loads(self._open(name, blob).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise StoreError("store_undecryptable") from exc
+
     def _write(self, rel: str, name: str, payload: Any) -> None:
+        if _windows():
+            from . import _windows_archive
+
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            sealed = self._seal(name, data)
+            _checked(lambda: _windows_archive.write_archive_file(self._root, rel, sealed))
+            return
         from ...keyvault._storage import atomic_write
 
         path = self._root / rel
@@ -172,6 +230,11 @@ class ArchiveStore:
         atomic_write(path, self._seal(name, data))
 
     def _read(self, rel: str, name: str) -> Any | None:
+        if _windows():
+            from . import _windows_archive
+
+            checked = _checked(lambda: _windows_archive.read_archive_file(self._root, rel))
+            return None if checked is None else self._decode(name, checked)
         path = self._root / rel
         if path.is_symlink():
             raise StoreError("store_path_unsafe")
@@ -179,10 +242,7 @@ class ArchiveStore:
             blob = path.read_bytes()
         except FileNotFoundError:
             return None
-        try:
-            return json.loads(self._open(name, blob).decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise StoreError("store_undecryptable") from exc
+        return self._decode(name, blob)
 
     # -- naming -------------------------------------------------------------
 
@@ -232,6 +292,10 @@ class ArchiveStore:
         payload = self._read(f"dialogs/{name}.enc", name)
         if payload is None:
             return None
+        return self._segment_messages(payload)
+
+    @staticmethod
+    def _segment_messages(payload: Any) -> list[StoredMessage]:
         if not isinstance(payload, list):
             raise StoreError("store_undecryptable")
         try:
@@ -245,6 +309,13 @@ class ArchiveStore:
 
     def _last_segment(self, dialog_id: int) -> int:
         """Index of the last existing segment, or -1 when the dialog is empty."""
+        if _windows():
+            from . import _windows_archive
+
+            return (
+                _checked(lambda: _windows_archive.count_segments(self._root, lambda n: self.segment_name(dialog_id, n)))
+                - 1
+            )
         segment = 0
         while (self._root / "dialogs" / f"{self.segment_name(dialog_id, segment)}.enc").exists():
             segment += 1
@@ -252,6 +323,15 @@ class ArchiveStore:
 
     def load_messages(self, dialog_id: int) -> list[StoredMessage]:
         messages: list[StoredMessage] = []
+        if _windows():
+            from . import _windows_archive
+
+            blobs = _checked(
+                lambda: _windows_archive.read_segments(self._root, lambda n: self.segment_name(dialog_id, n))
+            )
+            for name, blob in blobs:
+                messages.extend(self._segment_messages(self._decode(name, blob)))
+            return messages
         segment = 0
         while True:
             chunk = self._load_segment(dialog_id, segment)
@@ -293,12 +373,28 @@ class ArchiveStore:
         instead of parking a thread that could outlive a cancelled task and
         keep the lock forever.
         """
+        if _windows():
+            with _windows_sync_lock(self._root):
+                yield
+            return
         _ensure_private_dir(self._root)
         with _nonblocking_flock(self._root / ".lock"):
             yield
 
     def wipe(self) -> None:
         wipe_archive(self._root)
+
+
+@contextlib.contextmanager
+def _windows_sync_lock(root: Path) -> Iterator[None]:
+    """The checked Windows sync lock; acquisition refusals become store codes."""
+    from . import _windows_archive
+
+    held = _windows_archive.sync_lock(root)
+    _checked(held.__enter__, lock=True)
+    with contextlib.ExitStack() as stack:
+        stack.push(held)
+        yield
 
 
 @contextlib.contextmanager
@@ -331,6 +427,10 @@ def _nonblocking_flock(path: Path) -> Iterator[None]:
 def archive_busy(root: Path | None = None) -> bool:
     """True while another process holds the sync lock (checked without waiting)."""
     base = root if root is not None else telegram_dir()
+    if _windows():
+        from . import _windows_archive
+
+        return _checked(lambda: _windows_archive.busy(base))
     if not (base / ".lock").exists():
         return False
     try:
@@ -342,9 +442,34 @@ def archive_busy(root: Path | None = None) -> bool:
         raise
 
 
-def wipe_archive(root: Path | None = None) -> None:
-    """Delete every archive file, refusing while a sync holds the lock."""
+def archive_updated(root: Path | None = None) -> float | None:
+    """Modification time (epoch seconds) of ``index.enc``; ``None`` when absent."""
     base = root if root is not None else telegram_dir()
+    if _windows():
+        from . import _windows_archive
+
+        mtime_ns = _checked(lambda: _windows_archive.index_mtime_ns(base))
+        return None if mtime_ns is None else mtime_ns / 1_000_000_000
+    index = base / "index.enc"
+    return index.stat().st_mtime if index.exists() else None
+
+
+def wipe_archive(root: Path | None = None, *, forget: bool = False, backend: NativeBackend | None = None) -> None:
+    """Delete every archive file, refusing while a sync holds the lock.
+
+    ``forget`` is the Windows ``logout --forget`` ceremony: after the archive
+    it deletes ``credentials.sealed``/``credentials.meta.json`` and then resets
+    only the custody ``telegram`` role (C5e ``reset_role`` with erasure
+    authorization); memory and audit roles are untouched. On macOS/Linux the
+    Enclave/TPM store's ``update(None)`` and ``delete_key`` remain the forget
+    path, so ``forget=True`` is refused there (``forget_unsupported``).
+    """
+    base = root if root is not None else telegram_dir()
+    if _windows():
+        _windows_wipe(base, forget=forget, backend=backend)
+        return
+    if forget:
+        raise StoreError("forget_unsupported")
     if base.is_symlink() or not base.is_dir():
         return
     with _nonblocking_flock(base / ".lock"):
@@ -357,3 +482,29 @@ def wipe_archive(root: Path | None = None) -> None:
                     child.unlink()
         if dialogs.is_dir() and not dialogs.is_symlink() and not any(dialogs.iterdir()):
             dialogs.rmdir()
+
+
+def _windows_wipe(base: Path, *, forget: bool, backend: NativeBackend | None) -> None:
+    """Checked bounded deletion under the sync lock; never ``rmtree``.
+
+    Without ``forget`` only enumerated archive files go. With ``forget`` the
+    custody role is validated first, then archive files, then the sealed
+    credentials and their metadata, and only then the ``telegram`` role; an
+    ambiguous native deletion stays journaled and refuses the next forget.
+    """
+    from . import _windows_archive
+
+    if not forget:
+        if not _checked(lambda: _windows_archive.directory_present(base)):
+            return
+        with _windows_sync_lock(base):
+            _checked(lambda: _windows_archive.wipe(base))
+        return
+    if base.name != "telegram" or base.parent.name != "mordred":
+        raise ValueError("forget requires the profile's <home>/mordred/telegram directory")
+    if not _checked(lambda: _windows_archive.directory_present(base.parent)):
+        return  # no Mordred directory: no custody manifest, nothing sealed or archived
+    from .windows_secrets import forget_telegram
+
+    with _windows_sync_lock(base):
+        forget_telegram(base.parent.parent, base, backend=backend)

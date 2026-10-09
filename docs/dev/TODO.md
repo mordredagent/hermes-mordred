@@ -382,3 +382,18 @@ Implementation and acceptance remain open:
   Windows journey sources; cut per-call inventory/stat/unwrap cost (shape B
   reads three times per mutation); strengthen the native process-lock test
   beyond `poll() is None`.
+
+### Windows Telegram custody follow-up (C10b)
+
+- [ ] Review the custody-role credential store, checked archive and
+  forget ceremony independently; native source/sdist-wheel runs of
+  `tests/test_windows_telegram_native.py` and the gated real-CNG
+  `tests/test_windows_telegram_live.py` remain controller-owned.
+- [ ] C6-telegram: route wizard telegram setup/login/logout on Windows through
+  `default_secret_store()`, the explicit `enroll_role("telegram")` ceremony
+  (mapping `telegram_not_enrolled`), `require_presence=False` after the
+  machine-bound disclosure, and `wipe_archive(forget=True)` for `--forget`;
+  replace the raw `_orphaned_archive_present` scan.
+- [ ] C11: Desktop/login adoption of the seam and of the presence opt-out
+  (`login_flow` keeps calling `ensure_key()`, which refuses on Windows).
+- [ ] Live Telegram account gate and Windows 11 installation-to-use acceptance.
