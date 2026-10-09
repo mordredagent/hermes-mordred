@@ -3,7 +3,8 @@
 The one ceremony that creates Windows CNG custody keys. It reads
 ``windows_capabilities(home)`` first, refuses unsafe, broken, uncertain or
 helper-less custody with the classified remedy, and only then enrolls the
-requested roles through C5a ``enroll_memory()`` / ``enroll_role("audit")``.
+requested roles through C5a ``enroll_memory()`` / ``enroll_role("audit")`` /
+``enroll_role("telegram")``.
 
 - Enrollment is inert: no memory marker is written and no memory file changes.
   ``encryption enable memory`` may run this ceremony for the memory role; an
@@ -15,8 +16,12 @@ requested roles through C5a ``enroll_memory()`` / ``enroll_role("audit")``.
   :data:`CUSTODY_NOTICE` (no per-use presence, no portable recovery), which
   ``encryption enable memory`` also prints whenever it creates the key.
 
-Telegram custody belongs to the Telegram setup ceremony and is not offered
-here. Heavy imports stay function-local so this module imports everywhere.
+``--role telegram`` (C6-telegram) creates the independent Telegram custody
+key that the C10b credential store seals to; ``telegram setup`` offers to run
+exactly this ceremony and ``telegram login`` refuses until it has. An enrolled
+telegram role is never rotated here (rotation would strand the sealed
+credentials). Heavy imports stay function-local so this module imports
+everywhere.
 """
 
 from __future__ import annotations
@@ -36,9 +41,13 @@ if TYPE_CHECKING:
 
 __all__ = ["CUSTODY_NOTICE", "NATIVE_ROLES", "RoleOutcome", "cli_native_init", "enroll_roles", "native_init"]
 
-NativeRole = Literal["memory", "audit"]
-NATIVE_ROLES: tuple[NativeRole, ...] = ("memory", "audit")
-_CAPABILITY_FOR: dict[NativeRole, CapabilityName] = {"memory": "memory_custody", "audit": "native_audit"}
+NativeRole = Literal["memory", "audit", "telegram"]
+NATIVE_ROLES: tuple[NativeRole, ...] = ("memory", "audit", "telegram")
+_CAPABILITY_FOR: dict[NativeRole, CapabilityName] = {
+    "memory": "memory_custody",
+    "audit": "native_audit",
+    "telegram": "telegram_hardware",
+}
 _OPERATION = "keyvault native init"
 #: SPEC-frozen notice, printed whenever a Windows CNG custody key is created.
 CUSTODY_NOTICE = (
@@ -159,6 +168,11 @@ def native_init(*, home: Path, roles: Sequence[NativeRole] = ("memory",)) -> int
             "Memory custody is inert until `hermes-mordred encryption enable memory` proves the installed Hermes "
             "runtime and seals the memories."
         )
+    if "telegram" in requested:
+        print(
+            "Telegram custody seals the Telegram credentials and the archive key; `hermes-mordred telegram setup` "
+            "and `hermes-mordred telegram login` use it after the machine-bound acknowledgement."
+        )
     print(CUSTODY_NOTICE)
     for capability in capabilities:
         if not capability.supported:
@@ -167,7 +181,7 @@ def native_init(*, home: Path, roles: Sequence[NativeRole] = ("memory",)) -> int
 
 
 def cli_native_init(args: argparse.Namespace) -> int:
-    """argparse handler for ``keyvault native init [--role memory|audit ...]``."""
+    """argparse handler for ``keyvault native init [--role memory|audit|telegram ...]``."""
     from .._home import hermes_home
 
     roles: list[NativeRole] = list(getattr(args, "roles", None) or ["memory"])
