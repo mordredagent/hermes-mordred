@@ -2101,18 +2101,28 @@ outcome settles before another thread appends.
 
 `AuditWriterRefused` is an ordinary exception, so existing Windows guards
 convert it: privacy hooks block tools or raise `MordredIntegrityRefused`.
-Uncertain, unsafe, invalid, custody and interrupted failures are sticky: a
-constructed writer's `refusal` stays set, a refused construction is remembered
-for the process without rescanning history, every privacy hook refuses until
+Exactly these reasons are recoverable: `audit-unavailable` (definite busy, I/O,
+`access_denied` or missing-directory storage failures), `policy-pending`,
+`native-unavailable` (missing helper or transient native failure),
+`custody-nesting` (nested canonical-session misuse) and `entry-rejected`
+(oversized or unserializable entry). They refuse only the current operation and
+never poison: an unrecordable session-start entry refuses the turn that fired
+the session hook and releases the one-shot marker claim so the next session
+start retries it (CLI/TUI hosts re-gate only when the system prompt is rebuilt,
+gateway hosts per turn; strict mode still poisons for disabled or incomplete
+plugins), an unrecordable egress approval becomes a block, an unrecordable
+Windows `pre_install` entry raises `InstallBlocked`, and a recoverable
+construction refusal is retried by the next hook. Everything else is sticky,
+including `audit-uncertain`, `audit-unsafe`, `audit-invalid` (for example a
+relative or `..`-aliased home), `custody-broken`, `custody-pending`,
+`custody-retained`, `native-key-missing`, `retained-ciphertext`,
+`history-unrecognized`, `audit-role-enrolled` and `interrupted`: a constructed
+writer's `refusal` stays set, a refused construction is remembered for the
+process without rescanning history, every privacy hook refuses until
 reconciliation and restart, and a refused session start also poisons the
-process, as for an unreadable policy. Recoverable definite failures (busy,
-I/O, missing directory, pending policy, transient native failure, nested
-canonical misuse, oversized entry) refuse only the current operation and never
-poison: an unrecordable session-start entry refuses only that session and
-releases the one-shot marker claim so the next session start retries it, an
-unrecordable egress approval becomes a block, an unrecordable Windows
-`pre_install` entry raises `InstallBlocked`, and a recoverable construction
-refusal is retried by the next hook. Privacy hooks append outside any held
+process, as for an unreadable policy. A checked-absent Hermes home on the
+default path selects the plaintext writer, whose first append creates `<home>`
+and `<home>/mordred` exact-private. Privacy hooks append outside any held
 canonical session, so a plain `append` never nests the home lock;
 `append_in_custody` serves callers that already own custody. The wizard audit
 CLI (C7b part 2) is separate.

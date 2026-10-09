@@ -134,6 +134,9 @@ def reset_state_for_tests() -> None:
         _state = None
         _poison_reason = None
         _degraded_no_origin_skill_emitted = False
+    from ._windows_audit import _forget_construction_refusals_for_tests
+
+    _forget_construction_refusals_for_tests()
 
 
 def reload_state() -> None:

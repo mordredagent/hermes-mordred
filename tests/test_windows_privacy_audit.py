@@ -527,6 +527,62 @@ def test_unmanaged_directory_rules_refuse_at_construction_consistently(fs, mordr
     assert backend.calls == []
 
 
+def test_checked_absent_home_gets_plaintext_and_the_first_append_creates_it(fs, tmp_path):
+    _, _, _, backend = fs
+    home = tmp_path / "absent-home"
+    path = home / "mordred" / "audit.log"
+    writer = make(path, home, backend)
+    assert writer.mode == "plaintext-degraded"
+    assert not home.exists(), "construction must not create the home"
+    writer.append({"event": "first"})
+    assert [json.loads(line)["event"] for line in path.read_bytes().splitlines()] == ["first"]
+    if os.name != "nt":
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
+        assert stat.S_IMODE((home / "mordred").stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert backend.calls == []
+
+
+def test_checked_absent_home_still_refuses_a_missing_non_default_directory(fs, tmp_path):
+    _, _, _, backend = fs
+    home = tmp_path / "absent-home"
+    with pytest.raises(AuditWriterRefused) as error:
+        make(home / "logs" / "audit.log", home, backend)
+    assert error.value.reason == "audit-unavailable"
+    assert not home.exists()
+
+
+@pytest.mark.parametrize("home", [Path("relative-home"), Path("/tmp/../escaped-home")])
+def test_invalid_canonical_home_is_a_sticky_invalid_refusal(fs, home):
+    _, _, _, backend = fs
+    with pytest.raises(AuditWriterRefused) as constructed:
+        make(home / "mordred" / "audit.log", home, backend)
+    assert constructed.value.reason == "audit-invalid"
+    writer = WindowsPlaintextAuditWriter(home / "mordred" / "audit.log", home=home)
+    with pytest.raises(AuditWriterRefused) as appended:
+        writer.append({"event": "x"})
+    assert appended.value.reason == "audit-invalid"
+    assert writer.refusal == "audit-invalid"
+
+
+@pytest.mark.parametrize("reset", ["runtime", "registry"])
+def test_test_resets_forget_remembered_construction_refusals(fs, reset):
+    from mordred_hermes.privacy_check import _windows_audit
+
+    _, _, home, backend = fs
+    with open_private_directory(home / "mordred", create=True):
+        pass
+    private_write(home / "mordred" / "audit.log", MRAL_LINE)
+    with pytest.raises(AuditWriterRefused):
+        make(home / "mordred" / "audit.log", home, backend)
+    assert _windows_audit._REFUSED_CONSTRUCTIONS
+    if reset == "runtime":
+        _runtime.reset_state_for_tests()
+    else:
+        _audit_support._reset_audit_writer_registry_for_tests()
+    assert not _windows_audit._REFUSED_CONSTRUCTIONS
+
+
 def test_sticky_construction_refusal_is_remembered_without_rescanning(fs, monkeypatch):
     c, _, home, backend = fs
     path = home / "mordred" / "audit.log"

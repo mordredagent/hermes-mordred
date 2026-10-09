@@ -135,9 +135,27 @@ def _entry_bytes(serialize: Callable[[Mapping[str, Any]], bytes], entry: Mapping
         raise AuditEntryRejected(str(exc)) from exc
 
 
+def _require_canonical_home(home: Path) -> None:
+    """Refuse a relative or ``..``-aliased home as invalid, before custody entry."""
+    from .._config_io import CanonicalPaths
+
+    try:
+        CanonicalPaths(home)
+    except ValueError as exc:
+        raise AuditWriterRefused("audit-invalid", str(exc)) from exc
+
+
+def _lexical(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
 @contextlib.contextmanager
 def _custody(factory: Callable[[], AbstractContextManager[WindowsCustodySession]]) -> Iterator[WindowsCustodySession]:
-    """Enter custody, labelling nested-canonical misuse at entry as ``custody-nesting``."""
+    """Enter custody, labelling nested-canonical misuse at entry as ``custody-nesting``.
+
+    Callers validate the canonical home first, so an entry ``ValueError`` here
+    is nesting misuse rather than an invalid path.
+    """
     with contextlib.ExitStack() as stack:
         try:
             session = stack.enter_context(factory())
@@ -236,6 +254,10 @@ def _check_without_mordred(path: Path, session: WindowsCustodySession, *, histor
     from .._audit_session import audit_session
 
     home = session.canonical.home_directory_identity()
+    if home is None and _lexical(path.parent) == _lexical(session.home / _MORDRED_LEAF):
+        # Checked-absent Hermes home: no history can exist below it. The first
+        # append creates ``<home>`` and ``<home>/mordred`` exact-private.
+        return
     with open_optional_private_directory(path.parent) as directory:
         identity = None if directory is None else directory.directory_identity()
     if identity is None:
@@ -391,6 +413,7 @@ class WindowsPlaintextAuditWriter(_WindowsAuditWriter):
         from ..keyvault import _windows_custody
 
         if custody is None:
+            _require_canonical_home(self.home)
             return lambda: _windows_custody.windows_custody_session(self.home, create=True)
         custody.check()
         return lambda: _windows_custody.windows_custody_session(self.home, canonical=custody.canonical)
@@ -484,6 +507,7 @@ def _construct(
 ) -> WindowsEncryptedAuditWriter | WindowsPlaintextAuditWriter:
     from ..keyvault import _windows_custody
 
+    _require_canonical_home(home)
     with _custody(lambda: _windows_custody.windows_custody_session(home, backend=backend)) as session:
         managed = _audit_role_enrolled(session)
         _check_namespace(path, session, history=not managed)

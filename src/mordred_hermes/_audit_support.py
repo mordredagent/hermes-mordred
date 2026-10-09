@@ -205,8 +205,15 @@ def _close_registered_audit_writers() -> None:
 
 
 def _reset_audit_writer_registry_for_tests() -> None:
-    """Test-only reset after callers clear module-local writer memoizers."""
+    """Test-only reset after callers clear module-local writer memoizers.
+
+    Also forgets privacy_check's remembered Windows construction refusals,
+    which otherwise outlive the registry for the whole process.
+    """
     _close_registered_audit_writers()
+    from .privacy_check._windows_audit import _forget_construction_refusals_for_tests
+
+    _forget_construction_refusals_for_tests()
 
 
 atexit.register(_close_registered_audit_writers)
