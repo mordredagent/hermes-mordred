@@ -27,24 +27,26 @@ import gzip
 import io
 import json
 import logging
+import os
 import threading
 import time
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from .._log_rotation import audit_rotation_names, rotate_audit, sweep_audit_retention
 from .._log_rotation import today_utc_date as _today_utc_date
 from .._log_rotation import utcnow_iso as _utcnow_iso
-from ._exceptions import AuditRefusalReason, AuditWriterRefused
+from .._private_fs import PrivateFSError, open_optional_confidential_directory, open_optional_private_directory
+from ._exceptions import AuditEntryRejected, AuditRefusalReason, AuditWriterRefused
 from .audit import DEFAULT_RETENTION_DAYS, DEFAULT_ROTATE_BYTES, Writer, _serialize
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from .._audit_session import AuditSession
-    from .._private_fs import PrivateFSError, PrivateTransaction
+    from .._private_fs import FileIdentity, PrivateTransaction
     from ..keyvault._windows_custody import WindowsCustodySession
     from ..keyvault.windows_audit import WindowsEncryptedWriter, _RecordedAudit
     from ..keyvault.wrap import NativeBackend
@@ -54,9 +56,10 @@ _LOG = logging.getLogger("mordred.privacy_check.audit")
 WindowsAuditMode = Literal["encrypted", "plaintext-degraded"]
 
 # Recoverable outcomes refuse only the current operation; every other reason
-# keeps the writer refused until explicit reconciliation and a restart.
+# keeps the writer (or a refused construction) refused until explicit
+# reconciliation and a restart.
 _RECOVERABLE: Final[frozenset[AuditRefusalReason]] = frozenset(
-    {"audit-unavailable", "policy-pending", "native-unavailable", "entry-rejected"}
+    {"audit-unavailable", "policy-pending", "native-unavailable", "entry-rejected", "custody-nesting"}
 )
 _TRANSIENT_FS_REASONS: Final = frozenset({"busy", "io", "access_denied", "missing"})
 # Bounds for inspecting retained history before a plaintext decision: C7a's
@@ -64,6 +67,14 @@ _TRANSIENT_FS_REASONS: Final = frozenset({"busy", "io", "access_denied", "missin
 _HISTORY_GZIP_LIMIT: Final = 16 * 1024 * 1024 + 65536
 _FIRST_LINE_LIMIT: Final = 4096
 _DAY_NS: Final = 86_400 * 1_000_000_000
+# Canonical ``CanonicalPaths`` Mordred leaf: the default audit directory.
+_MORDRED_LEAF: Final = "mordred"
+
+# Sticky construction refusals, keyed by normalized (audit path, home): a later
+# hook raises the same refusal without reentering custody or rescanning
+# history. Cleared only by a restart (tests use the reset helper below).
+_REFUSED_CONSTRUCTIONS: dict[tuple[str, str], AuditRefusalReason] = {}
+_REFUSED_LOCK = threading.Lock()
 
 
 def _classify_storage(exc: PrivateFSError) -> AuditRefusalReason:
@@ -81,12 +92,13 @@ def _classify_storage(exc: PrivateFSError) -> AuditRefusalReason:
 def classify_audit_failure(exc: BaseException) -> AuditRefusalReason:
     """Map a custody/storage/native failure onto the closed refusal vocabulary."""
     from .._config_io import PolicyPendingError
-    from .._private_fs import PrivateFSError
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
     from ..keyvault._windows_profile import CustodyError
 
     if isinstance(exc, AuditWriterRefused):
         return exc.reason
+    if isinstance(exc, AuditEntryRejected):
+        return "entry-rejected"
     if not isinstance(exc, Exception):
         return "interrupted"
     if isinstance(exc, PrivateFSError):
@@ -100,8 +112,14 @@ def classify_audit_failure(exc: BaseException) -> AuditRefusalReason:
     if isinstance(exc, WrapError):
         return "native-unavailable"
     if isinstance(exc, ValueError):
-        return "entry-rejected"
+        # Identity, bound or validation invariants of the checked storage layers.
+        return "audit-invalid"
     return "audit-uncertain"
+
+
+def refusal_is_recoverable(reason: AuditRefusalReason) -> bool:
+    """True when ``reason`` refuses only the current operation."""
+    return reason in _RECOVERABLE
 
 
 def audit_writer_refusal(writer: object) -> AuditRefusalReason | None:
@@ -109,27 +127,38 @@ def audit_writer_refusal(writer: object) -> AuditRefusalReason | None:
     return writer.refusal if isinstance(writer, _WindowsAuditWriter) else None
 
 
+def _entry_bytes(serialize: Callable[[Mapping[str, Any]], bytes], entry: Mapping[str, Any]) -> bytes:
+    """Serialize before any custody or I/O; reject oversized/unserializable entries."""
+    try:
+        return serialize({"ts": _utcnow_iso(), **dict(entry)})
+    except (TypeError, ValueError) as exc:
+        raise AuditEntryRejected(str(exc)) from exc
+
+
+@contextlib.contextmanager
+def _custody(factory: Callable[[], AbstractContextManager[WindowsCustodySession]]) -> Iterator[WindowsCustodySession]:
+    """Enter custody, labelling nested-canonical misuse at entry as ``custody-nesting``."""
+    with contextlib.ExitStack() as stack:
+        try:
+            session = stack.enter_context(factory())
+        except ValueError as exc:
+            raise AuditWriterRefused("custody-nesting", str(exc)) from exc
+        yield session
+
+
 def _audit_role_enrolled(session: WindowsCustodySession) -> bool:
-    """Observe the audit role from the checked manifest, with no native I/O.
+    """Observe the audit role through C5e ``role_status``, with no native I/O.
 
     ``True`` is a committed current generation; ``False`` is checked, clean
-    absence. Pending or orphan journals and retained generations without a
-    current one refuse. This mirrors C5e ``WindowsCustodySession.role_status``,
-    which is not in this base; replace this body with it once merged.
+    absence. A pending journal and retained generations without a current one
+    refuse here; ``role_status`` itself refuses orphan journals and unowned
+    records as broken custody.
     """
-    from ..keyvault import _windows_custody as custody
-    from ..keyvault._windows_profile import ROLES
-
-    manifest = session._manifest()
-    if manifest is None:
-        if any(custody._read(session._tx, custody._pending_name(role)) is not None for role in ROLES):
-            raise AuditWriterRefused("custody-pending", "orphan custody journal without ownership")
-        return False
-    if session._pending(manifest, "audit") is not None:
+    status = session.role_status("audit")
+    if status.pending:
         raise AuditWriterRefused("custody-pending", "unresolved audit enrollment or deletion journal")
-    state = manifest.role("audit")
-    if state.current is None:
-        if state.retained:
+    if status.current is None:
+        if status.retained:
             raise AuditWriterRefused("custody-retained", "retained audit generations without a current role")
         return False
     return True
@@ -182,8 +211,6 @@ def _inspect_namespace(audit: AuditSession) -> None:
 
 
 def _mordred_absent(exc: BaseException) -> bool:
-    from .._private_fs import PrivateFSError
-
     return (
         isinstance(exc, PrivateFSError)
         and exc.reason == "missing"
@@ -192,22 +219,55 @@ def _mordred_absent(exc: BaseException) -> bool:
     )
 
 
-def _refuse_retained_history(path: Path, session: WindowsCustodySession) -> None:
-    """Read-only checked scan of the audit namespace under the custody session."""
+def _is_default_directory(path: Path, home: FileIdentity | None) -> bool:
+    """Whether an absent audit directory is the canonical ``<home>/mordred``."""
+    if home is None or path.parent.name.casefold() != _MORDRED_LEAF:
+        return False
+    with open_optional_confidential_directory(path.parent.parent) as parent:
+        return parent is not None and parent.directory_identity() == home
+
+
+def _check_without_mordred(path: Path, session: WindowsCustodySession, *, history: bool) -> None:
+    """The ``_audit_scope`` directory rules when no protected Mordred loan exists.
+
+    Only the checked-absent default directory has no history; a missing custom
+    directory and the home itself refuse, exactly as with a Mordred loan.
+    """
     from .._audit_session import audit_session
+
+    home = session.canonical.home_directory_identity()
+    with open_optional_private_directory(path.parent) as directory:
+        identity = None if directory is None else directory.directory_identity()
+    if identity is None:
+        if not _is_default_directory(path, home):
+            raise PrivateFSError("missing", "audit_directory")
+        return
+    if identity == home:
+        raise PrivateFSError("unsafe", "audit_home_lock_order")
+    with audit_session(path, blocking=False) as audit:
+        if audit.directory_identity() != identity:
+            raise PrivateFSError("unsafe", "audit_directory_identity")
+        if history:
+            _inspect_namespace(audit)
+
+
+def _check_namespace(path: Path, session: WindowsCustodySession, *, history: bool) -> None:
+    """Apply the C5d directory rules at construction; scan history when asked.
+
+    Read-only. Opening a checked transaction may create the foundation's
+    permanent directory lock sidecar, never an audit file or directory.
+    """
     from ..keyvault.windows_audit import _audit_scope
 
     try:
         with _audit_scope(path, session) as audit:
-            _inspect_namespace(audit)
+            if history:
+                _inspect_namespace(audit)
         return
     except Exception as exc:
         if not _mordred_absent(exc):
             raise
-    # Checked-absent Mordred directory: no protected loan exists. Inspect the
-    # audit directory read-only under C7a's own lock; absence is an empty view.
-    with audit_session(path, blocking=False) as audit:
-        _inspect_namespace(audit)
+    _check_without_mordred(path, session, history=history)
 
 
 class _WindowsAuditWriter:
@@ -247,7 +307,7 @@ class WindowsEncryptedAuditWriter(_WindowsAuditWriter):
         self._flag = threading.Lock()
 
     def append(self, entry: Mapping[str, Any]) -> None:
-        self._call(lambda: self.inner.append(entry))
+        self._call(entry, lambda: self.inner.append(entry))
 
     def append_in_custody(
         self,
@@ -256,12 +316,15 @@ class WindowsEncryptedAuditWriter(_WindowsAuditWriter):
         custody: WindowsCustodySession,
         transaction: PrivateTransaction | None = None,
     ) -> None:
-        self._call(lambda: self.inner.append_in_custody(entry, custody=custody, transaction=transaction))
+        self._call(entry, lambda: self.inner.append_in_custody(entry, custody=custody, transaction=transaction))
 
     def close(self) -> None:
         self.inner.close()
 
-    def _call(self, call: Callable[[], None]) -> None:
+    def _call(self, entry: Mapping[str, Any], call: Callable[[], None]) -> None:
+        from ..keyvault import log_encryption as mral
+
+        _entry_bytes(mral._serialize, entry)  # the C5d writer's own entry limit
         self._refuse_if_sticky()
         try:
             call()
@@ -322,13 +385,15 @@ class WindowsPlaintextAuditWriter(_WindowsAuditWriter):
         # Each append owns its own custody/audit scope; nothing is cached.
         return None
 
-    def _custody(self, custody: WindowsCustodySession | None) -> AbstractContextManager[WindowsCustodySession]:
-        from ..keyvault._windows_custody import windows_custody_session
+    def _custody_factory(
+        self, custody: WindowsCustodySession | None
+    ) -> Callable[[], AbstractContextManager[WindowsCustodySession]]:
+        from ..keyvault import _windows_custody
 
         if custody is None:
-            return windows_custody_session(self.home, create=True)
+            return lambda: _windows_custody.windows_custody_session(self.home, create=True)
         custody.check()
-        return windows_custody_session(self.home, canonical=custody.canonical)
+        return lambda: _windows_custody.windows_custody_session(self.home, canonical=custody.canonical)
 
     def _append(
         self,
@@ -339,18 +404,19 @@ class WindowsPlaintextAuditWriter(_WindowsAuditWriter):
     ) -> None:
         from ..keyvault.windows_audit import _audit_scope
 
-        data = _serialize({"ts": _utcnow_iso(), **dict(entry)})
+        data = _entry_bytes(_serialize, entry)
         # ``held`` is outermost: the mutex is taken inside custody (lock order)
         # but released only after custody exits, so a late custody-exit failure
-        # settles under the mutex before another thread can append.
+        # settles under the mutex before another thread can append. The role is
+        # validated before the mutex, like C5d's generation check.
         with contextlib.ExitStack() as held:
             published = False
             try:
-                with self._custody(custody) as session:
-                    held.enter_context(self._lock)
-                    self._refuse_if_sticky()
+                with _custody(self._custody_factory(custody)) as session:
                     if _audit_role_enrolled(session):
                         raise AuditWriterRefused("audit-role-enrolled", "restart to use the encrypted audit role")
+                    held.enter_context(self._lock)
+                    self._refuse_if_sticky()
                     audit: _RecordedAudit | None = None
                     try:
                         with _audit_scope(self.path, session, transaction=transaction) as audit:
@@ -389,18 +455,41 @@ class WindowsPlaintextAuditWriter(_WindowsAuditWriter):
         )
 
 
-def _encrypted_writer(path: Path, home: Path, session: WindowsCustodySession) -> WindowsEncryptedAuditWriter:
+def _encrypted_writer(path: Path, home: Path, backend: NativeBackend | None) -> WindowsEncryptedAuditWriter:
+    from ..keyvault import _windows_custody
     from ..keyvault._windows_profile import CustodyError
     from ..keyvault.windows_audit import WindowsAuditProvider
 
-    session.check()
-    try:
-        backend = session.backend  # helper discovery only; no native operation
-    except CustodyError as exc:
-        raise AuditWriterRefused("native-unavailable", "Windows TPM helper unavailable") from exc
-    # C5d's load-only lease: validates ownership and the native public key.
-    inner = WindowsAuditProvider(home, backend=backend).writer(path, custody=session)
-    return WindowsEncryptedAuditWriter(inner)
+    if backend is None:
+        try:
+            backend = _windows_custody.windows_backend()  # helper discovery only; no native operation
+        except CustodyError as exc:
+            raise AuditWriterRefused("native-unavailable", "Windows TPM helper unavailable") from exc
+    # C5d's load-only lease (ownership plus the native public key) in a nested
+    # same-home custody session that joins the factory's canonical session.
+    return WindowsEncryptedAuditWriter(WindowsAuditProvider(home, backend=backend).writer(path))
+
+
+def _construction_key(path: Path, home: Path) -> tuple[str, str]:
+    return (os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(home)))
+
+
+def _forget_construction_refusals_for_tests() -> None:
+    with _REFUSED_LOCK:
+        _REFUSED_CONSTRUCTIONS.clear()
+
+
+def _construct(
+    path: Path, home: Path, backend: NativeBackend | None
+) -> WindowsEncryptedAuditWriter | WindowsPlaintextAuditWriter:
+    from ..keyvault import _windows_custody
+
+    with _custody(lambda: _windows_custody.windows_custody_session(home, backend=backend)) as session:
+        managed = _audit_role_enrolled(session)
+        _check_namespace(path, session, history=not managed)
+        if managed:
+            return _encrypted_writer(path, home, backend)
+    return WindowsPlaintextAuditWriter(path, home=home)
 
 
 def make_windows_audit_writer(audit_path: Path, *, home: Path, backend: NativeBackend | None = None) -> Writer:
@@ -408,22 +497,23 @@ def make_windows_audit_writer(audit_path: Path, *, home: Path, backend: NativeBa
 
     No catch-all plaintext fallback: only checked clean absence of the audit
     role (and of retained ciphertext) selects plaintext, and that downgrade is
-    logged and reported as ``mode == "plaintext-degraded"``.
+    logged and reported as ``mode == "plaintext-degraded"``. Sticky refusals
+    are remembered for the process; recoverable ones are retried.
     """
-    from ..keyvault._windows_custody import windows_custody_session
-
     path, home = Path(audit_path), Path(home)
-    writer: WindowsEncryptedAuditWriter | WindowsPlaintextAuditWriter
+    key = _construction_key(path, home)
+    with _REFUSED_LOCK:
+        remembered = _REFUSED_CONSTRUCTIONS.get(key)
+    if remembered is not None:
+        raise AuditWriterRefused(remembered, "remembered construction refusal; reconcile and restart")
     try:
-        with windows_custody_session(home, backend=backend) as session:
-            if _audit_role_enrolled(session):
-                writer = _encrypted_writer(path, home, session)
-            else:
-                _refuse_retained_history(path, session)
-                writer = WindowsPlaintextAuditWriter(path, home=home)
+        writer = _construct(path, home, backend)
     except Exception as exc:
         reason = classify_audit_failure(exc)
         _LOG.error("Windows audit writer refused for %s: %s (%s: %s)", path, reason, type(exc).__name__, exc)
+        if not refusal_is_recoverable(reason):
+            with _REFUSED_LOCK:
+                _REFUSED_CONSTRUCTIONS.setdefault(key, reason)
         if isinstance(exc, AuditWriterRefused):
             raise
         raise AuditWriterRefused(reason) from exc

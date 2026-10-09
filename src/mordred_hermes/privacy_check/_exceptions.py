@@ -30,6 +30,8 @@ AuditRefusalReason = Literal[
     "history-unrecognized",
     "audit-role-enrolled",
     "entry-rejected",
+    "custody-nesting",
+    "audit-invalid",
     "interrupted",
 ]
 
@@ -52,3 +54,12 @@ class AuditWriterRefused(RuntimeError):
         message = f"Windows audit writer refused: {reason}"
         super().__init__(f"{message} ({detail})" if detail else message)
         self.reason: AuditRefusalReason = reason
+
+
+class AuditEntryRejected(ValueError):
+    """A Windows audit entry was oversized or unserializable; nothing was written.
+
+    A :class:`ValueError` like the POSIX writers' oversize refusal, but
+    distinguishable from invariant/validation ``ValueError`` s raised by the
+    checked storage layers.
+    """

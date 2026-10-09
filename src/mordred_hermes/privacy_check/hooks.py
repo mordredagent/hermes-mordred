@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from .._audit_support import safe_audit_append
 from .._plugin_identity import MIGRATE_COMMAND, PLUGIN_NAME
@@ -70,11 +70,35 @@ def _record(state: Any, entry: dict[str, Any]) -> bool:
     return True
 
 
-def _refuse_windows_session(message: str) -> None:
-    """Poison and refuse, exactly like the C8 Windows unreadable-policy gate."""
-    _runtime.poison(message)
+def _recoverable_refusal(exc: BaseException) -> bool:
+    """A construction refusal that refuses only this operation (retried next)."""
+    if not isinstance(exc, AuditWriterRefused):
+        return False
+    from ._windows_audit import refusal_is_recoverable
+
+    return refusal_is_recoverable(exc.reason)
+
+
+def _refuse_windows_session(message: str, *, sticky: bool) -> NoReturn:
+    """Refuse the session; poison the process only for a sticky refusal.
+
+    Sticky refusals (an unreadable policy as in C8, a poisoned/uncertain writer,
+    retained ciphertext, broken or unsafe custody) poison like the C8 gate.
+    Recoverable audit failures refuse only this session start, so the next one
+    retries once the cause clears.
+    """
+    if sticky:
+        _runtime.poison(message)
     _LOG.error(message)
-    raise MordredIntegrityRefused(message)
+    raise MordredIntegrityRefused(message) from None
+
+
+def _refuse_unrecorded(state: Any, message: str) -> NoReturn:
+    """Refuse a session whose Windows audit entry could not be recorded."""
+    refusal = _audit_refusal(state)
+    if refusal is None:
+        _refuse_windows_session(message, sticky=False)
+    _refuse_windows_session(f"{message} ({refusal})", sticky=True)
 
 
 def _resolve_active_network_path() -> ActivePath | None:
@@ -121,11 +145,12 @@ def _check_plugin_integrity_state(**kwargs: Any) -> _runtime.PluginState:
         if _runtime._platform != "nt":
             raise
         message = f"{_windows_unavailable_message(exc)}; session refused."
-        _runtime.poison(message)
-        raise MordredIntegrityRefused(message) from None
+        _refuse_windows_session(message, sticky=not _recoverable_refusal(exc))
     refusal = _audit_refusal(state)
     if refusal is not None:
-        _refuse_windows_session(f"Mordred cannot write its Windows audit log ({refusal}); session refused.")
+        _refuse_windows_session(
+            f"Mordred cannot write its Windows audit log ({refusal}); session refused.", sticky=True
+        )
     disabled = (
         _runtime.disabled_from_checked(state.checked)
         if state.checked is not None
@@ -176,7 +201,7 @@ def _check_plugin_integrity_state(**kwargs: Any) -> _runtime.PluginState:
                 print(f"mordred: {msg}", file=sys.stderr)
             raise MordredIntegrityRefused(msg)
         if not recorded:
-            _refuse_windows_session("Mordred could not record its Windows integrity audit entry; session refused.")
+            _refuse_unrecorded(state, "Mordred could not record its Windows integrity audit entry; session refused.")
         _LOG.warning(
             "Mordred plugin not loaded or incomplete in %s mode: %s.%s", state.policy_mode, sorted(disabled), hint
         )
@@ -221,7 +246,10 @@ def on_session_start(**kwargs: Any) -> None:
             },
         )
         if not recorded:
-            _refuse_windows_session("Mordred could not record its Windows session audit entry; session refused.")
+            if _audit_refusal(state) is None:
+                # Recoverable: the next session start must retry the marker.
+                _runtime.release_no_origin_skill_emit()
+            _refuse_unrecorded(state, "Mordred could not record its Windows session audit entry; session refused.")
 
 
 def _check_tool_egress(state: Any, tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any] | None:

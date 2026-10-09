@@ -24,6 +24,15 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="actual Windows ACLs and
 VICTIM = b'{"event":"victim"}\n'
 
 
+@pytest.fixture(autouse=True)
+def forget_construction_refusals():
+    from mordred_hermes.privacy_check import _windows_audit
+
+    _windows_audit._forget_construction_refusals_for_tests()
+    yield
+    _windows_audit._forget_construction_refusals_for_tests()
+
+
 def acl(path: Path) -> bytes:
     return subprocess.run(["icacls.exe", str(path)], check=True, capture_output=True).stdout
 

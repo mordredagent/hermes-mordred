@@ -42,8 +42,20 @@ def windows_fs(custody_fixture, monkeypatch):
     monkeypatch.setattr(
         _audit_session.fs, "open_optional_private_directory", _config_io.open_optional_private_directory
     )
+    from mordred_hermes.privacy_check import _windows_audit
+
+    for name in ("open_optional_private_directory", "open_optional_confidential_directory"):
+        monkeypatch.setattr(_windows_audit, name, getattr(_config_io, name))
     monkeypatch.setattr(audit, "_platform", "win32")
-    return custody_fixture
+    forget_construction_refusals()
+    yield custody_fixture
+    forget_construction_refusals()
+
+
+def forget_construction_refusals() -> None:
+    from mordred_hermes.privacy_check import _windows_audit
+
+    _windows_audit._forget_construction_refusals_for_tests()
 
 
 def enroll(fs):
@@ -116,17 +128,21 @@ def test_managed_custom_directory_follows_c5d_child_rules(fs, exists):
     if exists:
         with open_private_directory(custom, create=True):
             pass
-    writer = make(custom / "audit.log", home, backend)
-    assert writer.mode == "encrypted"
     if exists:
+        writer = make(custom / "audit.log", home, backend)
+        assert writer.mode == "encrypted"
         writer.append({"event": "custom"})
         assert [entry["event"] for entry in decrypt(custom / "audit.log", home, backend)] == ["custom"]
     else:
-        with pytest.raises(PrivateFSError) as error:
-            writer.append({"event": "nowhere"})
-        assert error.value.reason == "missing"
+        # Same construction-time directory rule as the unmanaged paths; the
+        # refusal is recoverable, so creating the directory lets a retry pass.
+        with pytest.raises(AuditWriterRefused) as error:
+            make(custom / "audit.log", home, backend)
+        assert error.value.reason == "audit-unavailable"
         assert not custom.exists()
-        assert writer.refusal is None  # a definite, recoverable refusal
+        with open_private_directory(custom, create=True):
+            pass
+        assert make(custom / "audit.log", home, backend).mode == "encrypted"
     assert generated(backend) == 1
 
 
@@ -199,6 +215,32 @@ def test_audit_enrollment_after_construction_stops_the_plaintext_writer(fs):
     assert writer.refusal == "audit-role-enrolled"
     assert audit_files(path.parent) == before
     assert generated(backend) == 1
+
+
+def test_plaintext_role_check_precedes_the_writer_mutex(fs):
+    import threading
+
+    _, _, home, backend = fs
+    writer = make(home / "mordred" / "audit.log", home, backend)
+    writer.append({"event": "before"})
+    enroll(fs)
+    outcome: list[BaseException] = []
+
+    def append() -> None:
+        try:
+            writer.append({"event": "blocked?"})
+        except BaseException as exc:
+            outcome.append(exc)
+
+    with writer._lock:
+        thread = threading.Thread(target=append)
+        thread.start()
+        thread.join(timeout=10)
+        finished = not thread.is_alive()
+    thread.join(timeout=10)
+    assert finished, "the role check waited for the writer mutex"
+    assert isinstance(outcome[0], AuditWriterRefused)
+    assert outcome[0].reason == "audit-role-enrolled"
 
 
 def test_plaintext_append_in_custody_reuses_the_caller_session(fs):
@@ -357,7 +399,8 @@ def test_pending_or_orphan_audit_journal_refuses(fs, monkeypatch, orphan):
         (home / "mordred" / "windows-custody.json").unlink()
     with pytest.raises(AuditWriterRefused) as error:
         make(home / "mordred" / "audit.log", home, backend)
-    assert error.value.reason == "custody-pending"
+    # C5e ``role_status`` reports an orphan journal as broken custody.
+    assert error.value.reason == ("custody-broken" if orphan else "custody-pending")
     assert journal.exists()
     assert backend.calls == []
 
@@ -451,6 +494,126 @@ def test_unsafe_active_audit_object_refuses_without_following(fs, tmp_path):
     assert (home / "mordred" / "audit.log").is_symlink()
 
 
+def test_role_observation_uses_c5e_role_status(fs, monkeypatch):
+    c, _, home, backend = fs
+    enroll(fs)
+    original = c.WindowsCustodySession.role_status
+    roles: list[str] = []
+
+    def spy(self, role):
+        roles.append(role)
+        return original(self, role)
+
+    monkeypatch.setattr(c.WindowsCustodySession, "role_status", spy)
+    writer = make(home / "mordred" / "audit.log", home, backend)
+    assert writer.mode == "encrypted"
+    assert roles == ["audit"]
+
+
+@pytest.mark.parametrize("mordred", [False, True])
+@pytest.mark.parametrize("target", ["missing-custom", "home"])
+def test_unmanaged_directory_rules_refuse_at_construction_consistently(fs, mordred, target):
+    _, _, home, backend = fs
+    if mordred:
+        with open_private_directory(home / "mordred", create=True):
+            pass
+    path = home.parent / "missing-audit" / "audit.log" if target == "missing-custom" else home / "audit.log"
+    with pytest.raises(AuditWriterRefused) as error:
+        make(path, home, backend)
+    assert error.value.reason == ("audit-unavailable" if target == "missing-custom" else "audit-unsafe")
+    assert not (home.parent / "missing-audit").exists()
+    assert not (home / "audit.log").exists()
+    assert (home / "mordred").exists() is mordred
+    assert backend.calls == []
+
+
+def test_sticky_construction_refusal_is_remembered_without_rescanning(fs, monkeypatch):
+    c, _, home, backend = fs
+    path = home / "mordred" / "audit.log"
+    with open_private_directory(home / "mordred", create=True):
+        pass
+    private_write(path, MRAL_LINE)
+    with pytest.raises(AuditWriterRefused) as first:
+        make(path, home, backend)
+    assert first.value.reason == "retained-ciphertext"
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a remembered sticky refusal re-entered custody")
+
+    monkeypatch.setattr(c, "windows_custody_session", forbidden)
+    with pytest.raises(AuditWriterRefused) as second:
+        make(path, home, backend)
+    assert second.value.reason == "retained-ciphertext"
+
+
+def test_recoverable_construction_refusal_is_retried(fs):
+    _, _, home, backend = fs
+    custom = home.parent / "later-audit"
+    with pytest.raises(AuditWriterRefused) as error:
+        make(custom / "audit.log", home, backend)
+    assert error.value.reason == "audit-unavailable"
+    with open_private_directory(custom, create=True):
+        pass
+    assert make(custom / "audit.log", home, backend).mode == "plaintext-degraded"
+
+
+def test_nested_canonical_misuse_is_labelled_and_recoverable(fs, tmp_path):
+    from mordred_hermes._config_io import CanonicalPaths, canonical_session
+
+    _, _, home, backend = fs
+    path = home / "mordred" / "audit.log"
+    writer = make(path, home, backend)
+    other = tmp_path / "other-home"
+    with open_private_directory(other, create=True):
+        pass
+    with canonical_session(CanonicalPaths(other), scope="home"):
+        with pytest.raises(AuditWriterRefused) as appended:
+            writer.append({"event": "nested"})
+        with pytest.raises(AuditWriterRefused) as constructed:
+            make(path, home, backend)
+    assert appended.value.reason == constructed.value.reason == "custody-nesting"
+    assert writer.refusal is None
+    writer.append({"event": "after"})
+
+
+def test_invalid_audit_operation_is_not_an_entry_rejection(fs, monkeypatch):
+    _, _, home, backend = fs
+    writer = make(home / "mordred" / "audit.log", home, backend)
+
+    def invalid(self, *_args, **_kwargs):
+        raise ValueError("expected_identity must be a checked FileIdentity")
+
+    monkeypatch.setattr(AuditSession, "probe", invalid)
+    with pytest.raises(ValueError):
+        writer.append({"event": "x"})
+    assert writer.refusal == "audit-invalid"
+
+
+@pytest.mark.parametrize(("failure", "reason"), [("helper", "native-unavailable"), ("identity", "custody-broken")])
+def test_managed_backend_and_identity_failures_have_precise_labels(fs, monkeypatch, failure, reason):
+    c, _, home, backend = fs
+    enroll(fs)
+    if failure == "helper":
+
+        def missing_helper():
+            raise c.CustodyError("Windows TPM helper unavailable; install the package-bound helper")
+
+        monkeypatch.setattr(c, "windows_backend", missing_helper)
+    else:
+        monkeypatch.setattr(c, "windows_backend", lambda: backend)
+
+        def drifted(self):
+            # ``WindowsCustodySession.backend`` revalidates identity first.
+            raise c.CustodyError("Windows custody session identity changed")
+
+        monkeypatch.setattr(c.WindowsCustodySession, "backend", property(drifted))
+    calls = len(backend.calls)
+    with pytest.raises(AuditWriterRefused) as error:
+        make(home / "mordred" / "audit.log", home, None)
+    assert error.value.reason == reason
+    assert backend.calls[calls:] == []
+
+
 def test_keyvault_probe_is_unsupported_without_file_vault_reads_on_windows(monkeypatch, tmp_path):
     from mordred_hermes.keyvault import _storage
     from mordred_hermes.privacy_check import _keyvault_probe
@@ -532,16 +695,52 @@ def test_construction_refusal_blocks_tools_and_refuses_sessions(hooked):
     assert audit_files(path.parent) == before
 
 
-def test_definite_session_start_audit_failure_refuses_without_sticky_writer_poison(hooked, monkeypatch):
+def test_recoverable_session_start_audit_failure_refuses_without_poison_and_retries(hooked, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(AuditSession, "create", busy)
         with pytest.raises(MordredIntegrityRefused):
             hooks.on_session_start()
+    assert not _runtime.is_poisoned()
     assert _runtime.ensure_state().audit.refusal is None
-    _runtime.reset_state_for_tests()
+    assert hooks.pre_tool_call(tool_name="read_file") is None
+    # The cause cleared: the next session start records the one-shot marker
+    # that the refused attempt could not, exactly once.
+    hooks.on_session_start()
     hooks.on_session_start()
     entries = [json.loads(line) for line in (hooked / "mordred" / "audit.log").read_bytes().splitlines()]
     assert [entry["reason"] for entry in entries] == ["mordred.degraded.no_origin_skill"]
+    assert not _runtime.is_poisoned()
+
+
+def test_sticky_session_start_audit_failure_poisons_the_process(hooked, monkeypatch):
+    def uncertain_create(self, *_args, **_kwargs):
+        raise PrivateFSError("io", "create", commit_state="uncertain")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AuditSession, "create", uncertain_create)
+        with pytest.raises(MordredIntegrityRefused):
+            hooks.on_session_start()
+    assert _runtime.ensure_state().audit.refusal == "audit-uncertain"
+    assert _runtime.is_poisoned()
+    result = hooks.pre_tool_call(tool_name="read_file")
+    assert result is not None and result["action"] == "block"
+
+
+def test_recoverable_construction_refusal_at_session_start_does_not_poison(hooked, monkeypatch):
+    custom = hooked.parent / "session-audit"
+    monkeypatch.setattr(_runtime, "DEFAULT_AUDIT_PATH", custom / "audit.log")
+    with pytest.raises(MordredIntegrityRefused) as refused_start:
+        hooks.on_session_start()
+    assert "audit-unavailable" in str(refused_start.value)
+    assert not _runtime.is_poisoned()
+    blocked = hooks.pre_tool_call(tool_name="read_file")
+    assert blocked is not None and blocked["action"] == "block"
+    with open_private_directory(custom, create=True):
+        pass
+    hooks.on_session_start()
+    entries = [json.loads(line) for line in (custom / "audit.log").read_bytes().splitlines()]
+    assert [entry["reason"] for entry in entries] == ["mordred.degraded.no_origin_skill"]
+    assert hooks.pre_tool_call(tool_name="read_file") is None
 
 
 def test_unrecorded_egress_approval_becomes_a_block(hooked, monkeypatch):

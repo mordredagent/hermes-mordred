@@ -612,6 +612,17 @@ def claim_no_origin_skill_emit() -> bool:
         return True
 
 
+def release_no_origin_skill_emit() -> None:
+    """Undo an unrecorded one-shot claim so the next session start retries it.
+
+    Windows calls this only when a recoverable audit failure kept the marker
+    from being recorded; the session itself is refused.
+    """
+    global _degraded_no_origin_skill_emitted
+    with _state_lock:
+        _degraded_no_origin_skill_emitted = False
+
+
 def disabled_from_checked(checked: CheckedPolicy, siblings: Iterable[str] = SIBLING_PLUGINS) -> set[str]:
     """Evaluate the opt-in list from the same generation as the mode."""
     if checked.enabled is None:

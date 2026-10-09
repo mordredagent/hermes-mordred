@@ -2072,42 +2072,50 @@ On Windows, `privacy_check.audit.make_audit_writer(audit_path, keyvault_home,
 backend)` never consults `keyvault_initialized` or file-vault metadata; that
 probe returns `False` on Windows without reading `_storage`. Inside one
 load-only custody session (home, then mordred) the factory observes the
-independent audit role from the checked manifest and journals, without native
-I/O, then decides:
+independent audit role through C5e `WindowsCustodySession.role_status("audit")`,
+without native I/O, applies the C5d directory rules to the audit path, then
+decides:
 
 | Observed state | Result |
 | --- | --- |
-| Committed current audit generation | C5d `WindowsEncryptedWriter` from `WindowsAuditProvider.writer(..., custody=session)`, reported as `mode == "encrypted"` |
+| Committed current audit generation | C5d `WindowsEncryptedWriter` from `WindowsAuditProvider.writer(...)` in a nested same-home custody session, reported as `mode == "encrypted"` |
 | Checked clean absence: no manifest or an empty audit role, no pending or orphan journal, and no MRAL or unrecognized active or dated history in the audit namespace | Checked plaintext writer reported as `mode == "plaintext-degraded"`, with a logged downgrade warning |
-| Pending or orphan journal, retained generations without a current one, copied or malformed manifest, missing native key or helper, pending policy, unsafe or uncertain storage, retained MRAL or unrecognized history | `AuditWriterRefused` with a closed `reason`; no writer |
+| Pending or orphan journal, retained generations without a current one, copied or malformed manifest, missing native key or helper, pending policy, unsafe or uncertain storage, retained MRAL or unrecognized history, a missing custom audit directory or the home itself as audit directory | `AuditWriterRefused` with a closed `reason`; no writer |
 
 The POSIX catch-all plaintext fallback does not apply: no MRAL log is rotated
 aside and plaintext is never written over retained ciphertext. The factory never
 enrolls, creates or probes native keys beyond C5d's load-only lease (exactly one
-native public-key lookup for a managed role, none otherwise) and creates no
-files or directories at construction. The plaintext writer publishes only
-through C7a sessions in the C5d audit scope. Each append reenters custody,
-refuses once the audit role has been enrolled, takes the writer mutex, refuses
-an MRAL or unrecognized active file, and then appends, rotates, compresses and
-applies retention through the checked session. A missing `<home>/mordred` is
-created exact-private at the first append; a custom directory must already be
+native public-key lookup for a managed role, none otherwise). Construction
+creates no audit file or directory; its checked transactions may create only
+the foundation's permanent directory lock sidecar. The directory rules are the
+same whether or not `<home>/mordred` exists: only the checked-absent default
+`<home>/mordred` counts as empty history, while a missing custom directory or
+the home itself refuses. The plaintext writer publishes only through C7a
+sessions in the C5d audit scope. Each append reenters custody and refuses once
+the audit role has been enrolled, before taking the writer mutex; it then
+refuses an MRAL or unrecognized active file, and appends, rotates, compresses
+and applies retention through the checked session. A missing `<home>/mordred`
+is created exact-private at the first append; a custom directory must already be
 exact-private. The mutex is released only after custody exits, so a late
 outcome settles before another thread appends.
 
 `AuditWriterRefused` is an ordinary exception, so existing Windows guards
-convert it: privacy hooks block tools or raise `MordredIntegrityRefused`, and
-poison the process as for an unreadable policy. Uncertain, unsafe, custody and
-interrupted failures make a constructed writer's `refusal` sticky, after which
-every privacy hook refuses until reconciliation and restart. Recoverable definite
-failures (busy, I/O, missing directory, pending policy, transient native
-failure, oversized entry) refuse only the current operation: an unrecordable
-session-start entry refuses the session, an unrecordable egress approval becomes
-a block, and an unrecordable Windows `pre_install` entry raises
-`InstallBlocked`. Privacy hooks append outside any held canonical session, so a
-plain `append` never nests the home lock; `append_in_custody` serves callers
-that already own custody. The wizard audit CLI (C7b part 2) is separate. Until
-C5e merges, the role observation mirrors C5e `role_status` semantics, refusing
-retained-only generations.
+convert it: privacy hooks block tools or raise `MordredIntegrityRefused`.
+Uncertain, unsafe, invalid, custody and interrupted failures are sticky: a
+constructed writer's `refusal` stays set, a refused construction is remembered
+for the process without rescanning history, every privacy hook refuses until
+reconciliation and restart, and a refused session start also poisons the
+process, as for an unreadable policy. Recoverable definite failures (busy,
+I/O, missing directory, pending policy, transient native failure, nested
+canonical misuse, oversized entry) refuse only the current operation and never
+poison: an unrecordable session-start entry refuses only that session and
+releases the one-shot marker claim so the next session start retries it, an
+unrecordable egress approval becomes a block, an unrecordable Windows
+`pre_install` entry raises `InstallBlocked`, and a recoverable construction
+refusal is retried by the next hook. Privacy hooks append outside any held
+canonical session, so a plain `append` never nests the home lock;
+`append_in_custody` serves callers that already own custody. The wizard audit
+CLI (C7b part 2) is separate.
 
 #### Windows capability predicates and flat role reset (C5e)
 
