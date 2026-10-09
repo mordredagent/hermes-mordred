@@ -90,7 +90,7 @@ from .memory_crypto import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from importlib.machinery import ModuleSpec
     from types import ModuleType
 
@@ -189,7 +189,14 @@ class _HookConfig:
     @property
     def key(self) -> bytes | None:
         """The live memory key, or ``None`` when unset / unusable."""
-        return _decode_env_key(self.environ)
+        from ._memory_key import MemoryKeyError, resolve_memory_key
+
+        try:
+            return resolve_memory_key(home=self.home, platform=sys.platform, environ=self.environ)
+        except MemoryKeyError as exc:
+            raise MemoryEncryptionUnavailable(
+                "TPM memory key unavailable; restore the original TPM/key material"
+            ) from exc
 
 
 def _decode_env_key(environ: Mapping[str, str]) -> bytes | None:
@@ -572,25 +579,55 @@ def _publish(store: Any, name: str, wrapper: Any, *, static: bool) -> None:
     setattr(store, name, staticmethod(wrapper) if static else wrapper)
 
 
+@contextlib.contextmanager
+def _profile_operation(cfg: _HookConfig, path: Path, *, reading: bool = False) -> Iterator[_HookConfig]:
+    """Pin the home and serialize Linux memory I/O with provisioning and purge.
+
+    Even a disarmed write joins the lock: enable may arm the profile while that
+    write is in flight. A stale MemoryStore from another profile must refuse.
+    """
+    if sys.platform != "linux":
+        yield cfg
+        return
+    from ._memory_key import MemoryKeyError, linux_memory_managed, memory_key_lock
+
+    home = cfg.home
+    if path.is_symlink() or path.parent.resolve() != (home / "memories").resolve():
+        raise MemoryEncryptionUnavailable("memory path does not belong to the active profile")
+    bound = _HookConfig(environ=cfg.environ, delimiter=cfg.delimiter, home_factory=lambda: home)
+    # Reading an unmanaged profile needs no filesystem mutations. If enable
+    # races this read, the reader still validates any seal it observes; it
+    # never publishes data. Every writer continues to take the lifecycle lock.
+    if reading and not linux_memory_managed(home):
+        yield bound
+        return
+    try:
+        with memory_key_lock(home):
+            yield bound
+    except MemoryKeyError as exc:
+        raise MemoryEncryptionUnavailable("TPM memory lifecycle lock or key unavailable") from exc
+
+
 def _wrap_write_file(store: Any, cfg: _HookConfig) -> None:
     """The single content write of every shape — and the one place plaintext can escape."""
     original = store._write_file
 
     @functools.wraps(original)
     def _write_file(path: Path, entries: list[str]) -> Any:
-        if _sealed_on_disk(path):
-            key = _require_key_for_sealed(cfg, path)  # sealed stays sealed, armed or not
-        elif cfg.armed:
-            key = _require_key(cfg, path, writing=True)
-        else:
-            _refuse_magic_first_entry(entries, path)  # only this branch writes entries verbatim
-            return original(path, entries)
-        content = cfg.delimiter.join(entries) if entries else ""
-        sealed = seal(content.encode("utf-8"), key=key, name=path.name)
-        # Hand the blob back as a ONE-entry list: `delimiter.join([x]) == x`, so
-        # upstream's atomic write and its OSError -> RuntimeError translation are
-        # reused verbatim instead of reimplemented here.
-        return original(path, [sealed.decode("ascii")])
+        with _profile_operation(cfg, path) as bound:
+            if _sealed_on_disk(path):
+                key = _require_key_for_sealed(bound, path)  # sealed stays sealed, armed or not
+            elif bound.armed:
+                key = _require_key(bound, path, writing=True)
+            else:
+                _refuse_magic_first_entry(entries, path)  # only this branch writes entries verbatim
+                return original(path, entries)
+            content = bound.delimiter.join(entries) if entries else ""
+            sealed = seal(content.encode("utf-8"), key=key, name=path.name)
+            # Hand the blob back as a ONE-entry list: `delimiter.join([x]) == x`, so
+            # upstream's atomic write and its OSError -> RuntimeError translation are
+            # reused verbatim instead of reimplemented here.
+            return original(path, [sealed.decode("ascii")])
 
     _publish(store, "_write_file", _write_file, static=True)
 
@@ -601,15 +638,16 @@ def _wrap_read_raw_checked(store: Any, cfg: _HookConfig) -> None:
 
     @functools.wraps(original)
     def _read_raw_checked(path: Path) -> tuple[str, bool]:
-        raw, read_ok = original(path)
-        if not read_ok or not raw:
-            return raw, read_ok  # absent / unreadable: upstream's contract is untouched
-        if is_sealed(raw):
-            return _unseal_text(raw, path=path, key=_require_key(cfg, path, writing=False)), True
-        _refuse_broken_seal(raw, path)  # `raw` IS the file text here: classify it directly
-        if cfg.armed:
-            _note_plaintext_seen(path)
-        return raw, True
+        with _profile_operation(cfg, path, reading=True) as bound:
+            raw, read_ok = original(path)
+            if not read_ok or not raw:
+                return raw, read_ok  # absent / unreadable: upstream's contract is untouched
+            if is_sealed(raw):
+                return _unseal_text(raw, path=path, key=_require_key(bound, path, writing=False)), True
+            _refuse_broken_seal(raw, path)  # `raw` IS the file text here: classify it directly
+            if bound.armed:
+                _note_plaintext_seen(path)
+            return raw, True
 
     _publish(store, "_read_raw_checked", _read_raw_checked, static=True)
 
@@ -626,16 +664,17 @@ def _wrap_read_file(store: Any, cfg: _HookConfig) -> None:
 
     @functools.wraps(original)
     def _read_file(path: Path) -> list[str]:
-        entries: list[str] = original(path)
-        # A sealed file holds no delimiter, so it always parses as exactly one
-        # entry — already stripped by upstream, which `unseal` tolerates.
-        if len(entries) == 1 and is_sealed(entries[0]):
-            plaintext = _unseal_text(entries[0], path=path, key=_require_key(cfg, path, writing=False))
-            return _split_entries(plaintext, cfg.delimiter)
-        _refuse_broken_seal_on_disk(entries, path)
-        if entries and cfg.armed:
-            _note_plaintext_seen(path)
-        return entries
+        with _profile_operation(cfg, path, reading=True) as bound:
+            entries: list[str] = original(path)
+            # A sealed file holds no delimiter, so it always parses as exactly one
+            # entry — already stripped by upstream, which `unseal` tolerates.
+            if len(entries) == 1 and is_sealed(entries[0]):
+                plaintext = _unseal_text(entries[0], path=path, key=_require_key(bound, path, writing=False))
+                return _split_entries(plaintext, bound.delimiter)
+            _refuse_broken_seal_on_disk(entries, path)
+            if entries and bound.armed:
+                _note_plaintext_seen(path)
+            return entries
 
     _publish(store, "_read_file", _read_file, static=True)
 
@@ -653,10 +692,11 @@ def _wrap_drift_on_snapshot(store: Any, cfg: _HookConfig) -> None:
     @functools.wraps(original)
     def _detect_external_drift(self: Any, target: str, raw: str) -> Any:
         path = Path(self._path_for(target))
-        if not (cfg.armed or _sealed_on_disk(path)):
-            return original(self, target, raw)  # plaintext at rest and disarmed: upstream logic intact
-        key = _require_key(cfg, path, writing=True)
-        return _drift_on_plaintext(self, target, path, raw, cfg=cfg, key=key)
+        with _profile_operation(cfg, path) as bound:
+            if not (bound.armed or _sealed_on_disk(path)):
+                return original(self, target, raw)  # plaintext at rest and disarmed: upstream logic intact
+            key = _require_key(bound, path, writing=True)
+            return _drift_on_plaintext(self, target, path, raw, cfg=bound, key=key)
 
     _publish(store, "_detect_external_drift", _detect_external_drift, static=False)
 
@@ -674,12 +714,13 @@ def _wrap_drift_self_read(store: Any, cfg: _HookConfig) -> None:
     @functools.wraps(original)
     def _detect_external_drift(self: Any, target: str) -> Any:
         path = Path(self._path_for(target))
-        raw = _sealed_text_at(path)
-        if raw is None:
-            return original(self, target)  # absent / unreadable / plaintext: upstream logic intact
-        key = _require_key(cfg, path, writing=False)
-        plaintext = _unseal_text(raw, path=path, key=key)
-        return _drift_on_plaintext(self, target, path, plaintext, cfg=cfg, key=key)
+        with _profile_operation(cfg, path) as bound:
+            raw = _sealed_text_at(path)
+            if raw is None:
+                return original(self, target)  # absent / unreadable / plaintext: upstream logic intact
+            key = _require_key(bound, path, writing=False)
+            plaintext = _unseal_text(raw, path=path, key=key)
+            return _drift_on_plaintext(self, target, path, plaintext, cfg=bound, key=key)
 
     _publish(store, "_detect_external_drift", _detect_external_drift, static=False)
 
@@ -1093,7 +1134,14 @@ def warn_when_memory_is_locked(
     resolved = _home_factory(home)()
     if str(resolved) in _LOCKED_WARNED:
         return False
-    key = _decode_env_key(os.environ if environ is None else environ)
+    from ._memory_key import MemoryKeyError, resolve_memory_key
+
+    try:
+        key = resolve_memory_key(
+            home=resolved, platform=sys.platform, environ=os.environ if environ is None else environ
+        )
+    except MemoryKeyError:
+        key = None
     for path in sorted((resolved / "memories").glob("*.md")):
         note = _locked_memory_note(path, key)
         if not note:
@@ -1123,6 +1171,8 @@ def _locked_memory_note(path: Path, key: bytes | None) -> str:
         )
     if _opens_with(text, path, key):
         return ""
+    if sys.platform == "linux":
+        return f"agent memory {path.name} is sealed but cannot be opened; restore the original TPM and memory key"
     return (
         f"agent memory is sealed but {_MEMORY_KEY_ENV} is not available — {path.name} "
         f"cannot be opened, so this session starts with an empty memory; {_REMEDY}."

@@ -226,6 +226,30 @@ the source remains usable, and failure paths leave no partial destination.
 
 ## Cross-cutting (ongoing through the operational phase)
 
+### Linux private Telegram (proposed)
+
+- [x] Review the [design](SPEC.md#linux-private-telegram-design) and
+  [implementation plan](PLAN.md#linux-private-telegram-implementation-plan); land contracts
+  before component implementation PRs (contract PR #181).
+- [x] Verify the unchanged Linux TPM helper, Python wrap/unwrap, and Telegram
+  secret-store path on actual EC2 NitroTPM before feature development (2026-10-07).
+  Cross-instance rejection, stop/start persistence, CLI setup, and deletion
+  passed; 64 native and 172 focused Python tests passed. CI swtpm evidence
+  remains separate. See [CI.md](CI.md#manual-live-device-validation-log).
+- [x] Keyvault: TPM-wrapped memory-key custody, runtime resolution, and probes.
+- [x] Wizard: Linux memory lifecycle, uninstall, Telegram setup and diagnostics.
+- [x] Desktop/extension: platform-aware hardware and memory setup, preserving
+  macOS behavior and existing client/API compatibility.
+- [x] Verify synthetic custody/service integration independently on actual EC2
+  NitroTPM and swtpm; verify the packaged Linux Desktop setup.
+- [x] Operator-assisted live Telegram login, minimal sync, and private-model
+  questions on actual EC2 NitroTPM (2026-10-07).
+- [ ] Live-account cancel/logout and live Hermes/Desktop question UI acceptance.
+- [x] Split publication into contract, keyvault, wizard, and Desktop/extension
+  PRs targeting `dev`, in dependency order.
+
+### Ongoing maintenance
+
 - Keep maintained documentation indexed, English-only, free of stale local
   links and brittle line-number references.
 - Keep SPEC, PLAN, PATHS, POLICY, HOOK_PAYLOADS, and machine contracts aligned

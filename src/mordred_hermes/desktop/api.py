@@ -169,18 +169,30 @@ async def _require_hermes_model() -> JSONResponse | None:
 
 
 @router.get("/status")
-async def status() -> dict[str, Any]:
+async def status(client_version: int = 1) -> dict[str, Any]:
     """Setup progress from metadata only (no Touch ID, no secrets, no content)."""
+    platform_status = {
+        "platform": sys.platform,
+        "telegram_supported": sys.platform == "darwin" or (sys.platform == "linux" and client_version >= 2),
+        "telegram_platform_supported": sys.platform in ("darwin", "linux"),
+        "hardware_kind": {"darwin": "secure_enclave", "linux": "tpm"}.get(sys.platform),
+        "user_presence_supported": sys.platform == "darwin",
+    }
+    jobs = [_job_view(j) for j in _JOBS.values() if j.state == "running"]
+    if not platform_status["telegram_supported"]:
+        return {"ok": True, **platform_status, "checks": {}, "jobs": jobs}
+
     from ..wizard.telegram_setup_cli import run_checks
 
     checks = await asyncio.to_thread(run_checks)
     return {
         "ok": True,
+        **platform_status,
         "hermes_model": await hermes_model_check(),
         "checks": {c.name: {"ok": c.ok, "detail": c.detail} for c in checks},
         "hermes_venice_key": _hermes_venice_key() is not None,
         "telegram_api": bool((await asyncio.to_thread(_store().flags) or {}).get("api_configured")),
-        "jobs": [_job_view(j) for j in _JOBS.values() if j.state == "running"],
+        "jobs": jobs,
     }
 
 
@@ -210,8 +222,31 @@ async def job_status(job_id: str) -> Any:
 # -- step 1: Secure Enclave ---------------------------------------------------------------
 
 
+@router.post("/hardware/build")
+async def hardware_build() -> Any:
+    if sys.platform == "darwin":
+        return await enclave_build()
+    if sys.platform != "linux":
+        return _error("telegram_platform_unsupported")
+
+    async def work(job: _Job) -> None:
+        from ..wizard.keyvault_native_cli import enable_tpm
+
+        job.progress = {"message": "Building and probing the TPM 2.0 helper…"}
+        _emit("progress", {"job_id": job.job_id, **job.progress})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = await asyncio.to_thread(enable_tpm)
+        if rc != 0:
+            raise _Fail("tpm_build_failed")
+
+    return {"ok": True, **_job_view(_start_job("hardware", work))}
+
+
 @router.post("/enclave/build")
 async def enclave_build() -> Any:
+    if sys.platform != "darwin":
+        return _error("telegram_platform_unsupported")
+
     async def work(job: _Job) -> None:
         from ..wizard.keyvault_native_cli import enable_se
 
@@ -280,6 +315,12 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     in one flow, so the vault is unlocked at most once (not at all when it is
     created here).
     """
+    if sys.platform not in ("darwin", "linux"):
+        return _error("telegram_platform_unsupported")
+
+    if sys.platform == "linux" and (body or {}).get("acknowledge_tpm_no_recovery") is not True:
+        return _error("telegram_platform_unsupported")
+
     from ..extension.telegram.memory_guard import memory_encryption_active
     from ..wizard import env_decrypt_cli, memory_cli
     from ..wizard._flow_session import FlowSession
@@ -287,6 +328,8 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
 
     if await asyncio.to_thread(memory_encryption_active):
         return {"ok": True, "already": True}
+    if sys.platform == "linux":
+        return await _linux_memory_enable()
     requested = (body or {}).get("unattended")
     unattended = requested if isinstance(requested, bool) else None
     prompt = _FixedPassphrase(generate_recovery_passphrase())
@@ -310,6 +353,21 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     if prompt.used:
         result["recovery_passphrase"] = prompt._passphrase  # shown once; never persisted by Mordred
     return result
+
+
+async def _linux_memory_enable() -> Any:
+    from ..extension.telegram.memory_guard import memory_encryption_active
+    from ..wizard import memory_cli
+    from ..wizard.vault_cli import _resolve_root
+
+    def enable_linux() -> int:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return memory_cli.enable(home=_home(), root=_resolve_root(None), platform="linux")
+
+    rc = await asyncio.to_thread(enable_linux)
+    if rc != 0 or not await asyncio.to_thread(memory_encryption_active):
+        return _error("memory_encryption_failed", 500)
+    return {"ok": True, "restart_required": True}
 
 
 # -- step 3/4: Telegram API credentials and login -----------------------------------------------

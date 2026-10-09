@@ -133,6 +133,11 @@ Accepted limitations include:
 
 ### Telegram import
 
+Linux enablement is proposed in the
+[Linux private Telegram design](#linux-private-telegram-design).
+That draft does not change the current macOS-only agent-memory requirement;
+the TPM credential backend alone is not full Linux Telegram support.
+
 The optional `telegram` extra lets the operator import their **own** Telegram
 account (MTProto user session via Telethon) and ask questions over it from the
 browser extension, using a Venice.ai private model.
@@ -942,3 +947,229 @@ Operators should start with `hermes-mordred setup`; developers should follow
 [`CI.md`](./CI.md) and record the applicable manual live-device validations.
 Do not substitute version strings for checking which environment/import path
 is actually under test.
+
+## Linux Private Telegram Design
+
+Status: dedicated-key implementation completed on 2026-10-07; acceptance results
+are recorded below and in the validation log.
+Implementation and EC2 acceptance are recorded in PLAN.md and CI.md; live-account
+acceptance remains separate from synthetic hardware validation.
+
+### Intent and success criteria
+
+Enable Mordred's read-only private Telegram integration on Linux, including
+headless EC2 and Hermes Desktop. Preserve encrypted credentials, encrypted
+archives, mandatory encrypted agent memory, read-only MTProto, and Venice/local
+model restrictions. Validate on EC2 throughout implementation, including a
+packaged Desktop check. The user requested planning before implementation.
+
+Success requires the actual Linux Hermes interpreter to read and write sealed
+memory across process restarts, the Telegram setup to complete with a usable
+TPM, and failures to refuse without exposing plaintext or losing keys. A
+mocked platform check or successful helper compilation is insufficient.
+
+### Current evidence
+
+The following describes the unchanged pre-feature baseline `f3211c6fb`; the
+implementation now supplies the dedicated provider, lifecycle, and Linux UI
+described below. See CI.md for feature acceptance and the pending live-account gate.
+
+- `extension/telegram/tee.py:hardware_backend` already selects the Linux TPM
+  helper and excludes software and legacy fallbacks.
+- `_memory_hook.py` wraps the memory tool independently of the OS, but obtains
+  its key exclusively from `HERMES_MEMORY_KEY`.
+- `wizard/memory_cli.py` requires the macOS `.env` vault injection path;
+  `wizard/encryption_cli.py:memory_status` explicitly requires Darwin.
+- `keyvault/_identity.py:resolve_store` uses the Keychain anchor store. The
+  file vault has no production Linux freshness anchor. Enabling the existing
+  `.env` path on Linux would therefore be incomplete and unsafe.
+- `wizard/_runtime_gate.py` skips checks outside macOS. The memory runtime
+  probe currently proves only that the upstream memory seam is compatible.
+- Desktop rejects non-macOS setup; the CLI setup and diagnostic text assume
+  Secure Enclave, Touch ID, Xcode, and a Mac-local model.
+- The previous EC2 validation covered Linux API behavior and packaged Desktop,
+  but explicitly excluded hardware keys and live Telegram login.
+- The current baseline's Ubuntu CI TPM job passed 64 native tests against
+  swtpm with the live-test gate enabled. A separately requested EC2 baseline
+  run then passed the same 64 native tests on actual NitroTPM, 172 focused
+  Python tests, production wrap/unwrap and Telegram credential-store round
+  trips, cross-instance key-blob rejection, and stop/start persistence.
+  See [the validation log](CI.md#manual-live-device-validation-log).
+  This established the existing custody path before the Linux memory and
+  Telegram integration work.
+
+### Options and recommendation
+
+1. **Recommended: a dedicated TPM-wrapped Linux memory key.** Reuse the existing
+   hardware backend, wrap format, memory cipher, and memory hook. The Linux
+   memory lifecycle does not enroll `.env` or open the file vault. This delivers
+   private Telegram without redesigning the vault's freshness guarantees.
+2. **Port the complete file vault to Linux first.** Add a genuine device-bound
+   freshness anchor, recovery, runtime `.env` injection, and lifecycle support.
+   This offers broader feature parity but requires a separate security design
+   and substantially more work. A disk file pretending to be a Keychain anchor
+   is not an acceptable implementation.
+
+This proposal selects option 1. Existing macOS key custody and wire formats
+remain compatible. General Linux `.env`/config/workspace encryption and vault
+recovery are outside this feature.
+
+### Security and persistence contract
+
+- Python 3.11 remains the minimum; no Hermes upstream changes or PRs.
+- Linux requires a working TPM 2.0 helper; no software-key fallback.
+- TPM protection is machine-bound, without a per-use Touch ID/PIN guarantee.
+  UI, CLI, and documentation must describe that distinction explicitly.
+- Memory remains AES-256-GCM in the existing `memory_crypto` format.
+- A new 32-byte memory key is wrapped with `wrap.wrap_dek`; its existing
+  127-byte format is stored at `<home>/mordred/memory-key.wrapped`, mode `0600`.
+  The parent is private (`0700`); explicit provisioning tightens an existing
+  safe non-private parent to this mode. Reject symlinks and non-regular files.
+- The logical wrapping key ID is `mordred-hermes.memory.v1.` followed by the
+  first 16 hex characters of SHA-256 over the canonical absolute Hermes home.
+  Native storage uses that home's `mordred/keyvault` root. Another profile may
+  not read, overwrite, or delete this profile's memory key.
+- First provisioning is locked, atomic, and never replaces an existing key.
+  An orphaned hardware key may be reused if no wrapped key or sealed memories
+  exist. Corrupt/missing material with an armed marker or sealed memories is a
+  refusal, not an instruction to generate a new key.
+- A managed Linux profile reads its wrapped key directly through the memory
+  hook. No plaintext key is written to `.env`, config, logs, responses, command
+  arguments, or a new environment variable. No process-global key cache is
+  introduced in the first version: each key resolution follows the live home
+  and revalidates the stored material.
+- A valid ambient memory key may be adopted only by explicit enable-time
+  migration, after it authenticates every existing sealed memory. Re-enable
+  with an existing wrapped key ignores ambient values, including malformed ones. Runtime use
+  of a managed profile never falls back to ambient keys after TPM failure.
+- This is memory-key custody, not a new file-vault anchor. It does not add
+  rollback protection to memory snapshots or authenticate a whole-disk state;
+  public-key wrapping alone is not a freshness or writer-identity guarantee.
+  Existing vault verification remains unchanged.
+- The first version has no portable recovery/export for the Linux memory key.
+  Losing the TPM state loses access to sealed memory and Telegram credentials.
+  Disabling memory encryption while the TPM is usable restores plaintext;
+  setup must explain the recovery limitation before provisioning.
+
+### Runtime and lifecycle
+
+The new keyvault module owns hardware selection, key identity, secure storage,
+and runtime key resolution. It must not import Telegram or wizard modules.
+The memory hook resolves keys per profile before decrypting or sealing data,
+including when imported before plugin registration. Missing hardware or an
+invalid key must never cause a plaintext write or truncate a sealed file.
+Safe mode retains the existing protection against overwriting sealed memory.
+
+Linux `encryption enable memory` checks the local seam and installed Hermes
+runtime before provisioning. After provisioning, a subprocess of the actual
+runtime must unwrap the key and round-trip a synthetic memory payload in RAM;
+only then may the CLI arm the marker and migrate real files. Probe identifiable
+gateway interpreters as well. Check install-time capability separately from a
+running process: an older live gateway must be stopped/restarted before use.
+Probe failures leave existing files and markers unchanged; an inert provisioned
+key may remain for retry. No probe prints key bytes or real memory contents.
+
+The generic runtime gate gains a supported-platform parameter whose default
+remains Darwin-only; only memory opts into Linux. Existing force semantics may
+skip interpreter verification, but never hardware, key-integrity, or migration
+checks. Guided Telegram setup does not use the force option.
+
+Linux hook operations pin the active home, refuse paths from another profile,
+and hold the profile lifecycle lock through managed reads, every write and
+drift-backup publication. Unmanaged reads create no files and require no
+writable Mordred directory; if they observe a seal, it is still authenticated.
+The non-secret lock accepts safe existing non-private directories without
+changing their mode. Disable and purge take the same lock; even disarmed writes
+join it so concurrent enable cannot be followed by a stale plaintext write.
+Re-enable authenticates all existing seals and backups before arming.
+Linux adoption, migration, disable, purge and readiness checks enumerate memory
+files explicitly and refuse traversal/read failures; an inaccessible directory
+is never evidence that no encrypted files remain.
+
+Disable decrypts existing files before disarming, retaining the Linux key for
+re-enable. Purge deletes the Linux key only after successful disable and a
+rescan proving no sealed memory remains. Keep the current refusal on concurrent
+gateway resealing. Uninstall restores memory before removing the runtime hook;
+Telegram logout/forget never deletes the separate memory key. Keyvault reset
+takes the memory lifecycle lock before its own lock and refuses to remove the
+native store while independent memory custody remains. Uninstall with data
+purge restores or explicitly erases memory, then purges its key before resetting
+the native keyvault store.
+
+Read-only status uses local capability, marker, key-artifact, and plaintext-drift
+checks; it does not unwrap keys. It must distinguish configured protection from
+a verified live TPM operation. Actual access and enable-time probes are the
+authority when hardware disappears or loses permissions after a status check.
+
+### Telegram setup and interface compatibility
+
+- CLI selects `keyvault enable-tpm` on Linux and `enable-se` on macOS.
+- Linux setup enables memory directly, skipping `.env` enrollment and the
+  Keychain-backed vault. macOS retains its existing shared FlowSession.
+- Desktop adds `POST /hardware/build` with OS-aware dispatch. Retain
+  `/enclave/build` as the macOS-only compatibility endpoint.
+- Desktop `/status?client_version=2` retains `platform` and `telegram_supported`
+  (implementation support for a compatible client, not setup readiness), and adds
+  `hardware_kind` (`secure_enclave`, `tpm`, or `null`) and
+  `user_presence_supported` and `telegram_platform_supported`. Legacy status
+  requests keep Linux unsupported so old assets cannot promise Secure Enclave
+  or Touch ID behavior. Linux `/memory/enable` requires the new client
+  acknowledgment `acknowledge_tpm_no_recovery: true`, sent only from the button
+  below the displayed recovery limitation. Unready Linux shows TPM prerequisites and failed
+  checks; unsupported operating systems still refuse before any mutation.
+- Preserve the existing `secure_enclave` diagnostic field for older clients;
+  add a hardware-neutral `hardware` check for new clients and use explicit
+  metadata rather than parsing English sentences for readiness.
+- `/memory/enable` on Linux provisions only the dedicated key and never
+  generates a vault recovery passphrase. It preserves `ok`, `already`, and
+  `restart_required` response behavior. macOS responses remain compatible.
+- No Linux screen or error remediation prescribes Xcode or Touch ID. Local
+  model guidance says this host, not this Mac. Legacy client/server combinations
+  must retain a safe unsupported/setup-incomplete state.
+
+### EC2 validation contract
+
+The previous environment was found in local session
+`01a11385-d499-7af1-a128-6394c5b250aa` and the local artifact directory
+`~/.codex/artifacts/mordred-ubuntu-validation-20261007/`. Its AWS state was read
+on 2026-10-07: stopped, Ubuntu 24.04 x86_64, `t3.medium`, UEFI boot, no
+`TpmSupport`. The subsequent, explicitly requested TPM baseline test cloned
+that stopped disk into a private NitroTPM-enabled AMI and used two isolated
+instances. The original instance remained stopped. Results are in
+[CI.md](CI.md#manual-live-device-validation-log).
+
+1. Use the NitroTPM test environment for the required EC2 checks. Preserve the
+   earlier Desktop environment and use separate test homes, checkouts, and key
+   stores. Hermetic swtpm tests remain useful in CI but never replace the
+   user-requested actual-device acceptance gate.
+2. Use a NitroTPM-enabled Linux AMI and supported instance type for actual TPM
+   success tests. Reusing the old non-TPM machine unchanged cannot provide this proof.
+   Inspect P-256/ECDH support, device permissions, helper probe, and actual wrap
+   round trips before accepting that instance as a suitable test target.
+3. Use fresh processes, a Hermes gateway, and the packaged Desktop against the
+   new build. Confirm that the imported Mordred path is the intended checkout
+   or wheel in each interpreter. Use port 7799 and loopback-only SSH tunnels.
+4. Use synthetic Telegram messages for repeatable tests. A real account login,
+   small read-only sync, query, cancellation, and logout form a separate live
+   acceptance gate; the operator supplies API credentials, OTP/2FA and any
+   model credentials interactively, without putting them in test artifacts.
+5. Record exact commits, OS/Python/Hermes versions, commands, counts, failures,
+   screenshots, and limitations. Emulator, NitroTPM, and live Telegram results
+   must be reported separately. Stop task-owned compute after testing.
+
+AWS requires an enabled AMI and UEFI for NitroTPM. NitroTPM state is not part
+of EBS snapshots; restoring a disk is not key recovery. See the
+[AWS NitroTPM requirements](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/enable-nitrotpm-prerequisites.html).
+
+### Delivery boundaries
+
+Follow the repository's docs-first, one-component-per-PR convention: contract
+documentation, keyvault runtime, wizard lifecycle/setup, then Desktop/extension
+integration. All PRs target `dev`. Do not advertise Linux support before the
+dependent slices and acceptance gates pass. This change contains planning and
+the separately requested unchanged-code TPM baseline evidence, not the feature
+implementation or published PRs.
+
+Review decisions: approve the dedicated-key scope and its recovery limitation;
+choose in-session execution or subagent-driven execution. Recommended execution
+is in-session because the small sequence has tightly coupled interfaces.

@@ -35,6 +35,7 @@ Heavy imports stay function-local; this module imports on any platform.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -42,6 +43,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final, NamedTuple
@@ -165,6 +167,10 @@ _MEMORY_PROBE_SRC = """
 import sys
 try:
     from mordred_hermes.keyvault._memory_hook import memory_seam_shape, seam_check
+    if sys.platform == "linux":
+        from mordred_hermes.keyvault._memory_key import MEMORY_KEY_PROVIDER_VERSION
+        if MEMORY_KEY_PROVIDER_VERSION != 1:
+            sys.exit(33)
     ok, reason = seam_check()
     if not ok:
         sys.stderr.write(reason or "the memory seam is unsupported")
@@ -764,6 +770,7 @@ def _run_runtime_probe(
     *,
     timeout: float,
     extra_env: dict[str, str] | None = None,
+    hermes_startup: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str] | None, str]:
     """Run ``probe_src`` in ``python`` with a sanitized env.
 
@@ -780,15 +787,21 @@ def _run_runtime_probe(
     if extra_env:
         env.update(extra_env)
     try:
-        # `python` is a resolved interpreter path (not user shell input); shell=False.
-        proc = subprocess.run(
-            [str(python), "-c", probe_src],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            check=False,
-        )
+        with contextlib.ExitStack() as stack:
+            command = [str(python), "-c", probe_src]
+            if hermes_startup:
+                directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="mordred-probe-"))
+                script = Path(directory) / "hermes"
+                script.write_text(probe_src, encoding="utf-8")
+                command = [str(python), str(script)]
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         return None, f"probing the hermes runtime ({python}) timed out after {timeout:g}s"
     except OSError as exc:
@@ -908,3 +921,50 @@ def runtime_memory_encryption_available(
         cannot="encrypt agent memory",
         ok_suffix=lambda out: f" (seam {out.strip() or '?'})",
     )
+
+
+_MEMORY_KEY_PROBE_SRC = """
+import os
+import sys
+from pathlib import Path
+try:
+    from mordred_hermes.keyvault._memory_key import MEMORY_KEY_PROVIDER_VERSION, load_linux_memory_key
+    from mordred_hermes.keyvault._memory_hook import memory_hook_installed
+    if not memory_hook_installed():
+        sys.exit(36)
+    from mordred_hermes.keyvault.memory_crypto import seal, unseal
+    if MEMORY_KEY_PROVIDER_VERSION != 1:
+        sys.exit(33)
+    key = load_linux_memory_key(home=Path(os.environ["HERMES_HOME"]))
+    payload = b"mordred-runtime-memory-probe"
+    blob = seal(payload, key=key, name="MEMORY.md")
+    if unseal(blob, key=key, name="MEMORY.md") != payload:
+        sys.exit(34)
+except Exception:
+    sys.exit(35)
+sys.exit(0)
+"""
+
+
+def runtime_memory_key_available(
+    *,
+    home: Path,
+    runtime_python: Path | None = None,
+    timeout: float = 10.0,
+) -> tuple[bool, str]:
+    """Unwrap via the installed runtime, without reporting any secret output."""
+    python, reason = _resolve_runtime_python(home, runtime_python)
+    if python is None:
+        return False, reason
+    proc, error = _run_runtime_probe(
+        python,
+        _MEMORY_KEY_PROBE_SRC,
+        hermes_startup=True,
+        timeout=timeout,
+        extra_env={"HERMES_HOME": str(home), "MORDRED_CONFIG_DECRYPT": "0"},
+    )
+    if proc is None:
+        return False, error
+    if proc.returncode != 0:
+        return False, "Hermes runtime could not unwrap and verify the TPM memory key"
+    return True, "Hermes runtime verified the TPM memory key"

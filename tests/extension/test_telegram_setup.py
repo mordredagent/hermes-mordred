@@ -59,6 +59,7 @@ def test_doctor_reports_metadata_only(monkeypatch, capsys):
     assert {c["name"] for c in report} == {
         "telethon",
         "secure_enclave",
+        "hardware",
         "memory_encryption",
         "login",
         "privacy_llm",
@@ -120,3 +121,15 @@ def test_setup_stops_without_enclave(monkeypatch):
 @pytest.mark.parametrize(("answer", "expected"), [("", True), ("y", True), ("n", False), ("no", False)])
 def test_yes_prompt(answer, expected):
     assert setup_cli._yes(lambda _p: answer, "?") is expected
+
+
+def test_linux_cli_remediation_uses_tpm_and_memory_only(monkeypatch, capsys):
+    from mordred_hermes.wizard import telegram_cli
+
+    monkeypatch.setattr(telegram_cli, "sys", SimpleNamespace(platform="linux", stderr=__import__("sys").stderr))
+    telegram_cli._report("tee_unavailable")
+    telegram_cli._report("memory_encryption_required")
+    text = capsys.readouterr().err
+    assert "enable-tpm" in text
+    assert "enable memory" in text
+    assert "enable-se" not in text and "enable env" not in text

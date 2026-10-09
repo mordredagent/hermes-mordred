@@ -34,6 +34,7 @@ matching the wizard CLI convention.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -65,9 +66,10 @@ def _default_gateway_discovery(*, home: Path) -> list[GatewayRuntime]:
 
 def _install_lines(python: Path) -> str:
     """The two-line "install the wheel here" remedy for ``python``."""
+    extra = "macos" if sys.platform == "darwin" else "keyvault,telegram"
     return (
-        "  Install the published package into that interpreter:\n"
-        f"    uv pip install --python {python} 'hermes-mordred[macos]>=0.1.0a16'\n"
+        "  Install the matching Mordred build into that interpreter:\n"
+        f"    uv pip install --python {python} 'hermes-mordred[{extra}]'\n"
     )
 
 
@@ -190,6 +192,7 @@ def runtime_gate(
     mechanism: str,
     rerun_tail: str,
     gateway_discovery: GatewayDiscovery | None = None,
+    supported_platforms: tuple[str, ...] = ("darwin",),
 ) -> int:
     """Fail-closed macOS gate for a destructive seal of ``target``.
 
@@ -204,7 +207,7 @@ def runtime_gate(
     newline-terminated-line blocks slotted verbatim into the message.
     ``gateway_discovery`` is injectable for tests.
     """
-    if platform != "darwin" or force_runtime_unverified:
+    if platform not in supported_platforms or force_runtime_unverified:
         return 0
     probe = runtime_probe or default_probe
     ok, detail = probe(home=home)

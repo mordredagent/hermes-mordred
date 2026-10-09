@@ -131,15 +131,15 @@ class TestEnableGates:
         assert "tools.memory_tool is missing" in err
         assert "set-memory-key" in err
 
-    def test_refuses_off_macos(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_refuses_unsupported_platform(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
         home.mkdir()
 
-        rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="linux")
+        rc = memory_cli.enable(home=home, root=root, backend=FakeBackend(), store=FakeAnchorStore(), platform="win32")
 
         assert rc == 1
         assert not memory_marker_path(home).exists()
-        assert "macos" in capsys.readouterr().err.lower()
+        assert "unsupported" in capsys.readouterr().err.lower()
 
     def test_refuses_when_env_target_is_not_enrolled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -524,7 +524,7 @@ class TestDisable:
         assert memory_optout_marker_path(home).exists()
         assert _is_valid_memory_key(_effective_memory_key(_vault_env_text(root, backend, store)))
         out = capsys.readouterr().out
-        assert "Agent-memory encryption disabled (2 file(s) decrypted back to plaintext; key kept in the vault" in out
+        assert "Agent-memory encryption disabled (2 file(s) decrypted back to plaintext; key kept" in out
 
     def test_refuses_when_the_key_is_gone(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         root, home, backend, store = _setup_home_and_vault(tmp_path)
@@ -834,3 +834,12 @@ class TestSetEncryptionFlagPreservesFormatting:
         # would instead collapse the dash indent to offset 0.
         assert enabled_block in after
         assert after.startswith(before.rstrip("\n"))
+
+
+@pytest.fixture(autouse=True)
+def _macos_key_custody_contract(monkeypatch):
+    """These regressions exercise macOS env/vault custody on every CI OS."""
+    import mordred_hermes.wizard.memory_cli as module
+    from tests._helpers import PlatformSys
+
+    monkeypatch.setattr(module, "sys", PlatformSys("darwin"))

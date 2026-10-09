@@ -293,12 +293,12 @@ class TestMemoryStatus:
         assert encryption_cli.status_mark(st) == "on"
         assert "hook armed" in st.detail
 
-    def test_marker_inactive_off_macos(self, tmp_path: Path) -> None:
+    def test_linux_marker_without_key_is_inactive(self, tmp_path: Path) -> None:
         self._arm(tmp_path)
         st = encryption_cli.memory_status(home=tmp_path, platform="linux")
         assert st.configured is True
         assert st.active is False
-        assert "linux" in st.detail
+        assert "TPM memory key" in st.detail
 
     def test_optout_is_paused(self, tmp_path: Path) -> None:
         self._opt_out(tmp_path)

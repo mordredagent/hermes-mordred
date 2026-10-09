@@ -582,3 +582,22 @@ jobs:
           TCTI: swtpm:host=127.0.0.1,port=2321
           MORDRED_TPM_TEST: "1"
         run: cargo test --locked -- --test-threads=1
+
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build helper and validate Linux memory/Telegram against swtpm
+        working-directory: ${{ github.workspace }}
+        env:
+          TCTI: swtpm:host=127.0.0.1,port=2321
+          MORDRED_TPM_TEST: "1"
+          HERMES_HOME: /tmp/mordred-ci-telegram-home
+          MORDRED_LINUX_TELEGRAM_TEST: "1"
+          MORDRED_TPMKEY_HELPER: ${{ github.workspace }}/native/tpmkey-helper/target/debug/mordred-hermes-tpmkey
+        run: |
+          cargo build --locked --manifest-path native/tpmkey-helper/Cargo.toml
+          python -m venv .venv
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,telegram]"
+          .venv/bin/python -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
