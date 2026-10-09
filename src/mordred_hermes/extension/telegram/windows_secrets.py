@@ -59,6 +59,8 @@ _SEALED = tee._SEALED_NAME
 _META = tee._META_NAME
 #: ``_publish`` expectation that replaces whatever is sealed (``store``).
 _ANY = object()
+#: Codes for definite (uncommitted) checked-storage failures, shared with ``store``.
+_DEFINITE = {"missing": "store_missing", "io": "store_io", "busy": "store_busy"}
 
 Snapshot = tee.Snapshot
 AuditSink = Callable[[dict[str, Any]], None]
@@ -87,10 +89,13 @@ def _classified(exc: Exception) -> TelegramSecretsError | None:
     if isinstance(exc, TelegramSecretsError):
         return None
     if isinstance(exc, PrivateFSError):
-        if exc.commit_state != "uncertain" and exc.reason in ("unsafe", "access_denied", "unsupported"):
+        if exc.commit_state == "uncertain":
+            code = "custody_uncertain"
+        elif exc.reason in ("unsafe", "access_denied", "unsupported"):
             code = "custody_unsafe"
         else:
-            code = "custody_uncertain"  # uncertain/io/busy/missing outcomes
+            # Definite, uncommitted failures keep their own classification.
+            code = _DEFINITE.get(exc.reason, "custody_uncertain")
     elif isinstance(exc, PolicyPendingError):
         code = "custody_uncertain"
     elif isinstance(exc, CustodyError):
@@ -138,8 +143,6 @@ def _require_telegram_lease(lease: GenerationLease) -> None:
 
 def _telegram_role(session: WindowsCustodySession) -> tuple[GenerationLease, NativeBackend]:
     """Current telegram lease plus its fingerprint-verified backend; never generates."""
-    from ...keyvault._windows_profile import CustodyError
-
     status = session.role_status("telegram")
     if status.pending:
         raise TelegramSecretsError("custody_uncertain")
@@ -147,11 +150,19 @@ def _telegram_role(session: WindowsCustodySession) -> tuple[GenerationLease, Nat
         raise TelegramSecretsError("telegram_not_enrolled")
     lease = session.lease("telegram")
     _require_telegram_lease(lease)
-    try:
-        _ = session.backend  # load-only helper discovery before the fingerprint check
-    except CustodyError as exc:
-        raise TelegramSecretsError("tee_unavailable") from exc
+    _discover_helper(session)
     return lease, session.backend_for(lease)
+
+
+def _discover_helper(session: WindowsCustodySession) -> None:
+    """Load-only helper discovery; a changed session identity stays broken custody."""
+    from ...keyvault._windows_profile import CustodyError
+
+    try:
+        _ = session.backend
+    except CustodyError as exc:
+        session.check()  # re-raises "session identity changed" as broken custody
+        raise TelegramSecretsError("tee_unavailable") from exc
 
 
 def _meta_dict(raw: bytes | None) -> dict[str, Any] | None:
@@ -387,12 +398,52 @@ def forget_telegram(home: Path, root: Path, *, backend: NativeBackend | None = N
     """
     from ...keyvault._windows_custody import windows_custody_session
 
-    with _translated(), windows_custody_session(home, backend=backend) as session:
-        status = session.role_status("telegram")
-        if status.pending:
-            raise TelegramSecretsError("custody_uncertain")
-        with session.canonical.publication_receipt() as receipt:
-            # One validated plan: segments, index, then the sealed credentials.
-            checked.wipe(root, _ReceiptRecorder(receipt), credentials=(_SEALED, _META))
-        if status.current is not None or status.retained:
-            session.reset_role("telegram", erase_authorized=True)
+    resetting = False
+    try:
+        with windows_custody_session(home, backend=backend) as session:
+            leases = _forget_preflight(session)
+            with session.canonical.publication_receipt() as receipt:
+                # One validated plan: segments, index, then the sealed credentials.
+                checked.wipe(root, _ReceiptRecorder(receipt), credentials=(_SEALED, _META))
+            if leases:
+                resetting = True
+                session.reset_role("telegram", erase_authorized=True)
+    except TelegramSecretsError:
+        raise
+    except Exception as exc:
+        if resetting:
+            # Every definite refusal was preflighted, so a failure from here on
+            # follows the deletion journal: report it as uncertain, never as a
+            # native outage, and keep the journal for explicit reconciliation.
+            raise TelegramSecretsError("custody_uncertain") from exc
+        mapped = _classified(exc)
+        if mapped is None:
+            raise
+        raise mapped from exc
+
+
+def _forget_preflight(session: WindowsCustodySession) -> tuple[GenerationLease, ...]:
+    """Every ``reset_role`` refusal that can be checked, before anything is deleted.
+
+    Validates the complete manifest and every role's journal, refuses an
+    unresolved telegram journal, discovers the helper, verifies each owned
+    generation's native fingerprint and checks epoch headroom for one deletion
+    per generation. Returns the telegram generations to reset (possibly none).
+    """
+    from ...keyvault import _windows_profile as profile
+
+    statuses = {role: session.role_status(role) for role in profile.ROLES}
+    status = statuses["telegram"]
+    if status.pending:
+        raise TelegramSecretsError("custody_uncertain")
+    leases = status.retained + (() if status.current is None else (status.current,))
+    if not leases:
+        return leases
+    _discover_helper(session)
+    for lease in leases:
+        _require_telegram_lease(lease)
+        session.backend_for(lease)
+    manifest = session._manifest()  # read-only epoch headroom; delete_role rechecks per generation
+    if manifest is None or manifest.epoch > profile.MAX_EPOCH - len(leases):
+        raise profile.CustodyError("custody lifecycle epoch exhausted; refusing irreversible deletion")
+    return leases

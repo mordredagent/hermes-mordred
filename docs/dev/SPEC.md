@@ -2392,3 +2392,23 @@ before any filesystem use) and `VaultSecretStore` refuses `vault_unavailable`
 Telethon session never appears in logs, exceptions or metadata. Wizard
 telegram ceremonies, a live Telegram account gate and Windows 11 acceptance
 remain separate gates.
+
+Forget preflight and labels (C10b round 2): before deleting anything,
+`wipe_archive(forget=True)` validates the complete manifest and every role's
+journal, refuses an unresolved telegram journal, discovers the helper,
+verifies each owned telegram generation's native fingerprint and checks epoch
+headroom for one deletion per generation, so a missing helper or native key,
+a malformed memory/audit journal or exhausted epochs refuse with the archive
+and credentials intact. Any failure once `reset_role` has started is
+`custody_uncertain` (its journal is kept), never `tee_unavailable`. A checked
+absent `telegram/` directory creates no directory, `.gitignore` or
+`sync-lock/`; an owned role is still reset. A sync-lock release failure is a
+classified store error and `TelegramService` records it as `last_error`
+while still setting `finished_at`. Definite uncommitted `missing`/`io`/`busy`
+storage failures are `store_missing`/`store_io`/`store_busy` for both the
+archive and the credential store; a changed custody session identity during
+helper discovery is `custody_broken`. A telegram role rotation
+(`enroll_role("telegram", retain_current=True)`) leaves the credentials sealed
+to the retained generation, so they and the archive (whose `store_key` they
+hold) become unreadable (`secrets_corrupt`): C6 must re-seal the credentials
+under the new generation before retiring the old one, or not offer rotation.

@@ -426,8 +426,13 @@ class TelegramService:
             if client is not None:
                 with contextlib.suppress(Exception):
                     await client.disconnect()
-            lock.__exit__(None, None, None)
-            self._progress.finished_at = int(time.time())
+            try:
+                lock.__exit__(None, None, None)
+            except StoreError as exc:
+                # A classified lock-release failure is reported, never lost.
+                self._last_error = self._last_error or exc.code
+            finally:
+                self._progress.finished_at = int(time.time())
 
     async def cancel_sync(self) -> None:
         task = self._sync_task

@@ -397,3 +397,7 @@ Implementation and acceptance remain open:
 - [ ] C11: Desktop/login adoption of the seam and of the presence opt-out
   (`login_flow` keeps calling `ensure_key()`, which refuses on Windows).
 - [ ] Live Telegram account gate and Windows 11 installation-to-use acceptance.
+- [ ] C6: never rotate the telegram role (`retain_current=True`) without
+  re-sealing `credentials.sealed` under the new generation first; otherwise
+  credentials and archive become `secrets_corrupt`. Not offering rotation is
+  acceptable.

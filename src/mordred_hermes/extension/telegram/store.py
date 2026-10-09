@@ -82,7 +82,8 @@ def _store_error(exc: PrivateFSError, *, lock: bool = False) -> StoreError:
     elif exc.reason in ("unsafe", "access_denied", "unsupported"):
         code = "store_path_unsafe"
     else:
-        code = "store_unavailable"
+        # Definite, uncommitted failures keep their own classification.
+        code = {"missing": "store_missing", "io": "store_io", "busy": "store_busy"}.get(exc.reason, "store_unavailable")
     return StoreError(code)
 
 
@@ -392,9 +393,20 @@ def _windows_sync_lock(root: Path) -> Iterator[None]:
 
     held = _windows_archive.sync_lock(root)
     _checked(held.__enter__, lock=True)
-    with contextlib.ExitStack() as stack:
-        stack.push(held)
+    try:
         yield
+    except BaseException as body:
+        # The body's own failure stays primary; a different release failure is classified.
+        try:
+            released = held.__exit__(type(body), body, body.__traceback__)
+        except PrivateFSError as exc:
+            if exc is body:
+                raise
+            raise _store_error(exc) from exc
+        if not released:
+            raise
+    else:
+        _checked(lambda: held.__exit__(None, None, None))
 
 
 @contextlib.contextmanager
@@ -506,5 +518,10 @@ def _windows_wipe(base: Path, *, forget: bool, backend: NativeBackend | None) ->
         return  # no Mordred directory: no custody manifest, nothing sealed or archived
     from .windows_secrets import forget_telegram
 
+    if not _checked(lambda: _windows_archive.directory_present(base)):
+        # Checked absence: nothing sealed or archived and no sync can run without
+        # credentials, so create no directory or lock; still reset an owned role.
+        forget_telegram(base.parent.parent, base, backend=backend)
+        return
     with _windows_sync_lock(base):
         forget_telegram(base.parent.parent, base, backend=backend)

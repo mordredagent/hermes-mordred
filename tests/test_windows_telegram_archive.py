@@ -410,8 +410,10 @@ def test_ambiguous_native_deletion_stays_journaled_and_blocks_the_next_forget(ar
         raise RuntimeError("native deletion result lost")
 
     monkeypatch.setattr(backend, "delete_enclave_key", lost)
-    with pytest.raises(RuntimeError):
+    # The FIRST ambiguous attempt is reported as uncertain, never as a native outage.
+    with pytest.raises(secrets.TelegramSecretsError) as first:
         store.wipe_archive(root, forget=True, backend=backend)
+    assert code(first) == "custody_uncertain"
     journal = home / "mordred" / "windows-telegram.pending.json"
     assert journal.exists()
     before = journal.read_bytes()
@@ -485,3 +487,184 @@ def test_hermes_tool_coverage_uses_checked_metadata(archive, monkeypatch):
     assert coverage["sync_running"] is False
     with store.ArchiveStore(KEY, root).locked():
         assert hermes_tools._coverage()["sync_running"] is True
+
+
+# -- round 2: forget preflight, absent directory, release failures, labels -----------------
+
+
+def _intact(home, root):
+    assert (root / "index.enc").exists()
+    assert [n for n in names(root / "dialogs") if n.endswith(".enc")]
+    assert sealed_path(home).exists()
+    assert (root / "credentials.meta.json").exists()
+    assert not (home / "mordred" / "windows-telegram.pending.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["helper", "journal", "native", "epoch"])
+def test_forget_preflight_refuses_with_nothing_deleted(archive, monkeypatch, failure):
+    c, home, backend, root = archive
+    leases = seed(home, backend, root, c)
+    use_backend = backend
+    expected = "tee_unavailable"
+    if failure == "helper":
+
+        def no_helper():
+            raise c.CustodyError("Windows TPM helper unavailable; install the package-bound helper")
+
+        monkeypatch.setattr(c, "windows_backend", no_helper)
+        use_backend = None
+    elif failure == "journal":
+        # Another role's malformed journal must refuse before the first deletion.
+        with open_private_directory(home / "mordred") as d, d.transaction() as tx:
+            tx.create_bytes("windows-audit.pending.json", b"{}")
+        expected = "custody_broken"
+    elif failure == "native":
+        del backend._keys[leases["telegram"].native_key_id]
+    else:
+        from mordred_hermes.keyvault import _windows_profile
+
+        with c.windows_custody_session(home, backend=backend) as session:
+            epoch = session._manifest().epoch
+        monkeypatch.setattr(_windows_profile, "MAX_EPOCH", epoch)
+        monkeypatch.setattr(c, "MAX_EPOCH", epoch)
+        expected = "custody_broken"
+    with pytest.raises(secrets.TelegramSecretsError) as excinfo:
+        store.wipe_archive(root, forget=True, backend=use_backend)
+    assert code(excinfo) == expected
+    _intact(home, root)
+    assert ops(backend, "delete") == 0
+
+
+@posix_only
+@pytest.mark.parametrize("name", ["credentials.sealed", "credentials.meta.json"])
+def test_forget_with_unsafe_credentials_leaves_the_archive_untouched(archive, name):
+    c, home, backend, root = archive
+    seed(home, backend, root, c)
+    os.chmod(root / name, 0o644)
+    with pytest.raises(secrets.TelegramSecretsError) as excinfo:
+        store.wipe_archive(root, forget=True, backend=backend)
+    assert code(excinfo) == "custody_unsafe"
+    _intact(home, root)
+    assert stat_mode(root / name) == 0o644
+    assert ops(backend, "delete") == 0
+
+
+def test_forget_without_a_telegram_directory_creates_nothing_and_resets_the_role(tg):
+    c, home, backend = tg
+    leases = enroll(c, home, backend, "audit", "telegram")
+    root = home / "mordred" / "telegram"
+    store.wipe_archive(root, forget=True, backend=backend)
+    assert not root.exists()  # no telegram/, .gitignore or sync-lock/ created
+    with c.windows_custody_session(home, backend=backend) as session:
+        assert session.role_status("telegram") == c.RoleStatus("telegram", None, (), False)
+        session.validate_lease(leases["audit"])
+    assert leases["telegram"].native_key_id not in backend._keys
+    store.wipe_archive(root)  # non-forget wipe of an absent archive creates nothing either
+    assert not root.exists()
+
+
+@contextmanager
+def _release_fails():
+    from mordred_hermes._private_fs import PrivateFSError
+
+    yield
+    raise PrivateFSError("io", "telegram_sync_unlock")
+
+
+def test_sync_lock_release_failure_is_a_classified_store_error(archive, monkeypatch):
+    _c, _home, _backend, root = archive
+    from mordred_hermes.extension.telegram import _windows_archive
+
+    monkeypatch.setattr(_windows_archive, "sync_lock", lambda path: _release_fails())
+    with pytest.raises(store.StoreError, match="store_io"), store.ArchiveStore(KEY, root).locked():
+        pass
+    # A body failure keeps its own identity; release still runs.
+    with pytest.raises(KeyError), store.ArchiveStore(KEY, root).locked():
+        raise KeyError("body")
+
+
+def test_service_sync_still_finishes_when_the_lock_release_fails(archive, monkeypatch):
+    c, home, backend, root = archive
+    import asyncio
+
+    from mordred_hermes.extension.telegram import _windows_archive, service
+
+    enroll(c, home, backend, "telegram")
+    windows_store(home, backend).store(_value(store_key=KEY))
+
+    async def fake_sync(client, archive_store, *, options, progress):
+        return service.SyncProgress()
+
+    class Client:
+        async def connect(self):
+            return None
+
+        async def is_user_authorized(self):
+            return True
+
+        async def disconnect(self):
+            return None
+
+    monkeypatch.setattr(service, "sync_archive", fake_sync)
+    monkeypatch.setattr(service, "_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(_windows_archive, "sync_lock", lambda path: _release_fails())
+    svc = service.TelegramService(
+        secret_store=windows_store(home, backend),
+        archive_root=root,
+        client_factory=lambda *a, **k: Client(),
+        installed=lambda: True,
+        memory_guard=lambda: None,
+    )
+
+    async def run():
+        await svc.start_sync()
+        await svc.wait_for_sync()
+
+    asyncio.run(run())
+    assert svc._progress.finished_at > 0
+    assert svc._last_error == "store_io"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"), [("missing", "store_missing"), ("io", "store_io"), ("busy", "store_busy")]
+)
+def test_uncommitted_read_failures_keep_their_own_codes(archive, monkeypatch, reason, expected):
+    c, home, backend, root = archive
+    from mordred_hermes._private_fs import PrivateFSError
+    from mordred_hermes.extension.telegram import _windows_archive
+
+    enroll(c, home, backend, "telegram")
+    windows_store(home, backend).store(_value(store_key=KEY))
+    store.ArchiveStore(KEY, root).save_index(store.ArchiveIndex(account_label="me"))
+
+    def failing(tx, name, limit):
+        raise PrivateFSError(reason, "telegram_probe")
+
+    monkeypatch.setattr(_windows_archive, "read_optional", failing)
+    with pytest.raises(secrets.TelegramSecretsError) as excinfo:
+        windows_store(home, backend).load()
+    assert code(excinfo) == expected
+    with pytest.raises(store.StoreError) as archived:
+        store.ArchiveStore(KEY, root).load_index()
+    assert archived.value.code == expected
+
+
+def test_session_identity_change_is_broken_custody_not_a_missing_helper(archive, monkeypatch):
+    c, home, backend, _root = archive
+    from tests.test_windows_custody_profile import SID
+
+    enroll(c, home, backend, "telegram")
+    windows_store(home, backend).store(_value(store_key=KEY))
+    other = bytearray(SID)
+    other[-1] ^= 1
+
+    def identity_changes_during_discovery():
+        monkeypatch.setattr(c, "current_principal_id", lambda: bytes(other))
+        raise c.CustodyError("Windows TPM helper unavailable; install the package-bound helper")
+
+    monkeypatch.setattr(c, "windows_backend", identity_changes_during_discovery)
+    from mordred_hermes.extension.telegram.windows_secrets import WindowsCustodySecretStore
+
+    with pytest.raises(secrets.TelegramSecretsError) as excinfo:
+        WindowsCustodySecretStore(home, audit_sink=lambda entry: None).load()
+    assert code(excinfo) == "custody_broken"
