@@ -65,7 +65,7 @@ def test_checked_unmanaged_read_write_each_seam(windows, shape):
     assert module.MemoryStore._read_file(path) == []
     module.MemoryStore._write_file(path, [" alpha ", "beta"])
     assert module.MemoryStore._read_file(path) == ["alpha", "beta"]
-    assert path.read_text() == " alpha \n§\nbeta"
+    assert path.read_text(encoding="utf-8") == " alpha \n§\nbeta"
     assert not backend.calls
 
 

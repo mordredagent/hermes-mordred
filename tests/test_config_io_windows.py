@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from mordred_hermes._config_io import (
     canonical_session,
     read_canonical_snapshot,
 )
+from mordred_hermes._private_fs import PrivateFSError
 from tests.test_private_fs_confidential_windows import descriptor
 from tests.test_private_fs_confidential_windows import shared_home as shared_home
 
@@ -27,6 +29,24 @@ def line(process):
     output = queue.Queue()
     threading.Thread(target=lambda: output.put(process.stdout.readline().strip()), daemon=True).start()
     return output.get(timeout=20)
+
+
+def after_killed_holder(read, seconds=20.0):
+    """Retry ``read`` while a killed lock holder's byte-range lock is still held.
+
+    Windows releases a terminated process's file locks asynchronously, and a
+    venv ``python.exe`` launcher's interpreter child is terminated only after
+    the launcher itself, so ``wait()`` returning does not mean "released".
+    Only ``busy`` is retried, within a bound; every other outcome is returned.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return read()
+        except PrivateFSError as exc:
+            if exc.reason != "busy" or time.monotonic() >= deadline:
+                raise
+        time.sleep(0.05)
 
 
 def test_native_noop_preserves_inherited_descriptor_and_case_nesting(shared_home):
@@ -92,15 +112,13 @@ with canonical_session(paths, scope="policy", create=True) as session, session.p
     paths = CanonicalPaths(shared_home)
     try:
         assert line(child) == "partial"
-        from mordred_hermes._private_fs import PrivateFSError
-
         with pytest.raises(PrivateFSError) as err:
             read_canonical_snapshot(paths)
         assert err.value.reason == "busy"
         child.kill()
         child.wait(timeout=20)
         with pytest.raises(PolicyPendingError):
-            read_canonical_snapshot(paths)
+            after_killed_holder(lambda: read_canonical_snapshot(paths))
         with canonical_session(paths, scope="policy") as session, session.policy_update(recover_pending=True) as update:
             assert session.read_pair().config.data == b"new"
             update.put_config(b"new")

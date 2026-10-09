@@ -174,11 +174,6 @@ def managed_root():
             set_managed(parent)
             set_managed(parent.parent)
         os.link(directory / "safe" / "image.exe", directory / "safe" / "alias.exe")
-        subprocess.run(
-            ["cmd.exe", "/d", "/c", "mklink", "/J", str(directory / "junction"), str(directory / "safe")],
-            check=True,
-            capture_output=True,
-        )
         icacls(directory / "writable-file" / "image.exe", "/grant", "*S-1-1-0:(W)")
         icacls(directory / "writable-parent", "/grant", "*S-1-1-0:(W)")
         icacls(directory / "delete-child", "/grant", "*S-1-1-0:(DC)")
@@ -189,6 +184,16 @@ def managed_root():
         user = get_api().sid_text(get_api().user_sid())
         icacls(directory / "current-owned" / "image.exe", "/setowner", "*" + user)
         set_managed(directory)
+        # Only after the root is protected: a junction created earlier keeps no
+        # inherited ACE once the root's inheritance is removed, and an empty
+        # DACL refuses even the elevated open (and teardown delete) before the
+        # reparse point itself is classified. Created now, it gets the
+        # creator's default DACL (Administrators/SYSTEM) and stays openable.
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(directory / "junction"), str(directory / "safe")],
+            check=True,
+            capture_output=True,
+        )
         yield directory
     finally:
         shutil.rmtree(directory)  # Exactly the nonce-named fixture created here.
@@ -222,9 +227,15 @@ def test_native_current_user_owned_readonly_image_is_refused_without_changes(tmp
     image = tmp_path / "svchost.exe"
     shutil.copyfile(sys.executable, image)
     api = get_api()
+    user = "*" + api.sid_text(api.user_sid())
+    # A pytest base temp created with mode 0o700 by Python >= 3.13 grants the
+    # ordinary user access only through an inheritable OWNER RIGHTS ACE, which
+    # the owner change below leaves inherit-only. Grant the owner explicitly so
+    # the premise (a current-user-owned, writable-by-owner image) holds there.
+    icacls(image, "/grant", user + ":(F)")
     # Elevated Windows may default newly created owners to BA; explicitly make
     # the new test file current-SID-owned so this tests the claimed premise.
-    icacls(image, "/setowner", "*" + api.sid_text(api.user_sid()))
+    icacls(image, "/setowner", user)
     image.chmod(0o444)
     before, content = acl(image), image.read_bytes()
     assert before.owner == api.user_sid()

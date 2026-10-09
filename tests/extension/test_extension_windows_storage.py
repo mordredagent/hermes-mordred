@@ -36,6 +36,7 @@ from mordred_hermes.extension import crypto as xc
 from mordred_hermes.extension import errors as extension_errors
 from mordred_hermes.extension import history, pairing
 from mordred_hermes.extension import wallet as extension_wallet
+from tests._child_env import with_package_under_test
 from tests.extension._windows_storage_support import REPO_ROOT, enable_checked_storage
 
 ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
@@ -851,7 +852,7 @@ for _ in range(25):
 
 def _race(home: Path, children: list[tuple[str, list[str]]]) -> list[list[str]]:
     """Start children while the parent holds the checked lock, then release them together."""
-    env = os.environ | {"HERMES_HOME": str(home), "PYTHONPATH": str(REPO_ROOT)}
+    env = with_package_under_test(os.environ | {"HERMES_HOME": str(home), "PYTHONPATH": ""}, REPO_ROOT)
     processes: list[subprocess.Popen[str]] = []
     lines: list[queue.Queue[str]] = []
     errors: list[list[str]] = []

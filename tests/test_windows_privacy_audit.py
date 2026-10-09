@@ -26,7 +26,7 @@ from mordred_hermes.privacy_check import _runtime, audit, egress, hooks, install
 from mordred_hermes.privacy_check._exceptions import AuditWriterRefused, MordredIntegrityRefused
 from mordred_hermes.privacy_check._windows_audit import WindowsPlaintextAuditWriter
 from tests import test_windows_custody
-from tests.test_windows_privacy_policy import write_pair
+from tests._private_files import write_private
 
 custody_fixture = test_windows_custody.fs
 
@@ -82,9 +82,7 @@ def forbid_file_vault_probe(monkeypatch) -> None:
 
 
 def private_write(path: Path, data: bytes) -> None:
-    path.write_bytes(data)
-    if os.name != "nt":
-        path.chmod(0o600)
+    write_private(path, data)
 
 
 def audit_files(directory: Path) -> dict[str, bytes]:
@@ -685,6 +683,47 @@ def test_keyvault_probe_is_unsupported_without_file_vault_reads_on_windows(monke
 # --- hook wiring ---------------------------------------------------------------------
 
 
+def test_private_policy_pair_is_checked_on_creation_and_update(fs, monkeypatch):
+    _, _, home, _ = fs
+    config = home / "config.yaml"
+    with open_private_directory(home / "mordred", create=True):
+        pass
+    raw_write = Path.write_text
+
+    def refuse_raw_config(path, *args, **kwargs):
+        if path == config:
+            # POSIX write_pair chmods after writing; on Windows it leaves a
+            # creator-default DACL. Pin checked creation before either write.
+            raise AssertionError("private config must be created through checked IO")
+        return raw_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_raw_config)
+    for level in ("off", "ask"):
+        write_private_pair(home, mode="strict", level=level)
+        with open_private_directory(home) as directory:
+            actual = json.loads(directory.read_bytes("config.yaml", max_bytes=4096))
+        assert actual == {
+            "plugins": {
+                "enabled": ["mordred"],
+                "mordred_privacy_check": {"policy": "strict", "tool_egress": {"level": level}},
+            }
+        }
+        with open_private_directory(home / "mordred") as directory:
+            assert json.loads(directory.read_bytes("policy.json", max_bytes=4096)) == {"policy": "strict"}
+
+
+def write_private_pair(home: Path, *, mode: str = "off", level: str = "off") -> None:
+    """Publish directly into the checked private custody home.
+
+    A raw creator-default file cannot be admitted for checked replacement on
+    Windows; both initial creation and later updates must use the primitive.
+    """
+    section = {"policy": mode, "tool_egress": {"level": level}}
+    config = {"plugins": {"enabled": ["mordred"], "mordred_privacy_check": section}}
+    write_private(home / "config.yaml", json.dumps(config).encode("utf-8"))
+    write_private(home / "mordred" / "policy.json", json.dumps({"policy": mode}).encode("utf-8"))
+
+
 @pytest.fixture
 def hooked(fs, monkeypatch):
     c, _, home, backend = fs
@@ -699,7 +738,7 @@ def hooked(fs, monkeypatch):
     _audit_support._reset_audit_writer_registry_for_tests()
     with open_private_directory(home / "mordred", create=True):
         pass
-    write_pair(home)
+    write_private_pair(home)
     yield home
     _runtime.reset_state_for_tests()
     _audit_support._reset_audit_writer_registry_for_tests()
@@ -800,7 +839,7 @@ def test_recoverable_construction_refusal_at_session_start_does_not_poison(hooke
 
 
 def test_unrecorded_egress_approval_becomes_a_block(hooked, monkeypatch):
-    write_pair(hooked, level="ask")
+    write_private_pair(hooked, level="ask")
     args = {"tool_name": "some_unknown_tool", "args": {"x": 1}, "session_id": "c7b"}
     approved = hooks.pre_tool_call(**args)
     assert approved is not None and approved["action"] == "approve"
