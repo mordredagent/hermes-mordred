@@ -21,10 +21,11 @@ auth requests are unlocked.
 On Windows (C6-telegram, :mod:`._windows_telegram`) the credentials use the
 C10b custody store, created only by ``keyvault native init --role telegram``;
 login asks ``require_presence=False`` only after the machine-bound
-acknowledgement; ``logout`` wipes the archive and keeps the credentials and
-the custody role; ``logout --forget`` asks for a typed confirmation and runs
-``wipe_archive(forget=True)``; ``migrate-tee`` is refused (file vault
-excluded). macOS/Linux behaviour is unchanged.
+acknowledgement; ``logout`` keeps the encrypted archive, the credentials and
+the custody role exactly like macOS/Linux; ``logout --forget`` asks for a
+typed confirmation, runs ``wipe_archive(forget=True)`` and then revokes the
+session; ``migrate-tee`` is refused (file vault excluded). macOS/Linux
+behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from . import _term, _windows_telegram
@@ -170,7 +172,7 @@ def telegram_login(
     from ..extension.telegram.service import error_code
 
     factory = client_factory or build_client
-    problem = _login_gate(client_factory, telethon_available, input_fn, acknowledge_machine_bound)
+    problem = _login_gate(client_factory, telethon_available, input_fn, acknowledge_machine_bound, store)
     if problem is not None:
         return _report(problem)
     windows = _windows_telegram.routed()
@@ -230,6 +232,7 @@ def _login_gate(
     telethon_available: Callable[[], bool],
     input_fn: InputFn,
     acknowledged: bool,
+    store: Any = None,
 ) -> str | None:
     """Every login refusal that precedes unsealing or contacting Telegram, as a code.
 
@@ -238,7 +241,7 @@ def _login_gate(
     """
     problem = None if client_factory is not None else _login_preflight(telethon_available)
     if problem is None and _windows_telegram.routed():
-        problem = _windows_telegram.login_refusal(input_fn, acknowledged=acknowledged)
+        problem = _windows_telegram.login_refusal(input_fn, acknowledged=acknowledged, secrets_store=store)
     return problem
 
 
@@ -497,64 +500,102 @@ def telegram_logout(
     return 0
 
 
-def _forget_confirmation(before: _windows_telegram.TelegramState, input_fn: InputFn) -> int | None:
-    """``None`` to proceed; otherwise the exit code (nothing to delete, or no typed confirmation)."""
-    if before.empty:
-        print("Nothing to delete: this profile has no Telegram credentials, archive or custody key.")
-        return 0
-    print(_windows_telegram.forget_plan(before))
-    if not _windows_telegram.typed_confirmation(input_fn):
-        print("Confirmation did not match; nothing was changed.")
-        return 1
-    return None
-
-
 def _windows_logout(*, forget: bool, store: Any, client_factory: Callable[..., Any] | None, input_fn: InputFn) -> int:
-    """Windows logout: archive wiped, credentials and role kept; ``--forget`` deletes all three.
+    """Windows logout: revoke and drop the session, keeping the archive (as on macOS/Linux).
 
-    A running sync or unusable custody refuses before anything changes;
-    ``--forget`` shows what it deletes and needs the typed confirmation first.
-    Credentials that cannot be unsealed (corrupt, or no role) are still
-    deleted by ``--forget``; only the revocation at Telegram is then skipped.
+    A running sync or unusable custody refuses before anything changes.
+    ``--forget`` is :func:`_windows_forget`.
     """
     from ..extension.telegram.secrets import TelegramSecretsError
-    from ..extension.telegram.store import StoreError, telegram_dir, wipe_archive
+    from ..extension.telegram.store import telegram_dir
 
-    windows = _windows_telegram
     root = telegram_dir()
     secrets_store = store if store is not None else _secret_store()
-    refusal = windows.logout_refusal(root)
+    refusal = _windows_telegram.logout_refusal(root)
     if refusal is not None:
         return _report(refusal)
-    before = windows.observe(secrets_store, root)
-    stop = _forget_confirmation(before, input_fn) if forget else None
-    if stop is not None:
-        return stop
+    if forget:
+        return _windows_forget(root, secrets_store, client_factory, input_fn)
     try:
         current, snapshot = _load_for_update(secrets_store)
     except TelegramSecretsError as exc:
-        if not forget or exc.code not in windows.FORGET_DESPITE:
+        return _report(_windows_telegram.refine(exc.code, secrets_store))
+    if current is None:
+        print("Telegram is not configured; nothing to do.")
+        return 0
+    _revoke_stored(current, client_factory)
+    try:
+        _write_back(secrets_store, snapshot, lambda old: replace(old, session=None) if old is not None else None)
+    except TelegramSecretsError as exc:
+        return _report(exc.code)
+    print(_windows_telegram.LOGGED_OUT)
+    return 0
+
+
+def _windows_forget(
+    root: Path, secrets_store: Any, client_factory: Callable[..., Any] | None, input_fn: InputFn
+) -> int:
+    """load -> plan + typed confirmation -> ``wipe_archive(forget=True)`` -> revoke -> re-checked outcome.
+
+    The credentials are loaded before the confirmation, so an unusable seal
+    warns (or refuses) first. The C10b preflight runs inside the wipe: a
+    refusal there leaves the credentials, the archive and the live session
+    untouched. The session is revoked from memory only once the credentials
+    are confirmed deleted, and every outcome (also a partial failure) is
+    re-checked and printed.
+    """
+    from ..extension.telegram.secrets import TelegramSecretsError
+    from ..extension.telegram.store import StoreError, wipe_archive
+
+    windows = _windows_telegram
+    try:
+        current, _snapshot = _load_for_update(secrets_store)
+    except TelegramSecretsError as exc:
+        if exc.code not in windows.FORGET_DESPITE:
             return _report(exc.code)
         _term.emit_warn(
             f"the sealed credentials could not be opened ({exc.code}), so the Telegram session cannot be revoked "
             "from here; also terminate it in Telegram → Settings → Devices."
         )
-        current, snapshot = None, None
-    if current is None and not forget:
-        print("Telegram is not configured; nothing to do.")
+        current = None
+    before = windows.observe(secrets_store, root)
+    if before.empty:
+        print("Nothing to delete: this profile has no Telegram credentials, archive or custody key.")
         return 0
-    _revoke_stored(current, client_factory)
+    print(windows.forget_plan(before, revocable=current is not None and current.session is not None))
+    if not windows.typed_confirmation(input_fn):
+        print("Confirmation did not match; nothing was changed.")
+        return 1
+    failure = None
     try:
-        if forget:
-            wipe_archive(root, forget=True)
-        else:
-            _write_back(secrets_store, snapshot, lambda old: replace(old, session=None) if old is not None else None)
-            wipe_archive(root)
+        wipe_archive(root, forget=True)
     except (TelegramSecretsError, StoreError) as exc:
-        return _report(exc.code)
-    for line in windows.outcome_lines(before, windows.observe(secrets_store, root), forget=forget):
+        failure = exc.code
+    after = windows.observe(secrets_store, root)
+    _revoke_after_forget(current, client_factory, before, after)
+    if failure is not None:
+        _report(failure)
+    for line in windows.outcome_lines(before, after, forget=True):
         print(line)
-    return 0
+    return 0 if failure is None else 1
+
+
+def _revoke_after_forget(
+    current: Any,
+    client_factory: Callable[..., Any] | None,
+    before: _windows_telegram.TelegramState,
+    after: _windows_telegram.TelegramState,
+) -> None:
+    """Revoke from memory only when the local credentials are confirmed gone."""
+    if current is None or current.session is None:
+        return
+    if before.credentials is True and after.credentials is False:
+        _revoke_stored(current, client_factory)
+    elif after.credentials is None:
+        _term.emit_warn(
+            "could not confirm whether the sealed credentials were deleted, so the Telegram session was not "
+            "revoked; if they are gone, terminate it in Telegram → Settings → Devices."
+        )
 
 
 def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, store: Any = None) -> int:
@@ -565,7 +606,7 @@ def telegram_venice(*, model: str | None, secret_fn: InputFn = getpass.getpass, 
     if windows:
         code = _windows_telegram.custody_code()  # load-only: refuse before asking for the key
         if code is not None:
-            return _report(code)
+            return _report(_windows_telegram.refine(code, secrets_store))
     key = secret_fn("Venice API key (hidden; Enter keeps the stored key): ").strip()
 
     class _NoKey(Exception):
@@ -623,7 +664,7 @@ def telegram_local_llm(*, endpoint: str, model: str, store: Any = None) -> int:
     if windows:
         code = _windows_telegram.custody_code()
         if code is not None:
-            return _report(code)
+            return _report(_windows_telegram.refine(code, secrets_store))
     try:
         # Windows: update() itself verifies the enrolled role (presence is excluded there).
         ensure = None if windows else getattr(secrets_store, "ensure_key", None)

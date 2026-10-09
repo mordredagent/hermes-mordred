@@ -174,18 +174,17 @@ def segments(env):
 def tree(env):
     """Every data file under the profile's mordred directory with its digest.
 
-    Permanent ``.mordred-fs.lock`` files are listed but not read: one may be
-    held (a byte-range lock on Windows) while the snapshot is taken.
+    Skipped: permanent ``.mordred-fs.lock`` files (one may be held, a byte-range
+    lock on Windows, or first created by a refused operation's checked lock
+    acquisition) and the audit log, which records every unwrap by design.
     """
     base = env.home / "mordred"
     if not base.exists():
         return {}
     return {
-        str(path.relative_to(base)): (
-            "lock" if path.name == ".mordred-fs.lock" else hashlib.sha256(path.read_bytes()).hexdigest()
-        )
+        str(path.relative_to(base)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(base.rglob("*"))
-        if path.is_file()
+        if path.is_file() and path.name != ".mordred-fs.lock" and "audit.log" not in path.name
     }
 
 
@@ -271,6 +270,9 @@ def test_setup_on_a_fresh_home_runs_the_ceremony_then_login_with_acknowledgement
     assert flags["logged_in"] is True and flags["sync_scope"]["include_channels"] is False
     assert generated(wt) == 1, "only the explicit ceremony generates a key"
     assert role(wt, "memory").current is None and role(wt, "audit").current is None
+    assert telegram_setup_cli.WINDOWS_DONE in out
+    assert "not available on Windows yet" in out and "C11" in out
+    assert "Restart the Hermes gateway" not in out and "Browser extension: ⚙" not in out
 
 
 def test_setup_on_an_enrolled_home_skips_the_ceremony(wt, monkeypatch):
@@ -416,7 +418,9 @@ def test_login_refuses_without_acknowledgement_before_any_backend_call(wt, capsy
     rc = telegram_cli.telegram_login(input_fn=answers, secret_fn=forbidden, client_factory=factory)
     assert rc == 1
     captured = capsys.readouterr()
-    assert keyvault_windows_cli.CUSTODY_NOTICE in captured.out and _windows_telegram.TELEGRAM_NOTICE in captured.out
+    assert _windows_telegram.disclosure() in captured.out and _windows_telegram.TELEGRAM_NOTICE in captured.out
+    assert "There is no per-use presence and no portable recovery" in captured.out
+    assert "Disable memory encryption" not in captured.out, "the memory-only sentence is not part of the disclosure"
     assert ACK_FLAG in captured.err
     assert wt.backend.calls == calls, "nothing unsealed before the acknowledgement"
     assert factory.calls == 0
@@ -502,7 +506,7 @@ CODES = {
     "custody_uncertain": "no `keyvault native reconcile` command yet",
     "custody_broken": "never adopted",
     "tee_unavailable": "keyvault enable-winkey",
-    "tee_auth_cancelled": "stayed sealed",
+    "tee_auth_cancelled": "retry the command",
     "secrets_corrupt": "telegram logout --forget",
     "store_path_unsafe": "never repairs ACLs",
     "store_write_uncertain": "telegram doctor",
@@ -510,7 +514,8 @@ CODES = {
     "store_missing": "retry",
     "store_io": "retry",
     "store_busy": "retry",
-    "store_undecryptable": "telegram logout",
+    "store_undecryptable": "`hermes-mordred telegram logout --forget`, then run `hermes-mordred telegram setup`",
+    "credentials_without_custody": "`hermes-mordred telegram logout --forget`",
     "store_key_invalid": "telegram logout --forget",
     "sync_in_progress": "nothing was changed",
     "vault_unavailable": "excluded on Windows",
@@ -614,14 +619,17 @@ def test_windows_memory_guard_never_uses_the_posix_marker_check(wt, monkeypatch)
 # -----------------------------------------------------------------------------
 # telegram logout / logout --forget
 # -----------------------------------------------------------------------------
-def test_logout_wipes_the_archive_and_keeps_credentials_and_role(wt, capsys):
+def test_logout_keeps_the_archive_credentials_and_role(wt, capsys):
     leases = seed(wt)
+    archive_before = {name: digest for name, digest in tree(wt).items() if name.endswith(".enc")}
     factory = Factory()
     assert telegram_cli.telegram_logout(store=None, client_factory=factory, input_fn=forbidden) == 0
     out = capsys.readouterr().out
     assert factory.client.logged_out and "Revoked the session" in out
-    assert "Deleted the local encrypted archive" in out and "--forget" in out
-    assert not (wt.root / "index.enc").exists() and segments(wt) == []
+    assert "Logged out. The encrypted archive is kept (use --forget to delete it)." in out
+    assert {name: digest for name, digest in tree(wt).items() if name.endswith(".enc")} == archive_before
+    assert (wt.root / "index.enc").exists() and len(segments(wt)) == 2
+    assert store.ArchiveStore(KEY, wt.root).load_index().account_label == "me"
     value = windows_store(wt.home, wt.backend).load()
     assert value is not None and value.session is None and value.store_key == KEY
     with wt.custody.windows_custody_session(wt.home, backend=wt.backend) as session:
@@ -631,15 +639,17 @@ def test_logout_wipes_the_archive_and_keeps_credentials_and_role(wt, capsys):
 
 def test_forget_requires_the_typed_confirmation(wt, capsys):
     seed(wt)
-    before, calls = tree(wt), list(wt.backend.calls)
+    before = tree(wt)
     factory = Factory()
     for answer in ("yes", "forget", "", EOFError()):
         rc = telegram_cli.telegram_logout(
             forget=True, client_factory=factory, input_fn=Answers([(FORGET_PROMPT, answer)])
         )
         assert rc == 1
-    assert "nothing was changed" in capsys.readouterr().out
-    assert factory.calls == 0 and tree(wt) == before and wt.backend.calls == calls
+    out = capsys.readouterr().out
+    assert "nothing was changed" in out and "Then the stored Telegram session is revoked" in out
+    assert factory.calls == 0 and tree(wt) == before
+    assert ops(wt.backend, "delete") == 0 and generated(wt) == 3, "only the load ran before the refusal"
 
 
 def audit_roundtrip(env, lease, blob=None):
@@ -731,10 +741,18 @@ def test_ambiguous_forget_deletion_reports_the_reconcile_gap(wt, monkeypatch, ca
         raise RuntimeError("native deletion result lost")
 
     monkeypatch.setattr(wt.backend, "delete_enclave_key", lost)
+    leases = role(wt, "telegram")
     confirm = Answers([(FORGET_PROMPT, "forget telegram")])
-    assert telegram_cli.telegram_logout(forget=True, client_factory=Factory(), input_fn=confirm) == 1
-    err = capsys.readouterr().err
-    assert "custody-uncertain" in err and "no `keyvault native reconcile` command yet" in err
+    factory = Factory()
+    assert telegram_cli.telegram_logout(forget=True, client_factory=factory, input_fn=confirm) == 1
+    captured = capsys.readouterr()
+    assert "custody-uncertain" in captured.err and "no `keyvault native reconcile` command yet" in captured.err
+    assert "nothing is deleted" not in captured.err
+    deleted, _, remaining = captured.out.partition("Still present:")
+    assert "Deleted:" in deleted and "credentials.sealed" in deleted and "local encrypted archive" in deleted
+    assert leases.current.generation in remaining and "deletion journal is kept" in remaining
+    assert factory.client.logged_out, "the in-memory session is revoked once the credentials are gone"
+    assert not sealed_path(wt.home).exists() and not (wt.root / "index.enc").exists()
     journal = wt.home / "mordred" / "windows-telegram.pending.json"
     assert journal.exists()
     monkeypatch.setattr(wt.backend, "delete_enclave_key", real_delete)
@@ -746,6 +764,149 @@ def test_forget_on_an_unconfigured_profile_deletes_nothing_without_prompting(wt,
     assert telegram_cli.telegram_logout(forget=True, client_factory=Factory(), input_fn=forbidden) == 0
     assert "Nothing to delete" in capsys.readouterr().out
     assert wt.backend.calls == [] and not (wt.home / "mordred").exists()
+
+
+class FailingClient(FakeClient):
+    """Revocation that cannot reach Telegram; records whether the local credentials were already gone."""
+
+    def __init__(self, sealed):
+        super().__init__()
+        self.sealed = sealed
+        self.credentials_at_revoke: bool | None = None
+
+    async def connect(self):
+        self.credentials_at_revoke = self.sealed.exists()
+        raise OSError("network unreachable")
+
+
+def test_forget_preflight_refusal_leaves_credentials_archive_and_session_untouched(wt, capsys):
+    seed(wt)
+    # A malformed memory journal: the telegram capability is fine, the C10b forget preflight refuses.
+    with open_private_directory(wt.home / "mordred") as directory, directory.transaction() as tx:
+        tx.create_bytes("windows-memory.pending.json", b"{}")
+    before = tree(wt)
+    factory = Factory()
+    confirm = Answers([(FORGET_PROMPT, "forget telegram")])
+    assert telegram_cli.telegram_logout(forget=True, client_factory=factory, input_fn=confirm) == 1
+    captured = capsys.readouterr()
+    assert "(custody-broken)" in captured.err
+    assert "Nothing was deleted." in captured.out and "Still present:" in captured.out
+    assert factory.calls == 0, "the live session is not revoked when nothing was deleted"
+    assert tree(wt) == before and ops(wt.backend, "delete") == 0
+    assert windows_store(wt.home, wt.backend).load().session == SESSION
+
+
+def test_forget_revokes_only_after_local_deletion_and_warns_when_telegram_is_unreachable(wt, capsys):
+    seed(wt)
+    client = FailingClient(sealed_path(wt.home))
+    confirm = Answers([(FORGET_PROMPT, "forget telegram")])
+    rc = telegram_cli.telegram_logout(forget=True, client_factory=lambda *a, **k: client, input_fn=confirm)
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert client.credentials_at_revoke is False, "revocation runs after the local deletion"
+    assert "could not reach Telegram" in captured.err and "Settings → Devices" in captured.err
+    assert "Deleted:" in captured.out and "credentials.sealed" in captured.out
+    assert not sealed_path(wt.home).exists() and role(wt, "telegram").current is None
+
+
+def orphan_credentials(env):
+    """Sealed credentials whose telegram role was reset elsewhere (no key can ever open them)."""
+    seed(env)
+    with env.custody.windows_custody_session(env.home, backend=env.backend) as session:
+        session.reset_role("telegram", erase_authorized=True)
+    assert sealed_path(env.home).exists() and role(env, "telegram").current is None
+
+
+def test_credentials_without_a_role_point_to_forget_and_setup_offers_no_ceremony(wt, capsys):
+    orphan_credentials(wt)
+    before, calls = tree(wt), list(wt.backend.calls)
+    factory = Factory()
+    assert telegram_cli.telegram_logout(client_factory=factory, input_fn=forbidden) == 1
+    assert (
+        telegram_cli.telegram_login(
+            input_fn=forbidden, secret_fn=forbidden, client_factory=factory, acknowledge_machine_bound=True
+        )
+        == 1
+    )
+    assert telegram_cli.telegram_venice(model="m", secret_fn=forbidden) == 1
+    assert telegram_setup_cli.telegram_setup(input_fn=forbidden, secret_fn=forbidden) == 1
+    err = capsys.readouterr().err
+    assert err.count("(credentials_without_custody)") == 4 and CEREMONY not in err
+    assert factory.calls == 0 and tree(wt) == before and wt.backend.calls == calls
+    assert generated(wt) == 3, "no ceremony was offered or run"
+
+
+def test_forget_deletes_credentials_without_a_role_after_warning_first(wt, capsys):
+    orphan_credentials(wt)
+    factory = Factory()
+    seen: list[str] = []
+
+    def confirm(prompt):
+        seen.append(capsys.readouterr().err)
+        assert FORGET_PROMPT in prompt
+        return "forget telegram"
+
+    assert telegram_cli.telegram_logout(forget=True, client_factory=factory, input_fn=confirm) == 0
+    assert "Settings → Devices" in seen[0], "the skipped-revocation warning precedes the confirmation"
+    assert "credentials.sealed" in capsys.readouterr().out
+    assert factory.calls == 0 and not sealed_path(wt.home).exists() and not (wt.root / "index.enc").exists()
+
+
+def test_logout_and_forget_refuse_broken_custody_before_anything(wt, capsys):
+    seed(wt)
+    with open_private_directory(wt.home / "mordred") as directory, directory.transaction() as tx:
+        tx.create_bytes("windows-telegram.pending.json", b"{}")
+    before, calls = tree(wt), list(wt.backend.calls)
+    factory = Factory()
+    assert telegram_cli.telegram_logout(client_factory=factory, input_fn=forbidden) == 1
+    assert telegram_cli.telegram_logout(forget=True, client_factory=factory, input_fn=forbidden) == 1
+    assert capsys.readouterr().err.count("(custody-broken)") == 2
+    assert factory.calls == 0 and tree(wt) == before and wt.backend.calls == calls
+
+
+def test_logout_and_forget_refuse_an_unresolved_telegram_journal(wt, monkeypatch, capsys):
+    seed(wt)
+
+    def denied(*args, **kwargs):
+        raise wt.custody.CustodyError("native creation failed")
+
+    monkeypatch.setattr(wt.backend, "generate_enclave_key", denied)
+    with (
+        pytest.raises(wt.custody.CustodyError),
+        wt.custody.windows_custody_session(wt.home, backend=wt.backend) as session,
+    ):
+        session.enroll_role("telegram", retain_current=True)
+    assert (wt.home / "mordred" / "windows-telegram.pending.json").exists()
+    before, calls = tree(wt), list(wt.backend.calls)
+    factory = Factory()
+    assert telegram_cli.telegram_logout(client_factory=factory, input_fn=forbidden) == 1
+    assert telegram_cli.telegram_logout(forget=True, client_factory=factory, input_fn=forbidden) == 1
+    assert capsys.readouterr().err.count("(custody-uncertain)") == 2
+    assert factory.calls == 0 and tree(wt) == before and wt.backend.calls == calls
+
+
+def test_login_wipes_orphaned_segments_without_an_index_through_checked_storage(wt, monkeypatch, capsys):
+    enroll(wt.custody, wt.home, wt.backend, "telegram")
+    orphan = store.ArchiveStore(b"\x09" * 32, wt.root)
+    orphan.save_index(store.ArchiveIndex(account_label="old"))
+    orphan.append_messages(1, [_msg(1)])
+    with open_private_directory(wt.root) as directory, directory.transaction() as tx:
+        tx.delete_file("index.enc", expected_identity=tx.stat("index.enc").identity)
+    assert segments(wt) and not (wt.root / "index.enc").exists()
+
+    def raw_scan(*args, **kwargs):
+        raise AssertionError("raw directory scan of the Telegram archive on Windows")
+
+    monkeypatch.setattr(Path, "rglob", raw_scan)
+    monkeypatch.setattr(Path, "glob", raw_scan)
+    rc = telegram_cli.telegram_login(
+        input_fn=Answers(LOGIN_ANSWERS),
+        secret_fn=Answers([("api_hash", "cd" * 16)]),
+        client_factory=Factory(),
+        acknowledge_machine_bound=True,
+    )
+    assert rc == 0 and "undecryptable archive" in capsys.readouterr().err
+    assert segments(wt) == []
 
 
 def test_cli_logout_forget_routes_to_the_typed_confirmation(wt, monkeypatch, capsys):
@@ -792,6 +953,8 @@ def test_doctor_reports_each_capability_without_unwrap_or_native_calls(wt, monke
     report = {row["name"]: row for row in json.loads(capsys.readouterr().out)}
     for name in ("telethon", "telegram_custody", "hardware", "memory_encryption", "login", "privacy_llm", "archive"):
         assert report[name]["ok"] is True, name
+    assert "device hardware" not in report["login"]["detail"]
+    assert "Windows CNG Telegram custody key" in report["login"]["detail"]
     assert leases["telegram"].generation in report["telegram_custody"]["detail"]
     assert leases["telegram"].public_sha256 in report["telegram_custody"]["detail"]
     capability_rows = [name for name in report if name.startswith("capability.")]

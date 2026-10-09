@@ -469,8 +469,8 @@ Implementation and acceptance remain open:
 - [ ] C6-telegram progress: `keyvault native init --role telegram`, the
   Windows `telegram setup` (capabilities, offered ceremony, C6 memory enable,
   acknowledged login), login with `require_presence=False` only after the
-  machine-bound acknowledgement, classified Windows messages, logout (archive
-  wiped, credentials and role kept), `logout --forget` (typed confirmation,
+  machine-bound acknowledgement, classified Windows messages, logout (archive,
+  credentials and role kept), `logout --forget` (typed confirmation,
   `wipe_archive(forget=True)`), a load-only doctor with per-capability rows
   and the migrate-tee refusal are implemented with portable tests.
   Remaining: independent review, scoped Windows CI and native runs of
@@ -481,3 +481,9 @@ Implementation and acceptance remain open:
   the Hermes Telegram tools, Desktop and the extension server refuse
   `memory_encryption_required`), Desktop login (C11), the live account gate
   and Windows 11 acceptance.
+  Review fix round 1: plain logout keeps the archive (R-C6T-1); forget
+  deletes before revoking and reports partial outcomes (R-C6T-2); role-less
+  credentials point to `logout --forget` (R-C6T-3). Still open from the
+  review: the `_windows_gates` not-enrolled wording for `telegram_hardware`
+  (C6 vocabulary) and helper-missing blocking a role-less forget (fail
+  closed).

@@ -1740,8 +1740,8 @@ acknowledgement order, login refusals without enrollment or acknowledgement
 with zero backend calls, `require_presence=False` only after the
 acknowledgement, the checked orphan-archive wipe under a raw-scan tripwire,
 a parametrized message per classified code, venice/local-llm without a
-presence request, the sync memory guard, logout (archive wiped, credentials
-and role kept), forget (typed confirmation, corrupt credentials, busy refusal,
+presence request, the sync memory guard, logout (archive, credentials and
+role kept), forget (typed confirmation, corrupt credentials, busy refusal,
 missing helper, ambiguous deletion journal, unconfigured profile, memory and
 audit kept decryptable), the load-only doctor and the migrate-tee tripwire.
 `test_wizard_windows_telegram_native.py` (host-skipped) repeats the ceremony,
@@ -1751,3 +1751,21 @@ real-CNG recipe. Both portable and native modules join the scoped Windows CI
 job. Remaining: a wizard reconciliation verb, Windows routing of the
 extension memory guard (Hermes tools, Desktop, extension server), Desktop
 login (C11), the live account gate and Windows 11.
+
+Review fix round 1 (rulings R-C6T-1..3): Windows plain logout keeps the
+archive exactly like macOS/Linux (only `--forget` wipes it, and
+`store_undecryptable` now points to `logout --forget` then setup). `--forget`
+loads the credentials before the typed confirmation, runs
+`wipe_archive(forget=True)` (with the C10b preflight inside) before revoking
+the in-memory session, revokes only once the credentials are re-checked as
+deleted, and prints the re-checked deleted/still-present lines also after a
+partial failure. Sealed credentials without a role are reported as
+`credentials_without_custody` (remedy `logout --forget`) by logout, login,
+venice/local-llm and setup, which then offers no ceremony. Orphan detection
+also lists `dialogs/*.enc` through the checked transaction; the disclosure
+drops the memory-only sentence; the Windows setup completion text lists only
+`sync`/`status`/`doctor`. New portable tests cover the kept archive, the
+preflight refusal leaving the session untouched, revocation after deletion
+with an unreachable Telegram, role-less credentials (logout, login, venice,
+setup and forget with the warning before the confirmation), broken and
+uncertain custody on logout/forget, and orphaned segments without an index.

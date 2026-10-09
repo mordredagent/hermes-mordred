@@ -82,14 +82,14 @@ def _check_enclave() -> Check:
     return Check("secure_enclave", True, "helper ready; Telegram key present")
 
 
-def _check_credentials(flags: dict[str, Any] | None) -> list[Check]:
+def _check_credentials(flags: dict[str, Any] | None, *, sealed_by: str = "device hardware") -> list[Check]:
     if flags is None:
         return [Check("login", False, "not configured", "hermes-mordred telegram setup")]
     checks = [
         Check(
             "login",
             flags.get("logged_in") is True,
-            "logged in (credentials sealed by device hardware)" if flags.get("logged_in") else "logged out",
+            f"logged in (credentials sealed by {sealed_by})" if flags.get("logged_in") else "logged out",
             "" if flags.get("logged_in") else "hermes-mordred telegram setup",
         )
     ]
@@ -220,7 +220,7 @@ def _windows_checks() -> list[Check]:
     custody = _windows_custody_check(home, rows, error)
     flags, code = _windows_flags()
     login = (
-        _check_credentials(flags)
+        _check_credentials(flags, sealed_by="this profile's Windows CNG Telegram custody key")
         if code is None
         else [Check("login", False, f"credential metadata unreadable ({code})", _windows_telegram.message(code) or "")]
     )
@@ -248,8 +248,8 @@ def _windows_custody_check(home: Path, rows: tuple[WindowsCapability, ...], erro
     if row.reason != "enrolled":
         fix = _windows_telegram.CEREMONY if row.reason == "not-enrolled" else remedy(row.reason)
         return Check("telegram_custody", False, detail, fix)
-    leases = _windows_telegram.role_leases(home) or ()
-    current = leases[-1] if leases else None
+    status = _windows_telegram.telegram_role(home)
+    current = None if status is None else status.current
     metadata = (
         f": generation {current.generation}, public key SHA-256 {current.public_sha256}" if current is not None else ""
     )
@@ -510,15 +510,19 @@ def _windows_setup(*, input_fn: InputFn, secret_fn: InputFn, acknowledged: bool)
     if _first_import(input_fn) != 0:
         return 1
 
-    print(
-        "\nDone. How to use it:\n"
-        "  • Restart the Hermes gateway (and Hermes Desktop), then ask e.g. “What did we decide on Telegram last "
-        "week?”.\n"
-        "    The agent uses telegram_ask; Windows custody asks for no per-use confirmation.\n"
-        "  • Browser extension: ⚙ → ✈️ Telegram.\n"
-        "  • Health check any time: hermes-mordred telegram doctor"
-    )
+    print(WINDOWS_DONE)
     return 0
+
+
+#: What works on Windows today; agent, extension and Desktop access are separate slices.
+WINDOWS_DONE = (
+    "\nDone. What works on Windows now:\n"
+    "  • hermes-mordred telegram sync     import new messages into the encrypted archive\n"
+    "  • hermes-mordred telegram status   login state and archive counts\n"
+    "  • hermes-mordred telegram doctor   health check from metadata only\n"
+    "Asking through the Hermes agent (telegram_ask), the browser extension and Hermes Desktop is not available "
+    "on Windows yet: it is pending the extension memory-guard follow-up and the Desktop slice (C11)."
+)
 
 
 def _ensure_windows_custody(input_fn: InputFn) -> bool:
@@ -535,6 +539,16 @@ def _ensure_windows_custody(input_fn: InputFn) -> bool:
         return True
     if reason != "not-enrolled":
         _term.emit_error(f"Telegram custody refused ({reason}): {remedy(reason)}. Nothing was generated or changed.")
+        return False
+    present = _windows_telegram.credentials_present()
+    if present is not False:
+        # Sealed credentials without their key can never be opened by a new key,
+        # so no ceremony is offered; unreadable metadata is not guessed at either.
+        _term.emit_error(
+            _windows_telegram.message("credentials_without_custody") or ""
+            if present
+            else "the Telegram credential metadata could not be read; run `hermes-mordred telegram doctor`."
+        )
         return False
     print("This profile has no Windows Telegram custody key yet. Only this explicit ceremony creates it:")
     print(f"  {_windows_telegram.CEREMONY}")

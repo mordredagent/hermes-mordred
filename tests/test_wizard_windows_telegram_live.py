@@ -6,9 +6,10 @@ in ``MORDRED_WINKEY_HELPER``. Through the real CLI and wizard functions it runs
 ``keyvault native init --role telegram`` (a fresh CNG telegram key), the
 machine-bound login with SYNTHETIC credentials and a synthetic Telegram client
 (no account, phone number, network or model), a fresh-process reload of the
-sealed credentials, ``telegram doctor --json`` (load-only), ``telegram logout``
-(archive wiped, credentials and role kept) and ``telegram logout --forget``
-(typed confirmation; credentials, archive and the telegram role deleted). Only
+sealed credentials, a synthetic archive, ``telegram doctor --json``
+(load-only), ``telegram logout`` (archive, credentials and role kept) and
+``telegram logout --forget`` (typed confirmation; credentials, archive and the
+telegram role deleted). Only
 the new profile and its own key are created. A failure preserves the profile
 and its journals (no recursive removal); only paths and shapes are printed.
 """
@@ -78,6 +79,8 @@ def test_wizard_telegram_ceremony_login_logout_forget_real_cng(monkeypatch, caps
     import ctypes
 
     from mordred_hermes._private_fs import open_confidential_directory
+    from mordred_hermes.extension.telegram import store
+    from mordred_hermes.extension.telegram.windows_secrets import WindowsCustodySecretStore
     from mordred_hermes.keyvault._windows_custody import windows_custody_session
     from mordred_hermes.wizard import cli, telegram_cli
 
@@ -113,6 +116,11 @@ def test_wizard_telegram_ceremony_login_logout_forget_real_cng(monkeypatch, caps
             [sys.executable, "-c", _RELOAD, str(home)], capture_output=True, text=True, timeout=120, check=False
         )
         assert reloaded.returncode == 0 and reloaded.stdout.strip() == "reloaded", "fresh-process reload failed"
+        sealed = WindowsCustodySecretStore(home, audit_sink=lambda entry: None).load()
+        archive_root = home / "mordred" / "telegram"
+        archive = store.ArchiveStore(sealed.store_key, archive_root)
+        archive.save_index(store.ArchiveIndex(account_label="synthetic"))
+        archive.append_messages(1, [store.StoredMessage(id=1, date=1, sender="synthetic", text="synthetic")])
 
         capsys.readouterr()
         cli.main(["telegram", "doctor", "--json"])
@@ -121,11 +129,11 @@ def test_wizard_telegram_ceremony_login_logout_forget_real_cng(monkeypatch, caps
         assert report["telegram_custody"] is True and report["login"] is True
 
         assert telegram_cli.telegram_logout(client_factory=lambda *a, **k: client, input_fn=_answers({})) == 0
-        assert (home / "mordred" / "telegram" / "credentials.sealed").exists()
+        assert (archive_root / "credentials.sealed").exists() and (archive_root / "index.enc").exists()
         confirm = _answers({"Type 'forget telegram'": "forget telegram"})
         rc = telegram_cli.telegram_logout(forget=True, client_factory=lambda *a, **k: client, input_fn=confirm)
         assert rc == 0
-        assert not (home / "mordred" / "telegram" / "credentials.sealed").exists()
+        assert not (archive_root / "credentials.sealed").exists() and not (archive_root / "index.enc").exists()
         with windows_custody_session(home) as owner:
             status = owner.role_status("telegram")
             assert status.current is None and not status.retained and not status.pending

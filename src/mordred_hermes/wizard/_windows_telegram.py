@@ -11,15 +11,17 @@ and :mod:`.telegram_setup_cli` unchanged. On ``win32`` (the wizard's
   ``hermes-mordred keyvault native init --role telegram``; the other commands
   read ``windows_capability(home, "telegram_hardware")`` first and refuse
   ``telegram_not_enrolled`` / ``custody_*`` / ``tee_unavailable`` before any
-  native call;
+  native call (sealed credentials without a role are
+  ``credentials_without_custody``: only ``logout --forget`` can remove them);
 - login requests ``require_presence=False`` only after the machine-bound
-  disclosure (:data:`CUSTODY_NOTICE` plus :data:`TELEGRAM_NOTICE`) is
-  acknowledged with ``--acknowledge-machine-bound`` or an explicit yes;
+  disclosure (:func:`disclosure`) is acknowledged with
+  ``--acknowledge-machine-bound`` or an explicit yes;
 - memory encryption is the C6 Windows memory target (a load-only
   observation), never the macOS/Linux marker check;
-- archive presence, busy state and credential flags come from the C10b
-  checked seams (``archive_updated``, ``archive_busy``,
-  ``directory_present``, ``flags()``), never from raw ``telegram_dir`` scans.
+- archive presence, busy state, credential flags and the role come from the
+  C10b checked seams (``archive_updated``, the checked ``transaction``
+  listing, ``archive_busy``, ``directory_present``, ``flags()``) and the
+  load-only ``role_status``, never from raw ``telegram_dir`` scans.
 
 Heavy imports stay function-local so this module imports on any platform.
 """
@@ -36,7 +38,7 @@ from ._windows_gates import WINDOWS, classify_exception, remedy
 
 if TYPE_CHECKING:
     from ..keyvault._windows_capability import WindowsCapability
-    from ..keyvault._windows_custody import GenerationLease
+    from ..keyvault._windows_custody import RoleStatus
 
 __all__ = [
     "ACK_FLAG",
@@ -47,6 +49,7 @@ __all__ = [
     "TelegramState",
     "acknowledge",
     "archive_present",
+    "credentials_present",
     "custody_code",
     "disclosure",
     "explicit_yes",
@@ -58,10 +61,11 @@ __all__ = [
     "message",
     "observe",
     "outcome_lines",
-    "role_leases",
+    "refine",
     "routed",
     "secret_store",
     "telegram_capability",
+    "telegram_role",
     "typed_confirmation",
 ]
 
@@ -71,7 +75,7 @@ InputFn = Callable[[str], str]
 CEREMONY = "hermes-mordred keyvault native init --role telegram"
 ACK_FLAG = "--acknowledge-machine-bound"
 FORGET_PHRASE = "forget telegram"
-#: Telegram-specific sentence of the machine-bound disclosure (after ``CUSTODY_NOTICE``).
+#: Telegram-specific sentence of the machine-bound disclosure (after the custody sentence).
 TELEGRAM_NOTICE = (
     "Telegram credentials (the API application, the Telegram session, the archive key and the LLM key) are "
     "sealed by this profile's Windows CNG telegram custody key: any program running as this Windows account on "
@@ -80,6 +84,8 @@ TELEGRAM_NOTICE = (
 )
 #: Unseal failures after which ``logout --forget`` may still delete everything (no revocation possible).
 FORGET_DESPITE = frozenset({"secrets_corrupt", "telegram_not_enrolled"})
+#: The exact macOS/Linux plain-logout sentence; Windows keeps the archive the same way.
+LOGGED_OUT = "Logged out. The encrypted archive is kept (use --forget to delete it)."
 
 #: Capability reason -> the C10b store code reported through ``telegram_cli._report``.
 _CODES: dict[str, str] = {
@@ -92,8 +98,8 @@ _CODES: dict[str, str] = {
 }
 _RECONCILE_GAP = (
     "There is no `keyvault native reconcile` command yet: an unresolved Telegram custody journal (for example an "
-    "ambiguous key deletion during `telegram logout --forget`) is kept and keeps refusing until explicit "
-    "reconciliation exists; nothing is deleted or regenerated in its place meanwhile."
+    "ambiguous key deletion during `telegram logout --forget`) is kept, no key is regenerated in its place, and "
+    "every later forget refuses until explicit reconciliation exists."
 )
 
 
@@ -162,10 +168,30 @@ def custody_code(home: Path | None = None) -> str | None:
     return _CODES.get(reason, "custody_uncertain")
 
 
-def disclosure() -> str:
+def credentials_present(secrets_store: Any = None) -> bool | None:
+    """Sealed credentials exist (checked metadata read, never an unseal); ``None`` when unreadable."""
+    try:
+        return (secrets_store if secrets_store is not None else secret_store()).flags() is not None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def refine(code: str, secrets_store: Any = None) -> str:
+    """``telegram_not_enrolled`` with sealed credentials present: a new key can never open them."""
+    if code == "telegram_not_enrolled" and credentials_present(secrets_store):
+        return "credentials_without_custody"
+    return code
+
+
+def _custody_sentence() -> str:
+    """The custody notice without its memory-specific last sentence."""
     from .keyvault_windows_cli import CUSTODY_NOTICE
 
-    return f"{CUSTODY_NOTICE} {TELEGRAM_NOTICE}"
+    return CUSTODY_NOTICE.partition(" Disable memory encryption")[0]
+
+
+def disclosure() -> str:
+    return f"{_custody_sentence()} {TELEGRAM_NOTICE}"
 
 
 def explicit_yes(input_fn: InputFn, prompt: str) -> bool:
@@ -187,11 +213,13 @@ def acknowledge(input_fn: InputFn, *, flag: bool) -> bool:
     return explicit_yes(input_fn, "Acknowledge the machine-bound Telegram custody and continue?")
 
 
-def login_refusal(input_fn: InputFn, *, acknowledged: bool, home: Path | None = None) -> str | None:
+def login_refusal(
+    input_fn: InputFn, *, acknowledged: bool, home: Path | None = None, secrets_store: Any = None
+) -> str | None:
     """Custody first (load-only), then the acknowledgement; a code, or ``None`` to continue."""
     code = custody_code(home)
     if code is not None:
-        return code
+        return refine(code, secrets_store)
     return None if acknowledge(input_fn, flag=acknowledged) else "machine_bound_not_acknowledged"
 
 
@@ -199,14 +227,41 @@ def login_refusal(input_fn: InputFn, *, acknowledged: bool, home: Path | None = 
 # Checked archive / credential / role observation (logout, forget, doctor)
 # -----------------------------------------------------------------------------
 def archive_present(root: Path | None = None) -> bool:
-    """A checked ``index.enc`` exists (``StoreError`` on unsafe or uncertain state)."""
+    """Any archive ``*.enc`` (``index.enc`` or a dialog segment) through checked reads, like POSIX.
+
+    ``StoreError`` / ``PrivateFSError`` on unsafe or uncertain state; never a raw scan.
+    """
+    from .._private_fs import PrivateFSError
+    from ..extension.telegram import _windows_archive as checked
     from ..extension.telegram.store import archive_updated
 
-    return archive_updated(root if root is not None else _archive_root()) is not None
+    base = root if root is not None else _archive_root()
+    if archive_updated(base) is not None:
+        return True
+    try:
+        with checked.transaction(base / checked.DIALOGS) as tx:
+            names = () if tx is None else tx.list_names(max_entries=checked.MAX_ENTRIES)
+    except PrivateFSError as exc:
+        raise _store_error(exc) from exc
+    return any(name.endswith(".enc") for name in names)
 
 
-def role_leases(home: Path | None = None) -> tuple[GenerationLease, ...] | None:
-    """Owned telegram generations (retained first, current last); ``None`` when unreadable.
+def _store_error(exc: OSError) -> RuntimeError:
+    """The C10b archive vocabulary for a classified checked-storage refusal (mirrors ``store``)."""
+    from ..extension.telegram.store import StoreError
+
+    reason, state = getattr(exc, "reason", ""), getattr(exc, "commit_state", "")
+    if state == "uncertain":
+        return StoreError("store_write_uncertain")
+    if reason in ("unsafe", "access_denied", "unsupported"):
+        return StoreError("store_path_unsafe")
+    return StoreError(
+        {"missing": "store_missing", "io": "store_io", "busy": "store_busy"}.get(reason, "store_unavailable")
+    )
+
+
+def telegram_role(home: Path | None = None) -> RoleStatus | None:
+    """The telegram role (current, retained, pending journal); ``None`` when unreadable.
 
     Load-only and non-blocking: no native call, no unwrap, no lock wait.
     """
@@ -219,10 +274,9 @@ def role_leases(home: Path | None = None) -> tuple[GenerationLease, ...] | None:
             canonical_session(CanonicalPaths(path), scope="policy", blocking=False) as canonical,
             windows_custody_session(path, canonical=canonical) as session,
         ):
-            status = session.role_status("telegram")
+            return session.role_status("telegram")
     except (OSError, RuntimeError, ValueError):
         return None
-    return status.retained + (() if status.current is None else (status.current,))
 
 
 @dataclass(frozen=True)
@@ -233,6 +287,7 @@ class TelegramState:
     directory: bool | None
     archive: bool | None
     generations: tuple[str, ...] | None
+    pending: bool | None = None
 
     @property
     def empty(self) -> bool:
@@ -240,7 +295,7 @@ class TelegramState:
 
 
 def observe(secrets_store: Any, root: Path, home: Path | None = None) -> TelegramState:
-    """Credential flags, archive index and owned telegram generations; never unseals."""
+    """Credential flags, archive files and the owned telegram generations; never unseals."""
     from ..extension.telegram._windows_archive import directory_present
 
     def checked(read: Callable[[], bool]) -> bool | None:
@@ -249,12 +304,14 @@ def observe(secrets_store: Any, root: Path, home: Path | None = None) -> Telegra
         except (OSError, RuntimeError, ValueError):
             return None
 
-    leases = role_leases(home)
+    status = telegram_role(home)
+    leases = () if status is None else status.retained + (() if status.current is None else (status.current,))
     return TelegramState(
         credentials=checked(lambda: secrets_store.flags() is not None),
         directory=checked(lambda: directory_present(root)),
         archive=checked(lambda: archive_present(root)),
-        generations=None if leases is None else tuple(lease.generation for lease in leases),
+        generations=None if status is None else tuple(lease.generation for lease in leases),
+        pending=None if status is None else status.pending,
     )
 
 
@@ -273,13 +330,18 @@ def logout_refusal(root: Path, *, home: Path | None = None) -> str | None:
     return None if code in (None, "telegram_not_enrolled") else code
 
 
-def forget_plan(state: TelegramState) -> str:
+def forget_plan(state: TelegramState, *, revocable: bool) -> str:
     generations = f" (generation(s) {', '.join(state.generations)})" if state.generations else ""
+    revoke = (
+        "Then the stored Telegram session is revoked at Telegram."
+        if revocable
+        else "No stored Telegram session can be revoked from here."
+    )
     return (
-        "telegram logout --forget revokes the Telegram session (when the credentials can be opened) and "
-        "permanently deletes this profile's sealed Telegram credentials (API application, session, archive key "
-        f"and LLM key), the local encrypted archive and the Windows Telegram custody key{generations}. Memory and "
-        "audit custody, directories, locks and unknown files are kept. This cannot be undone."
+        "telegram logout --forget permanently deletes this profile's sealed Telegram credentials (API "
+        "application, session, archive key and LLM key), the local encrypted archive and the Windows Telegram "
+        f"custody key{generations}. {revoke} Memory and audit custody, directories, locks and unknown files are "
+        "kept. This cannot be undone."
     )
 
 
@@ -296,32 +358,35 @@ def _gone(before: bool | None, after: bool | None) -> bool:
 
 
 def outcome_lines(before: TelegramState, after: TelegramState, *, forget: bool) -> list[str]:
-    """What the logout actually deleted (re-checked after the operation) and what it kept."""
-    archive = "the local encrypted archive (index.enc and its dialog segments)"
+    """What the logout deleted and what remains, re-checked after the operation (also after a failure)."""
     if not forget:
-        if _gone(before.archive, after.archive):
-            deleted = f"Deleted {archive}."
-        elif before.archive is False:
-            deleted = "No local archive was present."
-        else:
-            deleted = "The local archive could not be re-checked; run `hermes-mordred telegram doctor`."
-        return [
-            f"Logged out. {deleted} The API credentials, the archive key and this profile's Windows Telegram "
-            "custody key are kept (use --forget to delete them)."
-        ]
-    items = []
+        return [LOGGED_OUT]
+    archive = "the local encrypted archive (index.enc and its dialog segments)"
+    deleted = []
     if _gone(before.credentials, after.credentials):
-        items.append("the sealed Telegram credentials (credentials.sealed, credentials.meta.json)")
+        deleted.append("the sealed Telegram credentials (credentials.sealed, credentials.meta.json)")
     if _gone(before.archive, after.archive):
-        items.append(archive)
+        deleted.append(archive)
     removed = [
         generation
         for generation in before.generations or ()
         if after.generations is not None and generation not in after.generations
     ]
     if removed:
-        items.append(f"this profile's Windows Telegram custody key (generation(s) {', '.join(removed)})")
-    lines = ["Deleted:", *(f"  - {item}" for item in items)] if items else ["Nothing was deleted."]
+        deleted.append(f"this profile's Windows Telegram custody key (generation(s) {', '.join(removed)})")
+    remaining = []
+    if after.credentials:
+        remaining.append("the sealed Telegram credentials")
+    if after.archive:
+        remaining.append(archive)
+    if after.generations:
+        journal = "; its deletion journal is kept for explicit reconciliation" if after.pending else ""
+        remaining.append(
+            f"this profile's Windows Telegram custody key (generation(s) {', '.join(after.generations)}){journal}"
+        )
+    lines = ["Deleted:", *(f"  - {item}" for item in deleted)] if deleted else ["Nothing was deleted."]
+    if remaining:
+        lines += ["Still present:", *(f"  - {item}" for item in remaining)]
     if None in (after.credentials, after.archive, after.generations):
         lines.append("Some state could not be re-checked; run `hermes-mordred telegram doctor`.")
     lines.append("Kept: memory and audit custody, directories, locks and unknown files.")
@@ -338,6 +403,12 @@ _MESSAGES: dict[str, str] = {
         "this profile has no Windows Telegram custody key yet. Create it with the explicit ceremony "
         f"`{CEREMONY}` (`hermes-mordred telegram setup` offers to run it), then retry. Nothing was unsealed "
         "or sent to Telegram."
+    ),
+    "credentials_without_custody": (
+        "sealed Telegram credentials exist on this profile but its Windows Telegram custody key does not (it was "
+        "deleted, or the files come from elsewhere), and a new key can never open them "
+        "(credentials_without_custody). Delete them with `hermes-mordred telegram logout --forget`, then run "
+        "`hermes-mordred telegram setup`."
     ),
     "machine_bound_not_acknowledged": (
         "Telegram login on Windows needs the machine-bound custody acknowledged (no per-use presence, no "
@@ -360,7 +431,10 @@ _MESSAGES: dict[str, str] = {
         "`hermes-mordred telegram doctor`. A missing key is never regenerated in its place; the sealed "
         "credentials and the archive are kept."
     ),
-    "tee_auth_cancelled": "the Windows CNG operation was cancelled, so the credentials stayed sealed.",
+    "tee_auth_cancelled": (
+        "the Windows CNG operation was cancelled, so the credentials stayed sealed (tee_auth_cancelled); "
+        "nothing was changed — retry the command."
+    ),
     "secrets_corrupt": (
         "the sealed Telegram credentials could not be authenticated with this profile's Telegram custody key "
         "(a copied or restored file, another profile's seal, or a rotated custody key) (secrets_corrupt). "
@@ -385,8 +459,8 @@ _MESSAGES: dict[str, str] = {
     "store_busy": ("the Telegram storage is busy (store_busy); retry when the other Hermes/Mordred processes finish."),
     "store_undecryptable": (
         "the local Telegram archive cannot be decrypted with the stored archive key (store_undecryptable); it "
-        "is never repaired. Delete it with `hermes-mordred telegram logout` (the credentials and the custody "
-        "key are kept), log in again and re-import with `hermes-mordred telegram sync`."
+        "is never repaired. Delete it together with the credentials with `hermes-mordred telegram logout "
+        "--forget`, then run `hermes-mordred telegram setup` and re-import."
     ),
     "store_key_invalid": (
         "the stored archive key is invalid (store_key_invalid). Delete the credentials and the archive with "

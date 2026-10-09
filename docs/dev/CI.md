@@ -1495,9 +1495,10 @@ python -m pytest -q -s -o addopts= -m integration tests/test_wizard_windows_tele
 On a new UUID profile it runs `keyvault native init --role telegram` (a fresh
 CNG telegram key), the acknowledged login with synthetic credentials and a
 synthetic client, a fresh-process reload of the sealed credentials, `telegram
-doctor --json`, `telegram logout` (archive wiped, credentials and role kept)
-and `telegram logout --forget` with the typed confirmation, which deletes the
-credentials and that profile's telegram generation only. No Telegram account,
+doctor --json`, `telegram logout` (a synthetic archive, the credentials and
+the role are kept) and `telegram logout --forget` with the typed confirmation,
+which deletes the credentials, the archive and that profile's telegram
+generation only. No Telegram account,
 phone number, network or model is used; a failure keeps the profile and its
 journals and names the path. The live account gate, Desktop login (C11) and
 Windows 11 remain separate; record results in the Manual live-device
