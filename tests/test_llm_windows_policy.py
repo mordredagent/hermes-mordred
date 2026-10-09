@@ -521,3 +521,100 @@ def test_main_model_string_and_unset_fields_keep_off_mode(profile, field, value)
     (profile.home / "mordred" / "policy.json").write_bytes(b'{"policy":"off"}')
     (profile.home / "config.yaml").write_bytes(json.dumps({"model": {"provider": "openai", field: value}}).encode())
     run_provider(profile)
+
+
+SECRET = "mordred-c8-llm-secret-bytes"
+
+
+def exception_chain(error: BaseException) -> list[BaseException]:
+    """Every exception reachable through ``__cause__`` and ``__context__``."""
+    seen: list[BaseException] = []
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or any(current is known for known in seen):
+            continue
+        seen.append(current)
+        pending.extend([current.__cause__, current.__context__])
+    return seen
+
+
+def damage_profile(profile, monkeypatch, damage):
+    """Fail the checked read with ``SECRET`` in the exception or the document bytes."""
+    from mordred_hermes.llm_guard import _windows_policy
+
+    original = RuntimeError(SECRET)
+    if damage == "reader":
+
+        def broken(paths):
+            raise original
+
+        monkeypatch.setattr(_windows_policy, "read_canonical_snapshot", broken)
+    elif damage == "policy-parser":
+        (profile.home / "mordred" / "policy.json").write_bytes(b'{"policy": "strict", "x": "' + SECRET.encode())
+    else:
+        (profile.home / "config.yaml").write_bytes(b'plugins: {mordred_llm_guard: "' + SECRET.encode())
+    return original
+
+
+@pytest.mark.parametrize("damage", ["reader", "policy-parser", "config-parser"])
+def test_policy_refusal_retains_no_raw_exception_context(profile, monkeypatch, damage):
+    from mordred_hermes.llm_guard import _windows_policy
+
+    damage_profile(profile, monkeypatch, damage)
+    with pytest.raises(MordredSessionRefused) as caught:
+        _windows_policy.read_decision(
+            profile.home / "mordred" / profile.policy_name, profile.home / profile.config_name
+        )
+    refusal = caught.value
+    assert refusal.__context__ is None
+    assert refusal.__cause__ is None
+    assert refusal.__suppress_context__ is True
+    message = str(refusal)
+    assert SECRET not in message
+    assert message.startswith(
+        "Mordred refuses this LLM operation because canonical Windows policy/config could not be safely read ("
+    )
+    assert message.endswith("). Inspect the profile and recover configuration.")
+    if damage == "reader":
+        assert "(RuntimeError)" in message
+
+
+@pytest.mark.parametrize("damage", ["reader", "policy-parser", "config-parser"])
+def test_hook_policy_refusal_chain_retains_no_original_exception(profile, monkeypatch, damage):
+    original = damage_profile(profile, monkeypatch, damage)
+    with pytest.raises(MordredSessionRefused) as caught:
+        run_provider(profile)
+    chain = exception_chain(caught.value)
+    assert all(link is not original for link in chain)
+    assert all(type(link) is MordredSessionRefused for link in chain)
+    assert all(SECRET not in str(link) for link in chain)
+
+
+def test_audit_refusal_retains_no_raw_exception_context(monkeypatch, tmp_path):
+    from mordred_hermes.llm_guard import _windows_policy
+
+    def broken(path):
+        raise OSError(SECRET)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(MordredSessionRefused) as caught:
+        _windows_policy.guarded_audit_factory(broken, tmp_path / "audit.log")
+    refusal = caught.value
+    assert refusal.__context__ is None
+    assert refusal.__cause__ is None
+    assert str(refusal) == "Mordred refuses this LLM operation because audit initialization failed."
+
+
+def test_audit_factory_failure_still_reraises_original_off_windows(monkeypatch, tmp_path):
+    from mordred_hermes.llm_guard import _windows_policy
+
+    original = OSError(SECRET)
+
+    def broken(path):
+        raise original
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(OSError) as caught:
+        _windows_policy.guarded_audit_factory(broken, tmp_path / "audit.log")
+    assert caught.value is original

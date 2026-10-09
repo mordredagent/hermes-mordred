@@ -34,6 +34,7 @@ def read_decision(policy_path: Path, config_path: Path | None = None) -> Decisio
     """Return None only on POSIX; unsafe Windows state always aborts the hook."""
     if sys.platform != "win32":
         return None
+    failure = "Exception"
     try:
         home = policy_path.parent.parent
         if policy_path.parent.name.casefold() != "mordred":
@@ -65,12 +66,15 @@ def read_decision(policy_path: Path, config_path: Path | None = None) -> Decisio
                 generation.update(member.data)
         return Decision(mode, settings_from_mapping(policy), config, generation.hexdigest())
     except Exception as exc:
-        # BaseException is deliberate: Hermes catches ordinary exceptions and
-        # continues. Do not expose policy/config bytes or parser diagnostics.
-        raise MordredSessionRefused(
-            "Mordred refuses this LLM operation because canonical Windows policy/config "
-            f"could not be safely read ({type(exc).__name__}). Inspect the profile and recover configuration."
-        ) from None
+        # Keep only the type name. Raising after the handler leaves no
+        # ``__context__`` that could retain the parser exception or bytes.
+        failure = type(exc).__name__
+    # BaseException is deliberate: Hermes catches ordinary exceptions and
+    # continues. Do not expose policy/config bytes or parser diagnostics.
+    raise MordredSessionRefused(
+        "Mordred refuses this LLM operation because canonical Windows policy/config "
+        f"could not be safely read ({failure}). Inspect the profile and recover configuration."
+    ) from None
 
 
 def _validate_policy(policy: dict[str, Any]) -> None:
@@ -162,4 +166,5 @@ def guarded_audit_factory(factory: Callable[[Path], _Audit], path: Path) -> _Aud
     except Exception:
         if sys.platform != "win32":
             raise
-        raise MordredSessionRefused("Mordred refuses this LLM operation because audit initialization failed.") from None
+    # Raised after the handler so no ``__context__`` retains the factory error.
+    raise MordredSessionRefused("Mordred refuses this LLM operation because audit initialization failed.") from None
