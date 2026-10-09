@@ -28,6 +28,7 @@ from ..keyvault._runtime_env import _env_optout_marker_path
 from . import _term
 from ._runtime_gate import RuntimeProbe, runtime_gate
 from ._vault_open import _vault_present
+from ._windows_gates import excluded_refusal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -207,6 +208,9 @@ def reseal(
     fails; on a read-back mismatch or an unremovable plaintext it returns 0 —
     in every non-clean case the plaintext is kept so no secret is stranded.
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption enable env (reseal)")
+    if refusal is not None:
+        return refusal
     from ..keyvault._env_reseal import reseal_env
 
     return reseal_env(home=home, root=root, backend=backend, store=store)
@@ -300,6 +304,9 @@ def enable(
     policy with its other steps, so the flow asks for a passphrase once and
     unlocks the vault at most once (see :mod:`._flow_session`).
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption enable env")
+    if refusal is not None:
+        return refusal
     from . import vault_cli
 
     # Sweep a reseal temp stranded by a prior crash (a 0o600 plaintext at rest):
@@ -377,6 +384,9 @@ def disable(
     vault (fail-closed). ``flow_session`` (``uninstall``) lends the flow's
     already open vault, so restoring several targets unlocks it once.
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption disable env")
+    if refusal is not None:
+        return refusal
     rc = _restore_plaintext(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
     if rc != 0:
         return rc
@@ -400,6 +410,9 @@ def purge(
     ``.env.vault-purged`` sidecar before unenrolling. Returns 0 on success, 1 when
     the vault is present but cannot be opened to recover / unenroll.
     """
+    refusal = excluded_refusal("env_config_workspace_seals", "encryption purge env")
+    if refusal is not None:
+        return refusal
     from ..keyvault import _storage, anchor, vault
     from . import vault_cli
 

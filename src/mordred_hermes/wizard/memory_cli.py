@@ -32,6 +32,10 @@ marker is the source of truth (no runtime ever read the flag). ``disable`` /
 ``purge`` still turn a flag an older build left behind off, and ``status``
 reports one that is set without a marker.
 
+On Windows (``win32``) all three verbs are the proof-bound CNG flow in
+:mod:`._windows_memory`: capabilities -> stopped-gateway gate -> (inert
+enrollment) -> installed-runtime proof -> checked keyvault lifecycle.
+
 Heavy imports stay function-local so this module imports on any platform.
 """
 
@@ -62,6 +66,9 @@ __all__ = ["disable", "enable", "purge"]
 
 _CONFIG_NAME = "config.yaml"
 _DARWIN = "darwin"
+_WINDOWS = "win32"
+#: Only this caller's runtime gate lists Windows (stopped gateways, never a bypass).
+_GATE_PLATFORMS = ("darwin", "linux", _WINDOWS)
 #: The sealed-file magic line, under the name ``keyvault/memory_crypto.py``
 #: cites when it documents the format's text-safety. That module owns the bytes.
 _ENC_HEADER = MAGIC
@@ -265,7 +272,7 @@ def _runtime_gate(*, home: Path, platform: str, force_runtime_unverified: bool) 
         runtime_probe=None,
         force_runtime_unverified=force_runtime_unverified,
         default_probe=_default_runtime_probe,
-        supported_platforms=("darwin", "linux"),
+        supported_platforms=_GATE_PLATFORMS,
         target="agent memory",
         mechanism=(
             "  Sealed memory files are opened only by the mordred keyvault plugin in the\n"
@@ -431,6 +438,10 @@ def enable(
     file on its next write instead of leaving the target off.
     """
     resolved = sys.platform if platform is None else platform
+    if resolved == _WINDOWS:
+        from . import _windows_memory
+
+        return _windows_memory.enable(home=home, force_runtime_unverified=force_runtime_unverified)
 
     reason = _enable_gate_reason(home=home, root=root, platform=resolved)
     if reason is not None:
@@ -599,9 +610,14 @@ def disable(
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
     flow_session: FlowSession | None = None,
+    platform: str | None = None,
 ) -> int:
     from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
 
+    if (sys.platform if platform is None else platform) == _WINDOWS:
+        from . import _windows_memory
+
+        return _windows_memory.disable(home=home)
     if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
         try:
             with memory_key_lock(home):
@@ -692,6 +708,7 @@ def purge(
     root: Path,
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
+    platform: str | None = None,
 ) -> int:
     """Disable, then strip the memory key from the vault ``.env`` and clear both markers.
 
@@ -703,6 +720,10 @@ def purge(
     """
     from ..keyvault._memory_key import MemoryKeyError, delete_linux_memory_key, memory_key_lock, memory_key_path
 
+    if (sys.platform if platform is None else platform) == _WINDOWS:
+        from . import _windows_memory
+
+        return _windows_memory.purge(home=home)
     if memory_key_path(home).exists() or memory_key_path(home).is_symlink() or sys.platform == "linux":
         try:
             with memory_key_lock(home):

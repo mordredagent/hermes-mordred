@@ -820,7 +820,16 @@ def _resolve_step_keyvault(
     prompt_io: PromptIO,
     options: SetupOptions,
     flow_session: FlowSession | None = None,
+    platform: str | None = None,
 ) -> StepResult:
+    if (sys.platform if platform is None else platform) == "win32":
+        # The generic secret store is not ported to Windows: report it (a
+        # retained store is preserved, never read) and continue to the
+        # Windows memory step instead of prompting for a ceremony that would
+        # refuse after the passphrase and seed transcription.
+        from ._windows_status import keyvault_state
+
+        return StepResult(_STEP_KEYVAULT, "skipped", keyvault_state(home)[2])
     state, detail = _probe_keyvault(home=home)
     if state == "initialised":
         return StepResult(_STEP_KEYVAULT, "done", detail)
@@ -1004,6 +1013,13 @@ def _resolve_step_env_encryption(
     options: SetupOptions,
     flow_session: FlowSession | None = None,
 ) -> StepResult:
+    if platform == "win32":
+        return StepResult(
+            _STEP_ENV_ENCRYPTION,
+            "skipped",
+            "excluded on Windows (excluded-on-windows); .env stays plaintext and any retained seal state is "
+            "preserved unchanged",
+        )
     complete, detail = _probe_env_encryption(home=home, root=root, platform=platform)
     if complete:
         return StepResult(_STEP_ENV_ENCRYPTION, "done", detail)
@@ -1121,6 +1137,10 @@ def _resolve_step_memory_encryption(
     options: SetupOptions,
     flow_session: FlowSession | None = None,
 ) -> StepResult:
+    if platform == "win32":
+        return _resolve_windows_memory_step(
+            home=home, root=root, prompt_io=prompt_io, options=options, flow_session=flow_session
+        )
     complete, detail = _probe_memory_encryption(home=home, platform=platform)
     if complete:
         return StepResult(_STEP_MEMORY_ENCRYPTION, "done", detail)
@@ -1170,6 +1190,41 @@ def _resolve_step_memory_encryption(
             "run `hermes-mordred encryption enable memory` interactively"
         ),
         ran_detail="agent memories are now sealed at rest",
+    )
+
+
+def _resolve_windows_memory_step(
+    *,
+    home: Path,
+    root: Path,
+    prompt_io: PromptIO,
+    options: SetupOptions,
+    flow_session: FlowSession | None = None,
+) -> StepResult:
+    """Windows: probe through the capabilities and the load-only scan, then the proof-bound enable.
+
+    Unreadable, unsafe or broken custody is ``"blocked"`` (manual repair, never
+    reset); a missing CNG helper is ``"manual"``; an opt-out is respected.
+    """
+    from ._windows_memory import observe
+    from ._windows_status import setup_memory_state
+
+    action, detail = setup_memory_state(observe(home, blocking=False))
+    if action is not None:
+        return StepResult(_STEP_MEMORY_ENCRYPTION, action, detail)
+    return _run_gated_encryption_step(
+        step=_STEP_MEMORY_ENCRYPTION,
+        target="memory",
+        run=lambda: _run_memory_encryption(
+            home=home, root=root, platform="win32", prompt_io=prompt_io, flow_session=flow_session
+        ),
+        non_interactive=options.non_interactive,
+        non_interactive_detail=(
+            "Windows memory encryption enrolls a CNG key, proves the installed Hermes runtime and seals the "
+            "memories; run `hermes-mordred encryption enable memory` yourself"
+        ),
+        abort_detail="run `hermes-mordred encryption enable memory` interactively",
+        ran_detail="agent memories are now sealed at rest under Windows CNG custody",
     )
 
 
@@ -1237,7 +1292,9 @@ def _run_steps(
         ),
         lambda: _resolve_step_network(home=home, prompt_io=prompt_io, policy_writer=policy_writer),
         lambda: _resolve_step_hardware_helper(home=home, platform=platform),
-        lambda: _resolve_step_keyvault(home=home, prompt_io=prompt_io, options=options, flow_session=session),
+        lambda: _resolve_step_keyvault(
+            home=home, prompt_io=prompt_io, options=options, flow_session=session, platform=platform
+        ),
         lambda: _resolve_step_env_encryption(
             home=home, root=root, platform=platform, prompt_io=prompt_io, options=options, flow_session=session
         ),
@@ -1292,10 +1349,12 @@ def cli_setup(args: argparse.Namespace) -> int:
         store_seed_for_hd=bool(getattr(args, "store_seed_for_hd", True)),
     )
     prompt_io: PromptIO = _RefusingPromptIO() if non_interactive else resolve_prompt_io(None)
+    from ._windows_gates import host_platform
+
     return run_setup(
         home=_hermes_home(),
         root=resolve_root(None),
-        platform=sys.platform,
+        platform=host_platform(),
         workspace=_default_workspace_paths(),
         prompt_io=prompt_io,
         policy_writer=PolicyWriter(),
