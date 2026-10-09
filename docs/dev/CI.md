@@ -1301,3 +1301,30 @@ and journals and names the profile path; the root is never removed
 recursively. Record source and sdist-wheel results separately in the Manual
 live-device validation log. Neither run establishes Windows 11 or C6 product
 acceptance.
+
+### Windows extension checked state validation (C10a)
+
+The scoped Windows job includes `tests/extension/test_extension_windows_storage.py`
+and `tests/extension/test_extension_windows_storage_native.py`. The first runs
+the real pairing, attestation, WebAuthn, history, wallet-fingerprint and API
+paths against the native backend, including child processes that race one
+pairing code, revocation against consumption, replay claims and a commit
+against a reader. Native cases prove that an inherited extension directory,
+broadened directory/file/lock ACLs, a hard-linked `state.json`, an extension
+directory junction and another process holding the lock refuse or serialize
+without repairing ACLs or rewriting state. Existing POSIX extension suites
+remain required and are unchanged.
+
+For controller acceptance, use an ordinary non-administrator account and a
+disposable `HERMES_HOME`. Verify `mordred_hermes.__file__` in the source
+environment and again in a fresh sdist-built wheel environment, then run that
+environment's Python from the repository root with:
+
+```powershell
+python -m pytest -q -o addopts= tests/extension/test_extension_windows_storage.py tests/extension/test_extension_windows_storage_native.py
+```
+
+Record source and wheel results separately in the Manual live-device
+validation log. This does not validate Telegram custody/archive (C10b), the
+gateway/Desktop lifecycle (C11), a real browser extension pairing, or
+Windows 11 product acceptance.

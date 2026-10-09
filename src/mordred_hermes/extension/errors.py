@@ -98,6 +98,10 @@ _CODES_BY_CONTEXT = {
 # Exceptions whose *message* is prose (operator instructions, missing-field
 # lists) but whose *type* is a meaningful outcome for the client.
 _SAFE_EXCEPTION_CODES = {
+    # extension._windows_storage: checked Windows storage refused or may have
+    # published; the subclass comes first in each MRO walk.
+    "ExtensionStorageUncertain": "storage_uncertain",
+    "ExtensionStorageError": "storage_unavailable",
     "WalletConfigError": "wallet_config_invalid",
     "WalletNotConfigured": "wallet_not_configured",
     "TransactionFieldsMissing": "transaction_fields_missing",

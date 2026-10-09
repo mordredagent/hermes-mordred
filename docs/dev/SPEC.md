@@ -1110,6 +1110,53 @@ network policy decisions; native Tor/VPN routes remain C9. A null
 that refuse-only gate evaluates) but refused by the LLM reader, which validates
 the main model route it authorizes.
 
+### Windows extension checked state (C10a)
+
+On Windows, `<home>/extension/` is an exact-private `_private_fs` directory.
+`pending.json`, `state.json`, `attest_key.pem`, `webauthn.json` and
+`history.enc` are read and written only inside its checked transaction on the
+permanent `.mordred-fs.lock`, the lock the wallet selection already uses in
+that directory; `.lock` is not created. Reads are bounded (pending 1 MiB,
+state 8 MiB, WebAuthn 64 KiB, attestation key 16 KiB, history 64 MiB) and bound
+to the checked identity observed before and after the read. Writes refuse an
+oversized document before touching storage, create a checked absence without
+replacement and replace only the identity the operation observed; new files
+are private before content. Deletes are identity-bound. One-use codes, replay
+identities, revocation and pairing commits keep their POSIX read-modify-write
+order under that one transaction; nested same-thread calls reuse it because
+the foundation lock is not reentrant.
+
+Only a checked missing directory or file is absence. Reads never create the
+directory or state files; an admitted directory without `.mordred-fs.lock`
+receives the private lock file. Unsafe, inaccessible, oversized, hard-linked, reparse or
+otherwise unadmitted state refuses with a content-free `ExtensionStorageError`
+(`storage_unavailable`), without chmod, ACL repair or adoption. A refusal or
+cleanup failure after any mutation in the same operation, or an uncertain
+primitive outcome, is `ExtensionStorageUncertain` (`storage_uncertain`) and is
+never retried. Corrupt or truncated JSON keeps the POSIX `RuntimeError` refusal
+and is never reset. `pair_init` answers `pair_fail` with the storage code;
+authentication, the auth challenge (with fail-closed `webauthn_required`) and
+other requests surface the code instead of empty state. Unpair, WebAuthn
+removal and history clear refuse instead of silently leaving state. Only the
+records POSIX already tolerates (the pairing outcome annotation and stale
+WebAuthn removal after a committed re-pair) are logged rather than raised.
+
+The attestation key is created once, exclusively, under the lock. A checked
+absence while `state.json` holds an active pairing refuses instead of minting a
+new identity, with the dedicated reason `attestation_key_missing` reported by
+`pair_fail` and `pair_outcome`. Recovery is explicit: remove the pairing, then
+pair again; the new pairing presents a new attestation identity that the
+extension must trust anew. No operator unpair command exists yet; until one
+does, call `mordred_hermes.extension.pairing.clear_pairing()` from the Hermes
+environment's Python with the same `HERMES_HOME`. The `state.json` parse cache keys on directory and file identity,
+size and mtime and performs a checked stat for every read, so security drift
+refuses and a replaced identity is re-parsed. The extension wallet snapshot
+fingerprint is a checked stat under the same lock; wallet persistence remains
+the keyvault's checked storage. History keeps its pairing-key envelope and
+`undecryptable` status, while storage refusals reach the chat/history caller.
+POSIX behavior is unchanged. Telegram custody/archive (C10b), gateway/Desktop
+lifecycle (C11), native validation and Windows 11 acceptance remain open.
+
 ## MVP Phasing
 
 The original phase headings and pull-request notes have been removed from the

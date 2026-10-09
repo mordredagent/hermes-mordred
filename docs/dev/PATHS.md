@@ -564,3 +564,21 @@ The generic secret store `mordred/keyvault/` (meta, ciphertexts, digests,
 `.lock`) and its parent `mordred/.keyvault.lifecycle.lock` are not ported to
 Windows: `_storage.ensure_layout` and the lifecycle lock refuse there before
 creating directories or lock files, and retained store files are preserved.
+### Windows extension state paths (C10a)
+
+On Windows the files listed in the `<home>/extension/` section above live in an
+exact-private directory checked by `_private_fs`. The permanent
+`<home>/extension/.mordred-fs.lock`, shared with the wallet selection,
+serializes pairing, attestation, WebAuthn, history and wallet access; `.lock`
+is not created. Reads never create the directory or state files; an admitted
+directory without `.mordred-fs.lock` receives the private lock file. Pairing
+mutations may create only the final `extension` directory beneath an existing
+trusted home. A missing `attest_key.pem` while `state.json` holds a pairing is
+refused (`attestation_key_missing`), never regenerated; recover by removing the
+pairing (`clear_pairing()`) and pairing again. Foundation
+staging names (`.mordred-fs-tmp-*`) may remain after a crash and are never
+glob-deleted. Existing directories or files with broader ACLs, extra links or
+reparse points are refused without repair, adoption or migration; earlier
+Windows builds could not pass the POSIX mode checks, so no mixed-version lock
+compatibility is claimed. See
+[the component contract](SPEC.md#windows-extension-checked-state-c10a).

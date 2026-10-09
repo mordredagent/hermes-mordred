@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from . import _windows_storage as _storage
 from .crypto import b64u_decode, b64u_encode
 
 if TYPE_CHECKING:
@@ -117,6 +118,10 @@ def authentication_generation_fingerprint(
             ensure_ascii=True,
         ).encode("utf-8")
         return hashlib.sha256(canonical).digest()
+    except _storage.ExtensionStorageError:
+        # Windows: unsafe or uncertain storage is surfaced, not mistaken for
+        # "no active principal" (callers still fail closed).
+        raise
     except Exception:
         return None
 
@@ -216,6 +221,11 @@ def save_webauthn_credential(
 def clear_webauthn_credential() -> None:
     from . import pairing
 
+    if _storage.enabled():
+        # Checked, identity-bound removal; refusal is surfaced, never ignored.
+        with _storage.session(pairing._ext_dir(), create=False):
+            _storage.delete_file(_webauthn_path())
+        return
     with pairing._state_lock(), pairing._suppress_oserror():
         _webauthn_path().unlink()
 
@@ -421,6 +431,8 @@ def _persist_legacy_webauthn_binding(
             body["pairing_token_hash"] = _pairing_token_hash(active_token)
             pairing._write_private(_webauthn_path(), json.dumps(body).encode("utf-8"))
         return True
+    except _storage.ExtensionStorageError:
+        raise
     except Exception:
         return False
 

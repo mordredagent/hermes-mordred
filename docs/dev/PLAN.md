@@ -1543,3 +1543,35 @@ profile, copied or expired proofs, running or unknown gateways, forged seals,
 broken seals, impersonating plaintext, orphan siblings, marker exclusivity,
 purge reports and a fresh-process read through `windows_memory_session` are
 covered; `test_windows_memory_proof_live.py` is the gated real-CNG recipe.
+
+### Windows extension checked state (C10a)
+
+`extension/_windows_storage.py` owns the Windows branch: a per-thread reusable
+session holding one `_private_fs` transaction on `<home>/extension`
+(`open_private_directory(create=True)` for mutations,
+`open_optional_private_directory` for reads), identity-bound `read`/`write`/
+`delete` with per-file bounds, and content-free `ExtensionStorageError` /
+`ExtensionStorageUncertain` classification (session publication promotes later
+refusals). `pairing._ext_dir`, `_write_private`, `_read_json`,
+`_read_json_strict`, `_state_lock`, the attestation loader, the `state.json`
+cache, `clear_pairing` and the pair-result bookkeeping branch on
+`_windows_storage.enabled()`; `webauthn` re-raises storage refusals from its
+fingerprint and legacy-binding paths and uses checked removal; `history`
+persists the unchanged envelope through the session; the wallet snapshot
+fingerprint uses a checked stat. `api` surfaces the classified code
+(`pair_fail`, `auth_fail`, `error`, fail-closed `auth_challenge`) and `errors`
+maps both classes for chat/wallet contexts. POSIX code paths are untouched.
+
+TDD covers checked round trips, checked absence without creation, unreachable
+POSIX helpers and raw path APIs, unsafe directories and files (broadened,
+hard-linked, oversized) refusing every operation without repair, corrupt and
+truncated state, lost/unsafe attestation keys, identity-keyed cache
+revalidation, uncertain publication and cleanup, missing-lock and cleanup
+errors that are not absence, API surfacing, the wallet fingerprint, and
+cross-process races (two consumers of one code, revoke versus consume, replay
+claims, commit versus reader). `tests/extension/test_extension_windows_storage.py`
+runs on every host (POSIX descriptor-relative backend beneath the same calls)
+and in the scoped Windows CI job with the native backend;
+`tests/extension/test_extension_windows_storage_native.py` adds inherited and
+broadened ACLs, hardlinks, a junction and a lock held by another process.
+Native source/wheel acceptance is a controller gate.
