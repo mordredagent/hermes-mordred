@@ -115,14 +115,23 @@ def run(
         keyvault_initialized=vault_ready,
     )
 
-    audit.append(
-        {
-            "event": "pre_install",
-            "decision": outcome.decision,
-            "reason": outcome.reason,
-            "skill_id": metadata.name,
-        }
-    )
+    entry = {
+        "event": "pre_install",
+        "decision": outcome.decision,
+        "reason": outcome.reason,
+        "skill_id": metadata.name,
+    }
+    if _platform != "nt":
+        audit.append(entry)
+    else:
+        try:
+            audit.append(entry)
+        except Exception as exc:
+            # Windows audit writers fail closed: an install whose audit record
+            # cannot be published (refused, poisoned or uncertain) never runs.
+            from ._windows_audit import classify_audit_failure
+
+            raise InstallBlocked(classify_audit_failure(exc), metadata.name) from exc
 
     if outcome.decision == "block":
         raise InstallBlocked(outcome.reason or "unknown", metadata.name)

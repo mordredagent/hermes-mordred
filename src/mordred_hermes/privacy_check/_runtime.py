@@ -134,6 +134,9 @@ def reset_state_for_tests() -> None:
         _state = None
         _poison_reason = None
         _degraded_no_origin_skill_emitted = False
+    from ._windows_audit import _forget_construction_refusals_for_tests
+
+    _forget_construction_refusals_for_tests()
 
 
 def reload_state() -> None:
@@ -348,8 +351,10 @@ def _load_state(
     audit_path = audit_path_override
     if audit_path is None:
         audit_path = _resolve_audit_path(section.get("audit_log_path"))
-    # Encrypt the audit log once the keyvault is initialized. The factory
-    # fails open to plaintext NDJSON. keyvault_home is the Hermes
+    # Encrypt the audit log once the keyvault is initialized. On POSIX the
+    # factory fails open to plaintext NDJSON; on Windows it routes through the
+    # native audit custody role and refuses (AuditWriterRefused) instead, which
+    # the hooks turn into a fail-closed refusal. keyvault_home is the Hermes
     # home — the directory holding config.yaml.
     # All Mordred plugins share one process-wide writer per normalized path.
     # Reloading this PluginState therefore reuses the active writer (and, for
@@ -608,6 +613,17 @@ def claim_no_origin_skill_emit() -> bool:
             return False
         _degraded_no_origin_skill_emitted = True
         return True
+
+
+def release_no_origin_skill_emit() -> None:
+    """Undo an unrecorded one-shot claim so the next session start retries it.
+
+    Windows calls this only when a recoverable audit failure kept the marker
+    from being recorded; the session itself is refused.
+    """
+    global _degraded_no_origin_skill_emitted
+    with _state_lock:
+        _degraded_no_origin_skill_emitted = False
 
 
 def disabled_from_checked(checked: CheckedPolicy, siblings: Iterable[str] = SIBLING_PLUGINS) -> set[str]:

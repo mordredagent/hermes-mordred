@@ -306,6 +306,11 @@ required.
 - [ ] C6: wizard encryption/Telegram/vault lifecycle, upgrade and uninstall.
 - [ ] C7a: shared audit append/rotation/compression/retention prerequisites.
 - [ ] C7b: audit privacy and CLI migration after keyvault integration.
+  Part 1 (privacy_check factory, probe, hooks and install wrapper) routes
+  Windows writers through native audit custody with checked plaintext only for
+  clean absence and fail-closed refusals otherwise. Independent review, native
+  Windows CI, live CNG, C5e predicate adoption and the separate part 2 wizard
+  audit CLI remain.
 - [ ] C8: network/LLM/privacy checked readers and fail-closed cache decisions.
   The network slice routes every Windows network decision through one checked
   canonical generation (host-tested; native Windows source/wheel validation of

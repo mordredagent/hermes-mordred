@@ -1205,6 +1205,34 @@ fixtures join scoped Windows CI. The opt-in UUID audit-only CNG fixture and its
 fresh-process check remain controller-owned source/sdist-wheel acceptance; local
 fake-native success does not satisfy TPM, Windows 11 or product acceptance.
 
+### Windows privacy audit writer routing (C7b part 1)
+
+Privacy-only slice: `privacy_check/audit.py` dispatches `win32` before the
+POSIX fail-open block to `privacy_check/_windows_audit.py`; `_keyvault_probe`
+returns `False` on Windows without `_storage`; hooks and the install wrapper
+consume the writer's sticky `refusal`. No shared module, keyvault or wizard
+change. Reuse C5d's provider, writer, `_audit_scope` receipt accounting and C7a
+rotation/retention rather than another filesystem path. Observe the audit role
+through C5e `role_status` before any native call and apply the C5d directory
+rules at construction (also when `<home>/mordred` is absent); a managed role gets
+C5d's load-only lease, checked clean absence scans the active and dated history
+(bounded gzip prefix) for MRAL or unrecognized content before selecting
+plaintext, and everything else raises `AuditWriterRefused`. Lock order stays
+home -> mordred -> writer mutex -> audit: the role check precedes the plaintext
+mutex, which is held through custody exit for settlement. Sticky refusals are
+remembered and poison a refused session start; recoverable ones refuse only the
+current operation, release the session marker claim and are retried.
+
+TDD uses the C5a/C5d host pattern (real custody, canonical coordinator, C7a
+sessions, MRKW/MRAL; only the native P-256 boundary, SID and confidential
+opener injected): managed/custom encrypted writers, fresh plaintext with
+downgrade, rotation/retention, MRAL active and history refusals under lost or
+corrupt custody, pending/orphan/copied/retained-only/missing-key/uncertain/
+unsafe/pending-policy refusals, late custody-exit settlement, concurrency,
+backend call accounting and hook/install fail-closed wiring. Native inherited
+ACL and junction cases join scoped Windows CI. Part 2 (wizard audit CLI), C5e
+predicate adoption, native Windows runs and live CNG acceptance remain.
+
 ### Windows gateway inventory (C5c)
 
 The keyvault runtime inventory uses psutil's native Windows process APIs.
