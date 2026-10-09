@@ -20,6 +20,12 @@ Security model (this provider executes operator-supplied commands):
   use. (A self-declared kill-switch flag is intentionally not offered
   here; promoting an unverifiable claim to a strict guarantee would
   defeat the fail-closed design.)
+- Native Windows: every configured executable (up, down, health) is resolved
+  by ``network._windows_exec`` to one absolute ``.exe`` (no ``.cmd``/``.bat``,
+  no current-directory or relative lookup) and classified; the resolved path
+  replaces ``argv[0]`` for every run. Strict refuses an untrusted image (the
+  runtime's kill-switch gate refuses strict custom routes earlier anyway);
+  lenient/off warn.
 """
 
 from __future__ import annotations
@@ -28,11 +34,13 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
 from .._exceptions import BringupFailed
+from .._windows_exec import ResolvedExecutable, enforce_executable_trust, resolve_windows_executable
 from .base import DEFAULT_RUNNER, PolicyMode, SubprocessRunner, VpnCapabilities
 
 __all__ = ["CustomCommandProvider", "CustomHandle"]
@@ -52,6 +60,46 @@ def _command_summary(argv: tuple[str, ...]) -> str:
     executable = os.path.basename(argv[0]) or "<configured executable>"
     executable = "".join(char if ord(char) >= 0x20 and ord(char) != 0x7F else "?" for char in executable)[:64]
     return f"{executable!r} with {max(0, len(argv) - 1)} argument(s)"
+
+
+WindowsResolver = Callable[[str], ResolvedExecutable]
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowsCommands:
+    """Configured commands with ``argv[0]`` replaced by the resolved image."""
+
+    up: tuple[str, ...]
+    down: tuple[str, ...]
+    health: tuple[str, ...] | None
+    images: tuple[ResolvedExecutable, ...]
+
+
+def resolve_windows_commands(
+    up_cmd: tuple[str, ...],
+    down_cmd: tuple[str, ...],
+    health_cmd: tuple[str, ...] | None,
+    *,
+    resolver: WindowsResolver | None = None,
+) -> _WindowsCommands:
+    """Resolve every configured executable; raises ``ExecutableRefused``."""
+    if not up_cmd:
+        raise BringupFailed(
+            "custom vpn provider selected but no up command configured; "
+            "set plugins.mordred_network.custom_up_cmd (e.g. [expressvpnctl.exe, connect])."
+        )
+    resolve = resolver or (lambda command: resolve_windows_executable(command, purpose="custom vpn"))
+    images: list[ResolvedExecutable] = []
+
+    def bind(command: tuple[str, ...]) -> tuple[str, ...]:
+        image = resolve(command[0])
+        images.append(image)
+        return (image.path, *command[1:])
+
+    up = bind(up_cmd)
+    down = bind(down_cmd) if down_cmd else ()
+    health = bind(health_cmd) if health_cmd else None
+    return _WindowsCommands(up=up, down=down, health=health, images=tuple(images))
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +122,24 @@ class CustomCommandProvider:
         up_cmd: tuple[str, ...],
         down_cmd: tuple[str, ...],
         health_cmd: tuple[str, ...] | None = None,
+        windows_resolver: WindowsResolver | None = None,
     ) -> None:
         self._up_cmd = tuple(up_cmd)
         self._down_cmd = tuple(down_cmd)
         self._health_cmd = tuple(health_cmd) if health_cmd else None
+        self._windows_resolver = windows_resolver
+        self._windows: _WindowsCommands | None = None
+
+    def _windows_commands(self) -> _WindowsCommands:
+        if self._windows is None:
+            self._windows = resolve_windows_commands(
+                self._up_cmd, self._down_cmd, self._health_cmd, resolver=self._windows_resolver
+            )
+        return self._windows
 
     def detect_cli(self, *, which: Callable[[str], str | None] = shutil.which) -> str:
+        if sys.platform == "win32":
+            return self._windows_commands().up[0]
         if not self._up_cmd:
             raise BringupFailed(
                 "custom vpn provider selected but no up command configured; "
@@ -107,11 +167,17 @@ class CustomCommandProvider:
     ) -> CustomHandle:
         # The configured command encodes its own relay / options; the
         # strict kill-switch gate is enforced upstream in the runtime.
-        del cli_path, region, policy_mode
+        del cli_path, region
         if not self._up_cmd:
             raise BringupFailed("custom vpn provider selected but no up command configured; set custom_up_cmd.")
+        up_cmd, down_cmd, health_cmd = self._up_cmd, self._down_cmd, self._health_cmd
+        if sys.platform == "win32":
+            commands = self._windows_commands()
+            for image in commands.images:
+                enforce_executable_trust(image, policy_mode=policy_mode, purpose="custom vpn")
+            up_cmd, down_cmd, health_cmd = commands.up, commands.down, commands.health
         try:
-            result = runner(self._up_cmd, timeout=DEFAULT_UP_TIMEOUT)
+            result = runner(up_cmd, timeout=DEFAULT_UP_TIMEOUT)
         except (OSError, subprocess.SubprocessError) as exc:
             raise BringupFailed(
                 f"custom vpn up command {_command_summary(self._up_cmd)} failed or timed out ({type(exc).__name__})"
@@ -120,7 +186,7 @@ class CustomCommandProvider:
             raise BringupFailed(
                 f"custom vpn up command {_command_summary(self._up_cmd)} failed (rc={result.returncode})"
             )
-        return CustomHandle(down_cmd=self._down_cmd, health_cmd=self._health_cmd)
+        return CustomHandle(down_cmd=down_cmd, health_cmd=health_cmd)
 
     def wait_connected(self, *, cli_path: str, runner: SubprocessRunner = DEFAULT_RUNNER) -> None:
         # The up command is expected to return once connected; there is no

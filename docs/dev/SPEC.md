@@ -1175,6 +1175,154 @@ the keyvault's checked storage. History keeps its pairing-key envelope and
 `undecryptable` status, while storage refusals reach the chat/history caller.
 POSIX behavior is unchanged. Telegram custody/archive (C10b), gateway/Desktop
 lifecycle (C11), native validation and Windows 11 acceptance remain open.
+||||||| caa7ef45d
+### Windows network routes and VPN capability (C9)
+
+Product limitation (controller ruling for this slice): Tor is the only
+supported private route on native Windows. `vpn_providers.provider_capability`
+returns an explicit `(supported, available, reason)` per provider and never
+starts a process. `mullvad` and `wireguard` are `supported=False` with reason
+`not-ported-on-windows`, because their tunnel services need administrative
+installation and a separately validated route; every Mullvad and WireGuard
+entry point refuses with that reason before any subprocess, and their health
+probes report unhealthy. `custom` is supported only when every configured up,
+down and health executable resolves to a validated `.exe` (see below). A
+strict VPN default path on Windows therefore refuses bring-up with the
+classified reason (a validated custom route still fails the existing strict
+kill-switch gate) and never falls back to clearnet; lenient/off log a warning
+and record the existing audited clearnet fallback. The cost: Windows users who
+need Mullvad or WireGuard cannot route through them with Mordred until a later
+slice ports and validates those routes natively. Until then they must use Tor,
+or a custom VPN command under lenient/off without Mordred's kill-switch
+guarantee.
+
+Executables. `tor_binary` and each `custom_*_cmd` executable are resolved to
+one absolute `.exe`; `.cmd`, `.bat`, `.com`, scripts and extensionless absolute
+paths are refused. A path with a directory must be absolute with a drive;
+relative, drive-relative, UNC and device-namespace paths are refused. A bare
+name gains `.exe` and is looked up only in absolute, non-UNC `PATH` entries;
+the current directory, relative `PATH` entries and the App Paths registry are
+never consulted. The resolved image is admitted as `managed` by
+`inspect_managed_installation_image`, or as `user-private` when it is owned by
+the current user inside a checked confidential or private directory; anything
+else is `untrusted`. Strict refuses an untrusted image before any state or
+process is touched; lenient/off warn and continue. No ACL is repaired.
+Processes start from an argument list with the resolved image as the explicit
+executable, never through a shell; a lock test rejects `shell=True` and string
+commands anywhere in the network package. Refusals name only a sanitized
+basename.
+
+Tor private state. `<home>/mordred/tor-data` is opened through the checked
+private-directory contract: created with the private ACL before any content,
+and an existing unsafe directory, reparse point or unsafe member refuses
+bring-up without repair. Under its exclusive transaction (taken without
+waiting), Mordred publishes `torrc` and an empty pinned `torrc-defaults`
+through checked no-replace staging and rename, then records the launched
+daemon in `daemon.json` (at most 4 KiB, strict schema: Tor PID, creation time,
+image and user, the launching process PID and creation time, and the torrc
+path). Tor starts as `tor.exe -f <torrc> --defaults-torrc <defaults>`, so
+neither stdin nor a per-user default torrc configures it. The rendered torrc
+binds SOCKS and control ports to `127.0.0.1` only, quotes the DataDirectory as
+a Tor C string (control characters refused) and adds
+`__OwningControllerProcess <launching pid>`. Tor creates its control cookie
+with its token's default DACL; before authentication Mordred reads it through
+the checked bounded reader (trusted owner, no untrusted mutation grant, no
+reparse point, exactly 32 bytes) and treats an unsafe cookie as unhealthy.
+
+Process lifecycle. Tor starts with `CREATE_NO_WINDOW`, stdin from `NUL` and the
+image directory as working directory, and is assigned to a kill-on-close job
+object (standard library `ctypes`) whose membership is verified before its
+identity is recorded; when the launching process exits for any reason the
+kernel ends the job's members. Teardown revalidates the recorded PID and
+creation time through psutil, terminates through the creation handle, closes
+the job (exact membership) and forgets only its own record; nothing is ever
+selected by image name. Startup cleanup forgets a record whose process is gone
+or whose PID now has another creation time; terminates a recorded Tor only
+after its live PID, creation time, image and user match the record and its
+recorded launching process is gone; and refuses as uncertain on malformed
+state, an identity mismatch, a live launching process, denied inspection or a
+failed termination. A current-user process whose command line names this
+profile's torrc but is not recorded is refused, never stopped and never
+reused. Residuals: a crash between process creation and job assignment leaves
+an unrecorded Tor that Tor's own owning-controller poll ends; until then the
+command-line inventory refuses it, and Tor's DataDirectory lock refuses a
+second daemon on the same state. An elevated same-user process can hide its
+command line from that inventory; the DataDirectory lock remains the backstop.
+psutil's own creation-time check immediately precedes a stale termination,
+leaving only that call's PID-reuse interval.
+
+Liveness and proxies. The liveness worker keeps the existing strict contract:
+a dropped Tor latches the route, the next strict tool or provider request
+raises the existing non-catchable refusal, and nothing switches the process
+to clearnet. The bootstrap reader bounds each line to 8,192 characters and
+buffered lines to 1,024 on every platform; exceeding either is a classified
+bring-up failure while the pump keeps draining the pipe. The proxy environment
+is written to the current process environment only, with the same variables
+as POSIX; the network package never writes the registry, WinINET, WinHTTP or
+system proxy settings (lock-tested). Child-process counting uses psutil
+instead of `pgrep`. POSIX behavior and the wizard presentation are unchanged;
+wizard capability presentation is C6, and real route evidence and Windows 11
+acceptance remain separate gates.
+
+Executable admission scope (controller ruling R-C9-2). The `untrusted` class
+means an image in a directory that other principals can change, for example
+`C:\tools` created under `C:\` (which inherits the Authenticated Users modify
+grant), `C:\Users\Public`, or a directory with an Everyone grant. Images
+under default per-user ACL directories such as `%TEMP%` or `Downloads` are
+user-private and are admitted in strict mode, because the threat model is
+other principals. The cost: strict mode does not stop a Tor or custom VPN
+image that the current user, or code running as that user, placed in its own
+temporary or download directory.
+
+Control cookie residual (controller ruling R-C9-3). The checked cookie read
+proves integrity, not confidentiality. It refuses an untrusted owner, an
+untrusted mutation grant, a reparse point, a changed file and a wrong size,
+but it does not refuse read grants on the cookie itself. Confidentiality rests
+on the private `tor-data` directory ACL. Other principals cannot list, create
+or replace its members. Because the private ACL has no inheritable entries,
+the cookie that Tor creates there receives the Tor token's default DACL, which
+grants no other user. No further check is made. Windows bypass-traverse
+checking lets a principal open a file by its full path through a directory it
+cannot list, so a read grant that the owner or an administrator later adds to
+the cookie itself would expose it, and Mordred would not detect that.
+
+Cookie path pinning. stem's `Controller.authenticate()` re-reads the cookie
+with a raw `open()`. It uses the `COOKIEFILE` path that Tor reports in
+PROTOCOLINFO, and it does so after Mordred's checked precheck has read the
+private path. On native Windows the deep liveness probe therefore requests
+PROTOCOLINFO itself. The reported path must equal
+`<home>/mordred/tor-data/control_auth_cookie`, compared case-insensitively
+after Windows path normalization. The probe passes that same response to
+`authenticate(protocolinfo_response=...)`, so stem sends no second
+PROTOCOLINFO and opens only the checked private cookie. A missing reported
+path makes the probe unhealthy with the classified reason
+`control-cookie-path-unreported`; a different one gives
+`control-cookie-path-outside-tor-data`. The reason is logged as a warning, and
+the reported path is never echoed. In strict mode the existing liveness
+threshold then drops the route without any clearnet fallback. One residual
+remains: stem's raw `open()` of the pinned path follows reparse points and is
+not the checked read. A member swapped between the precheck and
+authentication would therefore be read, but only principals that can change
+the private directory (the current user, SYSTEM and Administrators) can swap
+it. POSIX keeps stem's own discovery unchanged.
+
+Nested jobs. The kill-on-close job relies on nested job objects (Windows 8 and
+Windows Server 2012 or later). The launching process may already run inside a
+job, for example under a terminal, a task scheduler, a service host or a CI
+runner. Tor's assignment to Mordred's empty job then succeeds only because
+Windows nests the new job under the inherited one. On a system without nested
+jobs that assignment fails: the child is terminated and bring-up refuses with
+the classified job failure, so Tor never runs outside the job. Windows 10,
+Windows 11 and Windows Server 2016 or later all provide nested jobs.
+
+Daemon state refusals. A malformed or oversized `daemon.json` refusal names
+the file and the private `mordred/tor-data` directory. It never echoes the
+full path or the contents. It tells the operator to confirm that no Tor from
+this profile is still running, then remove that file. If a Tor does survive,
+the command-line inventory and Tor's DataDirectory lock still refuse it at
+the next start. The inventory refusal says "an unrecorded process", because it
+matches any current-user process whose command line names this profile's
+torrc, not only Tor images (TODO.md records that gap).
 
 ## MVP Phasing
 

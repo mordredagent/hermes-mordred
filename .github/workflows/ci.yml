@@ -95,6 +95,8 @@ jobs:
           tests/test_windows_privacy_audit.py tests/test_windows_privacy_audit_windows.py
           tests/test_llm_windows_policy.py tests/test_llm_windows_policy_native.py
           tests/test_network_windows_policy.py tests/test_network_windows_policy_native.py
+          tests/test_network_windows_tor.py tests/test_network_windows_tor_lifecycle.py
+          tests/test_network_windows_vpn.py tests/test_network_windows_routes_native.py
           tests/test_windows_memory_storage.py tests/test_windows_memory_hook.py
           tests/test_windows_memory_native.py
           tests/test_windows_capability.py tests/test_windows_capability_native.py

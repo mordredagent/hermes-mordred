@@ -219,9 +219,46 @@ owns the location but does not interpret those files.
 it to the Tor runtime. Do not copy it between profiles as configuration or
 treat it as a backup.
 
+### Native Windows contract (C9)
+
+On native Windows the directory is a checked private directory: Mordred
+creates it with the exact private ACL before any content, takes its exclusive
+transaction without waiting, and refuses (never repairs) an existing unsafe
+directory, reparse point or unsafe member. Mordred owns these members:
+
+| Member | Writer | Contract |
+|---|---|---|
+| `torrc` | network runtime | rendered configuration; checked no-replace staging, then rename |
+| `torrc-defaults` | network runtime | empty file pinned with `--defaults-torrc` |
+| `daemon.json` | network runtime | at most 4 KiB; Tor PID, creation time, image and user, launching process PID and creation time, torrc path |
+| `.mordred-fs.lock` | private filesystem | transaction lock; never deleted to make a busy operation succeed |
+
+Tor owns everything else, including `control_auth_cookie` (created with the Tor
+token's default DACL and read only through the checked bounded reader, at
+most 32 bytes) and its `lock`. `daemon.json` is removed only by its own Tor's
+teardown or by startup cleanup after identity revalidation; malformed or
+uncertain state refuses bring-up and stays for inspection. POSIX keeps the
+existing behavior (Tor configured through stdin; no Mordred members here).
+
+The checked cookie read proves the cookie's integrity, not its
+confidentiality (controller ruling R-C9-3). Confidentiality rests on this
+directory's private ACL: its entries are not inheritable, so the cookie Tor
+creates here receives the Tor token's default DACL, which grants no other
+user. Mordred does not check the cookie's read grants. stem's
+`authenticate()` re-reads the cookie with a raw `open()` at the `COOKIEFILE`
+path Tor reports. On native Windows that path must equal this directory's
+`control_auth_cookie`, or the liveness probe refuses with
+`control-cookie-path-unreported` or `control-cookie-path-outside-tor-data`.
+stem's raw read still follows reparse points, so a member swapped between
+Mordred's precheck and authentication would be read; only principals that can
+change this directory can swap it. A malformed or oversized `daemon.json` refusal names
+`daemon.json` in this directory. Remove it only after confirming that no Tor
+from the profile is running.
+
 ### Cross-references
 
 - [`SPEC.md`](./SPEC.md) §Plugin: `mordred_network`
+- [`SPEC.md`](./SPEC.md) §Windows network routes and VPN capability (C9)
 - [`PLAN.md`](./PLAN.md) §3.1 Plugin: `mordred_network`
 
 ## `~/.hermes/mordred/keyvault/`
