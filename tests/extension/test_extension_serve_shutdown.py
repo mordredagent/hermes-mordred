@@ -309,13 +309,12 @@ def test_bind_failures_are_classified(platform, code, classification, hint):
 
 
 def test_busy_7799_refuses_without_falling_back(free_7799, capsys):
-    blocker = socket.socket()
-    blocker.bind(("127.0.0.1", PORT))
-    blocker.listen(1)
-    try:
+    with socket.socket() as blocker:
+        if not WINDOWS:
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", PORT))
+        blocker.listen(1)
         assert extension_main.serve(port=PORT) == 1
-    finally:
-        blocker.close()
     captured = capsys.readouterr()
     assert "(port-in-use)" in captured.err and "no other port is tried" in captured.err.lower()
     assert "WebSocket:" not in captured.out, "nothing was served on another port"
