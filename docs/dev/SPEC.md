@@ -1105,6 +1105,94 @@ network policy decisions; native Tor/VPN routes remain C9. A null
 that refuse-only gate evaluates) but refused by the LLM reader, which validates
 the main model route it authorizes.
 
+### Windows network routes and VPN capability (C9)
+
+Product limitation (controller ruling for this slice): Tor is the only
+supported private route on native Windows. `vpn_providers.provider_capability`
+returns an explicit `(supported, available, reason)` per provider and never
+starts a process. `mullvad` and `wireguard` are `supported=False` with reason
+`not-ported-on-windows`, because their tunnel services need administrative
+installation and a separately validated route; every Mullvad and WireGuard
+entry point refuses with that reason before any subprocess, and their health
+probes report unhealthy. `custom` is supported only when every configured up,
+down and health executable resolves to a validated `.exe` (see below). A
+strict VPN default path on Windows therefore refuses bring-up with the
+classified reason (a validated custom route still fails the existing strict
+kill-switch gate) and never falls back to clearnet; lenient/off log a warning
+and record the existing audited clearnet fallback. The cost: Windows users who
+need Mullvad or WireGuard cannot route through them with Mordred until a later
+slice ports and validates those routes natively. Until then they must use Tor,
+or a custom VPN command under lenient/off without Mordred's kill-switch
+guarantee.
+
+Executables. `tor_binary` and each `custom_*_cmd` executable are resolved to
+one absolute `.exe`; `.cmd`, `.bat`, `.com`, scripts and extensionless absolute
+paths are refused. A path with a directory must be absolute with a drive;
+relative, drive-relative, UNC and device-namespace paths are refused. A bare
+name gains `.exe` and is looked up only in absolute, non-UNC `PATH` entries;
+the current directory, relative `PATH` entries and the App Paths registry are
+never consulted. The resolved image is admitted as `managed` by
+`inspect_managed_installation_image`, or as `user-private` when it is owned by
+the current user inside a checked confidential or private directory; anything
+else is `untrusted`. Strict refuses an untrusted image before any state or
+process is touched; lenient/off warn and continue. No ACL is repaired.
+Processes start from an argument list with the resolved image as the explicit
+executable, never through a shell; a lock test rejects `shell=True` and string
+commands anywhere in the network package. Refusals name only a sanitized
+basename.
+
+Tor private state. `<home>/mordred/tor-data` is opened through the checked
+private-directory contract: created with the private ACL before any content,
+and an existing unsafe directory, reparse point or unsafe member refuses
+bring-up without repair. Under its exclusive transaction (taken without
+waiting), Mordred publishes `torrc` and an empty pinned `torrc-defaults`
+through checked no-replace staging and rename, then records the launched
+daemon in `daemon.json` (at most 4 KiB, strict schema: Tor PID, creation time,
+image and user, the launching process PID and creation time, and the torrc
+path). Tor starts as `tor.exe -f <torrc> --defaults-torrc <defaults>`, so
+neither stdin nor a per-user default torrc configures it. The rendered torrc
+binds SOCKS and control ports to `127.0.0.1` only, quotes the DataDirectory as
+a Tor C string (control characters refused) and adds
+`__OwningControllerProcess <launching pid>`. Tor creates its control cookie
+with its token's default DACL; before authentication Mordred reads it through
+the checked bounded reader (trusted owner, no untrusted mutation grant, no
+reparse point, exactly 32 bytes) and treats an unsafe cookie as unhealthy.
+
+Process lifecycle. Tor starts with `CREATE_NO_WINDOW`, stdin from `NUL` and the
+image directory as working directory, and is assigned to a kill-on-close job
+object (standard library `ctypes`) whose membership is verified before its
+identity is recorded; when the launching process exits for any reason the
+kernel ends the job's members. Teardown revalidates the recorded PID and
+creation time through psutil, terminates through the creation handle, closes
+the job (exact membership) and forgets only its own record; nothing is ever
+selected by image name. Startup cleanup forgets a record whose process is gone
+or whose PID now has another creation time; terminates a recorded Tor only
+after its live PID, creation time, image and user match the record and its
+recorded launching process is gone; and refuses as uncertain on malformed
+state, an identity mismatch, a live launching process, denied inspection or a
+failed termination. A current-user process whose command line names this
+profile's torrc but is not recorded is refused, never stopped and never
+reused. Residuals: a crash between process creation and job assignment leaves
+an unrecorded Tor that Tor's own owning-controller poll ends; until then the
+command-line inventory refuses it, and Tor's DataDirectory lock refuses a
+second daemon on the same state. An elevated same-user process can hide its
+command line from that inventory; the DataDirectory lock remains the backstop.
+psutil's own creation-time check immediately precedes a stale termination,
+leaving only that call's PID-reuse interval.
+
+Liveness and proxies. The liveness worker keeps the existing strict contract:
+a dropped Tor latches the route, the next strict tool or provider request
+raises the existing non-catchable refusal, and nothing switches the process
+to clearnet. The bootstrap reader bounds each line to 8,192 characters and
+buffered lines to 1,024 on every platform; exceeding either is a classified
+bring-up failure while the pump keeps draining the pipe. The proxy environment
+is written to the current process environment only, with the same variables
+as POSIX; the network package never writes the registry, WinINET, WinHTTP or
+system proxy settings (lock-tested). Child-process counting uses psutil
+instead of `pgrep`. POSIX behavior and the wizard presentation are unchanged;
+wizard capability presentation is C6, and real route evidence and Windows 11
+acceptance remain separate gates.
+
 ## MVP Phasing
 
 The original phase headings and pull-request notes have been removed from the

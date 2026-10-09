@@ -1416,6 +1416,62 @@ before route/status calls and strict registration without clearnet fallback.
 broadened ACLs, hardlinks, pending markers, a policy-directory junction and a
 competing process lock on actual Windows; both modules are in the scoped
 Windows CI selector. Native source/wheel acceptance is a controller gate.
+
+### Windows network routes (C9 network slice)
+
+Contract: SPEC.md §Windows network routes and VPN capability (C9). Component
+scope is `src/mordred_hermes/network/` with its tests and docs; the wizard
+presentation (C6) and the C8 policy reader are unchanged.
+
+- `network/_windows_exec.py`: `resolve_windows_executable` (`.exe` only,
+  absolute-with-drive or absolute non-UNC `PATH` lookup, never the current
+  directory), classification `managed` / `user-private` / `untrusted` through
+  `inspect_managed_installation_image` and the confidential-directory `stat`,
+  and `enforce_executable_trust` (strict refuses, lenient/off warn).
+- `network/_windows_job.py`: `KillOnCloseJob` over `kernel32` with `ctypes`;
+  assignment verified with `IsProcessInJob`; DLLs bound on first use only.
+- `network/paths/_tor_windows.py`: launch (checked private `tor-data`,
+  nonblocking transaction, startup cleanup, `torrc` / `torrc-defaults`
+  publication, argv spawn with `CREATE_NO_WINDOW`, job assignment, psutil
+  identity, `daemon.json` record), `WindowsTorProcess` (identity-revalidated
+  handle termination, job close, own-record removal), the checked control
+  cookie read and the psutil identity helpers. Every OS seam is injectable
+  through `WindowsTorSystem`.
+- `network/paths/tor.py`: `render_torrc(quote_paths=, owning_controller_pid=)`
+  (defaults keep POSIX output byte-identical); `start_process`, `stop` and the
+  cookie precheck of `circuit_status_health` dispatch on `win32` only; the
+  shared bootstrap reader is bounded (line and buffered-line caps).
+- `network/runtime.py`: on `win32` the Tor launch receives the private data
+  directory and policy mode, the VPN path checks `provider_capability` before
+  any provider call, and child counting uses psutil.
+- `network/paths/vpn.py`, `vpn_providers/wireguard.py`: refuse with
+  `not-ported-on-windows` before any subprocess; health is unhealthy. The
+  shared default runner passes the explicit image, `NUL` stdin and
+  `CREATE_NO_WINDOW` on Windows.
+- `vpn_providers/custom.py`, `vpn_providers/registry.py`: validated Windows
+  custom executables and `provider_capability(name) -> (supported, available,
+  reason)` on every platform.
+
+TDD: `tests/test_network_windows_tor.py`,
+`tests/test_network_windows_tor_lifecycle.py` and
+`tests/test_network_windows_vpn.py` run on every host. They cover discovery with spaces, non-ASCII and relative
+names; untrusted images (strict refuses, lenient warns); quoted torrc
+rendering; a real stub child process with real psutil identities and the
+host's checked private directory for launch, unsafe state, stale and
+mismatched daemon records, live owners, unrecorded users of the torrc, job
+assignment failure and exact teardown; bounded reader overflow; checked cookie
+states; the capability table and strict refusal without clearnet; strict
+liveness drops through the real `pre_tool_call`; process-only proxy variables
+on a case-insensitive environment; and AST lock tests for shells, string
+commands, registry and system proxy writes.
+`tests/test_network_windows_routes_native.py` runs only on Windows with a stub
+`tor.exe` built from pip's distlib launcher (job close and crashed-parent
+cases, full lifecycle, stale-record recovery, unrecorded-user and
+untrusted-image refusals, unsafe `tor-data`), plus a real-Tor case gated by
+`MORDRED_TEST_REAL_TOR` and the `integration` marker. All four modules are in
+the scoped Windows CI selector. Native source/wheel runs, real route evidence,
+wizard presentation and Windows 11 acceptance are controller gates.
+
 ### Windows capability predicates and role reset (C5e)
 
 Public signatures are frozen in SPEC.md §Windows dedicated custody and memory

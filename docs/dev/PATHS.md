@@ -219,9 +219,31 @@ owns the location but does not interpret those files.
 it to the Tor runtime. Do not copy it between profiles as configuration or
 treat it as a backup.
 
+### Native Windows contract (C9)
+
+On native Windows the directory is a checked private directory: Mordred
+creates it with the exact private ACL before any content, takes its exclusive
+transaction without waiting, and refuses (never repairs) an existing unsafe
+directory, reparse point or unsafe member. Mordred owns these members:
+
+| Member | Writer | Contract |
+|---|---|---|
+| `torrc` | network runtime | rendered configuration; checked no-replace staging, then rename |
+| `torrc-defaults` | network runtime | empty file pinned with `--defaults-torrc` |
+| `daemon.json` | network runtime | at most 4 KiB; Tor PID, creation time, image and user, launching process PID and creation time, torrc path |
+| `.mordred-fs.lock` | private filesystem | transaction lock; never deleted to make a busy operation succeed |
+
+Tor owns everything else, including `control_auth_cookie` (created with the Tor
+token's default DACL and read only through the checked bounded reader, at
+most 32 bytes) and its `lock`. `daemon.json` is removed only by its own Tor's
+teardown or by startup cleanup after identity revalidation; malformed or
+uncertain state refuses bring-up and stays for inspection. POSIX keeps the
+existing behavior (Tor configured through stdin; no Mordred members here).
+
 ### Cross-references
 
 - [`SPEC.md`](./SPEC.md) §Plugin: `mordred_network`
+- [`SPEC.md`](./SPEC.md) §Windows network routes and VPN capability (C9)
 - [`PLAN.md`](./PLAN.md) §3.1 Plugin: `mordred_network`
 
 ## `~/.hermes/mordred/keyvault/`

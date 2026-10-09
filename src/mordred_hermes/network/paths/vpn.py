@@ -12,8 +12,12 @@ The Mullvad client is daemonized externally — we don't track a
 ``Popen``. The handle records what *we* asked for so the runtime can decide
 whether to preserve lockdown on disconnect.
 
-Platform: macOS Apple Silicon + Ubuntu/Debian. Windows is out of scope
-for v1.
+Platform: macOS Apple Silicon + Ubuntu/Debian. Native Windows is not
+ported in this release: every entry point refuses with
+``not-ported-on-windows`` before any subprocess (``health`` reports
+unhealthy), so a strict Windows VPN route can never start. The shared
+default runner, used by the Windows custom provider, passes an explicit
+image, ``NUL`` stdin and ``CREATE_NO_WINDOW`` on Windows.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,6 +45,8 @@ DEFAULT_CONNECT_TIMEOUT: Final[float] = 10.0
 DEFAULT_POLL_INTERVAL: Final[float] = 0.5
 DEFAULT_MAX_HANDSHAKE_AGE_SECONDS: Final[float] = 180.0
 DEFAULT_COMMAND_TIMEOUT: Final[float] = 5.0
+NOT_PORTED_ON_WINDOWS: Final[str] = "not-ported-on-windows"
+_CREATE_NO_WINDOW: Final[int] = 0x08000000
 
 
 class SubprocessRunner(Protocol):
@@ -79,14 +86,40 @@ def _default_runner(
 
     Centralized so tests can swap in a fake and the production path
     retains a single subprocess invocation site.
+
+    Always an argument list, never a shell. On native Windows the first
+    element is a resolved absolute ``.exe`` (see ``_windows_exec``); it is
+    also passed as the explicit image so ``CreateProcess`` performs no search.
     """
+    command = list(argv)
+    if sys.platform == "win32":
+        return subprocess.run(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            executable=command[0] if command else None,
+            stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
+        )
     return subprocess.run(
-        list(argv),
+        command,
         check=check,
         capture_output=capture_output,
         text=text,
         timeout=timeout,
     )
+
+
+def refuse_on_windows(operation: str) -> None:
+    """Raise before any Mullvad/WireGuard subprocess on native Windows."""
+    if sys.platform == "win32":
+        raise BringupFailed(
+            f"{operation} refused: Mullvad and WireGuard VPN routes are not supported on native Windows "
+            f"in this release ({NOT_PORTED_ON_WINDOWS}). Use the Tor route, or a custom VPN command with a "
+            "validated .exe under lenient/off policy."
+        )
 
 
 DEFAULT_RUNNER: Final[SubprocessRunner] = _default_runner
@@ -123,6 +156,7 @@ def detect_cli(*, which: Callable[[str], str | None] = shutil.which) -> str:
     :class:`BringupFailed` if neither is present so the caller can
     surface an actionable error.
     """
+    refuse_on_windows("mullvad detection")
     path = which("mullvad")
     if path:
         return path
@@ -161,6 +195,7 @@ def bring_up(
     semantics are now subsumed by ``lockdown-mode``, so strict mode
     only flips that one setting.
     """
+    refuse_on_windows("mullvad bring-up")
     # Only enable a strict kill-switch we observed OFF. The state query and
     # mutation are not atomic (Mullvad exposes no CAS), so even a successful
     # ``set on`` cannot establish exclusive ownership. On later failure we
@@ -268,6 +303,7 @@ def wait_connected(
     interval is conservative so we don't hammer the daemon — the
     bring-up window in practice is 1-3 seconds.
     """
+    refuse_on_windows("mullvad status wait")
     start = clock()
     while True:
         try:
@@ -303,6 +339,7 @@ def disconnect(
     removed upstream and ``lockdown-mode`` now covers the same
     "block traffic when not connected" guarantee.
     """
+    refuse_on_windows("mullvad disconnect")
     _run_or_raise(runner, (handle.cli_path, "disconnect"))
     if not preserve_lockdown:
         _run_or_raise(runner, (handle.cli_path, "lockdown-mode", "set", "off"))
@@ -423,6 +460,8 @@ def health(
     down instead of crashing (matching the prior fail-closed contract, Codex
     P2 / HIGH-3 2026-05-13).
     """
+    if sys.platform == "win32":
+        return False  # not ported: never report a Windows Mullvad route healthy
     try:
         result = runner(
             (handle.cli_path, "status"),

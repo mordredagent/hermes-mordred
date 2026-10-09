@@ -1220,6 +1220,48 @@ python -m pytest -q -o addopts= tests/test_network_windows_policy.py tests/test_
 Record source and wheel results separately in the Manual live-device
 validation log. This does not validate native Tor/VPN routes (C9), live
 provider traffic, wizard status presentation or Windows 11 product acceptance.
+
+### Windows network routes validation (C9)
+
+The scoped Windows job adds `test_network_windows_tor.py`,
+`test_network_windows_tor_lifecycle.py`, `test_network_windows_vpn.py` and
+`test_network_windows_routes_native.py`. The first three also run on every
+POSIX job: discovery uses Windows path strings
+with an injected filesystem and admission; the Tor lifecycle uses the host's
+checked private directory, a real stub child process (a Python script standing
+in for `tor.exe`), real psutil identities and a fake job; VPN runners and
+`subprocess.run` are injected. No Tor, VPN, registry or system proxy setting
+is touched. The native module builds a real stub `tor.exe` from pip's
+vendored distlib launcher (it skips when pip is absent from the environment)
+and exercises the real kill-on-close job, `CREATE_NO_WINDOW` launch, checked
+`tor-data`, startup cleanup and exact teardown. Existing POSIX network suites
+remain required.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, an ordinary non-administrator
+account and a disposable `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_network_windows_tor.py tests/test_network_windows_tor_lifecycle.py tests/test_network_windows_vpn.py tests/test_network_windows_routes_native.py
+```
+
+Optional real-Tor recipe for a validation host with an installed Tor Expert
+Bundle and outbound network (it bootstraps a real Tor on loopback ports from
+19050, checks the control cookie and, when `stem` is installed, the circuit
+probe, then verifies exact teardown and record removal):
+
+```powershell
+$env:MORDRED_TEST_REAL_TOR = 'C:\Program Files\Tor\tor.exe'
+python -m pytest -q -s -o addopts= -m integration tests/test_network_windows_routes_native.py -k real_tor
+```
+
+Set `MORDRED_TEST_REAL_TOR_POLICY=lenient` only to exercise an image that is
+neither administrator-managed nor in a private per-user directory. Record
+source and wheel results separately in the Manual live-device validation log.
+None of these runs validates Mullvad/WireGuard (not ported on Windows in this
+release), live provider traffic through the route, wizard capability
+presentation (C6) or Windows 11 acceptance.
+
 ### Windows capability and role reset validation (C5e)
 
 The scoped Windows job adds `test_windows_capability.py`,
