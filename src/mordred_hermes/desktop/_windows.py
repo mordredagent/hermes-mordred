@@ -48,9 +48,8 @@ ACK_NO_RECOVERY = "acknowledge_cng_no_recovery"
 ACK_NO_PRESENCE = "acknowledge_no_presence"
 MEMORY_ACKNOWLEDGEMENTS = (ACK_NO_RECOVERY, ACK_NO_PRESENCE)
 TELEGRAM_ACKNOWLEDGEMENTS = (ACK_NO_PRESENCE,)
-#: No wizard verb enrolls the ``telegram`` custody role yet: ``keyvault native
-#: init`` offers memory/audit only (gap recorded for the C6-telegram slice).
-TELEGRAM_CEREMONY_COMMAND: str | None = None
+#: The C6 Telegram ceremony enrolls the role explicitly, outside the Desktop API.
+TELEGRAM_CEREMONY_COMMAND = "hermes-mordred keyvault native init --role telegram"
 PRESENCE_REASON = "excluded-on-windows"
 
 _DETAIL_LIMIT = 2000
@@ -266,7 +265,7 @@ def gateway_inventory(home: Path) -> dict[str, Any]:
 
 
 def telegram_custody(home: Path, row: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """The ``telegram_hardware`` capability; enrollment belongs to a (not yet available) wizard ceremony.
+    """The ``telegram_hardware`` capability; enrollment belongs to the explicit wizard ceremony.
 
     ``row`` reuses an already-read capability row (status) instead of a second predicate read.
     """
@@ -670,22 +669,85 @@ async def telegram_logout(store: Any, *, forget: bool) -> dict[str, Any]:
     """Windows logout (session dropped, archive kept) or forget (``wipe_archive(forget=True)``)."""
     import asyncio
 
-    from ..extension.telegram import store as archive
     from ..extension.telegram.secrets import TelegramSecretsError
 
     try:
-        current, snapshot = await asyncio.to_thread(store.load_snapshot)
+        snapshot = await asyncio.to_thread(store.load_snapshot)
     except TelegramSecretsError as exc:
-        return {"ok": False, "error": exc.code}
+        result: dict[str, Any] = {"ok": False, "error": exc.code}
+        if forget and exc.code in ("secrets_corrupt", "telegram_not_enrolled"):
+            result["remedy"] = (
+                "Desktop cannot forget unreadable credentials. Run `hermes-mordred telegram logout --forget` "
+                "in a terminal for checked recovery; also end the session in Telegram → Settings → Devices."
+            )
+        return result
+    current = snapshot[0]
+    if forget:
+        return await _forget_telegram(store, current)
     revoked: bool | None = None
     if current is not None and current.session is not None:
         revoked = await _revoke(current)
     try:
-        if forget:
-            # One validated plan: archive, sealed credentials, then the telegram role only.
-            await asyncio.to_thread(lambda: archive.wipe_archive(None, forget=True))
-        elif current is not None:
+        if current is not None:
             await asyncio.to_thread(store.update_from_snapshot, snapshot, _drop_session)
+    except TelegramSecretsError as exc:
+        result = {"ok": False, "error": exc.code, "revoked": revoked}
+    else:
+        result = {"ok": True, "forgot": False, "revoked": revoked}
+    _manual_revoke_remedy(result, needed=revoked is False)
+    return result
+
+
+def _manual_revoke_remedy(result: dict[str, Any], *, needed: bool) -> None:
+    if needed:
+        result.update(manual_revoke=True, remedy="Also end the session in Telegram → Settings → Devices.")
+
+
+def _credential_presence(root: Path) -> bool | None:
+    """Corroborate advisory flag absence against the checked seal; a failed read stays unknown."""
+    from ..extension.telegram import _windows_archive as checked
+
+    try:
+        with checked.transaction(root) as tx:
+            return tx is not None and checked.present(tx, "credentials.sealed")
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+async def _forget_telegram(store: Any, current: Any) -> dict[str, Any]:
+    """Checked wipe -> re-checked credentials -> revoke; preserve partial failures without retrying."""
+    import asyncio
+
+    from ..extension.telegram import store as archive
+    from ..extension.telegram.secrets import TelegramSecretsError
+    from ..wizard import _windows_telegram
+
+    root = archive.telegram_dir()
+    before = await asyncio.to_thread(_windows_telegram.observe, store, root)
+    if current is not None and before.credentials is not True:
+        before = replace(before, credentials=True)  # the loaded snapshot proves credentials existed
+    failure = None
+    try:
+        # The real C10b plan preflights before deleting archive, credentials and the telegram role.
+        await asyncio.to_thread(lambda: archive.wipe_archive(root, forget=True))
     except (TelegramSecretsError, archive.StoreError) as exc:
-        return {"ok": False, "error": exc.code, "revoked": revoked}
-    return {"ok": True, "forgot": forget, "revoked": revoked}
+        failure = exc.code
+    after = await asyncio.to_thread(_windows_telegram.observe, store, root)
+    if after.credentials is False:
+        # flags() can return None for non-object metadata even with a retained seal.
+        after = replace(after, credentials=await asyncio.to_thread(_credential_presence, root))
+    revoked: bool | None = None
+    has_session = current is not None and current.session is not None
+    if has_session and after.credentials is False:
+        revoked = await _revoke(current)
+    result: dict[str, Any] = {
+        "ok": failure is None,
+        "revoked": revoked,
+        "outcome": _windows_telegram.outcome_lines(before, after, forget=True),
+    }
+    if failure is None:
+        result["forgot"] = True
+    else:
+        result["error"] = failure
+    _manual_revoke_remedy(result, needed=has_session and (after.credentials is None or revoked is False))
+    return result

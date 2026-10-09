@@ -539,3 +539,31 @@ C11 review round 1 additions:
   ACLs, which the checked placement refuses (never repairs) and logs with the
   exact path. Remedy: delete those two folders by hand, then run
   `hermes-mordred desktop install`.
+
+C11 integration follow-up (R-C11-5/R-C11-6):
+
+- [x] Close the missing-command follow-up using C6 ceremony PR #222:
+  Desktop exposes `hermes-mordred keyvault native init --role telegram` in
+  status, enrollment refusals and the page's existing command rendering.
+  This supersedes the earlier pending ceremony/command item above.
+- [x] Ordinary logout reuses the full Windows credential snapshot with one
+  unwrap; real-store regressions preserve credentials, archive and roles.
+- [x] Forget follows R-C6T-2 checked wipe -> checked observation -> revoke,
+  preserving definite refusals and original partial failures; unknown state
+  and failed revoke show manual Devices advice with outcomes across refresh.
+  Cost (R-C11-6): local deletion can precede a failed remote revocation.
+- [ ] Desktop still refuses unreadable/corrupt or role-less credentials
+  before forget; use the displayed `hermes-mordred telegram logout --forget`
+  recovery remedy. Native Desktop destructive recovery parity is separate.
+- [ ] Bound the pre-existing chat executor worker lifecycle separately.
+  R-C11-5 accepts listener stop, 3-second connection-handler grace and
+  remaining task cancellation after an open WebSocket delayed SIGTERM about
+  46 seconds. Cost: POSIX in-flight connections may be cancelled and callers
+  may reconnect/retry. It is not a process-exit deadline: the isolated
+  12-second worker probe returned from `_run_forever` around 3.21 seconds
+  but Python awaited the worker during interpreter exit.
+- [ ] Shared Windows credential `flags()` currently returns `None` for
+  non-object JSON metadata even when `credentials.sealed` remains. Desktop
+  now corroborates observed absence with checked seal presence (and refuses
+  remote revoke on retained/unknown state); fix shared flags semantics in a
+  separate extension/C6 follow-up.

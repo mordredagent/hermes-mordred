@@ -112,7 +112,8 @@ jobs:
           tests/test_wizard_windows_native.py
           tests/test_wizard_windows_telegram.py tests/test_wizard_windows_telegram_native.py
           tests/test_desktop_windows_api.py tests/test_desktop_windows_native.py
-          tests/test_desktop_windows_page.py tests/extension/test_extension_serve_shutdown.py
+          tests/test_desktop_windows_page.py tests/test_desktop_windows_logout.py
+          tests/extension/test_extension_serve_shutdown.py
           tests/test_desktop_capture.py
       - name: Build a wheel from the sdist and smoke outside the checkout
         run: |

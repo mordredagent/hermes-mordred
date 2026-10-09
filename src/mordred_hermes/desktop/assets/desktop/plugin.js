@@ -47,7 +47,7 @@ const MESSAGES = {
   telegram_not_configured: 'Set the question model first (step 3).',
   hermes_model_not_private: 'Hermes itself must use a Venice private model or a local model first (step 0).',
   // Windows (machine-bound CNG custody, no per-use presence).
-  telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Its enrollment ceremony is not available in this Mordred build yet; nothing was created.',
+  telegram_not_enrolled: 'Telegram custody is not enrolled on this Windows profile. Follow the custody step or recovery remedy below.',
   telegram_custody_unavailable: 'Telegram custody could not be checked on this Windows profile.',
   presence_acknowledgement_required: 'First confirm that Windows asks for no per-use approval (Telegram custody step).',
   presence_unsupported: 'Windows has no per-use presence prompt. Confirm the machine-bound key first.',
@@ -656,27 +656,35 @@ function TelegramCustodyStep({ custody, ack, setAck }) {
   })
 }
 
-function WindowsLogout({ refresh }) {
+function WindowsLogout({ refresh, loggedIn }) {
   const [forget, setForget] = useState(false)
   const [phrase, setPhrase] = useState('')
   const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState(null)
+  const [failure, setFailure] = useState(null)
   const run = async () => {
     setBusy(true)
+    setResult(null)
+    setFailure(null)
     try {
       const r = await call('/telegram/logout', forget ? { forget, confirm: phrase } : { forget })
+      setResult(r)
       host.notify({
         kind: 'success',
-        message: forget ? 'Telegram data and its custody key were deleted.' : 'Logged out of Telegram; the encrypted archive is kept.',
+        message: forget ? 'Telegram deletion finished. See the checked outcome below.' : 'Logged out of Telegram; the encrypted archive is kept.',
       })
-      if (r.revoked === false) host.notify({ kind: 'info', message: 'Also end the session in Telegram → Settings → Devices.' })
+      if (r.manual_revoke) host.notify({ kind: 'info', message: r.remedy })
       refresh()
     } catch (e) {
+      setFailure(e)
       host.notifyError(e, 'Logout failed')
+      refresh()
     } finally {
       setBusy(false)
       setPhrase('')
     }
   }
+  if (!loggedIn && !result && !failure) return null
   return jsxs('section', {
     style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
     children: [
@@ -692,11 +700,15 @@ function WindowsLogout({ refresh }) {
       jsx(Row, {
         children: jsx(Button, {
           variant: 'outline',
-          disabled: busy || (forget && phrase.trim() !== PURGE_PHRASE),
+          disabled: busy || !loggedIn || (forget && phrase.trim() !== PURGE_PHRASE),
           onClick: run,
           children: busy ? 'Working…' : forget ? 'Log out and delete Telegram data' : 'Log out',
         }),
       }),
+      result && result.outcome ? jsx('pre', { style: { whiteSpace: 'pre-wrap' }, children: result.outcome.join('\n') }) : null,
+      result && result.remedy ? jsx('p', { children: result.remedy }) : null,
+      failure && failure.info.outcome ? jsx('pre', { style: { whiteSpace: 'pre-wrap' }, children: failure.info.outcome.join('\n') }) : null,
+      failure ? jsx(FailureNote, { error: failure }) : null,
     ],
   })
 }
@@ -733,8 +745,8 @@ function WindowsSetup({ status, refresh }) {
                     ],
                   })
                 : jsx('p', { children: 'The Telegram steps unlock once Hermes uses a private or local model, memory encryption is on and Telegram custody is confirmed.' }),
-              // Logout/forget stays reachable even when a later check closes the setup steps.
-              status.telegram_supported && loggedIn ? jsx(WindowsLogout, { refresh }) : null,
+              // Keep results mounted after logout changes the login status; controls then disable.
+              jsx(WindowsLogout, { refresh, loggedIn }),
             ],
           })
         : jsx('p', { role: 'status', children: 'Private Telegram is not available on this Windows profile.' }),
