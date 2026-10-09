@@ -26,6 +26,7 @@ from mordred_hermes.privacy_check import _runtime, audit, egress, hooks, install
 from mordred_hermes.privacy_check._exceptions import AuditWriterRefused, MordredIntegrityRefused
 from mordred_hermes.privacy_check._windows_audit import WindowsPlaintextAuditWriter
 from tests import test_windows_custody
+from tests._private_files import write_private
 from tests.test_windows_privacy_policy import write_pair
 
 custody_fixture = test_windows_custody.fs
@@ -82,9 +83,7 @@ def forbid_file_vault_probe(monkeypatch) -> None:
 
 
 def private_write(path: Path, data: bytes) -> None:
-    path.write_bytes(data)
-    if os.name != "nt":
-        path.chmod(0o600)
+    write_private(path, data)
 
 
 def audit_files(directory: Path) -> dict[str, bytes]:
