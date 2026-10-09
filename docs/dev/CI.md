@@ -1525,14 +1525,18 @@ editable install there), per module, failed/errors before (full selector,
 | `test_wizard_windows_uninstall.py` | 2/7 | 15/0/0 |
 
 The focused run totalled 10 failed, 503 passed, 18 skipped (27 min 45 s). The
-remaining failures are fixed by the two follow-up commits (the hooked privacy
-fixture's raw `config.yaml`, all nine; the old `unrecorded Tor` text, one);
-the host stopped before they could be rerun natively, so they are verified on
-macOS only. The 14 managed-image skips are the elevated/controller-root cases
-(an ordinary token without `MORDRED_MANAGED_IMAGE_TEST_ROOT`); the junction
-and teardown fix for the elevated runner is reasoned from the windows-2022 log
-and the host reproduction above and still needs a windows-2022 CI run. The
-wheel environment run of `412f920de` (82 failed, 2101 passed, 99 skipped,
-41 errors) shows the same categories. `test_windows_encrypted_audit_processes.py`
-timed out once on windows-2022 Python 3.12 only (passed on 3.11, 3.13 and the
-host); it is not changed here.
+remaining failures are fixed by two follow-up commits. The old
+`unrecorded Tor` text (one) also fails on every windows-2022 job since
+`3d9c4d090`, so CI verifies that fix. The hooked privacy fixture's raw
+`config.yaml` (nine) fails only under the SSH-logon default DACL and already
+passes on windows-2022, so it still needs a native rerun; the host stopped
+before one could run. The 14 managed-image skips are the elevated or
+controller-root cases (an ordinary token without
+`MORDRED_MANAGED_IMAGE_TEST_ROOT`); the junction and teardown fix for the
+elevated runner is reasoned from the windows-2022 log and the host
+reproduction above, and windows-2022 verifies it. The wheel environment run of
+`412f920de` (82 failed, 2101 passed, 99 skipped, 41 errors) shows the same
+categories and was not rerun. `test_windows_encrypted_audit_processes.py`
+timed out in 5 of the last 15 windows-2022 jobs (passed on the host): its
+three contending children now share one 120 s deadline instead of 30 s each,
+and print faulthandler stacks after 60 s so a real stall stays diagnosable.
