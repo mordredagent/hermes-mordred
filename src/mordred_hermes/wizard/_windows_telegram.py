@@ -227,9 +227,11 @@ def login_refusal(
 # Checked archive / credential / role observation (logout, forget, doctor)
 # -----------------------------------------------------------------------------
 def archive_present(root: Path | None = None) -> bool:
-    """Any archive ``*.enc`` (``index.enc`` or a dialog segment) through checked reads, like POSIX.
+    """``index.enc`` or a dialog segment the C10b wipe deletes, through checked reads.
 
-    ``StoreError`` / ``PrivateFSError`` on unsafe or uncertain state; never a raw scan.
+    Uses the C10b leaf rule (40-hex segment names), so an unknown file the wipe
+    keeps is never reported as archive. ``StoreError`` on unsafe or uncertain
+    state; never a raw scan.
     """
     from .._private_fs import PrivateFSError
     from ..extension.telegram import _windows_archive as checked
@@ -243,11 +245,15 @@ def archive_present(root: Path | None = None) -> bool:
             names = () if tx is None else tx.list_names(max_entries=checked.MAX_ENTRIES)
     except PrivateFSError as exc:
         raise _store_error(exc) from exc
-    return any(name.endswith(".enc") for name in names)
+    return any(checked._archive_leaf(checked.DIALOGS, name) for name in names)
 
 
 def _store_error(exc: OSError) -> RuntimeError:
-    """The C10b archive vocabulary for a classified checked-storage refusal (mirrors ``store``)."""
+    """The C10b archive vocabulary for a classified checked-storage refusal.
+
+    Mirrors the private ``store._store_error`` without importing it; a test
+    pins the two mappings to each other for every reason and commit state.
+    """
     from ..extension.telegram.store import StoreError
 
     reason, state = getattr(exc, "reason", ""), getattr(exc, "commit_state", "")

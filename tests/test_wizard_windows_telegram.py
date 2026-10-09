@@ -809,6 +809,84 @@ def test_forget_revokes_only_after_local_deletion_and_warns_when_telegram_is_unr
     assert not sealed_path(wt.home).exists() and role(wt, "telegram").current is None
 
 
+def _assert_forget_revoked_and_listed(env, factory, capsys):
+    confirm = Answers([(FORGET_PROMPT, "forget telegram")])
+    assert telegram_cli.telegram_logout(forget=True, client_factory=factory, input_fn=confirm) == 0
+    captured = capsys.readouterr()
+    assert factory.client.logged_out, "loaded credentials with a session are revoked once they are gone"
+    deleted = captured.out.partition("Deleted:")[2].partition("Kept:")[0]
+    assert "credentials.sealed" in deleted, "a successful load proves the credentials existed"
+    assert "Revoked the session at Telegram." in captured.out
+    assert not sealed_path(env.home).exists() and role(env, "telegram").current is None
+
+
+def test_forget_revokes_when_the_pre_wipe_flags_read_fails_once(wt, monkeypatch, capsys):
+    seed(wt)
+    real = WindowsCustodySecretStore.flags
+    calls = {"n": 0}
+
+    def flaky(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise secrets.TelegramSecretsError("store_busy")
+        return real(self)
+
+    monkeypatch.setattr(WindowsCustodySecretStore, "flags", flaky)
+    _assert_forget_revoked_and_listed(wt, Factory(), capsys)
+    assert calls["n"] >= 2
+
+
+def test_forget_revokes_when_oversized_metadata_hides_the_credentials_from_flags(wt, capsys):
+    seed(wt)
+    oversized = b'{"pad": "' + b"x" * 20000 + b'"}'
+    with open_private_directory(wt.root) as directory, directory.transaction() as tx:
+        tx.replace_bytes("credentials.meta.json", oversized)
+    with pytest.raises(secrets.TelegramSecretsError):
+        windows_store(wt.home, wt.backend).flags()
+    _assert_forget_revoked_and_listed(wt, Factory(), capsys)
+    assert not (wt.root / "credentials.meta.json").exists()
+
+
+def test_unknown_dialog_files_are_not_reported_as_archive(wt, monkeypatch, capsys):
+    seed(wt)
+    with open_private_directory(wt.root / "dialogs") as directory, directory.transaction() as tx:
+        tx.create_bytes("notes.enc", b"not an archive segment")
+    confirm = Answers([(FORGET_PROMPT, "forget telegram")])
+    assert telegram_cli.telegram_logout(forget=True, client_factory=Factory(), input_fn=confirm) == 0
+    out = capsys.readouterr().out
+    assert "the local encrypted archive" in out.partition("Deleted:")[2].partition("Kept:")[0]
+    assert "Still present:" not in out
+    assert (wt.root / "dialogs" / "notes.enc").exists(), "the C10b wipe keeps unknown names"
+    assert _windows_telegram.archive_present(wt.root) is False
+
+
+def test_login_ignores_unknown_dialog_files_as_orphans(wt, capsys):
+    enroll(wt.custody, wt.home, wt.backend, "telegram")
+    with open_private_directory(wt.home / "mordred", create=True):
+        pass
+    with open_private_directory(wt.root, create=True):
+        pass
+    with open_private_directory(wt.root / "dialogs", create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes("notes.enc", b"not an archive segment")
+    rc = telegram_cli.telegram_login(
+        input_fn=Answers(LOGIN_ANSWERS),
+        secret_fn=Answers([("api_hash", "cd" * 16)]),
+        client_factory=Factory(),
+        acknowledge_machine_bound=True,
+    )
+    assert rc == 0 and "undecryptable archive" not in capsys.readouterr().err
+    assert (wt.root / "dialogs" / "notes.enc").exists()
+
+
+@pytest.mark.parametrize("state", ["not_committed", "uncertain"])
+@pytest.mark.parametrize("reason", ["unsafe", "unsupported", "missing", "exists", "busy", "access_denied", "io"])
+def test_wizard_store_error_mapping_matches_the_c10b_store(reason, state):
+    from mordred_hermes._private_fs import PrivateFSError
+
+    error = PrivateFSError(reason, "telegram_probe", commit_state=state)
+    assert _windows_telegram._store_error(error).code == store._store_error(error).code
+
+
 def orphan_credentials(env):
     """Sealed credentials whose telegram role was reset elsewhere (no key can ever open them)."""
     seed(env)

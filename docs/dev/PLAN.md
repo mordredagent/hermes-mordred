@@ -1769,3 +1769,10 @@ preflight refusal leaving the session untouched, revocation after deletion
 with an unreachable Telegram, role-less credentials (logout, login, venice,
 setup and forget with the warning before the confirmation), broken and
 uncertain custody on logout/forget, and orphaned segments without an index.
+
+Review fix round 2: forget treats a load that read a sealed file as proof the
+credentials existed, so a failing `flags()` read (a transient `store_busy`, or
+metadata over the 16 KiB bound that the C10b wipe deletes unread) can no
+longer skip the revocation or drop the credentials from the deleted list;
+`archive_present` uses the C10b 40-hex segment leaf rule; a parametrized test
+pins the wizard's store-error mapping to `store._store_error`.

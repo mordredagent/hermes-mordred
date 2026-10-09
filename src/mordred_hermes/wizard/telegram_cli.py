@@ -538,18 +538,22 @@ def _windows_forget(
     """load -> plan + typed confirmation -> ``wipe_archive(forget=True)`` -> revoke -> re-checked outcome.
 
     The credentials are loaded before the confirmation, so an unusable seal
-    warns (or refuses) first. The C10b preflight runs inside the wipe: a
-    refusal there leaves the credentials, the archive and the live session
-    untouched. The session is revoked from memory only once the credentials
-    are confirmed deleted, and every outcome (also a partial failure) is
-    re-checked and printed.
+    warns (or refuses) first. A load that read a sealed file (success, or a
+    corrupt/role-less seal) proves the credentials existed, even when the
+    metadata read behind ``flags()`` fails. The C10b preflight runs inside the
+    wipe: a refusal there leaves the credentials, the archive and the live
+    session untouched. The session is revoked from memory once the
+    credentials are re-checked as gone, and every outcome (also a partial
+    failure) is re-checked and printed.
     """
     from ..extension.telegram.secrets import TelegramSecretsError
     from ..extension.telegram.store import StoreError, wipe_archive
 
     windows = _windows_telegram
+    sealed = False
     try:
         current, _snapshot = _load_for_update(secrets_store)
+        sealed = current is not None
     except TelegramSecretsError as exc:
         if exc.code not in windows.FORGET_DESPITE:
             return _report(exc.code)
@@ -557,8 +561,10 @@ def _windows_forget(
             f"the sealed credentials could not be opened ({exc.code}), so the Telegram session cannot be revoked "
             "from here; also terminate it in Telegram → Settings → Devices."
         )
-        current = None
+        current, sealed = None, True  # both codes are raised only after a sealed file was read
     before = windows.observe(secrets_store, root)
+    if sealed and before.credentials is not True:
+        before = replace(before, credentials=True)  # the load is the authority, not the metadata read
     if before.empty:
         print("Nothing to delete: this profile has no Telegram credentials, archive or custody key.")
         return 0
@@ -572,7 +578,7 @@ def _windows_forget(
     except (TelegramSecretsError, StoreError) as exc:
         failure = exc.code
     after = windows.observe(secrets_store, root)
-    _revoke_after_forget(current, client_factory, before, after)
+    _revoke_after_forget(current, client_factory, after)
     if failure is not None:
         _report(failure)
     for line in windows.outcome_lines(before, after, forget=True):
@@ -581,15 +587,12 @@ def _windows_forget(
 
 
 def _revoke_after_forget(
-    current: Any,
-    client_factory: Callable[..., Any] | None,
-    before: _windows_telegram.TelegramState,
-    after: _windows_telegram.TelegramState,
+    current: Any, client_factory: Callable[..., Any] | None, after: _windows_telegram.TelegramState
 ) -> None:
-    """Revoke from memory only when the local credentials are confirmed gone."""
+    """Revoke the loaded session once the credentials are re-checked as gone; warn when that is unknown."""
     if current is None or current.session is None:
         return
-    if before.credentials is True and after.credentials is False:
+    if after.credentials is False:
         _revoke_stored(current, client_factory)
     elif after.credentials is None:
         _term.emit_warn(

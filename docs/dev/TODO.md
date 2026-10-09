@@ -487,3 +487,7 @@ Implementation and acceptance remain open:
   review: the `_windows_gates` not-enrolled wording for `telegram_hardware`
   (C6 vocabulary) and helper-missing blocking a role-less forget (fail
   closed).
+  Review fix round 2: forget revokes whenever loaded credentials are re-checked
+  as gone (also when the metadata read fails); orphan detection follows the
+  C10b segment leaf rule. Open: a public store-error mapper in a later
+  extension slice would replace the pinned wizard copy.
