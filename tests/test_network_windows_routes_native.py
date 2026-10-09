@@ -254,7 +254,7 @@ def test_native_unrecorded_tor_on_this_profile_is_refused(private_stub: Path, da
         stderr=subprocess.DEVNULL,
     )
     try:
-        with pytest.raises(BringupFailed, match="unrecorded Tor"):
+        with pytest.raises(BringupFailed, match=r"unrecorded process .* names this profile's torrc"):
             tor.start_process(
                 binary=str(private_stub), torrc=render(data_dir), data_dir=data_dir, policy_mode="lenient"
             )
