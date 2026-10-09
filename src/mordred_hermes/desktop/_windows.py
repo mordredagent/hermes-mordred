@@ -4,10 +4,12 @@
 module. Every answer comes from public keyvault, wizard and Telegram APIs:
 
 - **status** — one row per ``windows_capabilities`` entry (name, supported,
-  available, reason) and no aggregate readiness answer; the load-only memory
-  scan (``wizard._windows_memory.observe`` + ``memory_target_status``); the C4
-  helper selection and its installer receipt; Telegram ``flags()``. Nothing is
-  unwrapped, generated or launched.
+  available, reason) and no aggregate readiness answer; the helper presence
+  read from those same non-blocking predicates; the load-only memory scan
+  (``wizard._windows_memory.observe`` + ``memory_target_status``); Telegram
+  ``flags()``. Nothing is unwrapped, generated, hashed, launched or waited for
+  beyond the predicates' own bounded in-process wait. The explicit
+  ``/hardware/build`` check additionally verifies the C4 installer receipt.
 - **memory enable/disable** — the C6 order capabilities -> gate -> ceremony ->
   proof -> lifecycle, run in a worker thread, reporting the refusing step and
   reason. The gate is the C5c typed gateway inventory (unknown or running
@@ -17,8 +19,9 @@ module. Every answer comes from public keyvault, wizard and Telegram APIs:
 - **Telegram** — the C10b store selected by ``default_secret_store()``. Login
   and the question model refuse until the ``telegram`` custody role is enrolled
   and the client acknowledged that Windows has no per-use presence; only then is
-  the role verified with ``ensure_key(require_presence=False)``. Forget runs
-  ``wipe_archive(forget=True)``.
+  the role verified with ``ensure_key(require_presence=False)``. Their memory
+  guard reports a busy custody lock as ``custody_busy`` (retry), never as
+  ``memory_encryption_required``. Forget runs ``wipe_archive(forget=True)``.
 
 The wizard exposes no structured (step, reason) result for its Windows memory
 verbs, so this module composes the same steps from their public parts
@@ -27,7 +30,6 @@ verbs, so this module composes the same steps from their public parts
 
 from __future__ import annotations
 
-import contextlib
 import io
 import os
 import sys
@@ -36,6 +38,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+from ._capture import captured_output
 
 WINDOWS = "win32"
 HARDWARE_KIND = "cng"
@@ -60,6 +64,11 @@ _LIFECYCLE_REMEDY = (
     "every memory file is its plaintext or an authenticated seal; resolve the cause, then retry (a fresh "
     "installed-runtime proof finishes the transition)"
 )
+_BUSY_REMEDY = (
+    "another Hermes or Mordred process is using memory custody right now (for example a gateway writing memory); "
+    "retry in a moment"
+)
+_APPROVAL_WARNING = "memory-write-approval-plaintext"
 _TELEGRAM_CODES = {
     "not-enrolled": "telegram_not_enrolled",
     "custody-unsafe": "custody_unsafe",
@@ -100,6 +109,9 @@ def capability_rows(home: Path) -> tuple[list[dict[str, Any]], str | None]:
     ], None
 
 
+_HELPER_ROLES = ("memory_custody", "native_audit", "telegram_hardware")
+
+
 def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
 
@@ -118,14 +130,38 @@ def helper_report(home: Path) -> dict[str, Any]:
     report: dict[str, Any] = {"state": "uncertain", "path": None, "install_command": HELPER_COMMAND}
     try:
         found = _seckey_helper.find_winkey_helper()
-    except (OSError, ValueError):
+        if found is None:
+            report["state"] = "missing"
+            return report
+        path = Path(found)
+        owned = _same_path(path.parent, home / "bin") and _windows_install.is_owned(path)
+    except Exception:  # an explicit check answers "uncertain", never a 500
         return report
-    if found is None:
-        report["state"] = "missing"
-        return report
-    path = Path(found)
-    owned = _same_path(path.parent, home / "bin") and _windows_install.is_owned(path)
     report.update(state="validated" if owned else "installed", path=str(path))
+    return report
+
+
+def helper_from_predicates(rows: list[dict[str, Any]], error: str | None) -> dict[str, Any]:
+    """Status helper state from the non-blocking capability rows only (no lock, no hash, no probe).
+
+    The predicates evaluate custody failures before the helper, so a role row
+    whose reason is a custody failure says nothing about the helper; the first
+    supported role row with another reason decides. ``present`` means the C4
+    selection found an executable; ownership is checked by ``/hardware/build``.
+    """
+    from ..wizard._windows_gates import CUSTODY_FAILURES
+
+    report: dict[str, Any] = {"state": "uncertain", "reason": error, "install_command": HELPER_COMMAND}
+    if error is not None:
+        return report
+    roles = [row for row in rows if row["supported"] and row["name"] in _HELPER_ROLES]
+    decisive = [row for row in roles if row["reason"] not in CUSTODY_FAILURES]
+    if not decisive:
+        report.update(state="unchecked", reason=roles[0]["reason"] if roles else None)
+        return report
+    reason = str(decisive[0]["reason"])
+    state = {"helper-missing": "missing", "helper-uncertain": "uncertain"}.get(reason, "present")
+    report.update(state=state, reason=reason)
     return report
 
 
@@ -148,7 +184,8 @@ def memory_summary(home: Path) -> dict[str, Any]:
     elif report.armed:
         state = "on" if status.active else ("exposed" if status.drift else "degraded")
     elif report.opted_out:
-        state = "paused"
+        # C6 wording: "disabled, but seals or staging remain — re-run: encryption disable memory".
+        state = "disabled-incomplete" if (report.sealed or report.broken or report.pending) else "paused"
     else:
         state = "enrolled"
     if reason is None and capability is not None and capability.reason not in ("enrolled", "not-enrolled"):
@@ -167,14 +204,38 @@ def memory_active(home: Path) -> bool:
     return bool(memory_summary(home).get("active"))
 
 
+def memory_refusal(home: Path) -> dict[str, Any] | None:
+    """``None`` when Telegram may proceed; else the refusal for its memory guard.
+
+    The load-only scan runs inside one non-blocking canonical session taken
+    here first, so a lock held by another process (a gateway's memory hook
+    takes the home lock first) is reported as ``custody_busy`` with a retry
+    remedy instead of looking like unencrypted memory. Other custody failures
+    keep their classified code; anything else is ``memory_encryption_required``.
+    """
+    from .._config_io import CanonicalPaths, canonical_session
+    from .._private_fs import PrivateFSError
+
+    try:
+        with canonical_session(CanonicalPaths(home), scope="policy", blocking=False):
+            active = memory_active(home)
+    except PrivateFSError as exc:
+        if exc.reason == "busy":
+            return {"ok": False, "error": "custody_busy", "remedy": _BUSY_REMEDY}
+        code = _TELEGRAM_CODES.get(_classify(exc), "memory_encryption_required")
+        return {"ok": False, "error": code}
+    return None if active else {"ok": False, "error": "memory_encryption_required"}
+
+
 def memory_guard(home_fn: Callable[[], Path]) -> Callable[[], None]:
-    """``TelegramService`` memory guard from the load-only Windows memory state."""
+    """``TelegramService`` memory guard from the load-only Windows memory state (busy stays distinct)."""
 
     def guard() -> None:
         from ..extension.telegram.memory_guard import MemoryEncryptionRequired
 
-        if not memory_active(home_fn()):
-            raise MemoryEncryptionRequired()
+        refusal = memory_refusal(home_fn())
+        if refusal is not None:
+            raise MemoryEncryptionRequired(str(refusal["error"]))
 
     return guard
 
@@ -186,12 +247,19 @@ def gateway_inventory(home: Path) -> dict[str, Any]:
     try:
         inventory = _windows_processes.inspect_windows_gateway_runtimes(home)
     except Exception as exc:  # a failed inventory is unknown, never empty
-        return {"state": "unknown", "running": None, "found": 0, "pids": [], "reasons": [f"scan:{type(exc).__name__}"]}
+        return {
+            "state": "unknown",
+            "running": None,
+            "found": None,
+            "pids": [],
+            "reasons": [f"scan:{type(exc).__name__}"],
+        }
     known = inventory.state == "known"
     return {
         "state": inventory.state,
         "running": len(inventory.runtimes) if known else None,
-        "found": len(inventory.runtimes),
+        # An unknown inventory is not a count: report nothing a client could read as zero.
+        "found": len(inventory.runtimes) if known else None,
         "pids": [runtime.pid for runtime in inventory.runtimes if runtime.pid is not None],
         "reasons": list(inventory.reasons),
     }
@@ -257,7 +325,7 @@ def status_payload(home: Path, store: object) -> dict[str, Any]:
     presence = by_name.get("presence")
     telegram_row = by_name.get("telegram_hardware")
     platform_supported = bool(custody_store_selected(store) and telegram_row and telegram_row["supported"])
-    helper = helper_report(home)
+    helper = helper_from_predicates(rows, error)
     memory = memory_summary(home)
     if telegram_row is not None:
         telegram = telegram_custody(home, telegram_row)
@@ -268,7 +336,7 @@ def status_payload(home: Path, store: object) -> dict[str, Any]:
             "ceremony_available": TELEGRAM_CEREMONY_COMMAND is not None,
             "ceremony_command": TELEGRAM_CEREMONY_COMMAND,
         }
-    helper_ok = helper["state"] in ("validated", "installed")
+    helper_ok = helper["state"] == "present"
     checks: dict[str, dict[str, Any]] = {
         "hardware": _check(helper_ok, f"CNG helper {helper['state']}"),
         "memory_encryption": _check(bool(memory["active"]), str(memory["state"])),
@@ -448,7 +516,7 @@ def _enable(home: Path, executable: str | None, captured: io.StringIO) -> dict[s
     except _errors() as exc:
         raise _lifecycle_refusal(exc, "enable", fields) from exc
     # The lifecycle report is authoritative; the load-only state is shown, never re-decided here.
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "restart_required": True,
         "sealed": report.sealed,
@@ -459,6 +527,19 @@ def _enable(home: Path, executable: str | None, captured: io.StringIO) -> dict[s
         "memory": memory_summary(home),
         **fields,
     }
+    if _write_approval_on(home):
+        # Same disclosure as the wizard's enable: the approval queue is not sealed.
+        warnings.append(_APPROVAL_WARNING)
+        result["pending_approvals"] = str(home / "pending" / "memory")
+    return result
+
+
+def _write_approval_on(home: Path) -> bool:
+    """``memory.write_approval`` parks pending writes as plaintext JSON outside the hooked memory files."""
+    from .._yaml_io import load_yaml_mapping
+
+    memory = load_yaml_mapping(home / "config.yaml").get("memory")
+    return isinstance(memory, dict) and memory.get("write_approval") is True
 
 
 def _disable(home: Path, executable: str | None) -> dict[str, Any]:
@@ -501,8 +582,7 @@ def _serialized(error: str, run: Callable[[io.StringIO], dict[str, Any]]) -> dic
     if not _MEMORY_LOCK.acquire(blocking=False):
         return {"ok": False, "error": "memory_operation_in_progress"}
     try:
-        captured = io.StringIO()
-        with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+        with captured_output() as captured:
             try:
                 return run(captured)
             except _Refusal as refusal:

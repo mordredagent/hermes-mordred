@@ -3075,3 +3075,26 @@ port: `port-in-use` (EADDRINUSE/WSAEADDRINUSE, with an `lsof` or
 Windows excluded port ranges) or `bind-failed`. The gateway plugin has no
 runtime-discovery hook; `GET /memory/status` is the only Desktop surface that
 reports running gateways.
+
+C11 review round 1 (rulings R-C11-1 to R-C11-4). `POST /telegram/logout`
+with `forget: true` requires `confirm` = `delete my data` server-side, exactly
+like `/uninstall`, and otherwise answers `forget_confirm_mismatch` before
+anything is read, revoked or deleted. The status `helper` comes only from the
+non-blocking capability rows (`present`, `missing`, `uncertain`, or
+`unchecked` while every supported role row reports a custody failure); the
+C4 receipt check (`validated`/`installed`) runs only for the explicit
+`/hardware/build`, and every helper failure is a classified state, never a
+500. Every Desktop capture of wizard output goes through one process-wide
+lock and keeps only the capturing thread's text. The Telegram login and import
+guards take one non-blocking canonical session around the load-only memory
+scan: a lock held elsewhere answers `custody_busy` with a retry remedy, never
+`memory_encryption_required`. Memory enable reports
+`memory-write-approval-plaintext` (with `pending_approvals`) when
+`memory.write_approval` is on; an opted-out profile with remaining seals or
+staging reports `disabled-incomplete`, not `paused`; an unknown gateway
+inventory reports `found: null`. `extension serve` closes the listener first
+and gives open connections 3 s before cancelling their handlers, so a
+connected extension WebSocket cannot hold a stop (or the port) for up to
+aiohttp's 60 s shutdown timeout. A pre-C11 Windows placement with inherited
+ACLs is refused and logged with its exact path; the remedy is to delete the
+two Mordred folders by hand and run `hermes-mordred desktop install`.

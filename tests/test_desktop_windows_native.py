@@ -110,8 +110,16 @@ def test_native_desktop_status_reads_real_predicates_without_a_subprocess(shared
     assert old["telegram_supported"] is False and old["checks"] == {}
 
 
-def test_native_placement_never_creates_a_missing_intermediate(shared_home):
-    """Only the Hermes-owned parents and Mordred's own folders are created, one checked level at a time."""
-    with pytest.raises(PrivateFSError), open_private_directory(shared_home / "absent" / "mordred", create=True):
+def test_native_status_and_removal_on_a_home_without_desktop_folders(desktop_home, capsys):
+    """The real Windows opener reports a missing ``plugins``/``desktop-plugins`` as ``missing``/``open``: absence."""
+    home = desktop_home
+    assert install.status(home) == 1
+    err = capsys.readouterr().err
+    assert "not installed" in err and "could not be checked" not in err
+    assert install.uninstall(home) == 0
+    captured = capsys.readouterr()
+    assert "Removed" not in captured.out and "could not be checked" not in captured.err
+    assert not (home / "desktop-plugins").exists() and not (home / "plugins").exists(), "reads create nothing"
+    with pytest.raises(PrivateFSError), open_private_directory(home / "absent" / "mordred", create=True):
         pass
-    assert not (shared_home / "absent").exists()
+    assert not (home / "absent").exists()

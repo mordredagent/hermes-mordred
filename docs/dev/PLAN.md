@@ -1757,3 +1757,18 @@ is host-skipped NTFS placement and status; `tests/test_desktop_windows_live.py`
 is the gated real-CNG Desktop API recipe. Wizard Telegram ceremonies
 (C6-telegram), the real packaged Desktop launch and Windows 11 remain separate
 gates.
+
+C11 review round 1 keeps the layout and adds `desktop/_capture.py` (one
+re-entrant process-wide capture lock; a per-thread stream keeps only the
+capturing thread's text and passes other threads through). `_windows.py` gains
+`helper_from_predicates`, `memory_refusal` (busy-aware guard) and the
+write-approval warning; `api.py` checks the forget phrase and routes every
+capture through `_capture`; `extension/__main__.py` bounds the stop
+(`_bounded_stop`, `_cancel_remaining`). Tests: the shutdown module's `servers`
+fixture kills and reaps every child (and the redirected Windows interpreter),
+then requires 7799 free; a connected HTTP keep-alive client and an open
+WebSocket at shutdown; the forget phrase, predicate-only helper status with an
+`is_owned` tripwire, `custody_busy` with a real cross-process lock holder, the
+approval warning, `disabled-incomplete`, unknown `found`, an end-to-end enable
+proving `sys.executable`, `tests/test_desktop_capture.py`, the logged refused
+placement and a native absent-folder case through C11 code.

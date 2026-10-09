@@ -35,6 +35,8 @@ from mordred_hermes.extension.telegram.windows_secrets import WindowsCustodySecr
 from mordred_hermes.keyvault import _seckey_helper, _windows_capability
 from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 from mordred_hermes.wizard import keyvault_windows_cli
+from mordred_hermes.wizard.uninstall_cli import PURGE_PHRASE
+from tests.test_private_fs_processes import _child, _line
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_lifecycle import (
     MARKER,
@@ -204,7 +206,10 @@ def test_old_client_on_windows_keeps_the_unsupported_shape_without_side_effects(
     }
 
 
-def test_windows_status_lists_each_capability_without_an_aggregate(desktop):
+def test_windows_status_lists_each_capability_without_an_aggregate(desktop, monkeypatch):
+    from mordred_hermes.wizard import _windows_install
+
+    monkeypatch.setattr(_windows_install, "is_owned", lambda path: pytest.fail("status never locks or hashes"))
     result = get(desktop.http, "/status?client_version=3")
 
     assert result["ok"] is True and result["platform"] == "win32"
@@ -246,6 +251,8 @@ def test_windows_status_lists_each_capability_without_an_aggregate(desktop):
     assert result["checks"]["telegram_custody"]["ok"] is False
     assert result["uninstall"] == {"erase_supported": False, "purge_scope": "memory_custody_key"}
     assert result["helper"]["install_command"] == "hermes-mordred keyvault enable-winkey"
+    assert result["helper"]["state"] == "present" and result["helper"]["reason"] == "not-enrolled"
+    assert result["checks"]["hardware"]["ok"] is True
     no_launches(desktop.env)
     no_native_unwrap(desktop.env)
 
@@ -295,10 +302,38 @@ def test_windows_status_follows_memory_and_telegram_state_load_only(desktop_seed
     no_native_unwrap(env)
 
 
+@pytest.mark.parametrize(
+    ("fault", "state"),
+    [("missing", "missing"), ("runtime-error", "uncertain"), ("capabilities-raise", "uncertain")],
+)
+def test_windows_status_helper_comes_from_the_predicates_and_never_raises(desktop, monkeypatch, fault, state):
+    from mordred_hermes.wizard import _windows_install
+
+    monkeypatch.setattr(_windows_install, "is_owned", lambda path: pytest.fail("status never locks or hashes"))
+    if fault == "missing":
+        monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: None)
+    elif fault == "runtime-error":
+
+        def broken() -> str:
+            raise RuntimeError("helper lookup failed")
+
+        monkeypatch.setattr(_seckey_helper, "find_winkey_helper", broken)
+    else:
+
+        def raising(home):
+            raise RuntimeError("predicate bug")
+
+        monkeypatch.setattr(_windows_capability, "windows_capabilities", raising)
+    result = get(desktop.http, "/status?client_version=3")
+    assert result["ok"] is True
+    assert result["helper"]["state"] == state
+    assert result["checks"]["hardware"]["ok"] is False
+
+
 # -----------------------------------------------------------------------------
 # /hardware/build — the owned helper state, never a build
 # -----------------------------------------------------------------------------
-@pytest.mark.parametrize("state", ["missing", "installed", "validated", "uncertain"])
+@pytest.mark.parametrize("state", ["missing", "installed", "validated", "uncertain", "uncertain-runtime"])
 def test_windows_hardware_build_reports_the_helper_state_and_never_builds(windows_api, monkeypatch, tmp_path, state):
     from mordred_hermes.wizard import _windows_install, keyvault_native_cli
 
@@ -311,6 +346,8 @@ def test_windows_hardware_build_reports_the_helper_state_and_never_builds(window
     def find():
         if state == "uncertain":
             raise OSError("PATH could not be read")
+        if state == "uncertain-runtime":
+            raise RuntimeError("helper lookup failed")
         return {"missing": None, "installed": str(elsewhere), "validated": str(owned)}[state]
 
     monkeypatch.setattr(_seckey_helper, "find_winkey_helper", find)
@@ -327,10 +364,10 @@ def test_windows_hardware_build_reports_the_helper_state_and_never_builds(window
 
     assert result["ok"] is True and result["built"] is False and result["hardware_kind"] == "cng"
     helper = result["helper"]
-    assert helper["state"] == state
+    assert helper["state"] == state.removesuffix("-runtime")
     assert helper["install_command"] == "hermes-mordred keyvault enable-winkey"
-    expected_path = {"missing": None, "uncertain": None, "installed": str(elsewhere), "validated": str(owned)}
-    assert helper["path"] == expected_path[state]
+    expected_path = {"missing": None, "installed": str(elsewhere), "validated": str(owned)}
+    assert helper["path"] == expected_path.get(state)
 
 
 # -----------------------------------------------------------------------------
@@ -429,7 +466,8 @@ def _broken_seal_after_enrollment(env, monkeypatch):
         (_gateway_running, "gate", "gateways-running", False),
         (_native_creation_denied, "ceremony", "ceremony-refused", False),
         (_invalid_interpreter, "proof", "interpreter-invalid", True),
-        (_broken_seal_after_enrollment, "lifecycle", None, False),
+        # Inherited from C6 classify_exception: a broken seal is "custody-uncertain" (recorded C6 note).
+        (_broken_seal_after_enrollment, "lifecycle", "custody-uncertain", False),
     ],
     ids=["capabilities", "gate-unknown", "gate-running", "ceremony", "proof", "lifecycle"],
 )
@@ -503,6 +541,82 @@ def test_windows_memory_disable_is_symmetric_and_keeps_the_key(desktop_seeded, m
     assert status["memory"]["state"] == "paused"
 
 
+def test_windows_memory_enable_proves_the_desktop_interpreter_end_to_end(desktop_seeded, monkeypatch):
+    """Without ``MORDRED_HERMES_PYTHON`` the proof runs the interpreter serving the API (``sys.executable``)."""
+    desktop = desktop_seeded
+    env = desktop.env
+    monkeypatch.delenv("MORDRED_HERMES_PYTHON")
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="win32", executable=str(env.python)))
+    result = post(desktop.http, "/memory/enable", ACKS)
+    assert result["ok"] is True and result["runtime"]["python"] == str(env.python)
+    assert_all_sealed(env)
+    assert fresh_process_read(env) == expected_hashes()
+
+
+def test_windows_memory_enable_refuses_an_unadmitted_desktop_interpreter(desktop_seeded, monkeypatch):
+    desktop = desktop_seeded
+    monkeypatch.delenv("MORDRED_HERMES_PYTHON")
+    bogus = desktop.env.home.parent / "not-a-venv" / "python.exe"
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="win32", executable=str(bogus)))
+    result = post(desktop.http, "/memory/enable", ACKS)
+    assert (result["step"], result["reason"]) == ("proof", "interpreter-invalid"), "no fallback to another runtime"
+    assert MARKER not in markers(desktop.env.home)
+
+
+def test_windows_memory_enable_surfaces_the_pending_approval_queue(desktop_seeded):
+    desktop = desktop_seeded
+    (desktop.env.home / "config.yaml").write_text("memory:\n  write_approval: true\n", encoding="utf-8")
+    result = post(desktop.http, "/memory/enable", ACKS)
+    assert result["ok"] is True
+    assert "memory-write-approval-plaintext" in result["warnings"]
+    assert result["pending_approvals"] == str(desktop.env.home / "pending" / "memory")
+
+
+def test_windows_memory_enable_has_no_approval_warning_by_default(desktop_seeded):
+    result = post(desktop_seeded.http, "/memory/enable", ACKS)
+    assert result["ok"] is True and "memory-write-approval-plaintext" not in result["warnings"]
+    assert "pending_approvals" not in result
+
+
+def test_windows_opted_out_profile_with_residue_is_not_shown_as_paused(desktop_seeded):
+    desktop = desktop_seeded
+    env = desktop.env
+    assert post(desktop.http, "/memory/enable", ACKS)["ok"] is True
+    assert post(desktop.http, "/memory/disable", {})["ok"] is True
+    assert get(desktop.http, "/memory/status")["memory"]["state"] == "paused"
+    put(env.home, "memories", ".mordred-memory-open-" + b"MEMORY.md".hex(), b"left behind")
+    memory = get(desktop.http, "/memory/status")["memory"]
+    assert memory["state"] == "disabled-incomplete" and memory["active"] is False
+    assert "seals or staging remain" in memory["detail"]
+
+
+def test_windows_telegram_guards_report_busy_custody_distinctly(desktop_seeded, monkeypatch):
+    desktop = desktop_seeded
+    env = desktop.env
+    assert post(desktop.http, "/memory/enable", ACKS)["ok"] is True
+    captured: dict[str, Any] = {}
+
+    class _Service:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("mordred_hermes.extension.telegram.service.TelegramService", _Service)
+    api._service()
+    guard = captured["memory_guard"]
+    guard()  # armed, clean and readable: the import may proceed
+
+    with _child(env.home, "hold") as holder:
+        assert _line(holder).startswith("locked ")
+        login = post(desktop.http, "/telegram/login/start", {**LOGIN, "acknowledge_no_presence": True})
+        assert login["ok"] is False and login["error"] == "custody_busy"
+        assert "retry" in login["remedy"]
+        with pytest.raises(memory_guard.MemoryEncryptionRequired) as busy:
+            guard()
+        assert busy.value.code == "custody_busy"
+    guard()
+    assert desktop.store.ensure_calls == [], "a busy custody scan never reaches the Telegram store"
+
+
 @pytest.mark.parametrize("state", ["unknown", "known-empty", "known-running"])
 def test_windows_memory_status_reports_the_typed_gateway_inventory(desktop, monkeypatch, state):
     env = desktop.env
@@ -518,7 +632,7 @@ def test_windows_memory_status_reports_the_typed_gateway_inventory(desktop, monk
     assert result["ok"] is True and result["memory"]["state"] == "off"
     gateways = result["gateways"]
     if state == "unknown":
-        assert gateways["state"] == "unknown" and gateways["running"] is None
+        assert gateways["state"] == "unknown" and gateways["running"] is None and gateways["found"] is None
         assert gateways["reasons"] == ["scan:inventory-unavailable"]
     elif state == "known-running":
         assert gateways == {"state": "known", "running": 1, "found": 1, "pids": [4040], "reasons": []}
@@ -534,7 +648,8 @@ def test_windows_gateway_inventory_failure_is_unknown_not_empty(windows_api, mon
 
     monkeypatch.setattr(_windows_processes, "inspect_windows_gateway_runtimes", broken)
     inventory = desktop_windows().gateway_inventory(tmp_path)
-    assert inventory["state"] == "unknown" and inventory["running"] is None and inventory["reasons"]
+    assert inventory["state"] == "unknown" and inventory["running"] is None and inventory["found"] is None
+    assert inventory["reasons"]
 
 
 def test_windows_memory_transitions_are_serialized(desktop_seeded):
@@ -626,8 +741,8 @@ def telegram(windows_api, monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_store", lambda: store)
     monkeypatch.setattr(
         desktop_windows(),
-        "memory_summary",
-        lambda home: {"state": "on" if state["memory_active"] else "off", "active": state["memory_active"]},
+        "memory_refusal",
+        lambda home: None if state["memory_active"] else {"ok": False, "error": "memory_encryption_required"},
     )
     tg = _Client()
     original_flows = LoginFlows
@@ -728,8 +843,9 @@ def test_windows_import_service_uses_the_load_only_memory_guard(telegram, monkey
     telegram.state["memory_active"] = True
     guard()
     telegram.state["memory_active"] = False
-    with pytest.raises(memory_guard.MemoryEncryptionRequired):
+    with pytest.raises(memory_guard.MemoryEncryptionRequired) as refused:
         guard()
+    assert refused.value.code == "memory_encryption_required"
 
 
 def test_windows_logout_keeps_the_archive_and_drops_only_the_session(telegram, monkeypatch):
@@ -757,7 +873,7 @@ def test_windows_forget_runs_the_custody_wipe_and_no_delete_key(telegram, monkey
         api_id=1, api_hash=SECRET_HASH, store_key=b"k" * 32, session="WINDOWS-SESSION"
     )
     assert not hasattr(telegram.store, "delete_key")
-    result = post(telegram.http, "/telegram/logout", {"forget": True})
+    result = post(telegram.http, "/telegram/logout", {"forget": True, "confirm": PURGE_PHRASE})
     assert result == {"ok": True, "forgot": True, "revoked": True}
     assert wiped == [{"forget": True}]
     assert telegram.store.updates == 0, "forget deletes through the validated wipe plan, not a rewrite"
@@ -770,7 +886,7 @@ def test_windows_forget_reports_a_classified_wipe_refusal(telegram, monkeypatch)
         raise tg_store.StoreError("sync_in_progress")
 
     monkeypatch.setattr(tg_store, "wipe_archive", busy)
-    result = post(telegram.http, "/telegram/logout", {"forget": True})
+    result = post(telegram.http, "/telegram/logout", {"forget": True, "confirm": PURGE_PHRASE})
     assert result["ok"] is False and result["error"] == "sync_in_progress"
 
 
@@ -782,7 +898,26 @@ def test_windows_logout_refuses_when_credentials_cannot_be_read(telegram, monkey
 
     monkeypatch.setattr(telegram.store, "load_snapshot", unreadable)
     monkeypatch.setattr(tg_store, "wipe_archive", lambda *a, **k: pytest.fail("nothing is deleted after a refusal"))
-    assert post(telegram.http, "/telegram/logout", {"forget": True}) == {"ok": False, "error": "custody_broken"}
+    assert post(telegram.http, "/telegram/logout", {"forget": True, "confirm": PURGE_PHRASE}) == {
+        "ok": False,
+        "error": "custody_broken",
+    }
+
+
+@pytest.mark.parametrize("confirm", [None, "", "yes", "delete my", "DELETE MY DATA"])
+def test_windows_forget_requires_the_typed_phrase_server_side(telegram, monkeypatch, confirm):
+    from mordred_hermes.extension.telegram import store as tg_store
+
+    monkeypatch.setattr(tg_store, "wipe_archive", lambda *a, **k: pytest.fail("no phrase, no deletion"))
+    telegram.store.value = tg_secrets.TelegramSecrets(
+        api_id=1, api_hash=SECRET_HASH, store_key=b"k" * 32, session="WINDOWS-SESSION"
+    )
+    body: dict[str, Any] = {"forget": True}
+    if confirm is not None:
+        body["confirm"] = confirm
+    assert post(telegram.http, "/telegram/logout", body) == {"ok": False, "error": "forget_confirm_mismatch"}
+    assert not telegram.client.logged_out, "nothing is revoked or read before the phrase matches"
+    assert telegram.store.value is not None and telegram.store.value.session == "WINDOWS-SESSION"
 
 
 # -----------------------------------------------------------------------------

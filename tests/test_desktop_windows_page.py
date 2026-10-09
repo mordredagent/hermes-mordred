@@ -102,3 +102,11 @@ def test_no_readiness_is_derived_from_english_text():
     assert ".test(String(" not in text, "error handling selects by code, not by matching the message"
     assert "/expired/" not in text
     assert "e.code === 'login_flow_expired'" in text
+
+
+def test_logout_stays_reachable_and_forget_sends_the_typed_phrase():
+    text = source()
+    assert "status.telegram_supported && loggedIn ? jsx(WindowsLogout" in text, "logout does not depend on the gate"
+    assert "confirm: phrase" in text
+    assert re.search(r"\bforget_confirm_mismatch:", block("MESSAGES"))
+    assert re.search(r"\bcustody_busy:", block("MESSAGES"))

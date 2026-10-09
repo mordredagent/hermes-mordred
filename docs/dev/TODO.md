@@ -492,3 +492,25 @@ extension server's Windows shutdown (host-tested; native and live gates below).
 - [ ] Windows `extension serve` binds without `SO_EXCLUSIVEADDRUSE`; decide
   whether loopback port hijacking by another same-user process needs it.
 - [ ] Checked recursive removal for the kept Desktop folders and locks.
+
+C11 review round 1 additions:
+
+- [ ] C6 (wizard): on Windows `uninstall_cli._clean_hermes_files` still prints
+  "Removed the Hermes Desktop page <folder>" after `remove_page()`, although
+  the Windows removal keeps the folders and prints each kept path.
+- [ ] C6 (wizard): the uninstall plan's gateway diagnostic uses the advisory
+  discovery, so on Windows an unknown inventory reads as "no gateway"; route
+  it through the typed inventory (`unknown` stays unknown).
+- [ ] C6 note: a broken memory seal met at the lifecycle step classifies as
+  `custody-uncertain` (with the "busy, retry" remedy) through
+  `classify_exception`; the Desktop inherits it. A dedicated `seal-broken`
+  reason belongs to the wizard/keyvault classification.
+- [ ] C6-telegram: the structured wizard result should also carry the wizard's
+  messages (or take an explicit output stream) so the Desktop no longer
+  captures process-wide stdout/stderr; until then every Desktop capture is
+  serialized and keeps only the capturing thread's text (`desktop/_capture.py`).
+- [ ] Pre-C11 Windows Desktop placements: earlier builds created
+  `<home>\desktop-plugins\mordred` and `<home>\plugins\mordred` with inherited
+  ACLs, which the checked placement refuses (never repairs) and logs with the
+  exact path. Remedy: delete those two folders by hand, then run
+  `hermes-mordred desktop install`.

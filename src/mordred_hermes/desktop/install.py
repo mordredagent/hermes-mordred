@@ -34,6 +34,7 @@ reporting every exact path.
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import sys
 from importlib import resources
@@ -45,7 +46,14 @@ from ..wizard import _term
 if TYPE_CHECKING:
     from ._windows_assets import Removal
 
+_log = logging.getLogger(__name__)
 PLUGIN_ID = "mordred"
+#: Shown whenever a Windows placement refuses unsafe state; Mordred never repairs it.
+WINDOWS_REMEDY = (
+    "Unsafe state is never repaired: fix the ownership or ACL of that path by hand, or remove the Mordred "
+    "folder there (pre-C11 Windows builds created `desktop-plugins\\mordred` and `plugins\\mordred` with "
+    "inherited ACLs), then re-run `hermes-mordred desktop install`."
+)
 _PAGE_FILE = "desktop/plugin.js"
 _API_FILES = ("dashboard/manifest.json", "dashboard/plugin_api.py")
 _FILES = (_PAGE_FILE, *_API_FILES)
@@ -100,7 +108,12 @@ def ensure_page(home: Path | None = None) -> bool:
     if _windows():
         from . import _windows_assets
 
-        return _windows_assets.place(base, _assets()).changed
+        try:
+            return _windows_assets.place(base, _assets()).changed
+        except _windows_assets.PlacementRefused as exc:
+            # The plugin's start hook logs only the exception type; name the exact path and remedy here.
+            _log.warning("Mordred desktop page not placed: %s. %s", exc, WINDOWS_REMEDY)
+            raise
     assets = resources.files("mordred_hermes.desktop").joinpath("assets")
     changed = False
     for rel, destination in _targets(base).items():
@@ -141,11 +154,7 @@ def _install_windows(base: Path) -> int:
     try:
         placement = _windows_assets.place(base, _assets())
     except _windows_assets.PlacementRefused as exc:
-        _term.emit_error(
-            f"Mordred desktop page not installed: {exc}. Unsafe state is never repaired: fix the ownership or "
-            "ACL of that path by hand (or remove the Mordred folder there), then re-run "
-            "`hermes-mordred desktop install`."
-        )
+        _term.emit_error(f"Mordred desktop page not installed: {exc}. {WINDOWS_REMEDY}")
         return 1
     for path in placement.written:
         print(f"Wrote {_quoted(path)}.")

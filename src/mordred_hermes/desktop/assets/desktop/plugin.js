@@ -57,6 +57,8 @@ const MESSAGES = {
   memory_encryption_refused: 'Memory encryption was not turned on. Nothing was sealed.',
   memory_disable_refused: 'Memory encryption was not turned off.',
   memory_operation_in_progress: 'Another memory encryption change is running. Try again when it finishes.',
+  custody_busy: 'Memory custody is busy (another Hermes or Mordred process is using it). Try again in a moment.',
+  forget_confirm_mismatch: 'Type delete my data exactly to delete the Telegram data.',
   secrets_corrupt: 'The sealed Telegram credentials cannot be opened with this profile’s key.',
   store_path_unsafe: 'A Telegram archive file or folder is not private to this account. Nothing was changed.',
   store_unavailable: 'The Telegram archive is unavailable right now.',
@@ -111,6 +113,7 @@ const REASONS = {
   'locks-held': 'another Mordred operation holds a lock',
   'custody-not-enrolled': 'memory custody is not enrolled',
   'custody-pending': 'an unresolved custody journal',
+  'memory-write-approval-plaintext': 'memory.write_approval is on: writes awaiting approval stay plaintext until applied',
 }
 const STEP_LABELS = {
   capabilities: 'capabilities',
@@ -120,6 +123,8 @@ const STEP_LABELS = {
   lifecycle: 'encryption',
 }
 const HELPER_STATES = {
+  present: 'installed',
+  unchecked: 'not checked while custody is unavailable',
   validated: 'installed (installer-owned)',
   installed: 'installed (not installer-owned)',
   missing: 'not installed',
@@ -132,6 +137,7 @@ const MEMORY_STATES = {
   exposed: 'on, but a plaintext memory file is on disk',
   degraded: 'on, with a problem',
   paused: 'turned off (custody key kept)',
+  'disabled-incomplete': 'turned off, but seals or interrupted staging remain (turn it off again to finish)',
   unavailable: 'unavailable',
 }
 
@@ -577,8 +583,11 @@ function WindowsMemoryStep({ status, refresh }) {
     setBusy(true)
     setFailure(null)
     try {
-      await call('/memory/enable', { acknowledge_cng_no_recovery: noRecovery, acknowledge_no_presence: noPresence })
+      const r = await call('/memory/enable', { acknowledge_cng_no_recovery: noRecovery, acknowledge_no_presence: noPresence })
       host.notify({ kind: 'success', message: 'Memory encryption is on. Restart Hermes and its gateways to finish.' })
+      ;(r.warnings || []).forEach((code) =>
+        host.notify({ kind: 'info', message: `${reason(code)}${code === 'memory-write-approval-plaintext' && r.pending_approvals ? ` (${r.pending_approvals})` : ''}.` }),
+      )
       refresh()
     } catch (e) {
       setFailure(e)
@@ -594,6 +603,7 @@ function WindowsMemoryStep({ status, refresh }) {
     children: jsxs(Fragment, {
       children: [
         jsx('p', { children: `Memory encryption: ${state}.` }),
+        memory.detail ? jsx('p', { style: { fontSize: 12, opacity: 0.8 }, children: memory.detail }) : null,
         jsx('p', { children: status.custody_notice }),
         jsx('p', {
           children: `Per-use presence is not supported on Windows (${reason(status.presence_reason)}). Stop every Hermes gateway before turning this on, and restart Hermes afterwards.`,
@@ -653,7 +663,7 @@ function WindowsLogout({ refresh }) {
   const run = async () => {
     setBusy(true)
     try {
-      const r = await call('/telegram/logout', { forget })
+      const r = await call('/telegram/logout', forget ? { forget, confirm: phrase } : { forget })
       host.notify({
         kind: 'success',
         message: forget ? 'Telegram data and its custody key were deleted.' : 'Logged out of Telegram; the encrypted archive is kept.',
@@ -720,10 +730,11 @@ function WindowsSetup({ status, refresh }) {
                         ? jsx(TelegramStep, { n: 5, done: loggedIn, needsApi: !status.telegram_api, refresh, extra })
                         : jsx(Step, { n: 5, title: 'Connect Telegram (read-only)', done: false, children: jsx('p', { children: 'Set the question model first (step 4).' }) }),
                       jsx(ImportStep, { n: 6, ready: loggedIn && ok('privacy_llm') && ok('memory_encryption'), refresh }),
-                      loggedIn ? jsx(WindowsLogout, { refresh }) : null,
                     ],
                   })
                 : jsx('p', { children: 'The Telegram steps unlock once Hermes uses a private or local model, memory encryption is on and Telegram custody is confirmed.' }),
+              // Logout/forget stays reachable even when a later check closes the setup steps.
+              status.telegram_supported && loggedIn ? jsx(WindowsLogout, { refresh }) : null,
             ],
           })
         : jsx('p', { role: 'status', children: 'Private Telegram is not available on this Windows profile.' }),

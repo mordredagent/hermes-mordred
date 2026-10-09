@@ -1507,3 +1507,10 @@ recorded separately in the Manual live-device validation log, is to:
 
 Telegram stays blocked at the custody step until the C6-telegram ceremony
 exists.
+
+C11 round 1: `tests/test_desktop_capture.py` joins the scoped Windows job. The
+shutdown module now reaps every child (and the redirected base interpreter)
+on every path and requires 7799 free afterwards, and also stops a server while
+an HTTP keep-alive client and an open WebSocket are connected, then restarts
+it on the same port (server-side TIME_WAIT on Windows without
+`SO_REUSEADDR`).

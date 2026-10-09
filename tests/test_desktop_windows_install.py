@@ -251,3 +251,17 @@ def test_windows_status_and_removal_on_a_home_without_desktop_folders(windows_in
     assert "could not be checked" not in captured.err and "Removed" not in captured.out
     assert not (home / "desktop-plugins").exists() and not (home / "plugins").exists(), "reads create nothing"
     assert windows_install.spy.calls == []
+
+
+def test_windows_refused_placement_logs_the_exact_path(windows_install, caplog):
+    import logging
+
+    home = windows_install.home
+    unsafe = page(home).parent
+    unsafe.mkdir(parents=True)
+    os.chmod(unsafe, 0o755)
+    with caplog.at_level(logging.WARNING, logger="mordred_hermes.desktop.install"), pytest.raises(OSError):
+        install.ensure_page(home)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert f'"{unsafe}"' in logged and "(unsafe)" in logged
+    assert "desktop install" in logged, "the log names the manual remedy"

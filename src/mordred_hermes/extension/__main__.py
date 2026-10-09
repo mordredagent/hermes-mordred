@@ -40,6 +40,10 @@ _DEFAULT_PORT = 7788
 # Winsock codes (errno on Windows): WSAEADDRINUSE, WSAEACCES.
 _WSAEADDRINUSE = 10048
 _WSAEACCES = 10013
+# How long a stop waits for in-flight connections (an open extension
+# WebSocket never finishes on its own) before they are cancelled. The
+# listener is closed first, so the port is released at the start of the stop.
+_STOP_GRACE_SECONDS = 3.0
 
 
 def _load_vault_managed_environment() -> int:
@@ -95,7 +99,9 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
     already bound (either a stale ``extension serve`` from an earlier
     session or a running Hermes gateway already hosting the extension API),
     unresolvable host, or insufficient privileges — else ``0`` after a clean
-    shutdown on Ctrl+C or SIGTERM.
+    shutdown on Ctrl+C, SIGTERM or (Windows) Ctrl+Break. Shutdown closes the
+    listener first and gives open connections a short grace period, so a
+    connected extension cannot hold the process (or the port) open.
     """
     try:
         importlib.import_module("aiohttp")
@@ -249,6 +255,28 @@ def _install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event)
     return restore
 
 
+async def _bounded_stop(server: ExtensionAPIServer, grace: float) -> None:
+    """``server.stop()`` (listener first, then connections), cut off after ``grace`` seconds.
+
+    aiohttp waits up to 60 s for every open handler; a connected extension's
+    WebSocket handler only ends when the client leaves, so an unbounded stop
+    could hang a Ctrl-C/Ctrl-Break/SIGTERM for most of a minute.
+    """
+    try:
+        await asyncio.wait_for(server.stop(), timeout=grace)
+    except TimeoutError:
+        logging.getLogger(__name__).info("closing connections still open after %.0f s", grace)
+
+
+def _cancel_remaining(loop: asyncio.AbstractEventLoop) -> None:
+    """Cancel the connection handlers a bounded stop left behind, as ``asyncio.run`` would."""
+    pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+
 def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) -> int:
     """Own the event loop for the life of the server: bind, print the startup
     banner, block until interrupted, then shut down cleanly.
@@ -304,7 +332,8 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
             pass
         finally:
             restore_signals()
-            loop.run_until_complete(server.stop())
+            loop.run_until_complete(_bounded_stop(server, _STOP_GRACE_SECONDS))
+            _cancel_remaining(loop)
             print("Stopped.")
         return 0
     finally:

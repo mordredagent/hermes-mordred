@@ -13,10 +13,14 @@ through the agent, the model, or the chat. This module:
 - runs long work (building the Enclave helper, importing messages) as jobs
   and reports progress with plugin events plus a poll endpoint.
 
-On Windows (``client_version >= 3``) every route goes through :mod:`._windows`:
-per-capability status without an aggregate readiness answer, the CNG memory
-flow behind explicit acknowledgements, and Telegram through the C10b custody
-store. macOS and Linux never reach that module.
+On Windows the Windows-specific decisions live in :mod:`._windows`: status for
+``client_version >= 3`` (older clients keep the unsupported shape) with one row
+per capability and no aggregate readiness answer, the helper state, the CNG
+memory flow behind explicit acknowledgements, Telegram custody and
+acknowledgement gating, logout/forget and the import service's memory guard.
+Routes such as ``/sync`` and ``/jobs`` are shared. macOS and Linux never reach
+that module. Every captured wizard output goes through :mod:`._capture` (one
+capture per process at a time, only the capturing thread's text).
 
 Served by Hermes' dashboard server, which requires the per-process session
 token on every ``/api`` request and binds to loopback only.
@@ -26,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import logging
 import secrets
 import sys
@@ -37,6 +40,8 @@ from typing import Any
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+
+from ._capture import captured_output
 
 _log = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,6 +58,12 @@ def _error(code: str, status: int = 200) -> JSONResponse:
     """
     del status
     return JSONResponse({"ok": False, "error": code}, status_code=200)
+
+
+def _quiet(work: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run ``work`` with this thread's printed output captured and discarded (serialized, see ``_capture``)."""
+    with captured_output():
+        return work(*args, **kwargs)
 
 
 def _code(exc: BaseException, fallback: str) -> str:
@@ -254,8 +265,7 @@ async def hardware_build() -> Any:
 
         job.progress = {"message": "Building and probing the TPM 2.0 helper…"}
         _emit("progress", {"job_id": job.job_id, **job.progress})
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = await asyncio.to_thread(enable_tpm)
+        rc = await asyncio.to_thread(_quiet, enable_tpm)
         if rc != 0:
             raise _Fail("tpm_build_failed")
 
@@ -272,8 +282,7 @@ async def enclave_build() -> Any:
 
         job.progress = {"message": "Building the Secure Enclave helper (a few minutes)…"}
         _emit("progress", {"job_id": job.job_id, **job.progress})
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = await asyncio.to_thread(enable_se)
+        rc = await asyncio.to_thread(_quiet, enable_se)
         if rc != 0:
             raise _Fail("enclave_build_failed")
 
@@ -358,11 +367,7 @@ async def memory_enable(body: dict[str, Any] | None = None) -> Any:
     home, root, platform = _home(), _resolve_root(None), sys.platform
 
     def enable() -> int:
-        with (
-            FlowSession(unattended=unattended) as flow,
-            contextlib.redirect_stdout(io.StringIO()),
-            contextlib.redirect_stderr(io.StringIO()),
-        ):
+        with FlowSession(unattended=unattended) as flow, captured_output():
             rc = env_decrypt_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
             if rc == 0:
                 rc = memory_cli.enable(home=home, root=root, platform=platform, prompt_io=prompt, flow_session=flow)
@@ -383,7 +388,7 @@ async def _linux_memory_enable() -> Any:
     from ..wizard.vault_cli import _resolve_root
 
     def enable_linux() -> int:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with captured_output():
             return memory_cli.enable(home=_home(), root=_resolve_root(None), platform="linux")
 
     rc = await asyncio.to_thread(enable_linux)
@@ -444,13 +449,13 @@ def _flows() -> Any:
 
 async def _require_memory() -> JSONResponse | None:
     if sys.platform == "win32":
-        from ._windows import memory_active
+        from ._windows import memory_refusal
 
-        ok = await asyncio.to_thread(memory_active, _home())
-    else:
-        from ..extension.telegram.memory_guard import memory_encryption_active
+        refusal = await asyncio.to_thread(memory_refusal, _home())
+        return None if refusal is None else JSONResponse(refusal)
+    from ..extension.telegram.memory_guard import memory_encryption_active
 
-        ok = await asyncio.to_thread(memory_encryption_active)
+    ok = await asyncio.to_thread(memory_encryption_active)
     return None if ok else _error("memory_encryption_required", 409)
 
 
@@ -676,13 +681,23 @@ async def sync_status() -> Any:
 
 @router.post("/telegram/logout")
 async def telegram_logout(body: dict[str, Any] | None = None) -> Any:
-    """Windows only. Body ``{"forget": bool}``: logout drops the session (archive kept); forget runs the
-    custody wipe (archive, sealed credentials, then the ``telegram`` role) — never ``delete_key``."""
+    """Windows only. Body ``{"forget": bool, "confirm"?: str}``.
+
+    Logout drops the session and keeps the archive. ``forget`` runs the custody
+    wipe (archive, sealed credentials, then the ``telegram`` role; never
+    ``delete_key``) and, like ``/uninstall``, needs ``confirm`` = ``delete my
+    data`` checked here, before anything is read, revoked or deleted.
+    """
     if sys.platform != "win32":
         return _error("telegram_platform_unsupported")
+    from ..wizard.uninstall_cli import PURGE_PHRASE
     from ._windows import telegram_logout as windows_logout
 
-    return await windows_logout(_store(), forget=(body or {}).get("forget") is True)
+    body = body or {}
+    forget = body.get("forget") is True
+    if forget and str(body.get("confirm") or "").strip() != PURGE_PHRASE:
+        return _error("forget_confirm_mismatch")
+    return await windows_logout(_store(), forget=forget)
 
 
 # -- uninstall ----------------------------------------------------------------------------
@@ -723,8 +738,8 @@ async def uninstall_plan() -> Any:
     from ..wizard.uninstall_cli import UninstallOptions, run_uninstall
 
     def plan(purge: bool, erase: bool = False) -> str:
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        # The three dry runs share one process-wide capture lock, so they run one after another.
+        with captured_output() as out:
             run_uninstall(_uninstall_context(), UninstallOptions(dry_run=True, purge_data=purge, erase_encrypted=erase))
         return out.getvalue()
 
@@ -756,16 +771,15 @@ async def uninstall(body: dict[str, Any] | None = None) -> Any:
     prompt = _UninstallAnswers(str(body.get("recovery_passphrase") or ""), phrase)
 
     async def work(job: _Job) -> None:
-        out = io.StringIO()
-
-        def run() -> int:
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                return run_uninstall(
+        def run() -> tuple[int, str]:
+            with captured_output() as out:
+                rc = run_uninstall(
                     _uninstall_context(prompt), UninstallOptions(yes=True, purge_data=purge, erase_encrypted=erase)
                 )
+            return rc, out.getvalue()
 
-        rc = await asyncio.to_thread(run)
-        job.progress = {"summary": out.getvalue()}
+        rc, summary = await asyncio.to_thread(run)
+        job.progress = {"summary": summary}
         if rc != 0:
             raise _Fail("uninstall_failed")
 
