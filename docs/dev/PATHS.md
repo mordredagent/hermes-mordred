@@ -550,3 +550,18 @@ TPM recovery or the excluded Windows file vault.
 No recursive removal is implied by these flat paths. Unknown legacy vault trees
 and retained ciphertext stay intact until a separately checked lifecycle supports
 that operation; never remove live directory locks to force cleanup.
+
+### Windows extension state paths (C10a)
+
+On Windows the files listed in the `<home>/extension/` section above live in an
+exact-private directory checked by `_private_fs`. The permanent
+`<home>/extension/.mordred-fs.lock`, shared with the wallet selection,
+serializes pairing, attestation, WebAuthn, history and wallet access; `.lock`
+is not created. Reads create nothing; pairing mutations may create only the
+final `extension` directory beneath an existing trusted home. Foundation
+staging names (`.mordred-fs-tmp-*`) may remain after a crash and are never
+glob-deleted. Existing directories or files with broader ACLs, extra links or
+reparse points are refused without repair, adoption or migration; earlier
+Windows builds could not pass the POSIX mode checks, so no mixed-version lock
+compatibility is claimed. See
+[the component contract](SPEC.md#windows-extension-checked-state-c10a).

@@ -16,6 +16,11 @@ State lives under ``~/.hermes/extension/`` with ``0600`` permissions:
 - ``attest_key.pem`` — the P-256 attestation key (TOFU-pinned by the extension).
 - ``webauthn.json`` — the optional credential managed by :mod:`.webauthn`.
 
+On Windows these files live in a checked private directory instead
+(:mod:`._windows_storage`): the ``.mordred-fs.lock`` transaction replaces the
+``.lock`` flock, every read is bounded and identity-bound, and unsafe state is
+refused rather than repaired or treated as absent.
+
 WebAuthn operations remain available from this module for compatibility, while
 their credential binding and assertion verification live in :mod:`.webauthn`.
 
@@ -48,7 +53,9 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from .._file_lock import private_flock
+from .._private_fs import FileIdentity
 from ..keyvault._storage import atomic_write, safe_read
+from . import _windows_storage as _storage
 from . import webauthn as _webauthn
 from .crypto import b64u_decode, b64u_encode, derive_shared_key, x25519_public_raw
 from .webauthn import (
@@ -192,6 +199,33 @@ class PairError(Exception):
         self.reason = reason
 
 
+class PairingStorageError(PairError):
+    """``pair_fail`` for unavailable, unsafe or uncertain checked Windows storage.
+
+    ``reason`` is the wire code (``storage_unavailable`` / ``storage_uncertain``);
+    the classified storage reason, native status and commit state are kept.
+    """
+
+    def __init__(self, error: _storage.ExtensionStorageError) -> None:
+        super().__init__(error.wire_reason)
+        self.storage_reason = error.reason
+        self.native_code = error.native_code
+        self.commit_state = error.commit_state
+
+
+@contextlib.contextmanager
+def _tolerated_storage_failure(what: str) -> Iterator[None]:
+    """Log, never raise, a checked-storage failure of best-effort metadata.
+
+    Used exactly where POSIX already suppresses ``OSError`` because another
+    record is authoritative. The classification is logged without contents.
+    """
+    try:
+        yield
+    except _storage.ExtensionStorageError as exc:
+        _LOG.warning("%s was not saved (%s, %s)", what, exc.reason, exc.commit_state)
+
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
@@ -201,6 +235,10 @@ def _ext_dir() -> Path:
     from .._home import hermes_home
 
     d = hermes_home() / "extension"
+    if _storage.enabled():
+        # Admission, creation of the final directory and ACL validation happen
+        # inside the checked session; never lstat/mkdir/chmod the path here.
+        return d
     try:
         metadata = d.lstat()
     except FileNotFoundError:
@@ -223,7 +261,13 @@ def _write_private(path: Path, data: bytes) -> None:
     name, ``O_EXCL | O_NOFOLLOW`` (no symlink follow / tmp pre-planting), fsync
     of the tmp fd *and* the parent dir, and tmp cleanup on failure. The parent
     directory always exists here — every caller resolves its path through
-    :func:`_ext_dir`, which mkdirs it."""
+    :func:`_ext_dir`, which mkdirs it.
+
+    On Windows this is the checked create-or-replace of
+    :func:`._windows_storage.write_file` instead."""
+    if _storage.enabled():
+        _storage.write_file(path, data)
+        return
     atomic_write(path, data)
 
 
@@ -236,13 +280,21 @@ def _read_json(path: Path) -> dict[str, Any]:
     non-object file as empty would let the next read-modify-write silently
     replace pairing credentials, pending-code evidence, or channel keys.
     Existing bad state therefore fails closed and is left byte-for-byte intact.
+    On Windows only the checked absence is ``{}``; storage refusals raise
+    :class:`._windows_storage.ExtensionStorageError`.
     """
-    try:
-        raw = safe_read(path)
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        raise RuntimeError(f"extension JSON store {path.name} is unreadable or corrupt") from exc
+    if _storage.enabled():
+        checked = _storage.read_file(path)
+        if checked is None:
+            return {}
+        raw = checked
+    else:
+        try:
+            raw = safe_read(path)
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            raise RuntimeError(f"extension JSON store {path.name} is unreadable or corrupt") from exc
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -254,6 +306,17 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _read_json_strict(path: Path, purpose: str) -> dict[str, Any]:
     """Read a private JSON object, distinguishing missing/corrupt from empty."""
+    if _storage.enabled():
+        checked = _storage.read_file(path)
+        if checked is None:
+            raise RuntimeError(f"{purpose} is missing, unreadable, or corrupt")
+        try:
+            data = json.loads(checked.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise RuntimeError(f"{purpose} is missing, unreadable, or corrupt") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{purpose} is missing, unreadable, or corrupt")
+        return data
     try:
         raw = safe_read(path)
         data = json.loads(raw.decode("utf-8"))
@@ -292,7 +355,15 @@ def _state_lock() -> Iterator[None]:
     creating and validating the parent directory, and the raise in
     :func:`_reject_unsafe_state_lock` still happens in this module so its
     exact one-argument :exc:`OSError` is unchanged.
+
+    On Windows the mutex is the checked ``<home>/extension`` transaction
+    (``.mordred-fs.lock``, shared with the wallet selection); ``.lock`` is never
+    created there. Nested same-thread calls reuse that one transaction.
     """
+    if _storage.enabled():
+        with _storage.session(_ext_dir(), create=True):
+            yield
+        return
     with _STATE_THREAD_LOCK, private_flock(_ext_dir() / ".lock", on_unsafe=_reject_unsafe_state_lock):
         yield
 
@@ -447,6 +518,8 @@ def pair_outcome(code: str) -> tuple[str, str | None]:
 
 
 def _load_or_create_attest_key() -> ec.EllipticCurvePrivateKey:
+    if _storage.enabled():
+        return _load_or_create_checked_attest_key()
     path = _ext_dir() / "attest_key.pem"
     with _state_lock():
         try:
@@ -462,6 +535,38 @@ def _load_or_create_attest_key() -> ec.EllipticCurvePrivateKey:
             return key
         except OSError as exc:
             raise RuntimeError("attestation identity is unreadable; refusing replacement") from exc
+        try:
+            loaded_key = serialization.load_pem_private_key(pem, password=None)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("attestation identity is invalid; refusing replacement") from exc
+        if not isinstance(loaded_key, ec.EllipticCurvePrivateKey) or not isinstance(loaded_key.curve, ec.SECP256R1):
+            raise RuntimeError("attestation identity is invalid; refusing replacement")
+        return loaded_key
+
+
+def _load_or_create_checked_attest_key() -> ec.EllipticCurvePrivateKey:
+    """Windows: create the identity once, exclusively, under the checked lock.
+
+    A checked absence creates a key only while no pairing is committed: the
+    extension pinned the key that signed the active pairing, so a lost key
+    refuses instead of silently minting a different identity. Unsafe or
+    unreadable key files refuse through :class:`ExtensionStorageError`.
+    """
+    path = _ext_dir() / "attest_key.pem"
+    with _state_lock():
+        pem = _storage.read_file(path)
+        if pem is None:
+            state = _read_json(_state_path())
+            if state.get("aes_key") or state.get("ext_token"):
+                raise RuntimeError("attestation identity is missing for an existing pairing; refusing replacement")
+            key = ec.generate_private_key(ec.SECP256R1())
+            created = key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+            _storage.write_file(path, created, exclusive=True)
+            return key
         try:
             loaded_key = serialization.load_pem_private_key(pem, password=None)
         except (TypeError, ValueError) as exc:
@@ -565,6 +670,10 @@ def _pairing_code_digest(code: str) -> str:
 _STATE_CACHE_LOCK = threading.Lock()
 _state_cache: tuple[Path, int, int, dict[str, Any]] | None = None
 _state_cache_generation = 0
+# Windows: the key is the checked directory and file identity plus size and
+# mtime, re-validated (ACL, links, reparse) by a checked stat on every read.
+_CheckedStateKey = tuple[Path, FileIdentity, FileIdentity, int, int]
+_checked_state_cache: tuple[_CheckedStateKey, dict[str, Any]] | None = None
 
 
 def _state_stat_key() -> tuple[Path, int, int] | None:
@@ -579,15 +688,18 @@ def _state_stat_key() -> tuple[Path, int, int] | None:
 
 
 def _invalidate_state_cache() -> None:
-    global _state_cache, _state_cache_generation
+    global _state_cache, _checked_state_cache, _state_cache_generation
     with _STATE_CACHE_LOCK:
         _state_cache = None
+        _checked_state_cache = None
         _state_cache_generation += 1
 
 
 def _read_state_cached() -> dict[str, Any]:
     """Read-only, cached equivalent of ``_read_json(_state_path())``."""
     global _state_cache
+    if _storage.enabled():
+        return _read_checked_state_cached()
     key = _state_stat_key()
     with _STATE_CACHE_LOCK:
         cached = _state_cache
@@ -604,6 +716,34 @@ def _read_state_cached() -> dict[str, Any]:
         else:
             _state_cache = (key[0], key[1], key[2], data) if key is not None else None
     return data
+
+
+def _read_checked_state_cached() -> dict[str, Any]:
+    """Windows: a checked stat under the lock revalidates every cache hit.
+
+    Security drift (ACL, link count, reparse) refuses at the stat, so a cached
+    dict is never served for state that is no longer admissible, and a
+    replaced file has a new identity even when size and mtime match.
+    """
+    global _checked_state_cache
+    path = _state_path()
+    with _storage.session(path.parent, create=False) as active:
+        metadata = active.stat(path.name)
+        if metadata is None:
+            return {}
+        key = (path, active.directory_identity(), metadata.identity, metadata.size, metadata.mtime_ns)
+        with _STATE_CACHE_LOCK:
+            cached = _checked_state_cache
+            generation = _state_cache_generation
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        data = _read_json(path)
+        with _STATE_CACHE_LOCK:
+            if _state_cache_generation != generation or active.bound(path.name) != metadata.identity:
+                _checked_state_cache = None
+            else:
+                _checked_state_cache = (key, data)
+        return data
 
 
 def load_pairing() -> Pairing | None:
@@ -649,6 +789,10 @@ def _write_pairing_locked(p: Pairing, *, paired_code_digest: str | None) -> None
     # or a pairing flow would delete the real production credential
     # while every other patched operation uses the sandbox
     # (review 2026-07-29).
+    if _storage.enabled():
+        with _tolerated_storage_failure("stale WebAuthn credential removal"):
+            _storage.delete_file(_webauthn._webauthn_path())
+        return
     with _suppress_oserror():
         _webauthn._webauthn_path().unlink()
 
@@ -683,7 +827,7 @@ def _commit_pairing(code: str, p: Pairing) -> None:
         # Outcome metadata improves the polling UX, but state.json already
         # proves the commit and must not be rolled back if this annotation
         # fails after the pairing was durably saved.
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError), _tolerated_storage_failure("pairing outcome annotation"):
             _write_private(path, json.dumps(pending).encode("utf-8"))
 
 
@@ -857,6 +1001,17 @@ def claim_e2e_replay_identities(
 
 
 def clear_pairing() -> None:
+    if _storage.enabled():
+        # Revocation must not be silently partial: checked deletion refuses
+        # unsafe state instead of suppressing it, and never creates the
+        # directory just to find nothing to delete.
+        try:
+            with _storage.session(_ext_dir(), create=False):
+                for name in ("state.json", "webauthn.json"):
+                    _storage.delete_file(_ext_dir() / name)
+        finally:
+            _invalidate_state_cache()
+        return
     with _state_lock():
         for name in ("state.json", "webauthn.json"):
             with _suppress_oserror():
@@ -892,7 +1047,10 @@ def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict
     :func:`_mark_pair_result`) so the polling CLI reports rejection instead of
     a false "Paired" when the handshake dies after the code is claimed."""
     code = normalize_code(code)
-    _consume_code(code)  # raises on invalid/expired/used — nothing to record
+    try:
+        _consume_code(code)  # raises on invalid/expired/used — nothing to record
+    except _storage.ExtensionStorageError as exc:
+        raise PairingStorageError(exc) from None
 
     try:
         try:
@@ -937,11 +1095,18 @@ def handle_pair_init(code: str, ext_pubkey_b64: str, challenge_b64: str) -> dict
     except PairError as exc:
         # Outcome marking is best-effort UX metadata — never let its I/O
         # failure mask the PairError the extension's pair_fail frame needs.
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError), _tolerated_storage_failure("pairing outcome"):
             _mark_pair_result(code, "failed", exc.reason)
         raise
+    except _storage.ExtensionStorageError as exc:
+        # Windows: a refused read is recorded for the polling CLI; an uncertain
+        # publication is not followed by another write.
+        if exc.commit_state != "uncertain":
+            with _tolerated_storage_failure("pairing outcome"):
+                _mark_pair_result(code, "failed", exc.wire_reason)
+        raise PairingStorageError(exc) from None
     except Exception:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError), _tolerated_storage_failure("pairing outcome"):
             _mark_pair_result(code, "failed", "internal_error")
         raise
 

@@ -39,6 +39,7 @@ from urllib.parse import quote, urlsplit
 from aiohttp import WSMsgType, web
 
 from . import page_headers, pairing
+from ._windows_storage import ExtensionStorageError
 from .crypto import (
     DecryptError,
     decrypt_message,
@@ -443,15 +444,18 @@ class _Connection:
         from .crypto import b64u_encode
 
         self._nonce = os.urandom(32)
-        await self._send(
-            {
-                "type": "auth_challenge",
-                "nonce": b64u_encode(self._nonce),
-                "webauthn_required": pairing.has_webauthn_credential(),
-            }
-        )
+        challenge: dict[str, Any] = {"type": "auth_challenge", "nonce": b64u_encode(self._nonce)}
+        try:
+            challenge["webauthn_required"] = pairing.has_webauthn_credential()
+        except ExtensionStorageError as exc:
+            # Checked Windows storage refused: fail closed and say why, rather
+            # than advertising "no credential" from state that was not read.
+            self._log_storage_refusal("auth_challenge", exc)
+            challenge["webauthn_required"] = True
+            challenge["storage_error"] = exc.wire_reason
+        await self._send(challenge)
 
-    async def dispatch(self, raw: str) -> None:
+    async def _parse_frame(self, raw: str) -> dict[str, Any] | None:
         try:
             msg = json.loads(raw)
         except ValueError:
@@ -459,6 +463,12 @@ class _Connection:
         if not isinstance(msg, dict):
             _log.warning("extension WS: dropping malformed frame (%d bytes)", len(raw))
             await self._send({"type": "error", "reason": "bad_json"})
+            return None
+        return msg
+
+    async def dispatch(self, raw: str) -> None:
+        msg = await self._parse_frame(raw)
+        if msg is None:
             return
         mtype = msg.get("type")
         # Two dispatch tables keep the auth gate explicit: pre-auth messages are
@@ -488,9 +498,9 @@ class _Connection:
                 await pre_auth[mtype](msg)
             elif not self.authed:
                 await self._send({"type": "auth_fail", "reason": "not_authenticated"})
-            elif mtype in authed and not self._authentication_is_current():
+            elif mtype in authed and (failure := self._authentication_failure()) is not None:
                 self._invalidate_authentication()
-                await self._send({"type": "auth_fail", "reason": "pairing_changed"})
+                await self._send({"type": "auth_fail", "reason": failure})
             elif self.page_token is not None and mtype in authed and mtype not in _PAGE_ALLOWED:
                 # Page session (local-origin socket): only the read-only /
                 # conversational handlers in _PAGE_ALLOWED are permitted; every
@@ -506,6 +516,8 @@ class _Connection:
                 )
             elif mtype in authed:
                 await authed[mtype](msg)
+        except ExtensionStorageError as exc:
+            await self._send_storage_refusal(msg, exc)
         except Exception:
             _log.exception("extension API handler error (type=%s)", mtype)
             # A client awaiting a reply keyed by ``id`` must not hang forever
@@ -526,8 +538,47 @@ class _Connection:
         self._pending_sign.clear()
         self.cancel_background_tasks()
 
+    async def _send_storage_refusal(self, msg: dict[str, Any], exc: ExtensionStorageError) -> None:
+        """Surface a checked Windows storage refusal instead of empty state.
+
+        ``auth`` replies ``auth_fail``; every other request gets an ``error``
+        frame keyed by its ``id`` with the classified, content-free code.
+        """
+        mtype = msg.get("type")
+        self._log_storage_refusal(str(mtype), exc)
+        if mtype == "auth":
+            self._invalidate_authentication()
+            await self._send({"type": "auth_fail", "reason": exc.wire_reason})
+            return
+        refusal: dict[str, Any] = {"type": "error", "reason": exc.wire_reason}
+        if msg.get("id") is not None:
+            refusal["id"] = msg["id"]
+        await self._send(refusal)
+
+    @staticmethod
+    def _log_storage_refusal(what: str, exc: ExtensionStorageError) -> None:
+        _log.warning(
+            "extension %s refused by checked storage (%s, %s, native=%s)",
+            what,
+            exc.reason,
+            exc.commit_state,
+            exc.native_code,
+        )
+
+    def _authentication_failure(self) -> str | None:
+        """``None`` while the principal is current, else the auth_fail reason."""
+        try:
+            return None if self._authentication_is_current() else "pairing_changed"
+        except ExtensionStorageError as exc:
+            self._log_storage_refusal("authentication check", exc)
+            return exc.wire_reason
+
     def _authentication_is_current(self) -> bool:
-        """Fail closed unless this socket still names the active principal."""
+        """Fail closed unless this socket still names the active principal.
+
+        Checked Windows storage refusals propagate so the caller can report
+        their classification; every other failure is plain revocation.
+        """
         if not self.authed:
             return False
         if self._page_authenticated:
@@ -538,6 +589,8 @@ class _Connection:
         try:
             current = pairing.authentication_generation_fingerprint()
             return current is not None and secrets.compare_digest(expected, current)
+        except ExtensionStorageError:
+            raise
         except Exception:
             # Missing/corrupt/unreadable pairing state is revocation, not a
             # reason to retain a privileged session.

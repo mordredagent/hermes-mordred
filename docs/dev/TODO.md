@@ -312,6 +312,11 @@ required.
   `tests/test_network_windows_policy_native.py` is still required).
 - [ ] C9: native Tor/VPN route behavior and process cleanup.
 - [ ] C10: extension pairing/history/Telegram storage and lifecycle.
+  C10a routes Windows pairing, attestation, WebAuthn, history and the wallet
+  snapshot fingerprint through checked private storage (host-tested; native
+  Windows source/wheel validation of
+  `tests/extension/test_extension_windows_storage_native.py` is still required).
+  C10b Telegram custody/archive remains open.
 - [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
 - [ ] C12: integrated source/wheel CI, ordinary-user Server tests, virtual
   Windows 11 installation-to-use acceptance, and required live service gates.
