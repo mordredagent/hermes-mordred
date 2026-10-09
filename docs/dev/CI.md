@@ -186,6 +186,10 @@ Record native results in the validation log below.
   for the final full-suite snapshot. Production audit IO, live provider flow,
   other components, Windows 11 and full-product acceptance remain unfinished.
 
+  2026-10-09 host-only follow-up: policy/config and audit-factory refusals are
+  raised after their handlers (no `__context__` retains parser/reader errors or
+  bytes); 8 new host cases, full suite 7,160 passed; native reruns not repeated.
+
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
   #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
