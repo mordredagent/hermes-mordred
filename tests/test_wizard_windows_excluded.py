@@ -1,8 +1,9 @@
 """Excluded/unported Windows verbs refuse before any native key work (C6).
 
-``vault init`` and the env/config seal verbs consult the C5e capability guard
-before resolving a device backend or anchor store, prompting, or generating a
-key: call accounting proves nothing past the refusal is reached. The runtime
+``vault init``, the env/config seal verbs and ``keyvault init`` / ``keyvault
+reset`` consult the C5e capability guard before resolving a device backend or
+anchor store, taking a lock, prompting, or generating a key: call accounting
+proves nothing past the refusal is reached. The runtime
 gate never accepts ``--force-runtime-unverified`` on Windows, and only the
 memory caller gets the stopped-gateway gate there.
 """
@@ -15,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes.keyvault import _windows_capability, _windows_processes
+from mordred_hermes._private_fs import PrivateFSError
+from mordred_hermes.keyvault import _memory_key, _storage, _windows_capability, _windows_processes
 from mordred_hermes.keyvault._runtime_probe import GatewayRuntime
 from mordred_hermes.wizard import (
     _keyvault_init,
@@ -27,6 +29,7 @@ from mordred_hermes.wizard import (
     config_decrypt_cli,
     encryption_cli,
     env_decrypt_cli,
+    keyvault_cli,
     memory_cli,
 )
 
@@ -156,6 +159,50 @@ def test_keyvault_init_refuses_before_prompt_or_storage(windows, monkeypatch, ca
     assert "keyvault init: secret_store is not yet ported to Windows" in err and "(not-ported-on-windows)" in err
     assert "keyvault native init" in err
     assert trip.calls == [] and not (home / "mordred" / "keyvault").exists()
+
+
+def test_keyvault_reset_refuses_before_any_lock_or_storage(windows, monkeypatch, capsys):
+    """No Linux memory-key lock, keyvault lifecycle lock, root resolution or reset journal on Windows."""
+    home, trip = windows
+    store = home / "mordred" / "keyvault"
+    store.mkdir()
+    (store / "keyvault.json").write_text("{}\n", encoding="utf-8")
+    for module, name in (
+        (_memory_key, "memory_key_lock"),
+        (_memory_key, "memory_key_path"),
+        (_storage, "keyvault_lifecycle_lock"),
+        (_storage, "reset_journal_path"),
+        (keyvault_cli, "_resolve_root"),
+        (keyvault_cli, "_reset_keyvault"),
+    ):
+        monkeypatch.setattr(module, name, trip)
+    before = tree(home)
+    assert keyvault_cli.reset_keyvault(home=home, backend=trip, prompt_io=trip, assume_yes=True) == 1  # type: ignore[arg-type]
+    assert cli.main(["keyvault", "reset", "--yes"]) == 1
+    err = capsys.readouterr().err
+    assert err.count("keyvault reset: secret_store is not yet ported to Windows") == 2
+    assert "(not-ported-on-windows)" in err and "Traceback" not in err
+    assert trip.calls == [] and tree(home) == before
+
+
+@pytest.mark.parametrize(
+    ("reason", "commit_state", "host", "expected"),
+    [
+        ("unsupported", "not_committed", "win32", "custody-unsafe"),
+        ("unsafe", "not_committed", "win32", "custody-unsafe"),
+        ("access_denied", "not_committed", "win32", "custody-unsafe"),
+        ("busy", "not_committed", "win32", "custody-uncertain"),
+        ("unsupported", "uncertain", "win32", "custody-uncertain"),
+        ("unsafe", "uncertain", "win32", "custody-uncertain"),
+        ("unsupported", "not_committed", "darwin", "unsupported"),
+    ],
+)
+def test_classify_exception_matches_the_c5e_wording(monkeypatch, reason, commit_state, host, expected):
+    monkeypatch.setattr(_windows_gates, "host_platform", lambda: host)
+    error = PrivateFSError(reason, "probe", commit_state=commit_state)
+    assert _windows_gates.classify_exception(error) == expected
+    if host == "win32":
+        assert expected == _windows_capability._classify(error), "the wizard words C5e's classification"
 
 
 def test_excluded_guards_are_noops_off_windows(monkeypatch):

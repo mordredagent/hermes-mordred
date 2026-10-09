@@ -10,7 +10,9 @@ lifecycle, and each step names itself when it refuses:
   ``--force-runtime-unverified`` (Windows has no bypass) and then calls
   ``require_stopped_windows_gateways``; unknown or running gateways refuse.
 - **ceremony** — enable only: inert memory enrollment when the role is absent
-  (:mod:`.keyvault_windows_cli`). Audit is never enrolled here.
+  (:mod:`.keyvault_windows_cli`), printing the same no-presence /
+  no-portable-recovery notice as ``keyvault native init`` whenever the key is
+  created. Audit is never enrolled here.
 - **proof** — ``prove_windows_memory_runtime`` outside every lock, against the
   installed Hermes interpreter (``MORDRED_HERMES_PYTHON``, else the Hermes
   launcher's validated interpreter, else the C4 home venv).
@@ -223,7 +225,7 @@ def _lifecycle_failure(verb: str, exc: BaseException, *, state: str) -> int:
 def enable(*, home: Path, force_runtime_unverified: bool = False) -> int:
     """capabilities -> gate -> inert enrollment if absent -> proof -> enable_memory_encryption."""
     from ..keyvault._memory_storage import enable_memory_encryption
-    from .keyvault_windows_cli import enroll_roles
+    from .keyvault_windows_cli import CUSTODY_NOTICE, enroll_roles
 
     if _capability_refusal("enable", home) is not None:
         return 1
@@ -236,6 +238,7 @@ def enable(*, home: Path, force_runtime_unverified: bool = False) -> int:
     state = _UNCHANGED + (_KEPT if enrolled[0].created else "")
     if enrolled[0].created:
         print(f"Enrolled inert Windows memory custody (generation {enrolled[0].generation}).")
+        print(CUSTODY_NOTICE)
 
     proof = _prove("enable", home, state=state)
     if proof is None:

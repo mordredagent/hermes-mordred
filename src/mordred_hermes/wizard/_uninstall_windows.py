@@ -3,14 +3,19 @@
 - **Restore** covers agent memory only, through ``memory_cli.disable`` on
   ``win32`` (capabilities -> stopped-gateway gate -> installed-runtime proof
   -> checked disable; the CNG key is kept). A refusal stops the uninstall
-  before anything is removed. The env/config seals are excluded on Windows:
-  retained artifacts are reported and preserved, never restored or deleted.
+  before anything is removed. With ``--purge-data`` the restore is also
+  planned for enrolled-but-inert custody that was never explicitly disabled,
+  because the purge requires that disable. The env/config seals are excluded
+  on Windows: retained artifacts are reported and preserved, never restored
+  or deleted.
 - ``--purge-data`` purges the memory custody key through ``memory_cli.purge``
-  on ``win32`` after the verified restore (no seal or staging entry may
-  remain, then ``reset_role("memory")``). Audit and Telegram custody, a
-  retained secret store or file vault, and the ``<home>\\mordred`` and
-  ``<home>\\extension`` trees are kept and reported: Windows has no checked
-  recursive removal yet, so nothing is force-removed.
+  on ``win32`` right after the verified restore and before step b (no seal or
+  staging entry may remain, then ``reset_role("memory")``), so every refusal
+  -- gate, proof, verification or reset -- leaves Hermes's files, launchers
+  and the package installed. Audit and Telegram custody, a retained secret
+  store or file vault, and the ``<home>\\mordred`` and ``<home>\\extension``
+  trees are kept and reported: Windows has no checked recursive removal yet,
+  so nothing is force-removed.
 - ``--erase-encrypted`` refuses: sealed memory is never deleted unread.
 
 Heavy imports stay function-local so this module imports on any platform.
@@ -18,6 +23,7 @@ Heavy imports stay function-local so this module imports on any platform.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,7 +35,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PLAN_NOTE",
-    "PURGE_WARNING",
     "custody_roles",
     "device_keys",
     "erase_refusal",
@@ -37,7 +42,9 @@ __all__ = [
     "kept_lines",
     "purge",
     "purge_lines",
+    "purge_warning",
     "restore",
+    "restore_step",
     "restores",
 ]
 
@@ -46,12 +53,14 @@ PLAN_NOTE = (
     "process inventory is unknown; stop them first. Retained file-vault/seal/secret-store state is excluded or "
     "not ported on Windows and is preserved unchanged."
 )
-PURGE_WARNING = (
-    "\nWARNING: --purge-data on Windows permanently deletes the Windows CNG memory custody key after the\n"
-    "memory restore (step 5, first line). Copies sealed under it elsewhere can no longer be decrypted.\n"
-    "Everything else listed in step 5 is kept."
-)
 _ROLE_LABELS = {"memory": "memory", "audit": "audit", "telegram": "Telegram"}
+_DELETE_MEMORY = "delete the Windows CNG memory custody key"
+_UNREADABLE = "Windows custody could not be read"
+_STOPPED = (
+    "Nothing was removed and Mordred stays installed, so Hermes keeps working. Fix the cause, then re-run "
+    "`hermes-mordred uninstall --purge-data` (or uninstall without --purge-data to keep the key)."
+)
+_GATED = "refuse unless every Hermes gateway is stopped, prove the installed Hermes runtime, then "
 
 
 def erase_refusal() -> int:
@@ -63,8 +72,14 @@ def erase_refusal() -> int:
     return 1
 
 
-def restores(home: Path) -> list[Restore]:
-    """The memory restore the plan promises, from a load-only observation."""
+def restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
+    """The memory restore the plan promises, from a load-only observation.
+
+    With ``purge_data`` an enrolled profile that was never explicitly disabled
+    (inert custody from ``keyvault native init`` or an enable that refused at
+    the proof) is restored too: the purge requires the opt-out the checked
+    disable writes, so it is recorded before anything else happens.
+    """
     from ._windows_memory import observe
     from .uninstall_cli import Restore
 
@@ -80,27 +95,43 @@ def restores(home: Path) -> list[Restore]:
             )
         ]
     if not (report.armed or report.sealed or report.broken or report.pending):
-        return []
+        if not (purge_data and report.managed and not report.opted_out):
+            return []
+        detail = (
+            "Windows: nothing is sealed, but the enrolled memory custody was never explicitly disabled and "
+            f"--purge-data requires that: {_GATED}record the disable (opt-out marker) through the checked disable; "
+            "the CNG memory key is kept until the purge"
+        )
+        return [Restore("memory", detail, False)]
+    broken = (
+        f"; {len(report.broken)} broken seal(s) cannot be decrypted, so the restore refuses until they are restored "
+        "from a backup or moved out of the memories directory by hand"
+        if report.broken
+        else ""
+    )
     return [
         Restore(
             "memory",
-            "Windows: refuse unless every Hermes gateway is stopped, prove the installed Hermes runtime, then "
-            f"decrypt {len(report.sealed)} sealed memory file(s) back with verified checked replacement; the CNG "
-            "memory key is kept",
+            f"Windows: {_GATED}decrypt {len(report.sealed)} sealed memory file(s) back with verified checked "
+            f"replacement; the CNG memory key is kept{broken}",
             False,
         )
     ]
 
 
-def custody_roles(home: Path) -> tuple[list[str], str | None]:
-    """Roles with owned CNG generations, read without waiting for a lock or touching the TPM."""
+def custody_roles(home: Path, *, blocking: bool = False) -> tuple[list[str], str | None]:
+    """Roles with owned CNG generations, read without touching the TPM.
+
+    The plan reads without waiting for a lock (``blocking=False``); the purge
+    itself waits, like every other lifecycle command.
+    """
     from .._config_io import CanonicalPaths, canonical_session
     from ..keyvault._windows_custody import windows_custody_session
     from ..keyvault._windows_profile import ROLES
 
     try:
         with (
-            canonical_session(CanonicalPaths(home), scope="policy", blocking=False) as canonical,
+            canonical_session(CanonicalPaths(home), scope="policy", blocking=blocking) as canonical,
             windows_custody_session(home, canonical=canonical) as custody,
         ):
             owned: list[str] = []
@@ -127,12 +158,17 @@ def device_keys(home: Path, vault_root: Path) -> list[str]:
 
 def purge_lines(home: Path) -> list[str]:
     """What ``--purge-data`` does on Windows, exactly."""
-    roles, _ = custody_roles(home)
+    roles, error = custody_roles(home)
     lines = []
+    if error is not None:
+        lines.append(
+            f"{_UNREADABLE} ({error}); the purge reads it again right after the restore and refuses -- stopping "
+            "before anything is removed -- if it is still unreadable"
+        )
     if "memory" in roles:
         lines.append(
-            "delete the Windows CNG memory custody key after the verified restore (only when no sealed memory or "
-            "staging entry remains)"
+            f"{_DELETE_MEMORY} right after the verified restore, before anything else is removed (it refuses, and "
+            "the uninstall stops, while a gateway runs or sealed memory, a broken seal or staging remains)"
         )
     if "audit" in roles:
         lines.append("keep audit custody and audit history (their destructive purge is a separate ceremony)")
@@ -162,6 +198,38 @@ def kept_after_purge(purge: list[str], data: list[str]) -> list[str]:
     ]
 
 
+def purge_warning(purge: list[str] | None) -> str:
+    """The typed-confirmation warning for ``--purge-data`` on Windows, from the plan's step 5."""
+    lines = purge or []
+    if any(line.startswith(_DELETE_MEMORY) for line in lines):
+        return (
+            "\nWARNING: --purge-data on Windows permanently deletes the Windows CNG memory custody key right after\n"
+            "the memory restore (step 5, first line). Copies sealed under it elsewhere can no longer be decrypted.\n"
+            "Everything else listed in step 5 is kept."
+        )
+    if any(line.startswith(_UNREADABLE) for line in lines):
+        return (
+            "\nWARNING: Windows custody could not be read (step 5). --purge-data on Windows deletes at most the\n"
+            "Windows CNG memory custody key, right after the memory restore, and refuses before anything is\n"
+            "removed while custody stays unreadable. Everything else listed in step 5 is kept."
+        )
+    return (
+        "\nNote: no Windows CNG memory custody key is enrolled on this profile, so --purge-data on Windows\n"
+        "deletes no key here. Everything listed in step 5 is kept."
+    )
+
+
+def restore_step(*, purge_data: bool) -> Callable[[UninstallContext, list[Restore]], int]:
+    """Step a on Windows; with ``purge_data`` the memory custody purge follows at once, before step b."""
+
+    def step(ctx: UninstallContext, planned: list[Restore]) -> int:
+        if restore(ctx, planned) != 0:
+            return 1
+        return purge(ctx) if purge_data else 0
+
+    return step
+
+
 def restore(ctx: UninstallContext, planned: list[Restore]) -> int:
     """Step a on Windows: the proof-bound memory disable, or stop before removing anything."""
     from . import memory_cli
@@ -179,15 +247,15 @@ def restore(ctx: UninstallContext, planned: list[Restore]) -> int:
 
 
 def purge(ctx: UninstallContext) -> int:
-    """``--purge-data`` on Windows: memory custody only; everything else is kept and reported."""
+    """``--purge-data`` on Windows, right after the restore: memory custody only; the rest is kept and reported."""
     from . import memory_cli
 
-    roles, error = custody_roles(ctx.home)
+    roles, error = custody_roles(ctx.home, blocking=True)
     if error is not None:
-        _term.emit_error(f"Windows custody could not be read ({error}); Mordred data was retained.")
+        _term.emit_error(f"uninstall stopped: {_UNREADABLE} ({error}). {_STOPPED}")
         return 1
     if "memory" in roles and memory_cli.purge(home=ctx.home, root=ctx.vault_root, platform=WINDOWS) != 0:
-        _term.emit_error("Windows memory custody could not be purged (see above); Mordred data was retained.")
+        _term.emit_error(f"uninstall stopped: Windows memory custody could not be purged (see above). {_STOPPED}")
         return 1
     for line in purge_lines(ctx.home):
         if line.startswith("keep "):

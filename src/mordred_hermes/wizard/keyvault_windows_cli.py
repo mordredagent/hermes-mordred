@@ -11,7 +11,9 @@ requested roles through C5a ``enroll_memory()`` / ``enroll_role("audit")``.
 - An already enrolled role is reported, never re-created. Retained evidence
   without ownership (a marker, wrapper, journal or sealed memory) refuses
   inside C5a before any native key is generated.
-- Output is metadata only: role, generation and public-key fingerprint.
+- Output is metadata only: role, generation and public-key fingerprint, plus
+  :data:`CUSTODY_NOTICE` (no per-use presence, no portable recovery), which
+  ``encryption enable memory`` also prints whenever it creates the key.
 
 Telegram custody belongs to the Telegram setup ceremony and is not offered
 here. Heavy imports stay function-local so this module imports everywhere.
@@ -29,15 +31,21 @@ from . import _term
 from ._windows_gates import CUSTODY_FAILURES, HELPER_FAILURES, classify_exception, describe_capability, remedy
 
 if TYPE_CHECKING:
-    from ..keyvault._windows_capability import WindowsCapability
+    from ..keyvault._windows_capability import CapabilityName, WindowsCapability
     from ..keyvault._windows_custody import GenerationLease
 
-__all__ = ["NATIVE_ROLES", "RoleOutcome", "cli_native_init", "enroll_roles", "native_init"]
+__all__ = ["CUSTODY_NOTICE", "NATIVE_ROLES", "RoleOutcome", "cli_native_init", "enroll_roles", "native_init"]
 
 NativeRole = Literal["memory", "audit"]
 NATIVE_ROLES: tuple[NativeRole, ...] = ("memory", "audit")
-_CAPABILITY_FOR: dict[str, str] = {"memory": "memory_custody", "audit": "native_audit"}
+_CAPABILITY_FOR: dict[NativeRole, CapabilityName] = {"memory": "memory_custody", "audit": "native_audit"}
 _OPERATION = "keyvault native init"
+#: SPEC-frozen notice, printed whenever a Windows CNG custody key is created.
+CUSTODY_NOTICE = (
+    "There is no per-use presence and no portable recovery: losing the TPM, this Windows account or this "
+    "profile directory loses data encrypted under these keys. Disable memory encryption while the TPM is "
+    "usable to restore plaintext first."
+)
 
 
 @dataclass(frozen=True)
@@ -118,10 +126,10 @@ def _capabilities(home: Path) -> tuple[WindowsCapability, ...] | None:
     try:
         return windows_capabilities(home)
     except PrivateFSError as exc:
-        if exc.reason == "unsupported":
+        reason, detail = classify_exception(exc), f"{type(exc).__name__}: {exc}"
+        if reason == "unsupported":
             _term.emit_error(f"{_OPERATION}: Windows native custody exists only on native Windows.")
             return None
-        reason, detail = classify_exception(exc), f"{type(exc).__name__}: {exc}"
     except (OSError, RuntimeError, ValueError) as exc:
         reason, detail = classify_exception(exc), f"{type(exc).__name__}: {exc}"
     _refuse(_OPERATION, "Windows", reason, detail)
@@ -136,7 +144,7 @@ def native_init(*, home: Path, roles: Sequence[NativeRole] = ("memory",)) -> int
         return 1
     by_name = {capability.name: capability for capability in capabilities}
     for role in requested:
-        capability = by_name[_CAPABILITY_FOR[role]]  # type: ignore[index]
+        capability = by_name[_CAPABILITY_FOR[role]]
         if capability.reason in CUSTODY_FAILURES | HELPER_FAILURES:
             _refuse(_OPERATION, role, capability.reason, describe_capability(capability))
             return 1
@@ -151,11 +159,7 @@ def native_init(*, home: Path, roles: Sequence[NativeRole] = ("memory",)) -> int
             "Memory custody is inert until `hermes-mordred encryption enable memory` proves the installed Hermes "
             "runtime and seals the memories."
         )
-    print(
-        "There is no per-use presence and no portable recovery: losing the TPM, this Windows account or this "
-        "profile directory loses data encrypted under these keys. Disable memory encryption while the TPM is "
-        "usable to restore plaintext first."
-    )
+    print(CUSTODY_NOTICE)
     for capability in capabilities:
         if not capability.supported:
             print(f"  {describe_capability(capability)}")

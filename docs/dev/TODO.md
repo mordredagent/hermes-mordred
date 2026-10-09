@@ -358,6 +358,12 @@ Implementation and acceptance remain open:
   Windows CI, the gated `test_wizard_windows_memory_live.py` source and
   sdist-wheel runs, Windows 11 acceptance, wizard journal reconciliation,
   Telegram (C10b), audit CLI (C7b part 2) and Desktop (C11) routing.
+  Review fix round 1: uninstall `--purge-data` plans the disable for inert
+  custody and purges memory custody inside step a (every refusal precedes
+  step b); enable/setup print the no-presence/no-portable-recovery notice when
+  they create the key; `keyvault reset` refuses first on Windows. Still open:
+  armed-with-problems memory renders `paused` instead of `on`, and
+  `--purge-data` removes the CNG helper while audit/Telegram custody is kept.
 - [ ] Design and implement checked tree lifecycle before recursive cleanup;
   do not make it an implicit requirement for flat memory enrollment/purge.
 - [ ] Verify ordinary-user Server and Windows 11 installed flows, preserving

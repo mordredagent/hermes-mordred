@@ -2474,8 +2474,10 @@ enrolled role is reported unchanged and never re-created. A missing Hermes home
 refuses instead of being created. C5a still refuses any retained evidence
 without ownership before native generation. Output is metadata only (role,
 generation, public-key SHA-256) plus the no-presence/no-portable-recovery
-notice and the excluded/unported capability lines. Enrollment writes no marker
-and changes no memory file. An audit writer or callback never enrolls.
+notice and the excluded/unported capability lines. `encryption enable memory`
+(and therefore `setup`) prints the same notice whenever its ceremony step
+creates the memory key, even if a later step refuses. Enrollment writes no
+marker and changes no memory file. An audit writer or callback never enrolls.
 
 Windows routing per entry point (each refusal names its step and reason, and
 says what is unchanged):
@@ -2486,8 +2488,8 @@ says what is unchanged):
 | `encryption disable memory` | capabilities plus the load-only purge scan (an unmanaged clean profile is a no-op; sealed files without custody refuse as `custody-broken`; an already disabled clean profile is a no-op) -> helper check -> gate -> proof -> `disable_memory_encryption(keep_key=True)` |
 | `encryption purge memory --yes` | capabilities -> gate -> `verify_memory_purge_candidates` (any reason refuses with the remedy: disable first, finish interrupted staging, or restore broken seals by hand) -> `reset_role("memory", erase_authorized=False)` in a fresh custody scope |
 | `encryption status`, `status`, `setup` | `windows_capabilities` (non-blocking) and the purge scan joined to a non-blocking canonical session; no unwrap, backend, subprocess or lock wait |
-| `uninstall` | restore = the `disable` row; `--purge-data` adds the `purge` row after it; `--erase-encrypted` refuses |
-| `vault init`/open/change-passphrase/recover, env/config seal verbs, `keyvault init` | `refuse_excluded_on_windows` / `refuse_unported_on_windows` before any backend/store resolution, prompt, `_storage` read or key generation |
+| `uninstall` | restore = the `disable` row (with `--purge-data` also for enrolled custody never explicitly disabled); `--purge-data` runs the `purge` row right after it, before any Hermes file, launcher or package step; `--erase-encrypted` refuses |
+| `vault init`/open/change-passphrase/recover, env/config seal verbs, `keyvault init`, `keyvault reset` | `refuse_excluded_on_windows` / `refuse_unported_on_windows` as the first statement, before any backend/store resolution, lock (including the Linux memory-key lock and the keyvault lifecycle lock), prompt, `_storage` read or key generation |
 
 Interpreter routing for the proof: `MORDRED_HERMES_PYTHON` remains
 authoritative inside the proof. Otherwise a Hermes launcher (`hermes.exe` on
@@ -2543,3 +2545,23 @@ retained secret store or file vault, and the `<home>\mordred` and
 `<home>\extension` trees are kept and reported, because Windows has no checked
 recursive removal yet. The plan lists exactly that. `--erase-encrypted`
 refuses on Windows, including `--dry-run`.
+
+Purge ordering on Windows uninstall: purge requires an explicit disable (the
+opt-out marker) and no seal, broken seal or staging entry. With `--purge-data`
+the restore is therefore planned whenever memory custody is managed and not
+opted out, including inert enrollment (`keyvault native init`, or an enable
+that refused at the proof); without `--purge-data` inert custody needs no
+restore and no proof. The memory purge (stopped-gateway gate, purge
+verification, `reset_role`) runs as part of step a, immediately after the
+restore and before the Desktop page, `config.yaml`/`.env` cleanup, launcher
+removal, helper removal or package uninstall, so a refusing gate, proof
+(including a proof child that cannot start), verification or reset leaves
+Hermes's files, launchers and the package installed. Its custody read waits for
+the lock like the other lifecycle commands; the plan reads without waiting and,
+when custody is unreadable, says the purge will re-check and refuse. The
+typed-confirmation warning names the memory key only when step 5 lists its
+deletion. Recorded C6 gaps: an armed profile with a broken seal, staging
+entries or a missing helper renders `paused` in `encryption status` rather
+than `on` (the fix changes setup's rerun decision and is deferred), and
+`--purge-data` removes the owned CNG helper while kept audit/Telegram custody
+still needs it.

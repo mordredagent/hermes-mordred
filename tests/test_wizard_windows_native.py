@@ -91,7 +91,7 @@ def test_native_copied_home_refuses_the_ceremony(native, capsys):
     assert backend.calls == calls
 
 
-def test_native_purge_refuses_an_enabled_profile_without_native_calls(native, capsys):
+def test_native_purge_refuses_an_inert_profile_without_native_calls(native, capsys):
     home, backend = native
     assert keyvault_windows_cli.native_init(home=home) == 0
     calls = list(backend.calls)

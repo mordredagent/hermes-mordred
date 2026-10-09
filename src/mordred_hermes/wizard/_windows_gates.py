@@ -149,14 +149,21 @@ def describe_capability(capability: WindowsCapability) -> str:
 
 
 def classify_exception(exc: BaseException) -> str:
-    """Map a custody/storage failure to the capability reason vocabulary."""
+    """Map a custody/storage failure to the capability reason vocabulary.
+
+    As in C5e, a settled ``unsupported`` failure on Windows (a filesystem or
+    object that cannot give the checked guarantees) is ``custody-unsafe``; only
+    off Windows does it mean the platform itself is unsupported.
+    """
     from .._private_fs import PrivateFSError
     from ..keyvault._windows_profile import CustodyError
 
     if isinstance(exc, PrivateFSError):
-        if exc.reason == "unsupported" and exc.commit_state != "uncertain":
+        if exc.commit_state == "uncertain":
+            return "custody-uncertain"
+        if exc.reason == "unsupported" and host_platform() != WINDOWS:
             return "unsupported"
-        if exc.commit_state != "uncertain" and exc.reason in ("unsafe", "access_denied"):
+        if exc.reason in ("unsafe", "access_denied", "unsupported"):
             return "custody-unsafe"
         return "custody-uncertain"
     if isinstance(exc, CustodyError):

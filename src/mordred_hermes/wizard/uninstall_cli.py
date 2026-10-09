@@ -32,9 +32,9 @@ Every step is idempotent: a second run finds nothing left and changes nothing.
 ``--dry-run`` prints the plan and changes nothing at all.
 
 On Windows the restore is the proof-bound memory disable only, ``--purge-data``
-purges only the memory custody key and reports everything else it keeps (no
-recursive removal), and ``--erase-encrypted`` refuses; see
-:mod:`._uninstall_windows`.
+purges only the memory custody key -- right after the restore, before step b --
+and reports everything else it keeps (no recursive removal), and
+``--erase-encrypted`` refuses; see :mod:`._uninstall_windows`.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import _term
+from . import _term, _uninstall_windows
 from ._uninstall_config import (
     ConfigCleanup,
     EnvCleanup,
@@ -177,11 +177,9 @@ class UninstallPlan:
 # -----------------------------------------------------------------------------
 # Plan (read-only)
 # -----------------------------------------------------------------------------
-def _restores(ctx: UninstallContext) -> list[Restore]:
+def _restores(ctx: UninstallContext, *, purge_data: bool = False) -> list[Restore]:
     if ctx.platform == "win32":
-        from . import _uninstall_windows
-
-        return _uninstall_windows.restores(ctx.home)
+        return _uninstall_windows.restores(ctx.home, purge_data=purge_data)
     from ..keyvault._config_bootstrap import _marker_path
     from ..keyvault._memory_hook import memory_marker_path
     from ..keyvault._runtime_env import _env_optout_marker_path
@@ -248,8 +246,6 @@ def _leftover_locks(home: Path) -> list[Path]:
 
 def _device_keys(ctx: UninstallContext, telegram_configured: bool) -> list[str]:
     if ctx.platform == "win32":
-        from . import _uninstall_windows
-
         return _uninstall_windows.device_keys(ctx.home, ctx.vault_root)
     from ..keyvault._identity import vault_identity
 
@@ -293,7 +289,7 @@ def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
     """Everything ``uninstall`` would do, computed without changing anything."""
     from ..desktop.install import page_dir, plugin_dir
 
-    restores = _restores(ctx)
+    restores = _restores(ctx, purge_data=opts.purge_data)
     config = plan_config_cleanup(ctx.home / "config.yaml")
     env = plan_env_cleanup(ctx.home / ".env")
     page = next(
@@ -318,8 +314,6 @@ def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
         leftovers=_leftover_locks(ctx.home),
     )
     if ctx.platform == "win32":
-        from . import _uninstall_windows
-
         plan.notes.append(_uninstall_windows.PLAN_NOTE)
         plan.windows_purge = _uninstall_windows.purge_lines(ctx.home)
     if any(r.target == "config" and r.needs_vault for r in restores):
@@ -410,10 +404,9 @@ def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
     out += _section("4. Package:", [_package_line(plan.hermes_env)])
     data = [f"{path}  -- {description}" for path, description in plan.data] + plan.device_keys
     if opts.purge_data and plan.windows_purge is not None:
-        from ._uninstall_windows import kept_after_purge
-
+        kept = _uninstall_windows.kept_after_purge(plan.windows_purge, data)
         title = "5. Data -- --purge-data on Windows (only what is listed first is deleted; the rest is kept):"
-        data = plan.windows_purge + [f"keep {line}" for line in kept_after_purge(plan.windows_purge, data)]
+        data = plan.windows_purge + [f"keep {line}" for line in kept]
     elif opts.purge_data:
         title = "5. Data -- PERMANENTLY DELETED (--purge-data):"
         if plan.telegram_configured:
@@ -684,7 +677,7 @@ def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
     return 0
 
 
-def _confirm(ctx: UninstallContext, opts: UninstallOptions) -> bool:
+def _confirm(ctx: UninstallContext, opts: UninstallOptions, plan: UninstallPlan) -> bool:
     from ._defaults import resolve_prompt_io
 
     if opts.yes and not opts.purge_data:
@@ -699,10 +692,8 @@ def _confirm(ctx: UninstallContext, opts: UninstallOptions) -> bool:
     if not opts.yes and not prompt_io.ask_bool("Uninstall Mordred as shown above?", False):
         return False
     if opts.purge_data:
-        from ._uninstall_windows import PURGE_WARNING
-
         print(
-            PURGE_WARNING
+            _uninstall_windows.purge_warning(plan.windows_purge)
             if ctx.platform == "win32"
             else "\nWARNING: --purge-data permanently deletes the data listed in step 5, including the device keys.\n"
             "Anything encrypted with them can be recovered only with the keyvault Seed Phrase / Passphrase /\n"
@@ -717,18 +708,23 @@ def _confirm(ctx: UninstallContext, opts: UninstallOptions) -> bool:
 
 
 def _execute(ctx: UninstallContext, plan: UninstallPlan, opts: UninstallOptions) -> int:
-    """Steps a-e in order, stopping at the first one that must not be passed."""
-    from . import _uninstall_windows
+    """Steps a-e in order, stopping at the first one that must not be passed.
 
+    On Windows the ``--purge-data`` custody purge belongs to step a, so its
+    refusal also comes before step b removes anything.
+    """
     windows = ctx.platform == "win32"
-    step_a = _uninstall_windows.restore if windows else _erase_encrypted if opts.erase_encrypted else _restore_all
+    if windows:
+        step_a = _uninstall_windows.restore_step(purge_data=opts.purge_data)
+    else:
+        step_a = _erase_encrypted if opts.erase_encrypted else _restore_all
     if step_a(ctx, plan.restores) != 0:
         return 1
     if _clean_hermes_files(ctx, plan) != 0:
         return 1
     _remove_launchers(plan)
     if opts.purge_data:
-        if (_uninstall_windows.purge(ctx) if windows else _purge_data(ctx, plan)) != 0:
+        if not windows and _purge_data(ctx, plan) != 0:
             return 1
         plan.data = _data_inventory(ctx)
         plan.device_keys = _device_keys(ctx, plan.telegram_configured) if windows else []
@@ -757,8 +753,6 @@ def _execute(ctx: UninstallContext, plan: UninstallPlan, opts: UninstallOptions)
 def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     """Plan, confirm, and run the uninstall. Returns the process exit code."""
     if opts.erase_encrypted and ctx.platform == "win32":
-        from . import _uninstall_windows
-
         return _uninstall_windows.erase_refusal()
     if opts.erase_encrypted and not opts.purge_data:
         opts = dataclasses.replace(opts, purge_data=True)
@@ -775,7 +769,7 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
         print("Mordred is not installed here; nothing to do.")
         print(_render_kept(plan))
         return 0
-    if not _confirm(ctx, opts):
+    if not _confirm(ctx, opts, plan):
         print("Uninstall cancelled; nothing was changed.")
         return 1
     return _execute(ctx, plan, opts)

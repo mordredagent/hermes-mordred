@@ -9,6 +9,8 @@ are exactly as before. Key bytes never appear in an assertion operand.
 
 from __future__ import annotations
 
+import builtins
+import io
 import os
 import sys
 from pathlib import Path
@@ -91,6 +93,10 @@ class Inventory:
         monkeypatch.setattr(_windows_processes, "inspect_windows_gateway_runtimes", inspect)
 
 
+#: The SPEC-frozen substance of the notice printed whenever a CNG custody key is created.
+NO_PRESENCE_NO_RECOVERY = "There is no per-use presence and no portable recovery: losing the TPM"
+
+
 def snapshot(env):
     mordred = env.home / "mordred"
     entries = sorted(path.name for path in mordred.iterdir()) if mordred.exists() else []
@@ -111,6 +117,7 @@ def test_ceremony_enrolls_inert_memory_once_and_prints_metadata_only(seeded, cap
     assert key_absent_from(env, out)
     assert "excluded on Windows (excluded-on-windows)" in out
     assert "not ported to Windows (not-ported-on-windows)" in out
+    assert NO_PRESENCE_NO_RECOVERY in out and keyvault_windows_cli.CUSTODY_NOTICE in out
     assert files(env.home) == ORIGINALS and markers(env.home) == set(), "enrollment must stay inert"
     assert role_current(env, "audit") is None, "audit is never enrolled implicitly"
     assert generated(env) == 1
@@ -200,6 +207,8 @@ def test_enable_end_to_end_through_the_cli(seeded, capsys):
     assert cli.main(["encryption", "enable", "memory"]) == 0
     out = capsys.readouterr().out
     assert "Enrolled inert Windows memory custody" in out
+    assert NO_PRESENCE_NO_RECOVERY in out and keyvault_windows_cli.CUSTODY_NOTICE in out
+    assert out.index(NO_PRESENCE_NO_RECOVERY) < out.index("Agent-memory encryption enabled on Windows")
     assert "Agent-memory encryption enabled on Windows: 3 file(s) sealed" in out
     assert_all_sealed(env)
     assert markers(env.home) == {MARKER}
@@ -210,6 +219,7 @@ def test_enable_end_to_end_through_the_cli(seeded, capsys):
     assert memory_cli.enable(home=env.home, root=env.home / "vault", platform="win32") == 0
     rerun = capsys.readouterr().out
     assert "0 file(s) sealed, 3 already sealed and verified" in rerun
+    assert NO_PRESENCE_NO_RECOVERY not in rerun, "the notice accompanies key creation only"
     assert generated(env) == 1, "an enrolled key is reused, never re-created"
 
 
@@ -267,9 +277,11 @@ def test_enable_refuses_at_the_proof_step_and_keeps_the_inert_key(seeded, monkey
     env = seeded
     monkeypatch.setenv("MORDRED_HERMES_PYTHON", str(env.home.parent / "missing" / "python.exe"))
     assert memory_cli.enable(home=env.home, root=env.home / "vault", platform="win32") == 1
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
     assert "refused at the proof step (interpreter-invalid)" in err
     assert "inert memory custody key is kept" in err
+    assert NO_PRESENCE_NO_RECOVERY in captured.out, "the created key is announced even when the proof refuses"
     assert memory_lease(env) is not None
     assert files(env.home) == ORIGINALS and markers(env.home) == set()
 
@@ -411,27 +423,65 @@ def test_proof_python_routes_through_the_launcher(win, monkeypatch):
     assert _windows_memory.proof_python(win.home) is None
 
 
-def test_lifecycle_never_writes_memory_or_markers_itself(seeded, monkeypatch):
-    """The wizard only calls keyvault APIs: no raw write reaches the memories/markers."""
-    env = seeded
-    real_write_bytes = Path.write_bytes
-    real_write_text = Path.write_text
+_WRITE_SPIES: tuple[tuple[object, str], ...] = (
+    (os, "open"),
+    (os, "replace"),
+    (os, "rename"),
+    (os, "remove"),
+    (os, "unlink"),
+    (builtins, "open"),
+    (io, "open"),
+    (Path, "open"),
+    (Path, "write_bytes"),
+    (Path, "write_text"),
+    (Path, "touch"),
+    (Path, "unlink"),
+    (Path, "replace"),
+    (Path, "rename"),
+)
+
+
+def spy_wizard_file_operations(monkeypatch, home: Path) -> list[str]:
+    """Record every file open/write/rename/unlink a ``mordred_hermes.wizard`` frame issues under ``home``.
+
+    Keyvault and private-fs frames (the checked lifecycle) are not recorded: only
+    a direct call from wizard code counts.
+    """
+    root = os.fspath(home)
     touched: list[str] = []
 
-    def write_bytes(self, data):
-        touched.append(os.fspath(self))
-        return real_write_bytes(self, data)
+    def wrap(name: str, real):
+        def spy(*args, **kwargs):
+            caller = sys._getframe(1).f_globals.get("__name__", "")
+            if caller.startswith("mordred_hermes.wizard"):
+                paths = [os.fspath(arg) for arg in args[:2] if isinstance(arg, (str, os.PathLike))]
+                if any(path.startswith(root) for path in paths):
+                    touched.append(f"{caller}:{name}:{' -> '.join(paths)}")
+            return real(*args, **kwargs)
 
-    def write_text(self, data, *args, **kwargs):
-        touched.append(os.fspath(self))
-        return real_write_text(self, data, *args, **kwargs)
+        return spy
 
-    monkeypatch.setattr(Path, "write_bytes", write_bytes)
-    monkeypatch.setattr(Path, "write_text", write_text)
+    for owner, name in _WRITE_SPIES:
+        monkeypatch.setattr(owner, name, wrap(name, getattr(owner, name)))
+    return touched
+
+
+def test_lifecycle_never_writes_memory_or_markers_itself(seeded, monkeypatch):
+    """The wizard only calls keyvault APIs: no raw file operation of its own reaches the home."""
+    env = seeded
+    touched = spy_wizard_file_operations(monkeypatch, env.home)
+    probe = env.home / "spy-probe"
+    exec(  # the spy is not vacuous: a wizard-module frame writing under the home is recorded
+        compile("probe.write_bytes(b'x'); os.replace(probe, probe); probe.unlink()", "<wizard-probe>", "exec"),
+        {"__name__": "mordred_hermes.wizard._spy_probe", "probe": probe, "os": os},
+    )
+    assert [entry.split(":")[1] for entry in touched] == ["write_bytes", "replace", "unlink"]
+    touched.clear()
+
     assert memory_cli.enable(home=env.home, root=env.home / "vault", platform="win32") == 0
     assert memory_cli.disable(home=env.home, root=env.home / "vault", platform="win32") == 0
-    home = os.fspath(env.home)
-    assert not [path for path in touched if path.startswith(home)]
+    assert memory_cli.purge(home=env.home, root=env.home / "vault", platform="win32") == 0
+    assert touched == []
 
 
 def test_unknown_inventory_error_is_classified_not_raised(seeded, monkeypatch, capsys):

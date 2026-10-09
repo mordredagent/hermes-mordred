@@ -16,13 +16,14 @@ import pytest
 
 from mordred_hermes import _config_io as cio
 from mordred_hermes.keyvault import _seckey_helper, wrap
-from mordred_hermes.wizard import encryption_cli, memory_cli, setup_cli, status_cli
+from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, setup_cli, status_cli
 from mordred_hermes.wizard._encryption_status import status_mark
 from mordred_hermes.wizard._workspace_paths import WorkspacePaths
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_lifecycle import ORIGINALS, put
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
 from tests.test_windows_memory_proof import proof_env as proof_env
+from tests.test_wizard_windows_memory import NO_PRESENCE_NO_RECOVERY
 from tests.test_wizard_windows_memory import seeded as seeded
 from tests.test_wizard_windows_memory import win as win
 
@@ -246,12 +247,15 @@ def run_steps(env, monkeypatch, *, non_interactive=False):
     return keyvault, env_step, memory
 
 
-def test_setup_skips_excluded_steps_and_runs_the_windows_memory_enable(seeded, monkeypatch):
+def test_setup_skips_excluded_steps_and_runs_the_windows_memory_enable(seeded, monkeypatch, capsys):
     env = seeded
     keyvault, env_step, memory = run_steps(env, monkeypatch)
     assert keyvault.action == "skipped" and "not-ported-on-windows" in keyvault.detail
     assert env_step.action == "skipped" and "excluded-on-windows" in env_step.detail
     assert memory.action == "ran"
+    out = capsys.readouterr().out
+    assert "Enrolled inert Windows memory custody" in out
+    assert NO_PRESENCE_NO_RECOVERY in out and keyvault_windows_cli.CUSTODY_NOTICE in out
     assert not setup_cli._stops_run(keyvault)
     assert run_steps(env, monkeypatch)[2].action == "done"
 
