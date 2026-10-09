@@ -318,6 +318,17 @@ required.
   executables, strict never falls back to clearnet (host-tested; native
   source/wheel runs of `tests/test_network_windows_routes_native.py`, real
   route evidence, wizard presentation (C6) and Windows 11 remain required).
+  C9 review residuals (documented gaps; only the inventory refusal wording changed):
+  - A Tor that exits immediately is reported only as exited or with "stdout
+    closed before bootstrap". This applies before its identity is recorded
+    or before bootstrap. Tor's own first output lines, which carry its
+    reason (for example a rejected torrc or DataDirectory), are discarded.
+    Surfacing a bounded, sanitized tail of that output is still open.
+  - The startup inventory refuses any current-user process whose command
+    line names this profile's torrc, not only Tor images (for example an
+    editor opened on the torrc). The refusal now says "an unrecorded
+    process". Narrowing the match to Tor images (image identity) is still
+    open; the refusal stays conservative and never stops the process.
 - [ ] C10: extension pairing/history/Telegram storage and lifecycle.
 - [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
 - [ ] C12: integrated source/wheel CI, ordinary-user Server tests, virtual

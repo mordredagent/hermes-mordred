@@ -18,6 +18,7 @@ import sys
 import textwrap
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import psutil
@@ -428,7 +429,13 @@ def test_malformed_or_oversized_daemon_state_refuses_without_echoing_bytes(
             policy_mode="lenient",
             system=make_system(launcher),
         )
-    assert "mordred-secret-bytes" not in str(caught.value)
+    message = str(caught.value)
+    assert "mordred-secret-bytes" not in message
+    # Actionable: names the exact file and where it lives, never a directory.
+    assert "'daemon.json'" in message
+    assert "private mordred/tor-data directory" in message
+    assert "remove that 'daemon.json' file" in message
+    assert str(data_dir) not in message and data_dir.parent.parent.name not in message
     assert caught.value.__cause__ is None
     link: BaseException | None = caught.value
     while link is not None:
@@ -439,12 +446,56 @@ def test_malformed_or_oversized_daemon_state_refuses_without_echoing_bytes(
     assert read_state(data_dir, wtor.DAEMON_STATE) == raw
 
 
+def test_recorded_tor_that_cannot_be_inspected_refuses_and_keeps_the_record(
+    data_dir: Path, launcher: StubPopen
+) -> None:
+    write_record(data_dir, identity_record(os.getpid(), owner=(os.getpid(), 1.0)))
+    before = read_state(data_dir, wtor.DAEMON_STATE)
+
+    def denied(_pid: int) -> Any:
+        raise wtor.ProcessStateUncertain("process-access-denied")
+
+    system = make_system(launcher, identify=denied, owner_alive=_never("owner_alive"), terminate=_never("terminate"))
+    with pytest.raises(BringupFailed, match=r"cannot be inspected \(process-access-denied\)"):
+        wtor.start_process(
+            binary="tor", torrc=torrc_for(data_dir), data_dir=data_dir, policy_mode="strict", system=system
+        )
+    assert read_state(data_dir, wtor.DAEMON_STATE) == before
+    assert launcher.calls == []
+
+
+def test_failed_stale_termination_refuses_and_keeps_the_record(data_dir: Path, launcher: StubPopen) -> None:
+    stale = spawn_sleeper("stale-tor")
+    try:
+        # Dead owner and a matching live identity: termination is attempted once.
+        write_record(data_dir, identity_record(stale.pid, owner=(os.getpid(), 1.0)))
+        before = read_state(data_dir, wtor.DAEMON_STATE)
+        attempts: list[int] = []
+
+        def failing(identity: Any, _timeout: float) -> bool:
+            attempts.append(identity.pid)
+            return False
+
+        system = make_system(launcher, terminate=failing)
+        with pytest.raises(BringupFailed, match="could not be stopped after identity revalidation"):
+            wtor.start_process(
+                binary="tor", torrc=torrc_for(data_dir), data_dir=data_dir, policy_mode="strict", system=system
+            )
+        assert attempts == [stale.pid]
+        assert stale.poll() is None
+        assert read_state(data_dir, wtor.DAEMON_STATE) == before
+        assert launcher.calls == []
+    finally:
+        stale.kill()
+        stale.wait(timeout=10)
+
+
 def test_an_unrecorded_tor_using_this_profile_is_refused_never_reused(data_dir: Path, launcher: StubPopen) -> None:
     torrc_path = str(data_dir / "torrc")
     orphan = spawn_sleeper("-f", torrc_path)
     try:
         system = make_system(launcher, scan=wtor.scan_torrc_users)
-        with pytest.raises(BringupFailed, match="unrecorded Tor"):
+        with pytest.raises(BringupFailed, match=r"unrecorded process .* names this profile's torrc"):
             wtor.start_process(
                 binary="tor", torrc=torrc_for(data_dir), data_dir=data_dir, policy_mode="strict", system=system
             )
@@ -589,3 +640,165 @@ def test_tor_start_process_dispatches_to_the_windows_launcher(monkeypatch: pytes
     assert calls == [{"binary": "tor", "torrc": "x", "data_dir": tmp_path, "policy_mode": "strict"}]
     with pytest.raises(BringupFailed):
         tor.start_process(binary="tor", torrc="x")
+
+
+# --------------------------------------------------------------------------- #
+# psutil-backed identity helpers with a fake psutil                           #
+# --------------------------------------------------------------------------- #
+
+FAKE_PID = 31337
+_FAKE_DEFAULTS: dict[str, Any] = {
+    "init": None,
+    "create_time": 100.0,
+    "exe": MANAGED,
+    "username": "HOST\\jane",
+    "terminate": None,
+    "wait": 0,
+}
+
+
+def fake_psutil(monkeypatch: pytest.MonkeyPatch, **behaviour: Any) -> list[str]:
+    """Replace ``_tor_windows.psutil``; each method returns or raises ``behaviour[name]``."""
+    calls: list[str] = []
+
+    def outcome(name: str) -> Any:
+        calls.append(name)
+        value = behaviour.get(name, _FAKE_DEFAULTS[name])
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    class Process:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            outcome("init")
+
+        @contextlib.contextmanager
+        def oneshot(self) -> Iterator[None]:
+            yield
+
+        def create_time(self) -> Any:
+            return outcome("create_time")
+
+        def exe(self) -> Any:
+            return outcome("exe")
+
+        def username(self) -> Any:
+            return outcome("username")
+
+        def terminate(self) -> None:
+            outcome("terminate")
+
+        def wait(self, timeout: float | None = None) -> Any:
+            return outcome("wait")
+
+    namespace = SimpleNamespace(
+        Process=Process,
+        NoSuchProcess=psutil.NoSuchProcess,
+        AccessDenied=psutil.AccessDenied,
+        Error=psutil.Error,
+        TimeoutExpired=psutil.TimeoutExpired,
+    )
+    monkeypatch.setattr(wtor, "psutil", namespace)
+    return calls
+
+
+RECORDED = wtor.ProcessIdentity(FAKE_PID, 100.0, MANAGED, "HOST\\jane")
+
+
+def test_identify_process_reports_the_live_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_psutil(monkeypatch, create_time=100)
+    assert wtor.identify_process(FAKE_PID) == RECORDED
+
+
+@pytest.mark.parametrize("stage", ["init", "create_time", "exe", "username"])
+def test_identify_process_maps_absence_to_none(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
+    fake_psutil(monkeypatch, **{stage: psutil.NoSuchProcess(FAKE_PID)})
+    assert wtor.identify_process(FAKE_PID) is None
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "reason"),
+    [
+        ({"init": psutil.AccessDenied(FAKE_PID)}, "process-access-denied"),
+        ({"create_time": psutil.AccessDenied(FAKE_PID)}, "process-access-denied"),
+        ({"exe": psutil.AccessDenied(FAKE_PID)}, "process-access-denied"),
+        ({"username": psutil.AccessDenied(FAKE_PID)}, "process-access-denied"),
+        ({"exe": psutil.Error("inspection failed")}, "process-inspection-failed"),
+        ({"username": OSError(5, "access is denied")}, "process-inspection-failed"),
+        ({"exe": ""}, "process-incomplete"),
+        ({"username": ""}, "process-incomplete"),
+    ],
+)
+def test_identify_process_maps_denial_and_failure_to_uncertainty(
+    monkeypatch: pytest.MonkeyPatch, behaviour: dict[str, Any], reason: str
+) -> None:
+    fake_psutil(monkeypatch, **behaviour)
+    with pytest.raises(wtor.ProcessStateUncertain) as caught:
+        wtor.identify_process(FAKE_PID)
+    assert caught.value.reason == reason
+    assert caught.value.__cause__ is None
+
+
+def test_terminate_identity_stops_exactly_the_recorded_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = fake_psutil(monkeypatch)
+    assert wtor.terminate_identity(RECORDED, 1.0) is True
+    assert calls[-2:] == ["terminate", "wait"]
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [{"create_time": 101.0}, {"exe": r"C:\Windows\notepad.exe"}, {"username": "OTHER\\mallory"}],
+)
+def test_terminate_identity_refuses_a_mismatched_process_without_terminating(
+    monkeypatch: pytest.MonkeyPatch, mismatch: dict[str, Any]
+) -> None:
+    calls = fake_psutil(monkeypatch, **mismatch)
+    assert wtor.terminate_identity(RECORDED, 1.0) is False
+    assert "terminate" not in calls
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "terminated"),
+    [
+        ({"init": psutil.AccessDenied(FAKE_PID)}, False),
+        ({"exe": psutil.AccessDenied(FAKE_PID)}, False),
+        ({"terminate": psutil.AccessDenied(FAKE_PID)}, True),
+        ({"wait": psutil.TimeoutExpired(1.0, FAKE_PID)}, True),
+        ({"username": OSError(5, "access is denied")}, False),
+    ],
+)
+def test_terminate_identity_reports_denial_and_timeout_as_not_stopped(
+    monkeypatch: pytest.MonkeyPatch, behaviour: dict[str, Any], terminated: bool
+) -> None:
+    calls = fake_psutil(monkeypatch, **behaviour)
+    assert wtor.terminate_identity(RECORDED, 1.0) is False
+    assert ("terminate" in calls) is terminated
+
+
+@pytest.mark.parametrize("stage", ["init", "create_time", "terminate", "wait"])
+def test_terminate_identity_treats_an_already_gone_process_as_stopped(
+    monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    fake_psutil(monkeypatch, **{stage: psutil.NoSuchProcess(FAKE_PID)})
+    assert wtor.terminate_identity(RECORDED, 1.0) is True
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "alive"),
+    [
+        ({}, True),
+        ({"create_time": 101.0}, False),  # the PID now names another process
+        ({"init": psutil.NoSuchProcess(FAKE_PID)}, False),
+        ({"create_time": psutil.NoSuchProcess(FAKE_PID)}, False),
+        ({"init": psutil.AccessDenied(FAKE_PID)}, True),
+        ({"create_time": psutil.AccessDenied(FAKE_PID)}, True),
+        ({"create_time": psutil.Error("inspection failed")}, True),
+        ({"create_time": OSError(5, "access is denied")}, True),
+    ],
+)
+def test_owner_alive_counts_uncertainty_as_alive(
+    monkeypatch: pytest.MonkeyPatch, behaviour: dict[str, Any], alive: bool
+) -> None:
+    fake_psutil(monkeypatch, **behaviour)
+    assert wtor.owner_alive(wtor.OwnerIdentity(FAKE_PID, 100.0)) is alive

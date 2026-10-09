@@ -52,7 +52,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol
 
 import psutil
 
@@ -93,6 +93,8 @@ _MAX_PID: Final[int] = 0xFFFFFFFF
 _MAX_TEXT: Final[int] = 1024  # per text field; encode also refuses a record over 4 KiB
 
 CookieState = Literal["missing", "ok", "unsafe"]
+COOKIE_PATH_UNREPORTED: Final[str] = "control-cookie-path-unreported"
+COOKIE_PATH_OUTSIDE_TOR_DATA: Final[str] = "control-cookie-path-outside-tor-data"
 
 
 class ProcessStateUncertain(Exception):
@@ -332,7 +334,7 @@ def _abort_child(popen: Any, job: JobHandle | None) -> None:
 def _reconcile(txn: PrivateTransaction, seams: WindowsTorSystem, *, torrc_path: str, owner: OwnerIdentity) -> None:
     metadata = _optional_stat(txn, DAEMON_STATE)
     if metadata is not None:
-        record = parse_record(txn.read_bytes(DAEMON_STATE, max_bytes=MAX_DAEMON_STATE_BYTES))
+        record = parse_record(_read_record_bytes(txn))
         _retire(record, seams, owner)
         txn.delete_file(DAEMON_STATE, expected_identity=metadata.identity)
     uncertain: str | None = None
@@ -346,10 +348,32 @@ def _reconcile(txn: PrivateTransaction, seams: WindowsTorSystem, *, torrc_path: 
             f"tor process inventory is uncertain ({uncertain}); refusing to start another Tor on this profile"
         )
     if orphans:
+        # The inventory matches any current-user process naming the torrc,
+        # not only Tor images (TODO.md: C9 review residuals).
         raise BringupFailed(
-            f"an unrecorded Tor process (pid {orphans[0]}) still uses this profile's torrc; Mordred neither "
-            "reuses nor stops it. Stop that process, then retry"
+            f"an unrecorded process (pid {orphans[0]}) names this profile's torrc in its command line; Mordred "
+            "neither reuses nor stops it. Stop that process, then retry"
         )
+
+
+def _read_record_bytes(txn: PrivateTransaction) -> bytes:
+    """Bounded read; an oversized record is refused like a malformed one."""
+    try:
+        return txn.read_bytes(DAEMON_STATE, max_bytes=MAX_DAEMON_STATE_BYTES)
+    except PrivateFSError as exc:
+        if exc.operation != "read_limit":
+            raise
+    # Raised outside the handler: nothing of the read failure is retained.
+    raise _malformed_record()
+
+
+def _malformed_record() -> BringupFailed:
+    """Actionable refusal naming only the file and its private directory."""
+    return BringupFailed(
+        f"tor daemon state file {DAEMON_STATE!r} in this profile's private mordred/tor-data directory is "
+        "malformed or oversized; refusing as uncertain (no process was stopped). Make sure no Tor started "
+        f"from this profile is still running, then remove that {DAEMON_STATE!r} file and retry"
+    )
 
 
 def _retire(record: DaemonRecord, seams: WindowsTorSystem, owner: OwnerIdentity) -> None:
@@ -418,7 +442,7 @@ def parse_record(raw: bytes) -> DaemonRecord:
         record = None
     if record is None:
         # Raised outside the handler: no parser exception (or document) is retained.
-        raise BringupFailed("tor daemon state is malformed; refusing as uncertain (no process was stopped)")
+        raise _malformed_record()
     return record
 
 
@@ -610,6 +634,42 @@ def control_cookie_state(data_dir: Path) -> CookieState:
     except (OSError, ValueError):
         return "unsafe"
     return "ok" if len(cookie) == CONTROL_COOKIE_BYTES else "unsafe"
+
+
+class ControlCookiePathRefused(Exception):
+    """Tor reported a control-cookie path other than the private one; ``reason`` is a code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _ProtocolInfoSource(Protocol):
+    def get_protocolinfo(self) -> object: ...
+
+
+def pinned_protocolinfo(controller: _ProtocolInfoSource, data_dir: Path) -> object:
+    """PROTOCOLINFO whose reported ``COOKIEFILE`` is this profile's private cookie.
+
+    stem's ``authenticate`` re-reads the cookie with a raw ``open()`` at the
+    path Tor reports, after :func:`control_cookie_state` checked the private
+    one. The caller passes the returned response to
+    ``authenticate(protocolinfo_response=...)``, so stem opens only
+    ``<tor_data_dir>\\control_auth_cookie`` (case and separators compared the
+    Windows way). A missing or different reported path refuses with a
+    classified :class:`ControlCookiePathRefused`; the path is never echoed.
+    """
+    response = controller.get_protocolinfo()
+    reported = getattr(response, "cookie_path", None)
+    if not isinstance(reported, str) or not reported:
+        raise ControlCookiePathRefused(COOKIE_PATH_UNREPORTED)
+    if _path_key(reported) != _path_key(str(data_dir / CONTROL_COOKIE)):
+        raise ControlCookiePathRefused(COOKIE_PATH_OUTSIDE_TOR_DATA)
+    return response
+
+
+def _path_key(path: str) -> str:
+    return ntpath.normcase(ntpath.normpath(path))
 
 
 # --------------------------------------------------------------------------- #

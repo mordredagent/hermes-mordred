@@ -23,8 +23,13 @@ capabilities; nothing here repairs an ACL or writes anything:
 - ``managed``: admitted by ``inspect_managed_installation_image`` (an
   administrator/OS-managed installation such as ``C:\\Program Files``).
 - ``user-private``: owned by the current user inside a checked
-  confidential (or private) directory.
-- ``untrusted``: anything else, e.g. a user-writable download directory.
+  confidential (or private) directory. Default per-user ACL directories
+  such as ``%TEMP%`` or ``Downloads`` are user-private and admitted, because
+  the threat model is other principals (controller ruling R-C9-2).
+- ``untrusted``: anything else, i.e. an image in a directory other principals
+  can change, e.g. ``C:\\tools`` created under ``C:\\`` (inheriting the
+  Authenticated Users modify grant), ``C:\\Users\\Public`` or a directory with
+  an Everyone grant.
 
 Strict policy refuses an untrusted image; lenient/off log a warning and
 continue. Refusal messages name only a sanitized basename, never the

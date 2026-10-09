@@ -240,6 +240,21 @@ teardown or by startup cleanup after identity revalidation; malformed or
 uncertain state refuses bring-up and stays for inspection. POSIX keeps the
 existing behavior (Tor configured through stdin; no Mordred members here).
 
+The checked cookie read proves the cookie's integrity, not its
+confidentiality (controller ruling R-C9-3). Confidentiality rests on this
+directory's private ACL: its entries are not inheritable, so the cookie Tor
+creates here receives the Tor token's default DACL, which grants no other
+user. Mordred does not check the cookie's read grants. stem's
+`authenticate()` re-reads the cookie with a raw `open()` at the `COOKIEFILE`
+path Tor reports. On native Windows that path must equal this directory's
+`control_auth_cookie`, or the liveness probe refuses with
+`control-cookie-path-unreported` or `control-cookie-path-outside-tor-data`.
+stem's raw read still follows reparse points, so a member swapped between
+Mordred's precheck and authentication would be read; only principals that can
+change this directory can swap it. A malformed or oversized `daemon.json` refusal names
+`daemon.json` in this directory. Remove it only after confirming that no Tor
+from the profile is running.
+
 ### Cross-references
 
 - [`SPEC.md`](./SPEC.md) §Plugin: `mordred_network`

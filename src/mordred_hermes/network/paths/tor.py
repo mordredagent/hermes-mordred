@@ -456,9 +456,16 @@ class _ControllerLike(Protocol):
     Stem does PROTOCOLINFO discovery + cookie read internally, so we
     invoke it with no positional args. Fakes that previously accepted
     ``cookie=...`` would have masked the API mismatch.
+
+    Native Windows first calls ``get_protocolinfo()`` and passes the response
+    whose ``COOKIEFILE`` is pinned to the private ``tor-data`` cookie as
+    ``authenticate(protocolinfo_response=...)``; POSIX still calls
+    ``authenticate()`` with no arguments.
     """
 
-    def authenticate(self) -> None: ...
+    def authenticate(self, *, protocolinfo_response: Any = None) -> None: ...
+
+    def get_protocolinfo(self) -> Any: ...
 
     def get_info(self, key: str) -> str: ...
 
@@ -531,7 +538,10 @@ def circuit_status_health(
     - Missing ``control_auth_cookie`` (Tor still bootstrapping or data
       dir wiped) → shallow fallback. On native Windows the cookie is first
       read through a checked bounded reader; an unsafe or wrongly sized
-      cookie → ``False``.
+      cookie → ``False``. stem then re-reads the cookie with a raw ``open()``
+      at the path Tor reports in PROTOCOLINFO, so on native Windows that
+      path is pinned to the private ``tor-data`` cookie first; a missing or
+      different reported path → ``False`` with a classified WARNING.
     - ImportError from the default factory (the user did not install
       ``hermes-mordred[tor-control]``) → shallow fallback.
     - Authentication failure (cookie mismatch, daemon rejected) →
@@ -579,7 +589,12 @@ def circuit_status_health(
             # ``Controller.authenticate`` does PROTOCOLINFO discovery and
             # reads the cookie file itself. The previous ``cookie=`` kwarg
             # raised TypeError on every probe.
-            controller.authenticate()
+            _authenticate(controller, handle)
+        except _tor_windows.ControlCookiePathRefused as refusal:
+            _LOG.warning(
+                "tor control cookie path refused (%s); the deep liveness probe reports unhealthy", refusal.reason
+            )
+            return False
         except Exception:
             return False
         try:
@@ -601,6 +616,22 @@ def circuit_status_health(
     finally:
         with contextlib.suppress(Exception):
             controller.close()
+
+
+def _authenticate(controller: _ControllerLike, handle: TorHandle) -> None:
+    """POSIX: stem's own discovery. Native Windows: the cookie path is pinned.
+
+    stem opens the cookie at the PROTOCOLINFO-reported path with a raw
+    ``open()``; on Windows the response is accepted only when that path is the
+    private ``<tor_data_dir>\\control_auth_cookie`` that
+    :func:`_cookie_precheck` just checked, and the same response is handed to
+    stem so it sends no second PROTOCOLINFO.
+    """
+    if sys.platform == "win32":
+        protocolinfo = _tor_windows.pinned_protocolinfo(controller, handle.data_dir)
+        controller.authenticate(protocolinfo_response=protocolinfo)
+        return
+    controller.authenticate()
 
 
 def _cookie_precheck(handle: TorHandle) -> bool | None:

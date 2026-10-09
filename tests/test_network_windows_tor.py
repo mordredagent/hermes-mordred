@@ -15,6 +15,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 from typing import Any, TextIO
 
 import pytest
@@ -366,8 +367,13 @@ class _AliveProcess:
 
 
 class _Controller:
-    def __init__(self) -> None:
+    """stem ``Controller`` stand-in reporting ``cookie_path`` in PROTOCOLINFO."""
+
+    def __init__(self, cookie_path: object = None) -> None:
         self.authenticated = False
+        self.protocolinfo = SimpleNamespace(cookie_path=cookie_path)
+        self.protocolinfo_calls = 0
+        self.authentications: list[object] = []
 
     def __enter__(self) -> _Controller:
         return self
@@ -375,7 +381,12 @@ class _Controller:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def authenticate(self) -> None:
+    def get_protocolinfo(self) -> SimpleNamespace:
+        self.protocolinfo_calls += 1
+        return self.protocolinfo
+
+    def authenticate(self, *, protocolinfo_response: object = None) -> None:
+        self.authentications.append(protocolinfo_response)
         self.authenticated = True
 
     def get_info(self, key: str) -> str:
@@ -411,10 +422,101 @@ def test_windows_cookie_is_read_through_the_checked_bounded_reader(
     controllers: list[_Controller] = []
 
     def factory(**_kwargs: Any) -> _Controller:
-        controllers.append(_Controller())
+        controllers.append(_Controller(str(tmp_path / "control_auth_cookie")))
         return controllers[-1]
 
     handle = tor.TorHandle(process=_AliveProcess(), socks_port=9050, control_port=9051, data_dir=tmp_path)
     assert tor.circuit_status_health(handle, controller_factory=factory) is expected
     assert reads == [(tmp_path / "control_auth_cookie", 32)]
     assert bool(controllers) is factory_used
+
+
+# --------------------------------------------------------------------------- #
+# Tor-reported cookie path pinned to the private tor-data directory           #
+# --------------------------------------------------------------------------- #
+
+
+def _probe_with_reported_cookie(
+    monkeypatch: pytest.MonkeyPatch, data_dir: Path, reported: object
+) -> tuple[bool, _Controller]:
+    """Run the Windows deep probe with a checked-``ok`` cookie and ``reported`` path."""
+    monkeypatch.setattr(wtor, "read_public_build_output", lambda path, *, max_bytes: b"\x01" * 32)
+    monkeypatch.setattr(sys, "platform", "win32")
+    controller = _Controller(reported)
+    handle = tor.TorHandle(process=_AliveProcess(), socks_port=9050, control_port=9051, data_dir=data_dir)
+    return tor.circuit_status_health(handle, controller_factory=lambda **_kwargs: controller), controller
+
+
+@pytest.mark.parametrize("variant", ["exact", "case", "dot-segment", "parent-hop"])
+def test_windows_stem_reads_only_the_pinned_private_cookie(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
+) -> None:
+    data_dir = tmp_path / "ホーム home" / "mordred" / "tor-data"
+    cookie = str(data_dir / "control_auth_cookie")
+    reported = {
+        "exact": cookie,
+        "case": cookie.upper(),
+        "dot-segment": str(data_dir) + "/./control_auth_cookie",
+        "parent-hop": str(data_dir) + "/sub/../control_auth_cookie",
+    }[variant]
+    healthy, controller = _probe_with_reported_cookie(monkeypatch, data_dir, reported)
+    assert healthy is True
+    assert controller.protocolinfo_calls == 1
+    # stem receives the very response whose COOKIEFILE was pinned, so it sends
+    # no second PROTOCOLINFO and opens only the checked private cookie.
+    assert len(controller.authentications) == 1
+    assert controller.authentications[0] is controller.protocolinfo
+
+
+def _reported_cookie(kind: str, data_dir: Path) -> object:
+    return {
+        "none": None,
+        "empty": "",
+        "bytes": b"control_auth_cookie",
+        "relative": "control_auth_cookie",
+        "parent": str(data_dir.parent / "control_auth_cookie"),
+        "subdirectory": str(data_dir / "sub" / "control_auth_cookie"),
+        "escape": str(data_dir) + "/../elsewhere/control_auth_cookie",
+        "renamed": str(data_dir / "control_auth_cookie.bak"),
+        "public": r"C:\Users\Public\control_auth_cookie",
+    }[kind]
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("none", wtor.COOKIE_PATH_UNREPORTED),
+        ("empty", wtor.COOKIE_PATH_UNREPORTED),
+        ("bytes", wtor.COOKIE_PATH_UNREPORTED),
+        ("relative", wtor.COOKIE_PATH_OUTSIDE_TOR_DATA),
+        ("parent", wtor.COOKIE_PATH_OUTSIDE_TOR_DATA),
+        ("subdirectory", wtor.COOKIE_PATH_OUTSIDE_TOR_DATA),
+        ("escape", wtor.COOKIE_PATH_OUTSIDE_TOR_DATA),
+        ("renamed", wtor.COOKIE_PATH_OUTSIDE_TOR_DATA),
+        ("public", wtor.COOKIE_PATH_OUTSIDE_TOR_DATA),
+    ],
+)
+def test_windows_cookie_path_outside_tor_data_refuses_with_a_classified_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, kind: str, reason: str
+) -> None:
+    data_dir = tmp_path / "mordred" / "tor-data"
+    reported = _reported_cookie(kind, data_dir)
+    with caplog.at_level("WARNING", logger="mordred.network"):
+        healthy, controller = _probe_with_reported_cookie(monkeypatch, data_dir, reported)
+    assert healthy is False
+    assert controller.protocolinfo_calls == 1
+    assert controller.authentications == []  # stem never opens the reported path
+    messages = [entry.getMessage() for entry in caplog.records]
+    assert any(reason in message for message in messages)
+    if isinstance(reported, str) and reported:
+        assert not any(reported in message for message in messages)
+
+
+def test_posix_deep_probe_keeps_stem_discovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    (tmp_path / "control_auth_cookie").write_bytes(b"\x01" * 32)
+    controller = _Controller(None)
+    handle = tor.TorHandle(process=_AliveProcess(), socks_port=9050, control_port=9051, data_dir=tmp_path)
+    assert tor.circuit_status_health(handle, controller_factory=lambda **_kwargs: controller) is True
+    assert controller.protocolinfo_calls == 0
+    assert controller.authentications == [None]

@@ -306,6 +306,13 @@ def test_native_real_tor_bootstraps_and_tears_down_exactly(tmp_path: Path, home_
         tor.wait_for_bootstrap(process, timeout=300.0)
         assert wtor.control_cookie_state(data_dir) == "ok"
         if importlib.util.find_spec("stem") is not None:
+            from stem.control import Controller
+
+            # Tor's reported COOKIEFILE must be the private cookie (raises a
+            # classified ControlCookiePathRefused otherwise, e.g. on a
+            # non-ASCII profile path Tor reports in another encoding).
+            with Controller.from_port(address="127.0.0.1", port=port + 1) as controller:
+                wtor.pinned_protocolinfo(controller, data_dir)
             assert tor.circuit_status_health(handle) is True
         print(f"real tor pid={process.pid} trust={getattr(process, 'image_trust', None)} port={port}")
     finally:

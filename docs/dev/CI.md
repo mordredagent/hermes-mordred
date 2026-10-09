@@ -1262,6 +1262,16 @@ None of these runs validates Mullvad/WireGuard (not ported on Windows in this
 release), live provider traffic through the route, wizard capability
 presentation (C6) or Windows 11 acceptance.
 
+The kill-on-close job relies on nested job objects (Windows 8 and Windows
+Server 2012 or later). GitHub-hosted Windows runners start each step inside a
+job, so the native job cases on `windows-2022` exercise the nested path. On a
+host without nested jobs, assignment fails and bring-up refuses with the
+classified job failure. When `stem` is installed, the real-Tor case also
+requires the PROTOCOLINFO-reported cookie path to be the private
+`tor-data\control_auth_cookie` (`pinned_protocolinfo`). Record that result
+separately for the ASCII profile path and for the non-ASCII/space/`#` profile
+path, because a mismatch refuses with `control-cookie-path-outside-tor-data`.
+
 ### Windows capability and role reset validation (C5e)
 
 The scoped Windows job adds `test_windows_capability.py`,

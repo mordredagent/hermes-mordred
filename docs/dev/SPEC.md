@@ -1193,6 +1193,66 @@ instead of `pgrep`. POSIX behavior and the wizard presentation are unchanged;
 wizard capability presentation is C6, and real route evidence and Windows 11
 acceptance remain separate gates.
 
+Executable admission scope (controller ruling R-C9-2). The `untrusted` class
+means an image in a directory that other principals can change, for example
+`C:\tools` created under `C:\` (which inherits the Authenticated Users modify
+grant), `C:\Users\Public`, or a directory with an Everyone grant. Images
+under default per-user ACL directories such as `%TEMP%` or `Downloads` are
+user-private and are admitted in strict mode, because the threat model is
+other principals. The cost: strict mode does not stop a Tor or custom VPN
+image that the current user, or code running as that user, placed in its own
+temporary or download directory.
+
+Control cookie residual (controller ruling R-C9-3). The checked cookie read
+proves integrity, not confidentiality. It refuses an untrusted owner, an
+untrusted mutation grant, a reparse point, a changed file and a wrong size,
+but it does not refuse read grants on the cookie itself. Confidentiality rests
+on the private `tor-data` directory ACL. Other principals cannot list, create
+or replace its members. Because the private ACL has no inheritable entries,
+the cookie that Tor creates there receives the Tor token's default DACL, which
+grants no other user. No further check is made. Windows bypass-traverse
+checking lets a principal open a file by its full path through a directory it
+cannot list, so a read grant that the owner or an administrator later adds to
+the cookie itself would expose it, and Mordred would not detect that.
+
+Cookie path pinning. stem's `Controller.authenticate()` re-reads the cookie
+with a raw `open()`. It uses the `COOKIEFILE` path that Tor reports in
+PROTOCOLINFO, and it does so after Mordred's checked precheck has read the
+private path. On native Windows the deep liveness probe therefore requests
+PROTOCOLINFO itself. The reported path must equal
+`<home>/mordred/tor-data/control_auth_cookie`, compared case-insensitively
+after Windows path normalization. The probe passes that same response to
+`authenticate(protocolinfo_response=...)`, so stem sends no second
+PROTOCOLINFO and opens only the checked private cookie. A missing reported
+path makes the probe unhealthy with the classified reason
+`control-cookie-path-unreported`; a different one gives
+`control-cookie-path-outside-tor-data`. The reason is logged as a warning, and
+the reported path is never echoed. In strict mode the existing liveness
+threshold then drops the route without any clearnet fallback. One residual
+remains: stem's raw `open()` of the pinned path follows reparse points and is
+not the checked read. A member swapped between the precheck and
+authentication would therefore be read, but only principals that can change
+the private directory (the current user, SYSTEM and Administrators) can swap
+it. POSIX keeps stem's own discovery unchanged.
+
+Nested jobs. The kill-on-close job relies on nested job objects (Windows 8 and
+Windows Server 2012 or later). The launching process may already run inside a
+job, for example under a terminal, a task scheduler, a service host or a CI
+runner. Tor's assignment to Mordred's empty job then succeeds only because
+Windows nests the new job under the inherited one. On a system without nested
+jobs that assignment fails: the child is terminated and bring-up refuses with
+the classified job failure, so Tor never runs outside the job. Windows 10,
+Windows 11 and Windows Server 2016 or later all provide nested jobs.
+
+Daemon state refusals. A malformed or oversized `daemon.json` refusal names
+the file and the private `mordred/tor-data` directory. It never echoes the
+full path or the contents. It tells the operator to confirm that no Tor from
+this profile is still running, then remove that file. If a Tor does survive,
+the command-line inventory and Tor's DataDirectory lock still refuse it at
+the next start. The inventory refusal says "an unrecorded process", because it
+matches any current-user process whose command line names this profile's
+torrc, not only Tor images (TODO.md records that gap).
+
 ## MVP Phasing
 
 The original phase headings and pull-request notes have been removed from the
