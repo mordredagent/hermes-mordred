@@ -2948,3 +2948,72 @@ entries or a missing helper renders `paused` in `encryption status` rather
 than `on` (the fix changes setup's rerun decision and is deferred), and
 `--purge-data` removes the owned CNG helper while kept audit/Telegram custody
 still needs it.
+
+#### Windows wizard Telegram ceremony (C6-telegram)
+
+C6-telegram is the wizard consumer of C10b. It adds no extension or keyvault
+API: every Windows Telegram decision goes through `windows_capability(home,
+"telegram_hardware")`, the load-only `role_status("telegram")`,
+`tee.default_secret_store()`, `store.archive_busy`, `store.archive_updated`,
+the checked `directory_present`, `wipe_archive(root, forget=...)` and the C6
+Windows memory target. macOS and Linux behavior is unchanged.
+
+Ceremony extension: the frozen C6 command now also accepts `telegram`
+(`hermes-mordred keyvault native init [--role memory|audit|telegram ...]`).
+This supersedes the C6 sentence that Telegram custody stays with the Telegram
+setup ceremony: `telegram setup` offers to run exactly this command, and no
+other path creates the telegram role. It reads the capabilities first, refuses
+custody and helper failures with the classified remedy, enrolls the
+independent role through C5a `enroll_role("telegram")` only when it is absent,
+prints metadata only plus the no-presence/no-portable-recovery notice and a
+Telegram line, and never rotates an enrolled role (a rotation would strand
+the sealed credentials, see C10b round 2).
+
+Machine-bound disclosure: before Windows login the wizard prints the frozen
+custody notice plus a Telegram sentence (credentials, session, archive key and
+LLM key are usable by any program running as this Windows account without a
+prompt; losing the TPM, the account or the profile directory loses them and
+the archive). It is acknowledged by `--acknowledge-machine-bound` on `telegram
+login` / `telegram setup` or by an explicit yes (empty input and end of input
+are a no). Only after it does login pass `require_presence=False`; nothing is
+unsealed and Telegram is not contacted before the acknowledgement.
+
+Windows routing per `telegram` entry point:
+
+| Entry point | Order |
+| --- | --- |
+| `setup [--acknowledge-machine-bound]` | custody (enrolled continues; `not-enrolled` prints the exact ceremony command and offers it with an explicit yes; custody-unsafe/uncertain/broken and helper-missing/uncertain refuse with the remedy, nothing generated) -> memory (the C6 load-only memory target; otherwise offers the C6 `encryption enable memory` flow with an explicit yes, never the macOS/Linux path) -> login (below) -> privacy LLM -> first import (scope saved through the custody store) |
+| `login [--acknowledge-machine-bound]` | preflight (Telethon, C6 memory target) -> custody capability (`telegram_not_enrolled` names the ceremony) -> disclosure acknowledgement -> load -> `ensure_key(require_presence=False)` for new credentials -> sign-in -> seal; an orphaned archive is detected by a checked `index.enc` read and wiped through checked storage |
+| `venice`, `local-llm` | custody capability -> `update()` (verifies the role itself; no `ensure_key`, so presence is never requested) |
+| `sync` | `TelegramService(memory_guard=<C6 memory target>)`; `sync_in_progress` refuses |
+| `status` | unchanged: `TelegramService` already uses the seam and reads flags only |
+| `logout` | non-blocking `archive_busy` (`sync_in_progress`) -> custody capability (only `not-enrolled` passes) -> load -> revoke -> drop the session -> `wipe_archive(root)`: the archive is deleted, the credentials (API application, archive key, LLM settings) and the custody role are kept |
+| `logout --forget` | the same refusals -> checked observation (no credentials, no Telegram directory and no telegram generation: nothing to delete, no prompt) -> plan -> typed `forget telegram` -> load (credentials that are `secrets_corrupt` or role-less are still deleted; only the revocation is skipped with a warning) -> revoke -> `wipe_archive(root, forget=True)` -> a re-checked report of what was deleted; memory and audit custody are untouched |
+| `doctor` | `telegram_custody` (and the compatible `hardware` row) from the capability plus load-only role metadata (generation, public-key SHA-256), the C6 memory target, checked credential flags, checked `archive_updated`/`archive_busy`, then one informational `capability.<name>` row per `windows_capabilities` entry in the fixed C5e order; the exit status ignores the informational rows (no aggregate readiness); no backend, wrap, unwrap or raw directory scan |
+| `migrate-tee` | `excluded_refusal("file_vault", "telegram migrate-tee")` before any store, prompt or backend |
+
+Windows `telegram logout` therefore deletes the local archive while macOS and
+Linux keep it; the archive is re-importable and its key stays sealed.
+
+Every C10b code has a Windows message with a remedy: `telegram_not_enrolled`
+(the ceremony), `presence_unsupported` and the wizard's
+`machine_bound_not_acknowledged` (the acknowledgement), `custody_unsafe`,
+`custody_uncertain`, `custody_broken` (the C6 remedies), `tee_unavailable`
+(`keyvault enable-winkey`; never regenerated), `tee_auth_cancelled`,
+`secrets_corrupt` and `store_key_invalid` (`logout --forget`, then setup),
+`store_path_unsafe`, `store_write_uncertain`, `store_unavailable`,
+`store_missing`, `store_io`, `store_busy`, `store_undecryptable` (`logout`,
+then re-import), `sync_in_progress`, `vault_unavailable` /
+`vault_not_initialized` (file vault excluded) and
+`memory_encryption_required` (`encryption enable memory`).
+
+Recorded gaps: there is no `keyvault native reconcile` verb, so an ambiguous
+telegram deletion journal (C10b keeps it) makes every later forget refuse
+`custody_uncertain`, and the message says so instead of naming a command.
+`extension.telegram.memory_guard.memory_encryption_active()` (the default
+`TelegramService` guard used by the Hermes Telegram tools, Desktop and the
+extension server) is never true on `win32` because the marker-based
+`encryption_cli.memory_status` has no Windows branch; the wizard injects the C6
+memory target for its own login and sync only. A telegram generation whose
+native key is lost refuses forget in the C10b preflight after the session was
+already revoked, and has no wizard recovery path.

@@ -8,6 +8,14 @@ from Hermes Desktop and the browser extension.
 ``doctor`` reports health from metadata only. It never unseals the credentials
 (no Touch ID), never decrypts the archive, and never prints the account name
 or any chat title.
+
+On Windows (C6-telegram) setup checks ``windows_capabilities`` instead of the
+Enclave/TPM helper, offers the explicit ``keyvault native init --role
+telegram`` ceremony (explicit yes), runs the C6 Windows memory enable, and
+login asks for the machine-bound acknowledgement before anything is unsealed.
+``doctor`` adds one informational line per Windows capability (no aggregate
+readiness) and reads the role, credentials and archive load-only through the
+C10b checked seams. macOS/Linux behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -18,9 +26,13 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from . import _term
+from . import _term, _windows_telegram
+
+if TYPE_CHECKING:
+    from ..keyvault._windows_capability import WindowsCapability
 
 InputFn = Callable[[str], str]
 
@@ -126,6 +138,16 @@ def _check_hermes() -> Check:
 
 
 def _check_memory() -> Check:
+    if _windows_telegram.routed():
+        ok = _windows_telegram.memory_active()
+        return Check(
+            "memory_encryption",
+            ok,
+            "agent memory sealed (Windows CNG memory custody)"
+            if ok
+            else "agent memory is not sealed (required for Telegram)",
+            "" if ok else "hermes-mordred encryption enable memory",
+        )
     from ..extension.telegram.memory_guard import memory_encryption_active
 
     ok = memory_encryption_active()
@@ -144,6 +166,8 @@ def _check_memory() -> Check:
 
 
 def run_checks() -> list[Check]:
+    if _windows_telegram.routed():
+        return _windows_checks()
     from ..extension.telegram.tee import TeeSecretStore
 
     try:
@@ -168,11 +192,99 @@ def telegram_doctor(*, as_json: bool = False) -> int:
         print(json.dumps([asdict(c) for c in checks], indent=2))
     else:
         for c in checks:
-            mark = "OK " if c.ok else "!! "
+            mark = "-- " if _informational(c) else ("OK " if c.ok else "!! ")
             print(f"{mark}{c.name:20} {c.detail}")
             if c.fix:
                 print(f"    -> {c.fix}")
-    return 0 if all(c.ok for c in checks) else 1
+    # Per-capability rows are information, never an aggregate readiness verdict.
+    return 0 if all(c.ok for c in checks if not _informational(c)) else 1
+
+
+def _informational(check: Check) -> bool:
+    return check.name.startswith(_CAPABILITY_PREFIX)
+
+
+# -- doctor on Windows ---------------------------------------------------------------
+
+_CAPABILITY_PREFIX = "capability."
+
+
+def _windows_checks() -> list[Check]:
+    """Telegram checks plus one informational row per Windows capability; load-only."""
+    from .._home import hermes_home
+    from ._windows_gates import describe_capability
+    from ._windows_status import capability_rows
+
+    home = hermes_home()
+    rows, error = capability_rows(home)
+    custody = _windows_custody_check(home, rows, error)
+    flags, code = _windows_flags()
+    login = (
+        _check_credentials(flags)
+        if code is None
+        else [Check("login", False, f"credential metadata unreadable ({code})", _windows_telegram.message(code) or "")]
+    )
+    checks = [
+        _check_telethon(),
+        custody,
+        Check("hardware", custody.ok, custody.detail, custody.fix),
+        _check_memory(),
+        *login,
+        _windows_archive_check(),
+        _check_hermes(),
+    ]
+    if error is not None:
+        return [*checks, Check(f"{_CAPABILITY_PREFIX}unavailable", False, f"capabilities unavailable: {error}")]
+    return [*checks, *(Check(_CAPABILITY_PREFIX + row.name, row.available, describe_capability(row)) for row in rows)]
+
+
+def _windows_custody_check(home: Path, rows: tuple[WindowsCapability, ...], error: str | None) -> Check:
+    from ._windows_gates import remedy
+
+    row = next((item for item in rows if item.name == "telegram_hardware"), None)
+    if row is None:
+        return Check("telegram_custody", False, f"capabilities unavailable: {error}", remedy("custody-uncertain"))
+    detail = f"supported, {'available' if row.available else 'unavailable'} ({row.reason})"
+    if row.reason != "enrolled":
+        fix = _windows_telegram.CEREMONY if row.reason == "not-enrolled" else remedy(row.reason)
+        return Check("telegram_custody", False, detail, fix)
+    leases = _windows_telegram.role_leases(home) or ()
+    current = leases[-1] if leases else None
+    metadata = (
+        f": generation {current.generation}, public key SHA-256 {current.public_sha256}" if current is not None else ""
+    )
+    return Check("telegram_custody", True, f"{detail}; machine-bound CNG key, no per-use presence{metadata}")
+
+
+def _windows_flags() -> tuple[dict[str, Any] | None, str | None]:
+    """``(flags, None)`` through the checked store, or ``(None, classified code)``; never unseals."""
+    try:
+        return _windows_telegram.secret_store().flags(), None
+    except (OSError, RuntimeError) as exc:
+        return None, str(getattr(exc, "code", "telegram_unavailable"))
+
+
+def _windows_archive_check() -> Check:
+    """Index presence and the sync lock through the C10b checked seams; nothing is decrypted or scanned."""
+    from datetime import UTC, datetime
+
+    from ..extension.telegram.store import archive_busy, archive_updated, telegram_dir
+
+    root = telegram_dir()
+    try:
+        updated = archive_updated(root)
+        busy = archive_busy(root)
+    except (OSError, RuntimeError) as exc:
+        code = str(getattr(exc, "code", "store_unavailable"))
+        return Check("archive", False, f"archive state unreadable ({code})", _windows_telegram.message(code) or "")
+    if updated is None:
+        return Check("archive", False, "nothing imported yet", "hermes-mordred telegram sync")
+    when = datetime.fromtimestamp(updated, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return Check(
+        "archive",
+        True,
+        f"encrypted archive present (index updated {when}); sync running: {'yes' if busy else 'no'}",
+    )
 
 
 # -- setup -------------------------------------------------------------------------
@@ -253,9 +365,12 @@ def telegram_setup(
     input_fn: InputFn = input,
     secret_fn: InputFn = getpass.getpass,
     require_presence: bool = True,
+    acknowledge_machine_bound: bool = False,
 ) -> int:
     from .telegram_cli import telegram_login
 
+    if _windows_telegram.routed():
+        return _windows_setup(input_fn=input_fn, secret_fn=secret_fn, acknowledged=acknowledge_machine_bound)
     if not _supported_platform():
         return 1
     label = "TPM 2.0" if sys.platform == "linux" else "Secure Enclave"
@@ -301,7 +416,10 @@ def telegram_setup(
 
 
 def cli_setup(args: argparse.Namespace) -> int:
-    return telegram_setup(require_presence=not getattr(args, "no_touch_id", False))
+    return telegram_setup(
+        require_presence=not getattr(args, "no_touch_id", False),
+        acknowledge_machine_bound=bool(getattr(args, "acknowledge_machine_bound", False)),
+    )
 
 
 def cli_doctor(args: argparse.Namespace) -> int:
@@ -320,7 +438,6 @@ def _supported_platform() -> bool:
 
 
 def _first_import(input_fn: InputFn) -> int:
-    from ..extension.telegram.tee import TeeSecretStore
     from .telegram_cli import telegram_sync
 
     print("\nStep 5/5  First import")
@@ -335,7 +452,14 @@ def _first_import(input_fn: InputFn) -> int:
         "limit_per_dialog": RECOMMENDED_LIMIT,
     }
     if _yes(input_fn, "Use this scope for imports (saved for later `telegram sync` runs)?"):
-        TeeSecretStore().save_sync_scope(recommended)
+        if _windows_telegram.routed():
+            refused = _windows_save_scope(recommended)
+            if refused is not None:
+                return refused
+        else:
+            from ..extension.telegram.tee import TeeSecretStore
+
+            TeeSecretStore().save_sync_scope(recommended)
     if _yes(input_fn, "Import now?"):
         rc = telegram_sync()
         if rc != 0:
@@ -344,3 +468,111 @@ def _first_import(input_fn: InputFn) -> int:
         print("Skipped. Run `hermes-mordred telegram sync` any time.")
 
     return 0
+
+
+# -- setup on Windows ----------------------------------------------------------------
+
+
+def _windows_setup(*, input_fn: InputFn, secret_fn: InputFn, acknowledged: bool) -> int:
+    """custody (explicit ceremony) -> C6 memory enable -> acknowledged login -> LLM -> first import."""
+    from .telegram_cli import _report, telegram_login
+
+    print("Mordred Telegram setup — read-only, sealed by this profile's Windows CNG custody key, Venice/local only.\n")
+    print("Step 1/5  Windows Telegram custody")
+    if not _ensure_windows_custody(input_fn):
+        _term.emit_error("Windows Telegram custody is required; setup stopped.")
+        return 1
+
+    print("\nStep 2/5  Memory encryption")
+    if not _ensure_windows_memory(input_fn):
+        _term.emit_error("memory encryption is required for Telegram; setup stopped.")
+        return 1
+
+    print("\nStep 3/5  Telegram login")
+    flags, code = _windows_flags()
+    if code is not None:
+        return _report(code)
+    if flags and flags.get("logged_in"):
+        print("Already logged in.")
+    elif telegram_login(input_fn=input_fn, secret_fn=secret_fn, acknowledge_machine_bound=acknowledged) != 0:
+        return 1
+
+    flags, code = _windows_flags()
+    if code is not None:
+        return _report(code)
+    print("\nStep 4/5  Privacy LLM")
+    current = flags or {}
+    if current.get("llm_backend") in ("venice", "local"):
+        print(f"Already configured: {current.get('llm_backend')} ({current.get('llm_model')}).")
+    elif _choose_llm(input_fn, secret_fn) != 0:
+        return 1
+
+    if _first_import(input_fn) != 0:
+        return 1
+
+    print(
+        "\nDone. How to use it:\n"
+        "  • Restart the Hermes gateway (and Hermes Desktop), then ask e.g. “What did we decide on Telegram last "
+        "week?”.\n"
+        "    The agent uses telegram_ask; Windows custody asks for no per-use confirmation.\n"
+        "  • Browser extension: ⚙ → ✈️ Telegram.\n"
+        "  • Health check any time: hermes-mordred telegram doctor"
+    )
+    return 0
+
+
+def _ensure_windows_custody(input_fn: InputFn) -> bool:
+    """Enrolled -> continue; not enrolled -> offer the explicit ceremony; anything else refuses."""
+    from .._home import hermes_home
+    from ._windows_gates import remedy
+    from .keyvault_windows_cli import native_init
+
+    home = hermes_home()
+    capability = _windows_telegram.telegram_capability(home)
+    reason = capability if isinstance(capability, str) else capability.reason
+    if reason == "enrolled":
+        print("This profile's Windows Telegram custody key is enrolled (machine-bound CNG, no per-use presence).")
+        return True
+    if reason != "not-enrolled":
+        _term.emit_error(f"Telegram custody refused ({reason}): {remedy(reason)}. Nothing was generated or changed.")
+        return False
+    print("This profile has no Windows Telegram custody key yet. Only this explicit ceremony creates it:")
+    print(f"  {_windows_telegram.CEREMONY}")
+    print(_windows_telegram.TELEGRAM_NOTICE)
+    if not _windows_telegram.explicit_yes(input_fn, "Create this profile's Windows Telegram custody key now?"):
+        print(f"Run `{_windows_telegram.CEREMONY}` yourself, then re-run `hermes-mordred telegram setup`.")
+        return False
+    return native_init(home=home, roles=("telegram",)) == 0
+
+
+def _ensure_windows_memory(input_fn: InputFn) -> bool:
+    """The C6 Windows memory enable (capabilities -> gate -> ceremony -> proof -> lifecycle)."""
+    from .._home import hermes_home
+    from . import _windows_memory
+
+    home = hermes_home()
+    if _windows_telegram.memory_active(home):
+        return True
+    print(
+        "Telegram requires agent-memory encryption, so nothing Hermes remembers about your chats is stored in "
+        "plaintext. On Windows `hermes-mordred encryption enable memory` enrolls the CNG memory key if needed, "
+        "proves the installed Hermes runtime and seals the memories; every Hermes gateway must be stopped."
+    )
+    if not _windows_telegram.explicit_yes(input_fn, "Turn on Windows memory encryption now?"):
+        return False
+    if _windows_memory.enable(home=home) != 0:
+        return False
+    ok = _windows_telegram.memory_active(home)
+    if ok:
+        print("Memory encryption is on. Restart the Hermes gateways so they load the armed hook.")
+    return ok
+
+
+def _windows_save_scope(scope: dict[str, Any]) -> int | None:
+    from .telegram_cli import _report
+
+    try:
+        _windows_telegram.secret_store().save_sync_scope(scope)
+    except (OSError, RuntimeError) as exc:
+        return _report(str(getattr(exc, "code", "store_unavailable")))
+    return None

@@ -1715,3 +1715,39 @@ the package untouched; notice assertions for ceremony, enable and setup; the
 `keyvault reset` tripwire; `classify_exception` against C5e's classification;
 and a frame-filtered spy proving no wizard frame opens, writes, renames or
 unlinks anything under the home during enable/disable/purge.
+
+### Windows wizard Telegram ceremony (C6-telegram)
+
+Contract: SPEC.md §Windows wizard Telegram ceremony (C6-telegram). Scope is the
+wizard only: the `telegram` role row in `wizard/keyvault_windows_cli.py`
+(`NativeRole`, `NATIVE_ROLES`, `_CAPABILITY_FOR`), the `--role` choice and the
+`--acknowledge-machine-bound` flag of `telegram setup`/`login` in
+`wizard/_cli_parsers.py`, win32 routing in `wizard/telegram_cli.py` and
+`wizard/telegram_setup_cli.py`, and the new `wizard/_windows_telegram.py`
+(custody capability to C10b code mapping, the disclosure and acknowledgement,
+the C6 memory predicate and `TelegramService` guard, checked state observation
+for logout/forget/doctor, the forget plan, typed confirmation and outcome
+lines, and the Windows message table). No extension, keyvault or Desktop
+source changes; `wizard/_windows_gates.py` keeps its C6 wording.
+
+Tests: portable `test_wizard_windows_telegram.py` builds on the C10b fixture
+(real checked transactions, MRKW, MTC1/MTG1 and the real custody store and
+archive, with the native backend, SID, helper and platform decisions
+injected) and on the C6 proof harness for one real Windows memory enable. It
+covers the ceremony (`--role telegram` only, rerun, helper refusal), setup on
+fresh, enrolled, declined, copied, orphan-journal and helper-less homes, the
+acknowledgement order, login refusals without enrollment or acknowledgement
+with zero backend calls, `require_presence=False` only after the
+acknowledgement, the checked orphan-archive wipe under a raw-scan tripwire,
+a parametrized message per classified code, venice/local-llm without a
+presence request, the sync memory guard, logout (archive wiped, credentials
+and role kept), forget (typed confirmation, corrupt credentials, busy refusal,
+missing helper, ambiguous deletion journal, unconfigured profile, memory and
+audit kept decryptable), the load-only doctor and the migrate-tee tripwire.
+`test_wizard_windows_telegram_native.py` (host-skipped) repeats the ceremony,
+login/logout/forget, doctor and copied-home refusal on NTFS with the real
+platform decision; `test_wizard_windows_telegram_live.py` is the gated
+real-CNG recipe. Both portable and native modules join the scoped Windows CI
+job. Remaining: a wizard reconciliation verb, Windows routing of the
+extension memory guard (Hermes tools, Desktop, extension server), Desktop
+login (C11), the live account gate and Windows 11.
