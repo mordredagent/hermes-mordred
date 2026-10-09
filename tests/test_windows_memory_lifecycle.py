@@ -14,9 +14,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from mordred_hermes import _config_io as cio
 from mordred_hermes import _windows_runtime
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _windows_processes, wrap
@@ -505,6 +507,66 @@ def test_lifecycle_launches_no_subprocess(proven):
     storage().disable_memory_encryption(env.home, env.proof)
     storage().verify_memory_purge_candidates(env.home)
     assert len(env.launches.argv) == launches
+
+
+REAL_INVENTORY = _windows_processes.inspect_windows_gateway_runtimes
+
+
+def test_real_gate_runs_under_lifecycle_locks(proof_env, monkeypatch):
+    """Only psutil and the state-file PID reader are stubbed; the real gate decides."""
+    import psutil
+
+    env = proof_env
+    observed = []
+
+    class Owner:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def username(self):
+            return "operator"
+
+    def pids():
+        observed.append(getattr(cio._local, "state", None) is not None)
+        return []
+
+    fake = SimpleNamespace(
+        Process=Owner,
+        pids=pids,
+        Error=psutil.Error,
+        NoSuchProcess=psutil.NoSuchProcess,
+        AccessDenied=psutil.AccessDenied,
+    )
+    monkeypatch.setattr(_windows_processes, "inspect_windows_gateway_runtimes", REAL_INVENTORY)
+    monkeypatch.setattr(_windows_processes, "psutil", fake)
+    monkeypatch.setattr(_windows_processes, "_read_state_pid", lambda home: None)
+    enroll(env)
+    put(env.home, "memories", "MEMORY.md", b"gated")
+    proof = prove(env)
+    report = storage().enable_memory_encryption(env.home, proof)
+    assert report.sealed == 1 and report.armed
+    assert observed[0] is False, "the proof gate must run outside locks"
+    assert observed[1:] == [True, True], "the lifecycle gate must run twice under held locks"
+
+
+def test_pending_lifecycle_siblings_reports_interrupted_disable(proven, monkeypatch):
+    env = proven
+    module = storage()
+    module.enable_memory_encryption(env.home, env.proof)
+    assert module.pending_lifecycle_siblings(env.home) == ()
+    with monkeypatch.context() as patch:
+        Fault(patch, "replace_bytes", "MEMORY.md")
+        with pytest.raises((module.MemoryLifecycleError, PrivateFSError)):
+            module.disable_memory_encryption(env.home, env.proof)
+    sibling = SIBLING + "open-" + b"MEMORY.md".hex()
+    assert module.pending_lifecycle_siblings(env.home) == (sibling,)
+    assert is_sealed(files(env.home)["MEMORY.md"]), "the target stays sealed beside the plaintext sibling"
+    module.disable_memory_encryption(env.home, env.proof)
+    assert module.pending_lifecycle_siblings(env.home) == ()
+
+
+def test_pending_lifecycle_siblings_without_memories(proof_env):
+    assert storage().pending_lifecycle_siblings(proof_env.home) == ()
 
 
 def test_injected_backend_is_test_only_file():

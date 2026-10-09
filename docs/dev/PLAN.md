@@ -1425,7 +1425,10 @@ write, so refusals leave files and markers untouched. Convert through the C1
 create-no-replace sibling and atomic checked replacement, because confidential
 transactions expose no rename and a no-replace rename cannot replace a file.
 Markers transition last under the still-held custody locks after the proof and
-gateway gate are checked again. Purge verification is a load-only report; the
+gateway gate are checked again. No installed-runtime or Python subprocess runs
+under lifecycle locks; native CNG helper operations remain under lifecycle
+locks as c5-design allows. `pending_lifecycle_siblings` lets C6 status report
+interrupted staging without mutating it. Purge verification is a load-only report; the
 native purge remains C5e/C5a work driven by C6.
 
 Tests use real proofs from the installed-runtime child and fault injection at

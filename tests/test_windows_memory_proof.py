@@ -16,6 +16,7 @@ import dataclasses
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import sysconfig
@@ -75,12 +76,18 @@ class Launches:
 
     def __init__(self, monkeypatch):
         self.argv: list[list[str]] = []
+        self.processes: list[subprocess.Popen] = []
+        self.fail_child: OSError | None = None
         real = subprocess.Popen
 
         def guarded(argv, *args, **kwargs):
             assert getattr(cio._local, "state", None) is None, "subprocess launched under custody/memory locks"
             self.argv.append([str(part) for part in argv])
-            return real(argv, *args, **kwargs)
+            if self.fail_child is not None and str(argv[-1]).endswith(("hermes", "probe")):
+                raise self.fail_child
+            process = real(argv, *args, **kwargs)
+            self.processes.append(process)
+            return process
 
         monkeypatch.setattr(subprocess, "Popen", guarded)
 
@@ -318,6 +325,11 @@ def test_child_timeout_refuses_and_kills(proof_env, monkeypatch):
     with refused("runtime-timeout"):
         prove(env, timeout=1.0)
     assert time.monotonic() - started < 30
+    child = env.launches.processes[-1]
+    assert child.poll() is not None, "timed-out proof child is still running"
+    if os.name != "nt":
+        assert child.returncode == -signal.SIGKILL
+    assert list(env.scratch.iterdir()) == []
 
 
 def test_custody_change_during_child_is_stale(proof_env, monkeypatch):
@@ -451,3 +463,85 @@ def test_child_requires_the_installed_startup_bootstrap(proof_env, monkeypatch):
     with refused("runtime-failed") as failure:
         prove(env)
     assert "mordred-proof:12:memory-seam-not-installed" in str(failure.value)
+
+
+def test_child_launch_failure_is_classified_and_cleaned(proof_env):
+    env = proof_env
+    enroll(env)
+    env.launches.fail_child = OSError(8, "Exec format error")
+    with refused("launch-failed"):
+        prove(env)
+    assert list(env.scratch.iterdir()) == [], "probe directory survived a launch failure"
+
+
+def test_reader_alive_after_clean_exit_is_unterminated(proof_env, monkeypatch):
+    """A grandchild holding stdout open cannot pass as a complete report."""
+    env = proof_env
+    lease = enroll(env)
+    wrapped = hashlib.sha256((env.home / "mordred" / "memory-key.wrapped").read_bytes()).hexdigest()
+    mutation = "import subprocess; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'], stdout=1)"
+    source = (
+        CRAFTED.replace("GENERATION_HELPER", repr(str(INJECTION)))
+        .replace("GENERATION", repr(lease.generation))
+        .replace("WRAPPED", repr(wrapped))
+        .replace("MUTATION", mutation)
+        .replace("OUTPUT", "json.dumps(report) + '\\n'")
+        .replace("EXIT", "0")
+    )
+    module = proof_module()
+    monkeypatch.setattr(module, "_CHILD_SOURCE", source)
+    monkeypatch.setattr(module, "_DRAIN_SECONDS", 0.2)
+    with refused("output-unterminated"):
+        prove(env)
+
+
+def test_probe_cleanup_covers_script_creation_failure(proof_env, monkeypatch):
+    from mordred_hermes._private_fs import PrivateFSError
+
+    env = proof_env
+    enroll(env)
+    if os.name == "nt":
+        from mordred_hermes._private_fs import _windows_io as implementation
+    else:
+        from mordred_hermes._private_fs import _posix as implementation
+    real = implementation._Transaction.create_bytes
+
+    def published_then_failed(tx, name, data):
+        real(tx, name, data)
+        if name == "hermes":
+            raise PrivateFSError("io", "injected", commit_state="uncertain")
+
+    monkeypatch.setattr(implementation._Transaction, "create_bytes", published_then_failed)
+    with pytest.raises(PrivateFSError):
+        prove(env)
+    assert list(env.scratch.iterdir()) == [], "probe script or directory survived a creation failure"
+    assert env.launches.argv[-1][1:2] == ["-c"], "no child may start after a failed probe write"
+
+
+def test_helper_differing_from_selected_override_refuses(proof_env, monkeypatch, tmp_path):
+    env = proof_env
+    enroll(env)
+    other = tmp_path / "winkey-helper.exe"
+    other.write_bytes(b"not the reported helper")
+    monkeypatch.setenv("MORDRED_WINKEY_HELPER", str(other))
+    with refused("helper-mismatch"):
+        prove(env)
+
+
+@pytest.fixture(scope="session")
+def windows_layout_runtime(installed_runtime):
+    """The same environment reached through ``Scripts/python.exe`` and ``pythonw.exe``."""
+    scripts = installed_runtime.parent.parent / "Scripts"
+    if os.name != "nt":
+        scripts.mkdir(exist_ok=True)
+        (scripts / "python.exe").symlink_to(os.path.realpath(installed_runtime))
+        (scripts / "pythonw.exe").write_bytes(b"")
+    return scripts
+
+
+def test_existing_pythonw_maps_to_python_sibling(proof_env, windows_layout_runtime):
+    env = proof_env
+    enroll(env)
+    proof = prove(env, python=windows_layout_runtime / "pythonw.exe")
+    assert proof.python == windows_layout_runtime / "python.exe"
+    assert proof.seam in {"A", "B", "C"}

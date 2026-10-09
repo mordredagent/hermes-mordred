@@ -658,6 +658,21 @@ def disable_memory_encryption(home: Path, proof: WindowsRuntimeProof, *, keep_ke
     )
 
 
+def pending_lifecycle_siblings(home: Path) -> tuple[str, ...]:
+    """Names of interrupted lifecycle staging entries; read-only, for status reports.
+
+    An interrupted disable can leave a plaintext ``open`` sibling beside a still
+    sealed target. Only the next enable or disable removes such entries.
+    """
+    from ._windows_custody import windows_custody_session
+
+    with windows_custody_session(home), open_optional_confidential_directory(home / "memories") as directory:
+        if directory is None:
+            return ()
+        with directory.transaction() as tx:
+            return tuple(n for n in tx.list_names(max_entries=MEMORY_ENTRY_LIMIT) if n.startswith(_SIBLING_PREFIX))
+
+
 def verify_memory_purge_candidates(home: Path) -> PurgeReport:
     """Load-only complete checked scan; no proof, no native key operation, no mutation."""
     from ._windows_custody import windows_custody_session

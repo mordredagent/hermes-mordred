@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import IO, Final
 
 from .. import _config_io, _windows_runtime
-from .._private_fs import FileIdentity, open_private_directory
+from .._private_fs import FileIdentity, PrivateDirectory, PrivateFSError, open_private_directory
 from . import _runtime_probe
 from ._windows_custody import WindowsCustodySession, windows_custody_session
 
@@ -56,6 +56,8 @@ HELPER_OVERRIDE_ENV: Final = "MORDRED_WINKEY_HELPER"
 
 _OUTPUT_LIMIT: Final = 4096
 _STDERR_LIMIT: Final = 2048
+#: After the child exits, readers get this long to reach end-of-file.
+_DRAIN_SECONDS: Final = 5.0
 _SCRIPT_NAME: Final = "hermes"  # engages the runtime .pth bootstrap exactly like a Hermes start
 _REPORT_KEYS: Final = frozenset({"module", "helper", "seam", "generation", "wrapped_sha256", "challenge_sha256"})
 _SEAMS: Final = frozenset({"A", "B", "C"})
@@ -193,6 +195,7 @@ class _ChildResult:
     stdout_overflow: bool
     stderr: bytes
     timed_out: bool
+    incomplete: bool
 
 
 def _clock() -> float:
@@ -296,23 +299,46 @@ def _child_environment(environ: Mapping[str, str], home: Path) -> dict[str, str]
     return env
 
 
+def _remove_script(private: PrivateDirectory) -> None:
+    with private.transaction() as tx:
+        try:
+            identity = tx.stat(_SCRIPT_NAME).identity
+        except PrivateFSError as exc:
+            if exc.reason == "missing":
+                return
+            raise
+        tx.delete_file(_SCRIPT_NAME, expected_identity=identity)
+
+
 @contextlib.contextmanager
 def _probe_script() -> Iterator[Path]:
-    """Task-owned exact-private directory holding the probe; removed afterwards."""
+    """Task-owned exact-private directory holding the probe; removed afterwards.
+
+    Cleanup covers the creation window too: a failed or uncertain write still
+    removes whatever was published. A cleanup failure never masks the primary
+    error; it only leaves the private directory behind.
+    """
     directory = Path(tempfile.gettempdir()).resolve() / f"mordred-proof-{secrets.token_hex(16)}"
-    with open_private_directory(directory, create=True) as private:
-        with private.transaction() as tx:
-            tx.create_bytes(_SCRIPT_NAME, _CHILD_SOURCE.encode("utf-8"))
-            identity = tx.stat(_SCRIPT_NAME).identity
-        try:
-            yield directory / _SCRIPT_NAME
-        finally:
-            with private.transaction() as tx:
-                tx.delete_file(_SCRIPT_NAME, expected_identity=identity)
-    # The C1 sidecar lock is the only remaining entry of this new private directory.
-    with contextlib.suppress(OSError):
-        (directory / ".mordred-fs.lock").unlink()
-        directory.rmdir()
+    try:
+        with open_private_directory(directory, create=True) as private:
+            try:
+                with private.transaction() as tx:
+                    tx.create_bytes(_SCRIPT_NAME, _CHILD_SOURCE.encode("utf-8"))
+                yield directory / _SCRIPT_NAME
+            finally:
+                original = sys.exception()
+                try:
+                    _remove_script(private)
+                except OSError as failure:
+                    if original is None:
+                        raise
+                    original.add_note(f"probe script cleanup failed: {type(failure).__name__}")
+    finally:
+        # The C1 sidecar lock is the only other entry of this new private directory.
+        with contextlib.suppress(OSError):
+            (directory / ".mordred-fs.lock").unlink()
+        with contextlib.suppress(OSError):
+            directory.rmdir()
 
 
 class _BoundedReader(threading.Thread):
@@ -334,9 +360,12 @@ class _BoundedReader(threading.Thread):
 def _run_child(argv: list[str], *, env: dict[str, str], cwd: Path, stdin: bytes, timeout: float) -> _ChildResult:
     _require_unlocked()
     # Only the C4-validated interpreter and the task-owned private probe script run here.
-    process = subprocess.Popen(
-        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd
-    )
+    try:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd
+        )
+    except OSError as exc:
+        raise WindowsRuntimeProofError("launch-failed", type(exc).__name__) from exc
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
     out = _BoundedReader(process.stdout, _OUTPUT_LIMIT)
     err = _BoundedReader(process.stderr, _STDERR_LIMIT)
@@ -353,10 +382,10 @@ def _run_child(argv: list[str], *, env: dict[str, str], cwd: Path, stdin: bytes,
         timed_out = True
         process.kill()
         process.wait()
-    out.join(5.0)
-    err.join(5.0)
+    out.join(_DRAIN_SECONDS)
+    err.join(_DRAIN_SECONDS)
     incomplete = out.is_alive() or err.is_alive()
-    return _ChildResult(process.returncode, bytes(out.data), out.overflow or incomplete, bytes(err.data), timed_out)
+    return _ChildResult(process.returncode, bytes(out.data), out.overflow, bytes(err.data), timed_out, incomplete)
 
 
 def _sanitize(data: bytes) -> str:
@@ -388,6 +417,8 @@ def _parse_report(result: _ChildResult) -> dict[str, str]:
         raise WindowsRuntimeProofError("runtime-timeout")
     if result.returncode != 0:
         raise WindowsRuntimeProofError("runtime-failed", f"exit {result.returncode}; {_sanitize(result.stderr)}")
+    if result.incomplete:
+        raise WindowsRuntimeProofError("output-unterminated", "an output stream stayed open after the child exited")
     data = result.stdout
     if result.stdout_overflow or len(data) > _OUTPUT_LIMIT:
         raise WindowsRuntimeProofError("output-oversized")

@@ -2219,9 +2219,12 @@ propagate unchanged. There is no force, bool or callback substitute.
    `PYTHONDONTWRITEBYTECODE=1`. The probe is a C1 create-no-replace file in a
    new exact-private `mordred-proof-<random>` directory under the user temp
    directory, named `hermes` so the installed runtime `.pth` engages its real
-   startup bootstrap, and is removed afterwards. The 32-byte challenge is one
-   hex line on stdin; at most 4 KiB of stdout and 2 KiB of stderr are kept; the
-   timeout kills the child. The child moves its stdout descriptor to stderr,
+   startup bootstrap, and is removed afterwards; that cleanup also covers a
+   failed or uncertain probe write. The 32-byte challenge is one hex line on
+   stdin; at most 4 KiB of stdout and 2 KiB of stderr are kept; the timeout
+   kills the child. A launch `OSError` refuses as `launch-failed`, and an
+   output stream still open after the child exits refuses as
+   `output-unterminated`. The child moves its stdout descriptor to stderr,
    then requires `mordred_hermes.__file__` physically under its C4
    environment root, `memory_hook_installed()` after the installed bootstrap
    wrapped every seam of a supported shape, a resolved winkey helper,
@@ -2264,14 +2267,15 @@ Enable and disable check the issued proof and its TTL before any lock, own
 `windows_custody_session(home)` and join it with
 `windows_memory_session(home, custody=...)` (home -> mordred -> memories),
 then revalidate the proof with `validate_windows_runtime_proof` and run
-`require_stopped_windows_gateways` before any mutation. They launch no
-subprocess. Before the first mutation they refuse unrecognized lifecycle
+`require_stopped_windows_gateways` before any mutation. No installed-runtime
+or Python subprocess runs under lifecycle locks; native CNG helper operations
+remain under lifecycle locks as c5-design allows. Before the first mutation they refuse unrecognized lifecycle
 siblings or siblings without a target, authenticate every existing seal under
 its basename, refuse broken seals, non-UTF-8 files, decrypted text starting with
 the seal magic, per-file or aggregate bound overflow and a directory with no
-room for a staging entry, and prepare every replacement in RAM. Converted text
-is what the Windows hook reads (UTF-8 with normalized newlines), so disable
-publishes LF-normalized plaintext and enable seals exactly that text.
+room for a staging entry, and prepare every replacement in RAM. Enable seals
+the text the Windows hook reads, normalizing newlines of UTF-8 plaintext before
+sealing; disable publishes the unsealed text as-is.
 
 Each file is converted by a C1 create-no-replace staging sibling
 `.mordred-memory-{seal|open}-<hex of the UTF-8 name>` (never a memory leaf),
@@ -2307,3 +2311,12 @@ memories directory. `may_purge` requires managed custody, no opt-in marker,
 an opt-out marker and no sealed, broken or staging entry. The purge itself stays
 C5e `reset_role` plus C5a `delete_role`, invoked by C6 after this report and a
 fresh stopped-gateway gate.
+
+`pending_lifecycle_siblings(home) -> tuple[str, ...]` is a read-only status
+helper returning only the names of lifecycle staging entries in the checked
+memories directory (an empty tuple when it is absent). An interrupted disable
+can leave a plaintext `open` sibling beside a still sealed target, and an
+interrupted enable a `seal` sibling beside its plaintext target; status must
+report them. Only the next `enable_memory_encryption` or
+`disable_memory_encryption` removes them, and purge verification reports them
+as blockers.
