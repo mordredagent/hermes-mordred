@@ -684,6 +684,20 @@ def test_keyvault_probe_is_unsupported_without_file_vault_reads_on_windows(monke
 # --- hook wiring ---------------------------------------------------------------------
 
 
+def write_private_pair(home: Path, **kwargs: str) -> None:
+    """``write_pair`` for a checked private home (the custody ``fs`` home).
+
+    ``write_pair`` writes ``config.yaml`` raw, which suits an inherited-safe
+    Hermes home. Here the home is a protected private directory without
+    inheritable ACEs, so a raw file would carry the creator token's default
+    DACL (on an SSH logon a logon-session SID) and the canonical reader would
+    refuse it before the case under test; republish it privately instead.
+    """
+    write_pair(home, **kwargs)
+    config = home / "config.yaml"
+    write_private(config, config.read_bytes())
+
+
 @pytest.fixture
 def hooked(fs, monkeypatch):
     c, _, home, backend = fs
@@ -698,7 +712,7 @@ def hooked(fs, monkeypatch):
     _audit_support._reset_audit_writer_registry_for_tests()
     with open_private_directory(home / "mordred", create=True):
         pass
-    write_pair(home)
+    write_private_pair(home)
     yield home
     _runtime.reset_state_for_tests()
     _audit_support._reset_audit_writer_registry_for_tests()
@@ -799,7 +813,7 @@ def test_recoverable_construction_refusal_at_session_start_does_not_poison(hooke
 
 
 def test_unrecorded_egress_approval_becomes_a_block(hooked, monkeypatch):
-    write_pair(hooked, level="ask")
+    write_private_pair(hooked, level="ask")
     args = {"tool_name": "some_unknown_tool", "args": {"x": 1}, "session_id": "c7b"}
     approved = hooks.pre_tool_call(**args)
     assert approved is not None and approved["action"] == "approve"
