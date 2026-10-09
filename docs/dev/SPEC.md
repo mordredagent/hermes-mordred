@@ -3117,3 +3117,152 @@ including the live session, untouched, but a lost native key still has no
 wizard recovery path. A missing helper refuses forget even when no role
 exists (C5e reports `helper-missing` in place of `not-enrolled`); this is fail
 closed.
+### Windows Desktop integration and extension server shutdown (C11)
+
+C11 is the Desktop and extension-server consumer of C4-C6 and C10. It adds no
+keyvault, wizard or Telegram API: `desktop/api.py` routes `win32` to
+`desktop/_windows.py` (API) and `desktop/_windows_assets.py` (placement), and
+macOS/Linux never reach either module. Their behavior is unchanged.
+
+Status. `/status?client_version=3` on Windows returns `hardware_kind: "cng"`,
+`user_presence_supported: false` with `presence_reason` (the `presence`
+capability's reason, `excluded-on-windows`) and `capabilities`: one
+`{name, supported, available, reason}` row per `windows_capabilities(home)`
+entry in the C5e order, or `[]` with `capabilities_error` set to the
+classified reason. There is no aggregate readiness boolean.
+`telegram_platform_supported` and `telegram_supported` are true only when
+`default_secret_store()` selected the C10b store and `telegram_hardware` is
+supported. The response also carries `helper` (below), `memory` (the load-only
+C6 observation: `off`, `enrolled`, `on`, `exposed`, `degraded`, `paused` or
+`unavailable` with its reason; `active` only when armed, clean and readable),
+`telegram_custody` (`enrolled`, `reason`, `ceremony_available: false`,
+`ceremony_command: null`), the required `acknowledgements`, the frozen
+`custody_notice`, `uninstall` metadata (`erase_supported: false`,
+`purge_scope: "memory_custody_key"`), per-step `checks` and the existing model
+check (Venice private or a loopback local model). Older clients
+(`client_version < 3`) keep the unsupported shape and reach no capability,
+memory, credential or provider code. Status reads only the non-blocking
+predicates, the non-blocking memory scan, the helper selection with its
+installer receipt and Telegram `flags()`. It never unwraps, generates,
+deletes or launches a subprocess.
+
+Helper. `/hardware/build` on Windows never builds or installs. It returns
+`built: false` and `helper = {state, path, install_command}`. `state` is
+`validated` (the default `<home>\bin` executable with a verified C4 installer
+receipt), `installed` (a helper selected by the override, `PATH` or without a
+receipt), `missing` or `uncertain`. The documented command is
+`hermes-mordred keyvault enable-winkey`, or the native installer.
+
+Memory. `/memory/enable` requires `acknowledge_cng_no_recovery: true` and
+`acknowledge_no_presence: true`; otherwise it answers
+`telegram_platform_unsupported` before any custody read. It then runs in a
+worker thread, one transition per process (`memory_operation_in_progress`),
+in the C6 order:
+
+1. capabilities: `windows_capability(home, "memory_custody")`; custody and
+   helper failures refuse;
+2. gate: the C5c typed inventory; `unknown` refuses as `gateways-unknown` and
+   any runtime as `gateways-running`, and no force flag is read;
+3. ceremony: `enroll_roles(home, ("memory",))`; `custody_notice` is returned
+   whenever the key is created, even if a later step refuses;
+4. proof: `prove_windows_memory_runtime`;
+5. lifecycle: `enable_memory_encryption`.
+
+A refusal is `{ok: false, error: "memory_encryption_refused", step, reason,
+remedy, detail?}` plus `gateways` at the gate, `enrolled`/`custody_notice`
+after the ceremony, and `completed`/`remaining`/`uncertain`/`armed` for a
+partial lifecycle failure (`lifecycle-partial`). Success returns
+`restart_required: true`, the counts and the proven interpreter.
+`/memory/disable` is symmetric: load-only scan, helper, gate, proof, then
+`disable_memory_encryption(keep_key=True)`, with error
+`memory_disable_refused`. Purge stays the CLI ceremony. `GET /memory/status`
+returns the memory state and the typed gateway inventory
+`{state, running, found, pids, reasons}`; `running` is `null`, never zero,
+whenever the inventory is `unknown`.
+
+Desktop proof routing (deferred from C6): `MORDRED_HERMES_PYTHON` stays
+authoritative. Otherwise the interpreter serving the Desktop API (the
+Desktop-managed Hermes runtime) is passed as `python=` and validated by the
+proof, with no fallback to a `PATH` launcher or the home venv; an empty
+interpreter path refuses as `interpreter-invalid`. The wizard exposes no
+structured (step, reason) result, so the Desktop composes the same order from
+the wizard's and keyvault's public parts.
+
+Telegram. The Desktop uses `default_secret_store()` everywhere
+(`TeeSecretStore` on macOS/Linux, as before). On Windows, login start and the
+question-model routes (`/llm/venice`, `/llm/local`) refuse until
+`telegram_hardware` is `enrolled` (`telegram_not_enrolled` with
+`ceremony_available: false`, `custody_unsafe`, `custody_uncertain`,
+`custody_broken` or `tee_unavailable`), then until the request carries
+`acknowledge_no_presence: true` (`presence_acknowledgement_required`). Only
+then does the `NoPresenceStore` wrapper call
+`ensure_key(require_presence=False)`; its `ensure_key()` takes no argument, so
+no caller can request presence and receive an unattended check. Login also
+requires the load-only Windows memory state (`memory_encryption_required`)
+and the private model, and the import service receives the same memory guard.
+`POST /telegram/logout` (Windows only) revokes the session at Telegram on a
+best-effort basis. It then either drops the session and keeps the archive,
+or with `forget: true` runs `store.wipe_archive(forget=True)`: the archive,
+the sealed credentials, then only the `telegram` role. `delete_key` is never
+called, and a credential read refusal deletes nothing. No wizard verb enrolls
+the `telegram` role yet, so Windows Telegram setup stops at the custody step.
+
+Placement. `desktop install` and the plugin's `ensure_page` place
+`<home>\desktop-plugins\mordred\plugin.js` and
+`<home>\plugins\mordred\dashboard\{manifest.json,plugin_api.py}` under the
+shared home resolver (no second root). The Hermes-owned `desktop-plugins`
+and `plugins` folders are admitted through `open_confidential_directory(...,
+create=True)`. `plugins\mordred`, its `dashboard` and
+`desktop-plugins\mordred` are checked private directories, created one level
+at a time. A file is written with `create_bytes`/`replace_bytes` only when it
+changed, then read back. Unsafe existing state refuses with the exact quoted
+path and classified reason; no ACL is repaired. Removal (`desktop uninstall`
+and `hermes-mordred uninstall` step b) deletes, by checked identity, only the
+three enumerated files and the legacy `plugins\mordred\desktop\plugin.js`.
+Directories, their permanent `.mordred-fs.lock` and unknown files are kept and
+reported, and a refused folder is reported without stopping later steps.
+
+Page. `plugin.js` requests `client_version=3` and selects the Windows page by
+`hardware_kind === "cng"`. It renders each capability row through explicit
+label tables, shows the custody notice and both acknowledgements before the
+enable button, and renders the refusing step, reason and remedy from the
+refusal metadata. It labels the custody, Telegram store and shared pairing
+codes (`storage_unavailable`, `storage_uncertain`, `storage_error`,
+`attestation_key_missing`) and hides erase-without-decrypt on Windows. A login
+expiry resets by code, never by matching message text.
+
+Extension server. `extension serve` stops with exit 0 on Ctrl-C
+(`KeyboardInterrupt`), on SIGTERM (POSIX `add_signal_handler`) and, on
+Windows, on `CTRL_BREAK_EVENT`. The proactor loop has no
+`add_signal_handler`, so `SIGBREAK` goes through `signal.signal` and
+`loop.call_soon_threadsafe`. The previous handlers are restored and
+`server.stop()` closes the listener, so the same port can be bound again
+immediately. A bind failure is classified and exits 1 without trying another
+port: `port-in-use` (EADDRINUSE/WSAEADDRINUSE, with an `lsof` or
+`Get-NetTCPConnection` hint), `port-forbidden` (EACCES/WSAEACCES, including
+Windows excluded port ranges) or `bind-failed`. The gateway plugin has no
+runtime-discovery hook; `GET /memory/status` is the only Desktop surface that
+reports running gateways.
+
+C11 review round 1 (rulings R-C11-1 to R-C11-4). `POST /telegram/logout`
+with `forget: true` requires `confirm` = `delete my data` server-side, exactly
+like `/uninstall`, and otherwise answers `forget_confirm_mismatch` before
+anything is read, revoked or deleted. The status `helper` comes only from the
+non-blocking capability rows (`present`, `missing`, `uncertain`, or
+`unchecked` while every supported role row reports a custody failure); the
+C4 receipt check (`validated`/`installed`) runs only for the explicit
+`/hardware/build`, and every helper failure is a classified state, never a
+500. Every Desktop capture of wizard output goes through one process-wide
+lock and keeps only the capturing thread's text. The Telegram login and import
+guards take one non-blocking canonical session around the load-only memory
+scan: a lock held elsewhere answers `custody_busy` with a retry remedy, never
+`memory_encryption_required`. Memory enable reports
+`memory-write-approval-plaintext` (with `pending_approvals`) when
+`memory.write_approval` is on; an opted-out profile with remaining seals or
+staging reports `disabled-incomplete`, not `paused`; an unknown gateway
+inventory reports `found: null`. `extension serve` closes the listener first
+and gives open connections 3 s before cancelling their handlers, so a
+connected extension WebSocket cannot hold a stop (or the port) for up to
+aiohttp's 60 s shutdown timeout. A pre-C11 Windows placement with inherited
+ACLs is refused and logged with its exact path; the remedy is to delete the
+two Mordred folders by hand and run `hermes-mordred desktop install`.

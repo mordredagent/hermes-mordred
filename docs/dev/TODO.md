@@ -501,3 +501,51 @@ Implementation and acceptance remain open:
   as gone (also when the metadata read fails); orphan detection follows the
   C10b segment leaf rule. Open: a public store-error mapper in a later
   extension slice would replace the pinned wizard copy.
+
+### Windows Desktop and gateway follow-up (C11)
+
+C11 routes the Desktop status, helper state, CNG memory enable/disable,
+Telegram custody gating, logout/forget, checked page placement/removal and the
+extension server's Windows shutdown (host-tested; native and live gates below).
+
+- [ ] Native Windows CI run of `tests/test_desktop_windows_api.py`,
+  `tests/test_desktop_windows_native.py`, `tests/test_desktop_windows_page.py`
+  and `tests/extension/test_extension_serve_shutdown.py` (CTRL_BREAK on 7799).
+- [ ] Gated real-CNG `tests/test_desktop_windows_live.py` from the Desktop
+  runtime and from an sdist-built wheel venv; real packaged Hermes Desktop
+  launch, page render, memory enable and restart; Windows 11.
+- [ ] C6-telegram: a wizard ceremony that enrolls the `telegram` role
+  (`keyvault native init` offers memory/audit only); the Desktop then sets
+  `TELEGRAM_CEREMONY_COMMAND` and stops refusing `telegram_not_enrolled`.
+- [ ] C6-telegram: a structured (step, reason) result from the wizard's
+  Windows memory verbs so the Desktop stops composing the same order itself.
+- [ ] C6-telegram: `memory_guard.memory_encryption_active` (and the wizard
+  `telegram` CLI) still report Windows memory as inactive; only the Desktop
+  and its import service use the load-only Windows state today.
+- [ ] Desktop `_hermes_venice_key` still reads `<home>/.env` with python-dotenv
+  (C3 dotenv scope).
+- [ ] Windows `extension serve` binds without `SO_EXCLUSIVEADDRUSE`; decide
+  whether loopback port hijacking by another same-user process needs it.
+- [ ] Checked recursive removal for the kept Desktop folders and locks.
+
+C11 review round 1 additions:
+
+- [ ] C6 (wizard): on Windows `uninstall_cli._clean_hermes_files` still prints
+  "Removed the Hermes Desktop page <folder>" after `remove_page()`, although
+  the Windows removal keeps the folders and prints each kept path.
+- [ ] C6 (wizard): the uninstall plan's gateway diagnostic uses the advisory
+  discovery, so on Windows an unknown inventory reads as "no gateway"; route
+  it through the typed inventory (`unknown` stays unknown).
+- [ ] C6 note: a broken memory seal met at the lifecycle step classifies as
+  `custody-uncertain` (with the "busy, retry" remedy) through
+  `classify_exception`; the Desktop inherits it. A dedicated `seal-broken`
+  reason belongs to the wizard/keyvault classification.
+- [ ] C6-telegram: the structured wizard result should also carry the wizard's
+  messages (or take an explicit output stream) so the Desktop no longer
+  captures process-wide stdout/stderr; until then every Desktop capture is
+  serialized and keeps only the capturing thread's text (`desktop/_capture.py`).
+- [ ] Pre-C11 Windows Desktop placements: earlier builds created
+  `<home>\desktop-plugins\mordred` and `<home>\plugins\mordred` with inherited
+  ACLs, which the checked placement refuses (never repairs) and logs with the
+  exact path. Remedy: delete those two folders by hand, then run
+  `hermes-mordred desktop install`.
