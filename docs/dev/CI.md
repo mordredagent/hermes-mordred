@@ -1422,6 +1422,16 @@ telegram directory, a broadened ACL, a hardlink, a dialogs junction and a sync
 lock held by another process, and require refusal without ACL repair or
 deletion. Their injected CNG backend does not establish TPM acceptance.
 
+2026-10-09 host-only flags follow-up: the new extension module
+`tests/extension/test_telegram_windows_flags.py` reproduced 12 failures for
+non-object metadata with retained sealed credentials, then passed all 21
+cases after the Windows default-flags correction. The targeted command
+`.venv/bin/python -m pytest -q tests/extension/test_telegram_windows_flags.py tests/test_windows_telegram_custody.py tests/test_wizard_windows_telegram.py`
+passed all 130 cases on macOS. Checked presence, fresh conservative defaults,
+unchanged files and C6 observation are covered without native unseal or
+enrollment. Scoped Ruff checks and strict mypy passed. Native Windows and the
+final combined full-suite run remain separate controller checks.
+
 Explicit native rerun in the selected source or installed-wheel environment
 (after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
 

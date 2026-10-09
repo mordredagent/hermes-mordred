@@ -354,7 +354,7 @@ class WindowsCustodySecretStore:
             self._publish(session, self._seal(encode(value), lease, backend), value, expected=_ANY)
 
     def flags(self) -> dict[str, Any] | None:
-        """Non-secret status flags, or ``None`` when not configured. No native call."""
+        """Non-secret flags, or ``None`` for checked sealed-file absence. No native call."""
         with _translated(), checked.transaction(self.root) as tx:
             if tx is None or not checked.present(tx, _SEALED):
                 return None
@@ -365,7 +365,7 @@ class WindowsCustodySecretStore:
             meta = json.loads(raw.decode("utf-8"))
         except ValueError:
             return dict(tee._DEFAULT_FLAGS)
-        return meta if isinstance(meta, dict) else None
+        return meta if isinstance(meta, dict) else dict(tee._DEFAULT_FLAGS)
 
     def sync_scope(self) -> dict[str, Any]:
         """The import scope chosen at setup (non-secret); empty = everything."""
