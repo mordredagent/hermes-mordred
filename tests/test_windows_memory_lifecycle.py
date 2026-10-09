@@ -178,6 +178,27 @@ def test_enable_without_memories_directory_only_arms(proof_env):
     assert markers(env.home) == {MARKER}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="host emulation of a global POSIX pytest parent")
+def test_host_lifecycle_does_not_require_the_pytest_parent_to_be_a_venv(proof_env, monkeypatch, tmp_path):
+    env = proof_env
+    module = storage()
+    parent = tmp_path / "global" / "bin" / "python"
+    parent.parent.mkdir(parents=True)
+    parent.touch()
+    assert _windows_runtime.environment_root(parent) is None
+    # Replace only storage's sys binding; the real proof child and pytest's
+    # own sys.executable stay untouched.
+    monkeypatch.setattr(module, "sys", SimpleNamespace(executable=str(parent)))
+    enroll(env)
+    proof = prove(env)
+    report = module.enable_memory_encryption(env.home, proof)
+    assert report.sealed == 0 and report.armed
+    assert markers(env.home) == {MARKER}
+    disabled = module.disable_memory_encryption(env.home, proof)
+    assert disabled.decrypted == 0 and disabled.opted_out
+    assert markers(env.home) == {OPTOUT}
+
+
 def test_keep_key_false_refuses_before_any_lock_or_mutation(proven):
     env = proven
     before = files(env.home)

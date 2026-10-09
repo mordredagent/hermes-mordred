@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -11,9 +12,17 @@ from tests.test_private_fs_processes import _line
 from tests.test_windows_encrypted_audit import audit_fs as audit_fixture  # noqa: F401
 from tests.test_windows_encrypted_audit import checked_audit_boundary, custody_fixture  # noqa: F401
 
-_CHILD = """
+# Three writers contend for real locks; slow Windows runners (2 vCPU, Defender)
+# need well over the old 30 s per child. A stalled writer still fails, with the
+# faulthandler stacks each child prints to stderr after STACK_DUMP_SECONDS.
+CHILDREN_DEADLINE_SECONDS = 120.0
+STACK_DUMP_SECONDS = 60
+
+_CHILD = f"""
+import faulthandler
 import sys
 
+faulthandler.dump_traceback_later({STACK_DUMP_SECONDS})
 import pytest
 from pathlib import Path
 from tests._windows_audit_process_fakes import ProcessBackend, install_boundaries
@@ -25,7 +34,7 @@ with windows_custody_session(home, backend=backend) as custody:
     lease=custody.lease('audit')
 backend.bind(lease.native_key_id)
 writer=WindowsAuditProvider(home, backend=backend).writer(home/'mordred'/'audit.log', rotate_bytes=800)
-for n in range(8): writer.append({'worker':sys.argv[2], 'n':n})
+for n in range(8): writer.append({{'worker':sys.argv[2], 'n':n}})
 writer.close()
 print('committed', flush=True)
 """
@@ -48,9 +57,17 @@ def test_multiprocess_append_rotation_format_and_custody_serialization(fs):
         )
         for n in range(3)
     ]
+    deadline = time.monotonic() + CHILDREN_DEADLINE_SECONDS
     try:
-        for child in children:
-            out, err = child.communicate(timeout=30)
+        for index, child in enumerate(children):
+            try:
+                out, err = child.communicate(timeout=max(1.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                stalled = []
+                for other in children[index:]:
+                    other.kill()
+                    stalled.append(other.communicate(timeout=10)[1])
+                pytest.fail("stalled audit writer children; stderr (faulthandler stacks):\n" + "\n---\n".join(stalled))
             assert child.returncode == 0, err
             assert out.strip() == "committed"
     finally:
