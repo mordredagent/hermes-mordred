@@ -143,7 +143,11 @@ def _enable(home: Path) -> None:
     """Add ``mordred`` to ``plugins.enabled`` (round-trip, locked), migrating legacy names."""
     from ..wizard.policy_writer import PolicyWriter
 
-    writer = PolicyWriter(config_path=home / "config.yaml", policy_json_path=home / "mordred" / "policy.json")
+    writer = PolicyWriter(
+        config_path=home / "config.yaml",
+        policy_json_path=home / "mordred" / "policy.json",
+        mordred_dir=home / "mordred",
+    )
     for note in writer.migrate_plugin_identity(create_missing=True).notes():
         _term.emit_warn(note)
 
