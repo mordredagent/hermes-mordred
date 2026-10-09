@@ -1213,3 +1213,53 @@ a worker thread. They prove that broken or unproven custody with an unsupported
 seam ends the process through `os._exit(1)`, and that a fresh unmanaged
 profile continues in plaintext. The native junction case asserts the
 foundation's classified `unsafe`/`ancestor_identity` refusal.
+
+### Windows network canonical decisions validation (C8)
+
+The scoped Windows job includes `test_network_windows_policy.py` and
+`test_network_windows_policy_native.py`. Host tests drive the real canonical
+coordinator, registration, session-start wrapper and request hooks with a fake
+route runtime; no Tor/VPN process or network route is started. Native cases
+use inherited-safe task-owned homes and prove that broadened ACLs, hardlinks,
+pending markers, a policy-directory junction and another process holding the
+canonical locks refuse a previously allowed decision without repairing ACLs or
+rewriting documents. Existing POSIX network suites remain required.
+
+For controller acceptance, use an ordinary non-administrator account and a
+disposable `HERMES_HOME`. Verify `mordred_hermes.__file__` in the source
+environment and again in a fresh sdist-built wheel environment, then run that
+environment's Python with:
+
+```powershell
+python -m pytest -q -o addopts= tests/test_network_windows_policy.py tests/test_network_windows_policy_native.py
+```
+
+Record source and wheel results separately in the Manual live-device
+validation log. This does not validate native Tor/VPN routes (C9), live
+provider traffic, wizard status presentation or Windows 11 product acceptance.
+### Windows capability and role reset validation (C5e)
+
+The scoped Windows job adds `test_windows_capability.py`,
+`test_windows_capability_native.py`, `test_windows_custody_reset.py` and
+`test_windows_excluded_guards.py`. Host tests use real checked transactions
+and MRKW crypto, injecting only the native backend, principal and platform
+admission. Fault injectors fail if an excluded entry point reaches `_storage`,
+anchor or backend resolution, a lock, native wrap/unwrap or plaintext capture.
+Native cases use an inherited-safe task-owned NTFS home, its case alias and a
+copied exact-private home. Their injected seams are the CNG backend, the
+gateway inventory gate, C4 helper presence and C4 structural runtime
+admission; filesystem admission, SID and physical identity are real. They
+prove checked admission and refusal, not TPM availability. Held-lock cases
+use a real lock holder in another thread or process and require predicates
+to return `custody-uncertain` promptly instead of waiting.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_windows_capability.py tests/test_windows_capability_native.py tests/test_windows_custody_reset.py tests/test_windows_excluded_guards.py
+```
+
+Capability predicates are diagnostics, not product acceptance. Real CNG reset,
+Windows 11 and C6 wizard routing remain separate gates; record native results
+in the Manual live-device validation log.

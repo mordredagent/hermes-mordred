@@ -312,6 +312,9 @@ required.
   Windows CI, live CNG, C5e predicate adoption and the separate part 2 wizard
   audit CLI remain.
 - [ ] C8: network/LLM/privacy checked readers and fail-closed cache decisions.
+  The network slice routes every Windows network decision through one checked
+  canonical generation (host-tested; native Windows source/wheel validation of
+  `tests/test_network_windows_policy_native.py` is still required).
 - [ ] C9: native Tor/VPN route behavior and process cleanup.
 - [ ] C10: extension pairing/history/Telegram storage and lifecycle.
 - [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
@@ -340,6 +343,16 @@ Implementation and acceptance remain open:
   publication receipts are implemented. Independent review, native source/wheel
   CNG and Windows 11 acceptance remain; C7b factory/CLI adoption is separate.
 - [ ] C5e: excluded file-vault refusal and flat role reset/deletion journals.
+  C5e now supplies pure capability predicates (no aggregate readiness flag),
+  pre-mutation `KeyvaultUnsupportedOnWindows` guards, retained excluded-artifact
+  reports and journaled role-specific `reset_role`. Independent review, native
+  Windows CI, real CNG/Windows 11 acceptance and C6 routing remain open.
+  Fix round 1: predicates are non-blocking; the unported `_storage` secret
+  store reports `secret_store` / `not-ported-on-windows` and refuses before
+  any mkdir. Remaining: design a checked Windows secret-store port; C6/C7b
+  must gate audit/Telegram role reset on their consumers because reset does
+  not consult the gateway inventory; C6 status/doctor must route retained
+  secret-store refusals (now raised by the Windows lifecycle-lock guard).
 - [ ] C6: explicit native-custody/audit initialization and wizard memory flows;
   preserve separate C7b privacy/CLI and C10 Telegram migrations.
 - [ ] Design and implement checked tree lifecycle before recursive cleanup;

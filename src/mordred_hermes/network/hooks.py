@@ -32,7 +32,7 @@ import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, NoReturn, cast
+from typing import Any, Final, NoReturn, cast
 
 from .._audit_support import AuditWriter as _AuditWriter
 from .._audit_support import safe_audit_append
@@ -52,7 +52,8 @@ from ._exceptions import (
     MordredPathDropped,
     PathSwitchRequiresRestart,
 )
-from .provider_transport_flagger import ProviderEntry, TransportClass, evaluate
+from ._windows_policy import NetworkDecision, read_network_decision
+from .provider_transport_flagger import ProviderEntry, evaluate
 
 _LOG = logging.getLogger("mordred.network.hooks")
 
@@ -62,19 +63,6 @@ _PROTECTED_NETWORK_PATHS: Final[frozenset[str]] = frozenset({"tor", "vpn"})
 # refusal) and ``warn`` for a warning-severity one (audited, session continues).
 _REASON_TRANSPORT_FLAG: Final[str] = "network.transport_incompatible"
 _UNRESOLVED_PROVIDER: Final[str] = "<unresolved>"
-_OVERRIDE_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "transport",
-        "respects_proxy",
-        "respects_socks5h",
-        "localhost_only",
-        "dns_quirk",
-        "unverified_baseline",
-        "transport_class",
-        "respects_ipv6_proxy",
-    }
-)
-_TRANSPORT_CLASSES: Final[frozenset[str]] = frozenset({"http", "tcp", "udp", "quic", "grpc", "websocket"})
 
 
 # --------------------------------------------------------------------------- #
@@ -105,6 +93,42 @@ def _read_default_network_path(config_path: Path) -> str:
     return settings_mod.read_default_path(config_path, log=_LOG)
 
 
+def _checked_decision(
+    *,
+    policy_json_path: Path,
+    config_path: Path,
+    audit: _AuditWriter | None,
+    event: str,
+    reason: str,
+) -> NetworkDecision | None:
+    """Read one checked Windows generation for this decision (``None`` on POSIX).
+
+    A refused read is already sanitized (no policy/config bytes or parser
+    diagnostics). It is audited with the reason this event already uses for a
+    strict configuration-read refusal, then re-raised as the BaseException
+    refusal so Hermes' ``except Exception`` hook wrappers cannot swallow it.
+    The policy mode is unknowable here, so the refusal is recorded as strict.
+    """
+    try:
+        return read_network_decision(policy_json_path, config_path)
+    except MordredPathBringupFailed as refusal:
+        if audit is not None:
+            _safe_audit_append(
+                audit,
+                {
+                    "event": event,
+                    "decision": "block",
+                    "reason": reason,
+                    "severity": "abort",
+                    "stage": "checked_policy",
+                    "policy_mode": "strict",
+                    "detail": str(refusal),
+                },
+            )
+        _LOG.error("%s: %s", event, refusal)
+        raise
+
+
 def _read_default_network_path_strict(config_path: Path) -> str:
     """Read ``default_path`` without hiding damage to an existing config.
 
@@ -129,6 +153,7 @@ def on_session_start(
     config_path: Path,
     auth_json_path: Path | None = None,
     audit: _AuditWriter | None = None,
+    _decision: NetworkDecision | None = None,
     **_kwargs: Any,
 ) -> None:
     """Validate and reuse the configured process-global default path.
@@ -147,15 +172,30 @@ def on_session_start(
       overrides, or an internal gate error. Lenient downgrades provider flags;
       off skips them. Malformed overrides and internal errors warn and continue
       in lenient/off.
+    - On Windows every input comes from one checked canonical generation
+      (``_decision`` when the registered wrapper already read it); unsafe or
+      malformed canonical state refuses before the route is touched.
     """
-    policy_mode = _read_policy_mode(policy_json_path)
-    target = _read_default_network_path(config_path)
+    decision = _decision or _checked_decision(
+        policy_json_path=policy_json_path,
+        config_path=config_path,
+        audit=audit,
+        event="on_session_start",
+        reason="network.bringup_failed",
+    )
+    if decision is not None:
+        policy_mode: str = decision.mode
+        target: str = decision.default_path
+    else:
+        policy_mode = _read_policy_mode(policy_json_path)
+        target = _read_default_network_path(config_path)
     _reuse_frozen_route(
         policy_json_path=policy_json_path,
         config_path=config_path,
         policy_mode=policy_mode,
         target=target,
         audit=audit,
+        decision=decision,
     )
 
     # FIX 1 (2026-07-13): provider-vs-transport compatibility gate. Once the
@@ -174,11 +214,17 @@ def on_session_start(
             raise ValueError(f"runtime reported invalid active path {raw_active_path!r}")
         gate_active_path = cast(ActivePath, raw_active_path)
         gate_stage = "provider_resolution"
-        gate_providers = _resolve_active_providers(config_path=config_path, auth_json_path=auth_json_path)
+        gate_providers = _resolve_active_providers(
+            config_path=config_path,
+            auth_json_path=auth_json_path,
+            decision=decision,
+        )
         gate_stage = "provider_overrides"
-        overrides = _read_provider_overrides(policy_json_path)
+        overrides = decision.provider_overrides if decision is not None else _read_provider_overrides(policy_json_path)
         gate_stage = "policy_config"
-        disable_ipv6 = _read_disable_ipv6(policy_json_path, policy_mode)
+        disable_ipv6 = (
+            decision.disable_ipv6 if decision is not None else _read_disable_ipv6(policy_json_path, policy_mode)
+        )
         gate_stage = "evaluate"
         _flag_transport_compat(
             active_path=gate_active_path,
@@ -207,6 +253,7 @@ def _reuse_frozen_route(
     policy_mode: str,
     target: str,
     audit: _AuditWriter | None,
+    decision: NetworkDecision | None,
 ) -> None:
     """Validate the activation fingerprint and reuse the process route."""
     try:
@@ -216,6 +263,7 @@ def _reuse_frozen_route(
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
             config_path=config_path,
+            _decision=decision,
         )
         api.assert_route_config(current_config)
         api.update_policy_mode(policy_mode)
@@ -379,9 +427,17 @@ def pre_api_request(
     internal evaluation errors all fail closed. A refusal keeps the current
     runtime state intact and raises :class:`MordredPathBringupFailed`, whose
     ``BaseException`` inheritance escapes Hermes's ``except Exception`` hook
-    wrappers.
+    wrappers. On Windows the whole decision uses one checked canonical
+    generation read here, so unsafe state refuses even a non-strict request.
     """
-    policy_mode = _read_policy_mode(policy_json_path)
+    decision = _checked_decision(
+        policy_json_path=policy_json_path,
+        config_path=config_path,
+        audit=audit,
+        event="pre_api_request",
+        reason=_REASON_TRANSPORT_FLAG,
+    )
+    policy_mode = decision.mode if decision is not None else _read_policy_mode(policy_json_path)
     if policy_mode != "strict":
         return
 
@@ -395,13 +451,18 @@ def pre_api_request(
     active_path: ActivePath = "tor"
     stage = "configured_path"
     try:
-        configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
+        configured_path = (
+            decision.default_path
+            if decision is not None
+            else cast(ActivePath, _read_default_network_path_strict(config_path))
+        )
         stage = "activation_config"
         from . import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
             config_path=config_path,
+            _decision=decision,
         )
         api.assert_route_config(current_config)
         stage = "status"
@@ -426,9 +487,11 @@ def pre_api_request(
             return
 
         stage = "provider_overrides"
-        overrides = _read_provider_overrides(policy_json_path)
+        overrides = decision.provider_overrides if decision is not None else _read_provider_overrides(policy_json_path)
         stage = "policy_config"
-        disable_ipv6 = _read_disable_ipv6(policy_json_path, policy_mode)
+        disable_ipv6 = (
+            decision.disable_ipv6 if decision is not None else _read_disable_ipv6(policy_json_path, policy_mode)
+        )
         stage = "evaluate"
         _flag_transport_compat(
             active_path=active_path,
@@ -471,9 +534,17 @@ def pre_tool_call(
     the same activation-config, configured-path, readiness, and drop checks as
     the provider request gate. Lenient/off retain the historical ``None``
     result; the liveness worker already audits their drops with
-    ``decision=warn``.
+    ``decision=warn``. On Windows one checked canonical generation is read
+    first; unsafe state refuses the tool in every policy mode.
     """
-    policy_mode = _read_policy_mode(policy_json_path)
+    decision = _checked_decision(
+        policy_json_path=policy_json_path,
+        config_path=config_path,
+        audit=audit,
+        event="pre_tool_call",
+        reason=_REASON_TRANSPORT_FLAG,
+    )
+    policy_mode = decision.mode if decision is not None else _read_policy_mode(policy_json_path)
     if policy_mode != "strict":
         return None
 
@@ -484,13 +555,18 @@ def pre_tool_call(
     active_path: ActivePath = "tor"
     stage = "configured_path"
     try:
-        configured_path = cast(ActivePath, _read_default_network_path_strict(config_path))
+        configured_path = (
+            decision.default_path
+            if decision is not None
+            else cast(ActivePath, _read_default_network_path_strict(config_path))
+        )
         stage = "activation_config"
         from . import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
             config_path=config_path,
+            _decision=decision,
         )
         api.assert_route_config(current_config)
         stage = "status"
@@ -624,7 +700,12 @@ def _read_auth_active_provider(auth_json_path: Path) -> str | None:
     return read_auth_active_provider(auth_json_path, log=_LOG)
 
 
-def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None) -> list[str]:
+def _resolve_active_providers(
+    *,
+    config_path: Path,
+    auth_json_path: Path | None,
+    decision: NetworkDecision | None = None,
+) -> list[str]:
     """Resolve the provider(s) Hermes will run, for the transport gate.
 
     Same resolution order as ``llm_guard._resolve_active_provider``:
@@ -636,92 +717,31 @@ def _resolve_active_providers(*, config_path: Path, auth_json_path: Path | None)
     explicit ``<unresolved>`` sentinel is returned. That sentinel follows the
     normal unknown-provider severity matrix: strict + Tor aborts, lenient +
     Tor warns, and clearnet remains informational.
+
+    On Windows ``model.provider`` comes from the checked generation. The
+    ``auth.json`` fallback is Hermes credential state outside the canonical
+    config/policy pair; it only selects which provider this refuse-only gate
+    evaluates, and ``pre_api_request`` re-evaluates the actual provider.
     """
+    config_reader = (lambda _path: decision.config_provider) if decision is not None else _read_config_model_provider
     resolved = resolve_disk_provider(
         config_path=config_path,
         auth_json_path=auth_json_path,
-        config_reader=_read_config_model_provider,
+        config_reader=config_reader,
         auth_reader=_read_auth_active_provider,
     )
     return [resolved if resolved is not None else _UNRESOLVED_PROVIDER]
 
 
 def _read_provider_overrides(policy_json_path: Path) -> dict[str, ProviderEntry]:
-    """Parse additive transport facts from ``policy.json``.
+    """Parse additive transport facts from ``policy.json`` (POSIX reader).
 
-    Missing fields take conservative defaults so an incomplete entry cannot
-    accidentally satisfy strict Tor: SOCKS5h/IPv6 support default false and
-    ``unverified_baseline`` defaults true. Invalid types and unknown fields
-    raise ``ValueError``; the caller turns that into a strict-Tor refusal or a
-    lenient/off warning. Baseline replacement remains prohibited by
-    :func:`provider_transport_flagger.evaluate`.
+    Invalid types and unknown fields raise ``ValueError``; the caller turns
+    that into a strict-Tor refusal or a lenient/off warning. The parser is
+    shared with the checked Windows reader via
+    :func:`settings.parse_provider_overrides`.
     """
-    data = load_policy_mapping(policy_json_path, log=_LOG)
-    if "provider_overrides" not in data:
-        return {}
-    raw_overrides = data["provider_overrides"]
-    if not isinstance(raw_overrides, dict):
-        raise ValueError("policy.json provider_overrides must be an object")
-
-    overrides: dict[str, ProviderEntry] = {}
-    for raw_name, raw_entry in raw_overrides.items():
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            raise ValueError("provider_overrides keys must be non-empty strings")
-        name = raw_name.strip().lower()
-        if name in overrides:
-            raise ValueError(f"provider_overrides contains duplicate normalized provider {name!r}")
-        overrides[name] = _parse_provider_override(name, raw_entry)
-    return overrides
-
-
-def _parse_provider_override(name: str, raw_entry: Any) -> ProviderEntry:
-    if not isinstance(raw_entry, dict):
-        raise ValueError(f"provider override {name!r} must be an object")
-    unknown_fields = [field for field in raw_entry if field not in _OVERRIDE_FIELDS]
-    if unknown_fields:
-        raise ValueError(f"provider override {name!r} has unsupported field {unknown_fields[0]!r}")
-
-    raw_transport = raw_entry.get("transport", "unknown")
-    if not isinstance(raw_transport, str) or not raw_transport.strip():
-        raise ValueError(f"provider override {name!r} transport must be a non-empty string")
-
-    raw_respects_proxy = raw_entry.get("respects_proxy", False)
-    if not isinstance(raw_respects_proxy, bool) and raw_respects_proxy != "partial":
-        raise ValueError(f"provider override {name!r} respects_proxy must be boolean or 'partial'")
-    respects_proxy = cast(bool | Literal["partial"], raw_respects_proxy)
-
-    raw_transport_class = raw_entry.get("transport_class", "http")
-    if not isinstance(raw_transport_class, str) or raw_transport_class not in _TRANSPORT_CLASSES:
-        raise ValueError(f"provider override {name!r} transport_class must be one of {sorted(_TRANSPORT_CLASSES)!r}")
-
-    return ProviderEntry(
-        name=name,
-        transport=raw_transport.strip(),
-        respects_proxy=respects_proxy,
-        respects_socks5h=_read_override_bool(raw_entry, name=name, field="respects_socks5h", default=False),
-        localhost_only=_read_override_bool(raw_entry, name=name, field="localhost_only", default=False),
-        dns_quirk=_read_override_bool(raw_entry, name=name, field="dns_quirk", default=False),
-        unverified_baseline=_read_override_bool(
-            raw_entry,
-            name=name,
-            field="unverified_baseline",
-            default=True,
-        ),
-        transport_class=cast(TransportClass, raw_transport_class),
-        respects_ipv6_proxy=_read_override_bool(
-            raw_entry,
-            name=name,
-            field="respects_ipv6_proxy",
-            default=False,
-        ),
-    )
-
-
-def _read_override_bool(entry: Mapping[str, Any], *, name: str, field: str, default: bool) -> bool:
-    value = entry.get(field, default)
-    if not isinstance(value, bool):
-        raise ValueError(f"provider override {name!r} {field} must be boolean")
-    return value
+    return settings_mod.parse_provider_overrides(load_policy_mapping(policy_json_path, log=_LOG))
 
 
 def _read_disable_ipv6(policy_json_path: Path, policy_mode: str) -> bool:
