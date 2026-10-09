@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -80,7 +81,7 @@ def test_real_store_logout_reuses_full_snapshot_once_and_keeps_archive_and_roles
     assert ops(logout.backend, "ecdh") == unwraps + 1, "the unchanged snapshot avoids a second unwrap"
     assert logout.store.flags()["logged_in"] is False
     after = tree(logout)
-    changed = {name for name in before if before[name] != after.get(name)}
+    changed = {Path(name).as_posix() for name in before if before[name] != after.get(name)}
     expected_changed = {"telegram/credentials.sealed"}
     if logged_in:
         expected_changed.add("telegram/credentials.meta.json")
