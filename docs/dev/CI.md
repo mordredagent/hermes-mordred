@@ -1362,3 +1362,17 @@ account, credential, phone number, network or model is used; failure preserves
 the profile/journals and reports only its path. Wizard ceremonies, the live
 account gate and Windows 11 remain separate; record results in the Manual
 live-device validation log.
+
+### Canonical in-process wait validation (C2b)
+
+`tests/test_config_io.py`, already in the scoped Windows job, adds
+host-portable thread cases for SPEC.md ruling R-C2b-1: two concurrent
+`blocking=False` readers in one process both succeed; a reader behind an
+in-process holder refuses `busy`/`canonical_lock` only after
+`IN_PROCESS_WAIT_SECONDS` (2.0 s, minus 50 ms timer-tick slack) and before the
+bound plus 1 s; a holder released within the bound admits the reader;
+`blocking=True` ignores the bound; and a real cross-process home or `mordred`
+lock holder (the `tests/test_private_fs_processes.py` child) still refuses
+immediately. Host result 2026-10-09 (macOS arm64, Python 3.14.7): all pass,
+and C5e held-thread predicates now return within the bound; no native Windows
+rerun is recorded yet.

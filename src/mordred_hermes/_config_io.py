@@ -34,6 +34,10 @@ from ._private_fs._types import reserved, validate_leaf, validate_limit
 
 CONFIG_LIMIT = POLICY_LIMIT = DOTENV_LIMIT = 8 * 1024 * 1024
 MARKER_LIMIT = 4096
+# Bounded wait of a ``blocking=False`` session for another thread's in-process
+# session before refusing ``busy``/``canonical_lock``. The holder is one of our
+# own short sessions; cross-process file locks stay strictly nonblocking.
+IN_PROCESS_WAIT_SECONDS = 2.0
 _Result = TypeVar("_Result")
 POLICY_TRANSACTION_MARKER = ".policy-write.pending"
 
@@ -214,7 +218,8 @@ def canonical_session(
         with _nested_session(active, paths, scope, create, blocking) as session:
             yield session
         return
-    if not _lock.acquire(blocking=blocking):
+    # Nonblocking sessions wait a bounded time here only; file locks below keep ``blocking``.
+    if not (_lock.acquire() if blocking else _lock.acquire(timeout=IN_PROCESS_WAIT_SECONDS)):
         raise PrivateFSError("busy", "canonical_lock")
     state: _State | None = None
     try:
