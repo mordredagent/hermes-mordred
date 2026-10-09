@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -163,13 +164,18 @@ def test_size_rotation_of_todays_active_log_is_reported(win, monkeypatch, capsys
     now = today()
     append_on(monkeypatch, writer, now, "a")
     append_on(monkeypatch, writer, now, "b")  # TODAY.gz holds a; the active log holds b
-    before_first_decrypt(monkeypatch, lambda: append_on(monkeypatch, writer, now, "c"))
-    assert audit_cli.decrypt(date=now) == 1
-    captured = capsys.readouterr()
-    assert "b" not in decrypted(captured.out)
-    assert f"added audit.log.{now}.1.gz" in captured.err
-    assert "replaced audit.log" in captured.err
-    assert "re-run" in captured.err
+    with contextlib.ExitStack() as stack:
+        if os.name == "posix":
+            # Keep the old inode allocated across rotation so its replacement
+            # has a different identity. Windows must allow the file's deletion.
+            stack.enter_context(win.active.open("rb"))
+        before_first_decrypt(monkeypatch, lambda: append_on(monkeypatch, writer, now, "c"))
+        assert audit_cli.decrypt(date=now) == 1
+        captured = capsys.readouterr()
+        assert "b" not in decrypted(captured.out)
+        assert f"added audit.log.{now}.1.gz" in captured.err
+        assert "replaced audit.log" in captured.err
+        assert "re-run" in captured.err
     writer.close()
     assert audit_cli.decrypt(date=now) == 0
     assert decrypted(capsys.readouterr().out) == ["a", "b", "c"]
