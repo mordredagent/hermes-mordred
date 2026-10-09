@@ -67,8 +67,18 @@ def installed_runtime(tmp_path_factory):
         shutil.copyfile(ROOT / "packaging" / "pth" / name, purelib / name)
     # Path lines only: the test venv's own .pth files (editable source) never run.
     dependencies = sorted({sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]})
+    # An editable Hermes (``pip install -e``) is imported through one of those
+    # skipped .pth hooks; expose its source root last so ``hermes_cli`` still
+    # resolves exactly as in this interpreter without running the hooks.
+    dependencies += [root for root in _hermes_source_roots() if root not in dependencies]
     (purelib / "_mordred_test_dependencies.pth").write_text("\n".join(dependencies) + "\n", encoding="utf-8")
     return python
+
+
+def _hermes_source_roots() -> list[str]:
+    import hermes_cli
+
+    return [os.path.dirname(os.path.dirname(os.path.realpath(hermes_cli.__file__)))]
 
 
 class Launches:
