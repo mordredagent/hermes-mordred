@@ -1529,3 +1529,25 @@ phone number, network or model is used; a failure keeps the profile and its
 journals and names the path. The live account gate, Desktop login (C11) and
 Windows 11 remain separate; record results in the Manual live-device
 validation log.
+
+### Windows shared Telegram memory guard validation (C10c)
+
+The scoped Windows job adds
+`tests/extension/test_telegram_memory_guard_windows.py`. It uses real C6
+checked custody and proof-bound memory with the existing injected CNG
+boundary. Native operations and subprocesses are forbidden during each guard
+check. A real second interpreter holds the canonical lock while service and
+Hermes-tool refusal retains `custody_busy` before secrets, archive or network
+access. The established POSIX guard module pins its platform seam so native
+Windows runners do not select production Windows state.
+
+Explicit rerun in the selected source or installed-wheel environment:
+
+```powershell
+python -m pytest -q -o addopts= tests/extension/test_telegram_memory_guard.py tests/extension/test_telegram_memory_guard_windows.py tests/extension/test_telegram_api.py tests/extension/test_telegram_hermes_tools.py
+```
+
+Local portable logs and the implementation report are retained under
+`~/.codex/artifacts/mordred-windows-completion-20261008/c10c-*`. These are
+regression evidence, not native Windows source/wheel or Windows 11 acceptance.
+The real-account gate and wizard completion wording remain separate work.

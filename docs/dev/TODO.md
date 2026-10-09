@@ -501,3 +501,15 @@ Implementation and acceptance remain open:
   as gone (also when the metadata read fails); orphan detection follows the
   C10b segment leaf rule. Open: a public store-error mapper in a later
   extension slice would replace the pinned wizard copy.
+
+### Windows shared Telegram memory guard follow-up (C10c)
+
+- [x] Route the shared extension/Hermes Telegram service guard through C6's
+  load-only Windows memory target and retain `custody_busy` on canonical
+  contention. This supersedes the C6-telegram shared-guard routing gap above.
+- [x] Add checked-memory success/drift/status, unreadable/cleanup and real
+  cross-process refusal tests; include the portable module in Windows CI.
+- [ ] Repeat the selected guard and shared-service tests in native Windows
+  source and sdist-derived wheel environments; retain the real Telegram
+  account and Windows 11 acceptance gates. Wizard setup completion wording
+  remains a separate wizard slice; C10c changes no wizard user flow.

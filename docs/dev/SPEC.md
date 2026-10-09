@@ -3117,3 +3117,28 @@ including the live session, untouched, but a lost native key still has no
 wizard recovery path. A missing helper refuses forget even when no role
 exists (C5e reports `helper-missing` in place of `not-enrolled`); this is fail
 closed.
+
+### Windows shared Telegram memory guard (C10c)
+
+This extension consumer closes the shared memory-guard routing gap recorded
+under C6-telegram. On `win32`, both public guard interfaces use one classified
+load-only decision: a nonblocking canonical policy session encloses C6
+`_windows_memory.observe(home, blocking=False)` and
+`_windows_status.memory_target_status`. The checked scan consumes
+`WindowsCustodySession.memory_state()`; it never unwraps a key, enrolls custody,
+issues an installed-runtime proof or starts a process.
+
+Armed, managed Windows memory with a helper and no plaintext drift, broken
+seal or interrupted staging is allowed, including an empty memory directory.
+Unmanaged, enrolled-only, opted-out, unsafe or unreadable state is refused.
+`memory_encryption_active(home=None)` stays a fail-closed boolean;
+`require_memory_encryption(home=None)` raises `MemoryEncryptionRequired` with
+`custody_busy` for transient canonical contention and
+`memory_encryption_required` for other unavailable or inactive state. A lock
+cleanup failure cannot authorize Telegram access. Each call scans once.
+
+The shared service preserves this code through sync, dialogs and questions
+before secrets, archive or network access, and its existing error mapper
+retains it for extension and Hermes-tool transport. POSIX status routing and
+the public signatures are unchanged. This slice imports no Desktop code and
+does not establish native Windows, live-account or Windows 11 acceptance.
