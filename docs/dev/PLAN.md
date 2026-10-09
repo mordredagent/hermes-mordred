@@ -1575,3 +1575,36 @@ and in the scoped Windows CI job with the native backend;
 `tests/extension/test_extension_windows_storage_native.py` adds inherited and
 broadened ACLs, hardlinks, a junction and a lock held by another process.
 Native source/wheel acceptance is a controller gate.
+### Windows Telegram custody and archive (C10b)
+
+Contract: SPEC.md §Windows Telegram credential custody and checked archive
+(C10b). Scope is `extension/telegram/` only: new `windows_secrets.py`
+(`WindowsCustodySecretStore`, `forget_telegram`) and `_windows_archive.py`
+(checked directory admission, bounded reads, staged publication, sync lock,
+validated wipe plan), plus win32 dispatch in `store.py`, the
+`tee.default_secret_store()` seam used by `service.py` and `hermes_tools.py`,
+and fail-closed guards for the raw POSIX directory helper and the file-vault
+store. `tee.py` shares its MTC1 pack/unpack and metadata builders with the
+Windows store (byte-identical macOS/Linux behavior). No keyvault, wizard,
+Desktop, pairing or history change; the C5a/C5e role API sufficed.
+
+The sync lock lives in a dedicated `telegram/sync-lock` directory because
+private transactions are thread-bound and the sync spans asyncio worker
+threads: holding the data directory's own lock for a whole sync would block
+every status read and archive write. Wipe nests telegram then dialogs (the
+global order; no writer takes them in reverse) so the whole plan is validated
+before the first deletion. Archive I/O never takes the canonical home/mordred
+locks; credential I/O always does, which serializes read-modify-write.
+
+Validation: portable `test_windows_telegram_custody.py` and
+`test_windows_telegram_archive.py` use real checked transactions, MRKW and
+MTC1/MTG1 crypto with an injected native backend, SID and platform admission;
+POSIX mode/symlink/copied-tree stand-ins skip on Windows. Host-skipped
+`test_windows_telegram_native.py` covers an inherited-safe home and its case
+alias, an inherited (non-private) telegram directory, a broadened sealed-file
+ACL, a hardlinked archive file, a dialogs junction and a sync lock held by
+another process. `test_windows_telegram_live.py` is the gated real-CNG recipe
+on a fresh UUID profile with synthetic credentials and archive. All but the
+live module join the scoped Windows CI job. Remaining gates: the wizard
+telegram enrollment/login/logout routing (C6-telegram), Desktop adoption of
+the seam and presence opt-out (C11), the live account gate and Windows 11.

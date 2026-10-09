@@ -48,7 +48,7 @@ from .memory_guard import MemoryEncryptionRequired
 from .readonly import ReadOnlyViolation, RequestPolicy
 from .secrets import TelegramSecrets, TelegramSecretsError
 from .store import ArchiveStore, StoreError
-from .tee import TeeSecretStore
+from .tee import default_secret_store
 
 _log = logging.getLogger(__name__)
 
@@ -228,8 +228,9 @@ class TelegramService:
         installed: Callable[[], bool] = telethon_available,
         memory_guard: Callable[[], None] | None = None,
     ) -> None:
-        # Enclave-sealed; every load() is a fresh Secure Enclave unwrap.
-        self._secrets = secret_store if secret_store is not None else TeeSecretStore()
+        # Hardware-sealed (Enclave/TPM, or the Windows custody telegram role);
+        # every load() is a fresh native unwrap.
+        self._secrets = secret_store if secret_store is not None else default_secret_store()
         if secret_store is None:
             from .hardening import harden_process
 
@@ -425,8 +426,13 @@ class TelegramService:
             if client is not None:
                 with contextlib.suppress(Exception):
                     await client.disconnect()
-            lock.__exit__(None, None, None)
-            self._progress.finished_at = int(time.time())
+            try:
+                lock.__exit__(None, None, None)
+            except StoreError as exc:
+                # A classified lock-release failure is reported, never lost.
+                self._last_error = self._last_error or exc.code
+            finally:
+                self._progress.finished_at = int(time.time())
 
     async def cancel_sync(self) -> None:
         task = self._sync_task

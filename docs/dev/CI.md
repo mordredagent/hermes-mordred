@@ -1328,3 +1328,33 @@ Record source and wheel results separately in the Manual live-device
 validation log. This does not validate Telegram custody/archive (C10b), the
 gateway/Desktop lifecycle (C11), a real browser extension pairing, or
 Windows 11 product acceptance.
+### Windows Telegram custody and archive validation (C10b)
+
+The scoped Windows job adds `test_windows_telegram_custody.py`,
+`test_windows_telegram_archive.py` and `test_windows_telegram_native.py`.
+Host tests use real checked transactions, MRKW and MTC1/MTG1 crypto, injecting
+only the native backend, token SID and platform admission; POSIX
+mode/symlink/copied-tree stand-ins skip on Windows. Native cases use an
+inherited-safe task-owned home, its case alias, an inherited non-private
+telegram directory, a broadened ACL, a hardlink, a dialogs junction and a sync
+lock held by another process, and require refusal without ACL repair or
+deletion. Their injected CNG backend does not establish TPM acceptance.
+
+Explicit native rerun in the selected source or installed-wheel environment
+(after checking `mordred_hermes.__file__`, with a task-local `HERMES_HOME`):
+
+```powershell
+python -m pytest -q -o addopts= tests/test_windows_telegram_custody.py tests/test_windows_telegram_archive.py tests/test_windows_telegram_native.py
+```
+
+Optional real-CNG acceptance requires BOTH `MORDRED_TEST_WINDOWS_TELEGRAM_LIVE=1`
+and `MORDRED_WINDOWS_CUSTODY_TEST_ROOT` pointing to an existing isolated
+retained root; run that environment's Python with
+`python -m pytest -q -o addopts= -m integration tests/test_windows_telegram_live.py`.
+Each run creates a UUID profile, enrolls a fresh CNG `telegram` role, checks
+the presence refusal, seals synthetic credentials, writes a synthetic archive,
+reloads both in a fresh process and runs the forget ceremony. No Telegram
+account, credential, phone number, network or model is used; failure preserves
+the profile/journals and reports only its path. Wizard ceremonies, the live
+account gate and Windows 11 remain separate; record results in the Manual
+live-device validation log.

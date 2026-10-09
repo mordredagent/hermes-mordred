@@ -582,3 +582,23 @@ reparse points are refused without repair, adoption or migration; earlier
 Windows builds could not pass the POSIX mode checks, so no mixed-version lock
 compatibility is claimed. See
 [the component contract](SPEC.md#windows-extension-checked-state-c10a).
+
+### Windows Telegram paths (C10b)
+
+On Windows the files in `<home>/mordred/telegram/` keep their names, formats
+and roles; only their custody and storage change. `credentials.sealed` wraps
+its data key to the C5a custody `telegram` role (logical id
+`mordred-hermes.telegram.credentials.v1`, profile-scoped CNG selector) instead
+of a Secure Enclave key, so there is no `<home>/mordred/keyvault/sekey/` blob.
+`telegram/` and `telegram/dialogs/` are exact-private checked directories with
+the permanent `.mordred-fs.lock` and `.gitignore`. The POSIX `.lock` file is
+not used: the sync lock is the permanent `.mordred-fs.lock` of the private
+directory `telegram/sync-lock/`, always taken non-blocking. Foundation staging
+names may appear and are never removed by glob.
+
+`logout --forget` (`store.wipe_archive(forget=True)`) deletes only the
+enumerated, validated `dialogs/<hmac>.enc`, `index.enc`, `credentials.sealed`
+and `credentials.meta.json`, then resets only the custody `telegram` role
+(`mordred/windows-custody.json` and `mordred/windows-telegram.pending.json`).
+Directories, `.gitignore`, locks, unknown files and the memory/audit roles
+stay. See [the component contract](SPEC.md#windows-telegram-credential-custody-and-checked-archive-c10b).
