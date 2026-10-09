@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import contextlib
+import hashlib
 import json
 import os
 import queue
@@ -85,8 +86,26 @@ def posture(path: Path) -> object:
     return stat.S_IMODE(os.lstat(path).st_mode)
 
 
-def snapshot(directory: Path) -> dict[str, bytes]:
-    return {entry.name: entry.read_bytes() for entry in sorted(directory.iterdir()) if entry.is_file()}
+def sha(data: bytes | str) -> str:
+    """Compare secrets (PEM, aes_key, ext_token) only through digests in asserts."""
+    return hashlib.sha256(data.encode() if isinstance(data, str) else data).hexdigest()
+
+
+def file_sha(path: Path) -> str:
+    return sha(path.read_bytes())
+
+
+def snapshot(directory: Path) -> dict[str, str]:
+    return {entry.name: file_sha(entry) for entry in sorted(directory.iterdir()) if entry.is_file()}
+
+
+def token_is_valid(token: str) -> bool:
+    return pairing.validate_token(token)
+
+
+def loaded_token_sha() -> str | None:
+    loaded = pairing.load_pairing()
+    return None if loaded is None else sha(loaded.ext_token)
 
 
 def p256_public_key_b64() -> str:
@@ -138,7 +157,8 @@ def operations(token: str) -> dict[str, Callable[[], object]]:
 
 
 def test_handshake_state_and_history_use_the_checked_directory(paired: dict[str, Any], home: Path) -> None:
-    assert pairing.validate_token(paired["ext_token"]) is True
+    valid = token_is_valid(paired["ext_token"])
+    assert valid is True
     assert pairing.has_webauthn_credential() is True
     assert history.load_history().status == history.STATUS_OK
     names = sorted(entry.name for entry in ext(home).iterdir())
@@ -261,20 +281,24 @@ def test_posix_tolerant_storage_is_unreachable_on_windows(home: Path, monkeypatc
     ]:
         monkeypatch.setattr(owner, name, forbidden)
     monkeypatch.setattr(pairing, "os", ForbiddenModule())
+    # A present wallet selection, so the checked wallet fingerprint stats it.
+    put(ext(home), "wallet.json", b"{}")
     with forbid_raw_extension_paths(ext(home)):
         _exercise_every_storage_operation()
 
 
 def _exercise_every_storage_operation() -> None:
     result = handshake()
-    assert pairing.validate_token(result["ext_token"])
+    valid = token_is_valid(result["ext_token"])
+    assert valid
     assert pairing.attest_pubkey_spki_b64()
     pairing.save_channel_key("C1", b"\x01" * 32)
     assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
     assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is True
     pairing.save_webauthn_credential("cred-1", p256_public_key_b64(), origin=ORIGIN)
     assert pairing.has_webauthn_credential()
-    assert pairing.authentication_generation_fingerprint(result["ext_token"]) is not None
+    generation = pairing.authentication_generation_fingerprint(result["ext_token"])
+    assert generation is not None
     pairing.clear_webauthn_credential()
     history.save_messages([{"role": "user", "content": "hello"}])
     assert history.projected_history().turns == [{"role": "user", "content": "hello"}]
@@ -283,6 +307,8 @@ def _exercise_every_storage_operation() -> None:
     assert pairing.revoke_code(code) is True
     assert pairing.pair_outcome(code) == ("failed", "cancelled")
     assert pairing.code_consumed(code) is True
+    wallet_fingerprint = extension_wallet._wallet_config_fingerprint()
+    assert len(wallet_fingerprint) == 5 and str(wallet_fingerprint[0]).endswith("wallet.json")
     pairing.clear_pairing()
     assert pairing.load_pairing() is None
 
@@ -349,15 +375,17 @@ def test_broadened_file_refuses_without_repair(paired: dict[str, Any], home: Pat
 
 def test_unsafe_attestation_key_refuses_pairing_and_records_the_reason(paired: dict[str, Any], home: Path) -> None:
     os.link(ext(home) / "attest_key.pem", ext(home) / "alias")
-    key_before = (ext(home) / "attest_key.pem").read_bytes()
+    key_before = file_sha(ext(home) / "attest_key.pem")
     code, _expires = pairing.generate_code()
     ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
     with pytest.raises(pairing.PairError) as error:
         pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
     assert error.value.reason == "storage_unavailable"
     assert pairing.pair_outcome(code) == ("failed", "storage_unavailable")
-    assert (ext(home) / "attest_key.pem").read_bytes() == key_before
-    assert pairing.validate_token(paired["ext_token"]) is True
+    key_after = file_sha(ext(home) / "attest_key.pem")
+    assert key_after == key_before
+    valid = token_is_valid(paired["ext_token"])
+    assert valid is True
 
 
 def test_oversized_state_refuses_without_replacement(paired: dict[str, Any], home: Path) -> None:
@@ -366,7 +394,8 @@ def test_oversized_state_refuses_without_replacement(paired: dict[str, Any], hom
     for operation in (pairing.load_pairing, lambda: pairing.save_channel_key("C1", b"\x01" * 32)):
         with pytest.raises(storage.ExtensionStorageError):
             operation()
-    assert (ext(home) / "state.json").read_bytes() == huge
+    stored, expected = file_sha(ext(home) / "state.json"), sha(huge)
+    assert stored == expected
 
 
 def test_oversized_write_refuses_before_touching_storage(home: Path) -> None:
@@ -395,13 +424,15 @@ def test_corrupt_or_truncated_state_refuses_and_is_never_reset(
     with pytest.raises(RuntimeError) as error:
         operations(paired["ext_token"])[operation]()
     assert not isinstance(error.value, storage.ExtensionStorageError)
-    assert (ext(home) / name).read_bytes() == payload
+    stored, expected = file_sha(ext(home) / name), sha(payload)
+    assert stored == expected
 
 
 def test_undecryptable_history_keeps_its_status_and_blob(paired: dict[str, Any], home: Path) -> None:
     put(ext(home), "history.enc", b"truncated")
     assert history.load_history().status == history.STATUS_UNDECRYPTABLE
-    assert (ext(home) / "history.enc").read_bytes() == b"truncated"
+    stored, expected = file_sha(ext(home) / "history.enc"), sha(b"truncated")
+    assert stored == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -409,16 +440,45 @@ def test_undecryptable_history_keeps_its_status_and_blob(paired: dict[str, Any],
 # --------------------------------------------------------------------------- #
 
 
-def test_lost_attestation_key_refuses_instead_of_regenerating(paired: dict[str, Any], home: Path) -> None:
+def test_lost_attestation_key_refuses_with_a_classified_reason(paired: dict[str, Any], home: Path) -> None:
     checked_delete(ext(home), "attest_key.pem")
-    with pytest.raises(RuntimeError, match="attestation identity is missing"):
+    with pytest.raises(pairing.PairError) as direct:
         pairing.attest_pubkey_spki_b64()
+    assert direct.value.reason == "attestation_key_missing"
     code, _expires = pairing.generate_code()
     ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    with pytest.raises(RuntimeError, match="attestation identity is missing"):
+    with pytest.raises(pairing.PairError) as handshake_error:
         pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
+    assert handshake_error.value.reason == "attestation_key_missing"
+    assert pairing.pair_outcome(code) == ("failed", "attestation_key_missing")
     assert not (ext(home) / "attest_key.pem").exists()
-    assert pairing.validate_token(paired["ext_token"]) is True
+    still_paired = pairing.validate_token(paired["ext_token"])
+    assert still_paired is True
+
+
+def test_lost_attestation_key_is_reported_through_pair_fail(paired: dict[str, Any], home: Path) -> None:
+    checked_delete(ext(home), "attest_key.pem")
+    code, _expires = pairing.generate_code()
+    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
+    frame = {
+        "id": "p1",
+        "type": "pair_init",
+        "code": code,
+        "ext_pubkey": ext_pub,
+        "challenge": xc.b64u_encode(b"\x11" * 32),
+    }
+    reply = _dispatch(_connection(), frame)
+    assert reply == {"id": "p1", "type": "pair_fail", "reason": "attestation_key_missing"}
+
+
+def test_lost_attestation_key_recovers_by_unpairing_then_pairing(paired: dict[str, Any], home: Path) -> None:
+    checked_delete(ext(home), "attest_key.pem")
+    pairing.clear_pairing()
+    result = handshake()
+    repaired = pairing.validate_token(result["ext_token"])
+    old_rejected = pairing.validate_token(paired["ext_token"])
+    assert repaired is True and old_rejected is False
+    assert (ext(home) / "attest_key.pem").exists()
 
 
 def test_attestation_key_is_created_once_by_concurrent_threads(home: Path) -> None:
@@ -435,9 +495,10 @@ def test_attestation_key_is_created_once_by_concurrent_threads(home: Path) -> No
     for thread in threads:
         thread.join(timeout=30)
     assert len(results) == 4 and len(set(results)) == 1
-    pem = (ext(home) / "attest_key.pem").read_bytes()
+    pem_before = file_sha(ext(home) / "attest_key.pem")
     assert pairing.attest_pubkey_spki_b64() == results[0]
-    assert (ext(home) / "attest_key.pem").read_bytes() == pem
+    pem_after = file_sha(ext(home) / "attest_key.pem")
+    assert pem_after == pem_before
 
 
 def test_attestation_key_after_unpair_is_a_fresh_identity(paired: dict[str, Any], home: Path) -> None:
@@ -472,7 +533,8 @@ def test_state_cache_is_reused_for_an_unchanged_checked_identity(
 
 def test_state_cache_rereads_a_replaced_identity_with_same_size_and_mtime(paired: dict[str, Any], home: Path) -> None:
     state = ext(home) / "state.json"
-    assert pairing.load_pairing().ext_token == paired["ext_token"]
+    before_replacement, original_token = loaded_token_sha(), sha(paired["ext_token"])
+    assert before_replacement == original_token
     raw = state.read_bytes()
     original = os.stat(state)
     data = json.loads(raw)
@@ -482,7 +544,8 @@ def test_state_cache_rereads_a_replaced_identity_with_same_size_and_mtime(paired
     put(ext(home), "state.json", replacement)
     os.utime(state, ns=(original.st_atime_ns, original.st_mtime_ns))
     assert (os.stat(state).st_size, os.stat(state).st_mtime_ns) == (original.st_size, original.st_mtime_ns)
-    assert pairing.load_pairing().ext_token == data["ext_token"]
+    after_replacement, replacement_token = loaded_token_sha(), sha(data["ext_token"])
+    assert after_replacement == replacement_token
 
 
 def test_state_cache_never_serves_after_a_security_change(paired: dict[str, Any], home: Path) -> None:
@@ -664,7 +727,8 @@ def _dispatch(conn: extension_api._Connection, frame: dict[str, Any]) -> dict[st
 def test_api_surfaces_unsafe_storage_instead_of_empty_state(paired: dict[str, Any], home: Path) -> None:
     pairing.clear_webauthn_credential()
     conn = _connection()
-    assert _dispatch(conn, {"type": "auth", "ext_token": paired["ext_token"]})["type"] == "auth_ok"
+    authenticated = _dispatch(conn, {"type": "auth", "ext_token": paired["ext_token"]})
+    assert authenticated["type"] == "auth_ok"
 
     os.link(ext(home) / "history.enc", ext(home) / "alias")
     assert _dispatch(conn, {"id": "h1", "type": "history_get"}) == {
@@ -687,10 +751,8 @@ def test_api_surfaces_unsafe_storage_instead_of_empty_state(paired: dict[str, An
     challenge = fresh.ws.sent[-1]  # type: ignore[attr-defined]
     assert challenge["webauthn_required"] is True
     assert challenge["storage_error"] == "storage_unavailable"
-    assert _dispatch(fresh, {"type": "auth", "ext_token": paired["ext_token"]}) == {
-        "type": "auth_fail",
-        "reason": "storage_unavailable",
-    }
+    refused = _dispatch(fresh, {"type": "auth", "ext_token": paired["ext_token"]})
+    assert refused == {"type": "auth_fail", "reason": "storage_unavailable"}
     assert _dispatch(fresh, {"id": "p1", "type": "pair_init", "code": CODE, "ext_pubkey": "x", "challenge": "y"}) == {
         "id": "p1",
         "type": "pair_fail",
@@ -779,9 +841,10 @@ pairing._commit_pairing(sys.argv[1], pairing.Pairing(b"\\x05" * 32, sys.argv[2],
 print("committed", flush=True)
 """,
     "reader": """
+import hashlib
 for _ in range(25):
     loaded = pairing.load_pairing()
-    print("none" if loaded is None else loaded.ext_token, flush=True)
+    print("none" if loaded is None else hashlib.sha256(loaded.ext_token.encode()).hexdigest(), flush=True)
 """,
 }
 
@@ -870,6 +933,8 @@ def test_commit_and_reader_race_never_observes_partial_state(home: Path) -> None
     token = "T" * 43
     commit, reader = _race(home, [("commit", [code, token]), ("reader", [])])
     assert commit[-1] == "committed"
-    assert len(reader) == 25 and set(reader) <= {"none", token}
-    assert pairing.load_pairing().ext_token == token
+    token_digest = sha(token)
+    assert len(reader) == 25 and set(reader) <= {"none", token_digest}
+    committed_token = loaded_token_sha()
+    assert committed_token == token_digest
     assert pairing.pair_outcome(code) == ("paired", None)

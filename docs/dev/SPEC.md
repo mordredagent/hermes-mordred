@@ -1121,8 +1121,9 @@ identities, revocation and pairing commits keep their POSIX read-modify-write
 order under that one transaction; nested same-thread calls reuse it because
 the foundation lock is not reentrant.
 
-Only a checked missing directory or file is absence, and reads never create
-the directory. Unsafe, inaccessible, oversized, hard-linked, reparse or
+Only a checked missing directory or file is absence. Reads never create the
+directory or state files; an admitted directory without `.mordred-fs.lock`
+receives the private lock file. Unsafe, inaccessible, oversized, hard-linked, reparse or
 otherwise unadmitted state refuses with a content-free `ExtensionStorageError`
 (`storage_unavailable`), without chmod, ACL repair or adoption. A refusal or
 cleanup failure after any mutation in the same operation, or an uncertain
@@ -1137,7 +1138,12 @@ WebAuthn removal after a committed re-pair) are logged rather than raised.
 
 The attestation key is created once, exclusively, under the lock. A checked
 absence while `state.json` holds an active pairing refuses instead of minting a
-new identity. The `state.json` parse cache keys on directory and file identity,
+new identity, with the dedicated reason `attestation_key_missing` reported by
+`pair_fail` and `pair_outcome`. Recovery is explicit: remove the pairing, then
+pair again; the new pairing presents a new attestation identity that the
+extension must trust anew. No operator unpair command exists yet; until one
+does, call `mordred_hermes.extension.pairing.clear_pairing()` from the Hermes
+environment's Python with the same `HERMES_HOME`. The `state.json` parse cache keys on directory and file identity,
 size and mtime and performs a checked stat for every read, so security drift
 refuses and a replaced identity is re-parsed. The extension wallet snapshot
 fingerprint is a checked stat under the same lock; wallet persistence remains

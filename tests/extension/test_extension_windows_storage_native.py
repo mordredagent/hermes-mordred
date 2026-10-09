@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import queue
 import subprocess
@@ -27,8 +28,13 @@ def icacls(path: Path) -> bytes:
     return subprocess.check_output(["icacls.exe", str(path)])
 
 
-def contents(directory: Path) -> dict[str, bytes]:
-    return {entry.name: entry.read_bytes() for entry in sorted(directory.iterdir()) if entry.is_file()}
+def contents(directory: Path) -> dict[str, str]:
+    """File digests only: never place PEM/aes_key/ext_token bytes in assert operands."""
+    return {
+        entry.name: hashlib.sha256(entry.read_bytes()).hexdigest()
+        for entry in sorted(directory.iterdir())
+        if entry.is_file()
+    }
 
 
 @pytest.fixture
@@ -66,7 +72,8 @@ def refused_operations() -> list[Callable[[], object]]:
 
 
 def test_native_round_trip_keeps_exact_private_descriptors(paired: str, home: Path) -> None:
-    assert pairing.validate_token(paired)
+    valid = pairing.validate_token(paired)
+    assert valid
     assert history.projected_history().turns == [{"role": "user", "content": "hello"}]
     names = sorted(entry.name for entry in (home / "extension").iterdir())
     assert names == [".mordred-fs.lock", "attest_key.pem", "history.enc", "pending.json", "state.json"]
@@ -129,7 +136,8 @@ def test_native_extension_junction_is_refused_without_touching_target(paired: st
     finally:
         directory.rmdir()
         target.rename(directory)
-    assert pairing.validate_token(paired)
+    valid = pairing.validate_token(paired)
+    assert valid
 
 
 _HOLDER = """

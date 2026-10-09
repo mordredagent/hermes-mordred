@@ -316,7 +316,19 @@ required.
   snapshot fingerprint through checked private storage (host-tested; native
   Windows source/wheel validation of
   `tests/extension/test_extension_windows_storage_native.py` is still required).
-  C10b Telegram custody/archive remains open.
+  C10b Telegram custody/archive remains open. Follow-ups:
+  - [ ] Wizard `extension pair`: report a checked-storage refusal from
+    `generate_code` (`storage_unavailable` / `storage_uncertain`) instead of a
+    raw traceback.
+  - [ ] Browser extension client: handle `storage_unavailable` /
+    `storage_uncertain` in `pair_fail`, `auth_fail` and `error` frames, the
+    additive `auth_challenge.storage_error`, and `attestation_key_missing`.
+  - [ ] C11: move the synchronous checked extension-storage lock off the
+    gateway event loop (challenge, auth currency check, history clear).
+  - [ ] History: explain or relieve the 64 MiB `history.enc` bound; an
+    oversized blob blocks saves until `history_clear`.
+  - [ ] Operator unpair command for the documented `attestation_key_missing`
+    recovery (today `clear_pairing()` from the Hermes Python).
 - [ ] C11: Windows Desktop installation/capabilities and gateway lifecycle.
 - [ ] C12: integrated source/wheel CI, ordinary-user Server tests, virtual
   Windows 11 installation-to-use acceptance, and required live service gates.

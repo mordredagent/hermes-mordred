@@ -557,8 +557,12 @@ On Windows the files listed in the `<home>/extension/` section above live in an
 exact-private directory checked by `_private_fs`. The permanent
 `<home>/extension/.mordred-fs.lock`, shared with the wallet selection,
 serializes pairing, attestation, WebAuthn, history and wallet access; `.lock`
-is not created. Reads create nothing; pairing mutations may create only the
-final `extension` directory beneath an existing trusted home. Foundation
+is not created. Reads never create the directory or state files; an admitted
+directory without `.mordred-fs.lock` receives the private lock file. Pairing
+mutations may create only the final `extension` directory beneath an existing
+trusted home. A missing `attest_key.pem` while `state.json` holds a pairing is
+refused (`attestation_key_missing`), never regenerated; recover by removing the
+pairing (`clear_pairing()`) and pairing again. Foundation
 staging names (`.mordred-fs-tmp-*`) may remain after a crash and are never
 glob-deleted. Existing directories or files with broader ACLs, extra links or
 reparse points are refused without repair, adoption or migration; earlier

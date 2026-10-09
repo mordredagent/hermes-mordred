@@ -213,6 +213,19 @@ class PairingStorageError(PairError):
         self.commit_state = error.commit_state
 
 
+class AttestationKeyMissing(PairError):
+    """Windows: the attestation key that signed the active pairing is absent.
+
+    The extension pinned that key, so a replacement is never minted while
+    ``state.json`` holds the pairing. Recovery is explicit: remove the pairing
+    (:func:`clear_pairing`), then pair again, which creates and presents a new
+    attestation identity.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("attestation_key_missing")
+
+
 @contextlib.contextmanager
 def _tolerated_storage_failure(what: str) -> Iterator[None]:
     """Log, never raise, a checked-storage failure of best-effort metadata.
@@ -549,8 +562,10 @@ def _load_or_create_checked_attest_key() -> ec.EllipticCurvePrivateKey:
 
     A checked absence creates a key only while no pairing is committed: the
     extension pinned the key that signed the active pairing, so a lost key
-    refuses instead of silently minting a different identity. Unsafe or
-    unreadable key files refuse through :class:`ExtensionStorageError`.
+    refuses with :class:`AttestationKeyMissing` (``pair_fail`` /
+    ``pair_outcome`` reason ``attestation_key_missing``) instead of silently
+    minting a different identity. Unsafe or unreadable key files refuse
+    through :class:`ExtensionStorageError`.
     """
     path = _ext_dir() / "attest_key.pem"
     with _state_lock():
@@ -558,7 +573,7 @@ def _load_or_create_checked_attest_key() -> ec.EllipticCurvePrivateKey:
         if pem is None:
             state = _read_json(_state_path())
             if state.get("aes_key") or state.get("ext_token"):
-                raise RuntimeError("attestation identity is missing for an existing pairing; refusing replacement")
+                raise AttestationKeyMissing
             key = ec.generate_private_key(ec.SECP256R1())
             created = key.private_bytes(
                 serialization.Encoding.PEM,
