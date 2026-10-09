@@ -66,6 +66,16 @@ class Managed:
         return FileMetadata(FileIdentity(7, b"image"), 1, 0)
 
 
+def foreign_pids(count):
+    """``count`` PIDs from 100 upward, never this process's own PID.
+
+    ``scan`` answers ``os.getpid()`` with the pytest process itself, so a
+    synthetic table containing the real PID (common on Windows, whose PIDs are
+    small multiples of four) would silently replace one fixture entry.
+    """
+    return [pid for pid in range(100, 100 + count + 1) if pid != os.getpid()][:count]
+
+
 def scan(monkeypatch, tmp_path, processes, *, replacement=None, hints=(), managed=never_inspected):
     from mordred_hermes.keyvault import _windows_processes as win
 
@@ -706,7 +716,7 @@ def test_deadline_exhaustion_during_capability_calls_is_inventory_limit(monkeypa
         return FileMetadata(FileIdentity(7, b"image"), 1, 0)
 
     managed = Managed(slow)
-    processes = [denied("svchost.exe", SYSTEM32 + "svchost.exe", pid) for pid in range(100, 100 + count)]
+    processes = [denied("svchost.exe", SYSTEM32 + "svchost.exe", pid) for pid in foreign_pids(count)]
     found = scan(monkeypatch, tmp_path, processes, managed=managed)
     assert found.state == "unknown" and any(r.endswith("inventory-limit") for r in found.reasons)
     # The admission returned after the deadline is not used, and no later PID is inspected.
@@ -715,7 +725,7 @@ def test_deadline_exhaustion_during_capability_calls_is_inventory_limit(monkeypa
 
 def test_capability_calls_count_toward_the_entry_bound(monkeypatch, tmp_path):
     managed = Managed()
-    processes = [denied("svchost.exe", SYSTEM32 + "svchost.exe", pid) for pid in range(100, 100 + 4097)]
+    processes = [denied("svchost.exe", SYSTEM32 + "svchost.exe", pid) for pid in foreign_pids(4097)]
     found = scan(monkeypatch, tmp_path, processes, managed=managed)
     assert found.state == "unknown" and found.reasons == ("scan:inventory-limit",)
     assert len(managed.calls) == 4096

@@ -1588,3 +1588,127 @@ forget must not revoke. It injects a failed checked seal-presence read after
 an observed absence to verify unknown state, no revoke and Devices advice.
 Shared `flags()` semantics remain a separate fix; Desktop corroborates
 observed absence through the existing checked transaction/presence API.
+
+### Windows native selector green-up validation (2026-10-09)
+
+The scoped Windows job and the Windows Server 2025 validation host (ordinary
+non-elevated SSH user, Medium integrity) failed on the integration head
+`412f920de` for harness and fixture reasons, not product admission. The fixes
+are test-only; no product module changed:
+
+- Child interpreters now import the package under test: `tests/_child_env.py`
+  prepends the directory the parent imported `mordred_hermes` from (the `src`
+  checkout or the wheel's site-packages) to a child `PYTHONPATH` or fixture
+  `.pth`. Source-tree runs against the Hermes venv otherwise imported the older
+  hermes-mordred installed there (extension storage race, memory process
+  lock, PowerShell installer fixtures). The Tor stub launcher also comes from
+  standalone distlib or ensurepip's bundled pip wheel when pip is absent.
+- The installed-runtime proof fixture appends `hermes_cli`'s source root when
+  Hermes is an editable install, whose import hook the path-only `.pth` lines
+  never run; `resolve_windows_python` refused the fixture venv
+  (`interpreter-invalid`) for every proof, lifecycle and wizard memory test.
+- Private fixtures with arbitrary content (malformed audit headers, history,
+  copied manifests, the hooked privacy config) are written through
+  `open_private_directory` (`tests/_private_files.py`). A raw write in a
+  protected private directory gets the creator token's default DACL, which on
+  an SSH logon carries the logon-session SID, so admission refused with
+  `private_acl` before the classification under test.
+- The unmanaged memory seam test reads UTF-8 explicitly; the synthetic process
+  tables exclude the real PID; the native crash test retries only `busy`
+  (bounded) after killing the lock holder, because Windows releases a killed
+  process's byte-range lock asynchronously; the native unrecorded-Tor test
+  matches the current refusal text.
+- Managed-image fixtures: the elevated fixture creates its junction after the
+  root is protected (created earlier it keeps an empty DACL, so the elevated
+  open failed at `open` and `rmtree` could not delete it — reproduced on the
+  host with an ordinary-user equivalent); the current-user-owned image test
+  grants the owner explicitly, because a pytest base temp created with mode
+  `0o700` by Python >= 3.13 grants an ordinary user access only through
+  `OWNER RIGHTS`, which the owner change leaves inherit-only.
+
+Host results, source environment (`PYTHONPATH=<root>\src`, Hermes venv
+`C:\Users\mordred.000\hermes-source\venv`, Python 3.11.17; Hermes 0.21.5 is an
+editable install there), per module, failed/errors before (full selector,
+97 failed, 2082 passed, 99 skipped, 45 errors) and after (focused run of the
+15 affected modules at `a18295d6b`):
+
+| Module | Before F/E | After (passed/failed/skipped) |
+|---|---|---|
+| `extension/test_extension_windows_storage.py` | 4/0 | 48/0/0 |
+| `test_config_io_windows.py` | 1/0 | 6/0/0 |
+| `test_keyvault_windows_processes.py` | 1/0 | 132/0/0 |
+| `test_network_windows_routes_native.py` | 1/4 | 6/1/2 |
+| `test_private_fs_managed_images_windows.py` | 1/0 | 4/0/14 |
+| `test_windows_encrypted_audit.py` | 11/0 | 57/0/0 |
+| `test_windows_install_powershell.py` | 10/0 | 18/0/0 |
+| `test_windows_memory_hook.py` | 3/0 | 45/0/0 |
+| `test_windows_memory_lifecycle.py` | 2/34 | 39/0/0 |
+| `test_windows_memory_native.py` | 1/0 | 5/0/0 |
+| `test_windows_memory_proof.py` | 27/0 | 43/0/0 |
+| `test_windows_privacy_audit.py` | 16/0 | 45/9/1 |
+| `test_wizard_windows_memory.py` | 9/0 | 27/0/1 |
+| `test_wizard_windows_status.py` | 8/0 | 13/0/0 |
+| `test_wizard_windows_uninstall.py` | 2/7 | 15/0/0 |
+
+The focused run totalled 10 failed, 503 passed, 18 skipped (27 min 45 s). The
+remaining failures are fixed by two follow-up commits. The old
+`unrecorded Tor` text (one) also fails on every windows-2022 job since
+`3d9c4d090`, so CI verifies that fix. The hooked privacy fixture's raw
+`config.yaml` (nine) fails only under the SSH-logon default DACL and already
+passes on windows-2022, so it still needs a native rerun; the host stopped
+before one could run. The 14 managed-image skips are the elevated or
+controller-root cases (an ordinary token without
+`MORDRED_MANAGED_IMAGE_TEST_ROOT`); the junction and teardown fix for the
+elevated runner is reasoned from the windows-2022 log and the host
+reproduction above, and windows-2022 verifies it. The wheel environment run of
+`412f920de` (82 failed, 2101 passed, 99 skipped, 41 errors) shows the same
+categories and was not rerun. `test_windows_encrypted_audit_processes.py`
+timed out in 5 of the last 15 windows-2022 jobs (passed on the host): its
+three contending children now share one 120 s deadline instead of 30 s each,
+and print faulthandler stacks after 60 s so a real stall stays diagnosable.
+
+### Hosted CI fixture follow-up (2026-10-09)
+
+PR #221 run `37909321803` at `e13e79671` supersedes the earlier assumption
+that raw `config.yaml` republishing passed on windows-2022. All three native
+cells had 2,230 passed, 84 skipped and nine setup errors: checked replacement
+correctly refused the raw creator-default file before the hook cases ran.
+The fixture now creates both config/policy files directly through checked IO
+and uses checked replacement for later updates; product admission is unchanged.
+
+The six Unix cells and the Hermes-floor job also exposed a portable proof
+fixture assumption: their pytest parent is a global setup-python interpreter,
+whereas local `uv run` uses a venv. The shared fixture now explicitly emulates
+parent storage admission only on non-Windows. Its installed proof child keeps
+structural validation and the real probe; native Windows admission and the
+independent unsupported-runtime tests remain intact. A global-parent regression
+exercises real proof-bound enable/disable without changing `sys.executable`.
+
+macOS framework Python can reexec with the same PID but a different executable
+path. Test-owned Tor sleepers now wait for final-child readiness before their
+identity is recorded. A full framework-child reproduction also exposed this
+in `StubPopen`, so the same bounded readiness gate covers that companion stub,
+retaining its bootstrap output. Early-exit/timeout/malformed-line regressions
+verify that both paths reap their child and close the ready pipe. The fixed
+readiness token accepts LF or CRLF, with a real binary-pipe CRLF regression;
+arbitrary whitespace is refused. No product identity comparison was relaxed.
+
+Host checks on macOS arm64: four initial regressions passed after RED/GREEN;
+the companion stub's two cleanup regressions also failed before its fix. The
+final Tor module passed all 67 tests with framework Python 3.13 children, and
+the Tor module plus private-pair/global-parent regressions passed 69 tests.
+The broader nine-module focused run passed 306 tests before the companion
+readiness extension; a real Python 3.11 base-parent proof/lifecycle run passed
+three tests. Reduced-extras Python 3.11 strict mypy passed all 235 source files;
+Ruff check/format and shellcheck passed.
+The final frozen full host suite exited successfully with 7,431 passed and
+204 skipped (integration tests excluded by default), at 90.08% coverage.
+Its five existing warnings concern FastAPI/Starlette, a Hermes escape sequence
+and POSIX fork use; no test failure was reported.
+
+These are host fixture checks, not new native Windows acceptance. The next
+Unix/floor and three-version Windows CI runs, the previously skipped Windows
+wheel smoke, the ordinary
+native source/wheel reruns, controller-root managed images and Windows 11 remain
+pending. The three audit writers did not time out in the inspected PR #221
+run; one successful run does not close that intermittent observation.

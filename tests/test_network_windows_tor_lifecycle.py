@@ -13,9 +13,11 @@ import contextlib
 import json
 import ntpath
 import os
+import queue
 import subprocess
 import sys
 import textwrap
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +34,7 @@ from mordred_hermes.network.paths import tor
 
 MANAGED = r"C:\Program Files\Tor Browser\Tor\tor.exe"
 UNTRUSTED = r"C:\Users\Public\Downloads\tor.exe"
+CHILD_READY_TIMEOUT = 10.0
 
 
 # --------------------------------------------------------------------------- #
@@ -61,6 +64,7 @@ STUB_TOR = textwrap.dedent(
             data = pathlib.Path(unquote(line[len("DataDirectory "):]))
     if data is not None and os.environ.get("STUB_TOR_COOKIE") == "1":
         (data / "control_auth_cookie").write_bytes(os.urandom(32))
+    print("ready", flush=True)
     print("Tor 0.4.8 (stub) opening log", flush=True)
     print("Bootstrapped 5% (conn): Connecting to a relay", flush=True)
     print("Bootstrapped 100% (done): Done", flush=True)
@@ -108,6 +112,7 @@ class StubPopen:
             bufsize=1,
         )
         self.children.append(child)
+        _wait_for_python_child(child)
         return child
 
     def reap(self) -> None:
@@ -181,13 +186,113 @@ def write_record(data_dir: Path, record: dict[str, Any] | bytes) -> None:
         txn.create_bytes(wtor.DAEMON_STATE, raw)
 
 
+def _wait_for_python_child(child: subprocess.Popen[Any]) -> None:
+    """Wait for final-Python readiness; retain bootstrap output on success."""
+    stdout = child.stdout
+    assert stdout is not None
+    ready: queue.Queue[str | bytes] = queue.Queue()
+    reader = threading.Thread(target=lambda: ready.put(stdout.readline()), daemon=True)
+    reader.start()
+    ready_ok = False
+    try:
+        try:
+            line = ready.get(timeout=CHILD_READY_TIMEOUT)
+        except queue.Empty:
+            raise AssertionError("Python child readiness timed out") from None
+        if line not in (b"ready\n", b"ready\r\n", "ready\n", "ready\r\n"):
+            raise AssertionError("Python child exited before readiness or emitted an unexpected readiness line")
+        ready_ok = True
+    except BaseException:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=10)
+        raise
+    finally:
+        reader.join(timeout=10)
+        if not ready_ok:
+            stdout.close()
+
+
 def spawn_sleeper(*args: str) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        [sys.executable, "-c", "import time\nwhile True: time.sleep(0.2)", *args],
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True)\nwhile True: time.sleep(0.2)", *args],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    _wait_for_python_child(child)
+    assert child.stdout is not None
+    child.stdout.close()
+    # Framework Python on macOS can reexec under this PID; the final child's
+    # ready line ensures executable identity is stable before record capture.
+    return child
+
+
+@pytest.mark.parametrize(
+    "script, message",
+    [
+        ("raise SystemExit(7)", "exited before readiness"),
+        ("import time; time.sleep(30)", "readiness timed out"),
+        ("import time; print(' ready ', flush=True); time.sleep(30)", "unexpected readiness line"),
+    ],
+    ids=["early-exit", "timeout", "malformed"],
+)
+@pytest.mark.parametrize("launch_kind", ["sleeper", "stub"])
+def test_python_child_readiness_failure_reaps_child_and_closes_pipe(
+    monkeypatch, launcher, script, message, launch_kind
+):
+    real_popen = subprocess.Popen
+    children = []
+
+    def launch(argv, **kwargs):
+        child = real_popen([sys.executable, "-c", script], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setitem(globals(), "CHILD_READY_TIMEOUT", 0.1 if message == "readiness timed out" else 10.0)
+    try:
+        with pytest.raises(AssertionError, match=message):
+            if launch_kind == "sleeper":
+                spawn_sleeper()
+            else:
+                launcher([MANAGED])
+        [child] = children
+        assert child.poll() is not None
+        assert child.stdout.closed
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+            if child.stdout is not None:
+                child.stdout.close()
+
+
+def test_sleeper_accepts_the_windows_crlf_ready_line(monkeypatch):
+    real_popen = subprocess.Popen
+    children = []
+    script = (
+        "import sys, time; sys.stdout.buffer.write(b'ready\\r\\n'); sys.stdout.flush()\nwhile True: time.sleep(0.2)"
+    )
+
+    def launch(argv, **kwargs):
+        child = real_popen([sys.executable, "-c", script], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    try:
+        child = spawn_sleeper()
+        assert child.poll() is None
+        assert child.stdout.closed
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+            if child.stdout is not None:
+                child.stdout.close()
 
 
 def identity_record(

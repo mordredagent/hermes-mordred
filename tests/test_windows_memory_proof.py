@@ -67,8 +67,18 @@ def installed_runtime(tmp_path_factory):
         shutil.copyfile(ROOT / "packaging" / "pth" / name, purelib / name)
     # Path lines only: the test venv's own .pth files (editable source) never run.
     dependencies = sorted({sysconfig.get_paths()["purelib"], sysconfig.get_paths()["platlib"]})
+    # An editable Hermes (``pip install -e``) is imported through one of those
+    # skipped .pth hooks; expose its source root last so ``hermes_cli`` still
+    # resolves exactly as in this interpreter without running the hooks.
+    dependencies += [root for root in _hermes_source_roots() if root not in dependencies]
     (purelib / "_mordred_test_dependencies.pth").write_text("\n".join(dependencies) + "\n", encoding="utf-8")
     return python
+
+
+def _hermes_source_roots() -> list[str]:
+    import hermes_cli
+
+    return [os.path.dirname(os.path.dirname(os.path.realpath(hermes_cli.__file__)))]
 
 
 class Launches:
@@ -101,6 +111,13 @@ def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
     custody, storage, home, _ = fs
     backend = injected.backend_for(home)
     injected.emulate(monkeypatch.setattr, backend)
+    if os.name != "nt":
+        from mordred_hermes.keyvault import _memory_storage
+
+        # The pytest parent may be setup-python's global POSIX interpreter.
+        # Emulate its storage admission independently of the real installed
+        # proof child's structural validator; native Windows keeps both real.
+        monkeypatch.setattr(_memory_storage, "windows_memory_runtime_admitted", lambda executable=None: True)
     monkeypatch.setattr(_windows_processes, "inspect_windows_gateway_runtimes", known_empty)
     scratch = tmp_path / "scratch"
     scratch.mkdir(mode=0o700)
