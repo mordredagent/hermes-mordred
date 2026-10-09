@@ -27,7 +27,6 @@ from mordred_hermes.privacy_check._exceptions import AuditWriterRefused, Mordred
 from mordred_hermes.privacy_check._windows_audit import WindowsPlaintextAuditWriter
 from tests import test_windows_custody
 from tests._private_files import write_private
-from tests.test_windows_privacy_policy import write_pair
 
 custody_fixture = test_windows_custody.fs
 
@@ -684,18 +683,45 @@ def test_keyvault_probe_is_unsupported_without_file_vault_reads_on_windows(monke
 # --- hook wiring ---------------------------------------------------------------------
 
 
-def write_private_pair(home: Path, **kwargs: str) -> None:
-    """``write_pair`` for a checked private home (the custody ``fs`` home).
-
-    ``write_pair`` writes ``config.yaml`` raw, which suits an inherited-safe
-    Hermes home. Here the home is a protected private directory without
-    inheritable ACEs, so a raw file would carry the creator token's default
-    DACL (on an SSH logon a logon-session SID) and the canonical reader would
-    refuse it before the case under test; republish it privately instead.
-    """
-    write_pair(home, **kwargs)
+def test_private_policy_pair_is_checked_on_creation_and_update(fs, monkeypatch):
+    _, _, home, _ = fs
     config = home / "config.yaml"
-    write_private(config, config.read_bytes())
+    with open_private_directory(home / "mordred", create=True):
+        pass
+    raw_write = Path.write_text
+
+    def refuse_raw_config(path, *args, **kwargs):
+        if path == config:
+            # POSIX write_pair chmods after writing; on Windows it leaves a
+            # creator-default DACL. Pin checked creation before either write.
+            raise AssertionError("private config must be created through checked IO")
+        return raw_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_raw_config)
+    for level in ("off", "ask"):
+        write_private_pair(home, mode="strict", level=level)
+        with open_private_directory(home) as directory:
+            actual = json.loads(directory.read_bytes("config.yaml", max_bytes=4096))
+        assert actual == {
+            "plugins": {
+                "enabled": ["mordred"],
+                "mordred_privacy_check": {"policy": "strict", "tool_egress": {"level": level}},
+            }
+        }
+        with open_private_directory(home / "mordred") as directory:
+            assert json.loads(directory.read_bytes("policy.json", max_bytes=4096)) == {"policy": "strict"}
+
+
+def write_private_pair(home: Path, *, mode: str = "off", level: str = "off") -> None:
+    """Publish directly into the checked private custody home.
+
+    A raw creator-default file cannot be admitted for checked replacement on
+    Windows; both initial creation and later updates must use the primitive.
+    """
+    section = {"policy": mode, "tool_egress": {"level": level}}
+    config = {"plugins": {"enabled": ["mordred"], "mordred_privacy_check": section}}
+    write_private(home / "config.yaml", json.dumps(config).encode("utf-8"))
+    write_private(home / "mordred" / "policy.json", json.dumps({"policy": mode}).encode("utf-8"))
 
 
 @pytest.fixture

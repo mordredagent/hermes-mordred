@@ -111,6 +111,13 @@ def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
     custody, storage, home, _ = fs
     backend = injected.backend_for(home)
     injected.emulate(monkeypatch.setattr, backend)
+    if os.name != "nt":
+        from mordred_hermes.keyvault import _memory_storage
+
+        # The pytest parent may be setup-python's global POSIX interpreter.
+        # Emulate its storage admission independently of the real installed
+        # proof child's structural validator; native Windows keeps both real.
+        monkeypatch.setattr(_memory_storage, "windows_memory_runtime_admitted", lambda executable=None: True)
     monkeypatch.setattr(_windows_processes, "inspect_windows_gateway_runtimes", known_empty)
     scratch = tmp_path / "scratch"
     scratch.mkdir(mode=0o700)

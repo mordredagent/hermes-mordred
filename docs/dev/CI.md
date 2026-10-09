@@ -1540,3 +1540,49 @@ categories and was not rerun. `test_windows_encrypted_audit_processes.py`
 timed out in 5 of the last 15 windows-2022 jobs (passed on the host): its
 three contending children now share one 120 s deadline instead of 30 s each,
 and print faulthandler stacks after 60 s so a real stall stays diagnosable.
+
+### Hosted CI fixture follow-up (2026-10-09)
+
+PR #221 run `37909321803` at `e13e79671` supersedes the earlier assumption
+that raw `config.yaml` republishing passed on windows-2022. All three native
+cells had 2,230 passed, 84 skipped and nine setup errors: checked replacement
+correctly refused the raw creator-default file before the hook cases ran.
+The fixture now creates both config/policy files directly through checked IO
+and uses checked replacement for later updates; product admission is unchanged.
+
+The six Unix cells and the Hermes-floor job also exposed a portable proof
+fixture assumption: their pytest parent is a global setup-python interpreter,
+whereas local `uv run` uses a venv. The shared fixture now explicitly emulates
+parent storage admission only on non-Windows. Its installed proof child keeps
+structural validation and the real probe; native Windows admission and the
+independent unsupported-runtime tests remain intact. A global-parent regression
+exercises real proof-bound enable/disable without changing `sys.executable`.
+
+macOS framework Python can reexec with the same PID but a different executable
+path. Test-owned Tor sleepers now wait for final-child readiness before their
+identity is recorded. A full framework-child reproduction also exposed this
+in `StubPopen`, so the same bounded readiness gate covers that companion stub,
+retaining its bootstrap output. Early-exit/timeout/malformed-line regressions
+verify that both paths reap their child and close the ready pipe. The fixed
+readiness token accepts LF or CRLF, with a real binary-pipe CRLF regression;
+arbitrary whitespace is refused. No product identity comparison was relaxed.
+
+Host checks on macOS arm64: four initial regressions passed after RED/GREEN;
+the companion stub's two cleanup regressions also failed before its fix. The
+final Tor module passed all 67 tests with framework Python 3.13 children, and
+the Tor module plus private-pair/global-parent regressions passed 69 tests.
+The broader nine-module focused run passed 306 tests before the companion
+readiness extension; a real Python 3.11 base-parent proof/lifecycle run passed
+three tests. Reduced-extras Python 3.11 strict mypy passed all 235 source files;
+Ruff check/format and shellcheck passed.
+The final frozen full host suite exited successfully with 7,431 passed and
+204 skipped (integration tests excluded by default), at 90.08% coverage.
+Its five existing warnings concern FastAPI/Starlette, a Hermes escape sequence
+and POSIX fork use; no test failure was reported.
+
+These are host fixture checks, not new native Windows acceptance. The next
+Unix/floor and three-version Windows CI runs, the previously skipped Windows
+wheel smoke, the ordinary
+native source/wheel reruns, controller-root managed images and Windows 11 remain
+pending. The three audit writers did not time out in the inspected PR #221
+run; one successful run does not close that intermittent observation.
