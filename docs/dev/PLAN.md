@@ -1867,3 +1867,25 @@ WebSocket at shutdown; the forget phrase, predicate-only helper status with an
 approval warning, `disabled-incomplete`, unknown `found`, an end-to-end enable
 proving `sys.executable`, `tests/test_desktop_capture.py`, the logged refused
 placement and a native absent-folder case through C11 code.
+
+### Windows shared Telegram memory guard execution (C10c)
+
+Scope: the extension Telegram memory guard, its regression tests, the Windows
+CI selector and append-only contract/validation notes. Both public interfaces
+share one classified decision. Windows takes a nonblocking canonical policy
+session before C6's existing observer and status projection, preserving busy
+classification before the advisory projection can erase it; POSIX retains
+the marker-based status reader. No Desktop implementation is imported.
+
+Portable tests build real C6 proof-bound empty and populated memory with
+checked custody, MRKW and AES-GCM, then forbid native, unwrap, enrollment,
+proof and process operations during the guard. Unsafe-state tests cover
+unmanaged/inert custody, opt-out, broken seals, staging, plaintext drift,
+missing helper and unreadable scans. A separate interpreter holds the real
+canonical lock while the actual shared service and Hermes tools preserve
+`custody_busy` before secret, archive or network access. Cleanup failure and
+single-scan checks guard the decision boundary. Existing POSIX guard tests
+pin their platform seam explicitly, including when run on native Windows.
+
+Native Windows source/wheel reruns, a real Telegram account and Windows 11
+acceptance remain independent completion gates.

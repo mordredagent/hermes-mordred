@@ -1580,3 +1580,25 @@ on every path and requires 7799 free afterwards, and also stops a server while
 an HTTP keep-alive client and an open WebSocket are connected, then restarts
 it on the same port (server-side TIME_WAIT on Windows without
 `SO_REUSEADDR`).
+
+### Windows shared Telegram memory guard validation (C10c)
+
+The scoped Windows job adds
+`tests/extension/test_telegram_memory_guard_windows.py`. It uses real C6
+checked custody and proof-bound memory with the existing injected CNG
+boundary. Native operations and subprocesses are forbidden during each guard
+check. A real second interpreter holds the canonical lock while service and
+Hermes-tool refusal retains `custody_busy` before secrets, archive or network
+access. The established POSIX guard module pins its platform seam so native
+Windows runners do not select production Windows state.
+
+Explicit rerun in the selected source or installed-wheel environment:
+
+```powershell
+python -m pytest -q -o addopts= tests/extension/test_telegram_memory_guard.py tests/extension/test_telegram_memory_guard_windows.py tests/extension/test_telegram_api.py tests/extension/test_telegram_hermes_tools.py
+```
+
+Local portable logs and the implementation report are retained under
+`~/.codex/artifacts/mordred-windows-completion-20261008/c10c-*`. These are
+regression evidence, not native Windows source/wheel or Windows 11 acceptance.
+The real-account gate and wizard completion wording remain separate work.

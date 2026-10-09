@@ -14,6 +14,12 @@ from mordred_hermes.wizard import telegram_cli, telegram_setup_cli
 pytestmark = pytest.mark.memory_plain
 
 
+@pytest.fixture(autouse=True)
+def posix_guard(monkeypatch):
+    # These characterize the existing POSIX path even on a native Windows runner.
+    monkeypatch.setattr(memory_guard, "sys", SimpleNamespace(platform="linux"))
+
+
 def _status(active: bool, drift: bool = False):
     return lambda home, platform: SimpleNamespace(active=active, drift=drift)
 
