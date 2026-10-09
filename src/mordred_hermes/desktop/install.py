@@ -23,16 +23,27 @@ dashboard manifest's ``name`` to the agent plugin). The folder has no
 there that could shadow the entry point. For the same reason ``uninstall``
 removes only the folder and leaves ``plugins.enabled`` alone: dropping
 ``mordred`` there would turn every Mordred protection off.
+
+On Windows the same two folders are written through the checked filesystem
+primitives (:mod:`._windows_assets`): Hermes-owned parents are admitted as
+trusted parents, Mordred's folders are checked private directories, nothing is
+repaired, and removal deletes only the enumerated files (no recursive removal),
+reporting every exact path.
 """
 
 from __future__ import annotations
 
 import argparse
 import shutil
+import sys
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..wizard import _term
+
+if TYPE_CHECKING:
+    from ._windows_assets import Removal
 
 PLUGIN_ID = "mordred"
 _PAGE_FILE = "desktop/plugin.js"
@@ -44,6 +55,24 @@ def _home() -> Path:
     from .._home import hermes_home
 
     return hermes_home()
+
+
+def _platform() -> str:
+    """The platform the placement routes on (a seam; never patch ``sys.platform``)."""
+    return sys.platform
+
+
+def _windows() -> bool:
+    return _platform() == "win32"
+
+
+def _assets() -> dict[str, bytes]:
+    root = resources.files("mordred_hermes.desktop").joinpath("assets")
+    return {rel: root.joinpath(rel).read_bytes() for rel in _FILES}
+
+
+def _quoted(path: Path) -> str:
+    return f'"{path}"'
 
 
 def plugin_dir(home: Path | None = None) -> Path:
@@ -63,9 +92,15 @@ def _targets(base: Path) -> dict[str, Path]:
 def ensure_page(home: Path | None = None) -> bool:
     """Write the page and API files that are missing or outdated; return whether any changed.
 
-    Never follows a symlinked folder, and never touches ``config.yaml``.
+    Never follows a symlinked folder, and never touches ``config.yaml``. On
+    Windows the checked placement refuses unsafe state instead (raising
+    :class:`._windows_assets.PlacementRefused`).
     """
     base = home or _home()
+    if _windows():
+        from . import _windows_assets
+
+        return _windows_assets.place(base, _assets()).changed
     assets = resources.files("mordred_hermes.desktop").joinpath("assets")
     changed = False
     for rel, destination in _targets(base).items():
@@ -100,8 +135,37 @@ def _enable(home: Path) -> None:
         _term.emit_warn(note)
 
 
+def _install_windows(base: Path) -> int:
+    from . import _windows_assets
+
+    try:
+        placement = _windows_assets.place(base, _assets())
+    except _windows_assets.PlacementRefused as exc:
+        _term.emit_error(
+            f"Mordred desktop page not installed: {exc}. Unsafe state is never repaired: fix the ownership or "
+            "ACL of that path by hand (or remove the Mordred folder there), then re-run "
+            "`hermes-mordred desktop install`."
+        )
+        return 1
+    for path in placement.written:
+        print(f"Wrote {_quoted(path)}.")
+    for path in placement.unchanged:
+        print(f"Unchanged {_quoted(path)}.")
+    for path in placement.legacy_removed:
+        print(f"Removed the legacy page {_quoted(path)}.")
+    for refusal in placement.legacy_refused:
+        _term.emit_warn(f"legacy page folder kept: {refusal}")
+    _enable(base)
+    print(f"Installed the Mordred desktop page at {_quoted(page_dir(base))}.")
+    print("Next: restart Hermes Desktop, then open “Mordred” in the sidebar")
+    print("(or Ctrl+K → “Mordred: Set up private Telegram”).")
+    return 0
+
+
 def install(home: Path | None = None) -> int:
     base = home or _home()
+    if _windows():
+        return _install_windows(base)
     ensure_page(base)
     _enable(base)
     print(f"Installed the Mordred desktop page at {page_dir(base)}.")
@@ -114,9 +178,13 @@ def remove_page(home: Path | None = None) -> bool:
     """Remove the page folder; return whether one was removed.
 
     A symlink at the folder path is left alone (this command never writes one).
-    Shared by :func:`uninstall` and ``hermes-mordred uninstall``.
+    Shared by :func:`uninstall` and ``hermes-mordred uninstall``. On Windows
+    only the enumerated files are deleted and every path is reported; a
+    refused folder is reported, never raised, so a caller's later steps run.
     """
     base = home or _home()
+    if _windows():
+        return bool(_remove_windows(base).removed)
     removed = False
     for target in (page_dir(base), plugin_dir(base)):
         if target.is_dir() and not target.is_symlink():
@@ -125,7 +193,29 @@ def remove_page(home: Path | None = None) -> bool:
     return removed
 
 
+def _remove_windows(base: Path) -> Removal:
+    from . import _windows_assets
+
+    removal = _windows_assets.remove(base)
+    for path in removal.removed:
+        print(f"Removed {_quoted(path)}.")
+    for path in removal.kept:
+        print(f"Kept {_quoted(path)} (no recursive removal on Windows).")
+    for refusal in removal.refused:
+        _term.emit_warn(f"kept, could not be checked: {refusal}; nothing there was repaired or removed.")
+    return removal
+
+
 def uninstall(home: Path | None = None) -> int:
+    if _windows():
+        removal = _remove_windows(home or _home())
+        if removal.removed:
+            print("Deleted the Mordred desktop page files listed above. Restart Hermes Desktop.")
+        else:
+            print("No Mordred desktop page file was found to delete.")
+        print("The Mordred plugin itself stays enabled; turn it off with `hermes plugins disable mordred`.")
+        print("To remove Mordred completely, run `hermes-mordred uninstall`.")
+        return 1 if removal.refused else 0
     remove_page(home)
     print("Removed the Mordred desktop page. Restart Hermes Desktop.")
     print("The Mordred plugin itself stays enabled; turn it off with `hermes plugins disable mordred`.")
@@ -133,8 +223,26 @@ def uninstall(home: Path | None = None) -> int:
     return 0
 
 
+def _status_windows(base: Path) -> int:
+    from . import _windows_assets
+
+    missing, refused = _windows_assets.missing(base)
+    for refusal in refused:
+        _term.emit_warn(f"Mordred desktop page could not be checked: {refusal}.")
+    if missing or refused:
+        if missing:
+            _term.emit_warn(
+                f"Mordred desktop page not installed (missing: {', '.join(_quoted(path) for path in missing)})."
+            )
+        return 1
+    print(f"Mordred desktop page installed at {_quoted(page_dir(base))}.")
+    return 0
+
+
 def status(home: Path | None = None) -> int:
     base = home or _home()
+    if _windows():
+        return _status_windows(base)
     missing = [str(path) for path in _targets(base).values() if not path.is_file()]
     if missing:
         _term.emit_warn(f"Mordred desktop page not installed (missing: {', '.join(missing)}).")

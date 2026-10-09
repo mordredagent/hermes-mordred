@@ -639,3 +639,18 @@ and `credentials.meta.json`, then resets only the custody `telegram` role
 (`mordred/windows-custody.json` and `mordred/windows-telegram.pending.json`).
 Directories, `.gitignore`, locks, unknown files and the memory/audit roles
 stay. See [the component contract](SPEC.md#windows-telegram-credential-custody-and-checked-archive-c10b).
+
+### Windows Desktop page paths (C11)
+
+On Windows the files in the `<home>/desktop-plugins/mordred/` and
+`<home>/plugins/mordred/` section above keep their names and roles. The
+Hermes-owned `desktop-plugins` and `plugins` folders are admitted as trusted
+parents and created only when missing; `desktop-plugins\mordred`,
+`plugins\mordred` and `plugins\mordred\dashboard` are exact-private checked
+directories with the permanent `.mordred-fs.lock`. Existing folders with an
+inherited or broadened DACL, a foreign owner, links or reparse points are
+refused and never repaired. Removal deletes only `plugin.js`, `manifest.json`,
+`plugin_api.py` and the legacy `plugins\mordred\desktop\plugin.js`; the
+folders, their locks and unknown files stay and are listed, because Windows has
+no checked recursive removal yet. See
+[the component contract](SPEC.md#windows-desktop-integration-and-extension-server-shutdown-c11).

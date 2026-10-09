@@ -466,3 +466,29 @@ Implementation and acceptance remain open:
   re-sealing `credentials.sealed` under the new generation first; otherwise
   credentials and archive become `secrets_corrupt`. Not offering rotation is
   acceptable.
+
+### Windows Desktop and gateway follow-up (C11)
+
+C11 routes the Desktop status, helper state, CNG memory enable/disable,
+Telegram custody gating, logout/forget, checked page placement/removal and the
+extension server's Windows shutdown (host-tested; native and live gates below).
+
+- [ ] Native Windows CI run of `tests/test_desktop_windows_api.py`,
+  `tests/test_desktop_windows_native.py`, `tests/test_desktop_windows_page.py`
+  and `tests/extension/test_extension_serve_shutdown.py` (CTRL_BREAK on 7799).
+- [ ] Gated real-CNG `tests/test_desktop_windows_live.py` from the Desktop
+  runtime and from an sdist-built wheel venv; real packaged Hermes Desktop
+  launch, page render, memory enable and restart; Windows 11.
+- [ ] C6-telegram: a wizard ceremony that enrolls the `telegram` role
+  (`keyvault native init` offers memory/audit only); the Desktop then sets
+  `TELEGRAM_CEREMONY_COMMAND` and stops refusing `telegram_not_enrolled`.
+- [ ] C6-telegram: a structured (step, reason) result from the wizard's
+  Windows memory verbs so the Desktop stops composing the same order itself.
+- [ ] C6-telegram: `memory_guard.memory_encryption_active` (and the wizard
+  `telegram` CLI) still report Windows memory as inactive; only the Desktop
+  and its import service use the load-only Windows state today.
+- [ ] Desktop `_hermes_venice_key` still reads `<home>/.env` with python-dotenv
+  (C3 dotenv scope).
+- [ ] Windows `extension serve` binds without `SO_EXCLUSIVEADDRUSE`; decide
+  whether loopback port hijacking by another same-user process needs it.
+- [ ] Checked recursive removal for the kept Desktop folders and locks.

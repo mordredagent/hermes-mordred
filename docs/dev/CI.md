@@ -1462,3 +1462,48 @@ profile and journals and names the path; the root is never removed
 recursively. Record source and sdist-wheel results separately in the Manual
 live-device validation log. A real `hermes gateway` start, Desktop, Telegram
 and Windows 11 installed-product acceptance remain separate gates.
+
+### Windows Desktop and extension shutdown validation (C11)
+
+The scoped Windows job adds `tests/test_desktop_windows_api.py`,
+`tests/test_desktop_windows_native.py`, `tests/test_desktop_windows_page.py`
+and `tests/extension/test_extension_serve_shutdown.py`. The API module reuses
+the installed-runtime proof harness through the C6 fixtures, with the CNG
+boundary, principal and platform admission injected. The native module places
+the Desktop page in a profile-style shared home whose name has a space and
+non-ASCII characters, with the real `win32` decision, and checks refusals without ACL repair. The shutdown
+module starts `python -m mordred_hermes.extension --port 7799` in a new process
+group, sends `CTRL_BREAK_EVENT`, requires exit 0 within 10 s, no child process
+and a free port, then restarts on the same port. A Windows venv `python.exe`
+redirects to a base-interpreter child; the test inspects that interpreter.
+`tests/test_desktop_windows_install.py` is the POSIX stand-in and skips on
+NTFS. None of this is TPM, Desktop UI or product evidence.
+
+Explicit ordinary-user acceptance uses `tests/test_desktop_windows_live.py`
+with every Hermes gateway stopped, `MORDRED_TEST_WINDOWS_DESKTOP_LIVE=1`,
+`MORDRED_WINDOWS_CUSTODY_TEST_ROOT` set to an existing retained isolated root
+and `MORDRED_WINKEY_HELPER` set to the owned helper. Run it with the Python of
+the packaged Hermes Desktop runtime, and again with an sdist-built wheel venv
+(verify `mordred_hermes.__file__`), leaving `MORDRED_HERMES_PYTHON` unset so
+the Desktop routing proves the serving interpreter:
+
+```powershell
+& <desktop-or-venv>\python.exe -m pytest -q -s -o addopts= -m integration tests/test_desktop_windows_live.py
+```
+
+Through the real Desktop router it reads `/status?client_version=3` and
+`/hardware/build`, enables memory with both acknowledgements on a new UUID
+profile (fresh CNG key), reads `/memory/status` and disables memory again; the
+profile keeps its key until `encryption purge memory --yes`. The manual part,
+recorded separately in the Manual live-device validation log, is to:
+
+1. run `hermes-mordred desktop install` and launch the packaged Hermes Desktop;
+2. open the Mordred page and record a screenshot of the capability list and
+   helper state;
+3. enable memory with all gateways stopped, then restart Desktop and confirm
+   that the memory state reads `on`;
+4. stop `extension serve` with Ctrl-C and with Ctrl-Break, then restart it on
+   the same port.
+
+Telegram stays blocked at the custody step until the C6-telegram ceremony
+exists.

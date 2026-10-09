@@ -1715,3 +1715,45 @@ the package untouched; notice assertions for ceremony, enable and setup; the
 `keyvault reset` tripwire; `classify_exception` against C5e's classification;
 and a frame-filtered spy proving no wizard frame opens, writes, renames or
 unlinks anything under the home during enable/disable/purge.
+
+### Windows Desktop and extension server (C11)
+
+The Desktop/extension slice consuming C4-C6 and C10; SPEC.md §Windows Desktop
+integration and extension server shutdown (C11) freezes the wire shapes. New
+modules keep `desktop/api.py` close to its size: `desktop/_windows.py`
+(status payload, C4 helper state, load-only memory summary, C5c typed gateway
+inventory, the composed C6 memory enable/disable steps with step/reason
+refusals, the Desktop proof routing, Telegram custody/acknowledgement gating,
+the `NoPresenceStore` wrapper and Windows logout/forget) and
+`desktop/_windows_assets.py` (checked placement, enumerated removal and
+status of the page and API shim). `api.py` only routes `win32` (status with
+`client_version >= 3`, `/hardware/build`, `/memory/enable`, the new
+`/memory/disable`, `/memory/status` and `/telegram/logout`, login and
+question-model gating, the import service's memory guard) and uses
+`default_secret_store()` on every platform. `install.py` routes placement,
+removal and status through `_platform()`. `extension/__main__.py` gains
+`_install_stop_handlers` (POSIX `add_signal_handler`, else `signal.signal`
+for `_stop_signals()` with `_threadsafe_stop`) and `_bind_failure`
+(port-in-use / port-forbidden / bind-failed). `plugin.js` adds the Windows
+page (capability list, helper, memory acknowledgements, Telegram custody,
+logout) and code-keyed labels.
+
+Tests are portable and reuse the proof slice's harness through the C6
+fixtures: `tests/test_desktop_windows_api.py` (old/new client status, no
+aggregate, no subprocess or native call, capability failure, helper states,
+acknowledgements, the enable sequence end-to-end, a refusal at every step,
+partial lifecycle failure and rerun, symmetric disable, typed inventory with
+unknown propagation, serialization, proof routing, Telegram role and
+acknowledgement gating, the store seam, the import memory guard,
+logout/forget, macOS/Linux never routed), `tests/test_desktop_windows_install.py`
+(checked placement with a frame-filtered raw-I/O spy, idempotence, enumerated
+removal, unsafe refusal without repair, legacy page, wizard step never raising),
+`tests/test_desktop_windows_page.py` (`node --check`, explicit label tables,
+no text-matched readiness) and `tests/extension/test_extension_serve_shutdown.py`
+(7799 start/stop/port release/restart with CTRL_BREAK or SIGTERM, Ctrl-C, the
+`signal.signal` fallback under a loop without `add_signal_handler`, classified
+bind failures, busy port without fallback). `tests/test_desktop_windows_native.py`
+is host-skipped NTFS placement and status; `tests/test_desktop_windows_live.py`
+is the gated real-CNG Desktop API recipe. Wizard Telegram ceremonies
+(C6-telegram), the real packaged Desktop launch and Windows 11 remain separate
+gates.
