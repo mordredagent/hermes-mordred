@@ -11,6 +11,8 @@ from dataclasses import replace
 
 import pytest
 
+pytest.importorskip("fastapi")
+
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.desktop import api
 from mordred_hermes.extension.telegram import _windows_archive, secrets, store
