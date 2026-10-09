@@ -1092,6 +1092,25 @@ behavior remains unchanged; Windows legacy mode-based writers must all be
 stopped during migration. Unsafe upstream-created Windows defaults remain
 unchanged/refused and require a separately reviewed explicit migration.
 
+Bounded in-process wait (ruling R-C2b-1). A `blocking=False` canonical
+session waits only for the process-wide in-process guard: when another thread
+of the same process holds an outermost canonical session, the reader waits at
+most `IN_PROCESS_WAIT_SECONDS` (2.0 s, a documented `_config_io` module
+constant, applied as one timed acquire with no spinning) and then refuses with
+the same `busy` / `canonical_lock` error. That holder is one of Mordred's own
+short sessions, so two gateway threads reading policy at the same moment no
+longer refuse each other. The cross-process home and Mordred file locks stay
+strictly nonblocking for `blocking=False` and refuse `busy` immediately;
+nested sessions on the same thread reuse live capabilities without waiting;
+`blocking=True` sessions still wait without bound. Long-held in-process
+writers (the wizard memory lifecycle) require stopped gateways, so they do not
+coexist with gateway readers; the accepted cost is that a nonblocking reader
+meeting a slow in-process writer can take up to the bound before refusing.
+Where this specification says runtime readers or capability predicates take
+locks nonblocking, fail closed on contention or never wait for a lock, read it
+as never waiting for a cross-process lock and waiting at most this bound for an
+in-process holder; contention outlasting the bound still fails closed.
+
 ### Windows network checked decisions (C8)
 
 Every Windows network decision reads one checked canonical generation of the

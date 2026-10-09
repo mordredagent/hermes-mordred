@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
+import time
+from contextlib import ExitStack, contextmanager
 
 import pytest
 
 from mordred_hermes import _config_io as cio
-from mordred_hermes._private_fs import FileIdentity, FileMetadata, PrivateFSError
+from mordred_hermes._private_fs import FileIdentity, FileMetadata, PrivateFSError, open_private_directory
+from tests.test_private_fs_processes import _child, _line
 
 
 class Directory:
@@ -652,3 +654,144 @@ def test_policy_backup_verification_failure_poisoned(fs):
         with pytest.raises(cio.PrivateFSError):
             session.create_policy_backup("env-removed-now.env", b"secret")
     assert error.value.commit_state == "uncertain"
+
+
+# C2b (SPEC R-C2b-1): a nonblocking session waits a bounded time for another
+# thread's in-process session; the cross-process file lock stays nonblocking.
+# Windows timed waits may end up to one timer tick before the monotonic clock
+# shows the full timeout, so the lower bound allows that tick but no more.
+TIMER_SLACK = 0.05
+EMPTY = cio.CanonicalSnapshot(None, None)
+
+
+def _hold_in_thread(paths, release):
+    held = threading.Event()
+
+    def run():
+        with cio.canonical_session(paths, scope="policy"):
+            held.set()
+            release.wait(timeout=30)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    assert held.wait(timeout=10)
+    return thread
+
+
+def test_concurrent_nonblocking_readers_in_one_process_both_succeed(fs):
+    _, paths = fs
+    start = threading.Barrier(2)
+    results, errors = [], []
+
+    def read():
+        start.wait(timeout=10)
+        try:
+            with cio.canonical_session(paths, scope="policy", blocking=False) as session:
+                time.sleep(0.3)  # keep the in-process guard held while the peer enters
+                results.append(session._pair(recovery=False))
+        except PrivateFSError as exc:
+            errors.append((exc.reason, exc.operation))
+
+    threads = [threading.Thread(target=read, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert results == [EMPTY, EMPTY]
+
+
+def test_nonblocking_reader_refuses_only_after_in_process_bound(fs):
+    _, paths = fs
+    bound = cio.IN_PROCESS_WAIT_SECONDS
+    assert bound == 2.0
+    release = threading.Event()
+    holder = _hold_in_thread(paths, release)
+    try:
+        start = time.monotonic()
+        with pytest.raises(PrivateFSError) as busy:
+            cio.read_canonical_snapshot(paths)
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+        holder.join(timeout=10)
+    assert (busy.value.reason, busy.value.operation) == ("busy", "canonical_lock")
+    assert bound - TIMER_SLACK <= elapsed < bound + 1.0
+
+
+def test_nonblocking_reader_enters_when_in_process_holder_releases_within_bound(fs):
+    _, paths = fs
+    release = threading.Event()
+    holder = _hold_in_thread(paths, release)
+    timer = threading.Timer(0.3, release.set)
+    try:
+        start = time.monotonic()
+        timer.start()
+        snapshot = cio.read_canonical_snapshot(paths)
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+        timer.cancel()
+        holder.join(timeout=10)
+    assert snapshot == EMPTY
+    assert 0.2 <= elapsed < cio.IN_PROCESS_WAIT_SECONDS
+
+
+def test_blocking_session_is_not_limited_by_in_process_bound(fs, monkeypatch):
+    _, paths = fs
+    monkeypatch.setattr(cio, "IN_PROCESS_WAIT_SECONDS", 0.05)
+    release = threading.Event()
+    holder = _hold_in_thread(paths, release)
+    timer = threading.Timer(0.3, release.set)
+    try:
+        start = time.monotonic()
+        timer.start()
+        with cio.canonical_session(paths, scope="policy") as session:
+            elapsed = time.monotonic() - start
+            assert session.read_pair() == EMPTY
+    finally:
+        release.set()
+        timer.cancel()
+        holder.join(timeout=10)
+    assert elapsed >= 0.2
+
+
+@pytest.fixture
+def private_home(monkeypatch, tmp_path):
+    """Real checked directories and process-wide file locks on any host."""
+
+    @contextmanager
+    def optional(path):
+        with ExitStack() as stack:
+            try:
+                directory = stack.enter_context(open_private_directory(path))
+            except PrivateFSError as exc:
+                if exc.reason != "missing":
+                    raise
+                directory = None
+            yield directory
+
+    for name in ("open_confidential_directory", "open_private_directory"):
+        monkeypatch.setattr(cio, name, open_private_directory)
+    for name in ("open_optional_confidential_directory", "open_optional_private_directory"):
+        monkeypatch.setattr(cio, name, optional)
+    home = tmp_path.resolve() / "home"
+    with cio.canonical_session(cio.CanonicalPaths(home), scope="policy", create=True):
+        pass
+    return home
+
+
+@pytest.mark.parametrize("held", ["home", "mordred"])
+def test_cross_process_holder_still_refuses_immediately(private_home, held):
+    paths = cio.CanonicalPaths(private_home)
+    with _child(private_home if held == "home" else private_home / "mordred", "hold") as process:
+        assert _line(process).startswith("locked ")
+        start = time.monotonic()
+        with pytest.raises(PrivateFSError) as busy:
+            cio.read_canonical_snapshot(paths)
+        elapsed = time.monotonic() - start
+    assert busy.value.reason == "busy"
+    assert busy.value.operation != "canonical_lock"
+    assert elapsed < cio.IN_PROCESS_WAIT_SECONDS / 2
+    assert cio.read_canonical_snapshot(paths) == EMPTY
