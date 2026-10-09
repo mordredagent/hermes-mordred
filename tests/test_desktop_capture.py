@@ -99,10 +99,10 @@ def test_nested_capture_in_one_thread_does_not_deadlock():
 
 @pytest.mark.parametrize("module", ["api", "_windows"])
 def test_desktop_code_has_no_raw_redirects(module):
-    from importlib import import_module
+    from importlib.util import find_spec
 
-    source = sys.modules[import_module(f"mordred_hermes.desktop.{module}").__name__].__file__
-    assert source is not None
-    with open(source, encoding="utf-8") as handle:
+    spec = find_spec(f"mordred_hermes.desktop.{module}")
+    assert spec is not None and spec.origin is not None
+    with open(spec.origin, encoding="utf-8") as handle:
         text = handle.read()
     assert "redirect_stdout" not in text and "redirect_stderr" not in text, "every capture goes through _capture"
