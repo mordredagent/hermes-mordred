@@ -288,6 +288,25 @@ the source remains usable, and failure paths leave no partial destination.
 - [ ] Add the Windows CI/packaging matrix and a separate Windows 11 Desktop
   acceptance run before advertising general native Windows product support.
 
+## Windows shared private filesystem
+
+Historical foundation checklist restored from PR #191 at `5b848ca3b`.
+Completed WF tasks and the then-open PR review/merge and caller-migration
+items retain their original status; the Windows product completion backlog
+below tracks subsequent work. This checklist does not reopen completed
+component slices or close Windows 11, live or Desktop acceptance.
+
+- [x] Draft the shared filesystem contract and executable WF0–WF5 plan in SPEC/PLAN.
+- [x] Prove native filesystem assumptions on the retained AWS host (WF0).
+- [ ] Review and land the shared filesystem contract before merging the foundation PR.
+- [x] Implement and actual-host validate independent primitives (WF1–WF4).
+- [x] Finish the scoped hosted CI matrix and foundation PR #192 acceptance (WF5).
+- [ ] Review and merge the separate foundation PR #192 after the contract PR.
+- [ ] Migrate callers in separate component PRs; preserve transaction domains and
+  design append/delete/rotation before adoption.
+- [ ] Complete later Windows component and Windows 11 Desktop acceptance before
+  advertising general native Windows product support. Helper PR #190 is separate.
+
 # Windows product completion backlog
 
 The full Windows port is **incomplete**. The helper (#190), private filesystem

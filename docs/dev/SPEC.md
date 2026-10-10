@@ -1763,6 +1763,197 @@ live-account test is requested. Stop task-owned compute, retain only explicitly
 identified development resources, and record residual storage costs.
 
 
+## Windows private filesystem contract (2026-10-08)
+
+Historical foundation contract restored from PR #191 at `5b848ca3b`. Its
+unmerged-PR and unmigrated-caller statements describe the 2026-10-08 foundation
+snapshot. The later checked lifecycle, confidential-directory, custody, managed
+installation and component contracts below govern their explicit extensions
+and role-specific admission policies. This restoration supplies no new native
+or whole-product acceptance evidence.
+
+Status: approved contract; native assumptions and foundation behavior validated
+on 2026-10-08. Foundation implementation/acceptance is tracked separately in PR #192.
+The foundation is unmerged and under review. The broader Windows feasibility and helper work is tracked in PRs #189/#190. The
+implementation sequence is [WF0–WF5 in PLAN](PLAN.md#windows-private-filesystem-implementation-plan).
+
+### Filesystem scope and boundary
+
+Deliver a standalone internal `mordred_hermes._private_fs` package for private
+directory creation, bounded reads, exclusive creation, checked replacement and
+cooperating-process transactions. Import Windows APIs lazily behind OS dispatch;
+use stdlib `ctypes` with explicit signatures and owned handle lifetimes. No
+PowerShell/icacls subprocess is part of a product I/O operation. Existing
+`_file_lock.py`, `_audit_io.py` and component storage code remain unchanged until
+their individual migration PRs. The new POSIX backend uses descriptor-relative
+operations, private modes and flock; it does not replace existing POSIX code.
+
+On macOS, mode bits do not bound extended ACL grants. Inspect the extended ACL
+through each checked descriptor for ancestors, private directories, locks,
+staging files and targets, including operation-time revalidation. Initially
+accept only absent, empty or deny-only ACLs; reject every allow entry (including
+owner-only, read-only and inherit-only entries) and unknown entry types. This
+conservative policy permits the normal home-directory deny-delete ACL without
+attempting a full effective-rights evaluator. Native query failures must refuse
+the operation; do not remove or rewrite existing ACLs. This is a macOS backend
+rule, not a change to the Windows DACL policies below.
+
+This choice keeps locks and handles in the calling process without adding a
+packaged binary or a base dependency. A pywin32 backend would add a dependency;
+a Rust subprocess would need an additional long-lived handle/transaction
+protocol. Neither is needed for this bounded foundation.
+
+Initial Windows acceptance is x86_64, Python 3.11–3.13, fixed local NTFS on
+Server 2022/2025. Refuse remote/mapped drives, UNC/device namespaces, non-NTFS
+volumes and reparse points, including cloud placeholders and mounted folders.
+Windows 11, ReFS, removable drives and network filesystems need later acceptance.
+Protect against other ordinary users and accidental path substitution, not
+administrators, kernel code or arbitrary hostile code under the same user SID.
+
+### Private objects and trusted ancestors
+
+New private objects have current-token-user ownership and a present, non-NULL,
+protected DACL. Grant file/directory full control explicitly to that user,
+SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`) only. Full control is
+needed for lifecycle operations, including delete and replacement; handle access
+rights are narrower per operation. No inherited ACEs, inheritance propagation
+flags or other ACE types are accepted on a private object. Validate the semantic
+SID/mask set, not localized account names or SDDL text ordering. Reject additional
+trustees, missing grants, deny/callback/object ACEs, unexpected owner or inheritance.
+Do not repair an existing object while opening or reading it.
+
+Pass the security descriptor to `CreateFileW(CREATE_NEW)` or `CreateDirectoryW`
+at creation; creation followed by chmod/ACL repair is forbidden. Inspect owner,
+DACL, type, reparse attributes and volume/file ID through the opened handle
+before touching contents. Private regular files must have exactly one hard link.
+Handles are non-inheritable and closed exactly once, including exception paths.
+Creation of a directory permits only its final missing component; callers must
+create private ancestors explicitly. Existing directories are validated, not adopted.
+
+Walk an absolute drive-qualified path from its volume root one component at a
+time without resolving links away. Pin checked ancestor directory handles without
+delete sharing until the operation/context ends; reject every reparse component.
+Require local NTFS, stable volume/file identity and an existing trusted parent
+before creation. For existing system ancestors, allow current-user, SYSTEM,
+Administrators or TrustedInstaller ownership. Unlike private objects, normal
+system ancestors may have inherited/read/traverse ACEs. Reject untrusted effective
+grants to delete/rename that ancestor or its next child, change its DACL/owner,
+or modify reparse-relevant attributes. Conservatively reject unknown ACE forms
+or ambiguous masks; do not subtract deny ACEs to excuse an unsafe allow.
+Generic rights must be expanded; inherit-only ACEs do not grant rights to the
+ancestor itself. A broad ability to create unrelated children of `C:\Users` is
+not permission to replace an existing protected child. Creating a missing private
+root requires a parent whose child-creation rights are also restricted to trusted
+principals. Do not chmod or rewrite system/profile ancestor ACLs to make a test pass.
+
+Accept Unicode and spaces. Reject drive-relative/root-relative paths, `.`/`..`,
+alternate data streams, embedded NULs, reserved DOS names (including extension
+variants), trailing dots/spaces and separators in a leaf name. Validate raw input
+before path normalization (a supplied `Path` has already normalized its spelling;
+validate its remaining components and never use `resolve()` to establish trust).
+Internal long-path prefixes may be introduced only
+after validation. Do not trust the absence of `Path.is_symlink()` as junction
+proof. Do not claim `FILE_FLAG_OPEN_REPARSE_POINT` alone protects ancestors.
+
+### Transaction and replacement semantics
+
+Reserve lock/staging spellings case-insensitively on both backends, including
+case-insensitive POSIX filesystems. Use a permanent `.mordred-fs.lock` within
+each private directory. Never delete,
+truncate, rotate or replace it. A transaction holds an exclusive `LockFileEx`
+lock on byte `[0, 1)` of its validated handle, with read/write sharing but no
+delete sharing. Identity is rechecked after acquisition. Blocking acquisition
+uses interruptible retries of `LOCKFILE_FAIL_IMMEDIATELY`; nonblocking contention
+returns a classified busy error. Distinct threads and fresh processes must
+serialize. Recursive acquisition by the same thread is rejected, not deadlocked.
+Process termination eventually releases the OS lock; child processes must not
+inherit an owning handle. This protocol cannot serialize unmigrated callers
+using other lock paths; each caller migration must address mixed-version writers.
+
+Mutations require a live transaction object. Exclusive creation must preserve
+an existing target. Replacement requires an existing, validated private regular
+file; it cannot silently provision a missing secret. Both write all bytes into
+an unpredictable same-directory `CREATE_NEW` staging file with a private DACL,
+check short/zero writes, and `FlushFileBuffers` before publication. Validate and
+close the old-target inspection handle before replacement, keeping parent and
+transaction handles pinned. Publish the still-open staging handle using
+`SetFileInformationByHandle(FileRenameInfo)`, with `ReplaceIfExists` false for
+creation and true for replacement. Use `RootDirectory = NULL` and a
+NUL-terminated absolute volume-GUID destination derived from the pinned checked
+directory using `GetFinalPathNameByHandleW(VOLUME_NAME_GUID)`. On Server 2025, a
+non-NULL RootDirectory with a relative name returned error 87 even with the SDK
+ABI and terminated buffer; it is not a supported implementation path. Retain the
+ancestor handles and validate destination identity before/after publication.
+Never use delete-then-rename, copy-over-target, in-place truncation, an ACL-ignore
+flag or an unvalidated path fallback. Verify the new identity and DACL and flush
+the published handle. Missing-target races outside the cooperating protocol
+cannot be treated as an atomic compare-and-swap guarantee.
+
+The rename is the visibility commit point. Before commit, write/flush/sharing
+failures leave the old target and bytes intact (or the target absent for create).
+After commit, verification/flush failures report an uncertain commit and leave
+the complete published object in place: no rollback, automatic retry, key
+regeneration or target deletion. Closing a published file or leaving its
+transaction/directory context must also classify cleanup failures as uncertain
+when publication has occurred, while preserving an already active body error.
+An unexpected rename error whose state cannot
+be reconciled by handle identity is also uncertain. Cleanup only removes the
+operation's own unpublished staging object by handle; a crash may leave a private
+orphan. Never glob-delete staging files during open or recovery.
+
+This establishes complete-file visibility and tested process-crash behavior,
+not a blanket power-loss guarantee for directory metadata. A file flush is not
+proof of durable directory publication on every storage stack. Reboot/EC2
+stop-start checks are separate evidence, not simulated sudden power-loss tests.
+Native API behavior and the sharing/rename combination are an early actual-host
+gate; if they cannot meet this contract, revise the design before caller adoption.
+
+Errors carry a non-secret operation, reason, native Windows status (when present)
+and commit state (`not_committed` or `uncertain`). Reasons distinguish unsafe
+path/ACL, unsupported filesystem, missing/existing target, busy, access denial
+and I/O failure. A read never returns partial contents after an error or silently
+returns empty bytes on refusal. Bounded reads refuse a file exceeding the limit.
+
+### Filesystem delivery and evidence
+
+Submit this shared contract/plan before the foundation implementation PR; both
+target `dev`. PRs #189 and #190 remain independent and unmerged at planning time.
+The foundation PR changes only shared primitives, their tests and scoped CI.
+Later keyvault, wizard, network, llm_guard/policy, privacy_check and extension
+PRs own their error mappings, transaction lifetimes and feature acceptance.
+Append/rotation, safe deletion, plaintext capture, ACL migration/repair and
+executable installation require explicit follow-on contracts; this slice is not
+an authorization to mechanically rewrite those paths.
+
+Require real Windows subprocess tests for contention, concurrent writers,
+crash release, interrupted staging, held-target sharing failure, junctions at
+each path depth, hard links, ACL tampering, Unicode and access from a second
+ordinary user. Run fixtures under a credentialed ordinary user on the retained
+AWS host; elevated setup may provision only disposable adversarial fixtures.
+Keep TPM/custody fixtures and the prior Linux environment untouched. Record
+mocked faults, native filesystem observations, restart persistence and limitations
+separately. No filesystem success turns helper readiness into whole-product support.
+
+### Windows filesystem API references
+
+- [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+  and [file security](https://learn.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights)
+  define creation security and handle access/sharing.
+- [GetSecurityInfo](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo)
+  and [descriptor control](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-control)
+  define handle-based ACL inspection and protected DACLs.
+- [LockFileEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
+  defines range locking and release on handle close/process termination.
+- [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+  and [FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)
+  define handle-based publication; exact ctypes ABI layout must be SDK-checked.
+- [ReplaceFileW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)
+  documents partial-failure states and an unsupported write-through flag; it is
+  not the selected publication primitive.
+- [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+  and [Windows path naming](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)
+  bound the flush and namespace assumptions.
+
 ## Checked private file lifecycle (C1a)
 
 The opt-in `_private_fs` API retains checked private directories, single-link

@@ -960,6 +960,318 @@ The immediate implementation review is for W1–W4, not approval to combine all
 components into one PR. No native production code was changed in the planning
 and baseline-validation branch.
 
+## Windows Private Filesystem Implementation Plan
+
+Historical WF0–WF5 foundation plan restored from PR #191 at `5b848ca3b`,
+including its completed foundation checkboxes. Caller-migration and delivery
+instructions describe that snapshot; the Windows product completion execution
+plan below governs subsequent C1–C12 work. These historical steps do not
+authorize new compute or establish completion of the later acceptance gates.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:executing-plans for inline execution. Use
+> superpowers:subagent-driven-development only if the operator selects delegated
+> execution. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Deliver independently tested private filesystem primitives before
+component-by-component Windows adoption.
+
+**Architecture:** An internal, stdlib-only Python package dispatches to POSIX
+descriptor operations or a narrowly wrapped Windows API backend. A checked
+directory context owns pinned handles; a transaction owns its stable sidecar
+lock and is required for publication. Existing component implementations remain
+unchanged until separate migration PRs.
+
+**Tech Stack:** Python 3.11–3.13, ctypes, pytest, Win32 security/file APIs, local
+NTFS, Windows Server 2022 hosted CI and Server 2025 AWS acceptance.
+
+**Spec:** [Windows private filesystem contract
+(2026-10-08)](SPEC.md#windows-private-filesystem-contract-2026-10-08).
+
+### Filesystem Global Constraints
+
+- Initial Windows target: x86_64, fixed local NTFS, Python 3.11–3.13.
+- Exact private ACL trustees: current user, SYSTEM, Administrators; protected,
+  explicit full-control grants; current-user ownership; one hard link per file.
+- No API skipping, chmod-based Windows security, shell-based product I/O,
+  automatic ACL repair, software custody fallback or new product support claim.
+- Shared contract first, standalone foundation next, component migrations later.
+  Do not modify the keyvault helper, its crypto/protocol or its pending PR.
+- All writes/CLI tests use synthetic data and isolated `HERMES_HOME`; leave the
+  original dirty checkout and existing Linux validation resources untouched.
+- Preserve existing POSIX callers and required macOS/Linux CI checks.
+- Read [CI filesystem gates](CI.md#windows-private-filesystem-validation-gates)
+  before executing WF0 or starting task-owned compute.
+
+### Filesystem Review Focus
+
+- Default `C:\Users`/profile ACLs must pass without weakening the private-object
+  policy or rewriting system directories (WF0/WF2).
+- A handle intentionally held by a reader/antivirus must not make failed
+  publication remove the prior target (WF0/WF4).
+- A validation or flush failure after rename must not look retry-safe (WF4).
+- A case alias or second directory context must not bypass transaction locking;
+  recursive same-thread use must refuse promptly (WF3).
+- Privileged test runners cannot prove second-user exclusion or ordinary-user
+  access. Record token/elevation and separate fixture setup from assertions (WF5).
+
+### Filesystem interfaces and file ownership
+
+Create `src/mordred_hermes/_private_fs/` with the following files:
+
+| File | Responsibility |
+|---|---|
+| `__init__.py` | Public internal API, lazy OS dispatch; no component imports |
+| `_types.py` | Protocols, identity and error/commit-state types |
+| `_posix.py` | New API implemented with private modes, dir-fds, flock and fsync |
+| `_windows_api.py` | ctypes signatures/structures, owned HANDLE and LocalFree buffers |
+| `_windows_security.py` | Token SID, exact private ACL and ancestor-policy checks |
+| `_windows_paths.py` | Raw path validation, ancestor pinning, volume/file identity |
+| `_windows_lock.py` | Stable sidecar acquisition/release and same-thread recursion guard |
+| `_windows_io.py` | Directory/transaction objects, bounded reads and staged publication |
+
+The common API is:
+
+```python
+def open_private_directory(
+    path: str | Path, *, create: bool = False,
+) -> AbstractContextManager[PrivateDirectory]: ...
+
+class PrivateDirectory(Protocol):
+    def read_bytes(self, name: str, *, max_bytes: int) -> bytes: ...
+    def transaction(
+        self, *, blocking: bool = True,
+    ) -> AbstractContextManager[PrivateTransaction]: ...
+
+class PrivateTransaction(Protocol):
+    def read_bytes(self, name: str, *, max_bytes: int) -> bytes: ...
+    def create_bytes(self, name: str, data: bytes) -> None: ...
+    def replace_bytes(self, name: str, data: bytes) -> None: ...
+```
+
+`FileIdentity` contains `volume: int` and `file_id: bytes` (Windows 128-bit file
+ID; POSIX inode encoded as unsigned bytes). `PrivateFSError(OSError)` exposes
+`reason: Literal["unsafe", "unsupported", "missing", "exists", "busy",
+"access_denied", "io"]`, `operation: str`, `native_code: int | None`, and
+`commit_state: Literal["not_committed", "uncertain"]`. Paths may be included in
+errors; bytes, credentials and key material may not. For reads, lock/open errors
+and prepublication failures the commit state is `not_committed`.
+When postpublication reconciliation promotes the state to `uncertain`, the
+exception's rendered message and `args` must agree with its `commit_state`.
+
+Context/transaction use after exit raises `RuntimeError`; mutations cannot be
+called on `PrivateDirectory`. Reject nonpositive `max_bytes` with `ValueError`.
+Reserve `.mordred-fs.lock` and `.mordred-fs-tmp-` prefixed names from caller use.
+The foundation does not expose raw handles, generic open flags, append, unlink,
+recursive mkdir or permission-repair APIs. POSIX modes are 0700/0600, current
+euid ownership, no symlinks and one link per regular file; ancestor checks allow
+root-owned normal system directories but reject writable untrusted ancestors.
+On macOS, validate extended ACLs through those same descriptors and reject
+allow/unknown entries or query failures; absent, empty and deny-only ACLs are
+accepted. Test inherited grants, private-directory/file/lock grants, mutation
+during an open transaction, normal deny-delete ancestors and native-query
+failure cleanup without changing existing descriptors.
+
+### Task WF0: Prove the native filesystem assumptions
+
+**Files:** Modify `docs/dev/CI.md` with results only after execution. Disposable
+probe/evidence files go under
+`~/.codex/artifacts/mordred-windows-filesystem-20261008/`, outside the repository.
+
+**Interfaces:** Consumes the SPEC algorithms; produces pass/fail evidence for
+ordinary-user private creation, ancestor trust, byte locking and handle rename.
+This is a prerequisite to production implementation, not product code.
+
+- [x] Resume only retained instance `i-00f4db5c3a204906b` in `ap-southeast-1`;
+  set a fresh bounded shutdown deadline before running probes. Use existing SSM
+  access and the ordinary-user harness without logging credentials.
+- [x] Record actual OS, Python, token/elevation, NTFS volume and ordinary profile
+  ancestor descriptors. Prove private descriptor creation on a new directory and
+  file, no inherited ACEs, and rejection from a second ordinary user.
+- [x] SDK-check x64 structure sizes/offsets, especially variable-length
+  `FILE_RENAME_INFO`, `OVERLAPPED` and file-ID information. Demonstrate rename
+  using a pinned parent and still-open source handle; check post-rename identity,
+  DACL and flush under the standard user. Record the observed relative-name
+  refusal and use the checked handle-derived volume-GUID destination with NULL
+  RootDirectory, a byte-counted UTF-16 name and an explicit NUL terminator.
+  Preserve old bytes when a second
+  process opens the target without delete sharing.
+- [x] Demonstrate parent-junction refusal and the absence of a delete/rename
+  window with pinned ancestors. Test two-process byte locks and crash release.
+- [x] Record go/replan for each assumption. Any unsupported sharing/ABI/trust
+  behavior blocks implementation of the dependent operation; no permissive
+  fallback. Stop compute after the session unless continuing WF1–WF5 within the
+  same bounded deadline; record residual resources and commit sanitized evidence.
+
+### Task WF1: Pin the API, OS dispatch and POSIX compatibility
+
+**Files:** Create `__init__.py`, `_types.py`, `_posix.py` from the ownership map;
+create `tests/test_private_fs.py` and `tests/test_private_fs_posix.py`; update
+`docs/dev/PATHS.md` with the reserved sidecar/staging names within caller-owned
+private directories (no new default Hermes home or component root).
+
+**Interfaces:** Produces the complete common API above. Windows dispatch loads
+`_windows_io.open_private_directory` only on `os.name == "nt"`; unknown platforms
+raise `PrivateFSError(reason="unsupported", ...)`.
+
+- [x] Write tests `test_private_create_read_replace` (exact payloads and 0700/0600),
+  `test_create_preserves_existing`, `test_replace_requires_existing`,
+  `test_read_limit_refuses_oversize`, `test_context_use_after_close`,
+  `test_reserved_leaf_refused`, `test_symlink_and_hardlink_refused`,
+  `test_posix_import_does_not_load_windows` and
+  `test_unsupported_os_never_falls_back`. Errors must match reason/commit state.
+- [x] Run `uv run pytest -q tests/test_private_fs.py tests/test_private_fs_posix.py`;
+  confirm failures exercise absent API/contracts, then implement minimal types,
+  dispatch and POSIX backend. Use dir-relative exclusive staging, complete writes,
+  durable file flush and parent fsync. Publish creation using no-clobber
+  `os.link` with source/destination dir-fds, then unlink only the staging name;
+  publish replacement with dir-relative `os.replace`. A failed staging unlink
+  after a successful link is uncertain, never a reason to remove the target;
+  readers refuse the temporary two-link state. Classify all post-publication
+  errors uncertain, including a failed parent fsync.
+- [x] Run those tests plus `tests/test_file_lock.py`,
+  `tests/test_keyvault_api_storage.py`, `tests/test_keyvault_storage_lock_retry.py`
+  and `tests/test_audit.py`; require no regressions. Commit the isolated API slice.
+
+### Task WF2: Implement Windows handles, security and checked paths
+
+**Files:** Create `_windows_api.py`, `_windows_security.py`, `_windows_paths.py`,
+the directory/read portion of `_windows_io.py`, and
+`tests/test_private_fs_windows.py`, `tests/test_private_fs_windows_faults.py`.
+
+**Interfaces:** `_windows_api.OwnedHandle` owns one non-inheritable native handle;
+`close() -> None` is idempotent. `_windows_security.current_user_sid() -> bytes`,
+`validate_private(handle: OwnedHandle, *, directory: bool) -> None`, and
+`validate_ancestor(handle: OwnedHandle, *, creating_child: bool) -> None` enforce
+the two distinct ACL policies. `_windows_paths.checked_directory(path: str | Path,
+*, create: bool) -> AbstractContextManager[CheckedDirectory]` owns the directory
+and pinned ancestors; `CheckedDirectory.identity: FileIdentity` and
+`CheckedDirectory.handle: OwnedHandle` are backend-only.
+
+- [x] Write failing native tests for exact ACL/owner, broad/inherited/NULL/empty
+  DACL rejection, unsafe existing objects left unchanged, first-open creation
+  security, normal profile ancestors, unsafe writable parent, hard links, each
+  reparse depth, mapped/UNC/non-NTFS refusal, Unicode/spaces, and invalid raw path
+  spellings from SPEC. Check the outside target's bytes/ACL remain unchanged.
+- [x] Add injected-fault tests for failed descriptor queries, partial native
+  initialization, unknown ACEs, generic rights, inherit-only entries, failed
+  identity queries and cleanup. Every acquired resource closes exactly once;
+  unexpected errors cannot run an operation body. Use native-independent fake
+  API objects for these tests, not `os.name` monkeypatching of the whole interpreter.
+- [x] Run `uv run pytest -q tests/test_private_fs_windows_faults.py`; on Windows
+  run `.venv\Scripts\python.exe -m pytest -q tests/test_private_fs_windows.py`.
+  Observe contract failures, then implement the narrow bindings and policies
+  established by WF0. Give every ctypes function explicit argtypes/restype and
+  immediate last-error capture; validate security on existing opens separately.
+- [x] Repeat those suites and the WF1 open/read tests on both OS families;
+  defer the full Windows mutation API suite until WF4. Commit only
+  after native path/ACL checks pass. Do not mark mocked ACL tests as device proof.
+
+### Task WF3: Implement stable cross-process transactions
+
+**Files:** Create `_windows_lock.py`, modify `_windows_io.py` and `_posix.py` as
+needed for matching semantics; create `tests/test_private_fs_processes.py`.
+
+**Interfaces:** `_windows_lock.exclusive_lock(directory: CheckedDirectory, *,
+blocking: bool) -> AbstractContextManager[None]` owns byte `[0, 1)` of the
+permanent sidecar; the directory implementation yields a `PrivateTransaction`.
+Track same-thread recursion by directory identity, not path spelling.
+
+- [x] Write subprocess tests `test_second_process_busy`,
+  `test_waiter_enters_after_release`, `test_crashed_owner_releases_lock`,
+  `test_child_does_not_inherit_lock`, `test_case_alias_serializes`,
+  `test_recursive_transaction_refused` and `test_two_threads_serialize`.
+  A ready/release handshake establishes order; subprocess waits have 15-second
+  deadlines and guaranteed cleanup. Assert guarded bodies never overlap.
+- [x] Run `uv run pytest -q tests/test_private_fs_processes.py` on POSIX and the
+  corresponding venv Python command on Windows; confirm missing lock behavior.
+- [x] Implement non-inheritable validated sidecar handles, identity recheck,
+  `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY`, and 50 ms interruptible
+  retry only on lock contention for blocking mode. No retry on unsafe ACL,
+  access denial or other I/O failures. Unlock explicitly, then close in `finally`;
+  cleanup must preserve an active body exception.
+- [x] Repeat process/thread tests and inject acquisition/unlock exceptions;
+  require busy/error classification, no handle leak and unchanged sidecar identity.
+  Commit the transaction slice.
+
+### Task WF4: Implement checked publication and failure classification
+
+**Files:** Modify `_windows_io.py`, `_windows_api.py`; extend
+`tests/test_private_fs_windows_faults.py`, `tests/test_private_fs_processes.py`
+and `tests/test_private_fs_windows.py`.
+
+**Interfaces:** Completes `PrivateTransaction.create_bytes` and `replace_bytes`;
+consumes WF2 checked handles and WF3 lock ownership. Internal
+`publish(staging: OwnedHandle, directory: CheckedDirectory, name: str, *,
+replace: bool) -> None` owns the rename commit-state transition.
+
+- [x] Write tests for short/zero writes, empty payload, pre-rename flush failure,
+  target missing/existing mismatch, held-target sharing refusal, readonly target,
+  post-rename flush/verification failure, staging cleanup identity, a process
+  killed before/after rename, and concurrent transactional read-modify-write.
+  Before commit assert old bytes/identity remain; after commit assert complete
+  new bytes and `commit_state == "uncertain"` on failure. Creation must never
+  overwrite a concurrent existing target. Reserve test hooks at stage boundaries
+  through the injected API, not public product environment variables.
+- [x] Run the focused tests and observe the intended failures; implement
+  unpredictable 128-bit staging names, create-time DACL, complete writes, checked
+  handle publication and flush as specified. No ReplaceFileW/os.replace fallback.
+- [x] Native reader/writer processes must observe only a complete old/new file
+  or a classified refusal, never partial/missing replacement. Repeat interrupted
+  write tests with deterministic ready/kill handshakes. Validate orphan privacy
+  without automatically deleting files left by another operation.
+- [x] Run all `tests/test_private_fs*.py` on Windows and POSIX; commit after
+  native rename/lock behavior and injected uncertain-commit tests pass.
+
+### Task WF5: Run scoped CI, packaged-wheel and actual-host acceptance
+
+**Files:** Add `tests/integration/test_private_fs_windows.py`; modify
+`.github/workflows/ci.yml`, `docs/dev/CI.md`, `docs/dev/TODO.md`.
+
+**Interfaces:** Native integration is gated by Windows plus
+`MORDRED_WINDOWS_FS_LIVE=1` and `MORDRED_WINDOWS_FS_TEST_ROOT` pointing to a new
+absolute synthetic-fixture directory. It never reads production `HERMES_HOME`
+or keyvault state. Missing prerequisites are explicit skips in ordinary CI and
+an acceptance failure in the requested live run.
+
+- [x] Add a `windows-private-fs` CI job on `windows-2022`, Python 3.11/3.12/3.13,
+  reduced extras `.[dev,keyvault,extension]`. Run common/native/process/fault
+  filesystem suites and an out-of-checkout wheel smoke. Keep the scoped helper
+  job and all existing POSIX checks; do not enable the whole Windows test suite
+  or remove POSIX security assertions to make it green.
+- [x] Run Ruff check/format, reduced-extras strict mypy and full default pytest
+  with coverage >=80%, using AGENTS.md commands. Require Linux/macOS CI results
+  and the new Windows matrix; record actual commands, counts and skipped gates.
+- [x] Build a wheel from the sdist, install into a fresh host venv outside the
+  checkout, and record imported `mordred_hermes.__file__`, package hash and commit.
+  Run integration with `.venv\Scripts\python.exe -m pytest -q -o addopts=
+  -m integration tests/integration/test_private_fs_windows.py` under the ordinary
+  user. Use a separately credentialed second user for real access-denial attempts;
+  the product never captures passwords or impersonates tokens.
+- [x] Exercise WF2–WF4 assertions on AWS, preserve synthetic complete-file hashes
+  across Windows reboot and EC2 stop/start, and record distinct pass/fail/not-run
+  results. Keep API fault injection separate from actual disk/power-failure claims.
+- [x] Stop task-owned compute, verify stop state and record retained storage.
+  Update the manual validation log and mark only completed WF tasks. Review the
+  foundation diff and prepare its own PR targeting `dev`, after the docs contract
+  PR. Add one-line entries under `### Changes` / `### Fixes` in the PR body.
+
+### Filesystem caller migration order
+
+| Later PR | Existing surfaces to inspect | Separate acceptance gate |
+|---|---|---|
+| Keyvault runtime | `keyvault/_storage.py`, `_memory_key.py`, `_memory_hook.py`, `_plaintext_capture.py`, `_extension_config.py`, `log_encryption.py` | Memory custody provision/reset/purge, no replacement key on unavailable data, retained data |
+| Wizard | `wizard/env_file_writer.py`, `policy_writer.py`, `credentials_writer.py`, `audit_cli.py`, `openclaw_migration.py`, installation flows | Config preservation, permission migration, packaged installation under ordinary user |
+| Network | Network audit/config users of `_audit_io.py`, `_file_lock.py`, `_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
+| LLM guard/policy | Policy and audit users of `_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
+| Privacy check | `privacy_check/audit.py` | Multi-process append/rotation, private audit retention |
+| Extension/Desktop | `extension/pairing.py`, `history.py`, `telegram/store.py`, `desktop/install.py` | Store/pairing lifecycle, runtime/UI and later Windows 11/MSIX acceptance |
+
+Each migration must inventory actual callers afresh, preserve lock domains and
+error contracts, and design any missing append/delete/rotation primitive before
+adoption. Passing WF0–WF5 alone does not resolve the previously recorded Desktop
+startup failure or establish concurrent operation with an older writer version.
+
 # Windows product completion execution
 
 Execute the remaining work continuously in isolated component worktrees. This

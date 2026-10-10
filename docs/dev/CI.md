@@ -76,6 +76,50 @@ manual `mullvad_version` input. It installs the official daemon, runs
 disconnects and logs out in teardown. It never runs automatically because it
 uses a paid account and mutates runner network state.
 
+## Windows private filesystem validation gates
+
+Historical foundation gates restored from PR #191 at `5b848ca3b`. The
+approval, execution ownership and retained-host instructions describe the
+WF0–WF5 slice; its completed foundation evidence is retained in the dated
+manual log. Later validation sections and the Windows completion acceptance
+matrix govern subsequent slices. Restoration is documentation-only and
+records no new execution or current-candidate pass.
+
+The [WF0–WF5 plan](PLAN.md#windows-private-filesystem-implementation-plan) is
+approved as of 2026-10-08. WF0 assumption-probe evidence is recorded below;
+foundation execution and acceptance results are tracked in PR #192. Helper PR #190's 16 successful checks at `441083f61`
+are helper/regression evidence, not private-filesystem or whole-Windows acceptance.
+
+The scoped `windows-private-fs` job must use Server 2022 and Python
+3.11–3.13 with `.[dev,keyvault,extension]`. Its implementation and run evidence
+belong to the separate foundation PR. Native ACL/junction/lock/publication tests run there without a
+TPM. Separate faults injected into the binding layer from real native calls.
+The existing macOS/Linux suite, coverage floor and reduced-extras typing stay
+required. Do not turn the recorded Windows baseline failures into blanket skips.
+
+Actual-host acceptance uses the retained Server 2025 instance
+`i-00f4db5c3a204906b` in `ap-southeast-1`, a fresh synthetic test root and a
+credentialed ordinary-user process. Record token/elevation, Python/package
+location, commit/wheel hashes, NTFS volume, test commands/counts and fixture hashes.
+Provision adversarial ACL/junction/second-user fixtures separately from the
+ordinary-user assertions. Keep test credentials and existing private harness
+files out of repository changes and tool output. Leave TPM fixtures and Linux
+validation resources untouched; no additional instance/clone is required.
+
+Before starting compute, verify the retained host identity/state and install a
+bounded auto-stop deadline for this run. Use the existing SSM path without new
+inbound rules. After validation, stop compute and verify state; retain only the
+identified development host/storage and record residual resources. Reboot and
+stop/start persistence are not sudden power-loss proof. Do not modify production
+homes or request live Telegram/model credentials for this filesystem slice.
+
+Report independent outcomes for native ACLs and second-user exclusion, ancestor
+trust/reparse/hardlink refusal, process/thread locking and crash release,
+publication/held-target refusal, injected post-commit failure, out-of-checkout
+wheel use, and reboot/stop-start persistence. Any missing requested live gate
+stays not-run/failed; an elevated or mocked pass cannot replace it. Only record a
+new dated entry under the manual log after executing the corresponding checks.
+
 ## Windows dedicated custody validation
 
 The scoped Windows job includes `test_windows_custody_profile.py` and
@@ -174,6 +218,12 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
 ## Manual live-device validation log
 
+The restored WF0, C5 shared, C3 and C5a entries below are dated historical
+results for their original source/wheel snapshots, not evidence for the
+consolidated candidate `bb75885ac`. Pending observations in those entries
+describe their original test time; subsequent contracts and the Windows
+completion acceptance matrix track later work and current open gates.
+
 - **2026-10-08 — Windows privacy canonical decisions (C8).**
   Component revision `31845b8b4` follows the shared canonical coordinator.
   Ordinary non-administrator Server 2025 / Python 3.11.17 runs passed all
@@ -215,6 +265,82 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
   2026-10-09 host-only follow-up: policy/config and audit-factory refusals are
   raised after their handlers (no `__context__` retains parser/reader errors or
   bytes); 8 new host cases, full suite 7,160 passed; native reruns not repeated.
+
+- **2026-10-08 — Windows dedicated custody checked-file candidate (C5a).**
+  Revision `b4793e7d3` passed **51 tests with 11 POSIX-only fault-injection
+  skips** in both ordinary-user Server 2025 / Python 3.11.17 source and fresh
+  sdist-derived wheel environments. Selectors:
+  `tests/test_windows_custody.py tests/test_windows_custody_profile.py`.
+  These runs use real Windows checked files and real MRKW cryptography with
+  an injected native-key backend; they do **not** establish actual CNG enrollment
+  or deletion. All profiles are disposable and imported origins were checked.
+  Wheel SHA-256: `32298344357c81e279a0d66668b4f392170f6e583613feb7379949fae98345be`.
+
+  Core and scoped R1 independent reviews approved. Host full regression before
+  the narrow R1 correction: 6,060 passed, 126 skipped, 38 excluded. Final focused
+  checks: 62 passed, one native-only skip; reduced-extras types, lint/format,
+  shellcheck and docs passed. R1 validates malformed journal field types and
+  prevents pytest from rendering native key operands in live-test failures.
+
+  Real CNG validation is pending the C5c ordinary-user process-inventory gate:
+  protected foreign process token access is denied on this machine. The gate
+  remains strict; no native-key live test or fixture was run as a workaround.
+  The managed installation image prerequisite and supported-runtime boundary
+  are tracked in shared contract PR #195. Memory hooks, installed-runtime proof,
+  encrypted audit/Telegram consumers, wizard flows and Windows 11 are separate
+  unfinished gates. The component PR remains a draft until native custody
+  acceptance is complete.
+
+- **2026-10-08 — Windows wizard canonical writers (C3).**
+  Final code/tests `d6cfc519223096680005684d253e2fc6fcd0a6ee` passed
+  ordinary-user Server 2025 source and fresh sdist-derived wheel suites:
+  **147 passed each**. Native cases include configure rerun, concurrent config
+  and dotenv edits, crash/recovery, checked private credentials/backups,
+  no-overwrite collisions, busy custom destinations and hostile ACL/hardlink
+  refusal. The wheel SHA-256 was
+  `930c4c81db439f274fb041bc4727d4fca378e3d74475515d6c82c8e5006bd26a`.
+  Both module origins were checked; wheel tests borrowed only test dependencies
+  from the unchanged earlier validation environment.
+  A separate full Hermes 0.19.0 environment installed the final candidate wheel,
+  created a fresh home through Hermes itself, and ran the actual console
+  `configure --non-interactive --policy strict` twice. The checked policy was
+  strict, config/policy contents remained unchanged on rerun and the parent's
+  ACL was preserved. No account/provider calls or production home were used.
+
+  Independent review found two Important defects: lost child publication
+  uncertainty during a second cleanup failure, and stale interactive provider
+  overrides. Both reproduced and were fixed at `08ec8a76b`; scoped review
+  approved the fixes. Final targeted regression: 346 passed, eight native skips;
+  strict reduced-extras mypy (209 files), Ruff/format, shellcheck and docs links
+  passed. The earlier full host suite was 5,757 passed, 105 skipped, 37 excluded;
+  final narrow fixes have the focused and native evidence above.
+  Initial native testing completed 139 checks with two setup/teardown errors
+  because an 8 MiB pytest parameter ID exceeded Windows' environment limit.
+  Short IDs fixed only the harness. The resulting 67 MiB diagnostic log also
+  made line-based PowerShell tailing expensive; bounded recovery confirmed the
+  test process had finished. Only those task-owned log readers were stopped.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c3-*`.
+  Memory/OpenClaw lifecycle, enforcement callers, Windows 11 and full-product
+  acceptance remain separate; legacy generic Windows writers still refuse.
+
+- **2026-10-08 — Windows custody coordination prerequisites (C5 shared).**
+  Code `c6d2e8ab767d26df408aae3ca7091f55634fbcb0` passed ordinary-user
+  Server 2025 source and fresh sdist-derived wheel runs: **503 passed,
+  54 skipped each**. Native cases include inherited-safe confidential inventory,
+  canonical SID, bounded enumeration, protected transaction loans, child
+  publication receipts, process/lifetime refusal and borrowed C7a audit sessions.
+  The subsequent four-line checked-home identity accessor at `ff4edbbc2` passed
+  six focused cases in its fresh sdist-derived wheel, including native case-alias
+  identity (113 unrelated cases deselected). Both module origins were verified.
+  The final wheel SHA-256 was
+  `1ba8409d02a8550a866325e314814ce5bd9b6d99dda040e41a9fde0648f8e412`.
+  Independent original and accessor reviews found no actionable findings.
+  Host full regression before the accessor: 5,895 passed, 106 skipped,
+  37 integration deselected; final accessor focused host checks and strict
+  reduced-extras mypy (210 files), Ruff/format and shellcheck passed.
+  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c5-foundation-*`.
+  Custody providers, memory hooks, Windows 11 and full-product use are separate
+  gates. These tests do not provision or recover a TPM role key.
 
 - **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
   Component contract PR #193 follows the shared contract/foundation PRs
@@ -395,6 +521,37 @@ UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
   system ACLs are unchanged.
   Sanitized run evidence is retained privately under
   `~/.codex/artifacts/mordred-windows-filesystem-20261008/`.
+
+- **2026-10-08 — Windows private filesystem assumptions (WF0).**
+  Retained Server 2025 build 26100 on fixed local NTFS was resumed with a
+  four-hour shutdown deadline. Under the credentialed non-administrator
+  `mordred` token, create-time protected user/SYSTEM/Administrators DACLs were
+  observed independently through Get-Acl. A disposable second ordinary user
+  was denied access. Its first scheduled runs failed with logon error 1385;
+  granting only that disposable SID SeBatchLogonRight enabled the actual check.
+  The test account, task and granted right were removed afterward. No existing
+  user's password, TPM fixture or Linux validation resource was changed.
+
+  SDK 26100/MSVC confirmed x64 FILE_RENAME_INFO size 24/name offset 20,
+  OVERLAPPED size 32 and FILE_ID_INFO size 24. Relative-name publication with a
+  non-NULL RootDirectory failed with WinError 87. A NULL RootDirectory and
+  NUL-terminated absolute volume-GUID destination derived from the pinned
+  directory succeeded, including flush and complete payload reopen. A separate
+  unterminated disposable buffer produced a wrongly suffixed filename; production
+  tests must pin termination, byte length and non-ASCII names. Held-target
+  publication returned access denied without changing old bytes; renaming a
+  pinned parent returned sharing violation. Real subprocess byte locks excluded
+  a second process and released after owner termination. OPEN_REPARSE_POINT
+  inspection identified an actual junction tag without following it.
+
+  Default volume/profile ancestor descriptors were recorded without modifying
+  them. These are disposable native API probes, not a shipped-foundation pass;
+  production ACL parser, all-path refusal, failure injection, wheel, scoped CI
+  and restart persistence acceptance belong to WF2–WF5 in PR #192. Evidence is private under
+  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`. Compute was retained
+  within the deadline while implementation continued; final stopped-host evidence
+  is recorded in foundation PR #192.
+
 - **2026-10-08 — Native Windows installer and owned TPM helper (C4).**
   Code `f9c15a72ac060486e14f08f730e1021843a6a330` passed ordinary-user
   Windows Server 2025 source-editable and isolated sdist-derived wheel tests:
