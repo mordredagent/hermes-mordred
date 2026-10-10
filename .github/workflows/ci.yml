@@ -89,6 +89,25 @@ jobs:
           fi
           echo "MORDRED_TEST_PYTHON=$critical_python" >> "$GITHUB_ENV"
           echo "HERMES_HOME=$HERMES_HOME" >> "$GITHUB_ENV"
+      - name: Prepare checked Windows feedback home
+        if: runner.os == 'Windows'
+        # RUNNER_TEMP is broadly writable. Plugin paths freeze during collection,
+        # so admit an isolated profile namespace before pytest imports anything.
+        run: |
+          "$MORDRED_TEST_PYTHON" - <<'PY'
+          import os
+          import uuid
+          from pathlib import Path
+          from mordred_hermes._private_fs import open_private_directory
+
+          home = Path(os.environ["USERPROFILE"]) / ("mordred-critical-" + uuid.uuid4().hex)
+          with open_private_directory(home, create=True):
+              pass
+          with open_private_directory(home / "mordred", create=True):
+              pass
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              output.write(f"HERMES_HOME={home}\n")
+          PY
       - name: Static checks
         if: runner.os == 'Linux'
         run: |
@@ -111,7 +130,7 @@ jobs:
         if: runner.os == 'Linux'
         run: >-
           "$MORDRED_TEST_PYTHON" -m pytest -q
-          tests/test_critical_test_runner.py tests/test_ci_test_policy.py
+          tests/test_critical_test_runner.py tests/test_ci_test_policy.py tests/test_critical_test_home.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

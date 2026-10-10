@@ -131,6 +131,13 @@ PR events have no path filter, so conversion to ready-for-review cannot miss
 the full gate because of the files changed. Branch pushes retain their existing
 source/documentation path filters, now also including `AGENTS.md`.
 
+Windows critical CI prepares a fresh checked home and `mordred` child under
+`USERPROFILE`, then exports `HERMES_HOME` before test collection. `RUNNER_TEMP`
+is broadly writable and is not admitted for this checked ambient profile.
+Unsafe existing namespaces refuse without ACL repair. Local callers supplying
+`HERMES_HOME` must likewise provide an admissible isolated home before imports;
+changing it inside a test cannot update paths already frozen at collection.
+
 Historical native JUnit estimates for this preset are roughly 56 seconds of
 recorded test time for Windows before setup and unmeasured auth/import cases;
 the comparable macOS testcase sum is roughly 10 seconds. These are planning
