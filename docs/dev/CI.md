@@ -113,9 +113,10 @@ integration/code freeze. Reports or documentation do not justify repeatedly
 rerunning unchanged broad suites.
 
 Draft PR CI runs critical feedback on Ubuntu, macOS and Windows with Python
-3.12. It retains Ruff, strict typing, the Linux shellcheck gate, and the
-existing Unix status-skill drift guard. A Linux step also tests CI routing and
-the runner itself. Failures remain red; distinct critical JUnit artifacts are
+3.12. Repository-wide Ruff and strict typing run once on Ubuntu, alongside
+Linux shellcheck; the existing Unix status-skill drift guard is retained. This
+avoids duplicate static work and adds no Windows typing gate. A Linux step also
+tests CI routing and the runner itself. Failures remain red; distinct critical JUnit artifacts are
 uploaded even after failures. Draft green means critical feedback passed;
 full acceptance remains pending. This policy delays discovery of unselected
 regressions until the final review gate in exchange for faster iteration.

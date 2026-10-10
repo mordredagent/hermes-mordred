@@ -90,5 +90,7 @@ def test_workflow_retains_full_jobs_and_event_routes() -> None:
     assert next(s for s in critical["steps"] if s.get("name") == "Set up Python")["with"]["python-version"] == "3.12"
     assert any("--strict src tools scripts/keyvault_offline_digest.py" in s.get("run", "") for s in critical["steps"])
     assert any("ruff check src tests scripts tools" in s.get("run", "") for s in critical["steps"])
+    static = next(s for s in critical["steps"] if s.get("name") == "Static checks")
+    assert static["if"] == "runner.os == 'Linux'"  # One repository-wide pass, no new Windows typing gate.
     assert any("shellcheck scripts/*.sh native/*/build.sh" in s.get("run", "") for s in critical["steps"])
     assert any("policy dry-run skills/mordred-status" in s.get("run", "") for s in critical["steps"])

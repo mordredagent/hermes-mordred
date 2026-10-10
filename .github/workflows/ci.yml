@@ -90,6 +90,7 @@ jobs:
           echo "MORDRED_TEST_PYTHON=$critical_python" >> "$GITHUB_ENV"
           echo "HERMES_HOME=$HERMES_HOME" >> "$GITHUB_ENV"
       - name: Static checks
+        if: runner.os == 'Linux'
         run: |
           "$MORDRED_TEST_PYTHON" -m ruff check src tests scripts tools
           "$MORDRED_TEST_PYTHON" -m ruff format --check src tests scripts tools
