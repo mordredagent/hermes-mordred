@@ -68,6 +68,58 @@ Key policy:
 - Live LLM and Secure Enclave tests have no automated workflow. VPN is the only
   live-gated suite with a manual workflow.
 
+### Focused batches and native test shards
+
+For an iteration, run the affected modules together first, for example:
+
+```sh
+uv run pytest -q tests/test_native_test_shards.py tests/test_hook_payload_drift.py --durations=10
+uv run ruff check tools tests
+uv run ruff format --check tools tests
+uv run mypy --strict tools
+```
+
+After the final implementation and focused checks, run one full default sweep
+when the change needs broader regression evidence (`uv run pytest -q`), then
+the required checks for the affected platform. Avoid repeating the full sweep
+between unchanged batches. Coverage floors, platform gates, live-device gates,
+hook-name membership, and every consumed-field assertion remain in force.
+
+`windows-private-fs` runs three separate GitHub runners for each Python version
+(3.11, 3.12, 3.13). `tools/run_native_test_shard.py` assigns whole modules using
+deterministic longest-processing-time balancing from
+`tools/native_test_durations.json`, preserving selector order within each shard.
+The complete 82-module selector stays in the named native test step so the
+external frozen-native harness can continue extracting it. No native modules,
+assertions, security locks, timeouts, or tests are removed. A module appears
+once per Python version, and wheel build/smoke runs on shard 1 of each version.
+`fail-fast: false` preserves the other shards' evidence after a failure; each
+pytest nonzero exit fails its runner. Per-version/per-shard JUnit artifacts are
+uploaded with `always()`, and pytest prints its slowest 20 durations.
+
+For local reproduction, invoke the runner with `--shard-index 1 --shard-count 3
+--junitxml native-1.xml` followed by the full selector from the workflow; repeat
+with indices 2 and 3 if testing the complete selector. Missing module weights
+use a visible nonzero one-second default, so new modules still run. Empty
+selectors, duplicates, invalid indices/counts, and malformed weights are errors.
+
+The initial measured weights sum native JUnit testcase seconds. They estimate
+930.156, 930.156, and 930.157 seconds per shard (about 15.5 minutes), excluding
+runner provisioning, installation, collection, fixture effects, and wheel smoke.
+These are scheduling estimates, not measured shard wall times or a measured
+speedup. Nine runners trade additional duplicated setup for lower latency; use
+future per-shard JUnit and job wall times to assess the actual result.
+
+The installed-Hermes hook canary scans all Python sources owned by the
+`hermes-agent` distribution, including top-level modules outside `hermes_cli`,
+instead of recursively parsing unrelated site-packages. An incomplete wheel
+ownership manifest or unreadable owned source fails closed. Missing distribution
+metadata and source/editable installs emit a warning and use the original
+recursive source scan. The CLI's source-checkout scan is unchanged. Compare
+scanner outputs as well as elapsed time when assessing this optimization;
+one before/after run in the same environment is observational and may include
+cache effects.
+
 ## `integration-vpn.yml` details
 
 This workflow requires the `MORDRED_MULLVAD_ACCOUNT` repository secret and a
