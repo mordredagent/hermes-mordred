@@ -28,7 +28,8 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has nine job definitions:
+The workflow has ten full-regression job definitions, plus event routing and
+draft critical feedback:
 
 1. **`test`** — Python/OS matrix; Ruff, shellcheck (one Linux cell), strict
    mypy, pytest, coverage, and the status-skill drift guard.
@@ -53,6 +54,11 @@ The workflow has nine job definitions:
 9. **`windows-private-fs`** — scoped native ACL/path/publication/process tests on
    Server 2022 with Python 3.11–3.13, plus an sdist-derived wheel smoke outside
    the checkout. This is foundation coverage, not whole-Windows product support.
+10. **`winkey-helper`** — Windows native helper build and scoped helper tests.
+
+`ci-policy` routes known draft PR events to `critical-feedback`; all other
+events select the existing full regression jobs. Existing full job names and
+Python/OS matrices remain unchanged.
 
 Key policy:
 
@@ -67,6 +73,68 @@ Key policy:
   helper and integration jobs remain additional signals.
 - Live LLM and Secure Enclave tests have no automated workflow. VPN is the only
   live-gated suite with a manual workflow.
+
+### Critical feedback and full regression
+
+For ordinary edits, run the critical preset plus the modules you changed:
+
+```sh
+uv run python tools/run_critical_tests.py
+uv run pytest -q tests/test_<affected>.py
+uv run python tools/run_critical_tests.py --list
+uv run python tools/run_critical_tests.py --dry-run
+```
+
+The preset uses exact existing node IDs, including individual parameter cases;
+missing nodes fail collection. It runs 19 cases on Linux and 20 on macOS or
+Windows, prints the slowest durations, and accepts `--junitxml <file>` for
+evidence. It excludes integration/live gates and selects real filesystem tests
+for the current platform, rather than counting skipped foreign-platform cases.
+No test assertions, security checks or test timeouts are changed.
+
+| Critical risk | Representative existing test coverage |
+|---|---|
+| Unsafe storage or stuck lock | Real checked roundtrip; permissions and symlink/junction/hardlink refusal; crashed lock-owner release; macOS ancestor ACL refusal |
+| Configuration uncertainty | Failed pair verification retains its marker; caught post-publication verification failure remains uncertain |
+| Custody loss or profile copy | Retained wrapper without manifest never regenerates; copied physical home refuses |
+| Memory transition/read failure | Real installed child and checked storage enable, fresh read, rerun, disable, retained key; existing test-only native backend |
+| Authentication or credential exposure | Unauthenticated commands refuse; page sessions cannot access credentials; sealed credentials without custody refuse |
+| Destructive logout ordering | Busy forget preserves local/remote state; successful forget wipes before remote revocation and preserves other roles |
+| Gateway availability | Connected clients stop within the existing bound; immediate restart on test port 7799 |
+| Plugin or policy admission | Installed entry point resolves; real component registration; refusal propagates; pending policy generation blocks cached allow |
+
+Passing this subset is feedback only. The full suite retains unselected
+parameter combinations, fault matrices, packaging builds, provider extras,
+compatibility floor, native helpers and platform gates. Security-sensitive
+changes still require the entire containing test modules and their relevant
+explicit live-device paths; a fast preset cannot establish hardware or product
+acceptance. After focused iterations, run one full regression at final
+integration/code freeze. Reports or documentation do not justify repeatedly
+rerunning unchanged broad suites.
+
+Draft PR CI runs critical feedback on Ubuntu, macOS and Windows with Python
+3.12. It retains Ruff, strict typing, the Linux shellcheck gate, and the
+existing Unix status-skill drift guard. A Linux step also tests CI routing and
+the runner itself. Failures remain red; distinct critical JUnit artifacts are
+uploaded even after failures. Draft green means critical feedback passed;
+full acceptance remains pending. This policy delays discovery of unselected
+regressions until the final review gate in exchange for faster iteration.
+
+Converting a PR to ready-for-review triggers the full regression. Open/reopen
+and subsequent commits to ready PRs run full CI; `dev`/`main` pushes and manual
+`workflow_dispatch` also run full CI, including coverage and all original
+Python/OS/native gates. A manual dispatch runs full CI even from a draft branch.
+Unexpected event data selects full regression conservatively. Do not mark a PR
+ready solely to claim that the critical subset was full validation.
+PR events have no path filter, so conversion to ready-for-review cannot miss
+the full gate because of the files changed. Branch pushes retain their existing
+source/documentation path filters, now also including `AGENTS.md`.
+
+Historical native JUnit estimates for this preset are roughly 56 seconds of
+recorded test time for Windows before setup and unmeasured auth/import cases;
+the comparable macOS testcase sum is roughly 10 seconds. These are planning
+estimates from selected existing cases, not promises about job wall time.
+Runner provisioning, dependency installation and static checks add overhead.
 
 ### Focused batches and native test shards
 
@@ -109,6 +177,14 @@ runner provisioning, installation, collection, fixture effects, and wheel smoke.
 These are scheduling estimates, not measured shard wall times or a measured
 speedup. Nine runners trade additional duplicated setup for lower latency; use
 future per-shard JUnit and job wall times to assess the actual result.
+
+The first full sharded run (`38014669836`, commit `5bf2b868d`) passed all nine
+Windows shards. Its slowest Windows job took 1112s (18m32s), compared with
+2826s (47m06s) for the earlier unsharded run: about 60.7% lower maximum job
+latency in this observed comparison. Summed Windows job wall times increased
+from 6952s to 8258s (about 18.8%), reflecting the runner/setup tradeoff; this
+is not a compute-saving claim or a controlled benchmark. Each Python version
+reported 2602 passed, 111 skipped, zero failures, with no duplicated node IDs.
 
 The installed-Hermes hook canary scans all Python sources owned by the
 `hermes-agent` distribution, including top-level modules outside `hermes_cli`,
