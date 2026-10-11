@@ -147,9 +147,12 @@ class TestMullvadProviderDelegation:
             < runner.calls.index((cli, "connect"))
         )
 
+        status_calls_before_wait = runner.calls.count((cli, "status"))
         provider.wait_connected(cli_path=cli, runner=runner)
+        status_calls_after_wait = runner.calls.count((cli, "status"))
+        assert status_calls_after_wait > status_calls_before_wait
         assert provider.health(handle, runner=runner) is True
-        assert (cli, "status") in runner.calls
+        assert runner.calls.count((cli, "status")) > status_calls_after_wait
 
         provider.disconnect(handle, runner=runner)
         assert (cli, "disconnect") in runner.calls
