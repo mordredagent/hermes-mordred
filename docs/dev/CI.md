@@ -37,7 +37,8 @@ draft critical feedback:
    and runs their focused tests so optional coverage cannot disappear behind
    import skips.
 3. **`package-smoke`** — builds sdist then wheel, installs outside the checkout,
-   loads six plugin entry points plus the console script, and checks shipped
+   loads the single `mordred` plugin entry point plus the console script, and
+   checks shipped
    native/offline/web/bootstrap assets.
 4. **`hermes-floor`** — pins `hermes-agent==0.13.0`, verifies the resolver kept
    the pin, and runs the compatible default suite.

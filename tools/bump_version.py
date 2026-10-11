@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{current} -> {new_str}  ({changed} file(s) {label})")
     if not args.dry_run:
         print(
-            "\nNext: add a changelog entry, then verify with\n"
+            "\nNext: add a Changes/Fixes entry to the PR description, then verify with\n"
             "  uv run pytest tests/test_packaging_versions.py\n"
             "  uv build   # confirm sdist + wheel still build"
         )

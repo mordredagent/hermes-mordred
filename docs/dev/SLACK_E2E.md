@@ -100,6 +100,15 @@ stamps `scope_id` from the event's team id, the shipped Discord adapter stamps
 nothing, and the outbound send path has no event, so only Slack inbound is
 tightened.
 
+Slack Connect has a narrow installing-team exception: the current raw event
+must be a dict whose channel equals the routed `C`/`G` channel and whose
+`team_id`/`team` (including a dict `id`) matches the source scope. That source
+team must be absent from the live adapter's authenticated `_team_clients`;
+only teams in that installed map may be alternate key scopes. The checks do
+not require a separate `is_ext_shared` flag and do not authorize guessed host
+teams. Normal installed-team events, slash commands, DMs, malformed event
+structures and adapter drift keep the ordinary scope rule.
+
 <a id="3-replay&#x9632;&#x6b62;&#x3068;plaintext-release"></a>
 
 ## 3. Replay protection and plaintext release
@@ -242,7 +251,8 @@ encrypted-send path directly and never passes through the wrapper.
 > — in a shared channel that is the **posting user's** workspace — while slash
 > commands take the installing workspace from the command payload. The gateway
 > keeps exact scope binding for normal events and slash commands. It accepts an
-> installing-team alternative only for a proven external Slack channel event:
+> installing-team alternative only when the current external-channel raw
+> event structure and authenticated adapter pass the checks above:
 > the raw event's channel and team must match the `SessionSource`, the source
 > team must not be an installed team, and the alternative must be one of the
 > live adapter's `auth_test`-backed installations. DMs, malformed events,

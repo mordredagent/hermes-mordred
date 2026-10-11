@@ -343,11 +343,13 @@ content-addressed `blobs/*.blob`, `recovery.mrkv`, and `.lock`. A device-bound
 anchor outside the directory pins the authoritative generation and master-key
 fingerprint; the passphrase sidecar is the cold recovery path.
 
-`encryption enable env|config|memory` and the low-level `vault` commands manage
-this root. On macOS, `.env` injection and config materialize/reseal can make an
-enrolled copy the active runtime source. Outside macOS, current startup shims
-are inactive and plaintext runtime files remain; `encryption status` reports
-the enrolled target as paused/inactive rather than claiming protection.
+The low-level `vault` commands and file-vault env/config enrollment manage this
+root. On macOS it also stores the memory key in its `.env` entry; `.env`
+injection and config materialize/reseal make enrolled copies runtime sources.
+On Linux these env/config startup shims are inactive. Dedicated Linux TPM and
+Windows CNG memory custody do not use this directory. Windows file-vault
+operations are excluded; the generic early production-anchor refusal for
+other non-macOS platforms remains planned in SPEC/PLAN.
 
 The markers `<home>/mordred/env-vault.optout` and
 `<home>/mordred/config-vault.marker` control those macOS lifecycles;
@@ -444,8 +446,10 @@ environment, the `dashboard/plugin_api.py` shim serves a fallback API
 - `<home>/memories/*.md`: written by Hermes's memory tool. Files are
   plaintext unless Mordred's memory hook is armed; when armed, every write is
   sealed in the `HERMES-MEMORY-ENC-v1` format, and drift backups
-  (`*.md.bak.<ts>`) are sealed too. Mordred stores `HERMES_MEMORY_KEY` in the
-  vault `.env` and owns the sealed container format; Hermes owns the entry
+  (`*.md.bak.<ts>`) are sealed too. On macOS Mordred stores `HERMES_MEMORY_KEY`
+  in the file-vault `.env`; Linux uses `mordred/memory-key.wrapped`, and Windows
+  uses that wrapper through dedicated checked CNG custody. Mordred owns the
+  sealed container format; Hermes owns the entry
   format inside the plaintext and the memory tool itself. The legacy
   `memory.encryption.enabled` config flag is inert; `encryption status`
   reports a legacy flag without a marker as "legacy flag set — run

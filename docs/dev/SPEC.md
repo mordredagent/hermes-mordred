@@ -47,10 +47,17 @@ compatibility policy.
   fallbacks.
 - On Linux, the keyvault requires the installed TPM 2.0 helper and fails
   closed if it is absent or unusable. There is no Linux software-key fallback.
-- Transparent `.env` injection, `config.yaml` materialize/reseal, agent-memory
-  at-rest encryption, and the encrypted workspace integration are active only
-  on macOS. Off macOS they may be enrolled, but status reports them inactive
-  and plaintext remains the runtime source.
+- Transparent `.env` injection, `config.yaml` materialize/reseal, and the
+  encrypted workspace integration are active only on macOS. Linux env/config
+  enrollment does not activate those startup shims; plaintext remains their
+  runtime source. Windows file-vault and env/config seals are explicitly
+  excluded and refuse before mutation.
+- Agent-memory encryption uses the macOS file-vault env key, dedicated Linux
+  TPM custody, or dedicated Windows CNG custody. Linux standalone memory and
+  Private Telegram flows are implemented; general `setup` and `encryption
+  enable all` currently skip Linux memory. See [Linux Private Telegram
+  Design](#linux-private-telegram-design) and [Windows dedicated custody and
+  memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
 - Arming those macOS seals is fail-closed on the runtime: before removing a
   plaintext, the CLI probes the interpreter that should run `hermes` and also
   the interpreter of each `hermes gateway run` process it can identify in the
@@ -68,9 +75,13 @@ compatibility policy.
 - File-vault `vault recover` is supported only on macOS. The Linux TPM helper
   implements native wrapping, but the file vault has no Linux device-anchor
   store and must not claim a working recovery hot path there.
-- Windows product support is in development under the completion contract
-  below; it is not yet a supported end-to-end workflow. Mobile support remains
-  deferred. Injected-backend tests alone do not establish platform support.
+- Scoped Windows implementations and validation exist under the completion
+  contract below, including CNG memory, wizard ceremonies and shared Telegram
+  guards. They do not establish general product support, Windows 11 acceptance,
+  or unrun native/live gates. Follow the latest completion items in
+  [`TODO.md`](./TODO.md) and validation evidence in [`CI.md`](./CI.md).
+  Mobile support remains deferred. Injected-backend tests alone do not
+  establish platform support.
 
 ### License Note
 
@@ -134,10 +145,11 @@ Accepted limitations include:
 
 ### Telegram import
 
-Linux enablement is proposed in the
-[Linux private Telegram design](#linux-private-telegram-design).
-That draft does not change the current macOS-only agent-memory requirement;
-the TPM credential backend alone is not full Linux Telegram support.
+Dedicated TPM memory and Private Telegram flows are implemented on Linux;
+see the [Linux private Telegram design](#linux-private-telegram-design).
+Scoped Windows custody and consumers are described in the Windows completion
+contract. Hardware/account and Windows product acceptance remain distinct
+from implementation; see [`CI.md`](./CI.md) and [`TODO.md`](./TODO.md).
 
 The optional `telegram` extra lets the operator import their **own** Telegram
 account (MTProto user session via Telethon) and ask questions over it from the
@@ -146,11 +158,13 @@ browser extension, using a Venice.ai private model.
 - **Custody (TEE).** API credentials, the Telethon `StringSession`, the
   archive key and the LLM API key are sealed in `credentials.sealed` under a
   data key wrapped (keyvault ECIES, `wrap.wrap_dek`) by a P-256 key inside the
-  Secure Enclave (Linux: TPM). The backend is the signed hardware helper only
-  — no software-key namespace, no legacy fallback — so without
-  `keyvault enable-se` every read and write fails with `tee_unavailable`.
-  Every unseal is a fresh Enclave ECDH (nothing decrypted is cached); the key
-  requires Touch ID / passcode per use unless created with `--no-touch-id`.
+  Secure Enclave on macOS or TPM on Linux. The backend is the hardware helper
+  only — no software-key namespace or legacy fallback. Install it with
+  `keyvault enable-se` on macOS or `enable-tpm` on Linux; absent hardware
+  refuses with `tee_unavailable`. Every unseal performs fresh native ECDH
+  (nothing decrypted is cached). Touch ID / passcode per use applies to macOS
+  attended keys; Linux TPM and Windows CNG do not promise per-use presence.
+  Windows uses its dedicated checked custody store, specified below.
   The sealed file is not the vault `.env`, so nothing is ever injected into a
   Hermes process environment. The 2FA password is never stored.
 - **Plaintext in memory only.** Messages are AES-256-GCM encrypted on disk;
@@ -691,12 +705,10 @@ manual result as required by [`CI.md`](./CI.md).
 
 #### Agent-memory at-rest encryption (sealed memory file format v1)
 
-No Hermes release encrypts `<home>/memories/*.md`, and the `memory`
-encryption target previously only provisioned a key without protecting
-anything on disk. This runtime makes that protection real, on the same
-precedent as the `.env` write guard and the config `.pth` hook: a defensive
-wrapper Mordred installs around a private upstream seam, fail-closed on the
-read path.
+Mordred protects `<home>/memories/*.md` through a defensive wrapper around a
+private upstream memory seam, installed by the plugin and startup bootstrap.
+The installed supported Hermes memory tool has no native sealed-file reader;
+Mordred owns the container and fails closed when a sealed read cannot be opened.
 
 The sealed memory file format is a two-line text container:
 
@@ -705,8 +717,8 @@ line 0: HERMES-MEMORY-ENC-v1
 line 1: base64url(nonce[12] || AES-256-GCM(plaintext, aad))
 ```
 
-The key is `HERMES_MEMORY_KEY`: URL-safe base64 of exactly 32 bytes, with an
-optional `base64:` or `hex:` prefix. AAD binds each ciphertext to its file's
+On macOS the key is `HERMES_MEMORY_KEY`: URL-safe base64 of exactly 32 bytes,
+with an optional `base64:` or `hex:` prefix. AAD binds each ciphertext to its file's
 basename (`hermes-memory-v1:<file basename>`) so `MEMORY.md` and `USER.md`
 ciphertexts cannot be swapped for each other. The format is text-safe on
 purpose — an upstream `read_text()` of a sealed file yields a recognisable
@@ -714,22 +726,32 @@ magic line instead of a `UnicodeDecodeError`. Every write uses a fresh nonce,
 and the plaintext is always the whole file body: Mordred encrypts bytes and
 leaves entry parsing to Hermes.
 
+Linux resolves a dedicated TPM-wrapped memory key; Windows resolves dedicated
+CNG memory custody through checked storage and generation leases. Neither
+depends on the macOS env shim or file-vault recovery. Their custody and
+lifecycle rules are defined in the platform sections linked above.
+
 Arming is evaluated per call, from a marker file and the current key, never
-cached:
+cached. An opt-out marker pauses new sealing. Existing seals remain sticky:
+regardless of arming or safe mode, a supported hook needs the key to read or
+replace sealed bytes, and replacement stays sealed. The marker policy is:
 
 | marker | key | behavior |
 |---|---|---|
-| absent | any | not armed — plaintext as today |
+| absent or opted out | any | not armed — new/plaintext writes use upstream behavior |
 | present | valid | armed — writes seal; reads unseal sealed files and pass plaintext files through (migration on write) |
 | present | missing or invalid | armed, fails closed for memory I/O — every write refuses, and reading a *sealed* file refuses; plaintext files still read |
 | present | valid, but ciphertext fails to authenticate | refuses loudly — the read raises, so the affected load or mutation aborts and nothing is overwritten |
 
-`HERMES_SAFE_MODE` disarms the hook outright. An undecryptable sealed file
-always refuses loudly rather than reporting an empty memory. The hook never
-blocks interpreter start-up; when sealed files exist and the key is missing,
-the first memory load fails with the remedy in the message (so agent start-up
-stops there) instead of presenting an empty memory, and every memory write
-refuses — Mordred never silently writes plaintext while armed.
+On a recognized seam, a sealed read with a missing/invalid key or broken seal
+raises `MemoryEncryptionUnavailable`; Mordred emits the remedy. Hermes may
+catch that exception during its initial load and continue with an empty memory
+view. Hooked writes still refuse, preserving the sealed bytes.
+
+On supported POSIX seams, `HERMES_SAFE_MODE` stops new sealing but keeps the
+wrapper: reads still open sealed files when the key is available, and writes
+over existing seals still require the key and remain sealed. Safe mode is not
+a decryption or recovery key.
 
 Seam coverage depends on which shape of the upstream memory tool is
 installed. Mordred wraps three call sites per seam shape shipped by
@@ -739,6 +761,11 @@ unsupported: when armed, the process refuses to start (`sys.stderr` plus exit
 1, recoverable with `HERMES_SAFE_MODE=1`); when not armed, nothing is wrapped
 and memory stays plaintext.
 
+Windows has a stronger startup boundary: an unsupported seam continues only
+for a checked fresh unmanaged profile. Managed, sealed-but-unowned, or
+unreadable custody refuses startup even in safe mode; see the Windows hook
+contract below.
+
 Known out-of-band paths are documented limitations, not silent gaps: `hermes
 agent-import` is best-effort patched; raw readers (`hermes doctor` size
 reporting, the Desktop learning graph, the Honcho migration upload) see
@@ -747,9 +774,9 @@ out-of-process writer produces plaintext that is sealed on its next write and
 shown as `exposed` in the meantime; and `memory.write_approval` pending JSON
 stays plaintext (`encryption enable memory` warns about it).
 
-`encryption enable memory` requires the runtime probe to pass and the env
-target to already be enrolled and not opted out — the key rides on the env
-shim. It performs one Touch ID authorization through `set_memory_key`, writes
+On macOS, `encryption enable memory` requires the runtime probe to pass and
+the env target to already be enrolled and not opted out — the key rides on
+the env shim. It performs one Touch ID authorization through `set_memory_key`, writes
 the marker, eagerly migrates existing plaintext files to sealed, and warns
 when a running gateway needs a restart to pick up the change. `encryption
 disable memory` decrypts every sealed file back to plaintext, removes the
@@ -763,9 +790,31 @@ the operator opt-out.
 
 The capability probe `runtime_memory_encryption_available` joins the env and
 config probes in the same family and appears in `encryption status`'s gateway
-lines. A CI canary test runs the round trip against the installed upstream
-memory tool so an upstream refactor of the seam trips a red build rather than
-a silent regression.
+lines. Existing canary tests exercise the installed supported upstream memory
+tool. The weekly workflow currently scans hook contracts statically; an
+executable latest-main memory canary is planned below.
+
+Approved follow-up contracts (planned; not active runtime behavior):
+
+- The wizard must refuse production file-vault initialization and device-auth/
+  recovery paths off macOS before
+  resolving a backend/store, prompting or writing. This gate concerns the
+  Keychain device anchor, preserves injected portable stores and cached
+  FlowSession vaults, and does not gate dedicated Linux/Windows memory custody.
+  Anchor `WrapError` must produce a state-determination refusal before prompts
+  or writes. Portable cold reads/passphrase rotation remain available.
+- Weekly compatibility monitoring must execute memory read/write/mutation,
+  drift-backup and journey guards against explicitly selected latest-main
+  source in an isolated home, verify parent/child provenance, and retain the
+  Hermes floor. Missing dependencies/provenance are unavailable, not success.
+  Untrusted upstream execution must have no issue-write token; a separate
+  report job may publish only normalized status and fixed diagnostic context.
+- Linux general `setup` and enable-all must skip macOS env/config enrollment
+  and use the existing dedicated memory engine. Setup respects opt-out,
+  checks readiness without unwrap, reports unfinished noninteractive work as
+  manual, and never forces runtime proof. Enable-all skips an unsupported
+  seam, propagates real engine failure, and retains disable/purge behavior.
+  Preserve macOS FlowSession and Windows proof/custody routes.
 
 #### Explicitly out of v1
 

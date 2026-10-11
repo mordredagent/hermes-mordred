@@ -14,13 +14,15 @@ shape, and [`TODO.md`](./TODO.md) lists only open work.
 
 ## Prerequisites
 
-- Python 3.11 or later. The CI matrix covers Python 3.11–3.13 on Ubuntu and
-  macOS (see [`CI.md`](./CI.md) §`ci.yml` details)
+- Python 3.11 or later. Full CI covers Python 3.11–3.13 on Ubuntu, macOS and
+  scoped native Windows lanes (see [`CI.md`](./CI.md) §`ci.yml` details)
 - [uv](https://docs.astral.sh/uv/) — used to create the dev venv (`.venv/`) and reproduce `uv.lock`
 - git 2.30+
-- macOS / Linux (`mordred_keyvault` uses Secure Enclave/login Keychain on
-  macOS and the fail-closed TPM 2.0 helper on Linux; see
-  [`SPEC.md`](./SPEC.md) §Platform Support (v1))
+- macOS / Linux for established workflows; native Windows for scoped component
+  development and validation, with product/Windows 11 acceptance still open.
+  macOS uses Secure Enclave/login Keychain, Linux uses the fail-closed TPM 2.0
+  helper, and Windows memory uses dedicated CNG custody. See
+  [`SPEC.md`](./SPEC.md) §Platform Support (v1).
 - `hermes-agent` is **installed automatically from PyPI by `uv sync`** (it's a dependency in `pyproject.toml`; no adjacent clone is needed)
 
 ## Repository layout
@@ -60,7 +62,18 @@ During development, **two independent Python environments** coexist. Mixing up w
 | How to invoke | `.venv/bin/hermes-mordred …` | `hermes` on PATH (`~/.local/bin/hermes`) |
 | Purpose | **Verifying local changes**, pytest / ruff / mypy | Running the released version in production |
 
-**If you want to run local code, use the repo `.venv/`.** Since it's an editable install, editing `src/` takes effect immediately without reinstalling.
+**If you want to run local code, use the repo `.venv/`.** Editable `src/` edits
+take effect on the next process start. Package metadata is separate:
+`importlib.metadata` reads installed distribution metadata, including entry
+points and versions, which can stay stale after editing `pyproject.toml` or
+bumping the source version. Refresh it with:
+
+```sh
+uv sync --all-extras --reinstall-package hermes-mordred
+```
+
+Then start a new interpreter and verify both the module path and metadata;
+this does not update the separate Hermes-managed wheel environment.
 
 > **⚠️ You can't tell them apart by version number**: `__version__` in `__about__.py` only bumps at release time, so between releases the local dev-branch code and the published PyPI wheel **claim the same version string** while their contents differ — every merge to `dev` widens that gap until the next bump. `--version` therefore cannot answer "which one is running." The only reliable signal is `__file__` (see §"Verifying the local build").
 
@@ -84,10 +97,11 @@ cd hermes-mordred
 #    - all extras (dev / keyvault / macos / extension / tor-control / ethereum / …)
 uv sync --all-extras
 
-# 3. Confirm you're looking at the local code (success if src/... is printed)
+# 3. Isolate the profile before any interpreter starts, then check module origin
+export HERMES_HOME="$(mktemp -d /tmp/mordred-dev.XXXXXX)"
 .venv/bin/python -c "import mordred_hermes; print(mordred_hermes.__file__)"
 
-# 4. Sanity check that the CLI starts
+# 4. Sanity check that the CLI starts against that isolated profile
 .venv/bin/hermes-mordred status
 ```
 
@@ -236,9 +250,11 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 | Check overall status | `.venv/bin/hermes-mordred status` | Shows policy / network / keyvault / encryption on one screen (`--json` available). Read-only, no prompts or Secure Enclave access |
 | Start extension gateway | `.venv/bin/hermes-mordred extension serve --port 7799` | Use 7799 for the localhost page/API tests; the published Chromium bundle permits only 7788 |
 
-See `CI.md` for workflow details. The scheduled upstream check files an
-informational issue; the equivalent installed-Hermes contract test runs in the
-normal CI suite and can block an incompatible change.
+See `CI.md` for workflow details. The scheduled upstream check currently runs
+AST hook-contract scans of PyPI and main and files an informational issue;
+the installed-Hermes contract tests run in normal CI. A source-selected
+executable weekly memory/journey canary and separated issue-report permissions
+are approved follow-ups in SPEC/PLAN, not yet workflow behavior.
 
 ## Mordred-owned filesystem paths
 
