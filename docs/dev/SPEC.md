@@ -3210,6 +3210,16 @@ retained secret store or file vault, and the `<home>\mordred` and
 recursive removal yet. The plan lists exactly that. `--erase-encrypted`
 refuses on Windows, including `--dry-run`.
 
+Database encryption remains macOS-only. Windows `databases status` observes
+only known protection-state names through bounded, nonblocking checked
+storage; it never discovers databases or promises a scheduled conversion.
+Retained encryption/decryption markers, pending work or a conversion journal
+require reconciliation on macOS. Windows uninstall reports that refusal in
+its plan and stops before memory disable, custody purge or any teardown. It
+checks both a profile home and its owning root, and rechecks after confirmation.
+Unknown or unsafe storage refuses instead of reporting absence. This adds no
+Windows SQLCipher migration or decryption support.
+
 Purge ordering on Windows uninstall: purge requires an explicit disable (the
 opt-out marker) and no seal, broken seal or staging entry. With `--purge-data`
 the restore is therefore planned whenever memory custody is managed and not

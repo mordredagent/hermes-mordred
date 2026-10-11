@@ -204,6 +204,7 @@ jobs:
           tests/extension/test_telegram_windows_flags.py
           tests/test_wizard_windows_memory.py tests/test_wizard_windows_status.py
           tests/test_wizard_windows_excluded.py tests/test_wizard_windows_uninstall.py
+          tests/test_windows_database_compat.py
           tests/test_wizard_windows_native.py
           tests/test_wizard_windows_telegram.py tests/test_wizard_windows_telegram_native.py
           tests/test_desktop_windows_api.py tests/test_desktop_windows_native.py

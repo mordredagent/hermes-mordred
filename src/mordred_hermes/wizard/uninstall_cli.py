@@ -813,7 +813,7 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
         print("Uninstall cancelled; nothing was changed.")
         return 1
     planned_databases = any(r.target == "databases" for r in plan.restores)
-    if ctx.platform == "darwin" or planned_databases:
+    if ctx.platform == "darwin" or (planned_databases and ctx.platform != "win32"):
         try:
             # Confirmation happens without a lease. Always take custody now:
             # another process may have enabled encryption after the plan.

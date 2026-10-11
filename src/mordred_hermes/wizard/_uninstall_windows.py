@@ -80,9 +80,13 @@ def restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
     the proof) is restored too: the purge requires the opt-out the checked
     disable writes, so it is recorded before anything else happens.
     """
+    from . import _windows_databases
     from ._windows_memory import observe
     from .uninstall_cli import Restore
 
+    database_refusal = _windows_databases.refusal(home)
+    if database_refusal is not None:
+        return [Restore("databases", database_refusal + "; uninstall refuses before removing anything", False)]
     observation = observe(home, blocking=True)
     report = observation.report
     if observation.reason is not None or report is None:
@@ -233,7 +237,16 @@ def restore_step(*, purge_data: bool) -> Callable[[UninstallContext, list[Restor
 def restore(ctx: UninstallContext, planned: list[Restore]) -> int:
     """Step a on Windows: the proof-bound memory disable, or stop before removing anything."""
     from . import memory_cli
+    from ._windows_databases import refusal as database_refusal
 
+    # Confirmation ran without storage custody. Recheck before disabling memory
+    # or purging its key; a plan containing unsupported state must be reviewed
+    # again even if that state has since disappeared.
+    refusal = next((item.detail for item in planned if item.target == "databases"), None)
+    refusal = refusal or database_refusal(ctx.home)
+    if refusal is not None:
+        _term.emit_error(f"uninstall stopped: {refusal}. Nothing was removed; Mordred stays installed.")
+        return 1
     for item in planned:
         print(f"Restoring {item.target} ...")
         if memory_cli.disable(home=ctx.home, root=ctx.vault_root, platform=WINDOWS) != 0:
