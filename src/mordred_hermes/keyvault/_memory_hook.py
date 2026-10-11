@@ -783,8 +783,9 @@ def _wrap_drift_self_read(store: Any, cfg: _HookConfig) -> None:
 
     Base64 expansion alone pushes a sealed file past the store's char limit, which
     upstream reads as an oversize entry — every ``replace`` / ``remove`` would be
-    refused with a spurious drift error. So for a sealed file we replicate
-    upstream's two drift signals on the plaintext, and seal the backup we write.
+    refused with a spurious drift error. Evaluate one normalized snapshot, opening
+    seals first, and seal any backup before publication. Armed plaintext must use
+    the same protected backup path; only disarmed plaintext delegates upstream.
     """
     original = store._detect_external_drift
 
@@ -794,20 +795,28 @@ def _wrap_drift_self_read(store: Any, cfg: _HookConfig) -> None:
         if sys.platform == "win32":
             return _windows_drift(cfg, path, limit=self._char_limit(target))
         with _profile_operation(cfg, path) as bound:
-            raw = _sealed_text_at(path)
-            if raw is None:
-                return original(self, target)  # absent / unreadable / plaintext: upstream logic intact
-            key = _require_key(bound, path, writing=False)
-            plaintext = _unseal_text(raw, path=path, key=key)
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return None  # confirmed absence needs neither a key nor a backup
+            except (OSError, UnicodeDecodeError) as exc:
+                if bound.armed:
+                    raise MemoryEncryptionUnavailable(
+                        f"refusing drift backup of unreadable {path}; file unchanged on disk"
+                    ) from exc
+                return original(self, target)
+            if is_sealed(raw):
+                key = _require_key(bound, path, writing=False)
+                plaintext = _unseal_text(raw, path=path, key=key)
+            else:
+                _refuse_broken_seal(raw, path)
+                if not bound.armed:
+                    return original(self, target)
+                key = _require_key(bound, path, writing=True)
+                plaintext = raw
             return _drift_on_plaintext(self, target, path, plaintext, cfg=bound, key=key)
 
     _publish(store, "_detect_external_drift", _detect_external_drift, static=False)
-
-
-def _sealed_text_at(path: Path) -> str | None:
-    """The file's text when it exists and is sealed, else ``None``."""
-    text = _disk_text(path)
-    return text if text is not None and is_sealed(text) else None
 
 
 def _drift_on_plaintext(
