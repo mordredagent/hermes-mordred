@@ -38,16 +38,22 @@ def _key_from_environment() -> object | None:
 
 
 def databases_status(home: Path | None = None) -> int:
-    from ..dbcrypt import _migrate, armed
+    from ..dbcrypt import _migrate, armed, protected_state_present
 
     base = home or _home()
+    if sys.platform != "darwin":
+        print("Database encryption: unsupported on this platform (macOS only).")
+        if protected_state_present(base):
+            _term.emit_error("This home contains database encryption state; decrypt it on macOS before migration.")
+            return 1
+        print("  Hermes databases are not protected by Mordred database encryption on this platform.")
     print(f"Database encryption: {'on' if armed(base) else 'off'}")
     if _migrate.pending_path(base).is_file():
         print("  A conversion is scheduled; it runs the next time Hermes starts.")
     if _migrate.journal_path(base).is_file():
         print("  An interrupted conversion will be completed the next time Hermes starts.")
     try:
-        key = _key_from_environment()
+        key = _key_from_environment() if sys.platform == "darwin" else None
         databases = _migrate.discover(base, key)  # type: ignore[arg-type]
     except ImportError:
         _term.emit_warn("SQLCipher is not installed (pip install 'hermes-mordred[macos]').")
@@ -68,23 +74,6 @@ def _preflight() -> str | None:
     except ImportError:
         return "SQLCipher is not installed: pip install 'hermes-mordred[macos]'."
     return None
-
-
-def _arm_already_encrypted(base: Path, unreadable: list[str]) -> int:
-    """Nothing left to convert: switch encryption on (and say which files the key does not open)."""
-    from ..dbcrypt import _migrate, arm
-
-    arm(base)
-    _migrate.pending_path(base).unlink(missing_ok=True)
-    if unreadable:
-        _term.emit_warn(
-            "the database key does not open: " + ", ".join(unreadable) + " (encrypted with another key, "
-            "or damaged); Hermes cannot read them with this key."
-        )
-        print("No plaintext Hermes database is left; database encryption is on.")
-    else:
-        print("Every Hermes database is already encrypted; database encryption is on.")
-    return 0
 
 
 def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int:
@@ -112,8 +101,6 @@ def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int
     if dry_run:
         print("Dry run: nothing was changed.")
         return 0
-    if not todo:
-        return _arm_already_encrypted(base, [d.relative for d in databases if d.state == "unreadable"])
     busy = _migrate.holders([d.path for d in todo])
     if busy is None or busy:
         _migrate.schedule(base)
@@ -124,12 +111,20 @@ def databases_encrypt(*, dry_run: bool = False, home: Path | None = None) -> int
         return 0
     try:
         report = _migrate.migrate(base, key, arm=arm)
+    except _migrate.MigrationBusy:
+        _migrate.schedule(base)
+        print("A Hermes process is running; database encryption is scheduled for the next start after quitting Hermes.")
+        return 0
     except _migrate.MigrationError as exc:
         _term.emit_error(f"nothing was changed: {exc}")
         return 1
     print(f"Encrypted {len(report.converted)} database(s); database encryption is on.")
     if report.unreadable:
-        _term.emit_warn(f"left alone (not a database Mordred can read): {', '.join(report.unreadable)}")
+        _term.emit_warn(
+            "the database key does not open: "
+            + ", ".join(report.unreadable)
+            + " (encrypted with another key, or damaged); Hermes cannot read them with this key."
+        )
     print(_RESIDUE_NOTE)
     return 0
 
@@ -168,6 +163,10 @@ def databases_decrypt(*, dry_run: bool = False, home: Path | None = None) -> int
         return 0
     try:
         report = _migrate.decrypt_all(base, key)
+    except _migrate.MigrationBusy:
+        _migrate.schedule_decrypt(base)
+        print("A Hermes process is running; database decryption is scheduled for the next start after quitting Hermes.")
+        return 0
     except _migrate.MigrationError as exc:
         _term.emit_error(f"nothing was changed: {exc}")
         return 1

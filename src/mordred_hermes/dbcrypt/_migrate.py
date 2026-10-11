@@ -26,30 +26,27 @@ volume they can survive in free space or local snapshots until reused.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import stat
 import subprocess
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
 from ._key import DatabaseKey
+from ._locking import LOCK_SUBPATH as LOCK_SUBPATH
+from ._locking import MigrationBusy as MigrationBusy
+from ._locking import MigrationError as MigrationError
+from ._locking import migration_lock as migration_lock
 from ._policy import DENY_DIRS, in_scope, looks_like_database_name
-from ._shim import PLAINTEXT_HEADER_BYTES, SQLITE_MAGIC, apply_key, wrong_key_errors
+from ._shim import PLAINTEXT_HEADER_BYTES, SQLITE_MAGIC, apply_key, stdlib_sqlite3, wrong_key_errors
 
 PENDING_SUBPATH: Final = ("mordred", "db-encryption.pending")
 DECRYPT_PENDING_SUBPATH: Final = ("mordred", "db-decryption.pending")
 JOURNAL_SUBPATH: Final = ("mordred", "db-encryption.journal.json")
-LOCK_SUBPATH: Final = ("mordred", "db-encryption.lock")
 PREPARED_SUFFIX: Final = ".mordred-enc"
-
-
-class MigrationError(RuntimeError):
-    """A conversion that was refused or rolled back; the message says why."""
 
 
 @dataclass(frozen=True)
@@ -105,7 +102,7 @@ def _wrong_key_errors(sc: Any) -> tuple[type[BaseException], ...]:
 
 
 def _classify(path: Path, key: DatabaseKey | None) -> str:
-    sc = _sqlcipher()
+    plain_sqlite = stdlib_sqlite3()
     try:
         with path.open("rb") as handle:
             if handle.read(len(SQLITE_MAGIC)) != SQLITE_MAGIC:
@@ -113,13 +110,14 @@ def _classify(path: Path, key: DatabaseKey | None) -> str:
     except OSError:
         return "unreadable"
     uri = f"file:{path.as_posix()}?mode=ro"
-    with contextlib.closing(sc.connect(uri, uri=True)) as plain:
+    with contextlib.closing(plain_sqlite.connect(uri, uri=True)) as plain:
         try:
             plain.execute("SELECT count(*) FROM sqlite_master").fetchone()
             return "plaintext"
-        except _wrong_key_errors(sc):
+        except _wrong_key_errors(plain_sqlite):
             pass
     if key is not None:
+        sc = _sqlcipher()
         with contextlib.closing(sc.connect(uri, uri=True)) as keyed:
             try:
                 apply_key(keyed, key)
@@ -150,7 +148,11 @@ def discover(home: Path, key: DatabaseKey | None) -> list[Database]:
 
 
 def holders(paths: list[Path], *, runner: Callable[..., Any] = subprocess.run) -> list[int] | None:
-    """PIDs (other than ours) with any of ``paths`` (or their sidecars) open; ``None`` if unknown."""
+    """PIDs with any of ``paths`` (or their sidecars) open; ``None`` if unknown.
+
+    Our own open connection is unsafe too: a Desktop callback must not replace
+    the database underneath its running server.
+    """
     targets = [str(p) for base in paths for p in (base, Path(f"{base}-wal"), Path(f"{base}-shm")) if p.exists()]
     if not targets:
         return []
@@ -160,28 +162,7 @@ def holders(paths: list[Path], *, runner: Callable[..., Any] = subprocess.run) -
         return None
     if proc.returncode not in (0, 1):  # 1 = no process has them open
         return None
-    return sorted({int(pid) for pid in proc.stdout.split() if pid.isdigit() and int(pid) != os.getpid()})
-
-
-@contextlib.contextmanager
-def migration_lock(home: Path, *, timeout: float = 120.0) -> Iterator[None]:
-    """Serialize conversions (and the processes that wait for one) on this home."""
-    path = _path(home, LOCK_SUBPATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() > deadline:
-                    raise MigrationError("another process is converting the databases") from None
-                time.sleep(0.2)
-        yield
-    finally:
-        os.close(fd)
+    return sorted({int(pid) for pid in proc.stdout.split() if pid.isdigit()})
 
 
 # -- one database ----------------------------------------------------------------------------
@@ -417,6 +398,8 @@ def decrypt_all(
         resume(home, disarm=disarm)
         databases = discover(home, key)
         report.unreadable = [d.relative for d in databases if d.state == "unreadable"]
+        if report.unreadable:
+            raise MigrationError("unreadable database(s); encryption remains enabled: " + ", ".join(report.unreadable))
         todo = [d for d in databases if d.state == "encrypted"]
         _refuse_if_open(todo, holders_of)
         prepared = _prepare_all(todo, prepare_plain, key)

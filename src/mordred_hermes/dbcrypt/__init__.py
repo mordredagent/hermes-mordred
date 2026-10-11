@@ -45,7 +45,27 @@ def _home() -> Path:
 
 
 def armed(home: Path | None = None) -> bool:
-    return sys.platform == "darwin" and marker_path(home or _home()).is_file()
+    """Persisted encryption intent, including on an unsupported destination OS."""
+    return marker_path(home or _home()).is_file()
+
+
+def protected_state_present(home: Path) -> bool:
+    """A marker or interrupted transaction that requires SQLCipher-aware handling."""
+    directory = home / "mordred"
+    return armed(home) or any(
+        (directory / name).is_file() for name in ("db-encryption.journal.json", "db-decryption.pending")
+    )
+
+
+def _maintenance_process() -> bool:
+    """The standalone DB/uninstall CLI must be able to take exclusive custody."""
+    if not sys.argv:
+        return False
+    name = Path(sys.argv[0].replace("\\", "/")).stem.casefold()
+    args = sys.argv[1:]
+    if name == "hermes-mordred":
+        return bool(args and args[0] in {"databases", "uninstall"})
+    return len(args) >= 2 and args[0] in {"mordred", "mordred-wizard"} and args[1] in {"databases", "uninstall"}
 
 
 def arm(home: Path) -> None:
@@ -105,30 +125,46 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     Raises when armed but SQLCipher cannot be loaded: Hermes's databases are
     encrypted then, and the stdlib module cannot open them.
     """
+    # Maintenance commands explicitly open databases through _migrate. Running
+    # queued work here would mutate a home before status/--dry-run/confirmation,
+    # and a lifetime reader lease would prevent their own offline conversion.
+    if _maintenance_process():
+        return False
+    base = home or _home()
+    if sys.platform != "darwin":
+        if protected_state_present(base):
+            raise RuntimeError(
+                "Hermes database encryption is supported only on macOS; decrypt this home on macOS "
+                "before moving it to this platform. The databases were not opened."
+            )
+        return False
     from . import _migrate, _shim
+    from ._locking import runtime_lease
 
     if _shim.is_installed():
         return True
-    base = home or _home()
-    if sys.platform != "darwin":
-        return False
     global _PROVIDER
     _PROVIDER = provider or KeyProvider()
     key_provider = _PROVIDER
     if _migrate.journal_path(base).is_file():  # an interrupted conversion (either way); needs no key
-        with _migrate.migration_lock(base):
+        with _migrate.migration_lock(base, timeout=120.0):
             _migrate.resume(base)
     _run_pending_conversion(base, key_provider)
     _run_pending_decryption(base, key_provider)
-    if not armed(base):
-        return False
+    with runtime_lease(base):
+        # A converter may have started before we took our shared lease. Read
+        # the format only after it finishes; never admit a half-swapped home.
+        if _migrate.journal_path(base).is_file():
+            raise _migrate.MigrationError("an interrupted database conversion must be completed before startup")
+        if not armed(base):
+            return False
 
-    def has_key() -> bool:
-        return bool(os.environ.get("HERMES_MEMORY_KEY"))
+        def has_key() -> bool:
+            return bool(os.environ.get("HERMES_MEMORY_KEY"))
 
-    module = _shim.build_module(key=key_provider, home=lambda: base, has_key=has_key)
-    _shim.install_module(module)
-    return True
+        module = _shim.build_module(key=key_provider, home=lambda: base, has_key=has_key)
+        _shim.install_module(module)
+        return True
 
 
 def is_installed() -> bool:

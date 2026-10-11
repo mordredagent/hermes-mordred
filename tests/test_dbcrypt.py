@@ -318,8 +318,6 @@ def test_a_process_started_in_a_profile_home_uses_the_roots_marker(
 def test_install_is_a_noop_off_macos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
     monkeypatch.setattr(sys, "platform", "linux")
-    dbcrypt.marker_path(tmp_path).parent.mkdir(parents=True)
-    dbcrypt.marker_path(tmp_path).write_text("1")
     assert dbcrypt.install(home=tmp_path) is False
 
 
