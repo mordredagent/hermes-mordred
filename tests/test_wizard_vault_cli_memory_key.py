@@ -69,13 +69,6 @@ class TestSetMemoryKey:
         padding = "=" * (-len(value) % 4)
         return len(base64.urlsafe_b64decode(value + padding)) == 32
 
-    def test_adds_key_to_empty_vault(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        assert self._decodes_to_32_bytes(self._key_value(root))  # a valid AES-256 key
-
     def test_preserves_existing_env_lines(self, tmp_path: Path) -> None:
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
@@ -119,17 +112,11 @@ class TestSetMemoryKey:
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         captured = capsys.readouterr()
         value = self._key_value(root)
+        assert self._decodes_to_32_bytes(value)
+        assert "encryption enable memory" in captured.out.lower()
+        assert "warning" not in captured.err.lower()
         assert value not in captured.out
         assert value not in captured.err
-
-    def test_prints_config_hint(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        out = capsys.readouterr().out.lower()
-        # Storing the key does not turn sealing on: name the switch that does.
-        assert "encryption enable memory" in out
 
     def test_ensure_memory_key_returns_the_value_without_printing_it(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -223,14 +210,6 @@ class TestSetMemoryKey:
         err = capsys.readouterr().err.lower()
         assert "warning" in err
         assert "memor" in err  # names the agent-memory files at risk
-
-    def test_first_store_does_not_warn(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """The orphaned-memory warning is rotation-only; a first store must not emit it."""
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        assert "warning" not in capsys.readouterr().err.lower()
 
     def test_read_oserror_fails_closed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

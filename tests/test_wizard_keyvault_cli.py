@@ -1067,23 +1067,6 @@ class TestInit:
         assert "never stored" in intro
         assert "recover" in intro.lower()
 
-    def test_init_success_prints_next_step_hint(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Success must orient the user toward what the keyvault unlocks next."""
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "Next:" in out
-        assert "hermes-mordred" in out
-
     def test_digest_mismatch_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = keyvault_cli.init_keyvault(
             home=tmp_path,
@@ -1108,7 +1091,12 @@ class TestInit:
             display_fn=self._noop_display,
         )
         assert rc == 0
-        assert "initialised" in capsys.readouterr().out.lower()
+        output = capsys.readouterr()
+        assert "initialised" in output.out.lower()
+        assert "Next:" in output.out
+        assert "hermes-mordred" in output.out
+        assert "[audit] keyvault.init decision=allow (keyvault.init_started)" in output.err
+        assert "[audit] keyvault.init decision=allow (keyvault.init_completed)" in output.err
         meta = _storage.load_meta(_storage.resolve_keyvault_dir(tmp_path))
         assert meta["keys"]
 
@@ -1349,29 +1337,6 @@ class TestInit:
         )
         assert rc == 1
         assert "corrupt" in capsys.readouterr().err.lower()
-
-    def test_init_audit_lines_distinguish_started_from_completed(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """The two ``keyvault.init`` / ``decision=allow`` audit lines must be
-        distinguishable. They share event + decision and only differ by
-        ``reason``; the default stderr sink now appends it so an operator can
-        tell the durability-barrier emit from the completion emit.
-        """
-        rc = keyvault_cli.init_keyvault(
-            home=tmp_path,
-            backend=FakeBackend(),
-            prompt_io=ScriptedPromptIO(
-                texts=[self._expected_digest().hex()],
-                passwords=[self.PASSPHRASE, self.PASSPHRASE],
-            ),
-            surface=FakeSurface(),
-            display_fn=self._noop_display,
-        )
-        assert rc == 0
-        err = capsys.readouterr().err
-        assert "[audit] keyvault.init decision=allow (keyvault.init_started)" in err
-        assert "[audit] keyvault.init decision=allow (keyvault.init_completed)" in err
 
 
 class TestStderrAuditSink:

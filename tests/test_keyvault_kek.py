@@ -37,13 +37,6 @@ def backend() -> FakeBackend:
 # ---------------------------------------------------------------------------
 
 
-def test_seal_returns_opaque_blob(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    assert isinstance(wrapped, bytes)
-    # The wrap blob is the 127-byte MRKW envelope from wrap.wrap_dek.
-    assert len(wrapped) == 127
-
-
 def test_seal_produces_distinct_blobs_each_call(backend: FakeBackend) -> None:
     # Each seal generates a fresh random master key AND a fresh ephemeral
     # keypair, so two blobs must differ.
@@ -62,28 +55,16 @@ def test_seal_unknown_key_raises(backend: FakeBackend) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_encrypt_decrypt_roundtrip(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
-    blob = mk.encrypt(b"hello world")
-    assert mk.decrypt(blob) == b"hello world"
-
-
-def test_blob_differs_from_plaintext(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
-    plaintext = b"super secret value"
-    blob = mk.encrypt(plaintext)
-    assert plaintext not in blob
-
-
 def test_same_wrapped_blob_opens_to_same_master_key(backend: FakeBackend) -> None:
     # Journey: data encrypted in one session must decrypt in a later one,
     # because the same wrapped blob always unwraps to the same master key.
     wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
+    assert isinstance(wrapped, bytes)
+    assert len(wrapped) == 127  # MRKW wrapping envelope
     mk1 = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
     mk2 = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
     blob = mk1.encrypt(b"cross-session payload")
+    assert b"cross-session payload" not in blob
     assert mk2.decrypt(blob) == b"cross-session payload"
 
 
@@ -156,17 +137,11 @@ def test_close_blocks_further_use(backend: FakeBackend) -> None:
     wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
     mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
     mk.close()
+    mk.close()  # idempotent even after the master-key payload has been wiped
     with pytest.raises(ValueError):
         mk.encrypt(b"x")
     with pytest.raises(ValueError):
         mk.decrypt(b"x")
-
-
-def test_close_is_idempotent(backend: FakeBackend) -> None:
-    wrapped = kek.seal_master_key(_KEY_ID, backend=backend)
-    mk = kek.open_master_key(wrapped, _KEY_ID, backend=backend)
-    mk.close()
-    mk.close()  # must not raise
 
 
 def test_context_manager_closes_on_exit(backend: FakeBackend) -> None:

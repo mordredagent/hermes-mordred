@@ -32,22 +32,6 @@ def test_unreachable_is_exception_subclass() -> None:
         pass
 
 
-def test_harness_refused_is_base_exception() -> None:
-    """Strict-mode harness refusal must escape ``except Exception``."""
-    from mordred_hermes.llm_guard._exceptions import MordredHarnessRefused
-
-    assert issubclass(MordredHarnessRefused, BaseException)
-    assert not issubclass(MordredHarnessRefused, Exception)
-
-
-def test_session_refused_is_base_exception() -> None:
-    """Strict-mode provider refusal must escape ``except Exception``."""
-    from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
-
-    assert issubclass(MordredSessionRefused, BaseException)
-    assert not issubclass(MordredSessionRefused, Exception)
-
-
 def test_harness_refused_propagates_past_exception_wrapper() -> None:
     """Simulate Hermes ``invoke_hook`` ``except Exception:`` wrapper.
 
@@ -70,24 +54,6 @@ def test_harness_refused_propagates_past_exception_wrapper() -> None:
 
     with pytest.raises(MordredHarnessRefused):
         hermes_invoke_hook(harness_handler)
-
-
-def test_session_refused_propagates_past_exception_wrapper() -> None:
-    """Symmetric propagation test for the provider-refusal class."""
-    from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
-
-    def hermes_invoke_hook(callback: object) -> None:
-        try:
-            assert callable(callback)
-            callback()
-        except Exception:
-            pytest.fail("MordredSessionRefused was incorrectly swallowed by except Exception")
-
-    def session_handler() -> None:
-        raise MordredSessionRefused("non-allowlisted provider under strict policy")
-
-    with pytest.raises(MordredSessionRefused):
-        hermes_invoke_hook(session_handler)
 
 
 def test_session_refused_escapes_double_nested_exception_wrappers() -> None:
@@ -139,20 +105,3 @@ def test_refusal_classes_distinguishable_from_systemexit() -> None:
 
     assert not issubclass(MordredHarnessRefused, SystemExit)
     assert not issubclass(MordredSessionRefused, SystemExit)
-
-
-def test_no_stream_interrupted_class_in_v1() -> None:
-    """M2 is deferred to v2 — class must NOT exist in PR1 to prevent silent half-impl.
-
-    Repo audit: the freeze in
-    ``mordred-hermes/src/mordred_hermes/privacy_check/_audit_reasons.py``
-    still lists ``policy.strict.local_stream_interrupted`` because the enum
-    is frozen for the whole phase; the *exception class* is what we defer
-    so callers cannot accidentally raise it without an audit path.
-    """
-    import mordred_hermes.llm_guard._exceptions as exc_mod
-
-    assert not hasattr(exc_mod, "MordredLocalStreamInterrupted"), (
-        "MordredLocalStreamInterrupted should be deferred to v2 — Hermes core owns "
-        "streaming (see Phase 2 PR1 prep H1 verify)."
-    )

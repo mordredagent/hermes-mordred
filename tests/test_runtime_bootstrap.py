@@ -55,9 +55,12 @@ def _eval_pth_engages(argv0: str, modules: dict[str, object] | None = None) -> b
     ],
 )
 def test_runtime_pth_gate_matches_existing_hermes_matcher(argv0: str, expected: bool) -> None:
-    engaged = _eval_pth_engages(argv0)
-    assert engaged is expected
-    assert engaged == _pth_bootstrap._looks_like_hermes([argv0], {})
+    from tests.test_pth_bootstrap import _eval_pth_engages as eval_config_gate
+
+    matcher_result = _pth_bootstrap._looks_like_hermes([argv0], modules={})
+    assert matcher_result is expected
+    assert _eval_pth_engages(argv0) is matcher_result
+    assert eval_config_gate(argv0) is matcher_result
 
 
 @pytest.mark.parametrize("argv0", ["-c", "", "/usr/bin/python"])

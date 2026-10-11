@@ -32,6 +32,10 @@ _PLAINTEXT = b"the cat is on the mat\n\xc2\xa7\nsecond entry"
 def test_round_trip() -> None:
     blob = seal(_PLAINTEXT, key=_KEY, name="MEMORY.md")
     assert unseal(blob, key=_KEY, name="MEMORY.md") == _PLAINTEXT
+    assert blob.startswith(MAGIC + b"\n")
+    assert blob.endswith(b"\n")
+    blob.decode("ascii")  # survives the upstream UTF-8 reader unchanged
+    assert _PLAINTEXT not in blob
 
 
 def test_round_trip_empty_plaintext() -> None:
@@ -39,14 +43,6 @@ def test_round_trip_empty_plaintext() -> None:
     blob = seal(b"", key=_KEY, name="MEMORY.md")
     assert is_sealed(blob)
     assert unseal(blob, key=_KEY, name="MEMORY.md") == b""
-
-
-def test_wire_layout_is_ascii_and_newline_terminated() -> None:
-    blob = seal(_PLAINTEXT, key=_KEY, name="MEMORY.md")
-    assert blob.startswith(MAGIC + b"\n")
-    assert blob.endswith(b"\n")
-    blob.decode("ascii")  # must survive the upstream utf-8 reader unchanged
-    assert _PLAINTEXT not in blob
 
 
 def test_two_seals_of_the_same_plaintext_differ() -> None:

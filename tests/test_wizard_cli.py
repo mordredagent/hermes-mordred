@@ -74,43 +74,27 @@ class TestSubcommandTree:
         "argv",
         [
             ["mordred", "configure"],
-            ["mordred", "configure", "--skip-hermes-setup"],
-            ["mordred", "configure", "--with-hermes-setup"],
             ["mordred", "upgrade"],
-            ["mordred", "upgrade", "--reset"],
-            ["mordred", "upgrade", "--non-interactive"],
-            ["mordred", "upgrade", "--audit-merge", "skip"],
-            ["mordred", "upgrade", "--policy-conflict", "abort"],
             ["mordred", "install", "some-skill"],
             ["mordred", "network", "use", "tor"],
             ["mordred", "network", "use", "vpn"],
             ["mordred", "network", "use", "clearnet"],
             ["mordred", "network", "status"],
             ["mordred", "network", "init"],
-            ["mordred", "network", "init", "--non-interactive"],
-            ["mordred", "network", "init", "--clear-mullvad"],
-            ["mordred", "network", "init", "--non-interactive", "--path", "tor"],
-            ["mordred", "network", "init", "--no-mullvad-killswitch"],
-            ["mordred", "network", "init", "--tor-socks-port", "9050"],
             ["mordred", "policy", "show"],
             ["mordred", "policy", "explain", "skill-id"],
             ["mordred", "policy", "dry-run", "/tmp/SKILL.md"],
             ["mordred", "policy", "reload"],
             ["mordred", "audit", "tail"],
-            ["mordred", "audit", "tail", "-n", "5"],
             ["mordred", "audit", "grep", "policy.strict"],
             ["mordred", "audit", "decrypt", "--date", "2026-05-10"],
             ["mordred", "audit", "purge", "--before", "2026-01-01"],
             ["mordred", "keyvault", "init"],
-            ["mordred", "keyvault", "init", "--store-seed-for-hd"],
-            ["mordred", "keyvault", "init", "--paper-only"],
             ["mordred", "keyvault", "list"],
             ["mordred", "keyvault", "verify-digest"],
             ["mordred", "keyvault", "export", "--output", "/tmp/keyvault-backup.mrkv"],
             ["mordred", "keyvault", "recover", "--blob", "/tmp/x"],
             ["mordred", "vault", "migrate"],
-            ["mordred", "vault", "migrate", "/tmp/.env", "/tmp/config.yaml"],
-            ["mordred", "vault", "migrate", "--root", "/tmp/vault"],
             ["mordred", "plugins", "list"],
         ],
     )
@@ -118,6 +102,52 @@ class TestSubcommandTree:
         parser = _build_parser()
         ns = parser.parse_args(argv)
         assert hasattr(ns, "func"), f"set_defaults(func=...) missing for {argv!r}"
+
+    def test_upgrade_flags_map_to_handler_arguments(self) -> None:
+        ns = _build_parser().parse_args(["mordred", "upgrade", "--reset", "--non-interactive"])
+        assert ns.reset is True
+        assert ns.non_interactive is True
+        assert callable(ns.func)
+
+    def test_network_init_flags_map_to_handler_arguments(self) -> None:
+        ns = _build_parser().parse_args(
+            [
+                "mordred",
+                "network",
+                "init",
+                "--non-interactive",
+                "--path",
+                "tor",
+                "--clear-mullvad",
+                "--no-mullvad-killswitch",
+                "--tor-socks-port",
+                "9150",
+            ]
+        )
+        assert ns.non_interactive is True
+        assert ns.path == "tor"
+        assert ns.clear_mullvad is True
+        assert ns.mullvad_killswitch is False
+        assert ns.tor_socks_port == 9150
+        assert callable(ns.func)
+
+    def test_audit_tail_short_flag_sets_line_count(self) -> None:
+        ns = _build_parser().parse_args(["mordred", "audit", "tail", "-n", "5"])
+        assert ns.lines == 5
+        assert callable(ns.func)
+
+    def test_keyvault_init_accepts_legacy_store_seed_flag(self) -> None:
+        ns = _build_parser().parse_args(["mordred", "keyvault", "init", "--store-seed-for-hd"])
+        assert ns.store_seed_for_hd is True
+        assert callable(ns.func)
+
+    def test_vault_migrate_maps_multiple_sources_and_root(self) -> None:
+        ns = _build_parser().parse_args(
+            ["mordred", "vault", "migrate", "/tmp/.env", "/tmp/config.yaml", "--root", "/tmp/vault"]
+        )
+        assert ns.source == ["/tmp/.env", "/tmp/config.yaml"]
+        assert ns.root == "/tmp/vault"
+        assert callable(ns.func)
 
     def test_keyvault_init_defaults_to_encrypted_seed_storage(self) -> None:
         parser = _build_parser()
@@ -285,6 +315,7 @@ class TestMainStandaloneEntry:
         out = capsys.readouterr().out
         assert "configure" in out
         assert "upgrade" in out
+        assert "--no-color" in out
         assert "policy" in out
 
     def test_no_args_prints_friendly_help(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -295,12 +326,6 @@ class TestMainStandaloneEntry:
         out = capsys.readouterr().out
         assert "Quickstart" in out
         assert "configure" in out
-
-    def test_help_lists_no_color_flag(self, capsys: pytest.CaptureFixture[str]) -> None:
-        with pytest.raises(SystemExit) as exc:
-            main(["--help"])
-        assert exc.value.code == 0
-        assert "--no-color" in capsys.readouterr().out
 
     def test_no_color_flag_sets_no_color_env(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

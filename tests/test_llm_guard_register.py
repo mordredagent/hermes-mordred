@@ -166,15 +166,6 @@ class TestRegisterEntryPoint:
         assert model_endpoint.hits == 1
         assert proxy.hits == 0, "mordred-local request was captured by the ambient HTTP proxy"
 
-    def test_register_wires_on_session_start_hook(self) -> None:
-        from mordred_hermes.llm_guard import register
-
-        ctx = _FakeCtx()
-        register(ctx)
-
-        names = [name for name, _ in ctx.hooks]
-        assert "on_session_start" in names
-
     def test_register_wires_both_session_start_callbacks_in_order(self) -> None:
         """PR2: ``harness_detect`` is registered FIRST, then ``enforce``.
 
@@ -195,27 +186,13 @@ class TestRegisterEntryPoint:
         register(ctx)
 
         session_start_callbacks = [cb for name, cb in ctx.hooks if name == "on_session_start"]
+        assert "pre_llm_call" not in [name for name, _ in ctx.hooks]
+        assert "pre_tool_call" not in [name for name, _ in ctx.hooks]
         assert len(session_start_callbacks) == 4
         assert session_start_callbacks[0] is check_plugin_integrity
         assert session_start_callbacks[1] is _on_session_start_harness
         assert session_start_callbacks[2] is _on_session_start_auxiliary
         assert session_start_callbacks[3] is _on_session_start_enforce
-
-    def test_register_does_not_wire_pre_llm_call(self) -> None:
-        """PR1 does NOT touch ``pre_llm_call``.
-
-        HOOK_PAYLOADS.md §5 confirms ``pre_llm_call`` is context-injection
-        only in v0.11.0; provider override is structurally impossible.
-        PR2 will add ``on_session_start`` enforce; this test guards against
-        accidentally re-introducing the stale per-turn override design.
-        """
-        from mordred_hermes.llm_guard import register
-
-        ctx = _FakeCtx()
-        register(ctx)
-
-        names = [name for name, _ in ctx.hooks]
-        assert "pre_llm_call" not in names
 
     def test_register_wires_pre_api_request_enforce(self) -> None:
         """Codex review P1 round 3: ``on_session_start`` only has access to
@@ -238,16 +215,6 @@ class TestRegisterEntryPoint:
         pre_api_callbacks = [cb for name, cb in ctx.hooks if name == "pre_api_request"]
         assert len(pre_api_callbacks) == 1
         assert pre_api_callbacks[0] is _on_pre_api_request_enforce
-
-    def test_register_does_not_wire_pre_tool_call(self) -> None:
-        """``pre_tool_call`` is privacy_check's responsibility, not llm_guard's."""
-        from mordred_hermes.llm_guard import register
-
-        ctx = _FakeCtx()
-        register(ctx)
-
-        names = [name for name, _ in ctx.hooks]
-        assert "pre_tool_call" not in names
 
 
 class TestSessionStartEnforceIsAuditOnly:

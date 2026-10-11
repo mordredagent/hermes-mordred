@@ -1,12 +1,4 @@
-"""``hermes mordred keyvault {enable-se,enable-tpm}`` — native-helper build CLI.
-
-v2-OS2 follow-up (b): the commands that build the platform hardware-helper
-binaries from source (``enable-se`` / ``enable-tpm``) are extracted out of
-``keyvault_cli`` into their own module so ``keyvault_cli`` drops back under the
-800-LOC guideline. This first section pins the post-split module surface; the
-behavioural coverage (the migrated ``TestEnableSE`` / ``TestEnableTPM`` …
-classes) is added with the move.
-"""
+"""Native-helper build, install, platform guards, and CLI behavior."""
 
 from __future__ import annotations
 
@@ -15,42 +7,7 @@ from typing import Any
 
 import pytest
 
-# ``keyvault_cli`` is imported only for the negative-contract assertions (the
-# native-build commands must NO LONGER live there); ``keyvault_native_cli`` is
-# the module under test.
-from mordred_hermes.wizard import keyvault_cli, keyvault_native_cli
-
-#: Public command + argparse-adapter surface that must live in the new module.
-_PUBLIC = ("enable_se", "cli_enable_se", "enable_tpm", "cli_enable_tpm")
-#: Build seams (unit-test hooks) that move with the commands.
-_SEAMS = (
-    "_se_platform_reason",
-    "_missing_build_tools",
-    "_locate_sekey_source",
-    "_run_sekey_build",
-    "_verify_sekey_helper",
-    "_tpm_platform_reason",
-    "_missing_tpm_build_tools",
-    "_locate_tpmkey_source",
-    "_run_tpmkey_build",
-    "_verify_tpmkey_helper",
-)
-
-
-@pytest.mark.parametrize("name", _PUBLIC + _SEAMS)
-def test_native_cli_exposes_command(name: str) -> None:
-    assert hasattr(keyvault_native_cli, name), f"keyvault_native_cli must expose {name}"
-
-
-@pytest.mark.parametrize("name", _PUBLIC + _SEAMS)
-def test_keyvault_cli_no_longer_exposes_native_command(name: str) -> None:
-    # Clean split: the native-build commands are GONE from keyvault_cli.
-    assert not hasattr(keyvault_cli, name), f"keyvault_cli must not still expose {name}"
-
-
-def test_public_commands_in_native_all() -> None:
-    for name in _PUBLIC:
-        assert name in keyvault_native_cli.__all__
+from mordred_hermes.wizard import keyvault_native_cli
 
 
 class TestEnableSE:

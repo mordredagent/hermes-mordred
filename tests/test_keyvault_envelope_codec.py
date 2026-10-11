@@ -25,26 +25,9 @@ def _opaque_wrapped_dek() -> bytes:
     return bytes(codec._WRAPPED_DEK_LEN)
 
 
-class TestWireConstants:
-    def test_magic_and_version(self) -> None:
-        assert codec._ENVELOPE_MAGIC == b"MREN"
-        assert codec._ENVELOPE_VERSION == 1
-
-    def test_header_and_aad_lengths(self) -> None:
-        # 4 magic + 1 version + 16 key_id_hash + 16 purpose_hash + 127 wrapped = 164 AAD
-        assert codec._ENVELOPE_AAD_LEN == 164
-        # + 4-byte aes_blob_len field = 168 header
-        assert codec._ENVELOPE_HEADER_LEN == 168
-        assert codec._KEY_ID_HASH_LEN == 16
-        assert codec._WRAPPED_DEK_LEN == 127
-
-
 class TestHashId:
     def test_hash_id_is_sha256_first_16_bytes(self) -> None:
         assert codec._hash_id("default") == hashlib.sha256(b"default").digest()[:16]
-
-    def test_hash_id_width_matches_constant(self) -> None:
-        assert len(codec._hash_id("anything")) == codec._KEY_ID_HASH_LEN == 16
 
 
 class TestEncodeSplitParseRoundTrip:

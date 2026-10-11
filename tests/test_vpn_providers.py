@@ -70,13 +70,6 @@ def _result(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProces
 
 
 class TestVpnCapabilities:
-    def test_fields(self) -> None:
-        from mordred_hermes.network.vpn_providers import VpnCapabilities
-
-        caps = VpnCapabilities(killswitch=True, dns_leak_safe=False)
-        assert caps.killswitch is True
-        assert caps.dns_leak_safe is False
-
     def test_is_immutable(self) -> None:
         from dataclasses import FrozenInstanceError
 

@@ -195,16 +195,6 @@ class TestRegisterWiring:
 
         assert ctx.hooks.count("on_session_start") == 3
         assert "on_session_end" in ctx.hooks
-
-    def test_register_wires_the_memory_check_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A count only proves *three* callbacks arrived. The sealed-but-locked
-        diagnosis is the one the operator never sees fail, so pin its identity."""
-        from mordred_hermes import keyvault
-
-        _isolate_register(monkeypatch)
-        ctx = _FakeCtx()
-        keyvault.register(ctx)
-
         assert keyvault._on_session_memory_check in ctx.callbacks_for("on_session_start")
         assert keyvault._on_session_reseal in ctx.callbacks_for("on_session_start")
         assert keyvault._on_session_reseal in ctx.callbacks_for("on_session_end")

@@ -25,6 +25,13 @@ class TestInit:
             store=store,
         )
         assert rc == 0
+        out = capsys.readouterr().out.lower()
+        assert "vault" in out
+        assert "passphrase" in out or "recovery" in out
+        assert "two ways" in out
+        assert "this device" in out
+        assert "day to day" in out
+        assert "lost" in out
         # A real, cold-path-recoverable vault now exists at the root.
         opened = vault.recover_vault(tmp_path, _PASSPHRASE)
         try:
@@ -68,37 +75,6 @@ class TestInit:
         )
         assert rc == 1
         assert "already" in capsys.readouterr().err.lower()
-
-    def test_success_message_points_at_recovery_passphrase(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        vault_cli.init(
-            root=tmp_path,
-            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
-            backend=FakeBackend(),
-            store=FakeAnchorStore(),
-        )
-        out = capsys.readouterr().out.lower()
-        assert "vault" in out
-        assert "passphrase" in out or "recovery" in out
-
-    def test_output_teaches_the_two_key_model(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Newcomers conflate the device key with the recovery passphrase. The
-        creation output must state the two-key model so the mental model lands at
-        the moment of creation, not buried in docs."""
-        vault_cli.init(
-            root=tmp_path,
-            prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]),
-            backend=FakeBackend(),
-            store=FakeAnchorStore(),
-        )
-        out = capsys.readouterr().out.lower()
-        # both opening paths are named
-        assert "two ways" in out
-        assert "this device" in out
-        # the passphrase is framed as the backup, not the everyday key
-        assert "day to day" in out
-        assert "lost" in out
 
     def test_cli_init_adapter_delegates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, object] = {}

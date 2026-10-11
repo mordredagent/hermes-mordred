@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import socket
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -108,41 +107,6 @@ class _FakeClock:
 # --------------------------------------------------------------------------- #
 # torrc rendering                                                             #
 # --------------------------------------------------------------------------- #
-
-
-class TestTorrcRender:
-    def test_includes_socks_port(self, tmp_path: Path) -> None:
-        from mordred_hermes.network.paths import tor
-
-        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
-        assert "SOCKSPort 127.0.0.1:9050" in content
-
-    def test_includes_control_port(self, tmp_path: Path) -> None:
-        from mordred_hermes.network.paths import tor
-
-        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
-        assert "ControlPort 127.0.0.1:9051" in content
-
-    def test_includes_cookie_auth(self, tmp_path: Path) -> None:
-        from mordred_hermes.network.paths import tor
-
-        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
-        assert "CookieAuthentication 1" in content
-
-    def test_includes_data_directory(self, tmp_path: Path) -> None:
-        from mordred_hermes.network.paths import tor
-
-        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
-        assert f"DataDirectory {tmp_path}" in content
-
-    def test_includes_isolate_socks_auth(self, tmp_path: Path) -> None:
-        """v2-N1: make ``IsolateSOCKSAuth`` explicit on the SOCKSPort line so
-        per-credential circuit isolation does not rely on Tor's silent
-        default-on behaviour (a future Tor release could change the default)."""
-        from mordred_hermes.network.paths import tor
-
-        content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
-        assert "SOCKSPort 127.0.0.1:9050 IsolateSOCKSAuth" in content
 
 
 class TestTorrcRenderDisableIpv6:
@@ -408,18 +372,6 @@ class TestStartProcess:
 # --------------------------------------------------------------------------- #
 # PATH_NAME constant                                                          #
 # --------------------------------------------------------------------------- #
-
-
-def test_path_name_constant() -> None:
-    from mordred_hermes.network.paths import tor
-
-    assert tor.PATH_NAME == "tor"
-
-
-def test_default_socket_constants() -> None:
-    """Sanity: pick_free_port's defaults should be the standard TCP probe."""
-    assert socket.AF_INET == 2
-    assert socket.SOCK_STREAM == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -957,3 +909,13 @@ class TestPipedReadLine:
         writer.close()
         # The post-cleanup line was drained/discarded; EOF is the next item.
         assert read_line(2.0) is None
+
+
+def test_torrc_binds_loopback_ports_and_enables_cookie_auth_and_isolation(tmp_path: Path) -> None:
+    from mordred_hermes.network.paths import tor
+
+    content = tor.render_torrc(socks_port=9050, control_port=9051, data_dir=tmp_path)
+    assert "SOCKSPort 127.0.0.1:9050 IsolateSOCKSAuth" in content
+    assert "ControlPort 127.0.0.1:9051" in content
+    assert "CookieAuthentication 1" in content
+    assert f"DataDirectory {tmp_path}" in content

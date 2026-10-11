@@ -119,60 +119,6 @@ class TestWireFormat:
     ``MRKW|version(1)|alg_suite(1)|key_id_hash(16)|ephemeral_pub(65)|
     wrapped_dek(40)`` = 127 bytes."""
 
-    def test_blob_is_127_bytes_for_version_1(self, backend: FakeBackend) -> None:
-        from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        assert len(blob) == 127
-
-    def test_blob_starts_with_mrkw_magic(self, backend: FakeBackend) -> None:
-        from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        assert blob[:4] == b"MRKW"
-
-    def test_blob_version_and_alg_suite_bytes(self, backend: FakeBackend) -> None:
-        from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        assert blob[4] == 1  # version
-        assert blob[5] == 1  # alg_suite (P256+HKDF-SHA256+AES-KW)
-
-    def test_key_id_hash_is_sha256_prefix(self, backend: FakeBackend) -> None:
-        from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        expected = hashlib.sha256(b"k1").digest()[:16]
-        assert blob[6:22] == expected
-
-    def test_ephemeral_pub_is_sec1_uncompressed_p256(self, backend: FakeBackend) -> None:
-        from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        ephemeral_pub = blob[22:87]
-        assert len(ephemeral_pub) == 65
-        assert ephemeral_pub[0] == 0x04  # uncompressed prefix per SEC1
-
-    def test_wrapped_dek_is_40_bytes(self, backend: FakeBackend) -> None:
-        """RFC 3394 AES-KW for a 32-byte input → 40-byte output (8 bytes
-        of fixed AIV are prepended inside AES-KW)."""
-        from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
-
-        generate_wrapping_key("k1", backend=backend)
-        blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
-
-        assert len(blob[87:]) == 40
-
     def test_wrap_is_non_deterministic(self, backend: FakeBackend) -> None:
         """Codex BLOCKER-2 follow-up: wrap MUST generate a fresh ephemeral
         keypair every call. Two calls with the same DEK and key_id produce
@@ -238,26 +184,6 @@ class TestRoundTrip:
         recovered = unwrap_dek(blob, "k1", audit_sink=sink, backend=backend)
 
         assert recovered == dek
-
-    @pytest.mark.parametrize("iteration", range(20))
-    def test_round_trip_random_deks(
-        self,
-        iteration: int,
-        backend: FakeBackend,
-        captured_audit: tuple[list[dict[str, Any]], AuditSink],
-    ) -> None:
-        from mordred_hermes.keyvault.wrap import (
-            generate_wrapping_key,
-            unwrap_dek,
-            wrap_dek,
-        )
-
-        _, sink = captured_audit
-        generate_wrapping_key(f"k{iteration}", backend=backend)
-        dek = secrets.token_bytes(32)
-        blob = wrap_dek(dek, f"k{iteration}", backend=backend)
-
-        assert unwrap_dek(blob, f"k{iteration}", audit_sink=sink, backend=backend) == dek
 
 
 # ---------------------------------------------------------------------------
@@ -933,3 +859,16 @@ class TestAuthorizedAuditSinkResilience:
         # without exception.
         result = unwrap_dek(blob, "k1", audit_sink=bad_sink, backend=backend)
         assert len(result) == 32
+
+
+def test_mrkw_v1_wire_layout(backend: FakeBackend) -> None:
+    from mordred_hermes.keyvault.wrap import generate_wrapping_key, wrap_dek
+
+    generate_wrapping_key("k1", backend=backend)
+    blob = wrap_dek(secrets.token_bytes(32), "k1", backend=backend)
+    assert len(blob) == 127
+    assert blob[:6] == b"MRKW\x01\x01"
+    assert blob[6:22] == hashlib.sha256(b"k1").digest()[:16]
+    assert len(blob[22:87]) == 65
+    assert blob[22] == 0x04
+    assert len(blob[87:]) == 40

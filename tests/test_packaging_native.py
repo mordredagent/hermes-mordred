@@ -56,25 +56,13 @@ def test_wheel_bundles_sekey_helper_sources(wheel_names: frozenset[str]) -> None
     assert _WHEEL_PREFIX + "build.sh" in names
     assert _WHEEL_PREFIX + "Package.swift" in names
     assert any(n.startswith(_WHEEL_PREFIX + "Sources/") and n.endswith("main.swift") for n in names)
-
-
-def test_wheel_excludes_swift_build_artifacts(wheel_names: frozenset[str]) -> None:
-    names = wheel_names
     assert not any(".build/" in n for n in names), "Swift .build/ artifacts must not ship in the wheel"
     assert not any(n.endswith(".o") for n in names), "object files must not ship in the wheel"
+    assert _TPMKEY_WHEEL_PREFIX + "build.sh" in names
+    assert _TPMKEY_WHEEL_PREFIX + "Cargo.toml" in names
+    assert any(n.startswith(_TPMKEY_WHEEL_PREFIX + "src/") and n.endswith("main.rs") for n in names)
+    assert not any("tpmkey-helper/target/" in n for n in names), "Rust target/ artifacts must not ship in the wheel"
 
 
 #: Destination prefix the wheel must expose for the TPM helper sources (v2-OS2 2c).
 _TPMKEY_WHEEL_PREFIX = "mordred_hermes/_native/tpmkey-helper/"
-
-
-def test_wheel_bundles_tpmkey_helper_sources(wheel_names: frozenset[str]) -> None:
-    names = wheel_names
-    assert _TPMKEY_WHEEL_PREFIX + "build.sh" in names
-    assert _TPMKEY_WHEEL_PREFIX + "Cargo.toml" in names
-    assert any(n.startswith(_TPMKEY_WHEEL_PREFIX + "src/") and n.endswith("main.rs") for n in names)
-
-
-def test_wheel_excludes_rust_target_artifacts(wheel_names: frozenset[str]) -> None:
-    names = wheel_names
-    assert not any("tpmkey-helper/target/" in n for n in names), "Rust target/ artifacts must not ship in the wheel"

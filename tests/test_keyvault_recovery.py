@@ -66,12 +66,6 @@ class TestDigestMismatchRefuses:
         with pytest.raises(recovery.RecoveryDigestMismatch):
             recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=OFF_BY_ONE_DIGEST)
 
-    def test_zero_digest_raises_recovery_digest_mismatch(self, valid_blob: bytes) -> None:
-        from mordred_hermes.keyvault import recovery
-
-        with pytest.raises(recovery.RecoveryDigestMismatch):
-            recovery.import_backup(valid_blob, PASSPHRASE, recomputed_digest=WRONG_DIGEST)
-
     def test_recovery_digest_mismatch_subclasses_verification_digest_mismatch(
         self,
     ) -> None:

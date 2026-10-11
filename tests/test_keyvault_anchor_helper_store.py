@@ -45,31 +45,20 @@ def test_service_constant_matches_the_helper_source() -> None:
         assert f'let anchorServiceBase = "{HELPER_SERVICE}"' in handle.read()
 
 
-def test_satisfies_the_anchor_store_protocol() -> None:
-    assert isinstance(_store(SimKeychain()), anchor.AnchorStore)
-
-
 def test_round_trip_through_the_helper() -> None:
     kc = SimKeychain()
     store = _store(kc)
     assert store.read(_LABEL) is None
     store.write(_LABEL, b"v1")
+    kc.reset_counts()
     store.write(_LABEL, b"v2")
+    assert [op for _b, op, _s in kc.ops] == ["SecItemUpdate"]
     assert store.read(_LABEL) == b"v2"
     assert (HELPER_SERVICE, _LABEL) in kc.items
     assert (DEFAULT_SERVICE, _LABEL) not in kc.items  # never written in-process
     assert kc.items[(HELPER_SERVICE, _LABEL)].trusted == {"mordred-hermes-sekey"}
     store.delete(_LABEL)
     assert store.read(_LABEL) is None
-
-
-def test_a_commit_is_one_update() -> None:
-    kc = SimKeychain()
-    store = _store(kc)
-    store.write(_LABEL, b"v1")
-    kc.reset_counts()
-    store.write(_LABEL, b"v2")
-    assert [op for _b, op, _s in kc.ops] == ["SecItemUpdate"]
 
 
 def test_works_with_vault_anchor_helpers() -> None:
