@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from ..dbcrypt import root_home
 from ..dbcrypt._policy import DENY_DIRS, in_scope, looks_like_database_name
+from ._uninstall_database_archives import protected_archives, refuse_archives
 
 if TYPE_CHECKING:
     from ._flow_session import FlowSession
@@ -36,10 +37,14 @@ def state_paths(home: Path) -> list[Path]:
     return [base / "mordred" / name for name in _STATE_NAMES]
 
 
-def needed(home: Path) -> bool:
+def _live_needed(home: Path) -> bool:
     return any(path.exists() or path.is_symlink() for path in state_paths(home)) or any(
         _PREPARED_SUFFIX in path.name for path in _files(root_home(home), strict=False)
     )
+
+
+def needed(home: Path) -> bool:
+    return _live_needed(home) or bool(protected_archives(root_home(home)))
 
 
 def _files(home: Path, *, strict: bool = True) -> Iterator[Path]:
@@ -100,16 +105,25 @@ def database_files(home: Path) -> list[Path]:
 
 def detail(home: Path, *, erase: bool = False) -> str:
     base = root_home(home)
-    names = ", ".join(str(path.relative_to(base)) for path in database_files(base)) or "no database files found"
-    if erase:
-        return (
-            f"delete all Hermes databases under {base}, including profiles, backups, sidecars and prepared copies "
-            f"({names}); cancel pending conversions"
-        )
-    return (
-        f"restore all Hermes databases under {base}, including profiles and backups ({names}); "
-        "cancel pending conversions"
-    )
+    lines: list[str] = []
+    if _live_needed(home):
+        names = ", ".join(str(path.relative_to(base)) for path in database_files(base)) or "no database files found"
+        if erase:
+            lines.append(
+                f"delete all Hermes databases under {base}, including profiles, backups, sidecars and prepared copies "
+                f"({names}); cancel pending conversions"
+            )
+        else:
+            lines.append(
+                f"restore all Hermes databases under {base}, including profiles and backups ({names}); "
+                "cancel pending conversions"
+            )
+    archives = protected_archives(base)
+    if archives:
+        names = ", ".join(str(path.relative_to(base)) for path in archives)
+        action = "delete" if erase else "restore and decrypt separately before uninstalling"
+        lines.append(f"{action} encrypted or unreadable backup archives ({names})")
+    return "; ".join(lines)
 
 
 def needs_vault(ctx: UninstallContext) -> bool:
@@ -121,7 +135,7 @@ def needs_vault(ctx: UninstallContext) -> bool:
 
 
 @contextmanager
-def guard(ctx: UninstallContext) -> Iterator[None]:
+def guard(ctx: UninstallContext, *, erase: bool = False) -> Iterator[None]:
     """Refuse unsupported/profile operations before any restore or teardown."""
     base = root_home(ctx.home)
     if ctx.platform != "darwin":
@@ -136,6 +150,8 @@ def guard(ctx: UninstallContext) -> Iterator[None]:
                 f"database encryption is shared with the root home {base}; run uninstall with HERMES_HOME={base} "
                 "to restore or erase every profile before removing the shared key"
             )
+        if not erase:
+            refuse_archives(base)
         yield
 
 
@@ -189,7 +205,8 @@ def erase(ctx: UninstallContext) -> None:
     from ..dbcrypt import _migrate
 
     base = root_home(ctx.home)
-    paths = database_files(base)
+    live = _live_needed(base)
+    paths = (database_files(base) if live else []) + protected_archives(base)
     busy = _migrate.holders(paths)
     if busy is None:
         raise _migrate.MigrationError("could not check whether Hermes has the databases open (lsof failed)")
@@ -198,7 +215,7 @@ def erase(ctx: UninstallContext) -> None:
     for path in paths:
         path.unlink(missing_ok=True)
         print(f"Erased database file {path}.")
-    if database_files(base):
+    if (live and database_files(base)) or any(path.exists() for path in paths) or protected_archives(base):
         raise _migrate.MigrationError("database files remain after erasure; Mordred and its keys were kept")
     for path in state_paths(base):
         path.unlink(missing_ok=True)

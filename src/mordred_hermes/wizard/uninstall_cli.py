@@ -748,7 +748,7 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
         try:
             # Confirmation happens without a lease. Always take custody now:
             # another process may have enabled encryption after the plan.
-            with _uninstall_databases.guard(ctx):
+            with _uninstall_databases.guard(ctx, erase=opts.erase_encrypted):
                 if _uninstall_databases.needed(ctx.home) != planned_databases:
                     raise RuntimeError(
                         "database protection changed after the plan was printed; nothing was removed. "
