@@ -113,6 +113,12 @@ def inject_vault_env(
     return injected
 
 
+#: The default-environ injection already ran in this process (the database
+#: shim may run it before the plugin does); a second one would only unlock the
+#: vault again for the same values.
+_INJECTED_INTO_OS_ENVIRON = False
+
+
 def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None) -> int:
     """Install the runtime env decrypt at startup (called from the plugin ``register()``).
 
@@ -126,10 +132,17 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
     nothing is injected, even if ``.env`` is still enrolled — the operator has
     restored a plaintext ``.env`` and wants the runtime to use that.
     """
+    global _INJECTED_INTO_OS_ENVIRON
     if sys.platform != "darwin":
+        return 0
+    default = environ is None
+    if default and _INJECTED_INTO_OS_ENVIRON:
         return 0
     if environ is None:
         environ = os.environ
     if _env_optout_marker_path(_hermes_home()).exists():
         return 0
-    return inject_vault_env(root=default_vault_root(), environ=environ)
+    injected = inject_vault_env(root=default_vault_root(), environ=environ)
+    if default:
+        _INJECTED_INTO_OS_ENVIRON = True
+    return injected

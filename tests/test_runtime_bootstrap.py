@@ -29,9 +29,9 @@ def _pth_engage_expr() -> str:
     return line[len(_PTH_PREFIX) : -len(_PTH_SUFFIX)]
 
 
-def _eval_pth_engages(argv0: str) -> bool:
+def _eval_pth_engages(argv0: str, modules: dict[str, object] | None = None) -> bool:
     fake_os = SimpleNamespace(path=os.path)
-    fake_sys = SimpleNamespace(argv=[argv0])
+    fake_sys = SimpleNamespace(argv=[argv0], modules=modules or {})
     return bool(eval(_pth_engage_expr(), {"os": fake_os, "sys": fake_sys}))
 
 
@@ -57,10 +57,47 @@ def _eval_pth_engages(argv0: str) -> bool:
 def test_runtime_pth_gate_matches_existing_hermes_matcher(argv0: str, expected: bool) -> None:
     from tests.test_pth_bootstrap import _eval_pth_engages as eval_config_gate
 
-    matcher_result = _pth_bootstrap._looks_like_hermes([argv0])
+    matcher_result = _pth_bootstrap._looks_like_hermes([argv0], modules={})
     assert matcher_result is expected
     assert _eval_pth_engages(argv0) is matcher_result
     assert eval_config_gate(argv0) is matcher_result
+
+
+@pytest.mark.parametrize("argv0", ["-c", "", "/usr/bin/python"])
+def test_runtime_pth_gate_engages_under_the_managed_launcher(argv0: str) -> None:
+    # Hermes Desktop runs `python -I -c <code>`; its `.pth` files are processed
+    # while `hermes_bootstrap` is being imported.
+    managed = {_pth_bootstrap.MANAGED_LAUNCHER_MODULE: object()}
+    assert _eval_pth_engages(argv0, managed) is True
+    assert _pth_bootstrap._looks_like_hermes([argv0], managed) is True
+    assert _eval_pth_engages(argv0) is False
+
+
+def test_plugin_wrapper_is_deferred_under_the_managed_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from mordred_hermes.keyvault import _memory_hook
+
+    registered: dict[str, object] = {}
+    monkeypatch.setitem(sys.modules, _pth_bootstrap.MANAGED_LAUNCHER_MODULE, SimpleNamespace())
+    monkeypatch.delitem(sys.modules, "hermes_cli.plugins", raising=False)
+    monkeypatch.setattr(
+        _memory_hook, "register_post_import_action", lambda name, action: registered.update({name: action})
+    )
+
+    _runtime_bootstrap._install_plugin_discovery_wrapper()
+
+    assert set(registered) == {"hermes_cli.plugins"}
+    assert "hermes_cli.plugins" not in sys.modules  # never imported from inside site processing
+
+
+def test_deferred_wrapper_failure_refuses_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_module: object) -> None:
+        raise RuntimeError("shape drift")
+
+    monkeypatch.setattr(_runtime_bootstrap, "_wrap_plugin_manager", broken)
+    with pytest.raises(SystemExit):
+        _runtime_bootstrap._wrap_on_import(SimpleNamespace())
 
 
 _FAKE_MEMORY_TOOL_SRC = '''\
@@ -466,3 +503,44 @@ def test_discovery_wrapper_converts_host_drift_to_fail_closed_refusal(tmp_path: 
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.splitlines()[-1])
     assert result == {"raised": "SystemExit", "hooks": {}}
+
+
+def test_home_fallback_honours_hermes_home_before_hermes_is_importable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import builtins
+    import sys
+
+    from mordred_hermes import _home
+
+    real_import = builtins.__import__
+
+    def no_hermes_constants(name: str, *args: object, **kwargs: object) -> object:
+        if name == "hermes_constants":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delitem(sys.modules, "hermes_constants", raising=False)
+    monkeypatch.setattr(builtins, "__import__", no_hermes_constants)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    assert _home.hermes_home() == tmp_path / "profile"
+    monkeypatch.delenv("HERMES_HOME")
+    assert _home.hermes_home().name == ".hermes"
+
+
+@pytest.mark.parametrize(
+    ("orig_argv", "expected"),
+    [
+        (["/venv/bin/python", "-m", "hermes_cli.main", "-p", "default", "serve"], True),
+        (["/venv/bin/python", "-I", "-m", "hermes_cli.backup_sqlite", "/home"], True),
+        (["/venv/bin/python", "-m", "json.tool"], False),
+        (["/venv/bin/python", "-m", "pytest", "hermes_cli"], False),
+        (["/venv/bin/python", "-m"], False),
+    ],
+)
+def test_runtime_pth_gate_engages_for_python_m_hermes_cli(orig_argv: list[str], expected: bool) -> None:
+    """Hermes re-executes itself as ``python -m hermes_cli.main``; at site-init argv is only ``['-m', ...]``."""
+    fake_os = SimpleNamespace(path=os.path)
+    fake_sys = SimpleNamespace(argv=["-m", *orig_argv[3:]], modules={}, orig_argv=orig_argv)
+    assert bool(eval(_pth_engage_expr(), {"os": fake_os, "sys": fake_sys})) is expected
+    assert _pth_bootstrap._looks_like_hermes(["-m", *orig_argv[3:]], {}, orig_argv=orig_argv) is expected

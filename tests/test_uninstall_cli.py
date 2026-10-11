@@ -11,6 +11,7 @@ must be back to what they were.
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -389,8 +390,9 @@ class TestEraseEncrypted:
         assert not [call for call in installed.backend.calls if call[0] == "ecdh"]
         assert not (home / ".env").exists() and not (home / "config.yaml").exists()
         assert not any((home / "memories" / name).exists() for name in _MEMORIES)
-        # Mordred and all its data are gone.
-        assert not (home / "mordred").exists()
+        # User data is gone; the database coordination inode stays available.
+        assert list((home / "mordred").iterdir()) == [home / "mordred" / "db-encryption.lock"]
+        assert not installed.root.exists()
         assert not (home / "plugins" / "mordred").exists()
         assert installed.runner.uninstalls
 
@@ -425,7 +427,8 @@ class TestPurge:
         assert rc == 0
         assert events == ["telegram", "keyvault"]
         assert len(prompt.asked) == 1  # --yes skips the plain question, never the typed one
-        assert not (installed.home / "mordred").exists()
+        assert list((installed.home / "mordred").iterdir()) == [installed.home / "mordred" / "db-encryption.lock"]
+        assert not installed.root.exists()
         label = _identity.vault_identity(installed.root)
         assert installed.store.read(label) is None
         assert ("delete", label) in installed.backend.calls
@@ -444,7 +447,8 @@ class TestPurge:
 
         err = capsys.readouterr().err
         assert "Keychain Access" in err and "mordred-hermes.wrsw." in err
-        assert not (installed.home / "mordred").exists()
+        assert list((installed.home / "mordred").iterdir()) == [installed.home / "mordred" / "db-encryption.lock"]
+        assert not installed.root.exists()
 
     def test_wrong_phrase_changes_nothing(self, installed: Installed) -> None:
         rc = run_uninstall(
@@ -587,3 +591,525 @@ def _macos_key_custody_contract(monkeypatch):
     from tests._helpers import PlatformSys
 
     monkeypatch.setattr(module, "sys", PlatformSys("darwin"))
+
+
+@pytest.fixture
+def encrypted_databases(installed: Installed, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Real SQLCipher files, with hardware and process discovery kept in test fakes."""
+    import contextlib
+    import sqlite3
+
+    pytest.importorskip("sqlcipher3")
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _key, _migrate
+
+    key = memory_cli._memory_key_from_vault(root=installed.root, backend=installed.backend, store=installed.store)
+    assert key is not None
+    paths = [
+        installed.home / "state.db",
+        installed.home / "state.db.pre-update-20261011.bak",
+        installed.home / "cron" / "executions.db",
+        installed.home / "profiles" / "work" / "state.db",
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE messages (text TEXT)")
+            conn.execute("INSERT INTO messages VALUES ('preserve this conversation')")
+            conn.commit()
+    monkeypatch.setattr(_migrate, "holders", lambda _paths: [])
+    _migrate.migrate(installed.home, _key.derive(key), arm=dbcrypt.arm)
+    installed.backend.calls.clear()
+    return paths
+
+
+def _database_rows(path: Path) -> list[tuple[str]]:
+    import contextlib
+    import sqlite3
+
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        return conn.execute("SELECT text FROM messages").fetchall()
+
+
+class TestDatabaseUninstall:
+    def test_restores_root_backups_and_profiles_with_one_vault_unlock(
+        self, installed: Installed, encrypted_databases: list[Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes import dbcrypt
+
+        # Ambient state may belong to another home; the vault is authoritative.
+        monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + bytes(32).hex())
+        real_delete = installed.backend.delete_enclave_key
+
+        def delete_key(label: str) -> None:
+            for path in encrypted_databases:
+                assert _database_rows(path) == [("preserve this conversation",)]
+            real_delete(label)
+
+        monkeypatch.setattr(installed.backend, "delete_enclave_key", delete_key)
+        ctx = installed.context(prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+        assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 0
+        assert not installed.root.exists()
+        for path in encrypted_databases:
+            assert _database_rows(path) == [("preserve this conversation",)]
+        assert not dbcrypt.marker_path(installed.home).exists()
+        assert [call for call in installed.backend.calls if call[0] == "ecdh"] == [
+            ("ecdh", _identity.vault_identity(installed.root))
+        ]
+
+    def test_dry_run_lists_database_restore_without_unlocking(
+        self, installed: Installed, encrypted_databases: list[Path], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        before = _tree(installed.home)
+        assert run_uninstall(installed.context(), UninstallOptions(dry_run=True)) == 0
+        out = capsys.readouterr().out
+        assert "databases:" in out
+        for path in encrypted_databases:
+            assert str(path.relative_to(installed.home)) in out
+        assert _tree(installed.home) == before
+        assert not installed.backend.calls
+
+    @pytest.mark.parametrize("failure", ["missing-key", "wrong-key", "database-header", "backup-header"])
+    def test_unreadable_database_stops_before_restore_or_teardown(
+        self,
+        installed: Installed,
+        encrypted_databases: list[Path],
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+    ) -> None:
+        from mordred_hermes import dbcrypt
+
+        if failure.endswith("-header"):
+            path = encrypted_databases[0 if failure == "database-header" else 1]
+            path.write_bytes(b"!" + path.read_bytes()[1:])
+        else:
+            key = None if failure == "missing-key" else bytes(32)
+            monkeypatch.setattr(memory_cli, "_memory_key_from_vault", lambda **_kw: key)
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 1
+        assert dbcrypt.marker_path(installed.home).exists()
+        assert installed.root.exists()
+        assert not (installed.home / "config.yaml").exists()
+        assert not (installed.home / ".env").exists()
+        assert installed.runner.uninstalls == []
+        assert all(path.exists() for path in encrypted_databases)
+
+    def test_database_conversion_failure_stops_the_entire_uninstall(
+        self, installed: Installed, encrypted_databases: list[Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes import dbcrypt
+        from mordred_hermes.dbcrypt import _migrate
+
+        def fail_export(*_args: object) -> Path:
+            raise OSError("cannot write prepared database")
+
+        monkeypatch.setattr(_migrate, "prepare_plain", fail_export)
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 1
+        assert dbcrypt.marker_path(installed.home).exists()
+        assert not (installed.home / "config.yaml").exists()
+        assert installed.runner.uninstalls == []
+        assert installed.root.exists()
+
+    def test_unsupported_platform_preserves_keys_and_package(
+        self, installed: Installed, encrypted_databases: list[Path]
+    ) -> None:
+        assert run_uninstall(installed.context(platform="linux"), UninstallOptions(yes=True)) == 1
+        assert not (installed.home / "config.yaml").exists()
+        assert installed.runner.uninstalls == []
+        assert installed.root.exists()
+
+    def test_profile_uninstall_refuses_to_orphan_root_encryption(
+        self, installed: Installed, encrypted_databases: list[Path]
+    ) -> None:
+        profile = installed.home / "profiles" / "work"
+        ctx = installed.context(home=profile)
+        assert run_uninstall(ctx, UninstallOptions(yes=True)) == 1
+        assert installed.runner.uninstalls == []
+        assert installed.root.exists()
+        assert all(path.exists() for path in encrypted_databases)
+
+    def test_erase_removes_databases_sidecars_and_prepared_copies_before_keys(
+        self, installed: Installed, encrypted_databases: list[Path], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from mordred_hermes.dbcrypt import _migrate
+
+        erased = list(encrypted_databases)
+        for orphan in (
+            "orphan.db-wal",
+            "orphan.db.pre-update.bak-shm",
+            f"orphan.db.pre-update.bak{_migrate.PREPARED_SUFFIX}",
+        ):
+            artifact = installed.home / orphan
+            artifact.write_bytes(b"interrupted conversion data")
+            erased.append(artifact)
+        for path in encrypted_databases:
+            for suffix in (
+                "-wal",
+                "-shm",
+                "-journal",
+                _migrate.PREPARED_SUFFIX,
+                _migrate.PREPARED_SUFFIX + "-wal",
+                _migrate.PREPARED_SUFFIX + "-shm",
+            ):
+                artifact = Path(f"{path}{suffix}")
+                artifact.write_bytes(path.read_bytes() if suffix == _migrate.PREPARED_SUFFIX else b"sidecar")
+                erased.append(artifact)
+        unrelated = installed.home / "state.db.repair-attempts.json"
+        unrelated.write_text('{"attempts": 1}')
+        calls: list[str] = []
+        real_delete = installed.backend.delete_enclave_key
+
+        def delete_key(label: str) -> None:
+            assert not any(path.exists() for path in erased)
+            calls.append(label)
+            real_delete(label)
+
+        installed.backend.delete_enclave_key = delete_key  # type: ignore[method-assign]
+        ctx = installed.context(prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+        assert run_uninstall(ctx, UninstallOptions(yes=True, erase_encrypted=True)) == 0
+        out = capsys.readouterr().out
+        assert "databases:" in out
+        assert "sidecars" in out and "prepared" in out
+        assert not any(path.exists() for path in erased)
+        assert unrelated.exists()
+        assert calls
+        assert not any(call[0] == "ecdh" for call in installed.backend.calls)
+
+    @pytest.mark.parametrize("direction", ["encrypt", "decrypt"])
+    def test_interrupted_conversion_finishes_before_removing_the_key(
+        self,
+        installed: Installed,
+        encrypted_databases: list[Path],
+        direction: str,
+    ) -> None:
+        import json
+
+        from mordred_hermes import dbcrypt
+        from mordred_hermes.dbcrypt import _key, _migrate
+
+        memory_key = memory_cli._memory_key_from_vault(
+            root=installed.root, backend=installed.backend, store=installed.store
+        )
+        assert memory_key is not None
+        key = _key.derive(memory_key)
+        if direction == "encrypt":
+            _migrate.decrypt_all(installed.home, key)
+        database = _migrate.discover(installed.home, key)[0]
+        prepare = _migrate.prepare if direction == "encrypt" else _migrate.prepare_plain
+        prepared = prepare(database, key)
+        _migrate.journal_path(installed.home).write_text(
+            json.dumps({"direction": direction, "swaps": [{"path": str(database.path), "prepared": str(prepared)}]})
+        )
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 0
+        for path in encrypted_databases:
+            assert _database_rows(path) == [("preserve this conversation",)]
+        assert not dbcrypt.marker_path(installed.home).exists()
+        assert not _migrate.journal_path(installed.home).exists()
+        assert not prepared.exists()
+
+    def test_unjournaled_preparation_refuses_to_remove_the_key(
+        self, installed: Installed, encrypted_databases: list[Path]
+    ) -> None:
+        from mordred_hermes import dbcrypt
+        from mordred_hermes.dbcrypt import _migrate
+
+        prepared = Path(f"{encrypted_databases[0]}{_migrate.PREPARED_SUFFIX}")
+        prepared.write_bytes(encrypted_databases[0].read_bytes())
+        # A crash before writing the commit journal may leave no marker at all.
+        dbcrypt.marker_path(installed.home).unlink()
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 1
+        assert prepared.exists()
+        assert installed.root.exists()
+        assert not (installed.home / "config.yaml").exists()
+        assert installed.runner.uninstalls == []
+
+    def test_erase_refuses_open_databases_before_removing_any_files(
+        self, installed: Installed, encrypted_databases: list[Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes.dbcrypt import _migrate
+
+        monkeypatch.setattr(_migrate, "holders", lambda _paths: [4321])
+        ctx = installed.context(prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+        assert run_uninstall(ctx, UninstallOptions(yes=True, erase_encrypted=True)) == 1
+        assert installed.root.exists()
+        assert all(path.exists() for path in encrypted_databases)
+        assert installed.runner.uninstalls == []
+        assert all(is_sealed((installed.home / "memories" / name).read_bytes()) for name in _MEMORIES)
+
+    def test_pending_encryption_is_cancelled_without_a_key(self, installed: Installed) -> None:
+        from mordred_hermes.dbcrypt import _migrate
+
+        # Remove the ordinary encryption first so only the pending DB work remains.
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 0
+        _migrate.schedule(installed.home)
+        # The supplied vault is absent; cancelling a pending conversion must not unlock one.
+        ctx = installed.context(vault_root=installed.home / "absent-vault")
+        assert run_uninstall(ctx, UninstallOptions(yes=True)) == 0
+        assert not _migrate.pending_path(installed.home).exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX database lease")
+    def test_runtime_lease_blocks_uninstall_before_any_database_is_open(
+        self, installed: Installed, encrypted_databases: list[Path]
+    ) -> None:
+        code = (
+            "import fcntl, sys; "
+            "lock = open(sys.argv[1], 'r+'); "
+            "fcntl.flock(lock, fcntl.LOCK_SH); "
+            "print('ready', flush=True); sys.stdin.read()"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-S", "-c", code, str(installed.home / "mordred" / "db-encryption.lock")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert process.stdout is not None
+            assert process.stdout.readline() == "ready\n"
+            assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 1
+            assert installed.root.exists()
+            assert not (installed.home / "config.yaml").exists()
+            assert installed.runner.uninstalls == []
+            assert not any(call[0] == "ecdh" for call in installed.backend.calls)
+        finally:
+            process.communicate(timeout=10)
+
+    def test_encryption_started_during_confirmation_blocks_stale_purge_plan(
+        self, installed: Installed, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import contextlib
+        import sqlite3
+
+        pytest.importorskip("sqlcipher3")
+        from mordred_hermes import dbcrypt
+        from mordred_hermes.dbcrypt import _key, _migrate
+
+        key = memory_cli._memory_key_from_vault(root=installed.root, backend=installed.backend, store=installed.store)
+        assert key is not None
+        path = installed.home / "state.db"
+        with contextlib.closing(sqlite3.connect(path)) as connection:
+            connection.execute("CREATE TABLE messages (text TEXT)")
+            connection.execute("INSERT INTO messages VALUES ('created while confirming')")
+            connection.commit()
+        monkeypatch.setattr(_migrate, "holders", lambda _paths: [])
+
+        def confirm(_ctx: UninstallContext, _opts: UninstallOptions) -> bool:
+            assert not dbcrypt.marker_path(installed.home).exists()
+            _migrate.migrate(installed.home, _key.derive(key), arm=dbcrypt.arm)
+            return True
+
+        monkeypatch.setattr(uninstall_cli, "_confirm", confirm)
+        installed.backend.calls.clear()
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True, purge_data=True)) == 1
+        assert "changed" in capsys.readouterr().err
+        assert dbcrypt.marker_path(installed.home).exists()
+        assert installed.root.exists()
+        assert installed.runner.uninstalls == []
+        assert not (installed.home / "config.yaml").exists()
+        assert not (installed.home / ".env").exists()
+        assert not installed.backend.calls
+        assert all(is_sealed((installed.home / "memories" / name).read_bytes()) for name in _MEMORIES)
+
+    def test_plain_linux_uninstall_does_not_require_database_custody(
+        self, installed: Installed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mordred_hermes.dbcrypt import _migrate
+
+        def fail_lock(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("an unprotected Linux home must not acquire the macOS DB lock")
+
+        monkeypatch.setattr(_migrate, "migration_lock", fail_lock)
+        assert run_uninstall(installed.context(platform="linux"), UninstallOptions(yes=True)) == 0
+        assert (installed.home / ".env").read_bytes() == installed.before[".env"]
+        assert installed.runner.uninstalls
+
+    def test_encrypted_backup_archives_block_purge_before_any_restore(
+        self,
+        installed: Installed,
+        encrypted_databases: list[Path],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.dbcrypt import _key, _migrate
+
+        archives = _encrypted_backup_archives(installed, encrypted_databases)
+        # Even after live DBs were decrypted, encrypted archives still need the key.
+        key = memory_cli._memory_key_from_vault(root=installed.root, backend=installed.backend, store=installed.store)
+        assert key is not None
+        _migrate.decrypt_all(installed.home, _key.derive(key))
+        installed.backend.calls.clear()
+        ctx = installed.context(prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+        assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 1
+        output = capsys.readouterr()
+        for path in archives:
+            assert str(path) in output.err
+        assert "--erase-encrypted" in output.err
+        assert "decrypt" in output.err
+        assert installed.root.exists()
+        assert not installed.backend.calls
+        assert not (installed.home / "config.yaml").exists()
+        assert not (installed.home / ".env").exists()
+        assert installed.runner.uninstalls == []
+
+    @pytest.mark.parametrize("markerless", [False, True])
+    def test_erase_removes_protected_archives_but_keeps_plaintext_backups(
+        self,
+        installed: Installed,
+        encrypted_databases: list[Path],
+        markerless: bool,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        import contextlib
+        import sqlite3
+        import zipfile
+
+        from mordred_hermes.dbcrypt import _key, _migrate
+
+        archives = _encrypted_backup_archives(installed, encrypted_databases)
+        external = tmp_path / "external.zip"
+        custom = installed.home / "custom-backup.zip"
+        for path in (external, custom):
+            path.write_bytes(archives[0].read_bytes())
+        link = installed.home / "backups" / "external.zip"
+        link.symlink_to(external)
+        plain = tmp_path / "plain.db"
+        with contextlib.closing(sqlite3.connect(plain)) as conn:
+            conn.execute("CREATE TABLE keep (value TEXT)")
+            conn.commit()
+        plain_zip = installed.home / "backups" / "plaintext.zip"
+        with zipfile.ZipFile(plain_zip, "w") as archive:
+            archive.write(plain, "state.db")
+        if markerless:
+            key = memory_cli._memory_key_from_vault(
+                root=installed.root, backend=installed.backend, store=installed.store
+            )
+            assert key is not None
+            _migrate.decrypt_all(installed.home, _key.derive(key))
+        deleted: list[str] = []
+        real_delete = installed.backend.delete_enclave_key
+
+        def delete_key(label: str) -> None:
+            assert not any(path.exists() for path in archives)
+            deleted.append(label)
+            real_delete(label)
+
+        monkeypatch.setattr(installed.backend, "delete_enclave_key", delete_key)
+        ctx = installed.context(prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+        before = _tree(installed.home)
+        installed.backend.calls.clear()
+        assert run_uninstall(ctx, UninstallOptions(yes=True, erase_encrypted=True, dry_run=True)) == 0
+        assert _tree(installed.home) == before
+        assert not installed.backend.calls
+        out = capsys.readouterr().out
+        for path in archives:
+            assert str(path.relative_to(installed.home)) in out
+            assert path.exists()
+        installed.backend.calls.clear()
+        assert run_uninstall(ctx, UninstallOptions(yes=True, erase_encrypted=True)) == 0
+        assert deleted
+        assert not any(path.exists() for path in archives)
+        assert plain_zip.exists()
+        assert external.exists() and custom.exists()
+        assert link.is_symlink()
+        assert not any(call[0] == "ecdh" for call in installed.backend.calls)
+        if markerless:
+            for path in encrypted_databases:
+                assert _database_rows(path) == [("preserve this conversation",)]
+
+    @pytest.mark.parametrize("content", ["malformed", "marker"])
+    def test_suspect_backup_archive_blocks_uninstall_without_live_marker(
+        self, installed: Installed, content: str
+    ) -> None:
+        import zipfile
+
+        backup = installed.home / "backups" / "pre-migration.zip"
+        backup.parent.mkdir()
+        if content == "malformed":
+            backup.write_bytes(b"truncated zip file")
+        else:
+            with zipfile.ZipFile(backup, "w") as archive:
+                archive.writestr("hermes/mordred/db-encryption.marker", "1\n")
+        installed.backend.calls.clear()
+        assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 1
+        assert backup.exists()
+        assert installed.root.exists()
+        assert not installed.backend.calls
+        assert installed.runner.uninstalls == []
+
+    def test_unreadable_backup_directory_stops_before_teardown(
+        self, installed: Installed, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+        from types import SimpleNamespace
+
+        from mordred_hermes.wizard import _uninstall_database_archives as archives
+
+        directory = installed.home / "backups"
+        directory.mkdir()
+
+        def cannot_walk(path: Path, *, onerror):
+            onerror(PermissionError(errno.EACCES, "Permission denied", str(path)))
+            return iter(())
+
+        monkeypatch.setattr(archives, "os", SimpleNamespace(walk=cannot_walk))
+        installed.backend.calls.clear()
+        with pytest.raises(RuntimeError, match="cannot inspect Hermes backup directory"):
+            run_uninstall(installed.context(), UninstallOptions(yes=True))
+        assert installed.root.exists()
+        assert not installed.backend.calls
+        assert not (installed.home / "config.yaml").exists()
+        assert installed.runner.uninstalls == []
+
+
+def _encrypted_backup_archives(installed: Installed, databases: list[Path]) -> list[Path]:
+    import zipfile
+
+    archives = [
+        installed.home / "backups" / "pre-update.zip",
+        installed.home / "profiles" / "work" / "backups" / "pre-migration.zip",
+    ]
+    for archive_path, database in zip(archives, (databases[0], databases[-1]), strict=True):
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.write(database, "state.db")
+    return archives
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX database lease")
+def test_purge_preserves_database_lock_inode_through_package_teardown(installed: Installed) -> None:
+    lock = installed.home / "mordred" / "db-encryption.lock"
+    lock.touch(mode=0o600)
+    original_inode = lock.stat().st_ino
+    code = """\
+import fcntl, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(75)
+finally:
+    os.close(fd)
+"""
+
+    def probe() -> int:
+        return subprocess.run([sys.executable, "-S", "-c", code, str(lock)], check=False, timeout=10).returncode
+
+    during_uninstall: list[int] = []
+
+    def runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        if list(argv)[1:3] == ["pip", "uninstall"]:
+            during_uninstall.append(probe())
+        return installed.runner(argv)
+
+    ctx = installed.context(runner=runner, prompt_io=_TypedPrompt(uninstall_cli.PURGE_PHRASE))
+    assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 0
+    assert during_uninstall == [75]
+    assert lock.stat().st_ino == original_inode
+    assert probe() == 0
+    assert lock.stat().st_ino == original_inode
+    assert list(lock.parent.iterdir()) == [lock]
+    plan = uninstall_cli.build_plan(ctx, UninstallOptions())
+    assert plan.nothing_to_do
+    assert lock not in [path for path, _description in plan.data]

@@ -268,8 +268,11 @@ contents, notes) to the internet. Blocklisted sites and bare IP addresses are \
 always refused."""
 
 
-def network_prompt_section() -> str:
-    """The prompt section for the ``ask`` level (empty when another level is set)."""
+def network_prompt_section(_info: Any = None) -> str:
+    """The prompt section for the ``ask`` level (empty when another level is set).
+
+    Hermes calls a section callable with the session-info mapping.
+    """
     from . import egress
 
     try:

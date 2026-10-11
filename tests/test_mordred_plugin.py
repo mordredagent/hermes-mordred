@@ -88,6 +88,7 @@ def test_entry_point_components_load_in_the_documented_order() -> None:
         "llm_guard",
         "network",
         "privacy_check",
+        "dbcrypt",
         "e2e",
         "wizard",
     ]

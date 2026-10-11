@@ -800,6 +800,7 @@ extension   pair | serve
 desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
+databases   status | encrypt | decrypt
 telegram    setup | doctor | login | sync | status | logout | venice |
             local-llm | migrate-tee
 uninstall
