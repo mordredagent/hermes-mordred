@@ -14,18 +14,10 @@ class TestInitialState:
         s = rt.status()
         assert s.active_path == "clearnet"
         assert s.ready is False
-
-    def test_health_returns_true_when_idle(self) -> None:
-        rt = _make_runtime()
         assert rt.health() is True
 
 
 class TestUseValidation:
-    def test_unknown_path_raises(self) -> None:
-        rt = _make_runtime()
-        with pytest.raises(UnknownPath):
-            rt.use("i2p")
-
     def test_unknown_path_does_not_change_state(self) -> None:
         rt = _make_runtime()
         with pytest.raises(UnknownPath):

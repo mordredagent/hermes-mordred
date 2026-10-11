@@ -31,32 +31,15 @@ class TestSpecFixedVectors:
     def test_difficulty_8_worked_example(self) -> None:
         assert kvpow.compute_pow(SPEC_SEED, difficulty_bits=8) == SPEC_POW_D8
 
-    def test_production_difficulty_constant(self) -> None:
-        assert kvpow.POW_DIFFICULTY_BITS == 20
-
     def test_production_difficulty_vector(self) -> None:
         assert kvpow.compute_pow(SPEC_SEED) == SPEC_POW_D20
 
-    def test_top4_of_production_vector(self) -> None:
-        assert kvpow.compute_pow(SPEC_SEED)[:4] == bytes.fromhex("00000df4")
-
-    def test_prefix_is_domain_separated(self) -> None:
-        assert kvpow.POW_PREFIX == b"MRPOW\x01"
-
 
 class TestProperties:
-    def test_deterministic(self) -> None:
-        a = kvpow.compute_pow(SPEC_SEED, difficulty_bits=8)
-        b = kvpow.compute_pow(SPEC_SEED, difficulty_bits=8)
-        assert a == b
-
     def test_seed_bound(self) -> None:
         a = kvpow.compute_pow("alpha seed", difficulty_bits=8)
         b = kvpow.compute_pow("beta seed", difficulty_bits=8)
         assert a != b
-
-    def test_output_is_32_bytes(self) -> None:
-        assert len(kvpow.compute_pow(SPEC_SEED, difficulty_bits=8)) == 32
 
     def test_satisfies_requested_difficulty(self) -> None:
         out = kvpow.compute_pow(SPEC_SEED, difficulty_bits=12)

@@ -679,37 +679,6 @@ def test_v3_composite_binding_requires_a_known_scope_to_match() -> None:
         )
 
 
-def test_v3_composite_binding_accepts_the_matching_scope() -> None:
-    raw_key = _bind_key("slack:T0TEAM:C0BCX916V6Z")
-    token = _command(raw_key, chat_id="C0BCX916V6Z")
-
-    plaintext, _kid, replay = e2e.decrypt_gateway_envelope(
-        token,
-        "slack",
-        chat_id="C0BCX916V6Z",
-        thread_root=None,
-        scope_id="T0TEAM",
-    )
-    assert plaintext == "authenticated command"
-    assert replay is not None
-
-
-@pytest.mark.parametrize("scope_id", [None, ""])
-def test_v3_composite_binding_stays_lenient_when_the_scope_is_unknown(scope_id: str | None) -> None:
-    """The #83 shape: no event field to compare against, so do not refuse."""
-    raw_key = _bind_key("slack:T0TEAM:C0BCX916V6Z")
-    token = _command(raw_key, chat_id="C0BCX916V6Z")
-
-    plaintext, _kid, _replay = e2e.decrypt_gateway_envelope(
-        token,
-        "slack",
-        chat_id="C0BCX916V6Z",
-        thread_root=None,
-        scope_id=scope_id,
-    )
-    assert plaintext == "authenticated command"
-
-
 def test_v3_bare_channel_id_binding_ignores_a_known_scope() -> None:
     """A key stored under the native chat id carries no scope to check."""
     raw_key = _bind_key("C0BCX916V6Z")

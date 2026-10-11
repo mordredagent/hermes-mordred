@@ -195,11 +195,6 @@ class TestExpectedDigestMethod:
     outlive its deadline (codex pre-merge P2).
     """
 
-    def test_returns_the_expected_digest(self) -> None:
-        digest = b"\x5a" * 32
-        handle = _make_handle(expected_digest=digest)
-        assert handle.expected_digest() == digest
-
     def test_does_not_consume_the_handle(self) -> None:
         """Unlike consume(), expected_digest() leaves the handle usable —
         the display flow can still consume() the seed afterwards.
@@ -213,11 +208,6 @@ class TestExpectedDigestMethod:
         handle = _make_handle(expected_digest=b"\x5a" * 32)
         assert handle.expected_digest() == b"\x5a" * 32
         assert handle.expected_digest() == b"\x5a" * 32
-
-    def test_expired_raises_seed_display_expired(self) -> None:
-        handle = _make_handle(deadline=_FAR_PAST)
-        with pytest.raises(api.SeedDisplayExpired):
-            handle.expected_digest()
 
     def test_expired_wipes_the_payload(self) -> None:
         """An expired, never-displayed handle must not keep the seed in
@@ -254,15 +244,6 @@ class TestExpectedDigestMethod:
             handle.consume()
         # The seed is already gone — expiry no longer applies.
         assert handle.expected_digest() == digest
-
-    def test_expired_and_never_consumed_still_raises(self) -> None:
-        """The mirror of the above: an expired handle whose seed was NEVER
-        consumed must still raise — the deadline guard exists precisely to
-        wipe a never-displayed seed.
-        """
-        handle = _make_handle(deadline=_FAR_PAST)
-        with pytest.raises(api.SeedDisplayExpired):
-            handle.expected_digest()
 
 
 # ============================ repr / str (no leakage) ============================

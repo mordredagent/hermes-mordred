@@ -32,13 +32,6 @@ def test_history_roundtrip_and_persistence():
     assert extension_history.load_messages() == msgs
 
 
-def test_history_encrypted_at_rest(tmp_path):
-    extension_history.save_messages([{"role": "user", "content": "secret-text"}])
-    blob = (tmp_path / "extension" / "history.enc").read_text("utf-8")
-    assert blob.startswith(xc.ENC_PREFIX)
-    assert "secret-text" not in blob  # not stored in plaintext
-
-
 def test_projection_extracts_text():
     extension_history.save_messages(
         [
@@ -68,6 +61,9 @@ def test_save_ignores_a_preplanted_tmp_symlink(tmp_path):
     assert victim.read_text() == "untouched"  # no write through the symlink
     history = ext / "history.enc"
     assert history.is_file() and not history.is_symlink()
+    blob = history.read_text("utf-8")
+    assert blob.startswith(xc.ENC_PREFIX)
+    assert "secret-text" not in blob
     assert stat.S_IMODE(history.lstat().st_mode) == 0o600
     assert extension_history.load_messages() == [{"role": "user", "content": "secret-text"}]
 

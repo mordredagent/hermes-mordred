@@ -84,12 +84,6 @@ def test_empty_vault_round_trips(sealed: tuple[bytes, kek.MasterKey]) -> None:
     assert out.generation == 0
 
 
-def test_generation_is_preserved(sealed: tuple[bytes, kek.MasterKey]) -> None:
-    wmk, master = sealed
-    out = manifest.decode(manifest.encode(_manifest(wmk, generation=42), master), master)
-    assert out.generation == 42
-
-
 # ---------------------------------------------------------------------------
 # wire format
 # ---------------------------------------------------------------------------

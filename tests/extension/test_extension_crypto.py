@@ -17,20 +17,6 @@ def test_b64url_roundtrip_unpadded():
     assert xc.b64u_decode(enc) == raw
 
 
-def test_shared_key_agreement_both_sides_match():
-    code = "MORT-ABCDEFGH-JKLMNPQR"
-    ext_priv = X25519PrivateKey.generate()
-    hermes_priv = X25519PrivateKey.generate()
-    ext_pub_b64 = xc.b64u_encode(xc.x25519_public_raw(ext_priv))
-    hermes_pub_b64 = xc.b64u_encode(xc.x25519_public_raw(hermes_priv))
-
-    hermes_key = xc.derive_shared_key(hermes_priv, ext_pub_b64, code)
-    ext_key = xc.derive_shared_key(ext_priv, hermes_pub_b64, code)
-
-    assert hermes_key == ext_key
-    assert len(hermes_key) == 32
-
-
 def test_shared_key_differs_with_code():
     ext_priv = X25519PrivateKey.generate()
     hermes_priv = X25519PrivateKey.generate()

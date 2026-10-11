@@ -59,11 +59,6 @@ class TestSelfTest:
         """``--self-test`` validates SPEC fixed vector and exits 0."""
         result = _run("", "--self-test")
         assert result.returncode == 0, f"--self-test failed: stdout={result.stdout!r} stderr={result.stderr!r}"
-
-    def test_self_test_mentions_spec_digest(self) -> None:
-        """Self-test output reports the SPEC digest hex so an operator
-        can eyeball-confirm the regression anchor."""
-        result = _run("", "--self-test")
         assert SPEC_DIGEST.hex() in result.stdout
 
 

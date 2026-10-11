@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 from typing import Any
 
@@ -58,46 +57,8 @@ def kv_root(home: Path) -> Path:
 # interactive path — a strict improvement, documented in the GREEN commit.
 
 
-class TestGenerateSignature:
-    """``generate`` is positional on (seed, passphrase, pow_bytes,
-    expected_digest) then keyword-only (key_id, backend, audit_sink, home).
-    """
-
-    def test_signature_positional_then_keyword_only(self) -> None:
-        sig = inspect.signature(api.generate)
-        params = sig.parameters
-        assert list(params) == [
-            "seed_phrase",
-            "passphrase",
-            "pow_bytes",
-            "expected_digest",
-            "key_id",
-            "backend",
-            "audit_sink",
-            "home",
-            "unattended",
-        ]
-        assert params["expected_digest"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        assert params["backend"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params["audit_sink"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params["unattended"].kind is inspect.Parameter.KEYWORD_ONLY
-
-
 class TestGenerateHappyPath:
     """Correct expected_digest → full prepare→confirm in one call."""
-
-    def test_returns_generate_result(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        result = api.generate(
-            _SPEC_SEED,
-            _SPEC_PASSPHRASE,
-            _SPEC_POW,
-            _SPEC_DIGEST,
-            backend=backend,
-            audit_sink=audit,
-            home=home,
-        )
-        assert isinstance(result, api.GenerateResult)
-        assert result.key_id == "default"
 
     def test_canonical_vector_succeeds(
         self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
@@ -117,6 +78,12 @@ class TestGenerateHappyPath:
         )
         commit_path = kv_root / "digests" / f"{result.key_id_hash}.commit"
         assert _storage.safe_read(commit_path) == _SPEC_DIGEST
+        assert isinstance(result, api.GenerateResult)
+        assert result.key_id == "default"
+        meta = _storage.load_meta(kv_root)
+        native_key_id = meta["keys"][result.key_id_hash][_native_key_id.NATIVE_KEY_ID_FIELD]
+        assert len(wrap.get_wrapping_key_public("default", backend=backend, native_key_id=native_key_id)) == 65
+        assert [e["reason"] for e in audit.log] == ["keyvault.init_started", "keyvault.init_completed"]
 
     def test_explicit_key_id_used(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
         result = api.generate(
@@ -131,93 +98,9 @@ class TestGenerateHappyPath:
         )
         assert result.key_id == "automation-key"
 
-    def test_enclave_key_generated_and_meta_written(
-        self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
-    ) -> None:
-        result = api.generate(
-            _SPEC_SEED,
-            _SPEC_PASSPHRASE,
-            _SPEC_POW,
-            _SPEC_DIGEST,
-            backend=backend,
-            audit_sink=audit,
-            home=home,
-        )
-        meta = _storage.load_meta(kv_root)
-        assert result.key_id_hash in meta["keys"]
-        native_key_id = meta["keys"][result.key_id_hash][_native_key_id.NATIVE_KEY_ID_FIELD]
-        assert (
-            len(
-                wrap.get_wrapping_key_public(
-                    "default",
-                    backend=backend,
-                    native_key_id=native_key_id,
-                )
-            )
-            == 65
-        )
-
-    def test_audit_emits_started_then_completed(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        api.generate(
-            _SPEC_SEED,
-            _SPEC_PASSPHRASE,
-            _SPEC_POW,
-            _SPEC_DIGEST,
-            backend=backend,
-            audit_sink=audit,
-            home=home,
-        )
-        assert [e["reason"] for e in audit.log] == [
-            "keyvault.init_started",
-            "keyvault.init_completed",
-        ]
-
 
 class TestGenerateMismatch:
     """A wrong expected_digest is rejected — the durable phase never runs."""
-
-    def test_wrong_expected_digest_raises(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        with pytest.raises(api.VerificationDigestMismatch):
-            api.generate(
-                _SPEC_SEED,
-                _SPEC_PASSPHRASE,
-                _SPEC_POW,
-                b"\x22" * 32,
-                backend=backend,
-                audit_sink=audit,
-                home=home,
-            )
-
-    def test_mismatch_emits_init_denied(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        """generate delegates to confirm_generate, so a non-interactive
-        mismatch produces the same keyvault.init_denied audit trail as the
-        interactive confirm_generate path.
-        """
-        with pytest.raises(api.VerificationDigestMismatch):
-            api.generate(
-                _SPEC_SEED,
-                _SPEC_PASSPHRASE,
-                _SPEC_POW,
-                b"\x22" * 32,
-                backend=backend,
-                audit_sink=audit,
-                home=home,
-            )
-        assert [e["reason"] for e in audit.log] == ["keyvault.init_denied"]
-
-    def test_mismatch_generates_no_key(self, backend: FakeBackend, audit: _AuditCapture, home: Path) -> None:
-        with pytest.raises(api.VerificationDigestMismatch):
-            api.generate(
-                _SPEC_SEED,
-                _SPEC_PASSPHRASE,
-                _SPEC_POW,
-                b"\x22" * 32,
-                backend=backend,
-                audit_sink=audit,
-                home=home,
-            )
-        with pytest.raises(Exception):  # noqa: B017 — WrapKeyNotFound; key never created
-            wrap.get_wrapping_key_public("default", backend=backend)
 
     def test_mismatch_touches_no_filesystem(
         self, backend: FakeBackend, audit: _AuditCapture, home: Path, kv_root: Path
@@ -233,6 +116,8 @@ class TestGenerateMismatch:
                 home=home,
             )
         assert not kv_root.exists()
+        assert backend.calls == []
+        assert [e["reason"] for e in audit.log] == ["keyvault.init_denied"]
 
 
 class TestGenerateWipesHandle:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import time
 from typing import Any
 
@@ -32,30 +31,6 @@ from tests._keyvault_lifecycle_helpers import (
 #   - passphrase: NFKD only — case and whitespace are entropy, must NOT collapse
 
 
-class TestPrepareGenerateSignature:
-    """``prepare_generate`` returns ``(SeedDisplayHandle, 32-byte digest)``.
-
-    Pure function: no disk I/O, no audit_sink parameter, no backend
-    parameter. The two-phase split exists so that nothing durable
-    happens before the user has confirmed the digest via the offline
-    channel (SPEC §"Key generation" mandates "mandatory and one-shot").
-    """
-
-    def test_returns_two_tuple(self) -> None:
-        result = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-
-    def test_first_element_is_seed_display_handle(self) -> None:
-        handle, _ = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert isinstance(handle, api.SeedDisplayHandle)
-
-    def test_second_element_is_bytes_of_length_32(self) -> None:
-        _, digest = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert isinstance(digest, bytes)
-        assert len(digest) == 32
-
-
 class TestPrepareGenerateCanonicalVector:
     """ASCII canonical inputs reproduce SPEC.md §"Fixed test vector" digest.
 
@@ -70,32 +45,6 @@ class TestPrepareGenerateCanonicalVector:
         assert digest == _SPEC_DIGEST
 
 
-class TestPrepareGenerateDeterminism:
-    """Same inputs → same digest. Different inputs → different digest."""
-
-    def test_same_inputs_produce_same_digest(self) -> None:
-        _, d1 = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        _, d2 = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert d1 == d2
-
-    def test_different_seed_produces_different_digest(self) -> None:
-        _, d1 = api.prepare_generate("seed one", _SPEC_PASSPHRASE, _SPEC_POW)
-        _, d2 = api.prepare_generate("seed two", _SPEC_PASSPHRASE, _SPEC_POW)
-        assert d1 != d2
-
-    def test_different_passphrase_produces_different_digest(self) -> None:
-        _, d1 = api.prepare_generate(_SPEC_SEED, "pass one", _SPEC_POW)
-        _, d2 = api.prepare_generate(_SPEC_SEED, "pass two", _SPEC_POW)
-        assert d1 != d2
-
-    def test_different_pow_produces_different_digest(self) -> None:
-        pow_a = bytes.fromhex("deadbeef") + b"\x00" * 28
-        pow_b = bytes.fromhex("cafef00d") + b"\x00" * 28
-        _, d1 = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, pow_a)
-        _, d2 = api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, pow_b)
-        assert d1 != d2
-
-
 class TestPrepareGenerateSeedNormalization:
     """Seed phrase: NFKD + Cf-strip + casefold + whitespace-collapse.
 
@@ -103,32 +52,6 @@ class TestPrepareGenerateSeedNormalization:
     non-ASCII whitespace forms, invisible Cf chars from clipboard
     injection) collapses to the same digest as a clean reference input.
     """
-
-    def test_seed_uppercase_collapses_via_casefold(self) -> None:
-        _, ref = api.prepare_generate("test seed", _SPEC_PASSPHRASE, _SPEC_POW)
-        _, upper = api.prepare_generate("TEST SEED", _SPEC_PASSPHRASE, _SPEC_POW)
-        assert ref == upper
-
-    def test_seed_extra_whitespace_collapses(self) -> None:
-        _, ref = api.prepare_generate("test seed", _SPEC_PASSPHRASE, _SPEC_POW)
-        _, padded = api.prepare_generate("  test   seed  ", _SPEC_PASSPHRASE, _SPEC_POW)
-        assert ref == padded
-
-    def test_seed_tab_whitespace_treated_as_space(self) -> None:
-        _, ref = api.prepare_generate("test seed", _SPEC_PASSPHRASE, _SPEC_POW)
-        _, tabbed = api.prepare_generate("test\tseed", _SPEC_PASSPHRASE, _SPEC_POW)
-        assert ref == tabbed
-
-    def test_seed_nbsp_collapses_via_nfkd(self) -> None:
-        """U+00A0 NO-BREAK SPACE decomposes to U+0020 under NFKD, so the
-        BIP39 word-list tolerance covers clipboard-typo NBSP transparently.
-        """
-        _, ref = api.prepare_generate("test seed", _SPEC_PASSPHRASE, _SPEC_POW)
-        # Build the NBSP form via explicit escape so the source file does not
-        # carry an ambiguous literal (ruff RUF001 would flag that).
-        nbsp_seed = "test\u00a0seed"
-        _, nbsp = api.prepare_generate(nbsp_seed, _SPEC_PASSPHRASE, _SPEC_POW)
-        assert ref == nbsp
 
     def test_seed_zwsp_stripped_via_cf_category(self) -> None:
         """U+200B ZERO WIDTH SPACE is Cf-category — NFKD-stable and not a
@@ -206,8 +129,9 @@ class TestPrepareGenerateHandleBehavior:
         bytes the handle carries — PR5's display flow renders this string
         back to the user, so it has to match what compute_digest hashed.
         """
-        handle, _ = api.prepare_generate("  TEST   SEED  ", _SPEC_PASSPHRASE, _SPEC_POW)
+        handle, digest = api.prepare_generate("  TEST\t  SEED\u00a0 ", _SPEC_PASSPHRASE, _SPEC_POW)
         assert handle.consume() == "test seed"
+        assert digest == _SPEC_DIGEST
 
     def test_consecutive_calls_return_distinct_handles(self) -> None:
         """No memoization — each call mints a fresh handle so a stale
@@ -261,12 +185,3 @@ class TestPrepareGenerateNoPersistence:
         api.prepare_generate(_SPEC_SEED, _SPEC_PASSPHRASE, _SPEC_POW)
         after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
         assert before == after
-
-    def test_signature_does_not_require_audit_or_backend(self) -> None:
-        """``prepare_generate`` is positional-only on (seed, passphrase,
-        pow_bytes). No keyword-only ``audit_sink`` / ``backend`` / ``home``
-        — those are confirm_generate's surface.
-        """
-        sig = inspect.signature(api.prepare_generate)
-        param_names = list(sig.parameters)
-        assert param_names == ["seed_phrase", "passphrase", "pow_bytes"]

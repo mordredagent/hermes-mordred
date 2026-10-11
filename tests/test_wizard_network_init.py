@@ -362,24 +362,6 @@ class TestNetworkInitInputsRedactsSecret:
 
 
 class TestNetworkAnswersDataclass:
-    def test_fields_present(self) -> None:
-        import dataclasses
-
-        names = {f.name for f in dataclasses.fields(NetworkAnswers)}
-        assert names == {
-            "default_network_path",
-            "tor_binary_path",
-            "tor_socks_port",
-            "mullvad_account_id_env",
-            "mullvad_relay_country",
-            "mullvad_killswitch",
-            "vpn_provider",
-            "wireguard_config_path",
-            "custom_up_cmd",
-            "custom_down_cmd",
-            "custom_health_cmd",
-        }
-
     def test_to_config_yaml_section_shape(self) -> None:
         na = NetworkAnswers(
             default_network_path="vpn",

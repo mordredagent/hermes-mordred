@@ -1366,11 +1366,6 @@ class TestRenderReport:
         assert "BLOCKED" in text
         assert "keyvault reset" in text
 
-    def test_unknown_action_degrades_to_raw_token(self) -> None:
-        result = setup_cli.StepResult("mystery", "future-action", "detail")  # type: ignore[arg-type]
-        text = setup_cli.render_report([result])
-        assert "future-action" in text
-
 
 # --------------------------------------------------------------------------- #
 # argparse wiring                                                             #

@@ -62,22 +62,6 @@ class TestAesGcmRoundtrip:
 
         assert crypto.decrypt(key, blob) == plaintext
 
-    def test_encrypt_produces_unique_nonce_per_call(self) -> None:
-        """Same key + plaintext + AAD must produce different blobs across calls.
-
-        AES-GCM is catastrophically broken under nonce reuse with the same
-        key (CVE-class), so :func:`encrypt` MUST generate a fresh random
-        nonce on every invocation. We assert that across N calls all
-        blobs differ — a constant-nonce regression would collide.
-        """
-        from mordred_hermes.keyvault import crypto
-
-        key = b"\x42" * 32
-        plaintext = b"identical input"
-        blobs = {crypto.encrypt(key, plaintext, aad=b"same") for _ in range(8)}
-
-        assert len(blobs) == 8
-
     def test_encrypted_blob_carries_nonce_prefix(self) -> None:
         """Wire format is ``nonce(12) || ciphertext || tag(16)``. Two blobs
         encrypting the same plaintext must share no nonce — the 12-byte

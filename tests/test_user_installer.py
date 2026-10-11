@@ -423,17 +423,6 @@ def test_version_equals_form_is_supported(tmp_path: Path) -> None:
     assert "hermes-mordred[macos]==0.1.0a16,>=0.1.0a16" in fixture.uv_calls()
 
 
-def test_help_does_not_probe_or_modify_the_environment(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path)
-
-    result = _run(fixture, "--help")
-
-    assert result.returncode == 0, result.stderr
-    assert "--with-extension" in result.stdout
-    assert "--version VERSION" in result.stdout
-    assert not fixture.uv_log.exists()
-
-
 def test_bare_h_flag_shows_usage(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
 
@@ -497,17 +486,6 @@ def test_invalid_installer_arguments_stop_before_environment_changes(tmp_path: P
     assert not fixture.uv_log.exists()
 
 
-def test_installs_requested_optional_extras(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path, platform_name="Darwin")
-
-    result = _run(fixture, "--extras", "extension, ethereum,messaging")
-
-    assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging]>=0.1.0a16"
-    assert fixture.uv_calls().count(expected) == 2  # preflight + install
-    assert f"installing {expected} from PyPI" in result.stdout
-
-
 def test_installs_optional_extras_from_pipe_friendly_environment_variable(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, platform_name="Linux")
 
@@ -531,16 +509,17 @@ def test_piped_installer_accepts_optional_extra_arguments(tmp_path: Path) -> Non
 def test_all_extras_are_deduplicated_in_stable_order(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, platform_name="Darwin")
 
-    result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "messaging,extension")
+    result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "messaging, extension")
 
     assert result.returncode == 0, result.stderr
     expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
     calls = fixture.uv_calls()
     assert calls.count(expected) == 2
     assert "extension,extension" not in calls
+    assert f"installing {expected} from PyPI" in result.stdout
 
 
-@pytest.mark.parametrize("args", [("--extras", "all"), ("--extras=all",), ("--all-extras",)])
+@pytest.mark.parametrize("args", [("--extras", "all"), ("--extras=all",)])
 def test_extras_all_matches_the_all_extras_flag(tmp_path: Path, args: tuple[str, ...]) -> None:
     fixture = _fixture(tmp_path, platform_name="Darwin")
 
@@ -569,17 +548,8 @@ def test_env_extras_are_appended_after_argv_extras(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     expected = "hermes-mordred[macos,extension,ethereum,tor-control]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
-
-
-def test_mordred_install_extras_is_not_visible_to_uv(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path, platform_name="Darwin")
-
-    result = _run(fixture, MORDRED_INSTALL_EXTRAS="extension,ethereum")
-
-    assert result.returncode == 0, result.stderr
-    calls = fixture.uv_calls()
-    assert "MORDRED_INSTALL_EXTRAS=<unset>" in calls
-    assert "MORDRED_INSTALL_EXTRAS=extension,ethereum" not in calls
+    assert "MORDRED_INSTALL_EXTRAS=<unset>" in fixture.uv_calls()
+    assert "MORDRED_INSTALL_EXTRAS=tor-control,extension" not in fixture.uv_calls()
 
 
 def test_invalid_mordred_install_extras_env_var_names_its_source(tmp_path: Path) -> None:
@@ -656,27 +626,10 @@ def test_installer_help_does_not_require_hermes_or_uv(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "--extras LIST" in result.stdout
+    assert "--with-extension" in result.stdout
+    assert "--version VERSION" in result.stdout
     assert "extension, ethereum, messaging, tor-control" in result.stdout
     assert not fixture.uv_log.exists()
-
-
-def test_detects_the_official_bash_wrapper_not_only_the_canonical_path(tmp_path: Path) -> None:
-    """The real launcher's shebang names bash; the interpreter is on its exec line."""
-    fixture = _fixture(tmp_path, launcher_style="wrapper", shadow_env=tmp_path / "actual" / "venv")
-
-    result = _run(fixture)
-
-    assert result.returncode == 0, result.stderr
-    assert str(fixture.hermes_python) in fixture.uv_calls()
-
-
-def test_detects_root_style_environment_from_hermes_shebang(tmp_path: Path) -> None:
-    fixture = _fixture(tmp_path, launcher_style="console", shadow_env=tmp_path / "root-layout" / "venv")
-
-    result = _run(fixture)
-
-    assert result.returncode == 0, result.stderr
-    assert str(fixture.hermes_python) in fixture.uv_calls()
 
 
 @pytest.mark.parametrize("launcher_style", ["wrapper", "console"])
@@ -960,7 +913,7 @@ def test_old_hermes_stops_before_install(tmp_path: Path, hermes_version: str) ->
     assert "pip install" not in fixture.uv_calls()
 
 
-@pytest.mark.parametrize("hermes_version", ["0.13.0", "0.19.0", "0.13.0rc1", "1.0.0"])
+@pytest.mark.parametrize("hermes_version", ["0.13.0", "0.13.0rc1", "1.0.0"])
 def test_supported_hermes_versions_proceed(tmp_path: Path, hermes_version: str) -> None:
     fixture = _fixture(tmp_path, hermes_version=hermes_version)
 

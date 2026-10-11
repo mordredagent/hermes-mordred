@@ -101,6 +101,8 @@ class TestYAMLFallback:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from mordred_hermes.__about__ import __version__
+
         config = tmp_path / "config.yaml"
         config.write_text(
             "plugins:\n  enabled:\n    - mordred_privacy_check\n    - mordred_network\n    - other_plugin\n",
@@ -119,33 +121,9 @@ class TestYAMLFallback:
         assert "mordred_privacy_check" in out
         assert "mordred_network" in out
         assert "other_plugin" not in out
+        assert __version__ in out
         # Fallback path should leave a breadcrumb so users notice degraded mode.
         assert "fallback" in out.lower() or "config.yaml" in out
-
-    def test_fallback_shows_package_version_not_placeholder(
-        self,
-        tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from mordred_hermes.__about__ import __version__
-
-        config = tmp_path / "config.yaml"
-        config.write_text(
-            "plugins:\n  enabled:\n    - mordred_privacy_check\n",
-            encoding="utf-8",
-        )
-
-        def raise_import() -> Any:
-            raise ImportError("hermes_cli.plugins not available")
-
-        monkeypatch.setattr(plugins_list, "_get_manager", raise_import)
-
-        rc = plugins_list.run(config_path=config)
-
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert __version__ in out
 
     def test_fallback_with_missing_config_yaml_returns_0_with_message(
         self,

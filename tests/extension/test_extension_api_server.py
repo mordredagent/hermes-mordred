@@ -237,36 +237,6 @@ def test_full_server_flow():
     assert r["signature"] == "0xstubbedsig"
 
 
-def test_page_response_is_never_cached():
-    """The anonymous HTML shell never discloses the page bearer token."""
-
-    async def _flow(port):
-        server = extension_api.ExtensionAPIServer(port=port)
-        await server.start()
-        try:
-            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/") as response:
-                return response.status, response.headers, await response.text(), server._page_token
-        finally:
-            await server.stop()
-
-    status, headers, html, token = asyncio.run(_flow(_free_port()))
-    assert status == 200
-    assert headers["Cache-Control"] == "no-store"
-    assert headers["X-Content-Type-Options"] == "nosniff"
-    assert headers["Referrer-Policy"] == "no-referrer"
-    assert token not in html
-    assert "%%MORDRED_PAGE_TOKEN%%" not in html
-    assert "window.location.hash" in html
-    bootstrap = html.split("</script>", 1)[0]
-    assert bootstrap.index("sessionStorage.setItem(pageTokenStorageKey, pageToken)") < bootstrap.index(
-        "history.replaceState"
-    )
-    assert "sessionStorage.getItem(pageTokenStorageKey)" in bootstrap
-    assert "sessionStorage.removeItem(pageTokenStorageKey)" in bootstrap
-    assert "window.__MORDRED_HANDLE_AUTH_FAILURE__" in bootstrap
-    assert "Mordred authentication expired" in bootstrap
-
-
 def test_page_launch_url_keeps_token_out_of_http_url():
     server = extension_api.ExtensionAPIServer(port=7788)
     assert server.page_url.startswith("http://127.0.0.1:7788/#token=")
@@ -1762,11 +1732,26 @@ def test_page_response_carries_a_hash_based_csp():
         await server.start()
         try:
             async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/") as response:
-                return response.headers, await response.text(), port
+                return response.status, response.headers, await response.text(), port, server._page_token
         finally:
             await server.stop()
 
-    headers, html, port = asyncio.run(_flow(_free_port()))
+    status, headers, html, port, token = asyncio.run(_flow(_free_port()))
+    assert status == 200
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Referrer-Policy"] == "no-referrer"
+    assert token not in html
+    assert "%%MORDRED_PAGE_TOKEN%%" not in html
+    assert "window.location.hash" in html
+    bootstrap = html.split("</script>", 1)[0]
+    assert bootstrap.index("sessionStorage.setItem(pageTokenStorageKey, pageToken)") < bootstrap.index(
+        "history.replaceState"
+    )
+    assert "sessionStorage.getItem(pageTokenStorageKey)" in bootstrap
+    assert "sessionStorage.removeItem(pageTokenStorageKey)" in bootstrap
+    assert "window.__MORDRED_HANDLE_AUTH_FAILURE__" in bootstrap
+    assert "Mordred authentication expired" in bootstrap
     policy = headers["Content-Security-Policy"]
     assert headers["X-Frame-Options"] == "DENY"
     assert headers["Referrer-Policy"] == "no-referrer"

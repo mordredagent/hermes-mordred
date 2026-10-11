@@ -172,23 +172,6 @@ class TestNetworkUsePersistence:
     """``use`` always writes ``default_path`` to config.yaml so the next
     Hermes session opens with the user's preferred path."""
 
-    def test_use_writes_default_path_to_config(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        config = tmp_path / "config.yaml"
-        args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
-
     def test_use_preserves_other_plugin_sections(self, tmp_path: Path) -> None:
         from mordred_hermes.network import api
         from mordred_hermes.wizard import cli
@@ -246,20 +229,8 @@ class TestNetworkUseAtomicity:
         enabled = data["plugins"]["enabled"]
         # The single Mordred plugin must be enabled (PolicyWriter contract).
         assert "mordred" in enabled, "mordred missing from plugins.enabled after network_cli write"
-
-    def test_use_does_not_leave_tmp_artifact(self, tmp_path: Path) -> None:
-        """PolicyWriter's ``_atomic_write_text`` writes to ``<name>.tmp``
-        and renames; a clean run must not leave the tempfile behind."""
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        config = tmp_path / "config.yaml"
-        args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
-        tmp_artifact = config.with_name(config.name + ".tmp")
-        assert not tmp_artifact.exists()
+        assert not config.with_name(config.name + ".tmp").exists()
+        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
 
 
 class TestNetworkUseStandalone:
@@ -281,6 +252,8 @@ class TestNetworkUseStandalone:
         # The message must communicate the change applies on the next session
         # (not the running process), without the old confusing "deferred" wording.
         assert "next" in out.lower() and "session" in out.lower()
+        assert "tor" in out
+        assert "'tor'" not in out
 
     def test_no_runtime_tor_missing_prints_install_guidance(
         self,
@@ -340,6 +313,7 @@ class TestNetworkStatusLive:
         out = capsys.readouterr().out
         assert "tor" in out.lower()
         assert "ready" in out.lower()
+        assert "'tor'" not in out
 
     def test_status_includes_dropped_warning_when_flagged(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -382,6 +356,7 @@ class TestNetworkStatusStandalone:
         assert rc == 0
         out = capsys.readouterr().out
         assert "clearnet" in out.lower()
+        assert "'clearnet'" not in out
 
 
 class TestNetworkInitGuidance:
@@ -633,44 +608,6 @@ class TestUseErrorChannel:
         assert rc == 1
         captured = capsys.readouterr()
         assert "tor timeout" in captured.err
-
-
-class TestOutputHasNoPythonRepr:
-    """UX review 2026-06-11 Phase 3: enum values and paths must not be
-    rendered through ``!r`` — users see Python quoting ('tor') leak into
-    what should be plain CLI output."""
-
-    def test_use_deferred_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        from mordred_hermes.wizard import network_cli
-
-        args = _make_args(path="tor", config_path=tmp_path / "config.yaml")
-        rc = network_cli.handle_use(args)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "'tor'" not in out
-        assert "tor" in out
-
-    def test_live_status_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import network_cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        rt.use("tor")
-        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml"))
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "'tor'" not in out
-        assert "tor" in out
-
-    def test_disk_status_message_is_plain(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        from mordred_hermes.wizard import network_cli
-
-        rc = network_cli.handle_status(_make_args(config_path=tmp_path / "config.yaml"))
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "'clearnet'" not in out
-        assert "clearnet" in out
 
 
 class TestStatusJson:

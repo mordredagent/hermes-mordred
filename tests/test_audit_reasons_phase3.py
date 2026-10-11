@@ -25,36 +25,6 @@ from __future__ import annotations
 from typing import get_args
 
 
-def test_network_use_in_freeze() -> None:
-    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
-
-    assert "network.use" in get_args(ReasonCode)
-
-
-def test_network_use_failed_in_freeze() -> None:
-    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
-
-    assert "network.use_failed" in get_args(ReasonCode)
-
-
-def test_network_bringup_failed_in_freeze() -> None:
-    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
-
-    assert "network.bringup_failed" in get_args(ReasonCode)
-
-
-def test_network_path_dropped_in_freeze() -> None:
-    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
-
-    assert "network.path_dropped" in get_args(ReasonCode)
-
-
-def test_network_transport_incompatible_in_freeze() -> None:
-    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
-
-    assert "network.transport_incompatible" in get_args(ReasonCode)
-
-
 def test_phase1_freeze_preserved() -> None:
     """Adding Phase 3 codes must not remove or rename Phase 1 codes."""
     from mordred_hermes.privacy_check._audit_reasons import ReasonCode
@@ -112,3 +82,16 @@ def test_no_underscore_typo_legacy_name() -> None:
     members = set(get_args(ReasonCode))
     assert "network_use" not in members
     assert "network.use" in members
+
+
+def test_network_audit_reason_contract() -> None:
+    from mordred_hermes.privacy_check._audit_reasons import ReasonCode
+
+    expected = {
+        "network.use_failed",
+        "network.bringup_failed",
+        "network.transport_incompatible",
+        "network.use",
+        "network.path_dropped",
+    }
+    assert expected <= set(get_args(ReasonCode))

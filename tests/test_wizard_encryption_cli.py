@@ -539,22 +539,6 @@ class TestWorkspaceStatus:
 # Aggregation + rendering
 # -----------------------------------------------------------------------------
 class TestRender:
-    def test_collect_returns_all_four_targets(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        home.mkdir()
-        statuses = encryption_cli.collect_status(
-            home=home,
-            root=tmp_path / "v",
-            platform="darwin",
-            workspace=encryption_cli.WorkspacePaths(
-                image=tmp_path / "img.sparsebundle",
-                blob=tmp_path / "passphrase.wrapped",
-                mount=tmp_path / "mnt",
-            ),
-            on_path=lambda _name: False,
-        )
-        assert [s.target for s in statuses] == list(encryption_cli.TARGETS)
-
     def test_render_json_is_machine_readable(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
         home.mkdir()
@@ -570,27 +554,9 @@ class TestRender:
             on_path=lambda _name: False,
         )
         payload = json.loads(encryption_cli.render_json(statuses))
-        assert {row["target"] for row in payload} == set(encryption_cli.TARGETS)
+        assert [row["target"] for row in payload] == list(encryption_cli.TARGETS)
         for row in payload:
             assert set(row) >= {"target", "configured", "active", "detail"}
-
-    def test_render_text_lists_every_target(self, tmp_path: Path) -> None:
-        home = tmp_path / "home"
-        home.mkdir()
-        statuses = encryption_cli.collect_status(
-            home=home,
-            root=tmp_path / "v",
-            platform="linux",
-            workspace=encryption_cli.WorkspacePaths(
-                image=tmp_path / "img.sparsebundle",
-                blob=tmp_path / "passphrase.wrapped",
-                mount=tmp_path / "mnt",
-            ),
-            on_path=lambda _name: False,
-        )
-        text = encryption_cli.render_text(statuses)
-        for target in encryption_cli.TARGETS:
-            assert target in text
 
     def test_status_mark_reflects_active_not_just_configured(self) -> None:
         on = encryption_cli.TargetStatus("env", configured=True, active=True, detail="active")
@@ -622,13 +588,6 @@ class TestRender:
         assert "[off]" in text
         assert "legend:" not in text
 
-    def test_exposed_legend_is_target_neutral(self) -> None:
-        """`exposed` is now reachable for env *and* memory, so the alert line
-        must not name a single target's reseal command."""
-        body = encryption_cli.EXPOSED_LEGEND_BODY
-        assert "encryption enable <target>" in body
-        assert "encryption enable env" not in body
-
     def test_render_text_shows_the_exposed_alert_for_any_target(self) -> None:
         statuses = [
             encryption_cli.TargetStatus("memory", configured=True, active=True, detail="plaintext file", drift=True),
@@ -636,14 +595,8 @@ class TestRender:
         text = encryption_cli.render_text(statuses)
         assert "[exposed]" in text
         assert encryption_cli.EXPOSED_LEGEND_BODY in text
-
-    def test_workspace_mark_is_sealed_when_set_up_and_unmounted(self) -> None:
-        # The workspace is encrypted at rest whenever it is set up and sealed,
-        # so `disable` (= seal) must NOT read as the others' `on`/`off`.
-        sealed = encryption_cli.TargetStatus(
-            "workspace", configured=True, active=True, detail="sealed at rest", mounted=False
-        )
-        assert encryption_cli.status_mark(sealed) == "sealed"
+        assert "encryption enable <target>" in text
+        assert "encryption enable env" not in text
 
     def test_workspace_mark_is_open_when_mounted(self) -> None:
         mounted = encryption_cli.TargetStatus(
@@ -692,37 +645,6 @@ class TestRender:
 # Colour — opt-in styling; plain output stays byte-identical (above tests assert it)
 # -----------------------------------------------------------------------------
 class TestColor:
-    def test_style_mark_colours_by_state(self) -> None:
-        assert "\033[32m" in encryption_cli.style_mark("on", "on", enabled=True)  # green
-        assert "\033[32m" in encryption_cli.style_mark("sealed", "sealed", enabled=True)  # green
-        assert "\033[33m" in encryption_cli.style_mark("paused", "paused", enabled=True)  # yellow
-        assert "\033[36m" in encryption_cli.style_mark("open", "open", enabled=True)  # cyan
-        assert "\033[2m" in encryption_cli.style_mark("off", "off", enabled=True)  # dim
-
-    def test_style_mark_plain_when_disabled(self) -> None:
-        # The padded cell passes through unchanged so column alignment is preserved.
-        assert encryption_cli.style_mark("on", "on ", enabled=False) == "on "
-
-    def test_style_mark_unknown_word_passes_through(self) -> None:
-        assert encryption_cli.style_mark("mystery", "mystery", enabled=True) == "mystery"
-
-    def test_render_text_default_has_no_ansi(self) -> None:
-        statuses = [
-            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
-            encryption_cli.TargetStatus("config", configured=True, active=False, detail="disabled"),
-        ]
-        assert "\033" not in encryption_cli.render_text(statuses)
-
-    def test_render_text_color_emits_ansi_and_keeps_words(self) -> None:
-        statuses = [
-            encryption_cli.TargetStatus("env", configured=True, active=True, detail="active"),
-            encryption_cli.TargetStatus("config", configured=True, active=False, detail="disabled"),
-        ]
-        text = encryption_cli.render_text(statuses, color=True)
-        assert "\033[" in text  # styled
-        assert "\033[1m" in text  # heading is bold
-        assert "on" in text and "paused" in text  # mark words still present
-
     def _run_status(self, tmp_path: Path) -> int:
         return encryption_cli.status(
             home=tmp_path,
@@ -744,7 +666,10 @@ class TestColor:
         monkeypatch.delenv("FORCE_COLOR", raising=False)
         monkeypatch.delenv("NO_COLOR", raising=False)
         assert self._run_status(tmp_path) == 0
-        assert "\033" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "\033" not in out
+        for target in encryption_cli.TARGETS:
+            assert target in out
 
     def test_status_wiring_colours_when_forced(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

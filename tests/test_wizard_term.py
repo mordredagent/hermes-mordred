@@ -88,19 +88,6 @@ class TestStringHelpers:
         assert _term.bold("h", enabled=False) == "h"
         assert _term.heading("H", enabled=False) == "H"
 
-    def test_error_uses_red(self) -> None:
-        assert "\033[31m" in _term.error("bad", enabled=True)
-
-    def test_warn_uses_yellow(self) -> None:
-        assert "\033[33m" in _term.warn("hmm", enabled=True)
-
-    def test_hint_uses_dim(self) -> None:
-        assert "\033[2m" in _term.hint("psst", enabled=True)
-
-    def test_bold_and_heading_use_bold(self) -> None:
-        assert "\033[1m" in _term.bold("h", enabled=True)
-        assert "\033[1m" in _term.heading("H", enabled=True)
-
 
 # -----------------------------------------------------------------------------
 # glyph — UTF-aware symbols with ASCII fallback

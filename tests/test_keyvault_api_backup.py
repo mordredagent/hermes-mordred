@@ -78,72 +78,6 @@ def _key_id_hash_hex(key_id: str) -> str:
 
 
 class TestExportBlob:
-    def test_export_returns_parseable_mrkv_blob(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
-        _log, sink = audit
-        backend = FakeBackend()
-        home = tmp_path / "deviceA"
-        key_id = _init_device(home, backend, sink)
-
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend,
-            audit_sink=sink,
-            home=home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-
-        assert blob[:4] == b"MRKV"
-        # The PR2 backup parser must accept it without complaint.
-        parsed = backup.parse_header(blob)
-        assert parsed.version == backup.VERSION
-
-    def test_export_embeds_commit_verification_digest(
-        self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]
-    ) -> None:
-        """The blob's embedded digest is the one written to
-        ``digests/<kid>.commit`` at generate time — that is what
-        ``import_backup`` recomputes and checks against."""
-        _log, sink = audit
-        backend = FakeBackend()
-        home = tmp_path / "deviceA"
-        key_id = _init_device(home, backend, sink)
-
-        commit_path = home / "mordred" / "keyvault" / "digests" / f"{_key_id_hash_hex(key_id)}.commit"
-        commit_digest = _storage.safe_read(commit_path)
-
-        blob = api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend,
-            audit_sink=sink,
-            home=home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-        assert backup.parse_header(blob).verification_digest == commit_digest
-
-    def test_export_emits_backup_exported(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
-        log, sink = audit
-        backend = FakeBackend()
-        home = tmp_path / "deviceA"
-        key_id = _init_device(home, backend, sink)
-        log.clear()
-
-        api.export_backup(
-            key_id,
-            PASSPHRASE,
-            backend=backend,
-            audit_sink=sink,
-            home=home,
-            seed_phrase=SEED,
-            pow_bytes=POW,
-        )
-
-        exported = [e for e in log if e.get("reason") == "keyvault.backup_exported"]
-        assert len(exported) == 1
-
     def test_export_audit_fields_match_policy(self, tmp_path: Path, audit: tuple[list[dict[str, Any]], Any]) -> None:
         """POLICY.md #24: event=keyvault.backup_export, decision=allow,
         key_id_hash, blob_version=1, kdf_id=1, envelope_count."""
@@ -194,6 +128,11 @@ class TestExportBlob:
         )
 
         assert blob[:4] == b"MRKV"
+        parsed = backup.parse_header(blob)
+        assert parsed.version == backup.VERSION
+        commit_path = home / "mordred" / "keyvault" / "digests" / f"{_key_id_hash_hex(key_id)}.commit"
+        assert parsed.verification_digest == _storage.safe_read(commit_path)
+        assert len([e for e in log if e.get("reason") == "keyvault.backup_exported"]) == 1
         entry = next(e for e in log if e.get("reason") == "keyvault.backup_exported")
         assert entry["envelope_count"] == 0
 
