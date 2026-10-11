@@ -75,12 +75,16 @@ def _render(outcome: RoleOutcome) -> str:
     )
 
 
-def _refuse(operation: str, role: str, reason: str, detail: str) -> None:
+def _refuse(operation: str, role: str, reason: str, detail: str, *, enrollment_attempted: bool = False) -> None:
     hint = remedy(reason)
+    retained = (
+        " Enrollment may have created a key; retained keys and journals are preserved for explicit reconciliation. "
+        "No existing key is adopted or regenerated."
+        if enrollment_attempted
+        else " No key was generated for it; existing custody state is preserved."
+    )
     _term.emit_error(
-        f"{operation}: {role} custody refused ({reason}): {detail}"
-        + (f" — {hint}." if hint else ".")
-        + " No key was generated for it; existing custody state is preserved."
+        f"{operation}: {role} custody refused ({reason}): {detail}" + (f" — {hint}." if hint else ".") + retained
     )
 
 
@@ -122,7 +126,9 @@ def enroll_roles(home: Path, roles: Sequence[NativeRole], *, operation: str = _O
         except (OSError, RuntimeError, ValueError, WrapError) as exc:
             for outcome in outcomes:
                 print(_render(outcome))
-            _refuse(operation, role, classify_exception(exc), f"{type(exc).__name__}: {exc}")
+            # Native creation may succeed before verification or publication fails.
+            # Do not infer absence or expose arbitrary native/OS exception content.
+            _refuse(operation, role, classify_exception(exc), type(exc).__name__, enrollment_attempted=True)
             return None
         outcomes.append(RoleOutcome(role, lease.generation, lease.public_sha256, created))
     return outcomes
@@ -135,12 +141,12 @@ def _capabilities(home: Path) -> tuple[WindowsCapability, ...] | None:
     try:
         return windows_capabilities(home)
     except PrivateFSError as exc:
-        reason, detail = classify_exception(exc), f"{type(exc).__name__}: {exc}"
+        reason, detail = classify_exception(exc), type(exc).__name__
         if reason == "unsupported":
             _term.emit_error(f"{_OPERATION}: Windows native custody exists only on native Windows.")
             return None
     except (OSError, RuntimeError, ValueError) as exc:
-        reason, detail = classify_exception(exc), f"{type(exc).__name__}: {exc}"
+        reason, detail = classify_exception(exc), type(exc).__name__
     _refuse(_OPERATION, "Windows", reason, detail)
     return None
 

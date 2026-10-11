@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import io
+import json
 import os
 import sys
 from pathlib import Path
@@ -197,6 +198,58 @@ def test_ceremony_native_failure_keeps_intent_and_creates_no_wrapper(win, monkey
     assert "memory custody refused" in capsys.readouterr().err
     assert (env.home / "mordred" / "windows-memory.pending.json").exists()
     assert not (env.home / "mordred" / "memory-key.wrapped").exists()
+
+
+@pytest.mark.parametrize("role", ["memory", "audit", "telegram"])
+def test_ceremony_failed_verification_warns_about_retained_key_and_journal(fs, monkeypatch, capsys, role):
+    custody, storage, home, backend = fs
+    monkeypatch.setattr(_windows_capability, "_platform", lambda: "win32")
+    monkeypatch.setattr(_windows_gates, "host_platform", lambda: "win32")
+    monkeypatch.setattr(_seckey_helper, "find_winkey_helper", lambda: str(home / "bin" / "winkey.exe"))
+    monkeypatch.setattr(storage, "windows_memory_runtime_admitted", lambda executable=None: True)
+    monkeypatch.setattr(custody, "windows_backend", lambda: backend)
+    sensitive_detail = "DO-NOT-ECHO: " + "x" * 10000
+
+    def failed_lookup(key_id):
+        raise custody.CustodyError(sensitive_detail)
+
+    monkeypatch.setattr(backend, "get_enclave_public_key", failed_lookup)
+    assert keyvault_windows_cli.native_init(home=home, roles=[role]) == 1
+    err = capsys.readouterr().err
+    journal = home / "mordred" / f"windows-{role}.pending.json"
+    pending = json.loads(journal.read_bytes())
+    assert pending["operation"] == "create" and pending["phase"] == "intent"
+    assert pending["role"] == role
+    assert tuple(backend._keys) == (pending["record"]["native_key_id"],)
+    assert not (home / "mordred" / "memory-key.wrapped").exists()
+    assert "may have created a key" in err
+    assert "No key was generated" not in err
+    assert "journal" in err and "explicit reconciliation" in err
+    assert sensitive_detail not in err and len(err) < 2000
+
+    evidence = {path.name: path.read_bytes() for path in (home / "mordred").iterdir() if path.suffix == ".json"}
+    calls = list(backend.calls)
+    assert keyvault_windows_cli.native_init(home=home, roles=[role]) == 1
+    assert "(custody-uncertain)" in capsys.readouterr().err
+    assert {path.name: path.read_bytes() for path in (home / "mordred").iterdir() if path.suffix == ".json"} == evidence
+    assert tuple(backend._keys) == (pending["record"]["native_key_id"],)
+    assert backend.calls == calls, "an unresolved journal must prevent adoption or regeneration"
+
+
+def test_ceremony_capability_failure_does_not_echo_unbounded_exception_content(fs, monkeypatch, capsys):
+    _, _, home, backend = fs
+    sensitive_detail = "DO-NOT-ECHO: " + "x" * 10000
+
+    def failed_capabilities(path):
+        raise RuntimeError(sensitive_detail)
+
+    monkeypatch.setattr(_windows_capability, "windows_capabilities", failed_capabilities)
+    assert keyvault_windows_cli.native_init(home=home) == 1
+    err = capsys.readouterr().err
+    assert "(custody-uncertain)" in err
+    assert sensitive_detail not in err and len(err) < 2000
+    assert "No key was generated" in err
+    assert not (home / "mordred").exists() and backend.calls == []
 
 
 # -----------------------------------------------------------------------------
