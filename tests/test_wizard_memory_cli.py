@@ -253,8 +253,13 @@ class TestEnable:
             assert expected.encode("utf-8") not in data
             assert unseal(data, key=key, name=name).decode("utf-8") == expected
 
-        out = capsys.readouterr().out
-        assert "Agent-memory encryption enabled (2 file(s) sealed; hook armed at next Hermes start)." in out
+        captured = capsys.readouterr()
+        assert "Agent-memory encryption enabled (2 file(s) sealed; hook armed at next Hermes start)." in captured.out
+        value = _effective_memory_key(_vault_env_text(root, backend, store))
+        assert value is not None
+        assert value not in captured.out
+        assert value not in captured.err
+        assert not (home / "config.yaml").exists()
 
     def test_skips_already_sealed_files(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         root, home, backend, store = _setup_home_and_vault(tmp_path)
@@ -276,24 +281,6 @@ class TestEnable:
 
         assert _enable(home, root, backend, store) == 0
         assert not optout.exists()
-
-    def test_never_prints_the_key(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        root, home, backend, store = _setup_home_and_vault(tmp_path)
-
-        assert _enable(home, root, backend, store) == 0
-
-        captured = capsys.readouterr()
-        value = _effective_memory_key(_vault_env_text(root, backend, store))
-        assert value is not None
-        assert value not in captured.out
-        assert value not in captured.err
-
-    def test_does_not_write_the_legacy_config_flag(self, tmp_path: Path) -> None:
-        """The marker is the source of truth; config.yaml is left alone."""
-        root, home, backend, store = _setup_home_and_vault(tmp_path)
-
-        assert _enable(home, root, backend, store) == 0
-        assert not (home / "config.yaml").exists()
 
     def test_leaves_an_existing_legacy_flag_alone(self, tmp_path: Path) -> None:
         root, home, backend, store = _setup_home_and_vault(tmp_path)
@@ -491,11 +478,6 @@ class TestDisable:
         assert memory_optout_marker_path(home).exists()
         assert not memory_marker_path(home).exists()
         assert "0 file(s) decrypted" in capsys.readouterr().out
-
-    def test_does_not_create_the_legacy_flag(self, tmp_path: Path) -> None:
-        root, home, backend, store = _setup_home_and_vault(tmp_path)
-
-        assert memory_cli.disable(home=home, root=root, backend=backend, store=store) == 0
         assert not (home / "config.yaml").exists()
 
     def test_clears_an_existing_legacy_flag(self, tmp_path: Path) -> None:

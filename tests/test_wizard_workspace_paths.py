@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.wizard._workspace_paths import (
-    WorkspacePaths,
     is_mountpoint,
     resolve_workspace_env,
 )
@@ -39,12 +38,6 @@ class TestResolveWorkspaceEnv:
         assert env.keydir == tmp_path / "keys"
         assert env.blob == tmp_path / "keys" / "passphrase.wrapped"
         assert env.mount == tmp_path / "mnt"
-
-    def test_env_is_a_workspace_paths(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The read side annotates against WorkspacePaths; the resolver's
-        # WorkspaceEnv must satisfy it so one resolution serves both surfaces.
-        monkeypatch.setenv("HOME", str(tmp_path))
-        assert isinstance(resolve_workspace_env(), WorkspacePaths)
 
 
 class TestIsMountpoint:

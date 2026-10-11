@@ -82,13 +82,19 @@ class TestSetMemoryKey:
         assert "FOO=bar" in text
         assert "HERMES_MEMORY_KEY=" in text
 
-    def test_idempotent_when_already_set(self, tmp_path: Path) -> None:
+    def test_idempotent_when_already_set(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A second call without ``--rotate`` is a no-op: same key, no new generation."""
         root = tmp_path / "v"
         backend, store = FakeBackend(), FakeAnchorStore()
         self._init(root, backend, store)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         first_value = self._key_value(root)
+        captured = capsys.readouterr()
+        assert self._decodes_to_32_bytes(first_value)
+        assert "encryption enable memory" in captured.out.lower()
+        assert "warning" not in captured.err.lower()
+        assert first_value not in captured.out
+        assert first_value not in captured.err
         gen = self._generation(root)
         assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
         assert self._key_value(root) == first_value  # unchanged
@@ -104,19 +110,6 @@ class TestSetMemoryKey:
         text = self._env_text(root)
         assert self._key_value(root) != first_value  # rotated
         assert text.count("HERMES_MEMORY_KEY=") == 1  # replaced in place, not duplicated
-
-    def test_does_not_print_secret(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        assert vault_memory_key.set_memory_key(root=root, backend=backend, store=store) == 0
-        captured = capsys.readouterr()
-        value = self._key_value(root)
-        assert self._decodes_to_32_bytes(value)
-        assert "encryption enable memory" in captured.out.lower()
-        assert "warning" not in captured.err.lower()
-        assert value not in captured.out
-        assert value not in captured.err
 
     def test_ensure_memory_key_returns_the_value_without_printing_it(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -415,38 +408,3 @@ class TestSetMemoryKey:
         assert rc == 0
         assert seen["root"] == tmp_path
         assert seen["rotate"] is True
-
-
-class TestOpenHotPath:
-    """``_open_hot_path_or_report`` — the shared hot-path open used by add /
-    migrate / set_memory_key. Returns the opened vault (caller closes it), or
-    prints a fail-closed reason to stderr and returns ``None``.
-    """
-
-    def test_returns_opened_vault_when_initialised(self, tmp_path: Path) -> None:
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        assert (
-            vault_cli.init(
-                root=root, prompt_io=_PromptIO(passwords=[_PASSPHRASE, _PASSPHRASE]), backend=backend, store=store
-            )
-            == 0
-        )
-        opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
-        assert opened is not None
-        try:
-            assert opened.generation == 0  # freshly initialised, nothing enrolled
-        finally:
-            opened.close()
-
-    def test_uninitialised_returns_none_and_points_at_init(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        opened = vault_cli._open_hot_path_or_report(tmp_path / "v", backend=FakeBackend(), store=FakeAnchorStore())
-        assert opened is None
-        assert "init" in capsys.readouterr().err.lower()  # guidance: run `vault init` first
-
-    def test_keychain_error_returns_none(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        opened = vault_cli._open_hot_path_or_report(tmp_path / "v", backend=FakeBackend(), store=_ReadRaisesStore())
-        assert opened is None
-        assert capsys.readouterr().err.strip() != ""

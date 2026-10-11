@@ -55,6 +55,14 @@ def _backend(tmp_path: Path) -> tuple[FakeBackend, list[dict], dict]:
     return backend, log, kwargs
 
 
+def _run_cli(monkeypatch: pytest.MonkeyPatch, kwargs: dict, *args: str) -> int:
+    """Exercise parsed adapters with the real Ethereum consumer and a temporary vault."""
+    monkeypatch.setenv("HERMES_HOME", str(kwargs["home"]))
+    monkeypatch.setattr(keyvault_eth_cli, "resolve_backend", lambda backend: kwargs["backend"])
+    ns = _mordred_parser().parse_args(["mordred", "keyvault", "eth", *args])
+    return ns.func(ns)
+
+
 # ---------------------------------------------------------------------------
 # eth new — generate a random secp256k1 key
 # ---------------------------------------------------------------------------
@@ -67,18 +75,6 @@ def test_eth_new_prints_address_and_stores_one_envelope(tmp_path: Path, capsys: 
     out = capsys.readouterr().out
     assert "0x" in out
     assert len(list(tmp_path.rglob("*.gcm"))) == 1, "expected exactly one ciphertext envelope"
-
-
-def test_eth_new_json_shape(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    _, _, kw = _backend(tmp_path)
-    rc = keyvault_eth_cli.eth_new(as_json=True, **kw)
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["address"].startswith("0x")
-    assert len(payload["address"]) == 42
-    assert payload["key_id"] == "default"
-    assert isinstance(payload["envelope_id"], str)
-    assert len(payload["envelope_id"]) == 22
 
 
 def test_eth_new_two_keys_differ(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -96,16 +92,27 @@ def test_eth_new_two_keys_differ(tmp_path: Path, capsys: pytest.CaptureFixture[s
 # ---------------------------------------------------------------------------
 
 
-def test_eth_address_matches_new(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_eth_address_matches_new(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, _, kw = _backend(tmp_path)
-    keyvault_eth_cli.eth_new(as_json=True, **kw)
+    assert _run_cli(monkeypatch, kw, "new", "--json") == 0
     created = json.loads(capsys.readouterr().out)
+    assert created["address"].startswith("0x")
+    assert len(created["address"]) == 42
+    assert created["key_id"] == "default"
+    assert isinstance(created["envelope_id"], str)
+    assert len(created["envelope_id"]) == 22
 
-    rc = keyvault_eth_cli.eth_address(created["envelope_id"], as_json=True, **kw)
+    rc = _run_cli(monkeypatch, kw, "address", "--envelope-id", created["envelope_id"], "--json")
     assert rc == 0
     read = json.loads(capsys.readouterr().out)
     assert read["address"] == created["address"]
     assert read["envelope_id"] == created["envelope_id"]
+    assert read["key_id"] == "default"
+    with pytest.raises(SystemExit) as exc:
+        _mordred_parser().parse_args(["mordred", "keyvault", "eth", "address"])
+    assert exc.value.code == 2
 
 
 def test_eth_address_unknown_envelope_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -213,63 +220,6 @@ def test_eth_derive_enclave_failure_returns_1(
 
 
 # ---------------------------------------------------------------------------
-# argparse adapters — delegate to the business functions
-# ---------------------------------------------------------------------------
-
-
-def test_cli_eth_new_adapter_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict = {}
-
-    def fake(*, key_id: str, as_json: bool) -> int:
-        seen["key_id"] = key_id
-        seen["as_json"] = as_json
-        return 0
-
-    monkeypatch.setattr(keyvault_eth_cli, "eth_new", fake)
-    rc = keyvault_eth_cli.cli_eth_new(argparse.Namespace(key_id="default", json=True))
-    assert rc == 0
-    assert seen == {"key_id": "default", "as_json": True}
-
-
-def test_cli_eth_derive_adapter_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict = {}
-
-    def fake(**kwargs: object) -> int:
-        seen.update(kwargs)
-        return 0
-
-    monkeypatch.setattr(keyvault_eth_cli, "eth_derive", fake)
-    rc = keyvault_eth_cli.cli_eth_derive(
-        argparse.Namespace(
-            key_id="default",
-            index=3,
-            account=0,
-            change=0,
-            seed_envelope_id=None,
-            json=False,
-        )
-    )
-    assert rc == 0
-    assert seen["index"] == 3
-    assert seen["as_json"] is False
-
-
-def test_cli_eth_address_adapter_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict = {}
-
-    def fake(envelope_id: str, *, key_id: str, as_json: bool) -> int:
-        seen["envelope_id"] = envelope_id
-        seen["key_id"] = key_id
-        seen["as_json"] = as_json
-        return 0
-
-    monkeypatch.setattr(keyvault_eth_cli, "eth_address", fake)
-    rc = keyvault_eth_cli.cli_eth_address(argparse.Namespace(envelope_id="A" * 22, key_id="default", json=True))
-    assert rc == 0
-    assert seen == {"envelope_id": "A" * 22, "key_id": "default", "as_json": True}
-
-
-# ---------------------------------------------------------------------------
 # Parser wiring — `keyvault eth ...` is registered on the mordred tree and
 # routes to the right adapter (cli._add_keyvault -> add_eth_subparsers).
 # ---------------------------------------------------------------------------
@@ -286,26 +236,12 @@ def _mordred_parser() -> argparse.ArgumentParser:
     return root
 
 
-def test_parser_routes_eth_new() -> None:
-    ns = _mordred_parser().parse_args(["mordred", "keyvault", "eth", "new", "--json"])
-    assert ns.func is keyvault_eth_cli.cli_eth_new
-    assert ns.key_id == "default"
-    assert ns.json is True
-
-
-def test_parser_routes_eth_derive_with_options() -> None:
-    ns = _mordred_parser().parse_args(["mordred", "keyvault", "eth", "derive", "--index", "2", "--account", "1"])
-    assert ns.func is keyvault_eth_cli.cli_eth_derive
-    assert ns.index == 2
-    assert ns.account == 1
-    assert ns.change == 0
-    assert ns.seed_envelope_id is None
-
-
-def test_parser_routes_eth_address_requires_envelope_id() -> None:
-    parser = _mordred_parser()
-    ns = parser.parse_args(["mordred", "keyvault", "eth", "address", "--envelope-id", "A" * 22])
-    assert ns.func is keyvault_eth_cli.cli_eth_address
-    assert ns.envelope_id == "A" * 22
-    with pytest.raises(SystemExit):
-        parser.parse_args(["mordred", "keyvault", "eth", "address"])  # --envelope-id is required
+def test_parser_routes_eth_derive_with_options(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, kw = _backend(tmp_path)
+    store_seed_phrase("default", _TEST_MNEMONIC, **kw)
+    assert _run_cli(monkeypatch, kw, "derive", "--index", "2", "--account", "1") == 0
+    out = capsys.readouterr().out
+    assert "m/44'/60'/1'/0/2" in out
+    assert "address: 0x" in out

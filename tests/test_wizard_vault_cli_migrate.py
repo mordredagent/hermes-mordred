@@ -43,6 +43,9 @@ class TestMigrate:
 
         rc = vault_cli.migrate(root=root, sources=[plain / ".env", plain / "config.yaml"], backend=backend, store=store)
         assert rc == 0
+        # Enrollment leaves the operator's plaintext sources intact.
+        assert (plain / ".env").read_bytes() == b"ANTHROPIC_API_KEY=sk-secret\n"
+        assert (plain / "config.yaml").read_bytes() == b"a: 1\n"
         opened = vault.recover_vault(root, _PASSPHRASE)
         try:
             assert opened.read_file(".env") == b"ANTHROPIC_API_KEY=sk-secret\n"
@@ -118,17 +121,6 @@ class TestMigrate:
         rc = vault_cli.migrate(root=root, sources=[src], backend=backend, store=_ReadRaisesStore())
         assert rc == 1
         assert capsys.readouterr().err.strip() != ""
-
-    def test_does_not_remove_plaintext_source(self, tmp_path: Path) -> None:
-        """Like ``add``, migrate never deletes the plaintext — the operator owns shredding."""
-        root = tmp_path / "v"
-        backend, store = FakeBackend(), FakeAnchorStore()
-        self._init(root, backend, store)
-        src = tmp_path / ".env"
-        src.write_bytes(b"K=v\n")
-        assert vault_cli.migrate(root=root, sources=[src], backend=backend, store=store) == 0
-        assert src.exists()
-        assert src.read_bytes() == b"K=v\n"
 
     def test_overwrite_supersedes(self, tmp_path: Path) -> None:
         root = tmp_path / "v"

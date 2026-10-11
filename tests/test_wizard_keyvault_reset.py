@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import threading
 from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -106,27 +107,25 @@ def _write_current_reset_journal(
 
 
 class TestResetYes:
-    def test_removes_ondisk_dir_and_deletes_enclave_keys(self, tmp_path: Path) -> None:
-        root = _build_keyvault(tmp_path, ["default"])
+    def test_removes_ondisk_dir_and_deletes_enclave_keys(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mordred_hermes.wizard.cli import _setup_subparser
+
+        root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = FakeBackend()
         _seed_enclave(backend, [_DEFAULT_KEY_ID, AUDIT_LOG_KEY_ID])
 
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
-
-        assert rc == 0
+        monkeypatch.setattr(
+            keyvault_cli, "reset_keyvault", partial(keyvault_cli.reset_keyvault, home=tmp_path, backend=backend)
+        )
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        args = parser.parse_args(["keyvault", "reset", "--yes"])
+        assert args.func(args) == 0
         assert not root.exists()
         # Both the live key and the audit-log wrapping key are destroyed.
         assert _physical(root, _DEFAULT_KEY_ID) in _deleted(backend)
+        assert _physical(root, "payments") in _deleted(backend)
         assert _physical(root, AUDIT_LOG_KEY_ID) in _deleted(backend)
-
-    def test_deletes_every_meta_key(self, tmp_path: Path) -> None:
-        root = _build_keyvault(tmp_path, ["default", "payments"])
-        backend = FakeBackend()
-
-        rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
-
-        assert rc == 0
-        assert {_physical(root, "default"), _physical(root, "payments")} <= _deleted(backend)
 
     def test_corrupt_meta_still_resets_known_keys(self, tmp_path: Path) -> None:
         root = _storage.resolve_keyvault_dir(tmp_path)
@@ -604,17 +603,24 @@ class TestResetAbsent:
 
 class TestResetConfirmation:
     def test_wrong_phrase_aborts_and_preserves_keyvault(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from mordred_hermes.wizard.cli import _setup_subparser
+
         root = _build_keyvault(tmp_path, ["default"])
         backend = FakeBackend()
         _seed_enclave(backend, [_DEFAULT_KEY_ID])
-
-        rc = keyvault_cli.reset_keyvault(
-            home=tmp_path, backend=backend, prompt_io=_ScriptedPrompt("no"), assume_yes=False
+        prompt = _ScriptedPrompt("no")
+        monkeypatch.setattr(
+            keyvault_cli,
+            "reset_keyvault",
+            partial(keyvault_cli.reset_keyvault, home=tmp_path, backend=backend, prompt_io=prompt),
         )
-
-        assert rc == 1
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        args = parser.parse_args(["keyvault", "reset"])
+        assert args.func(args) == 1
+        assert prompt.asked
         assert root.exists()  # nothing deleted on abort
         assert _deleted(backend) == set()
         assert "aborted" in capsys.readouterr().out.lower()
@@ -712,31 +718,3 @@ class TestResetConfirmation:
         assert rc == 0
         assert prompt.asked == []
         assert not root.exists()
-
-
-class TestResetAdapter:
-    def test_cli_reset_delegates_with_assume_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, object] = {}
-
-        def _fake_reset(*, assume_yes: bool = False) -> int:
-            captured["assume_yes"] = assume_yes
-            return 0
-
-        monkeypatch.setattr(keyvault_cli, "reset_keyvault", _fake_reset)
-        rc = keyvault_cli.cli_reset(argparse.Namespace(assume_yes=True))
-
-        assert rc == 0
-        assert captured["assume_yes"] is True
-
-    def test_cli_reset_defaults_assume_yes_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: dict[str, object] = {}
-
-        def _fake_reset(*, assume_yes: bool = False) -> int:
-            captured["assume_yes"] = assume_yes
-            return 0
-
-        monkeypatch.setattr(keyvault_cli, "reset_keyvault", _fake_reset)
-        rc = keyvault_cli.cli_reset(argparse.Namespace())
-
-        assert rc == 0
-        assert captured["assume_yes"] is False

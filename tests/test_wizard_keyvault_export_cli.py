@@ -10,6 +10,7 @@ import argparse
 import errno
 import os
 import signal
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +186,7 @@ class TestPortableExport:
         isolated_home: Path,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         backend = FakeBackend()
         _key_id, _ethereum_envelope, entries = _initialize_source(
@@ -197,16 +199,21 @@ class TestPortableExport:
         source_before = _file_snapshot(isolated_home)
         native_keys_before = dict(backend._keys)
 
-        assert (
-            _export(
+        monkeypatch.setattr(
+            keyvault_export_cli,
+            "export_keyvault_backup",
+            partial(
+                keyvault_export_cli.export_keyvault_backup,
                 home=isolated_home,
                 backend=backend,
-                output=output,
-                prompts=prompts,
-                entries=entries,
-            )
-            == 0
+                prompt_io=prompts,
+                audit_sink=_sink(entries),
+            ),
         )
+        parser = argparse.ArgumentParser(prog="hermes-mordred")
+        _setup_subparser(parser)
+        args = parser.parse_args(["keyvault", "export", "--output", str(output)])
+        assert args.func(args) == 0
 
         blob = output.read_bytes()
         assert backup.parse_header(blob).version == backup.VERSION
@@ -753,23 +760,6 @@ class TestExportParserAndSecrecy:
         assert standalone_ns.keyvault_command == host_ns.keyvault_command == "export"
         assert standalone_ns.output == host_ns.output
         assert standalone_ns.func is host_ns.func
-
-    def test_cli_adapter_passes_output_path_without_subprocess(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        seen: list[Path] = []
-
-        def fake_export(*, output_path: Path) -> int:
-            seen.append(output_path)
-            return 0
-
-        monkeypatch.setattr(keyvault_export_cli, "export_keyvault_backup", fake_export)
-        output = tmp_path / "adapter.mrkv"
-
-        assert keyvault_export_cli.cli_export(argparse.Namespace(output=str(output))) == 0
-        assert seen == [output]
 
     def test_secrets_and_blob_never_reach_output_or_audit(
         self,

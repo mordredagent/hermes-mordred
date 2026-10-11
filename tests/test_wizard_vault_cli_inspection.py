@@ -17,15 +17,6 @@ from ._wizard_vault_cli_helpers import _KEY_ID, _LABEL, _PASSPHRASE, _build_vaul
 
 
 class TestStatus:
-    def test_reports_generation_and_files(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        _build_vault(tmp_path, files={".env": b"K=v\n", "config.yaml": b"a: 1\n"})
-        rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert ".env" in out
-        assert "config.yaml" in out
-        assert "generation: 2" in out
-
     def test_empty_vault_reports_zero(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _build_vault(tmp_path)
         rc = vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
@@ -33,21 +24,6 @@ class TestStatus:
         out = capsys.readouterr().out
         assert "generation: 0" in out
         assert "files: 0" in out
-
-    def test_status_does_not_leak_plaintext(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """``status`` lists enrolled names but never decrypts file contents."""
-        secret = b"ANTHROPIC_API_KEY=sk-do-not-print"
-        _build_vault(tmp_path, files={".env": secret})
-        vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
-        captured = capsys.readouterr()
-        assert secret.decode() not in captured.out
-        assert secret.decode() not in captured.err
-
-    def test_read_only_notice(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """A cold-path open is read-only; the operator is told so."""
-        _build_vault(tmp_path, files={".env": b"K=v\n"})
-        vault_cli.status(root=tmp_path, prompt_io=_PromptIO(password=_PASSPHRASE))
-        assert "read-only" in capsys.readouterr().out.lower()
 
     def test_succeeds_with_no_prompt_io_at_all(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """The default call shape (no ``prompt_io``, exactly how ``cli_status``
@@ -64,10 +40,17 @@ class TestStatus:
         :class:`NonInteractiveAbort` on its very first call (the
         ``--non-interactive`` guard) still lets ``status`` succeed, proving it
         is never called at all."""
-        _build_vault(tmp_path, files={".env": b"K=v\n"})
+        secret = b"ANTHROPIC_API_KEY=sk-do-not-print"
+        _build_vault(tmp_path, files={".env": secret, "config.yaml": b"a: 1\n"})
         rc = vault_cli.status(root=tmp_path, prompt_io=_RefusingPromptIO())
         assert rc == 0
-        assert "generation: 1" in capsys.readouterr().out
+        captured = capsys.readouterr()
+        assert "generation: 2" in captured.out
+        assert ".env" in captured.out
+        assert "config.yaml" in captured.out
+        assert "read-only" in captured.out.lower()
+        assert secret.decode() not in captured.out
+        assert secret.decode() not in captured.err
 
     def test_json_succeeds_with_a_refusing_prompt_io(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """The ``--json`` shape is equally non-prompting — Phase 5 (UX review
@@ -190,13 +173,6 @@ class TestStatus:
 
 
 class TestCat:
-    def test_prints_decrypted_bytes(self, tmp_path: Path, capsysbinary: pytest.CaptureFixture[bytes]) -> None:
-        _build_vault(tmp_path, files={".env": b"ANTHROPIC_API_KEY=sk-secret\n"})
-        rc = vault_cli.cat(root=tmp_path, name=".env", prompt_io=_PromptIO(password=_PASSPHRASE))
-        assert rc == 0
-        # Raw bytes, byte-exact — no trailing newline added, binary-safe.
-        assert capsysbinary.readouterr().out == b"ANTHROPIC_API_KEY=sk-secret\n"
-
     def test_binary_content_is_byte_exact(self, tmp_path: Path, capsysbinary: pytest.CaptureFixture[bytes]) -> None:
         blob = bytes(range(256))
         _build_vault(tmp_path, files={"key.bin": blob})

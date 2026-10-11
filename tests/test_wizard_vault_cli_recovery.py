@@ -111,6 +111,9 @@ class TestChangePassphrase:
         backend, store = FakeBackend(), FakeAnchorStore()
         root = tmp_path / "vault"
         _build_at_cli_identity(root, backend, store, files={".env": b"SECRET=1\n"})
+        ident = vault_cli._vault_identity(root)
+        with vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident) as before:
+            generation = before.generation
 
         rc = vault_cli.change_passphrase(
             root=root,
@@ -127,6 +130,11 @@ class TestChangePassphrase:
             assert opened.read_file(".env") == b"SECRET=1\n"
         finally:
             opened.close()
+
+        # Rotation also preserves the everyday device-key path and generation.
+        with vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident) as after:
+            assert after.generation == generation
+            assert after.read_file(".env") == b"SECRET=1\n"
 
         # The old passphrase no longer opens it.
         with pytest.raises(InvalidTag):
@@ -234,36 +242,6 @@ class TestChangePassphrase:
         for argv in (["vault", "change-passphrase"], ["encryption", "change-passphrase"]):
             ns = parser.parse_args(argv)
             assert ns.func.__name__ == "_handle_vault_change_passphrase"
-
-    def test_device_key_open_unaffected_and_generation_unchanged(self, tmp_path: Path) -> None:
-        """The headline claim: rotation re-wraps only the recovery sidecar, so the
-        everyday device-key (hot path) open still works, the file is intact, and no
-        new generation is written (nothing is re-encrypted)."""
-        backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
-        _build_at_cli_identity(root, backend, store, files={".env": b"K=v\n"})
-        ident = vault_cli._vault_identity(root)
-
-        before = vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident)
-        try:
-            gen_before = before.generation
-        finally:
-            before.close()
-
-        rc = vault_cli.change_passphrase(
-            root=root,
-            prompt_io=_PromptIO(passwords=[_NEW_PASSPHRASE, _NEW_PASSPHRASE]),
-            backend=backend,
-            store=store,
-        )
-        assert rc == 0
-
-        after = vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident)
-        try:
-            assert after.generation == gen_before  # no re-encrypt, no generation bump
-            assert after.read_file(".env") == b"K=v\n"
-        finally:
-            after.close()
 
     def test_rotation_survives_missing_lock_file(self, tmp_path: Path) -> None:
         """`keyvault_lock` opens .lock without O_CREAT; a vault whose dotfile was

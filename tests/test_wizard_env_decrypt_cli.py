@@ -72,8 +72,11 @@ class TestEnable:
         _init_empty_vault(root, backend, store)
         (home / ".env").write_bytes(_ENV_A)
 
+        before = sum(1 for call in backend.calls if call[0] == "ecdh")
         rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
+        after = sum(1 for call in backend.calls if call[0] == "ecdh")
         assert rc == 0
+        assert after - before == 1  # Enroll and pre-delete verification share one unlock.
         assert _vault_env(root, backend, store) == _ENV_A  # enrolled
         assert not (home / ".env").exists()  # no plaintext at rest on macOS
         assert not _env_optout_marker_path(home).exists()  # injection ON
@@ -158,25 +161,6 @@ class TestEnable:
         assert _vault_env(root, backend, store) == _ENV_A
         assert not (home / ".env").exists()  # plaintext removed after a clean enroll
 
-    def test_keeps_plaintext_if_disk_diverges_from_vault(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """macOS enable must not delete a plaintext that does not match the enrolled bytes."""
-        from mordred_hermes.wizard import vault_cli
-
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
-        # simulate the enrolled copy differing from what is on disk at unlink time
-        monkeypatch.setattr(vault_cli, "add_and_verify", lambda **_k: (0, _ENV_B))
-
-        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
-        assert rc == 0
-        assert (home / ".env").read_bytes() == _ENV_A  # plaintext NOT deleted
-        assert "leaving the plaintext" in capsys.readouterr().err.lower()
-
     def test_keeps_plaintext_if_disk_unreadable_at_verify(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -208,9 +192,8 @@ class TestEnable:
         """Multi-fault: the on-disk plaintext both mismatches the enrolled bytes
         AND would blow up if unlinking were ever attempted on it. The mismatch
         check inside ``_delete_enrolled_plaintext`` must run and return FIRST —
-        the same "leaving the plaintext in place" message as a lone mismatch
-        (see ``test_keeps_plaintext_if_disk_diverges_from_vault``) — never
-        reaching the unlink step at all.
+        the "leaving the plaintext in place" message — never reaching the
+        unlink step at all.
 
         Mutation-sensitive: swapping the mismatch-check block and the unlink
         block inside ``_delete_enrolled_plaintext`` makes this fail — the
@@ -242,23 +225,6 @@ class TestEnable:
         assert rc == 0
         assert env_path.read_bytes() == _ENV_A  # kept — the unlink path was never reached
         assert "leaving the plaintext" in capsys.readouterr().err.lower()
-
-    def test_enable_unlocks_the_enclave_once(self, tmp_path: Path) -> None:
-        """enable() must open the vault — one Secure-Enclave unlock, i.e. one Touch ID
-        prompt — exactly once: the enroll and the pre-delete verify share a single open."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / ".env").write_bytes(_ENV_A)
-
-        before = sum(1 for call in backend.calls if call[0] == "ecdh")
-        rc = env_decrypt_cli.enable(home=home, root=root, platform="darwin", backend=backend, store=store)
-        after = sum(1 for call in backend.calls if call[0] == "ecdh")
-
-        assert rc == 0
-        assert not (home / ".env").exists()  # plaintext removed after the verified enroll
-        assert after - before == 1  # a single device-key unlock for enroll + verify
 
     def test_clears_optout_marker(self, tmp_path: Path) -> None:
         root, home = tmp_path / "v", tmp_path / "home"
@@ -423,8 +389,11 @@ class TestReseal:
         # host writes only the just-set key (it started from an empty file)
         (home / ".env").write_bytes(b"C=3\n")
 
+        before = sum(1 for call in backend.calls if call[0] == "ecdh")
         rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
+        after = sum(1 for call in backend.calls if call[0] == "ecdh")
         assert rc == 0
+        assert after - before == 1  # Read, merge, enroll, and verify share one unlock.
         assert not (home / ".env").exists()  # plaintext removed again
         assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"  # A and B survived
 
@@ -507,25 +476,6 @@ class TestReseal:
         enrolled = _vault_env(root, backend, store).decode("utf-8")
         vals = dotenv_values(stream=StringIO(enrolled), interpolate=False)
         assert vals == {"A": "1", "B": "hello # world", "C": "line1\nline2"}
-
-    def test_reseal_unlocks_the_enclave_once(self, tmp_path: Path) -> None:
-        """reseal must open the vault — one Secure-Enclave unlock (one Touch ID) —
-        exactly once: read-base, enroll-merged, and the verify read-back all share a
-        single open (guards against a regression back to a two-open reseal)."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, _ENV_MULTI)
-        (home / ".env").write_bytes(b"C=3\n")  # partial plaintext slipped past the seal
-
-        before = sum(1 for call in backend.calls if call[0] == "ecdh")
-        rc = env_decrypt_cli.reseal(home=home, root=root, backend=backend, store=store)
-        after = sum(1 for call in backend.calls if call[0] == "ecdh")
-
-        assert rc == 0
-        assert after - before == 1  # one device-key unlock for read-base + enroll + verify
-        assert not (home / ".env").exists()
-        assert _vault_env(root, backend, store) == b"A=1\nB=2\nC=3\n"
 
 
 class TestEnableReconcilesDrift:

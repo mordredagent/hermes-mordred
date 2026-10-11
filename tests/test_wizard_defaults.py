@@ -1,10 +1,8 @@
 """Unit tests for ``wizard._defaults`` — the lazy production-default seams.
 
-Two contracts matter: an injected fake is returned unchanged (the test seam
-every keyvault-facing command relies on), and the production classes are
-imported only *inside* the resolvers, so importing the module never pulls the
-crypto / Keychain / prompt_toolkit stacks (the ``audit_cli``
-minimal-install guarantee — see ``test_audit_cli.TestMinimalInstallImport``).
+Production defaults are selected lazily, so importing this module never pulls
+crypto / Keychain / prompt_toolkit stacks. Injected defaults are exercised by
+the vault CLI tests that create and recover a vault using fake dependencies.
 """
 
 from __future__ import annotations
@@ -16,22 +14,6 @@ import textwrap
 import pytest
 
 from mordred_hermes.wizard import _defaults
-
-
-class TestPassThrough:
-    """An injected (non-None) value is returned as-is, no import triggered."""
-
-    def test_backend_passthrough(self) -> None:
-        sentinel = object()
-        assert _defaults.resolve_backend(sentinel) is sentinel  # type: ignore[arg-type]
-
-    def test_store_passthrough(self) -> None:
-        sentinel = object()
-        assert _defaults.resolve_store(sentinel) is sentinel  # type: ignore[arg-type]
-
-    def test_prompt_io_passthrough(self) -> None:
-        sentinel = object()
-        assert _defaults.resolve_prompt_io(sentinel) is sentinel  # type: ignore[arg-type]
 
 
 class TestLazyProductionDefaults:

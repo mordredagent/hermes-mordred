@@ -106,16 +106,12 @@ class TestShortCircuits:
 
 
 class TestProbeDispatch:
-    def test_probe_ok_passes_silently(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = _gate(tmp_path, runtime_probe=lambda *, home, runtime_python=None: (True, "ok"))
-        assert rc == 0
-        assert capsys.readouterr().err == ""
-
-    def test_injected_probe_wins_over_default(self, tmp_path: Path) -> None:
+    def test_injected_probe_wins_over_default(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         assert (
             _gate(tmp_path, runtime_probe=lambda *, home, runtime_python=None: (True, "ok"), default_probe=_boom_probe)
             == 0
         )
+        assert capsys.readouterr().err == ""
 
     def test_default_probe_used_when_none_injected(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = _gate(

@@ -259,14 +259,11 @@ class TestSetupPassphrase:
 
         assert rc == 0
         assert masked == ["Choose a Passphrase: ", "Re-enter the Passphrase: "]
+        # Fresh setup lends the newly created vault to env/memory without unwrapping it.
+        assert _unlocks(fresh_host["backend"]) == 0
         # The reused passphrase really is the vault's recovery passphrase.
         vault.recover_vault(fresh_host["root"], _PASSPHRASE).close()
         assert is_sealed((fresh_host["home"] / "memories" / "MEMORY.md").read_bytes())
-
-    def test_fresh_setup_counts_one_choose_and_one_confirm(self, fresh_host: dict[str, Any]) -> None:
-        prompt_io = _CountingPromptIO()
-        assert _run_setup(fresh_host, prompt_io) == 0
-        assert prompt_io.password_labels == ["Choose a Passphrase", "Re-enter the Passphrase"]
 
     def test_flow_session_is_closed_when_the_run_ends(
         self, fresh_host: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -307,12 +304,6 @@ class TestSetupPassphrase:
 # Vault unlocks (Secure Enclave ECDH = Touch ID / password dialog)
 # -----------------------------------------------------------------------------
 class TestVaultUnlocks:
-    def test_fresh_setup_never_unwraps_the_vault(self, fresh_host: dict[str, Any]) -> None:
-        """The run creates the vault and keeps it open for env + memory: 0 unlocks
-        (before: 2 -- one for the .env enroll, one for the memory key)."""
-        assert _run_setup(fresh_host, _CountingPromptIO()) == 0
-        assert _unlocks(fresh_host["backend"]) == 0
-
     def test_setup_with_an_existing_vault_unlocks_once(
         self, fresh_host: dict[str, Any], monkeypatch: pytest.MonkeyPatch
     ) -> None:

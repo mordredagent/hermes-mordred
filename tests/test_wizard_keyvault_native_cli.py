@@ -20,8 +20,8 @@ class TestEnableSE:
 
     def _patch_all_ok(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
         calls: dict[str, Any] = {"build": 0, "verify": 0}
-        monkeypatch.setattr(keyvault_native_cli, "_se_platform_reason", lambda: None, raising=False)
-        monkeypatch.setattr(keyvault_native_cli, "_missing_build_tools", lambda: [], raising=False)
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
         monkeypatch.setattr(
             keyvault_native_cli, "_locate_sekey_source", lambda: tmp_path / "sekey-helper", raising=False
         )
@@ -51,6 +51,9 @@ class TestEnableSE:
         assert calls["verify_install_dir"] is None
         out = capsys.readouterr().out
         assert "mordred-hermes-sekey" in out
+        assert "Building" in out
+        assert "Secure Enclave" in out
+        assert "minutes" in out
         assert "later fresh key creation" in out
         assert "now active for the keyvault" not in out
 
@@ -134,12 +137,7 @@ class TestEnableSE:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            keyvault_native_cli,
-            "_se_platform_reason",
-            lambda: "Secure Enclave requires macOS on Apple Silicon",
-            raising=False,
-        )
+        monkeypatch.setattr("platform.system", lambda: "Linux")
         monkeypatch.setattr(
             keyvault_native_cli,
             "_run_sekey_build",
@@ -148,13 +146,15 @@ class TestEnableSE:
         )
         rc = keyvault_native_cli.enable_se(home=tmp_path)
         assert rc == 1
-        assert "macOS" in capsys.readouterr().err
+        captured = capsys.readouterr()
+        assert "macOS" in captured.err
+        assert "Building" not in captured.out
 
     def test_missing_toolchain_returns_1_with_actionable_message(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(keyvault_native_cli, "_missing_build_tools", lambda: ["swift", "codesign"], raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: None if name == "swift" else "/usr/bin/" + name)
         monkeypatch.setattr(
             keyvault_native_cli,
             "_run_sekey_build",
@@ -163,7 +163,9 @@ class TestEnableSE:
         )
         rc = keyvault_native_cli.enable_se(home=tmp_path)
         assert rc == 1
-        assert "swift" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "missing build tool(s): swift." in err
+        assert "codesign" not in err
 
     def test_missing_source_returns_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -209,56 +211,9 @@ class TestEnableSE:
         assert calls["build_args"][1] == install_dir
         assert calls["verify_install_dir"] == install_dir
 
-    def test_prints_progress_notice_before_build(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """UX: the build can take minutes with capture_output=True (no live
-        output), so the operator must see a notice before it starts, not sit
-        looking at a blank terminal."""
-        self._patch_all_ok(monkeypatch, tmp_path)
-        rc = keyvault_native_cli.enable_se(home=tmp_path)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "Building" in out
-        assert "Secure Enclave" in out
-        assert "minutes" in out
-
-    def test_no_progress_notice_when_platform_guard_refuses(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """The notice must only print once the build is actually about to run,
-        not before an early guard refusal."""
-        self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            keyvault_native_cli,
-            "_se_platform_reason",
-            lambda: "Secure Enclave requires macOS on Apple Silicon",
-            raising=False,
-        )
-        rc = keyvault_native_cli.enable_se(home=tmp_path)
-        assert rc == 1
-        assert "Building" not in capsys.readouterr().out
-
 
 class TestEnableSESeams:
     """Direct coverage tests for the enable-se seams (mocked at the stdlib edge)."""
-
-    def test_platform_reason_none_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("platform.system", lambda: "Darwin")
-        assert keyvault_native_cli._se_platform_reason() is None
-
-    def test_platform_reason_set_off_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("platform.system", lambda: "Linux")
-        reason = keyvault_native_cli._se_platform_reason()
-        assert reason is not None and "macOS" in reason
-
-    def test_missing_build_tools_reports_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("shutil.which", lambda name: None if name == "swift" else "/usr/bin/" + name)
-        assert keyvault_native_cli._missing_build_tools() == ["swift"]
-
-    def test_missing_build_tools_empty_when_all_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
-        assert keyvault_native_cli._missing_build_tools() == []
 
     def test_locate_sekey_source_delegates(self) -> None:
         # In a source checkout this resolves the native/sekey-helper tree.
@@ -374,8 +329,8 @@ class TestEnableTPM:
 
     def _patch_all_ok(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
         calls: dict[str, Any] = {"build": 0, "verify": 0}
-        monkeypatch.setattr(keyvault_native_cli, "_tpm_platform_reason", lambda: None, raising=False)
-        monkeypatch.setattr(keyvault_native_cli, "_missing_tpm_build_tools", lambda: [], raising=False)
+        monkeypatch.setattr("platform.system", lambda: "Linux")
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
         monkeypatch.setattr(
             keyvault_native_cli, "_locate_tpmkey_source", lambda: tmp_path / "tpmkey-helper", raising=False
         )
@@ -403,6 +358,9 @@ class TestEnableTPM:
         assert calls["build"] == 1 and calls["verify"] == 1
         out = capsys.readouterr().out
         assert "mordred-hermes-tpmkey" in out
+        assert "Building" in out
+        assert "TPM" in out
+        assert "minutes" in out
         assert "hardware probe succeeded" in out
         assert "now active for the keyvault" not in out
 
@@ -410,9 +368,7 @@ class TestEnableTPM:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            keyvault_native_cli, "_tpm_platform_reason", lambda: "TPM 2.0 keyvault requires Linux", raising=False
-        )
+        monkeypatch.setattr("platform.system", lambda: "Darwin")
         monkeypatch.setattr(
             keyvault_native_cli,
             "_run_tpmkey_build",
@@ -421,13 +377,15 @@ class TestEnableTPM:
         )
         rc = keyvault_native_cli.enable_tpm(home=tmp_path)
         assert rc == 1
-        assert "Linux" in capsys.readouterr().err
+        captured = capsys.readouterr()
+        assert "Linux" in captured.err
+        assert "Building" not in captured.out
 
     def test_missing_toolchain_returns_1_with_actionable_message(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(keyvault_native_cli, "_missing_tpm_build_tools", lambda: ["cargo"], raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: None)
         monkeypatch.setattr(
             keyvault_native_cli,
             "_run_tpmkey_build",
@@ -463,14 +421,6 @@ class TestEnableTPM:
         assert rc == 1
         assert "boom" in capsys.readouterr().err
 
-    def test_verify_failure_returns_1(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(keyvault_native_cli, "_verify_tpmkey_helper", lambda **_k: False, raising=False)
-        rc = keyvault_native_cli.enable_tpm(home=tmp_path)
-        assert rc == 1
-
     def test_verify_failure_message_is_honest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -482,7 +432,7 @@ class TestEnableTPM:
         # 2b — it must point at real TPM troubleshooting instead.
         self._patch_all_ok(monkeypatch, tmp_path)
         monkeypatch.setattr(keyvault_native_cli, "_verify_tpmkey_helper", lambda **_k: False, raising=False)
-        keyvault_native_cli.enable_tpm(home=tmp_path)
+        assert keyvault_native_cli.enable_tpm(home=tmp_path) == 1
         err = capsys.readouterr().err
         assert "keep using the software fallback" not in err
         assert "fails closed" in err
@@ -500,53 +450,9 @@ class TestEnableTPM:
         assert calls["build_args"][1] == install_dir
         assert calls["verify_install_dir"] == install_dir
 
-    def test_prints_progress_notice_before_build(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """UX: the build can take minutes with capture_output=True (no live
-        output), so the operator must see a notice before it starts, not sit
-        looking at a blank terminal."""
-        self._patch_all_ok(monkeypatch, tmp_path)
-        rc = keyvault_native_cli.enable_tpm(home=tmp_path)
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "Building" in out
-        assert "TPM" in out
-        assert "minutes" in out
-
-    def test_no_progress_notice_when_platform_guard_refuses(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """The notice must only print once the build is actually about to run,
-        not before an early guard refusal."""
-        self._patch_all_ok(monkeypatch, tmp_path)
-        monkeypatch.setattr(
-            keyvault_native_cli, "_tpm_platform_reason", lambda: "TPM 2.0 keyvault requires Linux", raising=False
-        )
-        rc = keyvault_native_cli.enable_tpm(home=tmp_path)
-        assert rc == 1
-        assert "Building" not in capsys.readouterr().out
-
 
 class TestEnableTPMSeams:
     """Direct coverage tests for the enable-tpm seams (mocked at the stdlib edge)."""
-
-    def test_platform_reason_none_on_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("platform.system", lambda: "Linux")
-        assert keyvault_native_cli._tpm_platform_reason() is None
-
-    def test_platform_reason_set_off_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("platform.system", lambda: "Darwin")
-        reason = keyvault_native_cli._tpm_platform_reason()
-        assert reason is not None and "Linux" in reason
-
-    def test_missing_tpm_build_tools_reports_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("shutil.which", lambda name: None if name == "cargo" else "/usr/bin/" + name)
-        assert keyvault_native_cli._missing_tpm_build_tools() == ["cargo"]
-
-    def test_missing_tpm_build_tools_empty_when_all_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
-        assert keyvault_native_cli._missing_tpm_build_tools() == []
 
     def test_locate_tpmkey_source_delegates(self) -> None:
         # In a source checkout this resolves the native/tpmkey-helper tree.
