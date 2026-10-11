@@ -58,12 +58,12 @@ def import_target(name: str, *, optional: bool = False) -> Any:
 
 
 def verify_selected_source() -> None:
-    """Verify target, class and all loaded release-owned/shared source origins."""
+    """Verify selected origins, then read-only required memory and Journey contracts."""
     root = expected_root()
     if root is None:
         return
     memory = import_target("tools.memory_tool")
-    import_target("agent.learning_mutations")
+    journey = import_target("agent.learning_mutations")
     store = getattr(memory, "MemoryStore", None)
     if store is None:
         raise SeamDrift("selected memory module has no MemoryStore")
@@ -84,6 +84,17 @@ def verify_selected_source() -> None:
             verify_provenance(module, name, root)
     for name in ("utils", "hermes_constants"):
         verify_provenance(import_target(name), name, root)
+    # Establish known contracts before any canary body can produce follow-on
+    # AttributeErrors/TypeErrors that would obscure already proven seam drift.
+    # These validators inspect signatures only; they install no hooks or custody.
+    from mordred_hermes.keyvault import _memory_hook
+
+    shape, reason = _memory_hook.classify_seam(memory)
+    if not shape:
+        raise SeamDrift(reason)
+    reason = _memory_hook._journey_mismatch(journey)
+    if reason:
+        raise SeamDrift(reason)
 
 
 def child_main() -> int:

@@ -93,6 +93,8 @@ def test_runner_distinguishes_behavior_drift_from_incomplete_execution(events, c
         ("with pytest.raises(ValueError):\n        pass", "drift"),
         ("pytest.fail('required behavior failed')", "drift"),
         ("raise ImportError('dependency unavailable')", "unavailable"),
+        ("raise AttributeError('unexpected implementation failure')", "unavailable"),
+        ("raise TypeError('unexpected implementation failure')", "unavailable"),
         ("pytest.skip('cannot execute')", "unavailable"),
     ],
 )
@@ -133,13 +135,20 @@ def test_child_checks_shared_imports_and_reexported_class_provenance(tmp_path, r
     for package in ("tools", "agent"):
         (root / package).mkdir(parents=True)
         (root / package / "__init__.py").write_text("")
-    (root / "tools" / "memory_tool.py").write_text(
+    definition = (
         "from pathlib import Path as MemoryStore\n"
         if residue == "external_class"
         else "from memory_store import MemoryStore\n"
     )
-    (root / "memory_store.py").write_text("class MemoryStore: pass\n")
-    (root / "agent" / "learning_mutations.py").write_text("")
+    (root / "tools" / "memory_tool.py").write_text("ENTRY_DELIMITER = '\\n§\\n'\n" + definition)
+    (root / "memory_store.py").write_text(
+        "class MemoryStore:\n"
+        "    @staticmethod\n    def _write_file(path, entries): pass\n"
+        "    @staticmethod\n    def _read_file(path): return []\n"
+    )
+    (root / "agent" / "learning_mutations.py").write_text(
+        "def delete_node(node_id): pass\ndef edit_node(node_id, content): pass\n"
+    )
     (root / "utils.py").write_text("")
     (root / "hermes_constants.py").write_text("")
     code = f"""
@@ -157,3 +166,70 @@ raise SystemExit(child_main())
     }
     proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=False)
     assert proc.returncode == want, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize(
+    "owner,name,mutation",
+    [
+        ("journey", "edit_node", "missing"),
+        ("journey", "edit_node", "renamed"),
+        ("journey", "edit_node", "signature"),
+        ("journey", "delete_node", "not_callable"),
+        ("memory", "_write_file", "missing"),
+        ("memory", "_write_file", "renamed"),
+        ("memory", "_write_file", "signature"),
+        ("memory", "_read_file", "not_callable"),
+    ],
+)
+def test_complete_strict_canary_classifies_proven_required_seam_drift(tmp_path, owner, name, mutation):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    memory = import_target("tools.memory_tool")
+    import_target("agent.learning_mutations", optional=True)
+    root = os.environ.get("MORDRED_EXPECTED_UPSTREAM_ROOT") or str(Path(memory.__file__).resolve().parents[1])
+    code = f"""
+import importlib.util, json, pytest
+import tools.memory_tool as memory
+import agent.learning_mutations as journey
+spec = importlib.util.spec_from_file_location('runner', {str(Path(runner.__file__))!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+owner = journey if {owner!r} == 'journey' else memory.MemoryStore
+name = {name!r}
+original = owner.__dict__[name]
+if {mutation!r} in ('missing', 'renamed'):
+    if {mutation!r} == 'renamed': setattr(owner, name + '_renamed', original)
+    delattr(owner, name)
+elif {mutation!r} == 'signature':
+    def changed_signature(renamed_parameter): pass
+    setattr(owner, name, changed_signature if {owner!r} == 'journey' else staticmethod(changed_signature))
+else:
+    setattr(owner, name, None)
+try:
+    outcomes = module.Outcomes()
+    code = pytest.main(['-q', '-p', 'no:cacheprovider', '-o', 'addopts=',
+                       'tests/test_keyvault_memory_hook_canary.py'], plugins=[outcomes])
+    print('RESULT=' + json.dumps({{'status':outcomes.status(int(code)), 'code':int(code),
+                                  'passed':outcomes.passed, 'drift':outcomes.drift,
+                                  'unavailable':outcomes.unavailable}}))
+finally:
+    setattr(owner, name, original)
+    if {mutation!r} == 'renamed': delattr(owner, name + '_renamed')
+"""
+    env = {
+        **os.environ,
+        "HERMES_HOME": str(tmp_path / "home"),
+        "MORDRED_REQUIRE_UPSTREAM_MEMORY_SEAMS": "1",
+        "MORDRED_EXPECTED_UPSTREAM_ROOT": root,
+    }
+    proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.rpartition("RESULT=")[2])
+    assert result == {"status": "drift", "code": 1, "passed": 0, "drift": True, "unavailable": False}, proc.stdout
+    assert "SeamDrift" in proc.stdout
+    assert name in proc.stdout
+    assert "AttributeError:" not in proc.stdout
+    assert "TypeError:" not in proc.stdout

@@ -318,8 +318,10 @@ Agent-memory follow-up implementation status (separate PRs):
    journey canary with isolated home and verified parent/sanitized-child
    provenance. Treat setup/import failures as unavailable; strict-main mode
    cannot skip missing seams. Separate unprivileged upstream execution from
-   an issue-writing report job consuming only normalized statuses and fixed
-   context. The declared Hermes floor and production probe cleanup remain.
+   an issue-writing report job that receives candidate environment strings and
+   normalizes them in fixed JavaScript before Issue API inputs. Only normalized
+   status and fixed context are published. The declared Hermes floor and
+   production probe cleanup remain.
 2. Planned Linux orchestration: `setup` skips env enrollment; enable-all skips
    env/config enable and delegates memory to the existing engine after seam checks.
    Setup honors opt-out before readiness, requires active/non-drift load-only

@@ -59,9 +59,11 @@ Hermes dependencies. It verifies parent and sanitized-child source origins,
 read/write/mutation/refusal and sealed drift backups. This narrow source
 compatibility claim does not install or validate upstream main's full native
 package/runtime. Setup, dependency or provenance failures report unavailable;
-contract or behavioral failures report drift. Only normalized status and a
-trusted run link cross to the separate local issue-writing runner; upstream
-code never receives issue-write authority. See [`CI.md`](./CI.md)
+contract or behavioral failures report drift. Candidate status strings cross
+as environment data to the separate local issue-writing runner. Its fixed
+JavaScript normalizes them before Issue API inputs and publishes only
+normalized status and trusted run context; upstream code never receives
+issue-write authority. See [`CI.md`](./CI.md)
 §`upstream-check.yml` details for the execution and permission boundary.
 
 - Released-Hermes incompatibility can fail normal CI.

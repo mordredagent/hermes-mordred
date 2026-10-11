@@ -253,9 +253,11 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 See `CI.md` §`upstream-check.yml` details for workflow behavior. The scheduled
 check retains PyPI/main AST scans and executes source-selected latest-main
 memory/Journey seams in an isolated Python 3.12 environment. The separate
-issue-writing runner receives only normalized status and trusted run context.
-Missing preparation/dependencies/provenance report unavailable, never success;
-normal CI retains the declared Hermes floor and installed-release contracts.
+issue-writing runner receives candidate status strings as environment data;
+fixed JavaScript normalizes them before Issue API inputs and publishes only
+normalized status and trusted run context. Preparation, dependency and
+provenance failures report unavailable, never success. Normal CI retains the
+declared Hermes floor and installed-release contracts.
 
 ## Mordred-owned filesystem paths
 
