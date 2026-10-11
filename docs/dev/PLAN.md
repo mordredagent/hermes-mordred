@@ -270,11 +270,11 @@ historical context, not the source of truth.
 
 ## Risks and unresolved decisions
 
-- Proposed Linux private Telegram support: review the
+- Linux private Telegram implementation uses a dedicated TPM-wrapped memory
+  key rather than the macOS file vault; see the
   [design](SPEC.md#linux-private-telegram-design) and
-  [implementation plan](#linux-private-telegram-implementation-plan) before execution.
-  The proposal uses a dedicated TPM-wrapped memory key rather than the
-  macOS-only file vault; it is not yet implemented.
+  [implementation plan](#linux-private-telegram-implementation-plan).
+  Live-account acceptance and general setup/enable-all routing remain open.
 
 - Automatic lifecycle integration for `extension serve` is undecided.
 - Hermes still provides no `origin_skill` for per-skill runtime enforcement.
@@ -298,9 +298,34 @@ historical context, not the source of truth.
 5. Record one-line Changes/Fixes entries in the PR description; do not create a
    `CHANGELOG.md`.
 
-Current in-flight item: agent-memory at-rest encryption, in three PRs — docs
-first, then the keyvault runtime hook, then the wizard lifecycle and `setup`
-step.
+Agent-memory hook and wizard lifecycle implementation are complete; Linux
+dedicated custody and scoped Windows consumers are also implemented. Remaining
+acceptance and component follow-ups are tracked in [`TODO.md`](./TODO.md),
+including Windows live/Windows 11 gates and Linux live-account acceptance.
+
+Approved follow-ups to the agent-memory contract (separate implementation PRs,
+not yet shipped):
+
+1. Wizard file-vault eligibility/error handling: macOS-only production anchor
+   eligibility before backend/store resolution or prompts; preserve first
+   Windows exclusions, cached FlowSession reuse and injected stores. Catch
+   anchor `WrapError` before prompts/writes; preserve cold-path rotation and
+   recovery refusal ordering. Dedicated Linux/Windows memory engines stay
+   outside this gate.
+2. Weekly upstream compatibility: retain PyPI/main AST scans, Python 3.12 and
+   Monday 03:00 UTC. Add a source-selected latest-main executable memory and
+   journey canary with isolated home and verified parent/sanitized-child
+   provenance. Treat setup/import failures as unavailable; strict-main mode
+   cannot skip missing seams. Separate unprivileged upstream execution from
+   an issue-writing report job consuming only normalized statuses and fixed
+   context. Preserve the declared Hermes floor and production probe cleanup.
+3. Linux orchestration: `setup` skips env enrollment; enable-all skips env/config
+   enable and delegates memory to the existing engine after seam checks.
+   Setup honors opt-out before readiness, requires active/non-drift load-only
+   status (live TPM access is not checked), and returns manual for unfinished
+   noninteractive work. Never recreate armed missing/corrupt custody or force
+   setup proof. Preserve disable/purge-all, macOS FlowSession and Windows CNG
+   routing; run the explicit TPM gate separately from portable tests.
 
 ## Linux Private Telegram Implementation Plan
 
@@ -322,11 +347,11 @@ TPM helper/libtss2, FastAPI, existing Desktop JavaScript, Ubuntu EC2 and swtpm.
 **Spec:** [Linux Private Telegram Design](SPEC.md#linux-private-telegram-design).
 Status: implementation authorized on 2026-10-07. The separately requested
 unchanged-code NitroTPM baseline (Task 0A) is complete. Component implementation
-is complete on `feat/linux-private-telegram`; final real-device acceptance
-is recorded in CI.md. Live-account acceptance and PR publication remain pending.
+is present in `dev`; real-device memory/archive acceptance is recorded in
+CI.md. Live-account acceptance remains pending.
 Implementation scenarios are covered by the named suites; individual test names
-may differ from the initial plan. References to component PR commits below mean
-local component commits until publication is explicitly selected.
+may differ from the initial plan. Component commit references below retain the
+implementation history; current readiness is tracked in TODO.md and CI.md.
 
 ### Global Constraints
 

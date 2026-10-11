@@ -41,10 +41,15 @@ settings sections in `config.yaml` keep their names.
 ## Requirements
 
 - Python 3.11 or newer and `hermes-agent>=0.13.0`.
-- macOS or Linux. Windows and mobile support are deferred.
-- Transparent at-rest encryption of `.env`, configuration, memory, and the
-  workspace is macOS-only. On Linux the TPM-backed keyvault works, but those
-  encryption targets stay inactive.
+- macOS or Linux for the established operator workflows. Scoped native Windows
+  implementations exist; general Windows product, Windows 11, and live-device
+  acceptance remain incomplete. Mobile support is deferred. See
+  [Platform Support](docs/dev/SPEC.md#platform-support-v1).
+- Transparent `.env`, configuration, and workspace encryption use macOS
+  integrations. Memory uses the macOS file vault, a dedicated Linux TPM-wrapped
+  key, or dedicated Windows CNG custody. Linux memory and Private Telegram work
+  through their standalone commands; general `setup` and `encryption enable all`
+  currently skip Linux memory. Windows support is reported per capability.
 
 ## Install (users, from PyPI)
 

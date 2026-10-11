@@ -124,6 +124,11 @@ and provider messages) is written to the Hermes log instead of the reply.
 
 ## Supported messages
 
+`auth_ok.capabilities` currently advertises `discord_channel_resolve_v1` and
+`telegram_import_v1`. These names describe protocol support; they do not prove
+that Discord credentials, Telegram extras/login/private LLM, memory custody,
+or a particular platform's native/live acceptance gates are ready.
+
 | Message | Behavior |
 |---|---|
 | `auth_challenge` / `ping` | Server-initiated authentication challenge and application keepalive. |
@@ -134,6 +139,9 @@ and provider messages) is written to the Hermes log instead of the reply.
 | `encrypt` / `decrypt` | Encrypts or decrypts extension message payloads. |
 | `channel_key_set` | Stores an encrypted per-channel gateway key from the paired extension. |
 | `slack_setup` | Validates and stores Slack bot/app tokens for the next Hermes restart. |
+| `discord_channel_resolve` | Resolves channel/thread metadata with the configured bot token; returns `discord_channel_resolve_result`. |
+| `telegram_status` / `telegram_sync` / `telegram_dialogs` | Read-only importer status, synchronization and dialog listing; return the matching `*_result` messages. Account labels and dialog titles are sealed to the extension key. |
+| `telegram_ask` / `telegram_ask_cancel` | Private-model answer stream (`telegram_ask_meta`, `telegram_ask_chunk`, `telegram_ask_end` or `telegram_ask_error`) and cancellation. |
 | `accounts_request` | Returns the selected wallet address and chain ID, resolved at most once per minute (repeat requests are served from that snapshot, so a burst cannot drive repeated Touch ID prompts). |
 | `sign_request` | Produces a frozen approval prompt before any keyvault signing. |
 | `sign_approve` | Signs only the request captured by the matching prompt. |
