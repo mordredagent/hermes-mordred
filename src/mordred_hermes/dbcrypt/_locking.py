@@ -103,12 +103,12 @@ def migration_lock(home: Path, *, timeout: float = 0.0) -> Iterator[None]:
 
 
 def _after_fork() -> None:
-    # A forked child must acquire its own lease. Closing the inherited handles
-    # leaves the parent's locks intact and avoids extending them accidentally.
+    # A forked runtime inherits sqlite3 and may outlive its parent: retain its
+    # shared lease too. Exec closes it via O_CLOEXEC and bootstraps a new one.
+    # A fork cannot inherit ownership of an in-progress conversion transaction.
     global _MUTEX
-    for fd in {*_LEASES.values(), *_EXCLUSIVE.values()}:
+    for fd in _EXCLUSIVE.values():
         os.close(fd)
-    _LEASES.clear()
     _EXCLUSIVE.clear()
     _MUTEX = threading.RLock()
 

@@ -141,6 +141,38 @@ def test_enabling_an_empty_home_waits_for_existing_runtimes(tmp_path: Path, monk
     assert _migrate.pending_path(tmp_path).exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork lifetime")
+def test_a_forked_runtime_keeps_its_lease_after_the_parent_exits(tmp_path: Path) -> None:
+    pytest.importorskip("sqlcipher3")
+    _database(tmp_path)
+    script = """
+import os, sys
+from pathlib import Path
+from mordred_hermes import dbcrypt
+sys.platform = 'darwin'
+dbcrypt.install(home=Path(sys.argv[1]))
+if os.fork():
+    os._exit(0)
+print('child-ready', flush=True)
+sys.stdin.readline()
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "child-ready"
+        assert child.wait(timeout=10) == 0  # original runtime gone; forked worker still alive
+        with pytest.raises(_migrate.MigrationError, match="running"):
+            _migrate.migrate(tmp_path, _key.derive(bytes(range(32))), arm=dbcrypt.arm, holders_of=lambda _: [])
+    finally:
+        child.communicate("exit\n", timeout=10)
+
+
 @pytest.mark.parametrize(
     "args", [["databases", "status"], ["databases", "encrypt", "--dry-run"], ["uninstall", "--dry-run"]]
 )
