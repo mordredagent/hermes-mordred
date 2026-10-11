@@ -348,8 +348,11 @@ root. On macOS it also stores the memory key in its `.env` entry; `.env`
 injection and config materialize/reseal make enrolled copies runtime sources.
 On Linux these env/config startup shims are inactive. Dedicated Linux TPM and
 Windows CNG memory custody do not use this directory. Windows file-vault
-operations are excluded; the generic early production-anchor refusal for
-other non-macOS platforms remains planned in SPEC/PLAN.
+operations are excluded. Other non-macOS platforms refuse unsupported
+production-default device anchors before native resolution, prompting or
+enrollment; injected portable stores and cold reads/passphrase rotation retain
+their existing paths. This file-vault gate does not apply to dedicated memory
+custody.
 
 The markers `<home>/mordred/env-vault.optout` and
 `<home>/mordred/config-vault.marker` control those macOS lifecycles;

@@ -129,8 +129,9 @@ hermes-mordred status --json     # machine-readable
 
 Runs the upstream-Hermes check, Mordred configuration, network selection,
 platform helper, keyvault ceremony, env encryption, and memory encryption as
-seven steps, then final status. macOS uses the file vault; Linux currently
-skips memory here; Windows skips excluded env and unported keyvault operations
+seven steps, then final status. macOS uses the file vault; Linux skips env
+enrollment and uses dedicated TPM memory. Windows skips excluded env and
+unported keyvault operations
 and uses its dedicated proof-bound CNG memory ceremony. Completed steps are
 skipped on a rerun. A blocked or
 corrupt keyvault stops with repair guidance; setup never resets it
