@@ -299,10 +299,10 @@ def test_disable_and_purge_memory_dispatch_with_the_windows_platform(windows, mo
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the host is Windows")
-def test_posix_hosts_keep_the_vault_path(monkeypatch, tmp_path):
-    """Off Windows the guard is a no-op: init proceeds to its backend as before."""
+def test_non_windows_hosts_keep_the_injected_store_vault_path(monkeypatch, tmp_path):
+    """Off Windows an injected store bypasses production Keychain eligibility."""
     trip = Tripwire()
     monkeypatch.setattr(_vault_lifecycle, "resolve_backend", trip)
     with pytest.raises(AssertionError, match="resolver was reached"):
-        _vault_lifecycle.init(root=tmp_path / "v")
+        _vault_lifecycle.init(root=tmp_path / "v", store=trip)
     assert trip.calls == ["__call__"]
