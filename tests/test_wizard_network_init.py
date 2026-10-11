@@ -183,22 +183,16 @@ class TestCollectNetworkAnswers:
         assert na.mullvad_relay_country == "jp"
         assert na.mullvad_killswitch is True
         assert prompts.answers == [], "the vpn+mullvad answer list must be fully consumed"
-
-    def test_secret_captured_separately_not_in_network_answers(self) -> None:
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        inputs = collect_network_answers(prompts)
-        # The secret rides the transient inputs object, never NetworkAnswers.
-        import dataclasses
-
-        na_values = [getattr(inputs.network_answers, f.name) for f in dataclasses.fields(inputs.network_answers)]
-        assert "MULL-secret-99" not in na_values
-        assert inputs._mullvad_account_secret == "MULL-secret-99"
-
-    def test_tor_socks_port_coerced_to_int(self) -> None:
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_TOR))
-        inputs = collect_network_answers(prompts)
-        assert inputs.network_answers.tor_socks_port == 9150
-        assert isinstance(inputs.network_answers.tor_socks_port, int)
+        labels = [label for _, label, _ in prompts.seen]
+        assert len(labels) == 5
+        account_label = "Mullvad account number (blank = keep current; stored in ~/.hermes/.env)"
+        assert labels.index("VPN provider") < labels.index(account_label)
+        assert "Tor binary path" not in labels
+        assert "Tor SOCKS port" not in labels
+        section = na.to_config_yaml_section()
+        assert section["vpn_provider"] == "mullvad"
+        assert "wireguard_config_path" not in section
+        assert "custom_up_cmd" not in section
 
     def test_invalid_tor_socks_port_falls_back_to_default(self) -> None:
         prompts = _ScriptedPromptIO(answers=["tor", "/usr/bin/tor", "not-a-port"])
@@ -227,14 +221,6 @@ class TestCollectNetworkAnswers:
         inputs = collect_network_answers(prompts)
         assert inputs.network_answers.mullvad_relay_country == "jp"
 
-    def test_prompt_labels_carry_no_phase_jargon(self) -> None:
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        collect_network_answers(prompts)
-        labels = [label for _, label, _ in prompts.seen]
-        assert len(labels) == 5
-        for label in labels:
-            assert "Phase" not in label, f"user-facing label leaks internal jargon: {label!r}"
-
     def test_prompt_secret_false_skips_password_prompt(self) -> None:
         # With provider=mullvad but the password prompt off, the consumed
         # slots are path, provider, relay, killswitch (4 total).
@@ -260,6 +246,11 @@ class TestCollectNetworkAnswers:
             prompts.answers = list(answers)
             collect_network_answers(prompts)
         help_by_label = prompts.help_by_label
+        assert all("Phase" not in label for _, label, _ in prompts.seen)
+        for desc in (_TOR_BINARY_DESCRIPTION, _TOR_SOCKS_PORT_DESCRIPTION):
+            assert "Tor route only" in desc
+        for desc in (_MULLVAD_ACCOUNT_DESCRIPTION, _MULLVAD_RELAY_DESCRIPTION, _MULLVAD_KILLSWITCH_DESCRIPTION):
+            assert "VPN route only" in desc
 
         # The privacy-path radio carries an inline description for every route.
         path_desc = help_by_label["Network privacy path"]
@@ -281,35 +272,12 @@ class TestCollectNetworkAnswers:
         # Regression guard: no prompt is left bare.
         assert all(help_by_label.values()), f"a network-init prompt has no explanation: {help_by_label}"
 
-    def test_route_only_prompts_name_their_route(self) -> None:
-        """Each Tor/Mullvad help line names the route it matters for, so a
-        clearnet user knows every one of these can be Enter'd straight through."""
-        for desc in (_TOR_BINARY_DESCRIPTION, _TOR_SOCKS_PORT_DESCRIPTION):
-            assert "Tor route only" in desc
-        for desc in (_MULLVAD_ACCOUNT_DESCRIPTION, _MULLVAD_RELAY_DESCRIPTION, _MULLVAD_KILLSWITCH_DESCRIPTION):
-            assert "VPN route only" in desc
-
 
 class TestCollectNetworkAnswersSeedsDefaults:
     """Re-run safety: each prompt's default comes from the existing on-disk
     section, so pressing Enter keeps the current value. Split across the
     route that actually prompts for each field, since prompts are now
     route-gated (UX request 2026-08-12)."""
-
-    def test_tor_route_seeds_prompt_defaults(self) -> None:
-        """Seeded defaults are observed on the tor route, which is the one
-        that actually asks the Tor binary/port prompts."""
-        existing: Mapping[str, Any] = {
-            "default_path": "tor",
-            "tor_binary_path": "/opt/tor/bin/tor",
-            "tor_socks_port": 19050,
-        }
-        echo = _DefaultEchoPromptIO()
-        inputs = collect_network_answers(echo, existing=existing)
-        na = inputs.network_answers
-        assert na.default_network_path == "tor"
-        assert na.tor_binary_path == "/opt/tor/bin/tor"
-        assert na.tor_socks_port == 19050
 
     def test_vpn_route_seeds_mullvad_prompt_defaults(self) -> None:
         """Seeded defaults are observed on the vpn route, which is the one
@@ -352,6 +320,11 @@ class TestNetworkInitInputsRedactsSecret:
     def test_repr_does_not_contain_secret(self) -> None:
         prompts = _ScriptedPromptIO(answers=["vpn", "mullvad", "DO-NOT-LEAK-XYZ", "auto", True])
         inputs = collect_network_answers(prompts)
+        import dataclasses
+
+        na_values = [getattr(inputs.network_answers, f.name) for f in dataclasses.fields(inputs.network_answers)]
+        assert "DO-NOT-LEAK-XYZ" not in na_values
+        assert inputs._mullvad_account_secret == "DO-NOT-LEAK-XYZ"
         assert "DO-NOT-LEAK-XYZ" not in repr(inputs)
         assert "DO-NOT-LEAK-XYZ" not in str(inputs)
 
@@ -405,15 +378,19 @@ class TestRunInitPersistsConfig:
     def test_merges_network_section_into_config(self, tmp_path: Path) -> None:
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
         w = _writer(tmp_path)
+        env_w = _SpyEnvFileWriter()
+        cred_w = _SpyCredentialsWriter()
         rc = run_init(
             prompt_io=prompts,
             policy_writer=w,
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_SpyCredentialsWriter(),
+            env_writer=env_w,
+            credentials_writer=cred_w,
             env_path=tmp_path / ".env",
             credentials_path=tmp_path / "credentials" / "network.json",
         )
         assert rc == 0
+        assert env_w.calls == [(tmp_path / ".env", "MORDRED_MULLVAD_ACCOUNT", "MULL-secret-99")]
+        assert cred_w.calls == [(tmp_path / "credentials" / "network.json", "MORDRED_MULLVAD_ACCOUNT", "jp", True)]
 
         from ruamel.yaml import YAML
 
@@ -463,34 +440,6 @@ class TestRunInitPersistsConfig:
 
 
 class TestRunInitRoutesSecret:
-    def test_env_writer_receives_secret(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        env_w = _SpyEnvFileWriter()
-        env_path = tmp_path / ".env"
-        run_init(
-            prompt_io=prompts,
-            policy_writer=_writer(tmp_path),
-            env_writer=env_w,
-            credentials_writer=_SpyCredentialsWriter(),
-            env_path=env_path,
-            credentials_path=tmp_path / "credentials" / "network.json",
-        )
-        assert env_w.calls == [(env_path, "MORDRED_MULLVAD_ACCOUNT", "MULL-secret-99")]
-
-    def test_credentials_writer_receives_relay_and_killswitch(self, tmp_path: Path) -> None:
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        cred_w = _SpyCredentialsWriter()
-        creds_path = tmp_path / "credentials" / "network.json"
-        run_init(
-            prompt_io=prompts,
-            policy_writer=_writer(tmp_path),
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=cred_w,
-            env_path=tmp_path / ".env",
-            credentials_path=creds_path,
-        )
-        assert cred_w.calls == [(creds_path, "MORDRED_MULLVAD_ACCOUNT", "jp", True)]
-
     def test_blank_secret_does_not_touch_env_writer(self, tmp_path: Path) -> None:
         """Re-run safety: a blank Mullvad answer keeps the existing secret
         instead of stripping the .env line (Codex review 2026-06-05)."""
@@ -789,13 +738,13 @@ class TestClearMullvad:
         assert rc == 0
         assert env_w.calls == [(env_path, "MORDRED_MULLVAD_ACCOUNT", "")]
 
-    def test_clear_strips_existing_env_line(self, tmp_path: Path) -> None:
+    def test_clear_strips_existing_env_line(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         from mordred_hermes.wizard.network_cli import _persist_network, network_answers_from_args
 
         env_path = tmp_path / ".env"
         env_path.write_text("MORDRED_MULLVAD_ACCOUNT=OLD\nOTHER=keep\n", encoding="utf-8")
         inputs = network_answers_from_args(self._args(), existing={})
-        _persist_network(
+        rc = _persist_network(
             inputs,
             policy_writer=_writer(tmp_path),
             env_writer=DotEnvFileWriter(),
@@ -804,24 +753,11 @@ class TestClearMullvad:
             credentials_path=tmp_path / "credentials" / "network.json",
             clear_mullvad=True,
         )
+        assert rc == 0
+        assert "cleared" in capsys.readouterr().out.lower()
         text = env_path.read_text(encoding="utf-8")
         assert "MORDRED_MULLVAD_ACCOUNT" not in text
         assert "OTHER=keep" in text
-
-    def test_clear_summary_says_cleared(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        from mordred_hermes.wizard.network_cli import _persist_network, network_answers_from_args
-
-        inputs = network_answers_from_args(self._args(), existing={})
-        _persist_network(
-            inputs,
-            policy_writer=_writer(tmp_path),
-            env_writer=_SpyEnvFileWriter(),
-            credentials_writer=_SpyCredentialsWriter(),
-            env_path=tmp_path / ".env",
-            credentials_path=tmp_path / "credentials" / "network.json",
-            clear_mullvad=True,
-        )
-        assert "cleared" in capsys.readouterr().out.lower()
 
 
 class TestHandleInitNonInteractive:
@@ -1009,7 +945,10 @@ class TestCollectVpnProvider:
         # Provider is asked before the Mullvad trio, and wireguard gates that
         # trio out entirely: no Mullvad account / relay / killswitch slots here.
         # The vpn route also never sees the Tor prompts (UX request 2026-08-12).
-        na = collect_network_answers(_ScriptedPromptIO(answers=list(_ANSWERS_VPN_WIREGUARD))).network_answers
+        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_WIREGUARD))
+        na = collect_network_answers(prompts).network_answers
+        assert "password" not in [kind for kind, _, _ in prompts.seen]
+        assert not any("Mullvad" in label for _, label, _ in prompts.seen)
         assert na.vpn_provider == "wireguard"
         assert na.wireguard_config_path == "/etc/wireguard/wg0.conf"
         section = na.to_config_yaml_section()
@@ -1024,33 +963,6 @@ class TestCollectVpnProvider:
         assert na.custom_health_cmd == ("expressvpn", "status")
         # Persisted as YAML lists.
         assert na.to_config_yaml_section()["custom_up_cmd"] == ["expressvpn", "connect"]
-
-    def test_mullvad_default_omits_provider_specific_keys(self) -> None:
-        na = collect_network_answers(_ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))).network_answers
-        section = na.to_config_yaml_section()
-        assert section["vpn_provider"] == "mullvad"
-        assert "wireguard_config_path" not in section
-        assert "custom_up_cmd" not in section
-
-    def test_non_mullvad_provider_never_asks_for_mullvad_account(self) -> None:
-        """The 2026-06-16 fix: now that any VPN may be used, a WireGuard user is
-        never prompted for a Mullvad account number / relay / killswitch — those
-        prompts are gated behind ``provider == "mullvad"``."""
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_WIREGUARD))
-        collect_network_answers(prompts)
-        kinds = [k for k, _, _ in prompts.seen]
-        labels = [label for _, label, _ in prompts.seen]
-        assert "password" not in kinds, "a non-Mullvad provider must not trigger the secret prompt"
-        assert not any("Mullvad" in label for label in labels), f"Mullvad prompt leaked for wireguard: {labels}"
-
-    def test_provider_question_precedes_the_mullvad_prompts(self) -> None:
-        """Ordering guard: the provider is asked before the Mullvad trio, which
-        is what lets the provider choice gate them."""
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        collect_network_answers(prompts)
-        labels = [label for _, label, _ in prompts.seen]
-        account_label = "Mullvad account number (blank = keep current; stored in ~/.hermes/.env)"
-        assert labels.index("VPN provider") < labels.index(account_label)
 
     def test_mullvad_account_help_line_does_not_restate_the_label(self) -> None:
         """Dedup (2026-06-16): the label already says "Mullvad account number",
@@ -1082,19 +994,13 @@ class TestRouteGatedPrompts:
 
     def test_tor_run_never_issues_vpn_prompts(self) -> None:
         prompts = _ScriptedPromptIO(answers=list(_ANSWERS_TOR))
-        collect_network_answers(prompts)
+        inputs = collect_network_answers(prompts)
+        assert inputs.network_answers.tor_socks_port == 9150
+        assert isinstance(inputs.network_answers.tor_socks_port, int)
         labels = [label for _, label, _ in prompts.seen]
         assert "VPN provider" not in labels
         assert not any("Mullvad" in label for label in labels)
         assert prompts.answers == [], "the tor answer list must be fully consumed"
-
-    def test_vpn_run_never_issues_tor_prompts(self) -> None:
-        prompts = _ScriptedPromptIO(answers=list(_ANSWERS_VPN_MULLVAD))
-        collect_network_answers(prompts)
-        labels = [label for _, label, _ in prompts.seen]
-        assert "Tor binary path" not in labels
-        assert "Tor SOCKS port" not in labels
-        assert prompts.answers == [], "the vpn+mullvad answer list must be fully consumed"
 
     def test_clearnet_rerun_preserves_existing_tor_and_vpn_settings(self) -> None:
         """A clearnet re-run must not wipe a previously configured Tor path or

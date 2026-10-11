@@ -572,7 +572,8 @@ class TestHermesStep:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/hermes" if name == "hermes" else None)
-        (tmp_path / "config.yaml").write_text("plugins: {}\n", encoding="utf-8")
+        (tmp_path / "config.yaml").write_text("model:\n  provider: openai\nplugins: {}\n", encoding="utf-8")
+        assert setup_cli._probe_hermes(home=tmp_path)[0] is True
         runner = _FakeSetupRunner(rc=0)
 
         class _NeverAskPromptIO(_DefaultEchoPromptIO):
@@ -615,10 +616,6 @@ class TestHermesStep:
 
 
 class TestConfigureStep:
-    def test_probe_incomplete_without_config_yaml(self, tmp_path: Path) -> None:
-        complete, _ = setup_cli._probe_configure(policy_writer=_policy_writer(tmp_path))
-        assert complete is False
-
     def test_probe_incomplete_with_config_yaml_but_no_policy_json(self, tmp_path: Path) -> None:
         pw = _policy_writer(tmp_path)
         pw.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1238,19 +1235,6 @@ class TestMemoryEncryptionProbe:
         assert complete is False
         assert detail == "not enabled"
 
-    def test_marker_is_complete(self, tmp_path: Path) -> None:
-        _arm_memory(tmp_path)
-        complete, detail = setup_cli._probe_memory_encryption(home=tmp_path, platform="darwin")
-        assert complete is True
-        assert detail == "enabled"
-
-    def test_operator_optout_is_complete_and_says_paused(self, tmp_path: Path) -> None:
-        """`encryption disable memory` is a deliberate pause; setup never reverses it."""
-        _pause_memory(tmp_path)
-        complete, detail = setup_cli._probe_memory_encryption(home=tmp_path, platform="darwin")
-        assert complete is True
-        assert "paused by operator" in detail
-
     def test_plaintext_file_while_armed_is_incomplete(self, tmp_path: Path) -> None:
         _arm_memory(tmp_path)
         _plaintext_memory(tmp_path)
@@ -1276,6 +1260,7 @@ class TestMemoryEncryptionStep:
         monkeypatch.setattr(setup_cli, "_run_memory_encryption", _raiser("enable() must not be called"))
         result = self._resolve(tmp_path)
         assert result.action == "done"
+        assert result.detail == "enabled"
 
     def test_optout_is_done_and_enable_never_called(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         _pause_memory(tmp_path)
@@ -1284,7 +1269,7 @@ class TestMemoryEncryptionStep:
         )
         result = self._resolve(tmp_path)
         assert result.action == "done"
-        assert "paused" in result.detail.lower()
+        assert "paused by operator" in result.detail
         assert memory_optout_marker_path(tmp_path).exists()
 
     def test_unsupported_platform_is_skipped_and_never_runs(

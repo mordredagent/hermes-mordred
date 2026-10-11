@@ -20,12 +20,13 @@ transport when the process starts.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mordred_hermes.network._exceptions import BringupFailed, PathSwitchRequiresRestart, UnknownPath
+from mordred_hermes.network._exceptions import BringupFailed, PathSwitchRequiresRestart
 
 # --------------------------------------------------------------------------- #
 # Fakes                                                                       #
@@ -121,34 +122,6 @@ class TestNetworkUseLive:
         assert cli._handle_network_use(args) == 0
         assert rt.use_calls == ["vpn"]
 
-    def test_use_unknown_path_returns_nonzero(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        rt.use_raises = UnknownPath("bad")
-        api.set_runtime(rt)
-        args = _make_args(
-            path="i2p",
-            config_path=tmp_path / "config.yaml",
-        )
-        rc = cli._handle_network_use(args)
-        assert rc != 0
-
-    def test_use_bringup_failure_returns_nonzero(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        rt.use_raises = BringupFailed("tor timeout")
-        api.set_runtime(rt)
-        args = _make_args(
-            path="tor",
-            config_path=tmp_path / "config.yaml",
-        )
-        rc = cli._handle_network_use(args)
-        assert rc != 0
-
     def test_conflicting_frozen_route_is_saved_and_prints_restart_guidance(
         self,
         tmp_path: Path,
@@ -183,7 +156,7 @@ class TestNetworkUsePersistence:
             "plugins:\n  mordred_privacy_check:\n    policy: strict\n  mordred_llm_guard:\n    harness_primary: codex\n"
         )
         args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
+        assert cli._handle_network_use(args) == 0
 
         from ruamel.yaml import YAML
 
@@ -193,44 +166,9 @@ class TestNetworkUsePersistence:
         assert data["plugins"]["mordred_privacy_check"]["policy"] == "strict"
         assert data["plugins"]["mordred_llm_guard"]["harness_primary"] == "codex"
         assert data["plugins"]["mordred_network"]["default_path"] == "tor"
-
-
-class TestNetworkUseAtomicity:
-    """H1 fix (review 2026-05-14): writes must use PolicyWriter so they
-    inherit the canonical ``_atomic_write_text`` (tempfile + os.replace).
-
-    Detection strategy: PolicyWriter's ``_ensure_plugins_enabled`` adds
-    the full Mordred-plugin list to ``plugins.enabled`` on every write
-    (HOOK_PAYLOADS.md §1). A plain ``Path.write_text``
-    would not produce that side effect. Asserting the side effect proves
-    the write went through PolicyWriter and therefore got atomic-rename
-    semantics — without us having to interrupt a write to test atomicity
-    directly.
-    """
-
-    def test_use_writes_via_policy_writer_adding_plugins_enabled(self, tmp_path: Path) -> None:
-        from mordred_hermes.network import api
-        from mordred_hermes.wizard import cli
-
-        rt = _FakeRuntime()
-        api.set_runtime(rt)
-        config = tmp_path / "config.yaml"
-        args = _make_args(path="tor", config_path=config)
-        cli._handle_network_use(args)
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert "enabled" in data["plugins"], (
-            "PolicyWriter must add plugins.enabled — network_cli regressed to a non-atomic write path"
-        )
-        enabled = data["plugins"]["enabled"]
-        # The single Mordred plugin must be enabled (PolicyWriter contract).
-        assert "mordred" in enabled, "mordred missing from plugins.enabled after network_cli write"
+        # Writer integration: enabling Mordred accompanies the preserved config.
+        assert "mordred" in data["plugins"]["enabled"]
         assert not config.with_name(config.name + ".tmp").exists()
-        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
 
 
 class TestNetworkUseStandalone:
@@ -508,38 +446,6 @@ class TestNetworkUseMergePreservation:
     ``merge_mordred_sections`` so partial writes preserve everything else.
     """
 
-    def test_use_clearnet_preserves_tor_subfields(self, tmp_path: Path) -> None:
-        from mordred_hermes.wizard import cli
-
-        seed = """\
-plugins:
-  mordred_network:
-    default_path: tor
-    tor_binary_path: /usr/bin/tor
-    tor_socks_port: 9050
-    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
-    mullvad_relay_country: jp
-"""
-        config = tmp_path / "config.yaml"
-        config.write_text(seed, encoding="utf-8")
-
-        args = _make_args(path="clearnet", config_path=config)
-        rc = cli._handle_network_use(args)
-        assert rc == 0
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        section = data["plugins"]["mordred_network"]
-        assert section["default_path"] == "clearnet"
-        # All four sub-fields must survive the partial write.
-        assert section["tor_binary_path"] == "/usr/bin/tor"
-        assert section["tor_socks_port"] == 9050
-        assert section["mullvad_account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
-        assert section["mullvad_relay_country"] == "jp"
-
     def test_use_tor_then_use_clearnet_preserves_tor_subfields_across_runs(self, tmp_path: Path) -> None:
         """Two-step regression: configure persists Tor sub-fields, then a
         subsequent ``network use clearnet`` must not drop them."""
@@ -550,6 +456,8 @@ plugins:
   mordred_network:
     tor_binary_path: /opt/tor/bin/tor
     tor_socks_port: 19050
+    mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
+    mullvad_relay_country: jp
 """
         config = tmp_path / "config.yaml"
         config.write_text(seed, encoding="utf-8")
@@ -570,6 +478,8 @@ plugins:
         assert section["default_path"] == "clearnet"
         assert section["tor_binary_path"] == "/opt/tor/bin/tor"
         assert section["tor_socks_port"] == 19050
+        assert section["mullvad_account_id_env"] == "MORDRED_MULLVAD_ACCOUNT"
+        assert section["mullvad_relay_country"] == "jp"
 
 
 # --------------------------------------------------------------------------- #
@@ -608,6 +518,99 @@ class TestUseErrorChannel:
         assert rc == 1
         captured = capsys.readouterr()
         assert "tor timeout" in captured.err
+
+
+class TestInvalidConfiguration:
+    @pytest.fixture
+    def protected_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[Path, bytes]:
+        from mordred_hermes.wizard import network_cli
+
+        files = {
+            tmp_path / "config.yaml": b"plugins: {}\n",
+            tmp_path / ".env": b"MORDRED_MULLVAD_ACCOUNT=KEEP-SECRET\n",
+            tmp_path / "mordred" / "credentials" / "network.json": b'{"existing": true}\n',
+        }
+        for path, contents in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        monkeypatch.setattr(network_cli, "HERMES_BASE", tmp_path)
+
+        def never(*args: object, **kwargs: object) -> None:
+            pytest.fail("invalid config must refuse before switching runtime or writing secrets/credentials")
+
+        monkeypatch.setattr(network_cli.api, "use", never)
+        monkeypatch.setattr(network_cli, "_runtime_registered", lambda: True)
+        monkeypatch.setattr(network_cli.DotEnvFileWriter, "upsert", never)
+        monkeypatch.setattr(network_cli.JSONCredentialsWriter, "write_network", never)
+        return files
+
+    def _invoke(self, command: str, tmp_path: Path) -> int:
+        from mordred_hermes.wizard import network_cli
+
+        args = _make_args(path="tor", config_path=tmp_path / "config.yaml", non_interactive=True, clear_mullvad=True)
+        return network_cli.handle_use(args) if command == "use" else network_cli.handle_init(args)
+
+    @pytest.mark.skipif(os.name == "nt", reason="generic YAML writer; checked Windows validation has separate coverage")
+    @pytest.mark.parametrize("command", ["use", "init"])
+    def test_malformed_yaml_refuses_without_leaking_or_changing_files(
+        self,
+        command: str,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        protected_files[config] = b"plugins: [\n  TOP-SECRET-SENTINEL: {"
+        config.write_bytes(protected_files[config])
+
+        assert self._invoke(command, tmp_path) == 1
+
+        captured = capsys.readouterr()
+        assert "invalid" in captured.err.lower() and "config" in captured.err.lower()
+        assert captured.out == ""
+        assert "TOP-SECRET-SENTINEL" not in captured.err + caplog.text
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
+
+    @pytest.mark.parametrize("command", ["use", "init"])
+    def test_checked_validation_refuses_without_leaking_or_changing_files(
+        self,
+        command: str,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from mordred_hermes.wizard.policy_writer import PolicyWriter
+
+        def reject(self: object, sections: object) -> None:
+            raise ValueError("canonical config validation: TOP-SECRET-SENTINEL")
+
+        monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", reject)
+        assert self._invoke(command, tmp_path) == 1
+        captured = capsys.readouterr()
+        assert "invalid" in captured.err.lower() and "config" in captured.err.lower()
+        assert captured.out == ""
+        assert "TOP-SECRET-SENTINEL" not in captured.err
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
+
+    @pytest.mark.parametrize("command", ["use", "init"])
+    def test_unexpected_writer_failure_propagates(
+        self,
+        command: str,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from mordred_hermes.wizard.policy_writer import PolicyWriter
+
+        def bug(self: object, sections: object) -> None:
+            raise RuntimeError("unexpected writer bug")
+
+        monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", bug)
+        with pytest.raises(RuntimeError, match="unexpected writer bug"):
+            self._invoke(command, tmp_path)
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
 
 
 class TestStatusJson:

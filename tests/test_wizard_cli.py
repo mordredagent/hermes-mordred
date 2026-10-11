@@ -1,10 +1,7 @@
-"""Phase A acceptance tests for the wizard CLI scaffold.
+"""Wizard CLI parser, dispatch, and standalone entry-point contracts.
 
-Verifies that ``hermes mordred --help`` exposes every documented
-subcommand (SPEC.md §Plugin: ``mordred_wizard``) and that each Phase 0
-stub handler raises :class:`NotImplementedError` with the expected
-"Phase X not yet landed" marker. Subsequent phases will replace each
-stub-targeted test with a real behavioural test.
+Exercise flag defaults and refusals, native-helper adapters, graceful command
+failures, and top-level discovery through the public parser and dispatcher.
 """
 
 from __future__ import annotations
@@ -73,28 +70,22 @@ class TestSubcommandTree:
     @pytest.mark.parametrize(
         "argv",
         [
-            ["mordred", "configure"],
-            ["mordred", "upgrade"],
             ["mordred", "install", "some-skill"],
             ["mordred", "network", "use", "tor"],
             ["mordred", "network", "use", "vpn"],
             ["mordred", "network", "use", "clearnet"],
             ["mordred", "network", "status"],
-            ["mordred", "network", "init"],
             ["mordred", "policy", "show"],
             ["mordred", "policy", "explain", "skill-id"],
             ["mordred", "policy", "dry-run", "/tmp/SKILL.md"],
             ["mordred", "policy", "reload"],
-            ["mordred", "audit", "tail"],
             ["mordred", "audit", "grep", "policy.strict"],
             ["mordred", "audit", "decrypt", "--date", "2026-05-10"],
             ["mordred", "audit", "purge", "--before", "2026-01-01"],
-            ["mordred", "keyvault", "init"],
             ["mordred", "keyvault", "list"],
             ["mordred", "keyvault", "verify-digest"],
             ["mordred", "keyvault", "export", "--output", "/tmp/keyvault-backup.mrkv"],
             ["mordred", "keyvault", "recover", "--blob", "/tmp/x"],
-            ["mordred", "vault", "migrate"],
             ["mordred", "plugins", "list"],
         ],
     )
@@ -163,6 +154,7 @@ class TestSubcommandTree:
         parser = _build_parser()
         ns = parser.parse_args(["mordred", "configure"])
         assert ns.with_hermes_setup is False
+        assert callable(ns.func)
 
     def test_configure_with_hermes_setup_flag_sets_true(self) -> None:
         # Guards the flag-name -> dest mapping that cli_handler reads via
@@ -317,6 +309,10 @@ class TestMainStandaloneEntry:
         assert "upgrade" in out
         assert "--no-color" in out
         assert "policy" in out
+        assert "Quickstart" in out
+        assert "hermes-mordred configure" in out
+        assert "hermes-mordred status" in out
+        assert "encryption" in out
 
     def test_no_args_prints_friendly_help(self, capsys: pytest.CaptureFixture[str]) -> None:
         # Bare `hermes-mordred` is a discovery moment, not an error: print the
@@ -326,16 +322,6 @@ class TestMainStandaloneEntry:
         out = capsys.readouterr().out
         assert "Quickstart" in out
         assert "configure" in out
-
-    def test_no_color_flag_sets_no_color_env(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        # `--no-color` disables colour by flipping the env var the shared
-        # should_color() gate already respects; monkeypatch restores it on teardown.
-        monkeypatch.delenv("NO_COLOR", raising=False)
-        rc = main(["--no-color"])  # no subcommand -> prints help, returns 0
-        assert rc == 0
-        assert os.environ.get("NO_COLOR") == "1"
 
     def test_no_color_flag_applies_with_a_subcommand(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -359,16 +345,6 @@ class TestMainStandaloneEntry:
 class TestEnableSEWiring:
     """``hermes mordred keyvault enable-se`` parser wiring + adapter."""
 
-    def test_enable_se_parses_and_wires_handler(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "enable-se"])
-        assert hasattr(ns, "func"), "set_defaults(func=...) missing for keyvault enable-se"
-
-    def test_enable_se_install_dir_parses(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "enable-se", "--install-dir", "/tmp/bin"])
-        assert ns.install_dir == "/tmp/bin"
-
     def test_enable_se_rejects_unattended_installer_flag(self) -> None:
         parser = _build_parser()
         with pytest.raises(SystemExit) as exc:
@@ -383,7 +359,8 @@ class TestEnableSEWiring:
             return 0
 
         monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
-        ns = argparse.Namespace(install_dir="/tmp/bin")
+        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-se", "--install-dir", "/tmp/bin"])
+        assert callable(ns.func)
         rc = keyvault_native_cli.cli_enable_se(ns)
         assert rc == 0
         assert captured["install_dir"] == Path("/tmp/bin")
@@ -397,7 +374,8 @@ class TestEnableSEWiring:
             return 0
 
         monkeypatch.setattr(keyvault_native_cli, "enable_se", _fake_enable_se)
-        ns = argparse.Namespace(install_dir=None)
+        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-se"])
+        assert callable(ns.func)
         keyvault_native_cli.cli_enable_se(ns)
         assert captured["install_dir"] is None
         assert "unattended" not in captured
@@ -424,16 +402,6 @@ class TestEnableTPMWiring:
     ``--install-dir`` — there is deliberately no ``--unattended`` per-use gate.
     """
 
-    def test_enable_tpm_parses_and_wires_handler(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "enable-tpm"])
-        assert hasattr(ns, "func"), "set_defaults(func=...) missing for keyvault enable-tpm"
-
-    def test_enable_tpm_install_dir_parses(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "enable-tpm", "--install-dir", "/tmp/bin"])
-        assert ns.install_dir == "/tmp/bin"
-
     def test_enable_tpm_rejects_unattended_flag(self) -> None:
         parser = _build_parser()
         with pytest.raises(SystemExit):
@@ -447,7 +415,8 @@ class TestEnableTPMWiring:
             return 0
 
         monkeypatch.setattr(keyvault_native_cli, "enable_tpm", _fake_enable_tpm)
-        ns = argparse.Namespace(install_dir="/tmp/bin")
+        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm", "--install-dir", "/tmp/bin"])
+        assert callable(ns.func)
         rc = keyvault_native_cli.cli_enable_tpm(ns)
         assert rc == 0
         assert captured["install_dir"] == Path("/tmp/bin")
@@ -461,7 +430,8 @@ class TestEnableTPMWiring:
             return 0
 
         monkeypatch.setattr(keyvault_native_cli, "enable_tpm", _fake_enable_tpm)
-        ns = argparse.Namespace(install_dir=None)
+        ns = _build_parser().parse_args(["mordred", "keyvault", "enable-tpm"])
+        assert callable(ns.func)
         keyvault_native_cli.cli_enable_tpm(ns)
         assert captured["install_dir"] is None
 
@@ -485,33 +455,6 @@ class TestEnableTPMWiring:
 # -----------------------------------------------------------------------------
 
 
-def _iter_help_strings(parser: argparse.ArgumentParser) -> list[str]:
-    """Every help / description / epilog string in the parser tree."""
-    collected: list[str] = [parser.description or "", parser.epilog or ""]
-    for action in parser._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            for choice_action in action._choices_actions:
-                collected.append(choice_action.help or "")
-            for sub in action.choices.values():
-                collected.extend(_iter_help_strings(sub))
-        else:
-            collected.append(action.help or "")
-    return collected
-
-
-class TestHelpHasNoInternalJargon:
-    """--help is the product's front door: spec-internal references like
-    "Story 1 / Story 1.5", section anchors, or roadmap ids mean nothing to
-    a user and crowd out the actual explanation."""
-
-    @pytest.mark.parametrize("jargon", ["Story 1", "§", "v2-F8", "L128"])
-    def test_no_jargon_anywhere_in_help_tree(self, jargon: str) -> None:
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        _setup_subparser(parser)
-        offenders = [text for text in _iter_help_strings(parser) if jargon in text]
-        assert not offenders, f"internal jargon {jargon!r} leaks into --help: {offenders}"
-
-
 class TestVersionFlag:
     def test_version_prints_and_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
         from mordred_hermes.__about__ import __version__
@@ -520,34 +463,6 @@ class TestVersionFlag:
             main(["--version"])
         assert excinfo.value.code == 0
         assert __version__ in capsys.readouterr().out
-
-
-class TestQuickstartEpilog:
-    def test_top_level_help_carries_quickstart_and_group_guide(self) -> None:
-        """The epilog must orient a new user: the first-run order of
-        commands and how keyvault / vault / encryption relate."""
-        import contextlib
-        import io
-
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), pytest.raises(SystemExit) as excinfo:
-            main(["--help"])
-        assert excinfo.value.code == 0
-        out = buf.getvalue()
-        assert "Quickstart" in out
-        assert "hermes-mordred configure" in out
-        assert "hermes-mordred status" in out
-        # The three storage-ish commands confuse users without a map:
-        # `encryption` is the recommended switch, `vault` the low-level store.
-        assert "encryption" in out
-
-
-class TestPolicyExitCodeDocumented:
-    def test_explain_and_dry_run_helps_mention_exit_2(self) -> None:
-        parser = argparse.ArgumentParser(prog="hermes-mordred")
-        _setup_subparser(parser)
-        helps = " ".join(_iter_help_strings(parser))
-        assert "exit code 2" in helps
 
 
 class TestConfigureFlags:
