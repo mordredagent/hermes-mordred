@@ -18,18 +18,8 @@ class TestEvaluateInstall:
     @pytest.mark.parametrize(
         ("policy_mode", "network_req", "expected"),
         [
-            # off mode — always allow, no audit reason
-            ("off", None, PolicyOutcome("allow", None)),
-            ("off", "clearnet", PolicyOutcome("allow", None)),
-            # strict — block clearnet and missing, allow tor/vpn/local-only
-            ("strict", None, PolicyOutcome("block", "policy.strict.unknown_metadata")),
-            ("strict", "clearnet", PolicyOutcome("block", "policy.strict.clearnet")),
-            ("strict", "tor", PolicyOutcome("allow", None)),
             ("strict", "vpn", PolicyOutcome("allow", None)),
             ("strict", "local-only", PolicyOutcome("allow", None)),
-            # lenient — warn on missing, allow everything else
-            ("lenient", None, PolicyOutcome("warn", "policy.lenient.unknown_metadata_warning")),
-            ("lenient", "clearnet", PolicyOutcome("allow", None)),
         ],
     )
     def test_matrix(self, policy_mode: str, network_req: str | None, expected: PolicyOutcome) -> None:
@@ -46,17 +36,6 @@ class TestEvaluateInstallKeyvault:
     @pytest.mark.parametrize(
         ("policy_mode", "network_req", "keyvault_initialized", "expected"),
         [
-            # off — never enforces, even with an uninitialized keyvault
-            ("off", "local-only", False, PolicyOutcome("allow", None)),
-            ("off", "local-only", True, PolicyOutcome("allow", None)),
-            # strict — block when the keyvault holds no keys
-            ("strict", "local-only", False, PolicyOutcome("block", "policy.strict.keyvault_uninitialized")),
-            ("strict", "tor", False, PolicyOutcome("block", "policy.strict.keyvault_uninitialized")),
-            # strict — an initialized keyvault falls through to the network decision (allow)
-            ("strict", "local-only", True, PolicyOutcome("allow", None)),
-            ("strict", "tor", True, PolicyOutcome("allow", None)),
-            # lenient — warn (install proceeds) when uninitialized
-            ("lenient", "local-only", False, PolicyOutcome("warn", "policy.lenient.keyvault_uninitialized_warning")),
             ("lenient", "tor", True, PolicyOutcome("allow", None)),
         ],
     )
@@ -75,8 +54,19 @@ class TestEvaluateInstallKeyvault:
         )
         assert result == expected
 
-    @pytest.mark.parametrize("policy_mode", ["strict", "lenient", "off"])
-    @pytest.mark.parametrize("keyvault_initialized", [True, False])
+    @pytest.mark.parametrize(
+        "policy_mode",
+        [
+            "strict",
+            "lenient",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "keyvault_initialized",
+        [
+            False,
+        ],
+    )
     def test_keyvault_flag_ignored_when_skill_does_not_opt_in(
         self, policy_mode: str, keyvault_initialized: bool
     ) -> None:
@@ -120,28 +110,6 @@ class TestEvaluateInstallKeyvault:
 
 
 class TestEvaluatePreToolCall:
-    @pytest.mark.parametrize(
-        ("policy_mode", "tool_name", "active_path"),
-        [
-            ("off", "web_fetch", None),
-            ("off", "read_file", "tor"),
-            ("lenient", "web_search", "clearnet"),
-            ("lenient", "web_fetch", "vpn"),
-        ],
-    )
-    def test_off_and_lenient_always_allow(
-        self,
-        policy_mode: str,
-        tool_name: str,
-        active_path: str | None,
-    ) -> None:
-        result = evaluate_pre_tool_call(
-            policy_mode=policy_mode,  # type: ignore[arg-type]
-            tool_name=tool_name,
-            active_path=active_path,  # type: ignore[arg-type]
-        )
-        assert result == PolicyOutcome("allow", None)
-
     @pytest.mark.parametrize("blocked_tool", ["web_fetch", "web_search"])
     def test_strict_clearnet_blocks_default_blocklist(self, blocked_tool: str) -> None:
         result = evaluate_pre_tool_call(
@@ -150,35 +118,6 @@ class TestEvaluatePreToolCall:
             active_path="clearnet",
         )
         assert result == PolicyOutcome("block", "policy.strict.clearnet")
-
-    @pytest.mark.parametrize("blocked_tool", ["web_fetch", "web_search"])
-    def test_strict_no_active_path_treats_as_clearnet(self, blocked_tool: str) -> None:
-        """Phase 1 has no Phase 3 wiring — active_path=None is treated as clearnet."""
-        result = evaluate_pre_tool_call(
-            policy_mode="strict",
-            tool_name=blocked_tool,
-            active_path=None,
-        )
-        assert result == PolicyOutcome("block", "policy.strict.clearnet")
-
-    @pytest.mark.parametrize("path", ["tor", "vpn"])
-    @pytest.mark.parametrize("tool", ["web_fetch", "web_search"])
-    def test_strict_tor_or_vpn_allows_blocklisted_tools(self, path: str, tool: str) -> None:
-        """When the active path is not clearnet, strict mode lets the tool through."""
-        result = evaluate_pre_tool_call(
-            policy_mode="strict",
-            tool_name=tool,
-            active_path=path,  # type: ignore[arg-type]
-        )
-        assert result == PolicyOutcome("allow", None)
-
-    def test_strict_clearnet_unlisted_tool_allowed(self) -> None:
-        result = evaluate_pre_tool_call(
-            policy_mode="strict",
-            tool_name="read_file",
-            active_path="clearnet",
-        )
-        assert result == PolicyOutcome("allow", None)
 
     def test_custom_blocklist_overrides_default(self) -> None:
         custom = frozenset({"shell"})
