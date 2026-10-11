@@ -54,7 +54,7 @@ PREPARED_SUFFIX: Final = ".mordred-enc"
 class Database:
     path: Path
     relative: str
-    state: str  # "plaintext" | "encrypted" | "unreadable" (files that are not SQLite are not listed)
+    state: str  # "plaintext" | "encrypted" | "unreadable" (empty files and repair metadata are omitted)
 
 
 @dataclass
@@ -106,8 +106,12 @@ def _classify(path: Path, key: DatabaseKey | None) -> str:
     plain_sqlite = stdlib_sqlite3()
     try:
         with path.open("rb") as handle:
-            if handle.read(len(SQLITE_MAGIC)) != SQLITE_MAGIC:
-                return "other"  # not SQLite (``state.db.repair-attempts.json``) or empty
+            header = handle.read(len(SQLITE_MAGIC))
+            if header != SQLITE_MAGIC:
+                # A damaged header does not prove a DB or its backup contains
+                # no ciphertext. Retain its key; only empty files and Hermes's
+                # JSON repair metadata can be excluded without opening SQLite.
+                return "other" if not header or path.suffix.casefold() == ".json" else "unreadable"
     except OSError:
         return "unreadable"
     uri = f"file:{path.as_posix()}?mode=ro"

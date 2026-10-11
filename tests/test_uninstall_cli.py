@@ -668,17 +668,22 @@ class TestDatabaseUninstall:
         assert _tree(installed.home) == before
         assert not installed.backend.calls
 
-    @pytest.mark.parametrize("key", [None, bytes(32)], ids=["missing", "wrong"])
-    def test_unusable_key_stops_before_restore_or_teardown(
+    @pytest.mark.parametrize("failure", ["missing-key", "wrong-key", "database-header", "backup-header"])
+    def test_unreadable_database_stops_before_restore_or_teardown(
         self,
         installed: Installed,
         encrypted_databases: list[Path],
         monkeypatch: pytest.MonkeyPatch,
-        key: bytes | None,
+        failure: str,
     ) -> None:
         from mordred_hermes import dbcrypt
 
-        monkeypatch.setattr(memory_cli, "_memory_key_from_vault", lambda **_kw: key)
+        if failure.endswith("-header"):
+            path = encrypted_databases[0 if failure == "database-header" else 1]
+            path.write_bytes(b"!" + path.read_bytes()[1:])
+        else:
+            key = None if failure == "missing-key" else bytes(32)
+            monkeypatch.setattr(memory_cli, "_memory_key_from_vault", lambda **_kw: key)
         assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 1
         assert dbcrypt.marker_path(installed.home).exists()
         assert installed.root.exists()

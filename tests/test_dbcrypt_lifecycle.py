@@ -175,28 +175,25 @@ sys.stdin.readline()
 
 
 @pytest.mark.parametrize(
-    "args", [["databases", "status"], ["databases", "encrypt", "--dry-run"], ["uninstall", "--dry-run"]]
-)
-@pytest.mark.parametrize(
-    "command",
+    "argv",
     [
-        ["hermes-mordred"],
-        ["hermes-mordred", "--no-color"],
-        ["hermes-mordred", "--no-col"],
-        ["hermes", "mordred"],
-        ["hermes", "--profile", "work", "mordred"],
-        ["hermes", "--profile=work", "mordred"],
-        ["hermes", "-p", "work", "mordred"],
+        ["hermes-mordred", "databases", "status"],
+        ["hermes-mordred", "--no-color", "databases", "encrypt", "--dry-run"],
+        ["hermes-mordred", "--no-col", "uninstall", "--dry-run"],
+        ["hermes", "--model", "mordred", "--no-restore-cwd", "mordred", "--profile", "work", "databases", "status"],
+        ["hermes", "--profile=work", "mordred", "uninstall", "--dry-run"],
+        ["hermes", "mordred", "-p", "work", "databases", "encrypt", "--dry-run"],
+        ["hermes", "--profile", "work", "--model=x", "mordred", "databases", "status"],
     ],
 )
 def test_maintenance_startup_does_not_execute_pending_conversions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], command: list[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]
 ) -> None:
     pytest.importorskip("sqlcipher3")
     path = _database(tmp_path)
     before = path.read_bytes()
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(sys, "argv", [*command, *args])
+    monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setitem(sys.modules, "sqlite3", sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
     _migrate.schedule(tmp_path)
@@ -205,6 +202,18 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
     assert path.read_bytes() == before
     assert _migrate.pending_path(tmp_path).exists()
     assert not dbcrypt.marker_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hermes", "--model", "mordred", "databases", "status"],
+        ["hermes", "--oneshot", "mordred databases", "mordred", "databases", "status"],
+    ],
+)
+def test_agent_arguments_do_not_bypass_database_protection(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
+    monkeypatch.setattr(sys, "argv", argv)
+    assert dbcrypt._maintenance_process() is False
 
 
 def test_startup_joins_runtime_that_already_recovered_the_journal(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
+from ._cli import maintenance_process as _maintenance_process
 from ._key import KeyProvider
 
 MARKER_SUBPATH: Final = ("mordred", "db-encryption.marker")
@@ -55,30 +56,6 @@ def protected_state_present(home: Path) -> bool:
     return armed(home) or any(
         (directory / name).is_file() for name in ("db-encryption.journal.json", "db-decryption.pending")
     )
-
-
-def _maintenance_process() -> bool:
-    """The standalone DB/uninstall CLI must be able to take exclusive custody."""
-    if not sys.argv:
-        return False
-    name = Path(sys.argv[0].replace("\\", "/")).stem.casefold()
-    args = sys.argv[1:]
-    if name == "hermes-mordred":
-        # The standalone parser accepts this global flag (including argparse's
-        # unambiguous abbreviations) before the subcommand.
-        while args and len(args[0]) > 2 and args[0].startswith("--") and "--no-color".startswith(args[0]):
-            args = args[1:]
-        return bool(args and args[0] in {"databases", "uninstall"})
-    # Hermes consumes profile selection before its command parser, but the
-    # flag is still present when this interpreter-startup hook runs.
-    while args:
-        if args[0] in {"--profile", "-p"}:
-            args = args[2:]
-        elif args[0].startswith("--profile="):
-            args = args[1:]
-        else:
-            break
-    return len(args) >= 2 and args[0] in {"mordred", "mordred-wizard"} and args[1] in {"databases", "uninstall"}
 
 
 def arm(home: Path) -> None:
