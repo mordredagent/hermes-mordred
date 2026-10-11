@@ -30,6 +30,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -275,6 +276,27 @@ def _swap(path: Path, prepared: Path) -> None:
 
 
 # -- the whole home ---------------------------------------------------------------------
+
+
+def resume_at_startup(home: Path, *, timeout: float = 120.0) -> None:
+    """Recover a journal, or join the runtime that finished recovery first.
+
+    Re-check between nonblocking lock attempts: another startup can finish
+    recovery and retain its shared lease for hours, so waiting unconditionally
+    for exclusive custody would prevent this runtime from starting.
+    """
+    deadline = time.monotonic() + timeout
+    while journal_path(home).is_file():
+        try:
+            with migration_lock(home):
+                resume(home)
+            return
+        except MigrationBusy:
+            if not journal_path(home).is_file():
+                return
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
 def resume(

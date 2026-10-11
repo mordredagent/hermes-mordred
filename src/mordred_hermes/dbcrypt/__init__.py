@@ -64,6 +64,10 @@ def _maintenance_process() -> bool:
     name = Path(sys.argv[0].replace("\\", "/")).stem.casefold()
     args = sys.argv[1:]
     if name == "hermes-mordred":
+        # The standalone parser accepts this global flag (including argparse's
+        # unambiguous abbreviations) before the subcommand.
+        while args and len(args[0]) > 2 and args[0].startswith("--") and "--no-color".startswith(args[0]):
+            args = args[1:]
         return bool(args and args[0] in {"databases", "uninstall"})
     return len(args) >= 2 and args[0] in {"mordred", "mordred-wizard"} and args[1] in {"databases", "uninstall"}
 
@@ -146,9 +150,7 @@ def install(*, home: Path | None = None, provider: KeyProvider | None = None) ->
     global _PROVIDER
     _PROVIDER = provider or KeyProvider()
     key_provider = _PROVIDER
-    if _migrate.journal_path(base).is_file():  # an interrupted conversion (either way); needs no key
-        with _migrate.migration_lock(base, timeout=120.0):
-            _migrate.resume(base)
+    _migrate.resume_at_startup(base)
     _run_pending_conversion(base, key_provider)
     _run_pending_decryption(base, key_provider)
     with runtime_lease(base):

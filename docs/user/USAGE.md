@@ -571,8 +571,9 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > derived from the agent-memory key (no new key; run `encryption enable memory`
 > first) and is unlocked once per Hermes process. Files of other programs
 > (Hermes's install, toolchains, MCP servers, skills) and anything outside the
-> Hermes home are left alone. If Hermes has the databases open, the conversion
-> is scheduled and runs when Hermes next starts, before it opens them. The
+> Hermes home are left alone. If any Hermes process is running, even before
+> opening a database, conversion is scheduled. Quit all Hermes processes, then
+> restart; the conversion runs before the new process opens any database. The
 > conversion is all-or-nothing and verified (same tables and row counts); an
 > interrupted one is completed on the next start. Old plaintext blocks are
 > replaced, not overwritten: on an SSD they can survive in free space or APFS
@@ -584,7 +585,16 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > lenient policy warns you (through the agent and Hermes Desktop). The agent is
 > told the checked status, so it does not claim encryption that is not in
 > effect. `decrypt` (also scheduled for the next start if Hermes is running)
-> converts everything back before you uninstall Mordred.
+> converts everything back. A missing or wrong key leaves encryption enabled
+> and reports failure. Normal uninstall also restores the databases before
+> removing the package or keys. `status` and `--dry-run` do not execute pending
+> conversions.
+>
+> On Linux and Windows, ordinary homes continue using plain SQLite: memory
+> encryption does not encrypt `state.db`. Database encryption is supported only
+> on macOS. If you copy a home with its database-encryption marker or conversion
+> journal to Linux/Windows, startup refuses to open it. Run `databases decrypt`
+> on macOS and let it finish before moving the home.
 
 ### `egress` — limit what the agent's tools may send out
 ```sh
@@ -1254,9 +1264,10 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 Quit Hermes Desktop and stop any `hermes gateway` first. The command then runs
 these steps in order; each is safe to repeat, and a second run changes nothing:
 
-1. **Restore plaintext.** Every encryption target that is on is turned off with
-   the same reversible logic as `encryption disable` (config, memory, then env),
-   unlocking the vault once for all of them. `.env`, `config.yaml` and
+1. **Restore plaintext.** Protected databases in the root home and every profile
+   (including backups) are restored first on macOS, followed by config, memory
+   and env using the same reversible logic as `encryption disable`, unlocking
+   the vault once for all of them. `.env`, `config.yaml` and
    `memories/*.md` are back on disk exactly as Hermes wrote them. If the device
    key cannot open the vault you are offered the vault recovery passphrase. If
    any target cannot be restored, the command **stops before removing
@@ -1297,6 +1308,15 @@ remove it in Keychain Access. It asks you to type `delete my data`; `--yes` does
 skip that. Afterwards anything encrypted with those keys can be recovered only
 with the keyvault Seed Phrase, Passphrase and backup blob or the vault recovery
 passphrase — and only from a copy of the data kept elsewhere.
+
+`--erase-encrypted` removes encrypted content instead of restoring it and
+implies `--purge-data`. For a home with database protection it deletes all
+in-scope Hermes databases, including profile databases, backups, sidecars and
+prepared conversion copies, before deleting keys. It requires the existing
+typed deletion confirmation even with `--yes`. Both database modes require
+macOS and a stopped Hermes; a missing/wrong key, active process or incomplete
+restore stops normal uninstall before package or key removal. Run from the
+root `HERMES_HOME`, since database protection is shared by all profiles.
 
 What `uninstall` cannot restore:
 

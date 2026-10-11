@@ -3,8 +3,8 @@
 Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
 2 (`mordred_hermes.dbcrypt`, all of Hermes's databases), 3 (conversion of
 an existing home, `hermes-mordred databases encrypt`), 4 (monitor), 5 (status
-line) and the reverse conversion (`databases decrypt`) done; phases 6–7 not
-started.
+line), reverse conversion (`databases decrypt`) and both uninstall modes
+done; the Desktop page step and log-preview redaction remain.
 
 ## Goal
 
@@ -52,7 +52,20 @@ plugin's later injection is skipped (one vault unlock per process).
   elsewhere). Without the key an in-scope database is refused rather than
   opened, so Hermes can never create a plaintext replacement.
 - Armed by `<home>/mordred/db-encryption.marker` (phase 3 writes it after
-  converting every database). Unarmed, nothing changes. macOS only.
+  converting every database). Database encryption is macOS-only. Ordinary
+  unarmed Linux/Windows homes retain plain SQLite; enabling memory encryption
+  there does not encrypt databases. A marker or interrupted conversion copied
+  to an unsupported OS causes startup to refuse before opening the databases.
+  Decrypt the home on macOS before moving it.
+- On macOS every Hermes runtime holds a shared `db-encryption.lock` lease
+  until exit, including before its first database open and while unarmed.
+  Conversion and protected-home uninstall take exclusive custody. Starting
+  runtimes wait for conversions, then read the marker under their shared lease.
+  A startup that observes another runtime finish journal recovery can join its
+  shared lease without waiting for that runtime to exit.
+- Database maintenance and uninstall CLI commands skip automatic startup
+  conversion and the runtime lease, so `status` and `--dry-run` leave pending
+  work untouched and explicit maintenance can obtain exclusive custody.
 - `PRAGMA cipher_plaintext_header_size = 112`: Hermes reads fields of the
   100-byte SQLite header directly from the file (format string, page size,
   `application_id` at offset 68 for its "file was replaced" guard, the full
@@ -63,6 +76,8 @@ plugin's later injection is skipped (one vault unlock per process).
   header (no row data).
 - The replacement must happen before Hermes imports `sqlite3`, i.e. from the
   `.pth` bootstrap. Phase 1 made that bootstrap run under Hermes Desktop.
+  Desktop's generated package-manager member includes both canonical root
+  `.pth` files in its wheel, preserving these guards across environment rebuilds.
 
 ## Phase 0 results (spike, synthetic data in a throwaway HERMES_HOME)
 
@@ -129,8 +144,8 @@ module.
 
 `dbcrypt._migrate` converts an existing home (Mordred installed later):
 discover every in-scope database (skipping other programs' directories),
-classify plaintext / encrypted / unreadable, refuse if another process has any
-open (`lsof`), then prepare every encrypted copy (`sqlcipher_export`, carrying
+classify plaintext / encrypted / unreadable under the exclusive lifetime lock,
+refuse if any process has a candidate open (`lsof`), then prepare every encrypted copy (`sqlcipher_export`, carrying
 over `application_id`, `user_version` and WAL mode — rollback-journal mode
 instead when SQLCipher's SQLite has the WAL-reset bug, as Hermes itself
 chooses for new databases) and verify it
@@ -138,10 +153,12 @@ chooses for new databases) and verify it
 swap with `os.replace`, drop the old sidecars, remove the journal. A failure
 while preparing changes nothing; a crash after arming is completed from the
 journal on the next start. `hermes-mordred databases encrypt` runs it now, or
-schedules it (`db-encryption.pending`) when Hermes has the databases open; the
-runtime bootstrap then converts before the process opens any database (other
-starting processes wait on `db-encryption.lock`). Verified end-to-end on a
-throwaway home with Hermes's own code.
+schedules it (`db-encryption.pending`) when a Hermes runtime or another
+converter holds the lock. Quit all Hermes processes before restarting to
+apply the pending conversion; a runtime that has not opened a database yet
+also prevents conversion. The runtime bootstrap converts before opening any
+database, while other starting processes wait on `db-encryption.lock`.
+Verified end-to-end on a throwaway home with Hermes's own code.
 
 ## Phases 4 and 5 (done), and decrypting back
 
@@ -159,9 +176,12 @@ throwaway home with Hermes's own code.
   encrypted, scheduled (not active yet), or the violation.
 - `databases decrypt` (`_migrate.decrypt_all`) mirrors the conversion: prepare
   and verify every plaintext copy, journal, swap, then disarm; scheduled for
-  the next start (`db-decryption.pending`) when Hermes has the databases open.
+  the next start (`db-decryption.pending`) when a Hermes runtime is running.
   An interrupted run is completed from the journal before anything else at
-  startup (no key needed).
+  startup (no key needed). An unreadable database, including one encrypted
+  with a different key, refuses decryption before preparing copies or removing
+  the marker. SQLCipher imports are optional on unsupported platforms; their
+  monitor reports protected homes as unsupported instead of reporting success.
 - Gotcha found while testing: reading an encrypted file without the right key
   usually raises `DatabaseError`, but with the plaintext header SQLite
   sometimes parses the encrypted page as a schema and the random bytes end up
@@ -170,5 +190,11 @@ throwaway home with Hermes's own code.
 
 ## Remaining phases
 
-6. Desktop page step and both uninstall modes (decrypt back / erase).
+6. Desktop page step. Both uninstall modes are implemented: normal uninstall
+   synchronously restores all root/profile databases and backups before config,
+   memory, environment, package or key cleanup; failure retains the installation
+   and keys. `--erase-encrypted` explicitly deletes scoped databases, sidecars,
+   prepared copies and conversion state before key cleanup, without needing the
+   database key. Both modes require macOS, an idle home and the root
+   `HERMES_HOME`; a profile-only uninstall cannot remove shared protection.
 7. Redact message previews (`msg=`) from `logs/agent.log`.

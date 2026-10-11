@@ -13,6 +13,7 @@ import pytest
 
 from mordred_hermes import dbcrypt
 from mordred_hermes.dbcrypt import _key, _migrate, _shim
+from mordred_hermes.dbcrypt._locking import runtime_lease
 
 
 def _database(home: Path) -> Path:
@@ -176,14 +177,15 @@ sys.stdin.readline()
 @pytest.mark.parametrize(
     "args", [["databases", "status"], ["databases", "encrypt", "--dry-run"], ["uninstall", "--dry-run"]]
 )
+@pytest.mark.parametrize("options", [[], ["--no-color"], ["--no-col"]])
 def test_maintenance_startup_does_not_execute_pending_conversions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], options: list[str]
 ) -> None:
     pytest.importorskip("sqlcipher3")
     path = _database(tmp_path)
     before = path.read_bytes()
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(sys, "argv", ["hermes-mordred", *args])
+    monkeypatch.setattr(sys, "argv", ["hermes-mordred", *options, *args])
     monkeypatch.setitem(sys.modules, "sqlite3", sqlite3)
     monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", sqlite3.dbapi2)
     _migrate.schedule(tmp_path)
@@ -192,6 +194,54 @@ def test_maintenance_startup_does_not_execute_pending_conversions(
     assert path.read_bytes() == before
     assert _migrate.pending_path(tmp_path).exists()
     assert not dbcrypt.marker_path(tmp_path).exists()
+
+
+def test_startup_joins_runtime_that_already_recovered_the_journal(tmp_path: Path) -> None:
+    pytest.importorskip("sqlcipher3")
+    _database(tmp_path)
+    journal = _migrate.journal_path(tmp_path)
+    journal.parent.mkdir(parents=True)
+    journal.write_text('{"direction": "decrypt", "swaps": []}')
+    script = """
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from mordred_hermes import dbcrypt
+from mordred_hermes.dbcrypt import _migrate
+sys.platform = 'darwin'
+original = _migrate.migration_lock
+@contextmanager
+def delayed(*args, **kwargs):
+    print('recovering', flush=True)
+    sys.stdin.readline()
+    with original(*args, **kwargs):
+        yield
+_migrate.migration_lock = delayed
+dbcrypt.install(home=Path(sys.argv[1]))
+print('ready', flush=True)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "recovering"
+        with _migrate.migration_lock(tmp_path):
+            _migrate.resume(tmp_path)
+        with runtime_lease(tmp_path):
+            # Another startup now owns a lifetime reader lease. The child saw
+            # the old journal, but must join this reader instead of needing EX.
+            out, err = child.communicate("continue\n", timeout=3)
+            assert child.returncode == 0, err
+            assert "ready" in out
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.communicate()
 
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
