@@ -1036,6 +1036,19 @@ _POST_IMPORT_ACTIONS: Final[dict[str, Callable[[ModuleType], None]]] = {
 
 _IMPORT_HOOK_LOCK: Final = threading.Lock()
 
+
+def register_post_import_action(name: str, action: Callable[[ModuleType], None]) -> None:
+    """Run ``action(module)`` once ``name`` is imported (now, if it already is).
+
+    Shares this module's single ``sys.meta_path`` finder. For other startup
+    guards that must wait for an upstream module without importing it early
+    (under Hermes's managed launcher the Hermes checkout is not on
+    ``sys.path`` yet while ``.pth`` files run).
+    """
+    _POST_IMPORT_ACTIONS[name] = action
+    install_memory_import_hook()
+
+
 #: The one finder this process installed — a second install must not add another.
 _IMPORT_HOOK: _PostImportFinder | None = None
 

@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -417,6 +417,8 @@ class TelegramService:
         except Exception as exc:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
+            if code == "telegram_session_revoked":
+                await self._forget_revoked_session()
             if code == "telegram_sync_failed":
                 # Type name only: an exception message or traceback locals
                 # could carry message text.
@@ -433,6 +435,21 @@ class TelegramService:
                 self._last_error = self._last_error or exc.code
             finally:
                 self._progress.finished_at = int(time.time())
+
+    async def _forget_revoked_session(self) -> None:
+        """Telegram ended this login: drop the dead session so setup asks to log in again.
+
+        Keeps everything else (API id/hash, the archive and its key, the
+        question model), so logging in again resumes where the archive left
+        off. Best effort: if sealing fails the next sync reports it again.
+        """
+        try:
+            await asyncio.to_thread(
+                self._secrets.update, lambda old: replace(old, session=None) if old is not None else None
+            )
+            _audit("telegram.session", "revoked")
+        except Exception as exc:
+            _log.warning("could not clear the revoked Telegram session (%s)", type(exc).__name__)
 
     async def cancel_sync(self) -> None:
         task = self._sync_task

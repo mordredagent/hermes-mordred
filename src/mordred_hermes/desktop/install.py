@@ -139,6 +139,21 @@ def ensure_page(home: Path | None = None) -> bool:
     return changed
 
 
+def ensure_member(home: Path | None = None, *, force: bool = False) -> bool:
+    """Keep ``<home>/plugins/mordred/`` a pm workspace member (see :mod:`.member`).
+
+    Only on pm-managed Hermes installs (Hermes Desktop, source installs), where
+    each update builds a fresh environment from its recorded inputs; a plain
+    ``pip install hermes-agent`` never rebuilds and needs no member. ``force``
+    skips that check (``hermes-mordred desktop install --pm-member``).
+    """
+    from . import member
+
+    if not force and not member.pm_managed():
+        return False
+    return member.ensure_member(plugin_dir(home or _home()))
+
+
 def _enable(home: Path) -> None:
     """Add ``mordred`` to ``plugins.enabled`` (round-trip, locked), migrating legacy names."""
     from ..wizard.policy_writer import PolicyWriter
@@ -182,6 +197,11 @@ def install(home: Path | None = None) -> int:
     ensure_page(base)
     _enable(base)
     print(f"Installed the Mordred desktop page at {page_dir(base)}.")
+    try:
+        if ensure_member(base):
+            print("Registered Mordred with Hermes's package manager: Hermes updates now rebuild it in.")
+    except Exception as exc:  # the page works without it; say why survival is off
+        _term.emit_warn(f"Could not register Mordred with Hermes's package manager ({type(exc).__name__}: {exc}).")
     print("Next: restart Hermes Desktop, then open “Mordred” in the sidebar")
     print("(or ⌘K → “Mordred: Set up private Telegram”).")
     return 0
@@ -261,6 +281,19 @@ def status(home: Path | None = None) -> int:
         _term.emit_warn(f"Mordred desktop page not installed (missing: {', '.join(missing)}).")
         return 1
     print(f"Mordred desktop page installed at {page_dir(base)}.")
+    from . import member
+
+    recorded = member.member_status(plugin_dir(base))
+    if recorded.get("present") and recorded.get("valid"):
+        print(
+            f"Hermes package-manager member: hermes-mordred {recorded.get('version')} "
+            f"({recorded.get('source')}, extras: {', '.join(recorded.get('extras') or []) or 'none'})."
+        )
+    elif member.pm_managed():
+        _term.emit_warn(
+            "Mordred is not registered with Hermes's package manager; a Hermes update will drop it. "
+            "Run `hermes-mordred desktop install`."
+        )
     return 0
 
 

@@ -80,7 +80,7 @@ def test_entry_points_resolve() -> None:
     assert isinstance(loaded, ModuleType), f"entry point must load to a module (got {type(loaded).__name__})"
     assert callable(getattr(loaded, "register", None)), "entry point module must expose callable register()"
     components = [module for _component, module in loaded.COMPONENTS]
-    assert sorted(components) == sorted([*PLUGINS, "mordred_hermes.extension.gateway_plugin"])
+    assert sorted(components) == sorted([*PLUGINS, "mordred_hermes.dbcrypt", "mordred_hermes.extension.gateway_plugin"])
 
 
 def test_hermes_plugin_manager_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

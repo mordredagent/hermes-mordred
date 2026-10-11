@@ -237,6 +237,23 @@ async def _windows_status() -> dict[str, Any]:
     return result
 
 
+@router.get("/health")
+async def health() -> dict[str, Any]:
+    """Mordred is installed here: version, environment and package-manager member."""
+    from .. import __version__
+    from . import member
+    from .install import plugin_dir
+
+    return {
+        "ok": True,
+        "installed": True,
+        "version": __version__,
+        "environment": member.environment_info(),
+        "member": member.member_status(plugin_dir()),
+        "pm_managed": member.pm_managed(),
+    }
+
+
 @router.get("/jobs/{job_id}")
 async def job_status(job_id: str) -> Any:
     job = _JOBS.get(job_id)

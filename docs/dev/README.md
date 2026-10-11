@@ -18,6 +18,7 @@ design diaries and upstream snapshots remain available through Git history.
 | [`POLICY.md`](./POLICY.md) | Policy schema, decisions, and audit reason codes |
 | [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) | Consumed Hermes hook fields and drift validation |
 | [`SLACK_E2E.md`](./SLACK_E2E.md) | Gateway `ENC:v3` wire and mandatory-E2E behavior |
+| [`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) | state.db at-rest encryption (SQLCipher): design and spike results |
 | [`UPSTREAM.md`](./UPSTREAM.md) | Hermes compatibility and the zero-PR commitment |
 
 ## Operational and design references

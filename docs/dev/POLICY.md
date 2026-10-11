@@ -49,6 +49,7 @@ emit site. A reserved value is not evidence that the feature exists.
 | 30 | `policy.lenient.keyvault_uninitialized_warning` | live | Same condition warned under lenient policy. |
 | 31 | `mordred.degraded.audit_encryption_unavailable` | live | Encrypted audit was expected but writer creation fell back to plaintext. |
 | 32 | `policy.egress.tool_blocked` | live | The tool-egress level blocked a tool call that could reach the internet; the entry's `rule` field names the rule (e.g. `egress.url_fetch`, `egress.tainted_session`). |
+| 33 | `mordred.db_encryption.violation` | live | Database encryption is on but Hermes's databases are not protected (unprotected process, no key, interrupted conversion, or a plaintext database); `findings` lists the checks. Strict blocks the turn, lenient warns. |
 
 Existing reason strings are not renamed. Adding one requires the typed Literal,
 an emit site or explicit reserved rationale, focused tests, and this table in
